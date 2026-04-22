@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job Tracker Supreme Art</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #ffffff; --bg2: #f5f4f0; --bg3: #eeece7;
+    --text: #1a1a18; --text2: #6b6960; --text3: #9e9c94;
+    --border: rgba(0,0,0,0.12); --border2: rgba(0,0,0,0.2);
+    --blue-bg: #E6F1FB; --blue-text: #0C447C; --blue-border: #85B7EB;
+    --green-bg: #EAF3DE; --green-text: #27500A; --green-border: #97C459;
+    --red-bg: #FCEBEB; --red-text: #791F1F; --red-border: #F09595;
+    --amber-bg: #FAEEDA; --amber-text: #633806; --amber-border: #EF9F27;
+    --radius: 10px; --radius-sm: 7px;
+    --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  body { font-family: var(--font); background: var(--bg3); color: var(--text); min-height: 100vh; }
+  .topbar { background: var(--bg); border-bottom: 1px solid var(--border); padding: 0 1.5rem; display: flex; align-items: center; gap: 1rem; height: 56px; position: sticky; top: 0; z-index: 50; }
+  .topbar-brand { font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: -0.02em; }
+  .topbar-brand span { color: var(--blue-text); }
+  .topbar-sub { font-size: 12px; color: var(--text2); }
+  .topbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; }
+  .stat-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
+  .stat-value { font-size: 26px; font-weight: 600; color: var(--text); }
+  .stat-value.warn { color: #A32D2D; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
+  .tabs { display: flex; gap: 4px; }
+  .tab { padding: 6px 14px; font-size: 13px; border: 1px solid var(--border); border-radius: 20px; cursor: pointer; background: transparent; color: var(--text2); transition: all 0.12s; font-family: var(--font); }
+  .tab.active { background: var(--text); color: white; border-color: var(--text); }
+  .tab:hover:not(.active) { background: var(--bg2); color: var(--text); }
+  .search-wrap { flex: 1; min-width: 160px; position: relative; }
+  .search-wrap input { width: 100%; padding: 7px 30px 7px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
+  .search-icon { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--text3); font-size: 13px; pointer-events: none; line-height: 1; }
+  select.filter { padding: 7px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
+  .btn { padding: 7px 16px; font-size: 13px; border: 1px solid var(--border2); border-radius: var(--radius-sm); cursor: pointer; background: var(--bg); color: var(--text); font-family: var(--font); transition: all 0.12s; font-weight: 500; }
+  .btn:hover { background: var(--bg2); }
+  .btn-primary { background: var(--text); color: white; border-color: var(--text); }
+  .btn-primary:hover { opacity: 0.85; }
+  .btn-sm { padding: 4px 11px; font-size: 12px; }
+  .btn-danger { color: #A32D2D; border-color: var(--red-border); }
+  .btn-danger:hover { background: var(--red-bg); }
+  .jobs-list { display: flex; flex-direction: column; gap: 8px; }
+  .job-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; border-left: 4px solid var(--border); transition: box-shadow 0.12s; }
+  .job-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.07); }
+  .job-card.p-high { border-left-color: #E24B4A; }
+  .job-card.p-medium { border-left-color: #EF9F27; }
+  .job-card.p-low { border-left-color: #97C459; }
+  .job-card.is-done { opacity: 0.72; }
+  .job-top { display: flex; align-items: flex-start; gap: 12px; }
+  .job-meta { flex: 1; }
+  .job-id-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .job-id { font-size: 12px; font-weight: 600; color: var(--text2); }
+  .job-name { font-size: 15px; font-weight: 600; color: var(--text); }
+  .job-sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .job-actions { display: flex; gap: 5px; align-items: flex-start; flex-wrap: wrap; }
+  .badge { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
+  .badge-active { background: var(--blue-bg); color: var(--blue-text); }
+  .badge-done { background: var(--green-bg); color: var(--green-text); }
+  .badge-blocked { background: var(--red-bg); color: var(--red-text); }
+  .badge-new { background: var(--amber-bg); color: var(--amber-text); }
+  .pipeline { display: flex; align-items: center; gap: 3px; margin-top: 10px; flex-wrap: wrap; }
+  .stage-pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid; white-space: nowrap; font-weight: 500; }
+  .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+  .s-active { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-border); }
+  .s-pending { background: var(--bg2); color: var(--text3); border-color: var(--border); }
+  .s-blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
+  .arrow { font-size: 10px; color: var(--text3); }
+  .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
+  .empty { text-align: center; padding: 3rem 1rem; color: var(--text2); font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
+  .modal { background: var(--bg); border-radius: var(--radius); border: 1px solid var(--border); padding: 1.5rem; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; }
+  .modal h2 { font-size: 17px; font-weight: 600; margin-bottom: 1rem; }
+  .form-group { margin-bottom: 14px; }
+  .form-label { font-size: 12px; color: var(--text2); margin-bottom: 5px; display: block; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  input[type=text], input[type=date], input[type=number], select.form-select, textarea.form-ta { width: 100%; padding: 8px 11px; font-size: 13px; border: 1px solid var(--border2); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
+  textarea.form-ta { min-height: 65px; resize: vertical; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .section-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 7px; margin: 8px 0; }
+  .sec-btn { padding: 10px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--bg); text-align: center; font-size: 12px; font-weight: 500; color: var(--text2); transition: all 0.12s; font-family: var(--font); }
+  .sec-btn:hover { background: var(--bg2); color: var(--text); }
+  .sec-btn.sel { border: 2px solid var(--blue-border); background: var(--blue-bg); color: var(--blue-text); }
+  .history-item { font-size: 12px; color: var(--text2); padding: 6px 0; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 1fr auto; gap: 4px; align-items: start; }
+  .history-item:last-child { border-bottom: none; }
+  .h-stage { font-weight: 600; color: var(--text); }
+  .h-time { font-size: 11px; color: var(--text3); }
+  .h-note { color: var(--text2); margin-top: 2px; }
+  .notif { position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--text); color: white; padding: 10px 18px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; z-index: 300; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  .notif.show { opacity: 1; }
+  #loading-screen { display:flex; position:fixed; inset:0; background:var(--bg3); z-index:999; align-items:center; justify-content:center; flex-direction:column; gap:12px; }
+  @media (max-width: 600px) {
+    .form-row { grid-template-columns: 1fr; }
+    .job-top { flex-direction: column; }
+    .job-actions { flex-direction: row; }
+    .main { padding: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loading-screen">
+  <div style="font-size:16px;font-weight:600;color:var(--text);">Job Tracker Supreme Art</div>
+  <div style="font-size:13px;color:var(--text2);">Loading jobs...</div>
+</div>
+
+<div class="topbar">
+  <div>
+    <div class="topbar-brand">Job Tracker <span>Supreme Art</span></div>
+    <div class="topbar-sub">Packaging Press · Job Tracker</div>
+  </div>
+  <div class="topbar-right">
+    <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
+    <button class="btn btn-sm" onclick="loadJobs()">&#8635; Refresh</button>
+    <button class="btn btn-sm" onclick="exportCSV()">Export CSV</button>
+    <button class="btn btn-primary" onclick="openAdd()">+ New Job</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="stats-row" id="stats-row"></div>
+  <div class="toolbar">
+    <div class="tabs" id="tabs-wrap"></div>
+    <div class="search-wrap">
+      <input type="text" id="search-input" placeholder="Search job, client, or ID..." oninput="setFilter(this.value)">
+      <span class="search-icon">&#128269;</span>
+    </div>
+    <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)">
+      <option value="">All stages</option>
+    </select>
+  </div>
+  <div class="jobs-list" id="jobs-list"></div>
+</div>
+
+<div id="modal-root"></div>
+<div class="notif" id="notif"></div>
+
+<script>
+const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delivered'];
+const PAPERS  = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
+const MACHINES = ['SORM-Z','SORM','SM-74','CD-102','GTO','SM-52'];
+const COATING_OPTS = ['UV','Spot UV','Water Base','Lamination','Emboss','Dripup','Color Seal'];
+
+let jobs = [];
+let view = 'all';
+let filterText = '';
+let filterStage = '';
+let selSection = null;
+
+// ── Helpers ───────────────────────────────────────────────────
+function isDone(j) { return j.stages && j.stages[STAGES.length-1]?.status === 'done'; }
+function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
+function notify(msg) {
+  const el = document.getElementById('notif');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 2500);
+}
+
+// ── API calls ─────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error || 'Request failed'); }
+  return res.json();
+}
+
+async function loadJobs() {
+  try {
+    jobs = await api('GET', '/api/jobs');
+    render();
+  } catch(e) {
+    notify('Error loading jobs: ' + e.message);
+  }
+}
+
+// ── Filtering ─────────────────────────────────────────────────
+function getFiltered() {
+  return jobs.filter(j => {
+    const t = filterText.toLowerCase();
+    if (t && !j.name.toLowerCase().includes(t) && !j.client.toLowerCase().includes(t) && !String(j.id).includes(t)) return false;
+    if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
+    if (view === 'active') return !isDone(j);
+    if (view === 'done') return isDone(j);
+    if (view === 'blocked') return isBlocked(j);
+    return true;
+  });
+}
+
+// ── Render ────────────────────────────────────────────────────
+function renderStats() {
+  const s = { total: jobs.length, active: jobs.filter(j=>!isDone(j)&&!isBlocked(j)).length, done: jobs.filter(isDone).length, blocked: jobs.filter(isBlocked).length };
+  document.getElementById('stats-row').innerHTML = `
+    <div class="stat"><div class="stat-label">Total Jobs</div><div class="stat-value">${s.total}</div></div>
+    <div class="stat"><div class="stat-label">In Progress</div><div class="stat-value">${s.active}</div></div>
+    <div class="stat"><div class="stat-label">Completed</div><div class="stat-value">${s.done}</div></div>
+    <div class="stat"><div class="stat-label">Blocked</div><div class="stat-value ${s.blocked>0?'warn':''}">${s.blocked}</div></div>
+  `;
+}
+
+function renderTabs() {
+  const views = [['all','All'],['active','In Progress'],['blocked','Blocked'],['done','Done']];
+  document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
+  const sf = document.getElementById('stage-filter');
+  sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
+}
+
+function renderJobs() {
+  const filtered = getFiltered().slice().reverse();
+  const el = document.getElementById('jobs-list');
+  if (!filtered.length) {
+    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
+    return;
+  }
+  el.innerHTML = filtered.map(j => {
+    const si = j.stage_index || 0;
+    const done = isDone(j), blocked = isBlocked(j);
+    const badge = done ? `<span class="badge badge-done">Delivered</span>` :
+      blocked ? `<span class="badge badge-blocked">Blocked</span>` :
+      si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
+      `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
+    const pipeline = STAGES.map((s,i) => {
+      let cls = 's-pending';
+      const st = j.stages?.[i]?.status;
+      if (st==='done') cls='s-done';
+      else if (i===si && !done) cls = blocked ? 's-blocked' : 's-active';
+      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}">${SHORT[i]}</span>`;
+    }).join('');
+    const note = j.stages?.[si]?.notes;
+    const pc = j.priority==='High'?'p-high':j.priority==='Medium'?'p-medium':'p-low';
+    const coatings = Array.isArray(j.coatings) ? j.coatings : [];
+    return `
+    <div class="job-card ${pc} ${done?'is-done':''}">
+      <div class="job-top">
+        <div class="job-meta">
+          <div class="job-id-row">
+            <span class="job-id">#${j.id}</span>
+            ${badge}
+            ${j.priority==='High'?'<span class="badge badge-blocked" style="font-size:10px;">HIGH PRIORITY</span>':''}
+          </div>
+          <div class="job-name">${esc(j.name)}</div>
+          <div class="job-sub">${esc(j.client)}${j.qty?' &middot; '+esc(j.qty)+' pcs':''}${j.deadline?' &middot; Due: '+esc(j.deadline):''}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:12px;color:var(--text2);">
+            ${j.jobcode?`<span><b style="color:var(--text)">Code:</b> ${esc(j.jobcode)}</span>`:''}
+            ${j.dateissued?`<span><b style="color:var(--text)">Issued:</b> ${esc(j.dateissued)}</span>`:''}
+            ${j.size?`<span><b style="color:var(--text)">Size/GSM:</b> ${esc(j.size)}</span>`:''}
+            ${j.ups?`<span><b style="color:var(--text)">Ups:</b> ${esc(j.ups)}</span>`:''}
+            ${j.sheets?`<span><b style="color:var(--text)">Sheets:</b> ${esc(j.sheets)}</span>`:''}
+            ${j.paper?`<span><b style="color:var(--text)">Paper:</b> ${esc(j.paper)}</span>`:''}
+            ${j.machine?`<span><b style="color:var(--text)">Machine:</b> ${esc(j.machine)}</span>`:''}
+            ${coatings.length?`<span><b style="color:var(--text)">Coatings:</b> ${coatings.map(esc).join(', ')}</span>`:''}
+            ${j.delqty?`<span><b style="color:var(--text)">Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
+            ${j.cartonqty?`<span><b style="color:var(--text)">Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
+          </div>
+          <div class="pipeline">${pipeline}</div>
+          ${note?`<div class="job-notes">${esc(note)}</div>`:''}
+        </div>
+        <div class="job-actions">
+          ${!done?`<button class="btn btn-sm btn-primary" onclick="openUpdate(${j.id})">Update</button>`:''}
+          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+          <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})">&#10005;</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function render() { renderStats(); renderTabs(); renderJobs(); }
+function setView(v) { view=v; render(); }
+function setFilter(v) { filterText=v; renderJobs(); }
+function setStageFilter(v) { filterStage=v; renderJobs(); }
+
+// ── Modals ────────────────────────────────────────────────────
+function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
+function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
+function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
+
+function jobForm(j={}) {
+  const coatings = Array.isArray(j.coatings) ? j.coatings : [];
+  return `
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Job Name</label><input type="text" id="f-name" value="${esc(j.name||'')}" placeholder="e.g. Biscuit Box 200g"></div>
+      <div class="form-group"><label class="form-label">Client</label><input type="text" id="f-client" value="${esc(j.client||'')}" placeholder="e.g. National Foods"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Job Code</label><input type="text" id="f-jobcode" value="${esc(j.jobcode||'')}" placeholder="e.g. SA-2026-001"></div>
+      <div class="form-group"><label class="form-label">Job Ref / PO No.</label><input type="text" id="f-ref" value="${esc(j.ref||'')}" placeholder="Optional"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Date Issued</label><input type="date" id="f-dateissued" value="${esc(j.dateissued||'')}"></div>
+      <div class="form-group"><label class="form-label">Deadline</label><input type="date" id="f-deadline" value="${esc(j.deadline||'')}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Size / GSM</label><input type="text" id="f-size" value="${esc(j.size||'')}" placeholder="e.g. 12x18 / 300gsm"></div>
+      <div class="form-group"><label class="form-label">Ups</label><input type="text" id="f-ups" value="${esc(j.ups||'')}" placeholder="e.g. 4"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Sheets Quantity</label><input type="text" id="f-sheets" value="${esc(j.sheets||'')}" placeholder="e.g. 12500"></div>
+      <div class="form-group"><label class="form-label">PO Quantity (pcs)</label><input type="text" id="f-qty" value="${esc(j.qty||'')}" placeholder="e.g. 50000"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Type of Paper</label>
+        <select class="form-select" id="f-paper">
+          <option value="">— Select —</option>
+          ${PAPERS.map(p=>`<option ${j.paper===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Machine</label>
+        <select class="form-select" id="f-machine">
+          <option value="">— Select —</option>
+          ${MACHINES.map(m=>`<option ${j.machine===m?'selected':''}>${m}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Coatings</label>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;">
+        ${COATING_OPTS.map(c=>`<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;"><input type="checkbox" value="${c}" name="f-coatings" ${coatings.includes(c)?'checked':''}> ${c}</label>`).join('')}
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Priority</label>
+        <select class="form-select" id="f-priority">
+          <option ${(j.priority||'Medium')==='Low'?'selected':''}>Low</option>
+          <option ${(j.priority||'Medium')==='Medium'?'selected':''}>Medium</option>
+          <option ${(j.priority||'Medium')==='High'?'selected':''}>High</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Delivered PO Quantity</label><input type="text" id="f-delqty" value="${esc(j.delqty||'')}" placeholder="e.g. 48000"></div>
+      <div class="form-group"><label class="form-label">Unit Carton Quantity</label><input type="text" id="f-cartonqty" value="${esc(j.cartonqty||'')}" placeholder="e.g. 100"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${esc(j.notes||'')}</textarea></div>
+  `;
+}
+
+function getFormData() {
+  return {
+    name: document.getElementById('f-name').value.trim(),
+    client: document.getElementById('f-client').value.trim(),
+    jobcode: document.getElementById('f-jobcode').value.trim(),
+    ref: document.getElementById('f-ref').value.trim(),
+    dateissued: document.getElementById('f-dateissued').value,
+    deadline: document.getElementById('f-deadline').value,
+    size: document.getElementById('f-size').value.trim(),
+    ups: document.getElementById('f-ups').value.trim(),
+    sheets: document.getElementById('f-sheets').value.trim(),
+    qty: document.getElementById('f-qty').value.trim(),
+    paper: document.getElementById('f-paper').value,
+    machine: document.getElementById('f-machine').value,
+    coatings: [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c=>c.value),
+    priority: document.getElementById('f-priority').value,
+    delqty: document.getElementById('f-delqty').value.trim(),
+    cartonqty: document.getElementById('f-cartonqty').value.trim(),
+    notes: document.getElementById('f-notes').value.trim(),
+  };
+}
+
+function openAdd() {
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>New Job Card</h2>
+    ${jobForm()}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAdd()">Create Job</button>
+    </div>
+  </div>`);
+}
+
+async function saveAdd() {
+  const data = getFormData();
+  if (!data.name || !data.client) { alert('Job name and client are required.'); return; }
+  showSaving(true);
+  try {
+    const newJob = await api('POST', '/api/jobs', data);
+    jobs.push(newJob);
+    closeModal(); notify('Job created!'); render();
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+function openEdit(id) {
+  const j = jobs.find(x=>x.id===id);
+  if (!j) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Edit Job #${j.id}</h2>
+    ${jobForm(j)}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEdit(${j.id})">Save Changes</button>
+    </div>
+  </div>`);
+}
+
+async function saveEdit(id) {
+  const data = getFormData();
+  if (!data.name || !data.client) { alert('Name and client required.'); return; }
+  showSaving(true);
+  try {
+    const updated = await api('PUT', `/api/jobs/${id}`, data);
+    jobs = jobs.map(j => j.id===id ? {...j,...updated} : j);
+    closeModal(); notify('Saved!'); render();
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+function openUpdate(id) {
+  const j = jobs.find(x=>x.id===id);
+  if (!j) return;
+  const si = j.stage_index || 0;
+  const cur = STAGES[si];
+  const curStatus = j.stages?.[si]?.status || 'active';
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Update Job #${j.id}</h2>
+    <div style="font-size:13px;color:#6b6960;margin-bottom:1rem;">${esc(j.name)} &middot; ${esc(j.client)}</div>
+    <div class="form-group">
+      <label class="form-label">Who is updating? (your section)</label>
+      <div class="section-grid">
+        ${STAGES.map(s=>`<button class="sec-btn ${selSection===s?'sel':''}" onclick="selectSec('${s}')">${s}</button>`).join('')}
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Current stage: <span style="color:#1a1a18;font-weight:600">${cur}</span></label>
+      <select class="form-select" id="u-status">
+        <option value="active" ${curStatus==='active'?'selected':''}>In Progress</option>
+        <option value="done" ${curStatus==='done'?'selected':''}>Completed — move to next stage</option>
+        <option value="blocked" ${curStatus==='blocked'?'selected':''}>Blocked / On Hold</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Remark (optional)</label><textarea class="form-ta" id="u-notes" placeholder="Add a remark or reason..."></textarea></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveUpdate(${id})">Save Update</button>
+    </div>
+  </div>`);
+}
+
+function selectSec(s) {
+  selSection = s;
+  document.querySelectorAll('.sec-btn').forEach(b => b.classList.toggle('sel', b.textContent===s));
+}
+
+async function saveUpdate(id) {
+  const j = jobs.find(x=>x.id===id);
+  if (!j) return;
+  const status = document.getElementById('u-status').value;
+  const notes = document.getElementById('u-notes').value.trim();
+  const by = selSection || STAGES[j.stage_index||0];
+  const time = new Date().toLocaleString('en-PK');
+  let si = j.stage_index || 0;
+  const stages = { ...(j.stages||{}) };
+  const log = [...(j.log||[])];
+  stages[si] = { status, notes, by, time };
+  log.push({ stage: STAGES[si], status, notes, by, time });
+  if (status === 'done' && si < STAGES.length - 1) {
+    si++;
+    stages[si] = { status: 'active' };
+    log.push({ stage: STAGES[si], status: 'active', notes: 'Stage started', by, time });
+  }
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: si, stages, log });
+    jobs = jobs.map(x => x.id===id ? {...x,...updated} : x);
+    closeModal(); notify('Updated!'); render();
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+function openHistory(id) {
+  const j = jobs.find(x=>x.id===id);
+  if (!j) return;
+  const log = [...(j.log||[])].reverse();
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>History — #${j.id}</h2>
+    <div style="font-size:13px;color:#6b6960;margin-bottom:1rem;">${esc(j.name)} &middot; ${esc(j.client)}</div>
+    ${log.length===0?'<div style="text-align:center;padding:1.5rem;color:#9e9c94">No updates logged yet.</div>':log.map(l=>`
+    <div class="history-item">
+      <div>
+        <span class="h-stage">${esc(l.stage)}</span>
+        <span style="margin:0 5px;color:#c0bdb4">&bull;</span>
+        <span style="color:${l.status==='done'?'#27500A':l.status==='blocked'?'#791F1F':'#0C447C'};font-weight:600">${l.status==='done'?'Completed':l.status==='blocked'?'Blocked':'In Progress'}</span>
+        ${l.by?`<span style="margin:0 5px;color:#c0bdb4">&bull;</span><span style="color:#6b6960">${esc(l.by)}</span>`:''}
+        ${l.notes?`<div class="h-note">${esc(l.notes)}</div>`:''}
+      </div>
+      <div class="h-time">${esc(l.time||'')}</div>
+    </div>`).join('')}
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
+
+async function deleteJob(id) {
+  if (!confirm('Delete this job permanently?')) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/jobs/${id}`);
+    jobs = jobs.filter(j=>j.id!==id);
+    notify('Deleted'); render();
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+function exportCSV() {
+  const rows = [['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created']];
+  jobs.forEach(j => {
+    const coatings = Array.isArray(j.coatings) ? j.coatings.join('; ') : '';
+    rows.push([j.id, j.jobcode||'', j.name, j.client, j.dateissued||'', j.size||'', j.ups||'', j.sheets||'', j.qty||'', j.paper||'', j.machine||'', coatings, j.priority||'', j.ref||'', j.deadline||'', j.delqty||'', j.cartonqty||'', STAGES[j.stage_index||0]||'Delivered', isDone(j)?'Delivered':isBlocked(j)?'Blocked':'In Progress', j.created_at?new Date(j.created_at).toLocaleDateString('en-PK'):'']);
+  });
+  const csv = rows.map(r=>r.map(c=>'"'+String(c||'').replace(/"/g,'""')+'"').join(',')).join('\n');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <h2>Export CSV</h2>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:10px;">Click <b>Copy All</b> then paste into a new file and save as <b>jobs.csv</b>.</p>
+    <textarea class="form-ta" id="csv-out" style="min-height:200px;font-family:monospace;font-size:11px;" readonly>${esc(csv)}</textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Close</button>
+      <button class="btn btn-primary" onclick="document.getElementById('csv-out').select();document.execCommand('copy');notify('Copied!');">Copy All</button>
+    </div>
+  </div>`);
+  setTimeout(()=>{ const t=document.getElementById('csv-out'); if(t){t.focus();t.select();} }, 100);
+}
+
+// ── Init ──────────────────────────────────────────────────────
+async function init() {
+  await loadJobs();
+  document.getElementById('loading-screen').style.display = 'none';
+  setInterval(loadJobs, 30000);
+}
+
+init();
+</script>
+</body>
+</html>
