@@ -429,10 +429,16 @@ function openUpdate(id) {
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Current stage: <span style="color:#1a1a18;font-weight:600">${cur}</span></label>
+      <label class="form-label">Move to stage <span style="color:var(--text3);font-weight:400">(current: ${cur})</span></label>
+      <select class="form-select" id="u-stage">
+        ${STAGES.map((s,i)=>`<option value="${i}" ${i===si?'selected':''}>${s}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Status</label>
       <select class="form-select" id="u-status">
         <option value="active" ${curStatus==='active'?'selected':''}>In Progress</option>
-        <option value="done" ${curStatus==='done'?'selected':''}>Completed — move to next stage</option>
+        <option value="done" ${curStatus==='done'?'selected':''}>Completed</option>
         <option value="blocked" ${curStatus==='blocked'?'selected':''}>Blocked / On Hold</option>
       </select>
     </div>
@@ -454,18 +460,18 @@ async function saveUpdate(id) {
   if (!j) return;
   const status = document.getElementById('u-status').value;
   const notes = document.getElementById('u-notes').value.trim();
-  const by = selSection || STAGES[j.stage_index||0];
+  const target = parseInt(document.getElementById('u-stage').value, 10);
+  const by = selSection || STAGES[target];
   const time = new Date().toLocaleString('en-PK');
-  let si = j.stage_index || 0;
+  const prevSi = j.stage_index || 0;
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
-  stages[si] = { status, notes, by, time };
-  log.push({ stage: STAGES[si], status, notes, by, time });
-  if (status === 'done' && si < STAGES.length - 1) {
-    si++;
-    stages[si] = { status: 'active' };
-    log.push({ stage: STAGES[si], status: 'active', notes: 'Stage started', by, time });
+  if (target !== prevSi) {
+    log.push({ stage: STAGES[target], status: 'moved', notes: `Jumped from ${STAGES[prevSi]}`, by, time });
   }
+  stages[target] = { status, notes, by, time };
+  log.push({ stage: STAGES[target], status, notes, by, time });
+  const si = target;
   showSaving(true);
   try {
     const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: si, stages, log });
@@ -487,7 +493,7 @@ function openHistory(id) {
       <div>
         <span class="h-stage">${esc(l.stage)}</span>
         <span style="margin:0 5px;color:#c0bdb4">&bull;</span>
-        <span style="color:${l.status==='done'?'#27500A':l.status==='blocked'?'#791F1F':'#0C447C'};font-weight:600">${l.status==='done'?'Completed':l.status==='blocked'?'Blocked':'In Progress'}</span>
+        <span style="color:${l.status==='done'?'#27500A':l.status==='blocked'?'#791F1F':l.status==='moved'?'#633806':'#0C447C'};font-weight:600">${l.status==='done'?'Completed':l.status==='blocked'?'Blocked':l.status==='moved'?'Stage Changed':'In Progress'}</span>
         ${l.by?`<span style="margin:0 5px;color:#c0bdb4">&bull;</span><span style="color:#6b6960">${esc(l.by)}</span>`:''}
         ${l.notes?`<div class="h-note">${esc(l.notes)}</div>`:''}
       </div>
