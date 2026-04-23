@@ -418,29 +418,15 @@ function openUpdate(id) {
   if (!j) return;
   const si = j.stage_index || 0;
   const cur = STAGES[si];
-  const curStatus = j.stages?.[si]?.status || 'active';
+  selSection = cur;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Update Job #${j.id}</h2>
     <div style="font-size:13px;color:#6b6960;margin-bottom:1rem;">${esc(j.name)} &middot; ${esc(j.client)}</div>
     <div class="form-group">
-      <label class="form-label">Who is updating? (your section)</label>
+      <label class="form-label">Update stage to <span style="color:var(--text3);font-weight:400">(current: ${cur})</span></label>
       <div class="section-grid">
         ${STAGES.map(s=>`<button class="sec-btn ${selSection===s?'sel':''}" onclick="selectSec('${s}')">${s}</button>`).join('')}
       </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">Move to stage <span style="color:var(--text3);font-weight:400">(current: ${cur})</span></label>
-      <select class="form-select" id="u-stage">
-        ${STAGES.map((s,i)=>`<option value="${i}" ${i===si?'selected':''}>${s}</option>`).join('')}
-      </select>
-    </div>
-    <div class="form-group">
-      <label class="form-label">Status</label>
-      <select class="form-select" id="u-status">
-        <option value="active" ${curStatus==='active'?'selected':''}>In Progress</option>
-        <option value="done" ${curStatus==='done'?'selected':''}>Completed</option>
-        <option value="blocked" ${curStatus==='blocked'?'selected':''}>Blocked / On Hold</option>
-      </select>
     </div>
     <div class="form-group"><label class="form-label">Remark (optional)</label><textarea class="form-ta" id="u-notes" placeholder="Add a remark or reason..."></textarea></div>
     <div class="modal-actions">
@@ -458,19 +444,23 @@ function selectSec(s) {
 async function saveUpdate(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
-  const status = document.getElementById('u-status').value;
   const notes = document.getElementById('u-notes').value.trim();
-  const target = parseInt(document.getElementById('u-stage').value, 10);
-  const by = selSection || STAGES[target];
+  const target = STAGES.indexOf(selSection);
+  if (target < 0) { alert('Please pick a stage.'); return; }
+  const by = STAGES[target];
   const time = new Date().toLocaleString('en-PK');
   const prevSi = j.stage_index || 0;
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
-  if (target !== prevSi) {
-    log.push({ stage: STAGES[target], status: 'moved', notes: `Jumped from ${STAGES[prevSi]}`, by, time });
+  for (let i = 0; i < target; i++) {
+    if (!stages[i] || stages[i].status !== 'done') {
+      stages[i] = { ...(stages[i]||{}), status: 'done', by, time };
+    }
   }
+  const status = target === STAGES.length - 1 ? 'done' : 'active';
   stages[target] = { status, notes, by, time };
-  log.push({ stage: STAGES[target], status, notes, by, time });
+  const logNote = notes || (target !== prevSi ? `Moved from ${STAGES[prevSi]}` : 'Stage updated');
+  log.push({ stage: STAGES[target], status, notes: logNote, by, time });
   const si = target;
   showSaving(true);
   try {
