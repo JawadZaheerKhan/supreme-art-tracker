@@ -117,7 +117,7 @@
   <div class="topbar-right">
     <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
     <button class="btn btn-sm" onclick="loadJobs()">&#8635; Refresh</button>
-    <button class="btn btn-sm" onclick="exportCSV()">Export CSV</button>
+    <button class="btn btn-sm" onclick="exportCSV()">Export to Excel</button>
     <button class="btn btn-primary" onclick="openAdd()">+ New Job</button>
   </div>
 </div>
@@ -140,6 +140,7 @@
 <div id="modal-root"></div>
 <div class="notif" id="notif"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
 const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delivered'];
@@ -505,22 +506,18 @@ async function deleteJob(id) {
 }
 
 function exportCSV() {
-  const rows = [['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created']];
-  jobs.forEach(j => {
+  const header = ['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created'];
+  const rows = jobs.map(j => {
     const coatings = Array.isArray(j.coatings) ? j.coatings.join('; ') : '';
-    rows.push([j.id, j.jobcode||'', j.name, j.client, j.dateissued||'', j.size||'', j.ups||'', j.sheets||'', j.qty||'', j.paper||'', j.machine||'', coatings, j.priority||'', j.ref||'', j.deadline||'', j.delqty||'', j.cartonqty||'', STAGES[j.stage_index||0]||'Delivered', isDone(j)?'Delivered':isBlocked(j)?'Blocked':'In Progress', j.created_at?new Date(j.created_at).toLocaleDateString('en-PK'):'']);
+    return [j.id, j.jobcode||'', j.name, j.client, j.dateissued||'', j.size||'', j.ups||'', j.sheets||'', j.qty||'', j.paper||'', j.machine||'', coatings, j.priority||'', j.ref||'', j.deadline||'', j.delqty||'', j.cartonqty||'', STAGES[j.stage_index||0]||'Delivered', isDone(j)?'Delivered':isBlocked(j)?'Blocked':'In Progress', j.created_at?new Date(j.created_at).toLocaleDateString('en-PK'):''];
   });
-  const csv = rows.map(r=>r.map(c=>'"'+String(c||'').replace(/"/g,'""')+'"').join(',')).join('\n');
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
-    <h2>Export CSV</h2>
-    <p style="font-size:13px;color:var(--text2);margin-bottom:10px;">Click <b>Copy All</b> then paste into a new file and save as <b>jobs.csv</b>.</p>
-    <textarea class="form-ta" id="csv-out" style="min-height:200px;font-family:monospace;font-size:11px;" readonly>${esc(csv)}</textarea>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Close</button>
-      <button class="btn btn-primary" onclick="document.getElementById('csv-out').select();document.execCommand('copy');notify('Copied!');">Copy All</button>
-    </div>
-  </div>`);
-  setTimeout(()=>{ const t=document.getElementById('csv-out'); if(t){t.focus();t.select();} }, 100);
+  const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+  ws['!cols'] = header.map((h,i) => ({ wch: Math.max(h.length, ...rows.map(r => String(r[i]||'').length)) + 2 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Jobs');
+  const stamp = new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, `supreme-art-jobs-${stamp}.xlsx`);
+  notify('Exported!');
 }
 
 // ── Init ──────────────────────────────────────────────────────
