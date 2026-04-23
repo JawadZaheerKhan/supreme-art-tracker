@@ -115,19 +115,6 @@ app.patch('/api/jobs/:id/stage', async (req, res) => {
   }
 });
 
-// DELETE a job
-app.delete('/api/jobs/:id', async (req, res) => {
-  try {
-    const sql = getDb();
-    const { id } = req.params;
-    await sql`DELETE FROM jobs WHERE id=${id}`;
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });

@@ -268,7 +268,7 @@ function renderJobs() {
           ${!done?`<button class="btn btn-sm btn-primary" onclick="openUpdate(${j.id})">Update</button>`:''}
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})">&#10005;</button>
+          ${!done?`<button class="btn btn-sm btn-danger" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         </div>
       </div>
     </div>`;
@@ -494,13 +494,26 @@ function openHistory(id) {
   </div>`);
 }
 
-async function deleteJob(id) {
-  if (!confirm('Delete this job permanently?')) return;
+async function toggleBlock(id) {
+  const j = jobs.find(x=>x.id===id);
+  if (!j) return;
+  const si = j.stage_index || 0;
+  const currentlyBlocked = isBlocked(j);
+  const action = currentlyBlocked ? 'Unblock' : 'Block';
+  const reason = prompt(`${action} this job — add a reason (optional):`, '');
+  if (reason === null) return;
+  const time = new Date().toLocaleString('en-PK');
+  const by = STAGES[si];
+  const stages = { ...(j.stages||{}) };
+  const log = [...(j.log||[])];
+  const newStatus = currentlyBlocked ? 'active' : 'blocked';
+  stages[si] = { ...(stages[si]||{}), status: newStatus, notes: reason, by, time };
+  log.push({ stage: STAGES[si], status: newStatus, notes: reason || (currentlyBlocked?'Unblocked':'Blocked'), by, time });
   showSaving(true);
   try {
-    await api('DELETE', `/api/jobs/${id}`);
-    jobs = jobs.filter(j=>j.id!==id);
-    notify('Deleted'); render();
+    const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: si, stages, log });
+    jobs = jobs.map(x => x.id===id ? {...x,...updated} : x);
+    notify(currentlyBlocked ? 'Unblocked' : 'Blocked'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
