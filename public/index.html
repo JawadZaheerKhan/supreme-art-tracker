@@ -233,7 +233,8 @@ function renderJobs() {
       const st = j.stages?.[i]?.status;
       if (st==='done') cls='s-done';
       else if (i===si && !done) cls = blocked ? 's-blocked' : 's-active';
-      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}">${SHORT[i]}</span>`;
+      const click = done ? '' : ` onclick="moveToStage(${j.id},${i})" style="cursor:pointer"`;
+      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}"${click}>${SHORT[i]}</span>`;
     }).join('');
     const note = j.stages?.[si]?.notes;
     const pc = j.priority==='High'?'p-high':j.priority==='Medium'?'p-medium':'p-low';
@@ -468,6 +469,32 @@ async function saveUpdate(id) {
     const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: si, stages, log });
     jobs = jobs.map(x => x.id===id ? {...x,...updated} : x);
     closeModal(); notify('Updated!'); render();
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function moveToStage(id, target) {
+  const j = jobs.find(x=>x.id===id);
+  if (!j) return;
+  const prevSi = j.stage_index || 0;
+  if (target === prevSi) return;
+  const time = new Date().toLocaleString('en-PK');
+  const by = STAGES[target];
+  const stages = { ...(j.stages||{}) };
+  const log = [...(j.log||[])];
+  for (let i = 0; i < target; i++) {
+    if (!stages[i] || stages[i].status !== 'done') {
+      stages[i] = { ...(stages[i]||{}), status: 'done', by, time };
+    }
+  }
+  const status = target === STAGES.length - 1 ? 'done' : 'active';
+  stages[target] = { status, notes: '', by, time };
+  log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[prevSi]}`, by, time });
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: target, stages, log });
+    jobs = jobs.map(x => x.id===id ? {...x,...updated} : x);
+    notify(`Moved to ${STAGES[target]}`); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
