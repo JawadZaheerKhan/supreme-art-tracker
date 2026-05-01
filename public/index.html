@@ -100,6 +100,23 @@
     .job-actions { flex-direction: row; }
     .main { padding: 1rem; }
   }
+/* Print job card — A4 portrait, matches paper layout */
+#print-area { display: none; }
+@media print {
+  body * { visibility: hidden !important; }
+  #print-area, #print-area * { visibility: visible !important; }
+  #print-area { display: block !important; position: absolute; left: 0; top: 0; width: 100%; padding: 14mm; box-sizing: border-box; font-family: Arial, sans-serif; color: #000; }
+  @page { size: A4 portrait; margin: 0; }
+}
+.pc-table { width: 100%; border-collapse: collapse; font-size: 11pt; }
+.pc-table td { border: 1px solid #000; padding: 4px 6px; vertical-align: top; }
+.pc-label { font-size: 8pt; color: #555; text-transform: uppercase; letter-spacing: 0.3px; }
+.pc-value { font-weight: 600; min-height: 18px; }
+.pc-title { text-align: center; font-size: 22pt; font-weight: 700; letter-spacing: 4px; margin: 0 0 4px; }
+.pc-serial { text-align: right; font-size: 12pt; font-family: 'Courier New', monospace; }
+.pc-coat-row td { text-align: center; }
+.pc-coat-box { display: inline-block; border: 1px solid #000; width: 14px; height: 14px; vertical-align: middle; margin-right: 4px; text-align: center; line-height: 14px; font-size: 10pt; }
+.pc-sig { margin-top: 16px; text-align: right; font-size: 10pt; }
 </style>
 </head>
 <body>
@@ -138,6 +155,7 @@
 </div>
 
 <div id="modal-root"></div>
+<div id="print-area"></div>
 <div class="notif" id="notif"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -146,7 +164,9 @@ const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking
 const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delivered'];
 const PAPERS  = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
 const MACHINES = ['SORM-Z','SORM','SM-74','CD-102','GTO','SM-52'];
-const COATING_OPTS = ['UV','Spot UV','Water Base','Lamination','Emboss','Dripup','Color Seal'];
+const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Emboss','Color Seal','Dripup'];
+// Coatings printed on the physical job card, in paper-card order
+const PRINT_COATINGS = ['UV','Spot UV','Varnish','Lacquer','Lamination','Emboss','Color Seal','Dripup'];
 
 let jobs = [];
 let view = 'all';
@@ -268,6 +288,7 @@ function renderJobs() {
           <button class="btn btn-sm btn-primary" onclick="openUpdate(${j.id})">Update</button>
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit</button>
+          <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
           ${!done?`<button class="btn btn-sm btn-danger" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         </div>
       </div>
@@ -340,6 +361,14 @@ function jobForm(j={}) {
       <div class="form-group"><label class="form-label">Delivered PO Quantity</label><input type="text" id="f-delqty" value="${esc(j.delqty||'')}" placeholder="e.g. 48000"></div>
       <div class="form-group"><label class="form-label">Unit Carton Quantity</label><input type="text" id="f-cartonqty" value="${esc(j.cartonqty||'')}" placeholder="e.g. 100"></div>
     </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">B.No</label><input type="text" id="f-bno" value="${esc(j.bno||'')}" placeholder="Batch number"></div>
+      <div class="form-group"><label class="form-label">MRP</label><input type="text" id="f-mrp" value="${esc(j.mrp||'')}" placeholder="e.g. Rs 250"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Mfg Date</label><input type="date" id="f-mfgdate" value="${esc(j.mfgdate||'')}"></div>
+      <div class="form-group"><label class="form-label">Exp Date</label><input type="date" id="f-expdate" value="${esc(j.expdate||'')}"></div>
+    </div>
     <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${esc(j.notes||'')}</textarea></div>
   `;
 }
@@ -363,6 +392,10 @@ function getFormData() {
     delqty: document.getElementById('f-delqty').value.trim(),
     cartonqty: document.getElementById('f-cartonqty').value.trim(),
     notes: document.getElementById('f-notes').value.trim(),
+    bno: document.getElementById('f-bno').value.trim(),
+    mfgdate: document.getElementById('f-mfgdate').value,
+    expdate: document.getElementById('f-expdate').value,
+    mrp: document.getElementById('f-mrp').value.trim(),
   };
 }
 
@@ -385,6 +418,7 @@ async function saveAdd() {
     const newJob = await api('POST', '/api/jobs', data);
     jobs.push(newJob);
     closeModal(); notify('Job created!'); render();
+    setTimeout(() => printJobCard(newJob.id), 100);
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -544,6 +578,66 @@ async function toggleBlock(id) {
     notify(currentlyBlocked ? 'Unblocked' : 'Blocked'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+function buildPrintCard(j) {
+  const v = x => esc(x || '');
+  const fmt = d => d ? new Date(d).toLocaleDateString('en-PK') : '';
+  const coatings = Array.isArray(j.coatings) ? j.coatings : [];
+  const coatCell = name => `<span class="pc-coat-box">${coatings.includes(name) ? '✓' : ''}</span>${name === 'Color Seal' ? 'Colour Seal' : name}`;
+  const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
+  const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:6px;">
+      <div style="font-size:14pt;font-weight:600;">Supreme Art</div>
+      <div class="pc-serial">#${v(j.id)}${j.jobcode ? ' &middot; ' + v(j.jobcode) : ''}</div>
+    </div>
+    <h1 class="pc-title">JOB CARD</h1>
+    <table class="pc-table">
+      <tr>
+        ${dateCell('Date', j.dateissued)}
+        ${cell('Code', j.jobcode)}
+        ${cell('P.O. Qty', j.qty)}
+        ${cell('Machine Name', j.machine)}
+        ${cell('Ups', j.ups)}
+        ${cell('Job Priority', j.priority)}
+      </tr>
+      <tr>
+        <td colspan="3"><div class="pc-label">Job Name</div><div class="pc-value">${v(j.name)}</div></td>
+        <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
+        <td><div class="pc-label">Company</div><div class="pc-value">${v(j.client)}</div></td>
+      </tr>
+      <tr>
+        <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
+        <td colspan="2"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
+        <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
+      </tr>
+      <tr>
+        ${cell('B.No', j.bno)}
+        <td colspan="2"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
+        <td colspan="2"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
+        ${cell('MRP', j.mrp)}
+      </tr>
+      <tr class="pc-coat-row">
+        <td colspan="6">
+          ${PRINT_COATINGS.map(c => `<span style="display:inline-block;margin:0 12px;font-size:10pt;">${coatCell(c)}</span>`).join('')}
+        </td>
+      </tr>
+      ${j.notes ? `<tr><td colspan="6"><div class="pc-label">Notes</div><div class="pc-value">${v(j.notes)}</div></td></tr>` : ''}
+    </table>
+    <div class="pc-sig">Signature: ____________________________</div>
+  `;
+}
+
+function printJobCard(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  const area = document.getElementById('print-area');
+  area.innerHTML = buildPrintCard(j);
+  setTimeout(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  }, 50);
 }
 
 function exportCSV() {

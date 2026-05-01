@@ -41,6 +41,11 @@ async function initDb() {
         created_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Idempotent migrations for new fields added after the table existed
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bno     TEXT`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mfgdate TEXT`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS expdate TEXT`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mrp     TEXT`;
     console.log('Database ready');
   } catch (err) {
     console.error('Database init error:', err.message);
@@ -63,10 +68,10 @@ app.get('/api/jobs', async (req, res) => {
 app.post('/api/jobs', async (req, res) => {
   try {
     const sql = getDb();
-    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes } = req.body;
+    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp } = req.body;
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Medium'}, ${delqty||null}, ${cartonqty||null}, ${notes||null})
+      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp)
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Medium'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null})
       RETURNING *
     `;
     res.json(result[0]);
@@ -81,14 +86,15 @@ app.put('/api/jobs/:id', async (req, res) => {
   try {
     const sql = getDb();
     const { id } = req.params;
-    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes } = req.body;
+    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp } = req.body;
     const result = await sql`
       UPDATE jobs SET
         name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
         dateissued=${dateissued||null}, deadline=${deadline||null}, size=${size||null},
         ups=${ups||null}, sheets=${sheets||null}, qty=${qty||null}, paper=${paper||null},
         machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Medium'},
-        delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null}
+        delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
+        bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null}
       WHERE id=${id} RETURNING *
     `;
     res.json(result[0]);
