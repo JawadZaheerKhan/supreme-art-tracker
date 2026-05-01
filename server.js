@@ -52,9 +52,14 @@ async function initDb() {
   }
 }
 
+// Run schema migrations once at module load. Every handler awaits this so
+// requests can't race ahead of ALTER TABLE on a cold start.
+const dbReady = initDb();
+
 // GET all jobs
 app.get('/api/jobs', async (req, res) => {
   try {
+    await dbReady;
     const sql = getDb();
     const jobs = await sql`SELECT * FROM jobs ORDER BY id ASC`;
     res.json(jobs);
@@ -67,6 +72,7 @@ app.get('/api/jobs', async (req, res) => {
 // CREATE a job
 app.post('/api/jobs', async (req, res) => {
   try {
+    await dbReady;
     const sql = getDb();
     const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp } = req.body;
     const result = await sql`
@@ -84,6 +90,7 @@ app.post('/api/jobs', async (req, res) => {
 // UPDATE job details
 app.put('/api/jobs/:id', async (req, res) => {
   try {
+    await dbReady;
     const sql = getDb();
     const { id } = req.params;
     const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp } = req.body;
@@ -107,6 +114,7 @@ app.put('/api/jobs/:id', async (req, res) => {
 // UPDATE stage/status only
 app.patch('/api/jobs/:id/stage', async (req, res) => {
   try {
+    await dbReady;
     const sql = getDb();
     const { id } = req.params;
     const { stage_index, stages, log } = req.body;
@@ -126,8 +134,10 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-initDb().then(() => {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-});
+if (require.main === module) {
+  dbReady.then(() => {
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  });
+}
 
 module.exports = app;
