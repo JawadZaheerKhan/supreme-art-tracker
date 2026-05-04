@@ -224,17 +224,13 @@ const PARTICULARS_ROWS = [
   { key: 'output',                   label: 'Output' },
   { key: 'plates',                   label: 'Plates' },
   { key: 'no_of_colors',             label: 'No. of Colors' },
-  { type: 'papers' },
   { key: 'color_matter_approval',    label: 'Color Approval / Matter Approval' },
   { key: 'cutting_size_gsm',         label: 'Cutting Size / GSM' },
   { key: 'quantity_of_packets',      label: 'Quantity of Packets' },
   { key: 'approvals_sheets',         label: 'Approvals Sheets' },
   { key: 'printed_sheets_qty',       label: 'Printed Sheets Qty' },
   { key: 'printed_waste_sheets',     label: 'Printed Waste Sheets' },
-  { type: 'coatings1' },
-  { type: 'coatings2' },
   { key: 'uv_waste_sheets',          label: 'U.V Waste Sheets' },
-  { type: 'die_emboss' },
   { key: 'die_cutting_sheets',       label: 'Die Cutting Sheets' },
   { key: 'die_cutting_waste',        label: 'Die Cutting Waste' },
   { key: 'sorted_cartons_qty',       label: 'Sorted Cartons Qty' },
@@ -382,46 +378,41 @@ function openModal(html) { document.getElementById('modal-root').innerHTML=`<div
 function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
 function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
 
-function particularsTable(p, coatings) {
+function specsSection(p, coatings) {
+  const paperTypes = Array.isArray(p.paper_types) ? p.paper_types : [];
+  const papersRow = `
+    <tr class="jc-spec-row"><td colspan="5">
+      ${PAPER_TYPES.map(t => `<label><input type="checkbox" name="p-paper-types" value="${t}" ${paperTypes.includes(t)?'checked':''}> ${t}</label>`).join('')}
+      <span class="jc-brand">Brand: <input type="text" id="p-brand" value="${esc(p.brand||'')}"></span>
+    </td></tr>`;
+  const coatRow = list => `
+    <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
+      ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
+    </td></tr>`;
+  const dieRow = `
+    <tr class="jc-spec-row"><td colspan="5">
+      <label><input type="checkbox" id="p-die-emboss" ${p.die_emboss?'checked':''}> Die Embosss</label>
+      <label><input type="checkbox" id="p-cylinder-emboss" ${p.cylinder_emboss?'checked':''}> Cylinder Emboss</label>
+    </td></tr>`;
+  return `
+    <table class="jc-part jc-specs">
+      ${papersRow}
+      ${coatRow(PRINT_COATINGS_ROW1)}
+      ${coatRow(PRINT_COATINGS_ROW2)}
+      ${dieRow}
+    </table>`;
+}
+
+function particularsTable(p) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
-  const dataRow = r => `
+  const rows = PARTICULARS_ROWS.map(r => `
     <tr>
       <td class="jc-row-label">${r.label}</td>
       <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details')}"></td>
       <td><input type="text" id="p-${r.key}-quantity"  value="${get(r.key,'quantity')}"></td>
       <td><input type="text" id="p-${r.key}-name"      value="${get(r.key,'name')}"></td>
       <td><input type="text" id="p-${r.key}-signature" value="${get(r.key,'signature')}"></td>
-    </tr>`;
-  const paperTypes = Array.isArray(p.paper_types) ? p.paper_types : [];
-  const papersRow = `
-    <tr class="jc-spec-row">
-      <td colspan="5">
-        ${PAPER_TYPES.map(t => `<label><input type="checkbox" name="p-paper-types" value="${t}" ${paperTypes.includes(t)?'checked':''}> ${t}</label>`).join('')}
-        <span class="jc-brand">Brand: <input type="text" id="p-brand" value="${esc(p.brand||'')}"></span>
-      </td>
-    </tr>`;
-  const coatRow = (list) => `
-    <tr class="jc-spec-row">
-      <td colspan="5" style="text-align:center;">
-        ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
-      </td>
-    </tr>`;
-  const dieRow = `
-    <tr class="jc-spec-row">
-      <td colspan="5">
-        <label><input type="checkbox" id="p-die-emboss" ${p.die_emboss?'checked':''}> Die Embosss</label>
-        <label><input type="checkbox" id="p-cylinder-emboss" ${p.cylinder_emboss?'checked':''}> Cylinder Emboss</label>
-      </td>
-    </tr>`;
-
-  const rows = PARTICULARS_ROWS.map(r => {
-    if (r.type === 'papers')    return papersRow;
-    if (r.type === 'coatings1') return coatRow(PRINT_COATINGS_ROW1);
-    if (r.type === 'coatings2') return coatRow(PRINT_COATINGS_ROW2);
-    if (r.type === 'die_emboss')return dieRow;
-    return dataRow(r);
-  }).join('');
-
+    </tr>`).join('');
   return `
     <table class="jc-part">
       <tr>
@@ -432,8 +423,7 @@ function particularsTable(p, coatings) {
         <th>Signature</th>
       </tr>
       ${rows}
-    </table>
-  `;
+    </table>`;
 }
 
 function jobForm(j={}) {
@@ -482,7 +472,8 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
       </tr>
     </table>
-    ${particularsTable(j.particulars||{}, coatings)}
+    ${specsSection(j.particulars||{}, coatings)}
+    ${particularsTable(j.particulars||{})}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional details (digital tracking only — not on printed card)</div>
       <div class="form-row">
@@ -736,7 +727,7 @@ function buildPrintCard(j) {
     </tr>`;
   const papersRow = `
     <tr><td colspan="5" class="pp-spec">
-      ${PAPER_TYPES.map(t => `<span class="pc-coat-box">${paperTypes.includes(t)?'✓':''}</span>${t}`).map(s=>`<span style="margin-right:14px;">${s}</span>`).join('')}
+      ${PAPER_TYPES.map(t => `<span style="margin-right:14px;"><span class="pc-coat-box">${paperTypes.includes(t)?'✓':''}</span>${t}</span>`).join('')}
       <span style="margin-left:6px;">Brand: ${v(p.brand)}</span>
     </td></tr>`;
   const coatRow = list => `
@@ -748,13 +739,8 @@ function buildPrintCard(j) {
       <span style="margin-right:18px;"><span class="pc-coat-box">${p.die_emboss?'✓':''}</span>Die Embosss</span>
       <span><span class="pc-coat-box">${p.cylinder_emboss?'✓':''}</span>Cylinder Emboss</span>
     </td></tr>`;
-  const partRows = PARTICULARS_ROWS.map(r => {
-    if (r.type === 'papers')    return papersRow;
-    if (r.type === 'coatings1') return coatRow(PRINT_COATINGS_ROW1);
-    if (r.type === 'coatings2') return coatRow(PRINT_COATINGS_ROW2);
-    if (r.type === 'die_emboss')return dieRow;
-    return dataRow(r);
-  }).join('');
+  const specsRows = papersRow + coatRow(PRINT_COATINGS_ROW1) + coatRow(PRINT_COATINGS_ROW2) + dieRow;
+  const partRows = PARTICULARS_ROWS.map(dataRow).join('');
 
   return `
     <img class="pc-watermark" src="/logo.png" alt="">
@@ -789,6 +775,9 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
         ${cell('MRP', j.mrp)}
       </tr>
+    </table>
+    <table class="pp-table">
+      ${specsRows}
     </table>
     <table class="pp-table">
       <tr>
