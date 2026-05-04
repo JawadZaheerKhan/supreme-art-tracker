@@ -129,9 +129,20 @@
 @media print {
   body * { visibility: hidden !important; }
   #print-area, #print-area * { visibility: visible !important; }
-  #print-area { display: block !important; position: absolute; left: 0; top: 0; width: 100%; padding: 14mm; box-sizing: border-box; font-family: Arial, sans-serif; color: #000; }
+  #print-area {
+    display: block !important; position: absolute; left: 0; top: 0; width: 100%;
+    padding: 14mm; box-sizing: border-box; font-family: Arial, sans-serif; color: #000;
+    print-color-adjust: exact; -webkit-print-color-adjust: exact;
+  }
   @page { size: A4 portrait; margin: 0; }
 }
+.pc-logo { height: 44px; width: auto; }
+.pc-watermark {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 75%; opacity: 0.07; z-index: 0; pointer-events: none;
+  print-color-adjust: exact; -webkit-print-color-adjust: exact;
+}
+.pc-content { position: relative; z-index: 1; }
 .pc-table { width: 100%; border-collapse: collapse; font-size: 11pt; }
 .pc-table td { border: 1px solid #000; padding: 4px 6px; vertical-align: top; }
 .pc-label { font-size: 8pt; color: #555; text-transform: uppercase; letter-spacing: 0.3px; }
@@ -217,9 +228,8 @@ const PARTICULARS_ROWS = [
   { key: 'printed_waste_sheets',     label: 'Printed Waste Sheets' },
   { type: 'coatings1' },
   { type: 'coatings2' },
-  { key: 'uv_waste_sheets_1',        label: 'U.V Waste Sheets' },
+  { key: 'uv_waste_sheets',          label: 'U.V Waste Sheets' },
   { type: 'die_emboss' },
-  { key: 'uv_waste_sheets_2',        label: 'U.V Waste Sheets' },
   { key: 'die_cutting_sheets',       label: 'Die Cutting Sheets' },
   { key: 'die_cutting_waste',        label: 'Die Cutting Waste' },
   { key: 'sorted_cartons_qty',       label: 'Sorted Cartons Qty' },
@@ -466,14 +476,8 @@ function jobForm(j={}) {
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional details (digital tracking only — not on printed card)</div>
       <div class="form-row">
-        <div class="form-group"><label class="form-label">Type of Paper</label>
-          <select class="form-select" id="f-paper"><option value="">— Select —</option>${PAPERS.map(p=>`<option ${j.paper===p?'selected':''}>${p}</option>`).join('')}</select>
-        </div>
         <div class="form-group"><label class="form-label">Deadline</label><input type="date" id="f-deadline" value="${v(j.deadline)}"></div>
-      </div>
-      <div class="form-row">
         <div class="form-group"><label class="form-label">Delivered PO Quantity</label><input type="text" id="f-delqty" value="${v(j.delqty)}" placeholder="e.g. 48000"></div>
-        <div class="form-group"></div>
       </div>
       <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${v(j.notes)}</textarea></div>
     </div>
@@ -492,7 +496,6 @@ function getFormData() {
     ups: document.getElementById('f-ups').value.trim(),
     sheets: document.getElementById('f-sheets').value.trim(),
     qty: document.getElementById('f-qty').value.trim(),
-    paper: document.getElementById('f-paper').value,
     machine: document.getElementById('f-machine').value,
     coatings: [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c=>c.value),
     priority: document.getElementById('f-priority').value,
@@ -744,9 +747,11 @@ function buildPrintCard(j) {
   }).join('');
 
   return `
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:6px;">
-      <div style="font-size:14pt;font-weight:600;">Supreme Art</div>
-      <div class="pc-serial">#${v(j.id)}${j.jobcode ? ' &middot; ' + v(j.jobcode) : ''}</div>
+    <img class="pc-watermark" src="/logo.png" alt="">
+    <div class="pc-content">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+      <div class="pc-serial" style="text-align:left;padding-top:8px;">#${v(j.id)}${j.jobcode ? ' &middot; ' + v(j.jobcode) : ''}</div>
+      <img class="pc-logo" src="/logo.png" alt="Supreme Art">
     </div>
     <h1 class="pc-title">JOB CARD</h1>
     <table class="pc-table">
@@ -787,6 +792,7 @@ function buildPrintCard(j) {
     </table>
     ${j.notes ? `<div style="margin-top:10px;font-size:9pt;"><b>Notes:</b> ${v(j.notes)}</div>` : ''}
     <div class="pc-sig">Signature: ____________________________</div>
+    </div>
   `;
 }
 
