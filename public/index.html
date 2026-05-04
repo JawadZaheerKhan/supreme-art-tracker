@@ -109,6 +109,17 @@
 .jc-form input:focus, .jc-form select:focus { background: #fff7d6; }
 .jc-form .jc-coat { padding: 8px 10px !important; }
 .jc-form .jc-coat label { display: inline-flex; align-items: center; gap: 5px; margin: 3px 12px 3px 0; font-size: 13px; cursor: pointer; }
+/* Particulars table */
+.jc-part { width: 100%; border-collapse: collapse; margin-top: -1px; }
+.jc-part th, .jc-part td { border: 1px solid #c5c2b6; padding: 4px 6px; vertical-align: middle; background: #fdfcf7; font-size: 12px; }
+.jc-part th { background: #f4f1e6; font-weight: 600; text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: #555; }
+.jc-part .jc-row-label { font-weight: 600; min-width: 170px; }
+.jc-part input[type="text"] { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; padding: 1px 0; color: var(--text); }
+.jc-part input[type="text"]:focus { background: #fff7d6; }
+.jc-part .jc-spec-row td { padding: 6px 8px; }
+.jc-part .jc-spec-row label { display: inline-flex; align-items: center; gap: 4px; margin: 2px 10px 2px 0; font-size: 12px; cursor: pointer; }
+.jc-part .jc-spec-row .jc-brand { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; }
+.jc-part .jc-spec-row .jc-brand input { width: 120px; border-bottom: 1px solid #888; }
 .jc-title { text-align: center; font-size: 18px; font-weight: 700; letter-spacing: 3px; margin: 4px 0 0; color: var(--text); }
 .jc-extras { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px dashed var(--border); }
 .jc-extras .form-label { font-size: 11px; }
@@ -128,8 +139,13 @@
 .pc-title { text-align: center; font-size: 22pt; font-weight: 700; letter-spacing: 4px; margin: 0 0 4px; }
 .pc-serial { text-align: right; font-size: 12pt; font-family: 'Courier New', monospace; }
 .pc-coat-row td { text-align: center; }
-.pc-coat-box { display: inline-block; border: 1px solid #000; width: 14px; height: 14px; vertical-align: middle; margin-right: 4px; text-align: center; line-height: 14px; font-size: 10pt; }
-.pc-sig { margin-top: 16px; text-align: right; font-size: 10pt; }
+.pc-coat-box { display: inline-block; border: 1px solid #000; width: 12px; height: 12px; vertical-align: middle; margin-right: 4px; text-align: center; line-height: 12px; font-size: 9pt; }
+.pc-sig { margin-top: 12px; text-align: right; font-size: 10pt; }
+.pp-table { width: 100%; border-collapse: collapse; font-size: 9pt; margin-top: -1px; }
+.pp-table th, .pp-table td { border: 1px solid #000; padding: 3px 5px; vertical-align: middle; min-height: 18px; }
+.pp-table th { background: #eee; font-weight: 600; text-align: center; font-size: 8pt; text-transform: uppercase; }
+.pp-table .pp-row-label { font-weight: 600; min-width: 145px; font-size: 9pt; }
+.pp-table .pp-spec { font-size: 9pt; padding: 5px 6px; }
 </style>
 </head>
 <body>
@@ -178,8 +194,40 @@ const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delive
 const PAPERS  = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
 const MACHINES = ['SORM-Z','SORM','SM-74','CD-102','GTO','SM-52'];
 const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Emboss','Color Seal','Dripup'];
-// Coatings printed on the physical job card, in paper-card order
-const PRINT_COATINGS = ['UV','Spot UV','Varnish','Lacquer','Lamination','Emboss','Color Seal','Dripup'];
+// Coatings printed on the physical job card, in paper-card order (two rows)
+const PRINT_COATINGS_ROW1 = ['UV','Spot UV','Varnish','Lacquer','Lamination'];
+const PRINT_COATINGS_ROW2 = ['Emboss','Color Seal','Dripup'];
+const PAPER_TYPES = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Mat Paper'];
+
+// Particulars table — every row of the paper card's bottom section.
+// 'data' rows have Details/Quantity/Name/Signature inputs.
+// Specials handle the multi-checkbox rows that span those 4 columns.
+const PARTICULARS_ROWS = [
+  { key: 'artworks_matter_approval', label: 'Artworks & Matter Approval' },
+  { key: 'shade_card',               label: 'Shade Card' },
+  { key: 'output',                   label: 'Output' },
+  { key: 'plates',                   label: 'Plates' },
+  { key: 'no_of_colors',             label: 'No. of Colors' },
+  { type: 'papers' },
+  { key: 'color_matter_approval',    label: 'Color Approval / Matter Approval' },
+  { key: 'cutting_size_gsm',         label: 'Cutting Size / GSM' },
+  { key: 'quantity_of_packets',      label: 'Quantity of Packets' },
+  { key: 'approvals_sheets',         label: 'Approvals Sheets' },
+  { key: 'printed_sheets_qty',       label: 'Printed Sheets Qty' },
+  { key: 'printed_waste_sheets',     label: 'Printed Waste Sheets' },
+  { type: 'coatings1' },
+  { type: 'coatings2' },
+  { key: 'uv_waste_sheets_1',        label: 'U.V Waste Sheets' },
+  { type: 'die_emboss' },
+  { key: 'uv_waste_sheets_2',        label: 'U.V Waste Sheets' },
+  { key: 'die_cutting_sheets',       label: 'Die Cutting Sheets' },
+  { key: 'die_cutting_waste',        label: 'Die Cutting Waste' },
+  { key: 'sorted_cartons_qty',       label: 'Sorted Cartons Qty' },
+  { key: 'sorted_cartons_waste',     label: 'Sorted Cartons Waste' },
+  { key: 'pasted_cartons_qty',       label: 'Pasted Cartons Qty' },
+  { key: 'pasting_waste_qty',        label: 'Pasting Waste Qty' },
+  { key: 'delivered_cartons_qty',    label: 'Delivered Cartons Qty' },
+];
 
 let jobs = [];
 let view = 'all';
@@ -319,6 +367,60 @@ function openModal(html) { document.getElementById('modal-root').innerHTML=`<div
 function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
 function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
 
+function particularsTable(p, coatings) {
+  const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
+  const dataRow = r => `
+    <tr>
+      <td class="jc-row-label">${r.label}</td>
+      <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details')}"></td>
+      <td><input type="text" id="p-${r.key}-quantity"  value="${get(r.key,'quantity')}"></td>
+      <td><input type="text" id="p-${r.key}-name"      value="${get(r.key,'name')}"></td>
+      <td><input type="text" id="p-${r.key}-signature" value="${get(r.key,'signature')}"></td>
+    </tr>`;
+  const paperTypes = Array.isArray(p.paper_types) ? p.paper_types : [];
+  const papersRow = `
+    <tr class="jc-spec-row">
+      <td colspan="5">
+        ${PAPER_TYPES.map(t => `<label><input type="checkbox" name="p-paper-types" value="${t}" ${paperTypes.includes(t)?'checked':''}> ${t}</label>`).join('')}
+        <span class="jc-brand">Brand: <input type="text" id="p-brand" value="${esc(p.brand||'')}"></span>
+      </td>
+    </tr>`;
+  const coatRow = (list) => `
+    <tr class="jc-spec-row">
+      <td colspan="5" style="text-align:center;">
+        ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
+      </td>
+    </tr>`;
+  const dieRow = `
+    <tr class="jc-spec-row">
+      <td colspan="5">
+        <label><input type="checkbox" id="p-die-emboss" ${p.die_emboss?'checked':''}> Die Embosss</label>
+        <label><input type="checkbox" id="p-cylinder-emboss" ${p.cylinder_emboss?'checked':''}> Cylinder Emboss</label>
+      </td>
+    </tr>`;
+
+  const rows = PARTICULARS_ROWS.map(r => {
+    if (r.type === 'papers')    return papersRow;
+    if (r.type === 'coatings1') return coatRow(PRINT_COATINGS_ROW1);
+    if (r.type === 'coatings2') return coatRow(PRINT_COATINGS_ROW2);
+    if (r.type === 'die_emboss')return dieRow;
+    return dataRow(r);
+  }).join('');
+
+  return `
+    <table class="jc-part">
+      <tr>
+        <th class="jc-row-label">Particulars</th>
+        <th>Details</th>
+        <th>Quantity</th>
+        <th>Name</th>
+        <th>Signature</th>
+      </tr>
+      ${rows}
+    </table>
+  `;
+}
+
 function jobForm(j={}) {
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const v = x => esc(x||'');
@@ -359,15 +461,8 @@ function jobForm(j={}) {
         <td colspan="2"><span class="jc-lbl">Exp Date</span><input type="date" id="f-expdate" value="${v(j.expdate)}"></td>
         <td><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
       </tr>
-      <tr>
-        <td colspan="6" class="jc-coat">
-          <span class="jc-lbl">Coatings</span>
-          <div>
-            ${COATING_OPTS.map(c=>`<label><input type="checkbox" value="${c}" name="f-coatings" ${coatings.includes(c)?'checked':''}> ${c}</label>`).join('')}
-          </div>
-        </td>
-      </tr>
     </table>
+    ${particularsTable(j.particulars||{}, coatings)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional details (digital tracking only — not on printed card)</div>
       <div class="form-row">
@@ -408,7 +503,23 @@ function getFormData() {
     mfgdate: document.getElementById('f-mfgdate').value,
     expdate: document.getElementById('f-expdate').value,
     mrp: document.getElementById('f-mrp').value.trim(),
+    particulars: collectParticulars(),
   };
+}
+
+function collectParticulars() {
+  const out = {};
+  PARTICULARS_ROWS.forEach(r => {
+    if (r.type) return;
+    const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
+    const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
+    if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
+  });
+  out.paper_types = [...document.querySelectorAll('input[name="p-paper-types"]:checked')].map(c=>c.value);
+  out.brand = (document.getElementById('p-brand')||{}).value?.trim() || '';
+  out.die_emboss = !!(document.getElementById('p-die-emboss')||{}).checked;
+  out.cylinder_emboss = !!(document.getElementById('p-cylinder-emboss')||{}).checked;
+  return out;
 }
 
 function openAdd() {
@@ -596,9 +707,42 @@ function buildPrintCard(j) {
   const v = x => esc(x || '');
   const fmt = d => d ? new Date(d).toLocaleDateString('en-PK') : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
-  const coatCell = name => `<span class="pc-coat-box">${coatings.includes(name) ? '✓' : ''}</span>${name === 'Color Seal' ? 'Colour Seal' : name}`;
+  const p = j.particulars || {};
+  const paperTypes = Array.isArray(p.paper_types) ? p.paper_types : [];
+  const coatLabel = name => `<span class="pc-coat-box">${coatings.includes(name) ? '✓' : ''}</span>${name === 'Color Seal' ? 'Colour Seal' : name}`;
   const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
+
+  const dataRow = r => `
+    <tr>
+      <td class="pp-row-label">${r.label}</td>
+      <td>${v(p[r.key]?.details)}</td>
+      <td>${v(p[r.key]?.quantity)}</td>
+      <td>${v(p[r.key]?.name)}</td>
+      <td>${v(p[r.key]?.signature)}</td>
+    </tr>`;
+  const papersRow = `
+    <tr><td colspan="5" class="pp-spec">
+      ${PAPER_TYPES.map(t => `<span class="pc-coat-box">${paperTypes.includes(t)?'✓':''}</span>${t}`).map(s=>`<span style="margin-right:14px;">${s}</span>`).join('')}
+      <span style="margin-left:6px;">Brand: ${v(p.brand)}</span>
+    </td></tr>`;
+  const coatRow = list => `
+    <tr><td colspan="5" class="pp-spec" style="text-align:center;">
+      ${list.map(c => `<span style="margin:0 12px;">${coatLabel(c)}</span>`).join('')}
+    </td></tr>`;
+  const dieRow = `
+    <tr><td colspan="5" class="pp-spec">
+      <span style="margin-right:18px;"><span class="pc-coat-box">${p.die_emboss?'✓':''}</span>Die Embosss</span>
+      <span><span class="pc-coat-box">${p.cylinder_emboss?'✓':''}</span>Cylinder Emboss</span>
+    </td></tr>`;
+  const partRows = PARTICULARS_ROWS.map(r => {
+    if (r.type === 'papers')    return papersRow;
+    if (r.type === 'coatings1') return coatRow(PRINT_COATINGS_ROW1);
+    if (r.type === 'coatings2') return coatRow(PRINT_COATINGS_ROW2);
+    if (r.type === 'die_emboss')return dieRow;
+    return dataRow(r);
+  }).join('');
+
   return `
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:6px;">
       <div style="font-size:14pt;font-weight:600;">Supreme Art</div>
@@ -630,13 +774,18 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
         ${cell('MRP', j.mrp)}
       </tr>
-      <tr class="pc-coat-row">
-        <td colspan="6">
-          ${PRINT_COATINGS.map(c => `<span style="display:inline-block;margin:0 12px;font-size:10pt;">${coatCell(c)}</span>`).join('')}
-        </td>
-      </tr>
-      ${j.notes ? `<tr><td colspan="6"><div class="pc-label">Notes</div><div class="pc-value">${v(j.notes)}</div></td></tr>` : ''}
     </table>
+    <table class="pp-table">
+      <tr>
+        <th class="pp-row-label">Particulars</th>
+        <th>Details</th>
+        <th>Quantity</th>
+        <th>Name</th>
+        <th>Signature</th>
+      </tr>
+      ${partRows}
+    </table>
+    ${j.notes ? `<div style="margin-top:10px;font-size:9pt;"><b>Notes:</b> ${v(j.notes)}</div>` : ''}
     <div class="pc-sig">Signature: ____________________________</div>
   `;
 }
