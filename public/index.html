@@ -114,8 +114,9 @@
 .jc-part th, .jc-part td { border: 1px solid #c5c2b6; padding: 4px 6px; vertical-align: middle; background: #fdfcf7; font-size: 12px; }
 .jc-part th { background: #f4f1e6; font-weight: 600; text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: #555; }
 .jc-part .jc-row-label { font-weight: 600; min-width: 170px; }
-.jc-part input[type="text"] { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; padding: 1px 0; color: var(--text); }
-.jc-part input[type="text"]:focus { background: #fff7d6; }
+.jc-part input[type="text"], .jc-part textarea { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; padding: 1px 0; color: var(--text); resize: vertical; }
+.jc-part input[type="text"]:focus, .jc-part textarea:focus { background: #fff7d6; }
+.jc-part textarea { min-height: 38px; }
 .jc-part .jc-spec-row td { padding: 6px 8px; }
 .jc-part .jc-spec-row label { display: inline-flex; align-items: center; gap: 4px; margin: 2px 10px 2px 0; font-size: 12px; cursor: pointer; }
 .jc-part .jc-spec-row .jc-brand { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; }
@@ -209,10 +210,10 @@ const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking
 const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delivered'];
 const PAPERS  = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
 const MACHINES = ['SORM-Z','SORM','SM-74','CD-102','GTO','SM-52'];
-const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Emboss','Color Seal','Dripup'];
+const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Emboss','Color Seal','Dripup','Cylinder Emboss','Hot Foiling'];
 // Coatings printed on the physical job card, in paper-card order (two rows)
 const PRINT_COATINGS_ROW1 = ['UV','Spot UV','Varnish','Lacquer','Lamination'];
-const PRINT_COATINGS_ROW2 = ['Emboss','Color Seal','Dripup'];
+const PRINT_COATINGS_ROW2 = ['Emboss','Color Seal','Dripup','Cylinder Emboss','Hot Foiling'];
 const PAPER_TYPES = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Off-White'];
 
 // Particulars table — every row of the paper card's bottom section.
@@ -221,17 +222,11 @@ const PAPER_TYPES = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Pa
 const PARTICULARS_ROWS = [
   { key: 'artworks_matter_approval', label: 'Artworks & Matter Approval' },
   { key: 'shade_card',               label: 'Shade Card' },
-  { key: 'output',                   label: 'Output' },
   { key: 'plates',                   label: 'Plates' },
   { key: 'no_of_colors',             label: 'No. of Colors' },
-  { key: 'color_matter_approval',    label: 'Color Approval / Matter Approval' },
-  { key: 'cutting_size_gsm',         label: 'Cutting Size / GSM' },
-  { key: 'quantity_of_packets',      label: 'Quantity of Packets' },
-  { key: 'approvals_sheets',         label: 'Approvals Sheets' },
   { key: 'printed_sheets_qty',       label: 'Printed Sheets Qty' },
   { key: 'printed_waste_sheets',     label: 'Printed Waste Sheets' },
   { key: 'uv_waste_sheets',          label: 'U.V Waste Sheets' },
-  { key: 'die_cutting_sheets',       label: 'Die Cutting Sheets' },
   { key: 'die_cutting_waste',        label: 'Die Cutting Waste' },
   { key: 'sorted_cartons_qty',       label: 'Sorted Cartons Qty' },
   { key: 'sorted_cartons_waste',     label: 'Sorted Cartons Waste' },
@@ -389,17 +384,11 @@ function specsSection(p, coatings) {
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
       ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
     </td></tr>`;
-  const dieRow = `
-    <tr class="jc-spec-row"><td colspan="5">
-      <label><input type="checkbox" id="p-die-emboss" ${p.die_emboss?'checked':''}> Die Embosss</label>
-      <label><input type="checkbox" id="p-cylinder-emboss" ${p.cylinder_emboss?'checked':''}> Cylinder Emboss</label>
-    </td></tr>`;
   return `
     <table class="jc-part jc-specs">
       ${papersRow}
       ${coatRow(PRINT_COATINGS_ROW1)}
       ${coatRow(PRINT_COATINGS_ROW2)}
-      ${dieRow}
     </table>`;
 }
 
@@ -423,6 +412,10 @@ function particularsTable(p) {
         <th>Signature</th>
       </tr>
       ${rows}
+      <tr>
+        <td class="jc-row-label">Comments</td>
+        <td colspan="4"><textarea id="p-comments" placeholder="Any comments...">${esc(p.comments||'')}</textarea></td>
+      </tr>
     </table>`;
 }
 
@@ -459,6 +452,10 @@ function jobForm(j={}) {
         <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
         <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm"></td>
         <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" value="${v(j.client)}" placeholder="National Foods"></td>
+      </tr>
+      <tr>
+        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
+        <td colspan="3"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50"></td>
       </tr>
       <tr>
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
@@ -521,8 +518,9 @@ function collectParticulars() {
   });
   out.paper_types = [...document.querySelectorAll('input[name="p-paper-types"]:checked')].map(c=>c.value);
   out.brand = (document.getElementById('p-brand')||{}).value?.trim() || '';
-  out.die_emboss = !!(document.getElementById('p-die-emboss')||{}).checked;
-  out.cylinder_emboss = !!(document.getElementById('p-cylinder-emboss')||{}).checked;
+  out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
+  out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
+  out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
   return out;
 }
 
@@ -734,13 +732,13 @@ function buildPrintCard(j) {
     <tr><td colspan="5" class="pp-spec" style="text-align:center;">
       ${list.map(c => `<span style="margin:0 12px;">${coatLabel(c)}</span>`).join('')}
     </td></tr>`;
-  const dieRow = `
-    <tr><td colspan="5" class="pp-spec">
-      <span style="margin-right:18px;"><span class="pc-coat-box">${p.die_emboss?'✓':''}</span>Die Embosss</span>
-      <span><span class="pc-coat-box">${p.cylinder_emboss?'✓':''}</span>Cylinder Emboss</span>
-    </td></tr>`;
-  const specsRows = papersRow + coatRow(PRINT_COATINGS_ROW1) + coatRow(PRINT_COATINGS_ROW2) + dieRow;
-  const partRows = PARTICULARS_ROWS.map(dataRow).join('');
+  const specsRows = papersRow + coatRow(PRINT_COATINGS_ROW1) + coatRow(PRINT_COATINGS_ROW2);
+  const commentsRow = `
+    <tr>
+      <td class="pp-row-label">Comments</td>
+      <td colspan="4" style="min-height:32px;">${v(p.comments)}</td>
+    </tr>`;
+  const partRows = PARTICULARS_ROWS.map(dataRow).join('') + commentsRow;
 
   return `
     <img class="pc-watermark" src="/logo.png" alt="">
@@ -763,6 +761,10 @@ function buildPrintCard(j) {
         <td colspan="3"><div class="pc-label">Job Name</div><div class="pc-value">${v(j.name)}</div></td>
         <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
         <td><div class="pc-label">Company</div><div class="pc-value">${v(j.client)}</div></td>
+      </tr>
+      <tr>
+        <td colspan="3"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
+        <td colspan="3"><div class="pc-label">Quantity of Packets</div><div class="pc-value">${v(p.quantity_of_packets)}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
