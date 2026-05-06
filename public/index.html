@@ -196,6 +196,9 @@
     <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)">
       <option value="">All stages</option>
     </select>
+    <select class="filter" id="client-filter" onchange="setClientFilter(this.value)">
+      <option value="">All companies</option>
+    </select>
   </div>
   <div class="jobs-list" id="jobs-list"></div>
 </div>
@@ -239,11 +242,13 @@ let jobs = [];
 let view = 'all';
 let filterText = '';
 let filterStage = '';
+let filterClient = '';
 let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
 function isDone(j) { return j.stages && j.stages[STAGES.length-1]?.status === 'done'; }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
+function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Storage / Ready'); }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
 function notify(msg) {
@@ -276,8 +281,10 @@ function getFiltered() {
     const t = filterText.toLowerCase();
     if (t && !j.name.toLowerCase().includes(t) && !j.client.toLowerCase().includes(t) && !String(j.id).includes(t)) return false;
     if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
-    if (view === 'active') return !isDone(j);
-    if (view === 'done') return isDone(j);
+    if (filterClient && j.client !== filterClient) return false;
+    if (view === 'active')  return !isDone(j) && !isStorage(j);
+    if (view === 'storage') return isStorage(j);
+    if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
     return true;
   });
@@ -285,20 +292,30 @@ function getFiltered() {
 
 // ── Render ────────────────────────────────────────────────────
 function renderStats() {
-  const s = { total: jobs.length, active: jobs.filter(j=>!isDone(j)&&!isBlocked(j)).length, done: jobs.filter(isDone).length, blocked: jobs.filter(isBlocked).length };
+  const s = {
+    total: jobs.length,
+    active: jobs.filter(j=>!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
+    storage: jobs.filter(isStorage).length,
+    done: jobs.filter(isDone).length,
+    blocked: jobs.filter(isBlocked).length
+  };
   document.getElementById('stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Total Jobs</div><div class="stat-value">${s.total}</div></div>
     <div class="stat"><div class="stat-label">In Progress</div><div class="stat-value">${s.active}</div></div>
+    <div class="stat"><div class="stat-label">Storage</div><div class="stat-value">${s.storage}</div></div>
     <div class="stat"><div class="stat-label">Completed</div><div class="stat-value">${s.done}</div></div>
     <div class="stat"><div class="stat-label">Blocked</div><div class="stat-value ${s.blocked>0?'warn':''}">${s.blocked}</div></div>
   `;
 }
 
 function renderTabs() {
-  const views = [['all','All'],['active','In Progress'],['blocked','Blocked'],['done','Done']];
+  const views = [['all','All'],['active','In Progress'],['storage','Storage'],['blocked','Blocked'],['done','Done']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
+  const cf = document.getElementById('client-filter');
+  const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
 }
 
 function renderJobs() {
@@ -367,6 +384,7 @@ function render() { renderStats(); renderTabs(); renderJobs(); }
 function setView(v) { view=v; render(); }
 function setFilter(v) { filterText=v; renderJobs(); }
 function setStageFilter(v) { filterStage=v; renderJobs(); }
+function setClientFilter(v) { filterClient=v; renderJobs(); }
 
 // ── Modals ────────────────────────────────────────────────────
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
