@@ -200,6 +200,23 @@
     <select class="filter" id="client-filter" onchange="setClientFilter(this.value)">
       <option value="">All companies</option>
     </select>
+    <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
+      <option value="">All time</option>
+      <option value="this-week">This week</option>
+      <option value="last-week">Last week</option>
+      <option value="past-7">Past 7 days</option>
+      <option value="this-month">This month</option>
+      <option value="last-month">Last month</option>
+      <option value="past-30">Past 30 days</option>
+      <option value="this-year">This year</option>
+      <option value="last-year">Last year</option>
+      <option value="custom">Custom range…</option>
+    </select>
+    <span id="date-custom" style="display:none;gap:6px;align-items:center;">
+      <input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;">
+      <span style="color:var(--text2);font-size:12px;">to</span>
+      <input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;">
+    </span>
   </div>
   <div class="jobs-list" id="jobs-list"></div>
 </div>
@@ -244,12 +261,53 @@ let view = 'all';
 let filterText = '';
 let filterStage = '';
 let filterClient = '';
+let filterDateRange = '';
+let filterDateFrom = '';
+let filterDateTo = '';
 let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
 function isDone(j) { return j.stages && j.stages[STAGES.length-1]?.status === 'done'; }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
 function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Storage / Ready'); }
+function dateRangeBounds(preset) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayMon = today.getDay() === 0 ? 7 : today.getDay(); // Mon=1..Sun=7
+  const weekStart = new Date(today); weekStart.setDate(today.getDate() - (dayMon - 1));
+  const addDays = (d, n) => { const c = new Date(d); c.setDate(d.getDate() + n); return c; };
+  switch (preset) {
+    case 'this-week':  return { from: weekStart, to: addDays(weekStart, 7) };
+    case 'last-week':  return { from: addDays(weekStart, -7), to: weekStart };
+    case 'past-7':     return { from: addDays(today, -6), to: addDays(today, 1) };
+    case 'this-month': return { from: new Date(now.getFullYear(), now.getMonth(), 1), to: new Date(now.getFullYear(), now.getMonth()+1, 1) };
+    case 'last-month': return { from: new Date(now.getFullYear(), now.getMonth()-1, 1), to: new Date(now.getFullYear(), now.getMonth(), 1) };
+    case 'past-30':    return { from: addDays(today, -29), to: addDays(today, 1) };
+    case 'this-year':  return { from: new Date(now.getFullYear(), 0, 1), to: new Date(now.getFullYear()+1, 0, 1) };
+    case 'last-year':  return { from: new Date(now.getFullYear()-1, 0, 1), to: new Date(now.getFullYear(), 0, 1) };
+  }
+  return null;
+}
+function parseLocalDate(s) {
+  if (!s) return null;
+  const [y, m, d] = s.split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+function inDateRange(j) {
+  if (!filterDateRange) return true;
+  const issued = parseLocalDate(j.dateissued);
+  if (!issued) return false;
+  if (filterDateRange === 'custom') {
+    const from = parseLocalDate(filterDateFrom);
+    const to   = parseLocalDate(filterDateTo);
+    if (from && issued < from) return false;
+    if (to) { const end = new Date(to); end.setDate(end.getDate() + 1); if (issued >= end) return false; }
+    return true;
+  }
+  const b = dateRangeBounds(filterDateRange);
+  return b && issued >= b.from && issued < b.to;
+}
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
 function notify(msg) {
@@ -283,6 +341,7 @@ function getFiltered() {
     if (t && !j.name.toLowerCase().includes(t) && !j.client.toLowerCase().includes(t) && !String(j.id).includes(t)) return false;
     if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
     if (filterClient && j.client !== filterClient) return false;
+    if (!inDateRange(j)) return false;
     if (view === 'active')  return !isDone(j) && !isStorage(j) && !isBlocked(j);
     if (view === 'storage') return isStorage(j);
     if (view === 'done')    return isDone(j);
@@ -386,6 +445,18 @@ function setView(v) { view=v; render(); }
 function setFilter(v) { filterText=v; renderJobs(); }
 function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
+function setDateRange(v) {
+  filterDateRange = v;
+  const custom = document.getElementById('date-custom');
+  custom.style.display = v === 'custom' ? 'inline-flex' : 'none';
+  if (v !== 'custom') { filterDateFrom = ''; filterDateTo = ''; }
+  renderJobs();
+}
+function setDateCustom() {
+  filterDateFrom = document.getElementById('date-from').value;
+  filterDateTo = document.getElementById('date-to').value;
+  renderJobs();
+}
 
 // ── Modals ────────────────────────────────────────────────────
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
