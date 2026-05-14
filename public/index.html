@@ -46,6 +46,15 @@
   .ledger-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); }
   .ledger-pos { color: #166534; font-weight: 600; }
   .ledger-neg { color: #A32D2D; font-weight: 600; }
+  .bulk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .bulk-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); padding: 6px 8px; text-align: left; }
+  .bulk-table td { padding: 4px 4px; vertical-align: top; }
+  .bulk-table td input, .bulk-table td select { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); font-family: var(--font); }
+  .bulk-table .col-qty input { text-align: right; }
+  .bulk-table .col-del { width: 32px; text-align: center; }
+  .bulk-row-del { background: none; border: none; color: var(--text3); cursor: pointer; padding: 4px 8px; font-size: 16px; }
+  .bulk-row-del:hover { color: #A32D2D; }
+  .bulk-summary { background: var(--bg2); border-radius: var(--radius-sm); padding: 10px 14px; margin-top: 10px; font-size: 13px; color: var(--text2); }
   .paper-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .combo { position: relative; flex: 1; min-width: 280px; }
   .combo input[type="text"] { width: 100%; padding: 7px 10px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); font-family: var(--font); }
@@ -275,11 +284,18 @@
     <select class="filter" id="inv-type-filter" onchange="setInvTypeFilter(this.value)">
       <option value="">All paper types</option>
     </select>
+    <select class="filter" id="inv-size-filter" onchange="setInvSizeFilter(this.value)">
+      <option value="">All sizes</option>
+    </select>
+    <select class="filter" id="inv-gsm-filter" onchange="setInvGsmFilter(this.value)">
+      <option value="">All GSM</option>
+    </select>
     <select class="filter" id="inv-stock-filter" onchange="setInvStockFilter(this.value)">
       <option value="">All stock levels</option>
       <option value="low">Low stock only</option>
       <option value="out">Out of stock</option>
     </select>
+    <button class="btn btn-sm" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -329,8 +345,10 @@ let filterClient = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
-let invFilterText = '';
-let invFilterType = '';
+let invFilterText  = '';
+let invFilterType  = '';
+let invFilterSize  = '';
+let invFilterGsm   = '';
 let invFilterStock = '';
 let selSection = null;
 
@@ -545,6 +563,8 @@ function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)  { invFilterType  = v; renderInventory(); }
+function setInvSizeFilter(v)  { invFilterSize  = v; renderInventory(); }
+function setInvGsmFilter(v)   { invFilterGsm   = v; renderInventory(); }
 function setInvStockFilter(v) { invFilterStock = v; renderInventory(); }
 
 // ── Inventory rendering ──────────────────────────────────────
@@ -563,10 +583,20 @@ function getInventoryFiltered() {
       if (!hay.includes(t)) return false;
     }
     if (invFilterType && it.paper_type !== invFilterType) return false;
+    if (invFilterSize && (it.size||'') !== invFilterSize) return false;
+    if (invFilterGsm  && (it.gsm||'')  !== invFilterGsm)  return false;
     const state = invStockState(it);
     if (invFilterStock === 'low' && state === 'ok') return false;
     if (invFilterStock === 'out' && state !== 'out') return false;
     return true;
+  });
+}
+// Distinct, sorted values for the size and GSM filter dropdowns.
+function invDistinct(field) {
+  return [...new Set(inventory.map(i => i[field]).filter(Boolean))].sort((a,b)=>{
+    const an = parseInt(a, 10), bn = parseInt(b, 10);
+    if (!isNaN(an) && !isNaN(bn) && an !== bn) return an - bn;
+    return String(a).localeCompare(String(b));
   });
 }
 function renderInventoryStats() {
@@ -584,9 +614,12 @@ function renderInventoryStats() {
   `;
 }
 function renderInventoryFilters() {
-  const sf = document.getElementById('inv-type-filter');
-  const types = [...new Set(inventory.map(i => i.paper_type).filter(Boolean))].sort();
-  sf.innerHTML = `<option value="">All paper types</option>` + types.map(t => `<option value="${esc(t)}" ${invFilterType===t?'selected':''}>${esc(t)}</option>`).join('');
+  const types = invDistinct('paper_type');
+  const sizes = invDistinct('size');
+  const gsms  = invDistinct('gsm');
+  document.getElementById('inv-type-filter').innerHTML = `<option value="">All paper types</option>` + types.map(t => `<option value="${esc(t)}" ${invFilterType===t?'selected':''}>${esc(t)}</option>`).join('');
+  document.getElementById('inv-size-filter').innerHTML = `<option value="">All sizes</option>` + sizes.map(s => `<option value="${esc(s)}" ${invFilterSize===s?'selected':''}>${esc(s)}</option>`).join('');
+  document.getElementById('inv-gsm-filter').innerHTML  = `<option value="">All GSM</option>` + gsms.map(g => `<option value="${esc(g)}" ${invFilterGsm===g?'selected':''}>${esc(g)} gsm</option>`).join('');
 }
 function renderInventoryList() {
   const filtered = getInventoryFiltered();
@@ -625,18 +658,32 @@ function renderInventory() {
 }
 
 // ── Inventory modals ─────────────────────────────────────────
+// Shared <datalist>s — sizes / gsms / brands seen across existing inventory.
+// Embedded in every modal that has a size/gsm/brand input so users can pick
+// from existing values OR type a new one.
+function invDatalistsHtml() {
+  const sizes  = invDistinct('size');
+  const gsms   = invDistinct('gsm');
+  const brands = invDistinct('brand');
+  return `
+    <datalist id="inv-sizes">${sizes.map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
+    <datalist id="inv-gsms">${gsms.map(g=>`<option value="${esc(g)}">`).join('')}</datalist>
+    <datalist id="inv-brands">${brands.map(b=>`<option value="${esc(b)}">`).join('')}</datalist>`;
+}
+
 function openInvAdd() {
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Add Paper Item</h2>
+    ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
         <select id="inv-paper-type">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" placeholder="e.g. Century"></div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" placeholder="e.g. 25x36"></div>
-      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" placeholder="e.g. 300"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Opening Balance (sheets)</label><input type="number" id="inv-opening" placeholder="0" min="0"></div>
@@ -673,15 +720,16 @@ function openInvEdit(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Edit Paper Item</h2>
+    ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
         <select id="inv-paper-type">${PAPER_TYPES.map(t=>`<option ${it.paper_type===t?'selected':''}>${t}</option>`).join('')}</select>
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" value="${esc(it.brand||'')}"></div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" value="${esc(it.brand||'')}"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" value="${esc(it.size||'')}"></div>
-      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" value="${esc(it.gsm||'')}"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" value="${esc(it.size||'')}"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
     <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
     <div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${(it.current_balance||0).toLocaleString()}</b> ${esc(it.unit||'sheets')}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>
@@ -747,6 +795,134 @@ async function saveInvAddStock(id) {
     closeModal(); notify(`+${qty.toLocaleString()} sheets added`);
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// ── Bulk Stock In ────────────────────────────────────────────
+// Lets the user log a shipment with several papers at once. Each row is
+// matched against existing inventory by (paper_type, size, gsm, brand); a
+// match becomes an "add stock" transaction, a non-match auto-creates the
+// item with the entered quantity as its opening balance.
+let bulkRowSeq = 0;
+function bulkRowHtml(idx) {
+  return `
+    <tr data-row="${idx}">
+      <td><select class="bulk-paper-type">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></td>
+      <td><input type="text" class="bulk-size"  list="inv-sizes"  placeholder="e.g. 25x36"></td>
+      <td><input type="text" class="bulk-gsm"   list="inv-gsms"   placeholder="e.g. 300"></td>
+      <td><input type="text" class="bulk-brand" list="inv-brands" placeholder="e.g. Century"></td>
+      <td class="col-qty"><input type="number" class="bulk-qty" placeholder="0" min="1"></td>
+      <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkRemoveRow(${idx})" title="Remove row">×</button></td>
+    </tr>`;
+}
+function openBulkStockIn() {
+  bulkRowSeq = 0;
+  const rows = [0, 1, 2].map(() => bulkRowHtml(bulkRowSeq++)).join('');
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>Stock In · Bulk</h2>
+    ${invDatalistsHtml()}
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Supplier (optional)</label><input type="text" id="bulk-supplier" placeholder="e.g. XYZ Suppliers"></div>
+      <div class="form-group"><label class="form-label">Reference / Invoice (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. INV-2026-042"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Shipment Notes</label><input type="text" id="bulk-notes" placeholder="Optional notes applied to every row"></div>
+    <table class="bulk-table" id="bulk-table">
+      <thead>
+        <tr>
+          <th>Paper Type</th>
+          <th>Size</th>
+          <th>GSM</th>
+          <th>Brand</th>
+          <th style="text-align:right;">Quantity</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="bulk-rows">${rows}</tbody>
+    </table>
+    <div style="margin-top:8px;">
+      <button class="btn btn-sm" onclick="bulkAddRow()">+ Add Row</button>
+    </div>
+    <div class="bulk-summary">Each row is matched to an existing inventory item by paper type + size + GSM + brand. New combinations are auto-created. Quantities are appended to the ledger as a "delivery" transaction.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveBulkStockIn()">Save All</button>
+    </div>
+  </div>`);
+}
+function bulkAddRow() {
+  const tbody = document.getElementById('bulk-rows');
+  if (!tbody) return;
+  tbody.insertAdjacentHTML('beforeend', bulkRowHtml(bulkRowSeq++));
+}
+function bulkRemoveRow(idx) {
+  const tbody = document.getElementById('bulk-rows');
+  const row = tbody && tbody.querySelector(`tr[data-row="${idx}"]`);
+  if (!row) return;
+  // Keep at least one row visible so the user has something to type into.
+  if (tbody.children.length <= 1) {
+    row.querySelectorAll('input').forEach(i => i.value = '');
+    return;
+  }
+  row.remove();
+}
+async function saveBulkStockIn() {
+  const tbody = document.getElementById('bulk-rows');
+  if (!tbody) return;
+  const supplier = document.getElementById('bulk-supplier').value.trim();
+  const ref      = document.getElementById('bulk-ref').value.trim();
+  const notesIn  = document.getElementById('bulk-notes').value.trim();
+  const noteSuffix = [supplier && `Supplier: ${supplier}`, ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
+
+  // Gather + validate rows. Skip empties (all fields blank). Reject zero-qty rows.
+  const rows = [];
+  for (const tr of tbody.querySelectorAll('tr')) {
+    const paper_type = tr.querySelector('.bulk-paper-type').value;
+    const size       = tr.querySelector('.bulk-size').value.trim();
+    const gsm        = tr.querySelector('.bulk-gsm').value.trim();
+    const brand      = tr.querySelector('.bulk-brand').value.trim();
+    const qty        = parseInt(tr.querySelector('.bulk-qty').value, 10) || 0;
+    if (!size && !gsm && !brand && !qty) continue;  // empty row, skip
+    if (!qty || qty <= 0) {
+      alert('Every row needs a positive Quantity (or remove the row).'); return;
+    }
+    rows.push({ paper_type, size, gsm, brand, qty });
+  }
+  if (!rows.length) { alert('Add at least one row with a quantity.'); return; }
+
+  showSaving(true);
+  let saved = 0, errored = 0;
+  for (const r of rows) {
+    try {
+      // Try to match an existing item; treat missing fields as empty strings
+      // so the lookup mirrors the DB's COALESCE-based unique index.
+      const match = inventory.find(it =>
+        it.paper_type === r.paper_type &&
+        (it.size||'')  === r.size &&
+        (it.gsm||'')   === r.gsm &&
+        (it.brand||'') === r.brand
+      );
+      if (match) {
+        await api('POST', `/api/inventory/${match.id}/transactions`, {
+          change: r.qty, reason: 'delivery', notes: noteSuffix || null,
+        });
+      } else {
+        await api('POST', '/api/inventory', {
+          paper_type: r.paper_type,
+          size: r.size, gsm: r.gsm, brand: r.brand,
+          opening_balance: r.qty,
+          opening_notes: noteSuffix || 'Bulk stock-in',
+        });
+      }
+      saved++;
+    } catch (e) {
+      console.error('Row failed:', r, e);
+      errored++;
+    }
+  }
+  await loadInventory();
+  closeModal();
+  showSaving(false);
+  if (errored === 0) notify(`Stock in saved · ${saved} row${saved===1?'':'s'}`);
+  else notify(`${saved} saved · ${errored} failed (see console)`);
 }
 
 async function openInvHistory(id) {
