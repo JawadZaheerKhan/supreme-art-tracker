@@ -23,6 +23,34 @@
   .topbar-brand span { color: var(--blue-text); }
   .topbar-sub { font-size: 12px; color: var(--text2); }
   .topbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .mode-switch { display: flex; gap: 4px; margin-left: 1rem; background: var(--bg2); padding: 3px; border-radius: var(--radius-sm); }
+  .mode-btn { padding: 6px 14px; font-size: 13px; border: none; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text2); font-family: var(--font); font-weight: 500; transition: all 0.12s; }
+  .mode-btn.active { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+  .mode-btn:hover:not(.active) { color: var(--text); }
+  .inventory-list { display: flex; flex-direction: column; gap: 8px; }
+  .inv-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; display: flex; align-items: center; gap: 16px; border-left: 4px solid var(--border); }
+  .inv-card.low { border-left-color: #d97706; }
+  .inv-card.out { border-left-color: #A32D2D; }
+  .inv-main { flex: 1; }
+  .inv-name { font-size: 15px; font-weight: 600; color: var(--text); }
+  .inv-sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .inv-balance { text-align: right; }
+  .inv-balance-num { font-size: 22px; font-weight: 600; color: var(--text); line-height: 1; }
+  .inv-balance-unit { font-size: 11px; color: var(--text2); text-transform: uppercase; }
+  .inv-badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.04em; margin-left: 8px; }
+  .inv-badge.low { background: #fef3c7; color: #92400e; }
+  .inv-badge.out { background: #fee2e2; color: #991b1b; }
+  .inv-actions { display: flex; gap: 6px; }
+  .ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .ledger-table th, .ledger-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+  .ledger-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); }
+  .ledger-pos { color: #166534; font-weight: 600; }
+  .ledger-neg { color: #A32D2D; font-weight: 600; }
+  .paper-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .paper-pick select { flex: 1; min-width: 240px; padding: 7px 10px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); font-family: var(--font); }
+  .stock-hint { font-size: 12px; color: var(--text2); }
+  .stock-hint.low { color: #d97706; font-weight: 600; }
+  .stock-hint.out { color: #A32D2D; font-weight: 600; }
   .main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
   .stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; }
@@ -104,6 +132,7 @@
   }
 /* Job card style for the New/Edit form — mirrors paper layout */
 .modal-card { max-width: 760px !important; }
+.modal-wide { max-width: 880px !important; }
 .jc-form { width: 100%; border-collapse: collapse; margin-top: 4px; }
 .jc-form td { border: 1px solid #c5c2b6; padding: 5px 8px; vertical-align: top; background: #fdfcf7; }
 .jc-form .jc-lbl { display: block; font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 2px; font-weight: 600; }
@@ -180,15 +209,19 @@
     <div class="topbar-brand">Job Tracker <span>Supreme Art</span></div>
     <div class="topbar-sub">Packaging Press · Job Tracker</div>
   </div>
+  <div class="mode-switch" id="mode-switch">
+    <button class="mode-btn active" data-mode="jobs" onclick="setMode('jobs')">Jobs</button>
+    <button class="mode-btn" data-mode="inventory" onclick="setMode('inventory')">Inventory</button>
+  </div>
   <div class="topbar-right">
     <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
-    <button class="btn btn-sm" onclick="loadJobs()">&#8635; Refresh</button>
-    <button class="btn btn-sm" onclick="exportCSV()">Export to Excel</button>
-    <button class="btn btn-primary" onclick="openAdd()">+ New Job</button>
+    <button class="btn btn-sm" id="topbar-refresh" onclick="refreshCurrent()">&#8635; Refresh</button>
+    <button class="btn btn-sm" id="topbar-export" onclick="exportCSV()">Export to Excel</button>
+    <button class="btn btn-primary" id="topbar-add" onclick="openAdd()">+ New Job</button>
   </div>
 </div>
 
-<div class="main">
+<div class="main" id="jobs-mode">
   <div class="stats-row" id="stats-row"></div>
   <div class="toolbar">
     <div class="tabs" id="tabs-wrap"></div>
@@ -221,6 +254,25 @@
     </span>
   </div>
   <div class="jobs-list" id="jobs-list"></div>
+</div>
+
+<div class="main" id="inventory-mode" style="display:none;">
+  <div class="stats-row" id="inv-stats-row"></div>
+  <div class="toolbar">
+    <div class="search-wrap">
+      <input type="text" id="inv-search-input" placeholder="Search paper type, brand..." oninput="setInvFilter(this.value)">
+      <span class="search-icon">&#128269;</span>
+    </div>
+    <select class="filter" id="inv-type-filter" onchange="setInvTypeFilter(this.value)">
+      <option value="">All paper types</option>
+    </select>
+    <select class="filter" id="inv-stock-filter" onchange="setInvStockFilter(this.value)">
+      <option value="">All stock levels</option>
+      <option value="low">Low stock only</option>
+      <option value="out">Out of stock</option>
+    </select>
+  </div>
+  <div class="inventory-list" id="inventory-list"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -259,6 +311,8 @@ const PARTICULARS_ROWS = [
 ];
 
 let jobs = [];
+let inventory = [];          // cached inventory items (refreshed on load + after mutations)
+let mode = 'jobs';           // 'jobs' or 'inventory' — drives top-level view
 let view = 'all';
 let filterText = '';
 let filterStage = '';
@@ -266,6 +320,9 @@ let filterClient = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
+let invFilterText = '';
+let invFilterType = '';
+let invFilterStock = '';
 let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -335,6 +392,36 @@ async function loadJobs() {
     notify('Error loading jobs: ' + e.message);
   }
 }
+
+async function loadInventory() {
+  try {
+    inventory = await api('GET', '/api/inventory');
+    if (mode === 'inventory') renderInventory();
+  } catch(e) {
+    notify('Error loading inventory: ' + e.message);
+  }
+}
+
+// Mode (top-level page) switching — toggles between Jobs and Inventory views
+// and swaps the topbar's primary action button accordingly.
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
+  document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
+  const addBtn = document.getElementById('topbar-add');
+  const exportBtn = document.getElementById('topbar-export');
+  if (m === 'jobs') {
+    addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
+    exportBtn.style.display = '';
+    render();
+  } else {
+    addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
+    exportBtn.style.display = 'none';
+    renderInventory();
+  }
+}
+function refreshCurrent() { mode === 'jobs' ? loadJobs() : loadInventory(); }
 
 // ── Filtering ─────────────────────────────────────────────────
 function getFiltered() {
@@ -447,6 +534,245 @@ function setView(v) { view=v; render(); }
 function setFilter(v) { filterText=v; renderJobs(); }
 function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
+function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
+function setInvTypeFilter(v)  { invFilterType  = v; renderInventory(); }
+function setInvStockFilter(v) { invFilterStock = v; renderInventory(); }
+
+// ── Inventory rendering ──────────────────────────────────────
+function invStockState(item) {
+  const bal = item.current_balance || 0;
+  const thr = item.reorder_threshold || 0;
+  if (bal <= 0) return 'out';
+  if (thr > 0 && bal <= thr) return 'low';
+  return 'ok';
+}
+function getInventoryFiltered() {
+  return inventory.filter(it => {
+    const t = invFilterText.toLowerCase();
+    if (t) {
+      const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''}`.toLowerCase();
+      if (!hay.includes(t)) return false;
+    }
+    if (invFilterType && it.paper_type !== invFilterType) return false;
+    const state = invStockState(it);
+    if (invFilterStock === 'low' && state === 'ok') return false;
+    if (invFilterStock === 'out' && state !== 'out') return false;
+    return true;
+  });
+}
+function renderInventoryStats() {
+  const s = {
+    total: inventory.length,
+    low:   inventory.filter(i => invStockState(i) === 'low').length,
+    out:   inventory.filter(i => invStockState(i) === 'out').length,
+    sheets: inventory.reduce((a, i) => a + (i.current_balance || 0), 0),
+  };
+  document.getElementById('inv-stats-row').innerHTML = `
+    <div class="stat"><div class="stat-label">Paper Items</div><div class="stat-value">${s.total}</div></div>
+    <div class="stat"><div class="stat-label">Total Sheets</div><div class="stat-value">${s.sheets.toLocaleString()}</div></div>
+    <div class="stat"><div class="stat-label">Low Stock</div><div class="stat-value ${s.low>0?'warn':''}">${s.low}</div></div>
+    <div class="stat"><div class="stat-label">Out of Stock</div><div class="stat-value ${s.out>0?'warn':''}">${s.out}</div></div>
+  `;
+}
+function renderInventoryFilters() {
+  const sf = document.getElementById('inv-type-filter');
+  const types = [...new Set(inventory.map(i => i.paper_type).filter(Boolean))].sort();
+  sf.innerHTML = `<option value="">All paper types</option>` + types.map(t => `<option value="${esc(t)}" ${invFilterType===t?'selected':''}>${esc(t)}</option>`).join('');
+}
+function renderInventoryList() {
+  const filtered = getInventoryFiltered();
+  const el = document.getElementById('inventory-list');
+  if (!filtered.length) {
+    el.innerHTML = `<div class="empty">${inventory.length===0?'No inventory items yet. Click <b>+ New Paper</b> to add the first one.':'No items match this filter.'}</div>`;
+    return;
+  }
+  el.innerHTML = filtered.map(it => {
+    const state = invStockState(it);
+    const badge = state === 'out' ? '<span class="inv-badge out">Out</span>'
+                : state === 'low' ? '<span class="inv-badge low">Low</span>' : '';
+    const sub = [it.size, it.gsm ? it.gsm + ' gsm' : '', it.brand].filter(Boolean).map(esc).join(' · ');
+    return `
+    <div class="inv-card ${state}">
+      <div class="inv-main">
+        <div class="inv-name">${esc(it.paper_type)}${badge}</div>
+        <div class="inv-sub">${sub || '—'}${it.reorder_threshold ? ' · Reorder at ' + it.reorder_threshold.toLocaleString() : ''}</div>
+      </div>
+      <div class="inv-balance">
+        <div class="inv-balance-num">${(it.current_balance||0).toLocaleString()}</div>
+        <div class="inv-balance-unit">${esc(it.unit||'sheets')}</div>
+      </div>
+      <div class="inv-actions">
+        <button class="btn btn-sm btn-primary" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History</button>
+        <button class="btn btn-sm" onclick="openInvEdit(${it.id})">Edit</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function renderInventory() {
+  renderInventoryStats();
+  renderInventoryFilters();
+  renderInventoryList();
+}
+
+// ── Inventory modals ─────────────────────────────────────────
+function openInvAdd() {
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Add Paper Item</h2>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Paper Type *</label>
+        <select id="inv-paper-type">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" placeholder="e.g. Century"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" placeholder="e.g. 25x36"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" placeholder="e.g. 300"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Opening Balance (sheets)</label><input type="number" id="inv-opening" placeholder="0" min="0"></div>
+      <div class="form-group"><label class="form-label">Reorder Threshold (sheets)</label><input type="number" id="inv-threshold" placeholder="0" min="0"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. Initial stock count"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvAdd()">Add Item</button>
+    </div>
+  </div>`);
+}
+async function saveInvAdd() {
+  const data = {
+    paper_type: document.getElementById('inv-paper-type').value,
+    size:       document.getElementById('inv-size').value.trim(),
+    gsm:        document.getElementById('inv-gsm').value.trim(),
+    brand:      document.getElementById('inv-brand').value.trim(),
+    reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
+    opening_balance:   parseInt(document.getElementById('inv-opening').value, 10) || 0,
+    opening_notes:     document.getElementById('inv-opening-notes').value.trim(),
+  };
+  if (!data.paper_type) { alert('Paper type is required'); return; }
+  showSaving(true);
+  try {
+    await api('POST', '/api/inventory', data);
+    await loadInventory();
+    closeModal(); notify('Paper item added');
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+function openInvEdit(id) {
+  const it = inventory.find(x => x.id === id); if (!it) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Edit Paper Item</h2>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Paper Type *</label>
+        <select id="inv-paper-type">${PAPER_TYPES.map(t=>`<option ${it.paper_type===t?'selected':''}>${t}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" value="${esc(it.brand||'')}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" value="${esc(it.size||'')}"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" value="${esc(it.gsm||'')}"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
+    <div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${(it.current_balance||0).toLocaleString()}</b> ${esc(it.unit||'sheets')}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvEdit(${id})">Save Changes</button>
+    </div>
+  </div>`);
+}
+async function saveInvEdit(id) {
+  const data = {
+    paper_type: document.getElementById('inv-paper-type').value,
+    size:       document.getElementById('inv-size').value.trim(),
+    gsm:        document.getElementById('inv-gsm').value.trim(),
+    brand:      document.getElementById('inv-brand').value.trim(),
+    reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
+  };
+  if (!data.paper_type) { alert('Paper type is required'); return; }
+  showSaving(true);
+  try {
+    await api('PUT', `/api/inventory/${id}`, data);
+    await loadInventory();
+    closeModal(); notify('Item updated');
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+function openInvAddStock(id) {
+  const it = inventory.find(x => x.id === id); if (!it) return;
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Add Stock</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text)">${esc(label)}</b><br>Current: ${(it.current_balance||0).toLocaleString()} ${esc(it.unit||'sheets')}</div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Quantity *</label><input type="number" id="stock-qty" placeholder="e.g. 5000" min="1"></div>
+      <div class="form-group"><label class="form-label">Reason</label>
+        <select id="stock-reason">
+          <option value="delivery">Delivery</option>
+          <option value="adjustment">Manual adjustment</option>
+          <option value="return">Return / unused stock</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvAddStock(${id})">Add</button>
+    </div>
+  </div>`);
+}
+async function saveInvAddStock(id) {
+  const qty = parseInt(document.getElementById('stock-qty').value, 10);
+  if (!qty || qty <= 0) { alert('Quantity must be a positive number'); return; }
+  const data = {
+    change: qty,
+    reason: document.getElementById('stock-reason').value,
+    notes:  document.getElementById('stock-notes').value.trim(),
+  };
+  showSaving(true);
+  try {
+    await api('POST', `/api/inventory/${id}/transactions`, data);
+    await loadInventory();
+    closeModal(); notify(`+${qty.toLocaleString()} sheets added`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function openInvHistory(id) {
+  const it = inventory.find(x => x.id === id); if (!it) return;
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>History · ${esc(label)}</h2>
+    <div id="ledger-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  try {
+    const txs = await api('GET', `/api/inventory/${id}/transactions`);
+    const rows = txs.map(t => {
+      const date = new Date(t.created_at).toLocaleString('en-PK');
+      const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
+      const sign = t.change > 0 ? '+' : '';
+      const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+      return `<tr>
+        <td>${date}</td>
+        <td class="${cls}">${sign}${t.change.toLocaleString()}</td>
+        <td>${esc(t.reason||'')}</td>
+        <td>${job}</td>
+        <td>${esc(t.notes||'')}</td>
+      </tr>`;
+    }).join('');
+    document.getElementById('ledger-content').innerHTML = txs.length
+      ? `<table class="ledger-table">
+           <tr><th>When</th><th>Change</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+           ${rows}
+         </table>`
+      : '<div class="empty">No transactions yet.</div>';
+  } catch(e) {
+    document.getElementById('ledger-content').innerHTML = 'Error: ' + e.message;
+  }
+}
 function setDateRange(v) {
   filterDateRange = v;
   const custom = document.getElementById('date-custom');
@@ -465,12 +791,25 @@ function openModal(html) { document.getElementById('modal-root').innerHTML=`<div
 function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
 function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
 
-function specsSection(p, coatings) {
-  const paperTypes = Array.isArray(p.paper_types) ? p.paper_types : [];
+function specsSection(p, coatings, j) {
+  // Paper inventory dropdown — replaces the old free-text checkbox row.
+  // We list every inventory item; the live stock balance is shown inline.
+  // Validation in saveAdd/saveEdit will warn if sheets_qty > balance.
+  const currentItemId = j && j.inventory_item_id;
+  const itemOpt = it => {
+    const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''} — ${(it.current_balance||0).toLocaleString()} sheets`;
+    return `<option value="${it.id}" data-balance="${it.current_balance||0}" ${currentItemId===it.id?'selected':''}>${esc(label)}</option>`;
+  };
   const papersRow = `
     <tr class="jc-spec-row"><td colspan="5">
-      ${PAPER_TYPES.map(t => `<label><input type="checkbox" name="p-paper-types" value="${t}" ${paperTypes.includes(t)?'checked':''}> ${t}</label>`).join('')}
-      <span class="jc-brand">Brand: <input type="text" id="p-brand" value="${esc(p.brand||'')}"></span>
+      <div class="paper-pick">
+        <span class="jc-lbl" style="position:static;background:none;padding:0;">Paper:</span>
+        <select id="f-inventory-item" onchange="updateStockHint()">
+          <option value="">— Select paper from inventory —</option>
+          ${inventory.map(itemOpt).join('')}
+        </select>
+        <span class="stock-hint" id="stock-hint"></span>
+      </div>
     </td></tr>`;
   const coatRow = list => `
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
@@ -551,7 +890,7 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
-        <td colspan="2"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500"></td>
+        <td colspan="2"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="updateStockHint()"></td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
@@ -565,7 +904,7 @@ function jobForm(j={}) {
         <td colspan="3"><span class="jc-lbl">Delivered PO Qty</span><input type="text" id="f-delqty" value="${v(j.delqty)}" placeholder="e.g. 48000"></td>
       </tr>
     </table>
-    ${specsSection(j.particulars||{}, coatings)}
+    ${specsSection(j.particulars||{}, coatings, j)}
     ${particularsTable(j.particulars||{})}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
@@ -575,6 +914,8 @@ function jobForm(j={}) {
 }
 
 function getFormData() {
+  const itemEl = document.getElementById('f-inventory-item');
+  const inventory_item_id = itemEl && itemEl.value ? parseInt(itemEl.value, 10) : null;
   return {
     name: document.getElementById('f-name').value.trim(),
     client: document.getElementById('f-client').value.trim(),
@@ -597,6 +938,7 @@ function getFormData() {
     expdate: document.getElementById('f-expdate').value,
     mrp: document.getElementById('f-mrp').value.trim(),
     particulars: collectParticulars(),
+    inventory_item_id,
   };
 }
 
@@ -608,12 +950,41 @@ function collectParticulars() {
     const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
     if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
   });
-  out.paper_types = [...document.querySelectorAll('input[name="p-paper-types"]:checked')].map(c=>c.value);
-  out.brand = (document.getElementById('p-brand')||{}).value?.trim() || '';
   out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
   return out;
+}
+
+// Live "Available: X sheets" hint next to the paper dropdown in the job form.
+// Compares against the current Sheets Qty field so we can flag insufficient stock pre-save.
+function updateStockHint() {
+  const sel = document.getElementById('f-inventory-item');
+  const hint = document.getElementById('stock-hint');
+  if (!sel || !hint) return;
+  if (!sel.value) { hint.textContent = ''; hint.className = 'stock-hint'; return; }
+  const balance = parseInt(sel.options[sel.selectedIndex].dataset.balance, 10) || 0;
+  const needed = parseInt((document.getElementById('f-sheets')||{}).value, 10) || 0;
+  let cls = 'stock-hint';
+  if (balance <= 0) cls += ' out';
+  else if (needed > balance) cls += ' low';
+  hint.className = cls;
+  hint.textContent = needed > 0
+    ? `Available: ${balance.toLocaleString()} · Need: ${needed.toLocaleString()}${needed > balance ? ' · Short by ' + (needed - balance).toLocaleString() : ''}`
+    : `Available: ${balance.toLocaleString()} sheets`;
+}
+
+// Pre-save stock check — fires before POST/PUT. Returns true if okay to proceed,
+// false if the user chose to cancel after seeing the negative-stock warning.
+function checkStockBeforeSave(data) {
+  if (!data.inventory_item_id) return true;
+  const sheets = parseInt(data.sheets, 10) || 0;
+  if (sheets <= 0) return true;
+  const item = inventory.find(i => i.id === data.inventory_item_id);
+  if (!item) return true;
+  if (sheets <= (item.current_balance || 0)) return true;
+  const after = (item.current_balance || 0) - sheets;
+  return confirm(`Insufficient stock for ${item.paper_type}.\n\nAvailable: ${(item.current_balance||0).toLocaleString()} sheets\nNeeded: ${sheets.toLocaleString()} sheets\nBalance after: ${after.toLocaleString()} sheets\n\nProceed anyway?`);
 }
 
 function openAdd() {
@@ -625,15 +996,18 @@ function openAdd() {
       <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
     </div>
   </div>`);
+  updateStockHint();
 }
 
 async function saveAdd() {
   const data = getFormData();
   if (!data.name || !data.client) { alert('Job name and client are required.'); return; }
+  if (!checkStockBeforeSave(data)) return;
   showSaving(true);
   try {
     const newJob = await api('POST', '/api/jobs', data);
     jobs.push(newJob);
+    await loadInventory();   // refresh balances after server-side deduction
     closeModal(); notify('Job created!'); render();
     setTimeout(() => printJobCard(newJob.id), 100);
   } catch(e) { notify('Error: ' + e.message); }
@@ -651,15 +1025,23 @@ function openEdit(id) {
       <button class="btn btn-primary" onclick="saveEdit(${j.id})">Save Changes</button>
     </div>
   </div>`);
+  updateStockHint();
 }
 
 async function saveEdit(id) {
   const data = getFormData();
   if (!data.name || !data.client) { alert('Name and client required.'); return; }
+  // Stock warning only fires when the paper item or sheets qty actually changed
+  // vs. what's saved on the job — otherwise editing unrelated fields wouldn't ask.
+  const prior = jobs.find(j => j.id === id);
+  const itemChanged   = prior && prior.inventory_item_id !== data.inventory_item_id;
+  const sheetsChanged = prior && (prior.sheets || '') !== data.sheets;
+  if ((itemChanged || sheetsChanged) && !checkStockBeforeSave(data)) return;
   showSaving(true);
   try {
     const updated = await api('PUT', `/api/jobs/${id}`, data);
     jobs = jobs.map(j => j.id===id ? {...j,...updated} : j);
+    await loadInventory();
     closeModal(); notify('Saved!'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
@@ -802,7 +1184,12 @@ function buildPrintCard(j) {
   const fmt = d => d ? new Date(d).toLocaleDateString('en-PK') : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const p = j.particulars || {};
-  const paperTypes = Array.isArray(p.paper_types) ? p.paper_types : [];
+  // Paper checkmark sources: prefer the live inventory item the job points to;
+  // fall back to the old free-text paper_types array for jobs created before
+  // the inventory feature existed.
+  const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const paperTypes = invItem ? [invItem.paper_type] : (Array.isArray(p.paper_types) ? p.paper_types : []);
+  const paperBrand = invItem ? (invItem.brand || '') : (p.brand || '');
   const coatLabel = name => `<span class="pc-coat-box">${coatings.includes(name) ? '✓' : ''}</span>${name === 'Color Seal' ? 'Colour Seal' : name}`;
   const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
@@ -818,7 +1205,7 @@ function buildPrintCard(j) {
   const papersRow = `
     <tr><td colspan="5" class="pp-spec">
       ${PAPER_TYPES.map(t => `<span style="margin-right:14px;"><span class="pc-coat-box">${paperTypes.includes(t)?'✓':''}</span>${t}</span>`).join('')}
-      <span style="margin-left:6px;">Brand: ${v(p.brand)}</span>
+      <span style="margin-left:6px;">Brand: ${v(paperBrand)}</span>
     </td></tr>`;
   const coatRow = list => `
     <tr><td colspan="5" class="pp-spec" style="text-align:center;">
@@ -921,9 +1308,9 @@ function exportCSV() {
 
 // ── Init ──────────────────────────────────────────────────────
 async function init() {
-  await loadJobs();
+  await Promise.all([loadJobs(), loadInventory()]);
   document.getElementById('loading-screen').style.display = 'none';
-  setInterval(loadJobs, 30000);
+  setInterval(() => { loadJobs(); loadInventory(); }, 30000);
 }
 
 init();
