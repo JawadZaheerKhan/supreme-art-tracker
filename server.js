@@ -1,9 +1,28 @@
 const express = require('express');
 const path = require('path');
 const { neon } = require('@neondatabase/serverless');
+const { OAuth2Client } = require('google-auth-library');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
 
 const app = express();
 app.use(express.json());
+app.use(cookieParser());
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const JWT_SECRET       = process.env.JWT_SECRET || 'dev-only-change-me';
+const BOOTSTRAP_ADMIN  = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase();
+const SESSION_COOKIE   = 'sa_session';
+const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
+const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// Expose the public Google client id to the frontend so it can configure GIS.
+// Safe to expose — it's a public identifier, not a secret.
+app.get('/config.js', (req, res) => {
+  res.type('application/javascript');
+  res.send(`window.__SA_CONFIG__ = ${JSON.stringify({ googleClientId: GOOGLE_CLIENT_ID || '' })};`);
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 function getDb() {
@@ -83,6 +102,39 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_item_idx ON inventory_transactions(item_id)`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_job_idx  ON inventory_transactions(job_id)`;
 
+    // Auth: allow-list of users keyed by email. role is enforced via CHECK so
+    // the DB rejects typos. invited_by is just a breadcrumb for the Users tab.
+    await sql`
+      CREATE TABLE IF NOT EXISTS users (
+        id            SERIAL PRIMARY KEY,
+        email         TEXT NOT NULL UNIQUE,
+        name          TEXT,
+        picture       TEXT,
+        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+        invited_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        last_login_at TIMESTAMPTZ
+      )
+    `;
+
+    // Audit log: action-level history of every mutation. user_email is
+    // denormalized so log rows survive even if their user row is deleted.
+    await sql`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id          SERIAL PRIMARY KEY,
+        user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        user_email  TEXT,
+        action      TEXT NOT NULL,
+        entity_type TEXT,
+        entity_id   INTEGER,
+        summary     TEXT NOT NULL,
+        metadata    JSONB DEFAULT '{}',
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS audit_log_entity_idx ON audit_log(entity_type, entity_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS audit_log_user_idx   ON audit_log(user_id)`;
+
     console.log('Database ready');
   } catch (err) {
     console.error('Database init error:', err.message);
@@ -93,8 +145,231 @@ async function initDb() {
 // requests can't race ahead of ALTER TABLE on a cold start.
 const dbReady = initDb();
 
+// ── Auth helpers ─────────────────────────────────────────────
+
+// Parses our session cookie and attaches req.user if valid. Never errors —
+// downstream handlers use requireAuth/requireAdmin to enforce.
+function authMiddleware(req, res, next) {
+  const token = req.cookies && req.cookies[SESSION_COOKIE];
+  if (token) {
+    try {
+      const payload = jwt.verify(token, JWT_SECRET);
+      req.user = { id: payload.id, email: payload.email, role: payload.role, name: payload.name, picture: payload.picture };
+    } catch (e) {
+      // Invalid/expired token — leave req.user undefined.
+    }
+  }
+  next();
+}
+function requireAuth(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  next();
+}
+function requireAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
+app.use(authMiddleware);
+
+// Write an action-level audit row. Called from every mutating handler after
+// the primary write succeeds, so the log only ever shows real changes.
+async function logAudit(sql, req, { action, entityType, entityId, summary, metadata }) {
+  if (!req.user) return;
+  try {
+    await sql`
+      INSERT INTO audit_log (user_id, user_email, action, entity_type, entity_id, summary, metadata)
+      VALUES (${req.user.id}, ${req.user.email}, ${action}, ${entityType || null}, ${entityId || null}, ${summary}, ${JSON.stringify(metadata || {})})
+    `;
+  } catch (e) {
+    // Audit failures should never break the user-facing request.
+    console.error('Audit log write failed:', e.message);
+  }
+}
+
+// ── Auth routes ──────────────────────────────────────────────
+
+// Exchange a Google ID token for a session cookie. The frontend collects
+// the ID token via Google Identity Services and POSTs it here.
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    await dbReady;
+    if (!GOOGLE_CLIENT_ID) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID env var is not set on the server.' });
+    const { credential } = req.body || {};
+    if (!credential) return res.status(400).json({ error: 'Missing Google credential' });
+
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
+    const payload = ticket.getPayload();
+    const email = (payload.email || '').toLowerCase();
+    const name = payload.name || null;
+    const picture = payload.picture || null;
+    if (!email || !payload.email_verified) {
+      return res.status(401).json({ error: 'Google did not verify this email address.' });
+    }
+
+    const sql = getDb();
+    // Look up by email — case-insensitive.
+    let userRows = await sql`SELECT * FROM users WHERE lower(email) = ${email}`;
+    let user = userRows[0];
+
+    // Bootstrap: if no record exists and this email matches the env-configured
+    // BOOTSTRAP_ADMIN_EMAIL, auto-create as admin. This is the only way to get
+    // the first admin into a fresh database.
+    if (!user && BOOTSTRAP_ADMIN && email === BOOTSTRAP_ADMIN) {
+      const inserted = await sql`
+        INSERT INTO users (email, name, picture, role)
+        VALUES (${email}, ${name}, ${picture}, 'admin')
+        RETURNING *
+      `;
+      user = inserted[0];
+      // Audit the bootstrap as the new admin acting on themselves.
+      await logAudit(sql, { user: { id: user.id, email: user.email } },
+        { action: 'user.bootstrap', entityType: 'user', entityId: user.id, summary: `Bootstrap admin ${email} auto-created` });
+    }
+
+    if (!user) {
+      return res.status(403).json({ error: 'Not authorized — contact your administrator to be invited.' });
+    }
+
+    // Refresh profile + login timestamp on every sign-in.
+    const updated = await sql`
+      UPDATE users SET name = ${name}, picture = ${picture}, last_login_at = NOW()
+      WHERE id = ${user.id} RETURNING *
+    `;
+    user = updated[0];
+
+    const sessionToken = jwt.sign(
+      { id: user.id, email: user.email, role: user.role, name: user.name, picture: user.picture },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    res.cookie(SESSION_COOKIE, sessionToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      maxAge: SESSION_MAX_AGE,
+      path: '/',
+    });
+    res.json({ user: publicUser(user) });
+  } catch (err) {
+    console.error('Auth error:', err);
+    res.status(401).json({ error: 'Could not verify Google sign-in: ' + err.message });
+  }
+});
+
+// Logout — clears the cookie. Safe to call when already signed out.
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
+  res.json({ ok: true });
+});
+
+// Who am I — used by the frontend on load to decide whether to show the login screen.
+app.get('/api/auth/me', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  res.json({ user: req.user });
+});
+
+function publicUser(u) {
+  return { id: u.id, email: u.email, name: u.name, picture: u.picture, role: u.role, created_at: u.created_at, last_login_at: u.last_login_at, invited_by: u.invited_by };
+}
+
+// ── User management (admin only) ─────────────────────────────
+
+app.get('/api/users', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT u.*, inv.email AS invited_by_email
+      FROM users u
+      LEFT JOIN users inv ON inv.id = u.invited_by
+      ORDER BY u.created_at ASC
+    `;
+    res.json(rows.map(r => ({ ...publicUser(r), invited_by_email: r.invited_by_email })));
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/users', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const email = (req.body.email || '').trim().toLowerCase();
+    const role = req.body.role === 'admin' ? 'admin' : 'user';
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
+    const inserted = await sql`
+      INSERT INTO users (email, role, invited_by) VALUES (${email}, ${role}, ${req.user.id})
+      ON CONFLICT (email) DO NOTHING
+      RETURNING *
+    `;
+    if (!inserted.length) return res.status(409).json({ error: 'A user with this email already exists' });
+    await logAudit(sql, req, { action: 'user.invite', entityType: 'user', entityId: inserted[0].id, summary: `Invited ${email} as ${role}` });
+    res.json(publicUser(inserted[0]));
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/users/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { id } = req.params;
+    const role = req.body.role === 'admin' ? 'admin' : 'user';
+    // Guardrail: don't allow demoting yourself — locks you out of admin tools.
+    if (parseInt(id, 10) === req.user.id && role !== 'admin') {
+      return res.status(400).json({ error: "You can't change your own role away from admin." });
+    }
+    const updated = await sql`UPDATE users SET role = ${role} WHERE id = ${id} RETURNING *`;
+    if (!updated.length) return res.status(404).json({ error: 'User not found' });
+    await logAudit(sql, req, { action: 'user.role-change', entityType: 'user', entityId: updated[0].id, summary: `Set ${updated[0].email} to ${role}` });
+    res.json(publicUser(updated[0]));
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/users/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (id === req.user.id) return res.status(400).json({ error: "You can't delete yourself." });
+    const deleted = await sql`DELETE FROM users WHERE id = ${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'User not found' });
+    await logAudit(sql, req, { action: 'user.delete', entityType: 'user', entityId: id, summary: `Removed ${deleted[0].email}` });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Audit log query ──────────────────────────────────────────
+
+app.get('/api/audit', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { entity_type, entity_id, user_id, limit } = req.query;
+    const cap = Math.min(parseInt(limit, 10) || 100, 500);
+    let rows;
+    if (entity_type && entity_id) {
+      rows = await sql`SELECT * FROM audit_log WHERE entity_type = ${entity_type} AND entity_id = ${entity_id} ORDER BY id DESC LIMIT ${cap}`;
+    } else if (user_id) {
+      rows = await sql`SELECT * FROM audit_log WHERE user_id = ${user_id} ORDER BY id DESC LIMIT ${cap}`;
+    } else {
+      rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
+    }
+    res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // GET all jobs
-app.get('/api/jobs', async (req, res) => {
+app.get('/api/jobs', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -127,7 +402,7 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes 
 }
 
 // CREATE a job
-app.post('/api/jobs', async (req, res) => {
+app.post('/api/jobs', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -148,6 +423,7 @@ app.post('/api/jobs', async (req, res) => {
         notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name}`,
       });
     }
+    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client})` });
     res.json(job);
   } catch (err) {
     console.error(err);
@@ -156,7 +432,7 @@ app.post('/api/jobs', async (req, res) => {
 });
 
 // UPDATE job details
-app.put('/api/jobs/:id', async (req, res) => {
+app.put('/api/jobs/:id', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -204,7 +480,25 @@ app.put('/api/jobs/:id', async (req, res) => {
         notes: `Edit on Job E-${job.id}: consumed ${newSheets} sheets`,
       });
     }
+    await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
     res.json(job);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE a job — admin only. Inventory ledger entries keep their data
+// (the FK is ON DELETE SET NULL) so historical balances stay traceable.
+app.delete('/api/jobs/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM jobs WHERE id = ${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Job not found' });
+    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Deleted Job E-${id}: ${deleted[0].name}` });
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -214,7 +508,7 @@ app.put('/api/jobs/:id', async (req, res) => {
 // ── Inventory endpoints ─────────────────────────────────────────
 
 // LIST all inventory items
-app.get('/api/inventory', async (req, res) => {
+app.get('/api/inventory', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -228,7 +522,7 @@ app.get('/api/inventory', async (req, res) => {
 
 // CREATE an inventory item. Initial balance, if provided, is recorded as an
 // "opening-balance" ledger row so the audit trail is complete from day one.
-app.post('/api/inventory', async (req, res) => {
+app.post('/api/inventory', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -241,6 +535,7 @@ app.post('/api/inventory', async (req, res) => {
     `;
     const item = inserted[0];
     const opening = parseSheets(opening_balance);
+    const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
     if (opening > 0) {
       await applyInventoryChange(sql, {
         itemId: item.id,
@@ -250,8 +545,10 @@ app.post('/api/inventory', async (req, res) => {
         notes: opening_notes || 'Opening balance',
       });
       const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`;
+      await logAudit(sql, req, { action: 'inventory.create', entityType: 'inventory', entityId: item.id, summary: `Added paper item: ${label} (opening ${opening.toLocaleString()} sheets)` });
       return res.json(refreshed[0]);
     }
+    await logAudit(sql, req, { action: 'inventory.create', entityType: 'inventory', entityId: item.id, summary: `Added paper item: ${label}` });
     res.json(item);
   } catch (err) {
     console.error(err);
@@ -260,7 +557,7 @@ app.post('/api/inventory', async (req, res) => {
 });
 
 // UPDATE inventory item fields (not balance — balance is ledger-driven)
-app.put('/api/inventory/:id', async (req, res) => {
+app.put('/api/inventory/:id', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -272,7 +569,12 @@ app.put('/api/inventory/:id', async (req, res) => {
         brand=${brand||null}, reorder_threshold=${reorder_threshold||0}
       WHERE id=${id} RETURNING *
     `;
-    res.json(result[0]);
+    const item = result[0];
+    if (item) {
+      const label = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
+      await logAudit(sql, req, { action: 'inventory.update', entityType: 'inventory', entityId: item.id, summary: `Edited paper item: ${label}` });
+    }
+    res.json(item);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -280,7 +582,7 @@ app.put('/api/inventory/:id', async (req, res) => {
 });
 
 // ADD/ADJUST stock — used for deliveries and manual corrections.
-app.post('/api/inventory/:id/transactions', async (req, res) => {
+app.post('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -288,15 +590,22 @@ app.post('/api/inventory/:id/transactions', async (req, res) => {
     const { change, reason, notes } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
+    const itemId = parseInt(id, 10);
     await applyInventoryChange(sql, {
-      itemId: parseInt(id, 10),
+      itemId,
       change: delta,
       reason: reason || (delta > 0 ? 'delivery' : 'adjustment'),
       jobId: null,
       notes: notes || null,
     });
     const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
-    res.json(refreshed[0]);
+    const it = refreshed[0];
+    if (it) {
+      const label = `${it.paper_type}${it.size?' '+it.size:''}${it.gsm?' '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+      const sign = delta > 0 ? '+' : '';
+      await logAudit(sql, req, { action: 'inventory.stock', entityType: 'inventory', entityId: it.id, summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${reason || (delta>0?'delivery':'adjustment')})` });
+    }
+    res.json(it);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -304,7 +613,7 @@ app.post('/api/inventory/:id/transactions', async (req, res) => {
 });
 
 // LEDGER for one item — full transaction history, newest first.
-app.get('/api/inventory/:id/transactions', async (req, res) => {
+app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -324,7 +633,7 @@ app.get('/api/inventory/:id/transactions', async (req, res) => {
 });
 
 // UPDATE stage/status only
-app.patch('/api/jobs/:id/stage', async (req, res) => {
+app.patch('/api/jobs/:id/stage', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -334,7 +643,16 @@ app.patch('/api/jobs/:id/stage', async (req, res) => {
       UPDATE jobs SET stage_index=${stage_index}, stages=${JSON.stringify(stages)}, log=${JSON.stringify(log)}
       WHERE id=${id} RETURNING *
     `;
-    res.json(result[0]);
+    const job = result[0];
+    if (job) {
+      // Use the most recent log entry's action verb if available; otherwise generic.
+      const last = Array.isArray(log) && log.length ? log[log.length - 1] : null;
+      const summary = last
+        ? `Job E-${job.id} ${last.status === 'blocked' ? 'blocked' : last.status === 'done' ? 'completed' : 'moved'} at "${last.stage}"${last.notes ? ': ' + last.notes : ''}`
+        : `Job E-${job.id} stage updated`;
+      await logAudit(sql, req, { action: 'job.stage', entityType: 'job', entityId: job.id, summary });
+    }
+    res.json(job);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
