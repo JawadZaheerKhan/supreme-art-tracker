@@ -303,6 +303,44 @@ app.post('/api/inventory/:id/transactions', async (req, res) => {
   }
 });
 
+// REPORT: all inventory transactions across all items, with item details joined.
+// Query params (all optional):
+//   from       — ISO date (inclusive lower bound, e.g. "2026-05-01")
+//   to         — ISO date (inclusive upper bound, e.g. "2026-05-31")
+//   direction  — "in" (change > 0), "out" (change < 0), or omitted for both
+// Newest first. Used by the Inventory Stock Report screen.
+app.get('/api/inventory/transactions', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const from = req.query.from || null;
+    const to   = req.query.to   || null;
+    const dir = req.query.direction === 'in' ? 'in'
+              : req.query.direction === 'out' ? 'out'
+              : 'all';
+    // Inclusive end-of-day on `to` so a date like 2026-05-31 matches transactions
+    // recorded at 2026-05-31 18:00:00. Without this, same-day queries miss data.
+    const txs = await sql`
+      SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+             i.paper_type, i.size AS item_size, i.gsm AS item_gsm,
+             i.brand AS item_brand, i.unit AS item_unit
+      FROM inventory_transactions t
+      LEFT JOIN jobs j ON j.id = t.job_id
+      LEFT JOIN inventory_items i ON i.id = t.item_id
+      WHERE (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
+        AND (${to}::timestamptz   IS NULL OR t.created_at <  (${to}::timestamptz + INTERVAL '1 day'))
+        AND (${dir} = 'all'
+             OR (${dir} = 'in'  AND t.change > 0)
+             OR (${dir} = 'out' AND t.change < 0))
+      ORDER BY t.id DESC
+    `;
+    res.json(txs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // LEDGER for one item — full transaction history, newest first.
 app.get('/api/inventory/:id/transactions', async (req, res) => {
   try {

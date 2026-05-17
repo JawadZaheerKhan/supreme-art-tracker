@@ -295,7 +295,8 @@
       <option value="low">Low stock only</option>
       <option value="out">Out of stock</option>
     </select>
-    <button class="btn btn-sm" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
+    <button class="btn btn-sm" style="margin-left:auto;" onclick="openStockReport()">&#128202; Stock Report</button>
+    <button class="btn btn-sm" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -1056,6 +1057,236 @@ async function openInvHistory(id) {
     document.getElementById('ledger-content').innerHTML = 'Error: ' + e.message;
   }
 }
+
+// ── Stock Report ─────────────────────────────────────────────
+// Overall stock-movement report across ALL inventory items, with direction
+// (in/out/all) + date period (today/week/month/custom) filters and a print
+// view. Backend endpoint: GET /api/inventory/transactions
+let stockReportState = { direction: 'all', period: 'month', from: '', to: '', rows: [] };
+
+// Returns ISO yyyy-mm-dd strings for the chosen period. Custom passes through
+// whatever the user typed in the from/to date inputs.
+function stockReportDateRange(period) {
+  const now = new Date();
+  const iso = d => d.toISOString().slice(0, 10);
+  if (period === 'today') {
+    const t = iso(now);
+    return { from: t, to: t };
+  }
+  if (period === 'week') {
+    // ISO week — Monday as the first day. Sunday in JS is 0, so shift.
+    const day = now.getDay() === 0 ? 6 : now.getDay() - 1;
+    const monday = new Date(now); monday.setDate(now.getDate() - day);
+    return { from: iso(monday), to: iso(now) };
+  }
+  if (period === 'month') {
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { from: iso(first), to: iso(now) };
+  }
+  if (period === 'custom') {
+    return { from: stockReportState.from, to: stockReportState.to };
+  }
+  return { from: '', to: '' };
+}
+
+function openStockReport() {
+  stockReportState = { direction: 'all', period: 'month', from: '', to: '', rows: [] };
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>Stock Report</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-bottom:14px;">
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Direction</div>
+        <select class="filter" id="sr-direction" onchange="setStockReportDirection(this.value)">
+          <option value="all">All movement</option>
+          <option value="in">Stock In only (+)</option>
+          <option value="out">Stock Out only (−)</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Period</div>
+        <select class="filter" id="sr-period" onchange="setStockReportPeriod(this.value)">
+          <option value="today">Today</option>
+          <option value="week">This Week</option>
+          <option value="month" selected>This Month</option>
+          <option value="custom">Custom range…</option>
+        </select>
+      </div>
+      <div id="sr-custom" style="display:none;align-items:flex-end;gap:8px;">
+        <div>
+          <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">From</div>
+          <input class="filter" type="date" id="sr-from" onchange="setStockReportCustom()">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">To</div>
+          <input class="filter" type="date" id="sr-to" onchange="setStockReportCustom()">
+        </div>
+      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="printStockReport()">&#128424; Print Report</button>
+    </div>
+    <div id="sr-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    <div id="sr-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  loadStockReport();
+}
+
+function setStockReportDirection(v) { stockReportState.direction = v; loadStockReport(); }
+function setStockReportPeriod(v) {
+  stockReportState.period = v;
+  document.getElementById('sr-custom').style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') loadStockReport();
+}
+function setStockReportCustom() {
+  stockReportState.from = document.getElementById('sr-from').value;
+  stockReportState.to   = document.getElementById('sr-to').value;
+  if (stockReportState.from && stockReportState.to) loadStockReport();
+}
+
+async function loadStockReport() {
+  const { direction, period } = stockReportState;
+  const { from, to } = stockReportDateRange(period);
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to)   qs.set('to',   to);
+  if (direction !== 'all') qs.set('direction', direction);
+  try {
+    const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
+    stockReportState.rows = txs;
+    renderStockReport(from, to);
+  } catch (e) {
+    document.getElementById('sr-content').innerHTML = 'Error: ' + e.message;
+  }
+}
+
+function renderStockReport(from, to) {
+  const txs = stockReportState.rows;
+  // Totals — separate sums for In and Out, plus unique-items affected.
+  let totalIn = 0, totalOut = 0;
+  const itemSet = new Set();
+  for (const t of txs) {
+    if (t.change > 0) totalIn += t.change;
+    else              totalOut += -t.change; // store as positive magnitude
+    if (t.item_id)    itemSet.add(t.item_id);
+  }
+  const net = totalIn - totalOut;
+  const tile = (label, value, color) =>
+    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:140px;">
+       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
+       <div style="font-size:20px;font-weight:600;color:${color};margin-top:2px;">${value}</div>
+     </div>`;
+  document.getElementById('sr-summary').innerHTML =
+      tile('Total Stock In',  '+' + totalIn.toLocaleString(),                 '#166534')
+    + tile('Total Stock Out', '−' + totalOut.toLocaleString(),                '#A32D2D')
+    + tile('Net change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D')
+    + tile('Items affected',  itemSet.size.toLocaleString(),                  'var(--text)')
+    + tile('Transactions',    txs.length.toLocaleString(),                    'var(--text)');
+
+  const rows = txs.map(t => {
+    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
+    const sign = t.change > 0 ? '+' : '';
+    const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
+    const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    return `<tr>
+      <td>${date}</td>
+      <td>${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
+      <td class="${cls}">${sign}${t.change.toLocaleString()}</td>
+      <td>${esc(t.reason||'')}</td>
+      <td>${job}</td>
+      <td>${esc(t.notes||'')}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('sr-content').innerHTML = txs.length
+    ? `<div style="font-size:11px;color:var(--text2);margin-bottom:6px;">Period: ${from || '(any)'} to ${to || '(any)'} · ${txs.length} transaction${txs.length===1?'':'s'}</div>
+       <table class="ledger-table">
+         <tr><th>When</th><th>Item</th><th>Change</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+         ${rows}
+       </table>`
+    : '<div class="empty">No transactions in this period.</div>';
+}
+
+// Build a print-ready HTML block (A4 portrait) and trigger the browser print
+// dialog. Reuses the same #print-area / @media print rules as job-card printing.
+function printStockReport() {
+  const { direction, period, rows } = stockReportState;
+  const { from, to } = stockReportDateRange(period);
+  const dirLabel = direction === 'in' ? 'Stock In only' : direction === 'out' ? 'Stock Out only' : 'All movement';
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[period] || period;
+
+  let totalIn = 0, totalOut = 0;
+  const itemSet = new Set();
+  for (const t of rows) {
+    if (t.change > 0) totalIn += t.change; else totalOut += -t.change;
+    if (t.item_id) itemSet.add(t.item_id);
+  }
+  const net = totalIn - totalOut;
+
+  const tableRows = rows.map(t => {
+    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const sign = t.change > 0 ? '+' : '';
+    const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
+    const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    return `<tr>
+      <td>${date}</td>
+      <td>${item}</td>
+      <td style="text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};">${sign}${t.change.toLocaleString()}</td>
+      <td>${esc(t.reason||'')}</td>
+      <td>${job}</td>
+      <td>${esc(t.notes||'')}</td>
+    </tr>`;
+  }).join('');
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:16pt;font-weight:bold;">Supreme Art Packaging Press</div>
+          <div style="font-size:11pt;">Inventory Stock Report</div>
+        </div>
+        <div style="margin-left:auto;font-size:9pt;text-align:right;">
+          Generated: ${new Date().toLocaleString('en-PK')}
+        </div>
+      </div>
+      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
+        <tr>
+          <td style="padding:2px 8px 2px 0;"><b>Direction:</b> ${dirLabel}</td>
+          <td style="padding:2px 8px;"><b>Period:</b> ${periodLabel}</td>
+          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
+          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
+        </tr>
+      </table>
+      <table style="width:100%;font-size:10pt;border:1px solid #000;border-collapse:collapse;margin-bottom:10px;">
+        <tr style="background:#eee;">
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Total Stock In</b><br><span style="color:#166534;font-size:13pt;font-weight:bold;">+${totalIn.toLocaleString()}</span></td>
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Total Stock Out</b><br><span style="color:#A32D2D;font-size:13pt;font-weight:bold;">−${totalOut.toLocaleString()}</span></td>
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Net Change</b><br><span style="color:${net>=0?'#166534':'#A32D2D'};font-size:13pt;font-weight:bold;">${net>=0?'+':'−'}${Math.abs(net).toLocaleString()}</span></td>
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Items Affected</b><br><span style="font-size:13pt;font-weight:bold;">${itemSet.size}</span></td>
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Transactions</b><br><span style="font-size:13pt;font-weight:bold;">${rows.length}</span></td>
+        </tr>
+      </table>
+      ${rows.length ? `
+      <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th style="border:1px solid #000;padding:4px;text-align:left;">When</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Item</th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Change</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Reason</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Notes</th>
+        </tr>
+        ${tableRows.replace(/<td>/g, '<td style="border:1px solid #000;padding:4px;">').replace(/<td style="text-align:right;font-weight:bold;color:/g, '<td style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:')}
+      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No transactions in this period.</div>'}
+    </div>
+  `;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  setTimeout(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  }, 50);
+}
+
 function setDateRange(v) {
   filterDateRange = v;
   const custom = document.getElementById('date-custom');
