@@ -333,9 +333,22 @@
 </head>
 <body>
 
+<!-- Server-injected public config (Google client id). Loaded before GIS so the
+     Sign-In button can read window.__SA_CONFIG__.googleClientId. -->
+<script src="/config.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
 <div id="loading-screen">
   <div style="font-size:16px;font-weight:600;color:var(--text);">Job Tracker Supreme Art</div>
-  <div style="font-size:13px;color:var(--text2);">Loading jobs...</div>
+  <div style="font-size:13px;color:var(--text2);">Loading...</div>
+</div>
+
+<!-- Login screen — shown when /api/auth/me returns 401. Hidden once signed in. -->
+<div id="login-screen" style="display:none; position:fixed; inset:0; background:var(--bg3); z-index:998; align-items:center; justify-content:center; flex-direction:column; gap:18px; padding:24px; text-align:center;">
+  <div style="font-size:22px;font-weight:600;color:var(--text);">Job Tracker <span style="color:var(--blue-text);">Supreme Art</span></div>
+  <div style="font-size:13px;color:var(--text2);max-width:380px;">Sign in with your authorized Google account to continue. If you haven't been invited yet, please ask your administrator.</div>
+  <div id="google-signin-btn" style="margin-top:8px;"></div>
+  <div id="login-error" style="font-size:13px;color:#A32D2D;display:none;max-width:380px;"></div>
 </div>
 
 <div class="topbar">
@@ -348,12 +361,21 @@
     <button class="mode-btn" data-mode="inventory" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="reports" onclick="setMode('reports')">Reports</button>
     <button class="mode-btn" data-mode="stickers" onclick="setMode('stickers')">Stickers</button>
+    <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn" style="display:none;">Users</button>
   </div>
   <div class="topbar-right">
     <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
     <button class="btn btn-sm" id="topbar-refresh" onclick="refreshCurrent()">&#8635; Refresh</button>
     <button class="btn btn-sm" id="topbar-export" onclick="exportCSV()">Export to Excel</button>
     <button class="btn btn-primary" id="topbar-add" onclick="openAdd()">+ New Job</button>
+    <div id="user-chip" style="display:none; align-items:center; gap:8px; margin-left:10px; padding-left:10px; border-left:1px solid var(--border);">
+      <img id="user-pic" src="" alt="" style="width:28px; height:28px; border-radius:50%; display:none;">
+      <div style="text-align:right; line-height:1.2;">
+        <div id="user-name" style="font-size:13px; font-weight:600; color:var(--text);"></div>
+        <div id="user-role-pill" style="font-size:10px; color:var(--text2); text-transform:uppercase; letter-spacing:0.04em;"></div>
+      </div>
+      <button class="btn btn-sm" onclick="logout()" title="Sign out">Logout</button>
+    </div>
   </div>
 </div>
 
@@ -528,6 +550,19 @@
   </div>
 </div>
 
+<div class="main" id="users-mode" style="display:none;">
+  <div class="stats-row" id="users-stats-row"></div>
+  <div class="toolbar">
+    <div style="font-size:14px;font-weight:600;color:var(--text);">Authorized Users</div>
+    <button class="btn btn-sm btn-primary" style="margin-left:auto;" onclick="openInviteUser()">+ Invite User</button>
+  </div>
+  <div class="inventory-list" id="users-list"></div>
+  <div style="margin-top:1.5rem;">
+    <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:0.5rem;">Recent Activity</div>
+    <div class="inventory-list" id="audit-list"></div>
+  </div>
+</div>
+
 <div id="modal-root"></div>
 <div id="print-area"></div>
 <div class="notif" id="notif"></div>
@@ -642,11 +677,92 @@ function notify(msg) {
 
 // ── API calls ─────────────────────────────────────────────────
 async function api(method, path, body) {
-  const opts = { method, headers: {'Content-Type':'application/json'} };
+  const opts = { method, headers: {'Content-Type':'application/json'}, credentials: 'same-origin' };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(path, opts);
-  if (!res.ok) { const e = await res.json(); throw new Error(e.error || 'Request failed'); }
+  if (res.status === 401 && currentUser) {
+    // Session expired mid-use — drop back to the login screen.
+    currentUser = null;
+    showLogin('Your session has expired. Please sign in again.');
+    throw new Error('Session expired');
+  }
+  if (!res.ok) {
+    let msg = 'Request failed';
+    try { const e = await res.json(); msg = e.error || msg; } catch {}
+    throw new Error(msg);
+  }
   return res.json();
+}
+
+// ── Auth state ────────────────────────────────────────────────
+let currentUser = null;
+function isAdmin() { return currentUser && currentUser.role === 'admin'; }
+
+function showLogin(errorMsg) {
+  document.getElementById('login-screen').style.display = 'flex';
+  document.querySelector('.topbar').style.display = 'none';
+  document.getElementById('jobs-mode').style.display = 'none';
+  document.getElementById('inventory-mode').style.display = 'none';
+  document.getElementById('users-mode').style.display = 'none';
+  const err = document.getElementById('login-error');
+  if (errorMsg) { err.textContent = errorMsg; err.style.display = 'block'; }
+  else { err.style.display = 'none'; }
+  setupGoogleSignIn();
+}
+function hideLogin() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.querySelector('.topbar').style.display = 'flex';
+}
+function renderUserChip() {
+  const chip = document.getElementById('user-chip');
+  if (!currentUser) { chip.style.display = 'none'; return; }
+  chip.style.display = 'flex';
+  document.getElementById('user-name').textContent = currentUser.name || currentUser.email;
+  document.getElementById('user-role-pill').textContent = currentUser.role;
+  const pic = document.getElementById('user-pic');
+  if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
+  else { pic.style.display = 'none'; }
+  document.getElementById('mode-users-btn').style.display = isAdmin() ? 'block' : 'none';
+}
+
+// Google Identity Services — renders the official Sign In button into our
+// container. The callback fires with an ID token credential; we POST it to
+// our backend to exchange for a session cookie.
+function setupGoogleSignIn() {
+  const tryInit = () => {
+    if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+      setTimeout(tryInit, 100); return;
+    }
+    const cid = (window.__SA_CONFIG__ || {}).googleClientId;
+    if (!cid) {
+      document.getElementById('login-error').textContent = 'Sign-in unavailable: GOOGLE_CLIENT_ID is not configured on the server.';
+      document.getElementById('login-error').style.display = 'block';
+      return;
+    }
+    google.accounts.id.initialize({ client_id: cid, callback: onGoogleCredential });
+    google.accounts.id.renderButton(document.getElementById('google-signin-btn'),
+      { theme: 'outline', size: 'large', text: 'signin_with', shape: 'rectangular' });
+  };
+  tryInit();
+}
+async function onGoogleCredential(response) {
+  try {
+    const out = await api('POST', '/api/auth/google', { credential: response.credential });
+    currentUser = out.user;
+    hideLogin();
+    renderUserChip();
+    await Promise.all([loadJobs(), loadInventory()]);
+    document.getElementById('loading-screen').style.display = 'none';
+  } catch (e) {
+    const err = document.getElementById('login-error');
+    err.textContent = e.message || 'Sign-in failed.';
+    err.style.display = 'block';
+  }
+}
+async function logout() {
+  try { await api('POST', '/api/auth/logout'); } catch {}
+  currentUser = null;
+  showLogin();
 }
 
 async function loadJobs() {
@@ -667,15 +783,18 @@ async function loadInventory() {
   }
 }
 
-// Mode (top-level page) switching — toggles between Jobs and Inventory views
+// Mode (top-level page) switching — toggles between Jobs / Inventory / Users
 // and swaps the topbar's primary action button accordingly.
 function setMode(m) {
+  // Block non-admins from sneaking into the Users tab via dev tools.
+  if (m === 'users' && !isAdmin()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
   document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
+  document.getElementById('users-mode').style.display     = m === 'users' ? 'block' : 'none';
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('topbar-refresh');
@@ -698,14 +817,22 @@ function setMode(m) {
     // Default to the Dashboard pane every time the user lands on Reports
     // (avoids stale state if they had Stock In/Out open from a prior visit).
     setReportsTab('dashboard');
-  } else { // stickers
+  } else if (m === 'stickers') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     refreshBtn.style.display = 'none';
     initStickersTab();
+  } else if (m === 'users') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    loadUsersAndAudit();
   }
 }
-function refreshCurrent() { mode === 'jobs' ? loadJobs() : mode === 'inventory' ? loadInventory() : null; }
+function refreshCurrent() {
+  if (mode === 'jobs') loadJobs();
+  else if (mode === 'inventory') loadInventory();
+  else if (mode === 'users') loadUsersAndAudit();
+}
 
 // ── Filtering ─────────────────────────────────────────────────
 function getFiltered() {
@@ -807,6 +934,7 @@ function renderJobs() {
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit</button>
           <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
           ${!done?`<button class="btn btn-sm btn-danger" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
+          ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
         </div>
       </div>
     </div>`;
@@ -3303,14 +3431,15 @@ async function moveToStage(id, target) {
   showSaving(false);
 }
 
-function openHistory(id) {
+async function openHistory(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   const log = [...(j.log||[])].reverse();
-  openModal(`<div class="modal" onclick="event.stopPropagation()">
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History — #${j.id}</h2>
     <div style="font-size:13px;color:#6b6960;margin-bottom:1rem;">${esc(j.name)} &middot; ${esc(j.client)}</div>
-    ${log.length===0?'<div style="text-align:center;padding:1.5rem;color:#9e9c94">No updates logged yet.</div>':log.map(l=>`
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Stage Log</div>
+    ${log.length===0?'<div style="text-align:center;padding:1.5rem;color:#9e9c94">No stage updates yet.</div>':log.map(l=>`
     <div class="history-item">
       <div>
         <span class="h-stage">${esc(l.stage)}</span>
@@ -3321,8 +3450,36 @@ function openHistory(id) {
       </div>
       <div class="h-time">${esc(l.time||'')}</div>
     </div>`).join('')}
+    <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Audit Log</div>
+    <div id="job-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
   </div>`);
+  try {
+    const audit = await api('GET', `/api/audit?entity_type=job&entity_id=${id}`);
+    document.getElementById('job-audit-content').innerHTML = audit.length
+      ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${audit.map(a=>`<tr><td>${new Date(a.created_at).toLocaleString('en-PK')}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
+      : '<div class="empty">No audit entries yet.</div>';
+  } catch(e) {
+    document.getElementById('job-audit-content').innerHTML = 'Error: ' + e.message;
+  }
+}
+
+// Hard-deletes a job. Admin only — server also enforces. The inventory
+// ledger keeps its rows (FK is ON DELETE SET NULL on inventory_transactions.job_id),
+// so historical consumption stays traceable even after the job is gone.
+async function deleteJob(id) {
+  if (!isAdmin()) return;
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  if (!confirm(`Permanently delete Job E-${id}: "${j.name}"?\n\nThis cannot be undone. Inventory ledger entries will be preserved but their link to this job will be removed.`)) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/jobs/${id}`);
+    jobs = jobs.filter(x => x.id !== id);
+    await loadInventory();
+    notify('Job deleted'); render();
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 
 async function toggleBlock(id) {
@@ -3476,8 +3633,147 @@ function exportCSV() {
   notify('Exported!');
 }
 
+// ── Users tab ────────────────────────────────────────────────
+let usersList = [];
+let auditList = [];
+
+async function loadUsersAndAudit() {
+  try {
+    const [u, a] = await Promise.all([
+      api('GET', '/api/users'),
+      api('GET', '/api/audit?limit=50'),
+    ]);
+    usersList = u;
+    auditList = a;
+    renderUsersTab();
+  } catch (e) {
+    notify('Error loading users: ' + e.message);
+  }
+}
+function renderUsersTab() {
+  const stats = {
+    total: usersList.length,
+    admins: usersList.filter(u => u.role === 'admin').length,
+    users: usersList.filter(u => u.role === 'user').length,
+  };
+  document.getElementById('users-stats-row').innerHTML = `
+    <div class="stat"><div class="stat-label">Total Users</div><div class="stat-value">${stats.total}</div></div>
+    <div class="stat"><div class="stat-label">Admins</div><div class="stat-value">${stats.admins}</div></div>
+    <div class="stat"><div class="stat-label">Users</div><div class="stat-value">${stats.users}</div></div>
+  `;
+  document.getElementById('users-list').innerHTML = usersList.map(u => {
+    const last = u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-PK') : 'never';
+    const isMe = currentUser && u.id === currentUser.id;
+    return `
+    <div class="inv-card">
+      <img src="${esc(u.picture||'')}" alt="" style="width:36px;height:36px;border-radius:50%;${u.picture?'':'display:none;'}">
+      <div class="inv-main">
+        <div class="inv-name">${esc(u.name || u.email)}${isMe?' <span class="inv-badge low" style="background:#dbeafe;color:#1e40af;">You</span>':''}</div>
+        <div class="inv-sub">${esc(u.email)} · Last login: ${last}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
+      </div>
+      <div class="inv-balance">
+        <select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:110px;">
+          <option value="user" ${u.role==='user'?'selected':''}>User</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+        </select>
+      </div>
+      <div class="inv-actions">
+        <button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>
+        ${isMe ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty">No users yet.</div>';
+
+  // Recent activity feed — top 50 entries across everything.
+  document.getElementById('audit-list').innerHTML = auditList.length ? auditList.map(a => {
+    const when = new Date(a.created_at).toLocaleString('en-PK');
+    return `
+    <div class="inv-card">
+      <div class="inv-main">
+        <div class="inv-name">${esc(a.summary)}</div>
+        <div class="inv-sub">${esc(a.user_email || 'system')} · ${esc(a.action)} · ${when}</div>
+      </div>
+    </div>`;
+  }).join('') : '<div class="empty">No activity yet.</div>';
+}
+
+function openInviteUser() {
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Invite User</h2>
+    <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
+    <div class="form-group"><label class="form-label">Role</label>
+      <select id="invite-role">
+        <option value="user" selected>User</option>
+        <option value="admin">Admin</option>
+      </select>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">They'll be able to sign in with this exact email via Google. If their Google account uses a different address, invite that one instead.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvite()">Send Invite</button>
+    </div>
+  </div>`);
+}
+async function saveInvite() {
+  const email = document.getElementById('invite-email').value.trim();
+  const role  = document.getElementById('invite-role').value;
+  if (!email) { alert('Email required'); return; }
+  showSaving(true);
+  try {
+    await api('POST', '/api/users', { email, role });
+    await loadUsersAndAudit();
+    closeModal(); notify('User invited');
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function changeUserRole(id, role) {
+  showSaving(true);
+  try {
+    await api('PUT', `/api/users/${id}`, { role });
+    await loadUsersAndAudit();
+    notify('Role updated');
+  } catch(e) { notify('Error: ' + e.message); await loadUsersAndAudit(); }
+  showSaving(false);
+}
+async function removeUser(id) {
+  if (!confirm('Remove this user? They will no longer be able to sign in.')) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/users/${id}`);
+    await loadUsersAndAudit();
+    notify('User removed');
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function openUserActivity(userId) {
+  const u = usersList.find(x => x.id === userId);
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>Activity · ${esc(u ? (u.name || u.email) : 'User')}</h2>
+    <div id="user-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  try {
+    const rows = await api('GET', `/api/audit?user_id=${userId}&limit=200`);
+    document.getElementById('user-audit-content').innerHTML = rows.length
+      ? `<table class="ledger-table"><tr><th>When</th><th>Action</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${new Date(a.created_at).toLocaleString('en-PK')}</td><td>${esc(a.action)}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
+      : '<div class="empty">No activity yet.</div>';
+  } catch(e) {
+    document.getElementById('user-audit-content').innerHTML = 'Error: ' + e.message;
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────
 async function init() {
+  try {
+    const { user } = await api('GET', '/api/auth/me');
+    currentUser = user;
+  } catch {
+    showLogin();
+    document.getElementById('loading-screen').style.display = 'none';
+    return;
+  }
+  hideLogin();
+  renderUserChip();
   await Promise.all([loadJobs(), loadInventory()]);
   document.getElementById('loading-screen').style.display = 'none';
   setInterval(() => { loadJobs(); loadInventory(); }, 30000);
