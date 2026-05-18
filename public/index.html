@@ -33,6 +33,23 @@
   .report-card-icon { font-size: 28px; }
   .report-card-title { font-size: 17px; font-weight: 600; color: var(--text); }
   .report-card-desc { font-size: 13px; color: var(--text2); line-height: 1.45; }
+  .reports-layout { display: flex; gap: 0; min-height: calc(100vh - 56px); }
+  .reports-sidebar { width: 220px; background: var(--bg); border-right: 1px solid var(--border); padding: 18px 10px; display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+  .rsb-section { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text3); padding: 12px 10px 6px; font-weight: 600; }
+  .rsb-section:first-child { padding-top: 0; }
+  .rsb-item { background: transparent; border: none; padding: 9px 12px; border-radius: 7px; text-align: left; font-family: var(--font); font-size: 13px; color: var(--text); cursor: pointer; display: flex; align-items: center; gap: 10px; transition: background 0.12s; }
+  .rsb-item:hover { background: var(--bg2); }
+  .rsb-item.active { background: var(--text); color: var(--bg); }
+  .rsb-item.active .rsb-icon { color: var(--bg) !important; }
+  .rsb-icon { font-size: 15px; width: 18px; text-align: center; }
+  .reports-content { flex: 1; padding: 18px 24px; overflow-x: auto; min-width: 0; }
+  .rt-pane { max-width: 1400px; }
+  @media (max-width: 800px) {
+    .reports-layout { flex-direction: column; }
+    .reports-sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 10px; border-right: none; border-bottom: 1px solid var(--border); }
+    .rsb-section { display: none; }
+    .reports-content { padding: 14px; }
+  }
   .dash-flbl { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
   .dash-panel { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
   .dash-h { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--text); }
@@ -311,35 +328,34 @@
 </div>
 
 <div class="main" id="reports-mode" style="display:none;">
-  <!-- Landing — list of report types. Hidden when a specific report (e.g. Dashboard) is open. -->
-  <div id="reports-landing" style="max-width:1100px;margin:24px auto;">
-    <h2 style="margin-bottom:6px;font-size:22px;">Reports</h2>
-    <p style="color:var(--text2);margin-bottom:24px;font-size:14px;">Stock movement, summaries, and pending imports — all printable.</p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">
-      <button class="report-card" onclick="openDashboard()">
-        <div class="report-card-icon">&#128200;</div>
-        <div class="report-card-title">Dashboard</div>
-        <div class="report-card-desc">At-a-glance overview: totals in/out, breakdown by paper type, by size+GSM, and recent activity. Filter by date, paper type, size, and GSM.</div>
+  <div class="reports-layout">
+    <!-- Sidebar — five sections; Dashboard / Stock In / Stock Out render inline,
+         Stock Summary / Imports still open as modals (unchanged from before). -->
+    <aside class="reports-sidebar">
+      <div class="rsb-section">Movement</div>
+      <button class="rsb-item active" data-rt="dashboard" onclick="setReportsTab('dashboard')">
+        <span class="rsb-icon">&#128200;</span> Dashboard
       </button>
-      <button class="report-card" onclick="openStockReport()">
-        <div class="report-card-icon">&#128202;</div>
-        <div class="report-card-title">Stock Report</div>
-        <div class="report-card-desc">Flat list of every stock-in and stock-out movement. Filter by direction, paper type, and period (today / week / month / custom). Print.</div>
+      <button class="rsb-item" data-rt="stock-in" onclick="setReportsTab('stock-in')">
+        <span class="rsb-icon" style="color:#166534;">&#8595;</span> Stock In
       </button>
-      <button class="report-card" onclick="openStockSummary()">
-        <div class="report-card-icon">&#128203;</div>
-        <div class="report-card-title">Stock Summary</div>
-        <div class="report-card-desc">Per-paper-type monthly / weekly stock position: opening balance, in/out per period, totals, weight, and what's required next.</div>
+      <button class="rsb-item" data-rt="stock-out" onclick="setReportsTab('stock-out')">
+        <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Stock Out
       </button>
-      <button class="report-card" onclick="openImports()">
-        <div class="report-card-icon">&#128666;</div>
-        <div class="report-card-title">Imports</div>
-        <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders, mark them received (auto stock-in), and feed the Stock Summary's "After Import" column.</div>
+      <div class="rsb-section">Analysis</div>
+      <button class="rsb-item" data-rt="summary" onclick="setReportsTab('summary'); openStockSummary();">
+        <span class="rsb-icon">&#128203;</span> Stock Summary
       </button>
-    </div>
+      <button class="rsb-item" data-rt="imports" onclick="setReportsTab('imports'); openImports();">
+        <span class="rsb-icon">&#128666;</span> Imports
+      </button>
+    </aside>
+    <main class="reports-content">
+      <div id="rt-dashboard" class="rt-pane"></div>
+      <div id="rt-stock-in"  class="rt-pane" style="display:none;"></div>
+      <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
+    </main>
   </div>
-  <!-- Dashboard view — full-page (not modal) so the data has room to breathe. -->
-  <div id="dashboard-view" style="display:none;max-width:1400px;margin:18px auto;padding:0 12px;"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -508,6 +524,9 @@ function setMode(m) {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     refreshBtn.style.display = 'none';
+    // Default to the Dashboard pane every time the user lands on Reports
+    // (avoids stale state if they had Stock In/Out open from a prior visit).
+    setReportsTab('dashboard');
   }
 }
 function refreshCurrent() { mode === 'jobs' ? loadJobs() : mode === 'inventory' ? loadInventory() : null; }
@@ -1913,19 +1932,19 @@ async function receiveImport(id) {
 // visualisations, "by size+gsm" drill-down, "recent activity" list.
 let dashboardState = { from: '', to: '', paperType: '', size: '', gsm: '', txs: [], allInv: [] };
 
+// Open the Dashboard pane (called when entering Reports tab, or when the
+// Dashboard sidebar item is clicked). Renders into the inline #rt-dashboard
+// pane — no modal, no back button.
 function openDashboard() {
-  // Default: last 30 days. Picks a wider window than Stock Report's "month"
-  // default so first-load isn't blank.
+  // Default: last 30 days. Wider than Stock Report's "month" default so
+  // first-load isn't blank.
   const today = new Date();
   const start = new Date(today); start.setDate(today.getDate() - 29);
   const iso = d => d.toISOString().slice(0, 10);
   dashboardState = { from: iso(start), to: iso(today), paperType: '', size: '', gsm: '', txs: [], allInv: [] };
-  document.getElementById('reports-landing').style.display = 'none';
-  const view = document.getElementById('dashboard-view');
-  view.style.display = 'block';
+  const view = document.getElementById('rt-dashboard');
   view.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
-      <button class="btn btn-sm" onclick="closeDashboard()">&#8592; Back to Reports</button>
       <h2 style="margin:0;font-size:20px;">Dashboard</h2>
       <span style="margin-left:auto;color:var(--text2);font-size:12px;" id="dash-meta"></span>
     </div>
@@ -1965,9 +1984,256 @@ function openDashboard() {
   loadDashboard();
 }
 
-function closeDashboard() {
-  document.getElementById('dashboard-view').style.display = 'none';
-  document.getElementById('reports-landing').style.display = 'block';
+// ── Reports tab navigation ───────────────────────────────────
+// Switch which pane is visible inside the Reports tab. The Summary and
+// Imports tabs still launch their modals (kept unchanged from before), so
+// for those we update the active-state styling but don't swap panes.
+function setReportsTab(name) {
+  document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
+  // Only the inline panes have a #rt-* container; Summary/Imports skip this.
+  const inlinePanes = ['dashboard', 'stock-in', 'stock-out'];
+  inlinePanes.forEach(p => {
+    const el = document.getElementById('rt-' + p);
+    if (el) el.style.display = p === name ? 'block' : 'none';
+  });
+  if (name === 'dashboard') openDashboard();
+  if (name === 'stock-in')  openStockMovementPane('in');
+  if (name === 'stock-out') openStockMovementPane('out');
+}
+
+// ── Stock In / Stock Out panes ───────────────────────────────
+// Inline versions of the old Stock Report modal, one per direction. Filters:
+// paper type + period (today/week/month/custom). Each direction owns its own
+// state so flipping between tabs doesn't lose your filters.
+const stockMovementStates = {
+  in:  { period: 'month', from: '', to: '', paperType: '', rows: [] },
+  out: { period: 'month', from: '', to: '', paperType: '', rows: [] },
+};
+
+// Generic period-to-date-range helper, decoupled from any global state. Used
+// by both the inline panes (here) and the older Stock Summary code if it ever
+// wants to share.
+function periodToDateRange(period, customFrom, customTo) {
+  const now = new Date();
+  const iso = d => d.toISOString().slice(0, 10);
+  if (period === 'today') { const t = iso(now); return { from: t, to: t }; }
+  if (period === 'week') {
+    const day = now.getDay() === 0 ? 6 : now.getDay() - 1;
+    const monday = new Date(now); monday.setDate(now.getDate() - day);
+    return { from: iso(monday), to: iso(now) };
+  }
+  if (period === 'month') {
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { from: iso(first), to: iso(now) };
+  }
+  if (period === 'custom') return { from: customFrom || '', to: customTo || '' };
+  return { from: '', to: '' };
+}
+
+function openStockMovementPane(direction) {
+  const state = stockMovementStates[direction];
+  const pane  = document.getElementById('rt-stock-' + direction);
+  const title = direction === 'in' ? 'Stock In' : 'Stock Out';
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+      <h2 style="margin:0;font-size:20px;">${title}</h2>
+      <span style="color:var(--text2);font-size:12px;">${direction === 'in' ? 'Every stock addition (deliveries, imports received, opening balances).' : 'Every stock deduction (job consumption, manual adjustments).'}</span>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="printStockMovement('${direction}')">&#128424; Print Report</button>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="sm-${direction}-paper-type" onchange="setMovementPaperType('${direction}', this.value)">
+          <option value="">All paper types</option>
+          ${paperOpts}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="sm-${direction}-period" onchange="setMovementPeriod('${direction}', this.value)">${periodOpts}</select>
+      </div>
+      <div id="sm-${direction}-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="sm-${direction}-from" value="${state.from}" onchange="setMovementCustom('${direction}')"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="sm-${direction}-to" value="${state.to}" onchange="setMovementCustom('${direction}')"></div>
+      </div>
+    </div>
+    <div id="sm-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    <div id="sm-${direction}-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+  `;
+  loadStockMovement(direction);
+}
+
+function setMovementPaperType(dir, v) { stockMovementStates[dir].paperType = v; loadStockMovement(dir); }
+function setMovementPeriod(dir, v) {
+  stockMovementStates[dir].period = v;
+  const custom = document.getElementById(`sm-${dir}-custom`);
+  if (custom) custom.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') loadStockMovement(dir);
+}
+function setMovementCustom(dir) {
+  const state = stockMovementStates[dir];
+  state.from = document.getElementById(`sm-${dir}-from`).value;
+  state.to   = document.getElementById(`sm-${dir}-to`).value;
+  if (state.from && state.to) loadStockMovement(dir);
+}
+
+async function loadStockMovement(direction) {
+  const state = stockMovementStates[direction];
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to)   qs.set('to',   to);
+  qs.set('direction', direction);
+  try {
+    const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
+    state.rows = txs;
+    renderStockMovement(direction, from, to);
+  } catch (e) {
+    document.getElementById(`sm-${direction}-content`).innerHTML = 'Error: ' + esc(e.message);
+  }
+}
+
+function renderStockMovement(direction, from, to) {
+  const state = stockMovementStates[direction];
+  // Apply the paper-type filter (client-side) before totals.
+  const txs = state.paperType ? state.rows.filter(t => t.paper_type === state.paperType) : state.rows;
+  // Direction is fixed so there's only one total to show. Net change column
+  // would just duplicate that — skip it.
+  let total = 0;
+  for (const t of txs) total += direction === 'in' ? t.change : -t.change;
+  const color = direction === 'in' ? '#166534' : '#A32D2D';
+  const sign  = direction === 'in' ? '+' : '−';
+  const tile = (label, value, c, sub) =>
+    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
+       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
+       <div style="font-size:22px;font-weight:600;color:${c};margin-top:2px;line-height:1.1;">${value}</div>
+       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
+     </div>`;
+  document.getElementById(`sm-${direction}-summary`).innerHTML =
+      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + total.toLocaleString() + ' sheets', color, 'all paper types in filter')
+    + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
+
+  const rows = txs.map(t => {
+    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
+    const s    = t.change > 0 ? '+' : '';
+    const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
+    const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const ps    = packetSize(t.paper_type || '');
+    const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
+    const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+    const pkts  = t.change / ps;
+    const inv   = inventory.find(i => i.id === t.item_id);
+    const bal   = inv ? (inv.current_balance || 0) : null;
+    const balCell = bal === null
+      ? '<span style="color:var(--text3)">—</span>'
+      : `${bal.toLocaleString()} sheets<br><span style="color:var(--text2);font-size:11px;">${fmt(bal/ps)} ${unit}</span>`;
+    return `<tr>
+      <td>${date}</td>
+      <td>${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
+      <td class="${cls}">${s}${t.change.toLocaleString()} sheets<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${fmt(pkts)} ${unit}</span></td>
+      <td>${balCell}</td>
+      <td>${esc(t.reason||'')}</td>
+      <td>${job}</td>
+      <td>${esc(t.notes||'')}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById(`sm-${direction}-content`).innerHTML = txs.length
+    ? `<table class="ledger-table">
+         <tr><th>When</th><th>Item</th><th>Change</th><th>Current Balance</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+         ${rows}
+       </table>`
+    : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`;
+}
+
+// Print using the same A4 portrait layout as the old Stock Report — direction
+// is implied by which pane invoked it.
+function printStockMovement(direction) {
+  const state = stockMovementStates[direction];
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  const rows = state.paperType ? state.rows.filter(t => t.paper_type === state.paperType) : state.rows;
+  const dirLabel = direction === 'in' ? 'Stock In (additions only)' : 'Stock Out (deductions only)';
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
+  let total = 0;
+  for (const t of rows) total += direction === 'in' ? t.change : -t.change;
+  const sign = direction === 'in' ? '+' : '−';
+  const color = direction === 'in' ? '#166534' : '#A32D2D';
+
+  const tableRows = rows.map(t => {
+    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const s = t.change > 0 ? '+' : '';
+    const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
+    const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const ps   = packetSize(t.paper_type || '');
+    const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
+    const fmt  = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+    const pkts = t.change / ps;
+    const inv  = inventory.find(i => i.id === t.item_id);
+    const bal  = inv ? (inv.current_balance || 0) : null;
+    const balCell = bal === null ? '—' : `${bal.toLocaleString()}<br><span style="font-size:8pt;">${fmt(bal/ps)} ${unit}</span>`;
+    const tdL = 'style="border:1px solid #000;padding:4px;"';
+    const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+    const tdChg = `style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};"`;
+    return `<tr>
+      <td ${tdL}>${date}</td>
+      <td ${tdL}>${item}</td>
+      <td ${tdChg}>${s}${t.change.toLocaleString()}<br><span style="font-size:8pt;font-weight:normal;">${s}${fmt(pkts)} ${unit}</span></td>
+      <td ${tdR}>${balCell}</td>
+      <td ${tdL}>${esc(t.reason||'')}</td>
+      <td ${tdL}>${job}</td>
+      <td ${tdL}>${esc(t.notes||'')}</td>
+    </tr>`;
+  }).join('');
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:11pt;">${direction === 'in' ? 'Stock In Report' : 'Stock Out Report'}</div>
+        </div>
+        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${new Date().toLocaleString('en-PK')}</div>
+      </div>
+      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
+        <tr>
+          <td style="padding:2px 8px 2px 0;"><b>Direction:</b> ${dirLabel}</td>
+          <td style="padding:2px 8px;"><b>Paper Type:</b> ${state.paperType || 'All'}</td>
+          <td style="padding:2px 8px;"><b>Period:</b> ${periodLabel}</td>
+          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
+          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
+        </tr>
+      </table>
+      <table style="width:100%;font-size:10pt;border:1px solid #000;border-collapse:collapse;margin-bottom:10px;">
+        <tr style="background:#eee;">
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Total</b><br><span style="color:${color};font-size:13pt;font-weight:bold;">${sign}${total.toLocaleString()}</span> sheets</td>
+          <td style="border:1px solid #000;padding:4px 8px;"><b>Transactions</b><br><span style="font-size:13pt;font-weight:bold;">${rows.length}</span></td>
+        </tr>
+      </table>
+      ${rows.length ? `
+      <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th style="border:1px solid #000;padding:4px;text-align:left;">When</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Item</th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Change<br><span style="font-weight:normal;font-size:8pt;">(sheets / pkts·reams)</span></th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Current Balance</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Reason</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>
+          <th style="border:1px solid #000;padding:4px;text-align:left;">Notes</th>
+        </tr>
+        ${tableRows}
+      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No transactions in this period.</div>'}
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
 }
 
 function setDashFrom(v)      { dashboardState.from = v; loadDashboard(); }
