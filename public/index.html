@@ -28,6 +28,11 @@
   .mode-btn.active { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .mode-btn:hover:not(.active) { color: var(--text); }
   .inventory-list { display: flex; flex-direction: column; gap: 8px; }
+  .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
+  .report-card:hover { border-color: var(--blue-border); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-2px); }
+  .report-card-icon { font-size: 28px; }
+  .report-card-title { font-size: 17px; font-weight: 600; color: var(--text); }
+  .report-card-desc { font-size: 13px; color: var(--text2); line-height: 1.45; }
   .inv-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; display: flex; align-items: center; gap: 16px; border-left: 4px solid var(--border); }
   .inv-card.low { border-left-color: #d97706; }
   .inv-card.out { border-left-color: #A32D2D; }
@@ -230,6 +235,7 @@
   <div class="mode-switch" id="mode-switch">
     <button class="mode-btn active" data-mode="jobs" onclick="setMode('jobs')">Jobs</button>
     <button class="mode-btn" data-mode="inventory" onclick="setMode('inventory')">Inventory</button>
+    <button class="mode-btn" data-mode="reports" onclick="setMode('reports')">Reports</button>
   </div>
   <div class="topbar-right">
     <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
@@ -295,12 +301,33 @@
       <option value="low">Low stock only</option>
       <option value="out">Out of stock</option>
     </select>
-    <button class="btn btn-sm" style="margin-left:auto;" onclick="openStockReport()">&#128202; Stock Report</button>
-    <button class="btn btn-sm" onclick="openStockSummary()">&#128203; Stock Summary</button>
-    <button class="btn btn-sm" onclick="openImports()">&#128666; Imports</button>
-    <button class="btn btn-sm" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
+    <button class="btn btn-sm" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
+</div>
+
+<div class="main" id="reports-mode" style="display:none;">
+  <div style="max-width:1100px;margin:24px auto;">
+    <h2 style="margin-bottom:6px;font-size:22px;">Reports</h2>
+    <p style="color:var(--text2);margin-bottom:24px;font-size:14px;">Stock movement, summaries, and pending imports — all printable.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">
+      <button class="report-card" onclick="openStockReport()">
+        <div class="report-card-icon">&#128202;</div>
+        <div class="report-card-title">Stock Report</div>
+        <div class="report-card-desc">Flat list of every stock-in and stock-out movement. Filter by direction, paper type, and period (today / week / month / custom). Print.</div>
+      </button>
+      <button class="report-card" onclick="openStockSummary()">
+        <div class="report-card-icon">&#128203;</div>
+        <div class="report-card-title">Stock Summary</div>
+        <div class="report-card-desc">Per-paper-type monthly / weekly stock position: opening balance, in/out per period, totals, weight, and what's required next.</div>
+      </button>
+      <button class="report-card" onclick="openImports()">
+        <div class="report-card-icon">&#128666;</div>
+        <div class="report-card-title">Imports</div>
+        <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders, mark them received (auto stock-in), and feed the Stock Summary's "After Import" column.</div>
+      </button>
+    </div>
+  </div>
 </div>
 
 <div id="modal-root"></div>
@@ -449,19 +476,29 @@ function setMode(m) {
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
-  const addBtn = document.getElementById('topbar-add');
+  document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
+  const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
+  const refreshBtn= document.getElementById('topbar-refresh');
   if (m === 'jobs') {
+    addBtn.style.display = '';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
     exportBtn.style.display = '';
+    refreshBtn.style.display = '';
     render();
-  } else {
+  } else if (m === 'inventory') {
+    addBtn.style.display = '';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
+    refreshBtn.style.display = '';
     renderInventory();
+  } else { // reports
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    refreshBtn.style.display = 'none';
   }
 }
-function refreshCurrent() { mode === 'jobs' ? loadJobs() : loadInventory(); }
+function refreshCurrent() { mode === 'jobs' ? loadJobs() : mode === 'inventory' ? loadInventory() : null; }
 
 // ── Filtering ─────────────────────────────────────────────────
 function getFiltered() {
