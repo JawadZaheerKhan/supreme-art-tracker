@@ -1062,7 +1062,7 @@ async function openInvHistory(id) {
 // Overall stock-movement report across ALL inventory items, with direction
 // (in/out/all) + date period (today/week/month/custom) filters and a print
 // view. Backend endpoint: GET /api/inventory/transactions
-let stockReportState = { direction: 'all', period: 'month', from: '', to: '', rows: [] };
+let stockReportState = { direction: 'all', period: 'month', from: '', to: '', paperType: '', rows: [] };
 
 // Returns ISO yyyy-mm-dd strings for the chosen period. Custom passes through
 // whatever the user typed in the from/to date inputs.
@@ -1090,7 +1090,8 @@ function stockReportDateRange(period) {
 }
 
 function openStockReport() {
-  stockReportState = { direction: 'all', period: 'month', from: '', to: '', rows: [] };
+  stockReportState = { direction: 'all', period: 'month', from: '', to: '', paperType: '', rows: [] };
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Stock Report</h2>
     <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-bottom:14px;">
@@ -1100,6 +1101,13 @@ function openStockReport() {
           <option value="all">All movement</option>
           <option value="in">Stock In only (+)</option>
           <option value="out">Stock Out only (−)</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Paper Type</div>
+        <select class="filter" id="sr-paper-type" onchange="setStockReportPaperType(this.value)">
+          <option value="">All paper types</option>
+          ${paperOpts}
         </select>
       </div>
       <div>
@@ -1131,6 +1139,14 @@ function openStockReport() {
 }
 
 function setStockReportDirection(v) { stockReportState.direction = v; loadStockReport(); }
+// Paper-type filter is applied client-side (after fetch) — keeps the API simple
+// and the existing in/out direction filter intact. Cheap because we already
+// have all the period's rows in memory.
+function setStockReportPaperType(v) { stockReportState.paperType = v; renderStockReport(...currentStockReportRange()); }
+function currentStockReportRange() {
+  const { from, to } = stockReportDateRange(stockReportState.period);
+  return [from, to];
+}
 function setStockReportPeriod(v) {
   stockReportState.period = v;
   document.getElementById('sr-custom').style.display = v === 'custom' ? 'flex' : 'none';
@@ -1159,14 +1175,14 @@ async function loadStockReport() {
 }
 
 function renderStockReport(from, to) {
-  const txs = stockReportState.rows;
-  // Totals — separate sums for In and Out, plus unique-items affected.
+  // Apply the paper-type filter (client-side) before computing totals so the
+  // tiles reflect only what's actually shown.
+  const pt = stockReportState.paperType;
+  const txs = pt ? stockReportState.rows.filter(t => t.paper_type === pt) : stockReportState.rows;
   let totalIn = 0, totalOut = 0;
-  const itemSet = new Set();
   for (const t of txs) {
     if (t.change > 0) totalIn += t.change;
     else              totalOut += -t.change; // store as positive magnitude
-    if (t.item_id)    itemSet.add(t.item_id);
   }
   const net = totalIn - totalOut;
   const tile = (label, value, color) =>
@@ -1177,9 +1193,7 @@ function renderStockReport(from, to) {
   document.getElementById('sr-summary').innerHTML =
       tile('Total Stock In',  '+' + totalIn.toLocaleString(),                 '#166534')
     + tile('Total Stock Out', '−' + totalOut.toLocaleString(),                '#A32D2D')
-    + tile('Net change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D')
-    + tile('Items affected',  itemSet.size.toLocaleString(),                  'var(--text)')
-    + tile('Transactions',    txs.length.toLocaleString(),                    'var(--text)');
+    + tile('Net change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D');
 
   const rows = txs.map(t => {
     const date = new Date(t.created_at).toLocaleString('en-PK');
@@ -1222,16 +1236,17 @@ function renderStockReport(from, to) {
 // Build a print-ready HTML block (A4 portrait) and trigger the browser print
 // dialog. Reuses the same #print-area / @media print rules as job-card printing.
 function printStockReport() {
-  const { direction, period, rows } = stockReportState;
+  const { direction, period, paperType } = stockReportState;
+  // Apply the same client-side paper-type filter the on-screen report uses,
+  // so the print output matches what's visible.
+  const rows = paperType ? stockReportState.rows.filter(t => t.paper_type === paperType) : stockReportState.rows;
   const { from, to } = stockReportDateRange(period);
   const dirLabel = direction === 'in' ? 'Stock In only' : direction === 'out' ? 'Stock Out only' : 'All movement';
   const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[period] || period;
 
   let totalIn = 0, totalOut = 0;
-  const itemSet = new Set();
   for (const t of rows) {
     if (t.change > 0) totalIn += t.change; else totalOut += -t.change;
-    if (t.item_id) itemSet.add(t.item_id);
   }
   const net = totalIn - totalOut;
 
@@ -1278,6 +1293,7 @@ function printStockReport() {
       <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
         <tr>
           <td style="padding:2px 8px 2px 0;"><b>Direction:</b> ${dirLabel}</td>
+          <td style="padding:2px 8px;"><b>Paper Type:</b> ${paperType || 'All'}</td>
           <td style="padding:2px 8px;"><b>Period:</b> ${periodLabel}</td>
           <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
           <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
@@ -1288,8 +1304,6 @@ function printStockReport() {
           <td style="border:1px solid #000;padding:4px 8px;"><b>Total Stock In</b><br><span style="color:#166534;font-size:13pt;font-weight:bold;">+${totalIn.toLocaleString()}</span></td>
           <td style="border:1px solid #000;padding:4px 8px;"><b>Total Stock Out</b><br><span style="color:#A32D2D;font-size:13pt;font-weight:bold;">−${totalOut.toLocaleString()}</span></td>
           <td style="border:1px solid #000;padding:4px 8px;"><b>Net Change</b><br><span style="color:${net>=0?'#166534':'#A32D2D'};font-size:13pt;font-weight:bold;">${net>=0?'+':'−'}${Math.abs(net).toLocaleString()}</span></td>
-          <td style="border:1px solid #000;padding:4px 8px;"><b>Items Affected</b><br><span style="font-size:13pt;font-weight:bold;">${itemSet.size}</span></td>
-          <td style="border:1px solid #000;padding:4px 8px;"><b>Transactions</b><br><span style="font-size:13pt;font-weight:bold;">${rows.length}</span></td>
         </tr>
       </table>
       ${rows.length ? `
