@@ -219,6 +219,54 @@
   @page { size: A4 portrait; margin: 0; }
 }
 .pc-logo { height: 60px; width: auto; }
+
+/* ── Stickers tab ────────────────────────────────────────────── */
+.stk-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+@media (max-width: 1000px) { .stk-wrap { grid-template-columns: 1fr; } }
+.stk-form-card, .stk-preview-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+.stk-form-title { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.stk-form-sub { font-size: 12px; color: var(--text2); margin-bottom: 16px; }
+.stk-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.stk-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.stk-grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+@media (max-width: 600px) { .stk-grid2, .stk-grid3 { grid-template-columns: 1fr; } }
+.stk-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.3px; font-weight: 500; }
+.stk-input {
+  padding: 8px 10px; font-size: 13px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--text); font-family: var(--font);
+}
+.stk-input:focus { outline: none; border-color: #2563eb; }
+.stk-readonly { background: #f1f5f9; color: var(--text2); }
+.stk-range { margin-top: 8px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.stk-range-title { font-size: 12px; color: var(--text); font-weight: 600; margin-bottom: 8px; }
+.stk-actions { margin-top: 16px; display: flex; align-items: center; }
+
+.stk-preview {
+  background: #fff; border: 1px solid #cbd5e1; border-radius: 4px; padding: 24px;
+  min-height: 320px; color: #000; font-family: Arial, sans-serif;
+}
+
+/* The actual sticker — used both in preview and in print. Sized like the
+   sample image: full carton label with bordered table rows. */
+.sticker {
+  border: 2px solid #000; box-sizing: border-box; width: 100%;
+  font-family: Arial, sans-serif; color: #000; background: #fff;
+}
+.sticker-header { display: flex; align-items: center; border-bottom: 2px solid #000; padding: 10px 14px; }
+.sticker-header-left { display: flex; align-items: center; gap: 12px; flex: 1; }
+.sticker-logo { height: 50px; width: auto; }
+.sticker-brand { font-size: 14pt; font-weight: 700; letter-spacing: 0.3px; line-height: 1.15; }
+.sticker-date { font-size: 12pt; font-weight: 500; white-space: nowrap; }
+.sticker-row { display: flex; border-bottom: 2px solid #000; }
+.sticker-row:last-child { border-bottom: none; }
+.sticker-row-label { width: 30%; padding: 12px 14px; font-size: 12pt; font-weight: 500; border-right: 2px solid #000; box-sizing: border-box; }
+.sticker-row-value { flex: 1; padding: 12px 14px; font-size: 14pt; font-weight: 700; box-sizing: border-box; }
+.sticker-row-value.big { font-size: 22pt; }
+
+@media print {
+  .sticker-page { page-break-after: always; }
+  .sticker-page:last-child { page-break-after: auto; }
+}
 .pc-watermark {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: 85%; opacity: 0.08; z-index: 0; pointer-events: none;
@@ -257,6 +305,7 @@
     <button class="mode-btn active" data-mode="jobs" onclick="setMode('jobs')">Jobs</button>
     <button class="mode-btn" data-mode="inventory" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="reports" onclick="setMode('reports')">Reports</button>
+    <button class="mode-btn" data-mode="stickers" onclick="setMode('stickers')">Stickers</button>
   </div>
   <div class="topbar-right">
     <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
@@ -355,6 +404,78 @@
       <div id="rt-stock-in"  class="rt-pane" style="display:none;"></div>
       <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
     </main>
+  </div>
+</div>
+
+<div class="main" id="stickers-mode" style="display:none;">
+  <div class="stk-wrap">
+    <div class="stk-form-card">
+      <div class="stk-form-title">Carton Stickers</div>
+      <div class="stk-form-sub">Pick a job — Despatch To, P.O. No. and Description fill in automatically. Enter quantity per carton and total cases, then print.</div>
+
+      <div class="stk-row">
+        <label class="stk-label">Job</label>
+        <select id="stk-job" class="stk-input" onchange="onStickerJobChange()">
+          <option value="">— Select a job —</option>
+        </select>
+      </div>
+
+      <div class="stk-grid2">
+        <div class="stk-row">
+          <label class="stk-label">Despatch To</label>
+          <input type="text" id="stk-despatch" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
+        </div>
+        <div class="stk-row">
+          <label class="stk-label">P.O. No.</label>
+          <input type="text" id="stk-po" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
+        </div>
+      </div>
+
+      <div class="stk-row">
+        <label class="stk-label">Description</label>
+        <input type="text" id="stk-desc" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
+      </div>
+
+      <div class="stk-grid3">
+        <div class="stk-row">
+          <label class="stk-label">Quantity (per carton)</label>
+          <input type="number" id="stk-qty" class="stk-input" placeholder="e.g. 600" min="0" oninput="renderStickerPreview()">
+        </div>
+        <div class="stk-row">
+          <label class="stk-label">Total Cases</label>
+          <input type="number" id="stk-total" class="stk-input" placeholder="e.g. 10" min="1" oninput="onStickerTotalChange()">
+        </div>
+        <div class="stk-row">
+          <label class="stk-label">Date</label>
+          <input type="date" id="stk-date" class="stk-input">
+        </div>
+      </div>
+
+      <div class="stk-range">
+        <div class="stk-range-title">Reprint range <span style="color:var(--text2);font-weight:400;">(optional — leave at 1 to Total to print all)</span></div>
+        <div class="stk-grid2">
+          <div class="stk-row">
+            <label class="stk-label">From #</label>
+            <input type="number" id="stk-from" class="stk-input" min="1" value="1" oninput="renderStickerPreview()">
+          </div>
+          <div class="stk-row">
+            <label class="stk-label">To #</label>
+            <input type="number" id="stk-to" class="stk-input" min="1" oninput="renderStickerPreview()">
+          </div>
+        </div>
+      </div>
+
+      <div class="stk-actions">
+        <button class="btn btn-primary" onclick="printStickers()">&#128424; Print Stickers</button>
+        <span id="stk-count-hint" style="margin-left:12px;color:var(--text2);font-size:13px;"></span>
+      </div>
+    </div>
+
+    <div class="stk-preview-card">
+      <div class="stk-form-title">Preview</div>
+      <div class="stk-form-sub">Live preview of one sticker (first in range).</div>
+      <div id="stk-preview" class="stk-preview"></div>
+    </div>
   </div>
 </div>
 
@@ -505,6 +626,7 @@ function setMode(m) {
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
+  document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('topbar-refresh');
@@ -520,13 +642,18 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
     renderInventory();
-  } else { // reports
+  } else if (m === 'reports') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     refreshBtn.style.display = 'none';
     // Default to the Dashboard pane every time the user lands on Reports
     // (avoids stale state if they had Stock In/Out open from a prior visit).
     setReportsTab('dashboard');
+  } else { // stickers
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    refreshBtn.style.display = 'none';
+    initStickersTab();
   }
 }
 function refreshCurrent() { mode === 'jobs' ? loadJobs() : mode === 'inventory' ? loadInventory() : null; }
@@ -2228,6 +2355,172 @@ function printStockMovement(direction) {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
+// ── Stickers tab ─────────────────────────────────────────────
+// Carton labels printed and pasted on shipping cartons. Pick a job and the
+// Despatch To / P.O. No. / Description fields auto-fill from the job card —
+// the user only enters quantity per carton and total cases, then prints
+// stickers 1..N (or a sub-range for reprints). One sticker per A4 page.
+function initStickersTab() {
+  // Populate the job dropdown from the cached jobs list. Most-recent first
+  // so the latest job is easy to pick. Includes job code + name + client
+  // so a user can find the right one at a glance.
+  const sel = document.getElementById('stk-job');
+  // Preserve the current selection across reloads (e.g. when the user comes
+  // back to the Stickers tab after editing a job).
+  const prev = sel.value;
+  const sorted = [...jobs].sort((a, b) => (b.id || 0) - (a.id || 0));
+  sel.innerHTML = '<option value="">— Select a job —</option>' +
+    sorted.map(j => {
+      const label = `E-${j.id}` + (j.jobcode ? ` · ${j.jobcode}` : '') + ` — ${j.name || ''} (${j.client || ''})`;
+      return `<option value="${j.id}">${esc(label)}</option>`;
+    }).join('');
+  if (prev) sel.value = prev;
+
+  // Default date = today
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const dateInput = document.getElementById('stk-date');
+  if (!dateInput.value) dateInput.value = `${yyyy}-${mm}-${dd}`;
+
+  onStickerJobChange();
+}
+
+function onStickerJobChange() {
+  const id = +document.getElementById('stk-job').value;
+  const j = jobs.find(x => x.id === id);
+  document.getElementById('stk-despatch').value = j ? (j.client || '') : '';
+  document.getElementById('stk-po').value       = j ? (j.ref || '')    : '';
+  document.getElementById('stk-desc').value     = j ? (j.name || '')   : '';
+  renderStickerPreview();
+}
+
+function onStickerTotalChange() {
+  // When total changes, also bump 'to' to match if the user hasn't customised
+  // the range. Keeps the default behaviour ("print all 1..N") frictionless.
+  const total = +document.getElementById('stk-total').value || 0;
+  const toInput = document.getElementById('stk-to');
+  const fromInput = document.getElementById('stk-from');
+  if (!toInput.value || +toInput.value > total || +toInput.value === +toInput.dataset.lastTotal) {
+    toInput.value = total;
+  }
+  toInput.dataset.lastTotal = total;
+  if (!fromInput.value) fromInput.value = 1;
+  renderStickerPreview();
+}
+
+// Format date as DD-MM-YYYY (matches the sample sticker's "15-12-2022")
+function fmtStickerDate(iso) {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-');
+  return `${d}-${m}-${y}`;
+}
+
+function buildStickerHTML(opts) {
+  // opts: { despatch, po, desc, qty, caseNo, caseTotal, date }
+  return `
+    <div class="sticker">
+      <div class="sticker-header">
+        <div class="sticker-header-left">
+          <img src="/logo.png" class="sticker-logo" onerror="this.style.display='none'">
+          <div class="sticker-brand">SUPREME ART<br>(PRIVATE) LIMITED</div>
+        </div>
+        <div class="sticker-date">Date: ${esc(fmtStickerDate(opts.date))}</div>
+      </div>
+      <div class="sticker-row">
+        <div class="sticker-row-label">Despatch To</div>
+        <div class="sticker-row-value">${esc(opts.despatch || '')}</div>
+      </div>
+      <div class="sticker-row">
+        <div class="sticker-row-label">P.O. #</div>
+        <div class="sticker-row-value big">${esc(opts.po || '')}</div>
+      </div>
+      <div class="sticker-row">
+        <div class="sticker-row-label">Description</div>
+        <div class="sticker-row-value">${esc(opts.desc || '')}</div>
+      </div>
+      <div class="sticker-row">
+        <div class="sticker-row-label">Quantity</div>
+        <div class="sticker-row-value">${esc(String(opts.qty || ''))}</div>
+      </div>
+      <div class="sticker-row">
+        <div class="sticker-row-label">Case #</div>
+        <div class="sticker-row-value">${opts.caseNo} of ${opts.caseTotal}</div>
+      </div>
+    </div>`;
+}
+
+function renderStickerPreview() {
+  const despatch = document.getElementById('stk-despatch').value.trim();
+  const po       = document.getElementById('stk-po').value.trim();
+  const desc     = document.getElementById('stk-desc').value.trim();
+  const qty      = document.getElementById('stk-qty').value.trim();
+  const date     = document.getElementById('stk-date').value;
+  const total    = +document.getElementById('stk-total').value || 0;
+  const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
+  const to       = +document.getElementById('stk-to').value || total;
+
+  const hint = document.getElementById('stk-count-hint');
+  const previewBox = document.getElementById('stk-preview');
+
+  if (!total || total < 1) {
+    previewBox.innerHTML = '<div style="color:#94a3b8;padding:40px;text-align:center;font-size:13px;">Fill in the form to see a sticker preview…</div>';
+    hint.textContent = '';
+    return;
+  }
+  const validFrom = Math.min(Math.max(1, from), total);
+  const validTo   = Math.min(Math.max(validFrom, to), total);
+  const count = validTo - validFrom + 1;
+  hint.textContent = `${count} sticker${count === 1 ? '' : 's'} will print (case #${validFrom} → #${validTo} of ${total}).`;
+
+  previewBox.innerHTML = buildStickerHTML({
+    despatch, po, desc, qty, date,
+    caseNo: validFrom,
+    caseTotal: total,
+  });
+}
+
+function printStickers() {
+  const despatch = document.getElementById('stk-despatch').value.trim();
+  const po       = document.getElementById('stk-po').value.trim();
+  const desc     = document.getElementById('stk-desc').value.trim();
+  const qty      = document.getElementById('stk-qty').value.trim();
+  const date     = document.getElementById('stk-date').value;
+  const total    = +document.getElementById('stk-total').value || 0;
+  const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
+  const to       = +document.getElementById('stk-to').value || total;
+
+  // Validation — give the user a clear message rather than printing junk.
+  if (!despatch) return notify('Select a job first (Despatch To is empty).');
+  if (!qty)      return notify('Enter the quantity per carton.');
+  if (!total || total < 1) return notify('Enter the total number of cases.');
+
+  const validFrom = Math.min(Math.max(1, from), total);
+  const validTo   = Math.min(Math.max(validFrom, to), total);
+
+  // Build one .sticker-page per case in the chosen range; each page breaks
+  // to a new A4 sheet via the @media print rule (.sticker-page).
+  const pages = [];
+  for (let i = validFrom; i <= validTo; i++) {
+    pages.push(`<div class="sticker-page" style="padding:8mm;">${buildStickerHTML({
+      despatch, po, desc, qty, date,
+      caseNo: i, caseTotal: total,
+    })}</div>`);
+  }
+  const area = document.getElementById('print-area');
+  area.innerHTML = pages.join('');
+
+  // Same image-wait pattern as the rest of the app's print flows so the
+  // logo isn't blank when the print dialog opens.
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
