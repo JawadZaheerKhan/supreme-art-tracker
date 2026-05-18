@@ -297,6 +297,7 @@
     </select>
     <button class="btn btn-sm" style="margin-left:auto;" onclick="openStockReport()">&#128202; Stock Report</button>
     <button class="btn btn-sm" onclick="openStockSummary()">&#128203; Stock Summary</button>
+    <button class="btn btn-sm" onclick="openImports()">&#128666; Imports</button>
     <button class="btn btn-sm" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
@@ -1453,10 +1454,15 @@ async function loadStockSummary() {
   try {
     // Pull ALL transactions for this paper type (no date filter), then
     // compute opening balance and bucket sums client-side. Cheap for typical
-    // inventory sizes and avoids a custom aggregation endpoint.
-    const allTxs = await api('GET', '/api/inventory/transactions');
-    stockSummaryState.txs   = allTxs.filter(t => t.paper_type === stockSummaryState.paperType);
-    stockSummaryState.items = inventory.filter(i => i.paper_type === stockSummaryState.paperType);
+    // inventory sizes and avoids a custom aggregation endpoint. Also pull
+    // pending imports so the Required-After-Import column has data.
+    const [allTxs, imports] = await Promise.all([
+      api('GET', '/api/inventory/transactions'),
+      api('GET', '/api/imports?status=pending'),
+    ]);
+    stockSummaryState.txs     = allTxs.filter(t => t.paper_type === stockSummaryState.paperType);
+    stockSummaryState.items   = inventory.filter(i => i.paper_type === stockSummaryState.paperType);
+    stockSummaryState.imports = imports.filter(i => i.paper_type === stockSummaryState.paperType);
     renderStockSummary();
   } catch (e) {
     if (el) el.innerHTML = 'Error: ' + esc(e.message);
@@ -1468,7 +1474,7 @@ async function loadStockSummary() {
 // Each row has: item, opening, periods (array of {in, out, balance}), totalOut,
 // stockNow, weightKg, requiredNext, importPkts, importKg.
 function computeSummaryRows() {
-  const { paperType, from, to, granularity, items, txs } = stockSummaryState;
+  const { paperType, from, to, granularity, items, txs, imports } = stockSummaryState;
   const buckets = buildSummaryBuckets(from, to, granularity);
   const fromD = new Date(from + 'T00:00:00');
   const ps    = packetSize(paperType);
@@ -1505,14 +1511,28 @@ function computeSummaryRows() {
     }
     const stockNowSheets = it.current_balance || 0;
     const wPerPack = packWeightKg(paperType, it.size, it.gsm);
+    // Pending imports for this item — match on size+gsm+brand (allowing nulls
+    // to be equivalent to empty strings, same as the unique-item index).
+    const pendingPkts = (imports || [])
+      .filter(im => (im.size||'') === (it.size||'')
+                 && (im.gsm||'')  === (it.gsm||'')
+                 && (im.brand||'')=== (it.brand||''))
+      .reduce((a, im) => a + parseFloat(im.packets || 0), 0);
+    const stockNowPkts    = stockNowSheets / ps;
+    const requiredNextPkts = totalOutSheets / ps;
+    // Required After Import: surplus (+) or deficit (−) once pending imports
+    // arrive AND we've consumed what we're projecting to need next period.
+    const requiredAfterImportPkts = stockNowPkts + pendingPkts - requiredNextPkts;
     return {
       item: it,
       openingPkts: openingSheets / ps,
       periods: periods.map(p => ({ in: p.in / ps, out: p.out / ps, balance: p.balance / ps })),
       totalOutPkts:   totalOutSheets / ps,
-      stockNowPkts:   stockNowSheets / ps,
-      weightKg:       wPerPack === null ? null : (stockNowSheets / ps) * wPerPack,
-      requiredNextPkts: totalOutSheets / ps, // = total consumption — replace what was used
+      stockNowPkts,
+      weightKg:       wPerPack === null ? null : stockNowPkts * wPerPack,
+      requiredNextPkts,
+      pendingImportPkts: pendingPkts,
+      requiredAfterImportPkts,
       importPkts:     importSheets / ps,
       importKg:       wPerPack === null ? null : (importSheets / ps) * wPerPack,
     };
@@ -1564,6 +1584,10 @@ function renderStockSummary() {
       `<td style="text-align:right;color:#166534;">${fmtPkts(p.in)}</td>
        <td style="text-align:right;color:#A32D2D;">${fmtPkts(p.out)}</td>
        <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+    // Surplus = green, deficit = red, zero = neutral. Helps the eye spot rows
+    // that need restocking even after pending imports.
+    const afterImp = r.requiredAfterImportPkts;
+    const afterClr = afterImp > 0 ? '#166534' : afterImp < 0 ? '#A32D2D' : 'inherit';
     return `<tr>
       <td>${esc(r.item.gsm || '—')}</td>
       <td>${esc(r.item.size || '—')}</td>
@@ -1573,6 +1597,8 @@ function renderStockSummary() {
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
       <td style="text-align:right;">${fmtPkts(r.requiredNextPkts)}</td>
+      <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
+      <td style="text-align:right;font-weight:600;color:${afterClr};">${afterImp>0?'+':''}${fmtPkts(afterImp, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtPkts(r.importPkts)}</td>
       <td style="text-align:right;">${fmtKg(r.importKg)}</td>
     </tr>`;
@@ -1589,6 +1615,8 @@ function renderStockSummary() {
         <th rowspan="2">Stock Now</th>
         <th rowspan="2">Weight (kg)</th>
         <th rowspan="2">Required Next</th>
+        <th rowspan="2">Pending Import</th>
+        <th rowspan="2">After Import</th>
         <th rowspan="2">Total Import</th>
         <th rowspan="2">Import (kg)</th>
       </tr>
@@ -1613,6 +1641,8 @@ function printStockSummary() {
   const body = rows.map(r => {
     const periodCells = r.periods.map(p =>
       `<td ${tdR}>${fmtPkts(p.in)}</td><td ${tdR}>${fmtPkts(p.out)}</td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+    const afterImp = r.requiredAfterImportPkts;
+    const afterClr = afterImp > 0 ? '#166534' : afterImp < 0 ? '#A32D2D' : '#000';
     return `<tr>
       <td ${tdL}>${esc(r.item.gsm || '—')}</td>
       <td ${tdL}>${esc(r.item.size || '—')}</td>
@@ -1622,6 +1652,8 @@ function printStockSummary() {
       <td ${tdR}><b>${fmtPkts(r.stockNowPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.weightKg)}</td>
       <td ${tdR}>${fmtPkts(r.requiredNextPkts)}</td>
+      <td ${tdR}>${fmtPkts(r.pendingImportPkts)}</td>
+      <td style="border:1px solid #000;padding:3px;text-align:right;font-weight:bold;color:${afterClr};">${afterImp>0?'+':''}${fmtPkts(afterImp, {keepZero:true})}</td>
       <td ${tdR}>${fmtPkts(r.importPkts)}</td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
     </tr>`;
@@ -1652,6 +1684,8 @@ function printStockSummary() {
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Stock Now</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Weight (kg)</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required Next</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Pending Import</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">After Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Import (kg)</th>
         </tr>
@@ -1667,6 +1701,170 @@ function printStockSummary() {
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
+}
+
+// ── Imports (booked-but-not-arrived shipments) ───────────────
+// Imports sit alongside inventory but represent future stock. When an import
+// is "Received" the server creates a stock-in transaction on the matching
+// item (auto-creating the item if it doesn't exist yet), so the rest of the
+// app (history, summary, balance) starts seeing those packets immediately.
+let importsCache = [];
+
+async function loadImports() {
+  try {
+    importsCache = await api('GET', '/api/imports');
+  } catch (e) {
+    importsCache = [];
+    notify('Error loading imports: ' + e.message);
+  }
+}
+
+function openImports() {
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>Imports <span style="font-size:13px;color:var(--text2);font-weight:normal;">— booked-but-not-arrived shipments</span></h2>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+      <button class="btn btn-sm btn-primary" onclick="openImportAdd()">+ New Import</button>
+      <div id="import-filter-wrap" style="margin-left:8px;">
+        <select class="filter" id="import-status-filter" onchange="renderImportsTable()">
+          <option value="pending" selected>Pending only</option>
+          <option value="all">All</option>
+          <option value="received">Received only</option>
+          <option value="cancelled">Cancelled only</option>
+        </select>
+      </div>
+    </div>
+    <div id="imports-table" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  loadImports().then(renderImportsTable);
+}
+
+function renderImportsTable() {
+  const filter = document.getElementById('import-status-filter')?.value || 'pending';
+  const list = filter === 'all' ? importsCache : importsCache.filter(i => i.status === filter);
+  const el = document.getElementById('imports-table');
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = `<div class="empty">No imports in this view. Click <b>+ New Import</b> to book one.</div>`;
+    return;
+  }
+  // Sort: pending first, then by expected_arrival ascending.
+  list.sort((a, b) => {
+    if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+    const ad = a.expected_arrival || '9999-12-31';
+    const bd = b.expected_arrival || '9999-12-31';
+    return ad.localeCompare(bd);
+  });
+  const rows = list.map(i => {
+    const item = [i.paper_type, i.size, i.gsm && (i.gsm + 'gsm'), i.brand].filter(Boolean).map(esc).join(' · ');
+    const status = i.status === 'pending'
+      ? '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Pending</span>'
+      : i.status === 'received'
+      ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
+      : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
+    const actions = i.status === 'pending'
+      ? `<button class="btn btn-sm" onclick="receiveImport(${i.id})">Receive</button>
+         <button class="btn btn-sm" onclick="editImport(${i.id})">Edit</button>
+         <button class="btn btn-sm" onclick="cancelImport(${i.id})">Cancel</button>`
+      : '';
+    const unit = packetUnitLabel(i.paper_type).toLowerCase();
+    return `<tr>
+      <td>${status}</td>
+      <td>${item}</td>
+      <td style="text-align:right;">${(+i.packets).toLocaleString()} ${unit}</td>
+      <td>${esc(i.supplier || '—')}</td>
+      <td>${esc(i.booked_date || '—')}</td>
+      <td>${esc(i.expected_arrival || '—')}</td>
+      <td>${esc(i.notes || '')}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<table class="ledger-table">
+    <tr><th>Status</th><th>Item</th><th>Quantity</th><th>Supplier</th><th>Booked</th><th>Expected</th><th>Notes</th><th></th></tr>
+    ${rows}
+  </table>`;
+}
+
+// Open the add/edit form. If `id` is supplied, prefill from importsCache.
+function openImportAdd(id) {
+  const editing = id ? importsCache.find(i => i.id === id) : null;
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${editing && editing.paper_type===p?' selected':''}>${esc(p)}</option>`).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>${editing ? 'Edit Import' : 'New Import'}</h2>
+    <div class="form-grid">
+      <div><label class="form-label">Paper Type *</label>
+        <select id="imp-paper-type">${paperOpts}</select></div>
+      <div><label class="form-label">Size (in)</label>
+        <input type="text" id="imp-size" placeholder="25x30" value="${esc(editing?.size || '')}"></div>
+      <div><label class="form-label">GSM</label>
+        <input type="text" id="imp-gsm" placeholder="300" value="${esc(editing?.gsm || '')}"></div>
+      <div><label class="form-label">Brand</label>
+        <input type="text" id="imp-brand" placeholder="optional" value="${esc(editing?.brand || '')}"></div>
+      <div><label class="form-label">Quantity (packets/reams)</label>
+        <input type="number" id="imp-packets" step="any" min="0" value="${editing?.packets ?? ''}"></div>
+      <div><label class="form-label">Weight (kg, optional)</label>
+        <input type="number" id="imp-weight" step="any" min="0" value="${editing?.weight_kg ?? ''}"></div>
+      <div><label class="form-label">Supplier</label>
+        <input type="text" id="imp-supplier" placeholder="optional" value="${esc(editing?.supplier || '')}"></div>
+      <div><label class="form-label">Booked Date</label>
+        <input type="date" id="imp-booked" value="${esc(editing?.booked_date || new Date().toISOString().slice(0,10))}"></div>
+      <div><label class="form-label">Expected Arrival</label>
+        <input type="date" id="imp-expected" value="${esc(editing?.expected_arrival || '')}"></div>
+      <div style="grid-column:1/-1;"><label class="form-label">Notes</label>
+        <textarea id="imp-notes" rows="2">${esc(editing?.notes || '')}</textarea></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="openImports()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveImport(${id || 'null'})">${editing ? 'Save' : 'Book Import'}</button>
+    </div>
+  </div>`);
+}
+function editImport(id) { openImportAdd(id); }
+
+async function saveImport(id) {
+  const body = {
+    paper_type: document.getElementById('imp-paper-type').value,
+    size:       document.getElementById('imp-size').value.trim() || null,
+    gsm:        document.getElementById('imp-gsm').value.trim() || null,
+    brand:      document.getElementById('imp-brand').value.trim() || null,
+    packets:    parseFloat(document.getElementById('imp-packets').value) || 0,
+    weight_kg:  parseFloat(document.getElementById('imp-weight').value)  || null,
+    supplier:   document.getElementById('imp-supplier').value.trim() || null,
+    booked_date:      document.getElementById('imp-booked').value || null,
+    expected_arrival: document.getElementById('imp-expected').value || null,
+    notes:      document.getElementById('imp-notes').value.trim() || null,
+  };
+  if (!body.packets || body.packets <= 0) { notify('Quantity must be > 0'); return; }
+  try {
+    if (id) await api('PUT', `/api/imports/${id}`, body);
+    else    await api('POST', '/api/imports',       body);
+    notify(id ? 'Import updated' : 'Import booked');
+    openImports();
+  } catch (e) { notify('Error: ' + e.message); }
+}
+
+async function receiveImport(id) {
+  const imp = importsCache.find(i => i.id === id); if (!imp) return;
+  const unit = packetUnitLabel(imp.paper_type).toLowerCase();
+  const answer = prompt(`Received ${imp.packets} ${unit}? Enter the actual quantity received (or press OK to use the booked amount):`, imp.packets);
+  if (answer === null) return; // cancelled
+  const packets = parseFloat(answer);
+  if (!packets || packets <= 0) { notify('Quantity must be > 0'); return; }
+  try {
+    await api('POST', `/api/imports/${id}/receive`, { packets });
+    notify('Import received · stock added');
+    await loadInventory(); // refresh balances
+    openImports();
+  } catch (e) { notify('Error: ' + e.message); }
+}
+
+async function cancelImport(id) {
+  if (!confirm('Cancel this import? (You can still see it in the Cancelled filter afterward.)')) return;
+  try {
+    await api('POST', `/api/imports/${id}/cancel`);
+    notify('Import cancelled');
+    openImports();
+  } catch (e) { notify('Error: ' + e.message); }
 }
 
 function setDateRange(v) {
