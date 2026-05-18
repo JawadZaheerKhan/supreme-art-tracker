@@ -102,6 +102,32 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_item_idx ON inventory_transactions(item_id)`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_job_idx  ON inventory_transactions(job_id)`;
 
+    // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
+    // pending → received (creates a stock-in transaction) or pending → cancelled.
+    // inventory_item_id is nullable so users can book imports for items that
+    // don't yet exist in the catalog — the item gets auto-created on receive.
+    await sql`
+      CREATE TABLE IF NOT EXISTS inventory_imports (
+        id                SERIAL PRIMARY KEY,
+        paper_type        TEXT NOT NULL,
+        size              TEXT,
+        gsm               TEXT,
+        brand             TEXT,
+        packets           NUMERIC NOT NULL DEFAULT 0,
+        weight_kg         NUMERIC,
+        supplier          TEXT,
+        booked_date       DATE,
+        expected_arrival  DATE,
+        received_at       TIMESTAMPTZ,
+        status            TEXT NOT NULL DEFAULT 'pending',
+        inventory_item_id INTEGER REFERENCES inventory_items(id) ON DELETE SET NULL,
+        notes             TEXT,
+        created_at        TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS inventory_imports_status_idx ON inventory_imports(status)`;
+    await sql`CREATE INDEX IF NOT EXISTS inventory_imports_type_idx   ON inventory_imports(paper_type)`;
+
     // Auth: allow-list of users keyed by email. role is enforced via CHECK so
     // the DB rejects typos. invited_by is just a breadcrumb for the Users tab.
     await sql`
@@ -612,6 +638,44 @@ app.post('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   }
 });
 
+// REPORT: all inventory transactions across all items, with item details joined.
+// Query params (all optional):
+//   from       — ISO date (inclusive lower bound, e.g. "2026-05-01")
+//   to         — ISO date (inclusive upper bound, e.g. "2026-05-31")
+//   direction  — "in" (change > 0), "out" (change < 0), or omitted for both
+// Newest first. Used by the Inventory Stock Report screen.
+app.get('/api/inventory/transactions', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const from = req.query.from || null;
+    const to   = req.query.to   || null;
+    const dir = req.query.direction === 'in' ? 'in'
+              : req.query.direction === 'out' ? 'out'
+              : 'all';
+    // Inclusive end-of-day on `to` so a date like 2026-05-31 matches transactions
+    // recorded at 2026-05-31 18:00:00. Without this, same-day queries miss data.
+    const txs = await sql`
+      SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+             i.paper_type, i.size AS item_size, i.gsm AS item_gsm,
+             i.brand AS item_brand, i.unit AS item_unit
+      FROM inventory_transactions t
+      LEFT JOIN jobs j ON j.id = t.job_id
+      LEFT JOIN inventory_items i ON i.id = t.item_id
+      WHERE (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
+        AND (${to}::timestamptz   IS NULL OR t.created_at <  (${to}::timestamptz + INTERVAL '1 day'))
+        AND (${dir} = 'all'
+             OR (${dir} = 'in'  AND t.change > 0)
+             OR (${dir} = 'out' AND t.change < 0))
+      ORDER BY t.id DESC
+    `;
+    res.json(txs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // LEDGER for one item — full transaction history, newest first.
 app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   try {
@@ -630,6 +694,152 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Inventory Imports endpoints ─────────────────────────────────
+// "Pending imports" — orders placed with suppliers that haven't arrived yet.
+// Listed in their own modal, drive the "Required After Import" column in the
+// Stock Summary. Mark Received turns the import into a stock-in transaction.
+
+// LIST imports. Optional status query param ("pending" by default — that's
+// the only thing the UI cares about most of the time).
+app.get('/api/imports', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const status = req.query.status || null; // null means all statuses
+    const rows = await sql`
+      SELECT * FROM inventory_imports
+      WHERE (${status}::text IS NULL OR status = ${status})
+      ORDER BY (status = 'pending') DESC, expected_arrival NULLS LAST, id DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// CREATE an import. Auto-links to a matching inventory_item if one exists
+// (same paper_type + size + gsm + brand). No match → leave the link NULL;
+// receiving the import later will create the item.
+app.post('/api/imports', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes } = req.body;
+    if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
+    const matchRows = await sql`
+      SELECT id FROM inventory_items
+      WHERE paper_type = ${paper_type}
+        AND COALESCE(size,'')  = COALESCE(${size||null}, '')
+        AND COALESCE(gsm,'')   = COALESCE(${gsm||null},  '')
+        AND COALESCE(brand,'') = COALESCE(${brand||null},'')
+      LIMIT 1
+    `;
+    const itemId = matchRows[0]?.id || null;
+    const inserted = await sql`
+      INSERT INTO inventory_imports
+        (paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes, inventory_item_id)
+      VALUES
+        (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${packets||0}, ${weight_kg||null},
+         ${supplier||null}, ${booked_date||null}, ${expected_arrival||null}, ${notes||null}, ${itemId})
+      RETURNING *
+    `;
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// UPDATE import fields. Status changes go through /receive or /cancel below.
+app.put('/api/imports/:id', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { id } = req.params;
+    const { paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes } = req.body;
+    const rows = await sql`
+      UPDATE inventory_imports SET
+        paper_type=${paper_type}, size=${size||null}, gsm=${gsm||null}, brand=${brand||null},
+        packets=${packets||0}, weight_kg=${weight_kg||null}, supplier=${supplier||null},
+        booked_date=${booked_date||null}, expected_arrival=${expected_arrival||null}, notes=${notes||null}
+      WHERE id=${id} RETURNING *
+    `;
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// CANCEL an import (status → cancelled, no inventory change).
+app.post('/api/imports/:id/cancel', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { id } = req.params;
+    const rows = await sql`
+      UPDATE inventory_imports SET status='cancelled' WHERE id=${id} AND status='pending' RETURNING *
+    `;
+    if (!rows.length) return res.status(400).json({ error: 'Only pending imports can be cancelled' });
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// RECEIVE an import — converts it to a real stock-in transaction. If the
+// import has no linked inventory_item, we create one on the fly using the
+// import's paper_type/size/gsm/brand. The body may override `packets` (e.g.,
+// when the actual delivery differs from the booked quantity).
+app.post('/api/imports/:id/receive', async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { id } = req.params;
+    const overridePackets = parseFloat(req.body?.packets);
+    const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id}`)[0];
+    if (!imp) return res.status(404).json({ error: 'Import not found' });
+    if (imp.status !== 'pending') return res.status(400).json({ error: 'Only pending imports can be received' });
+
+    // Find or create the inventory item. The unique index on
+    // (paper_type, COALESCE(size,''), COALESCE(gsm,''), COALESCE(brand,''))
+    // means we can't race-create duplicates — but we still SELECT first since
+    // we need the id either way.
+    let itemId = imp.inventory_item_id;
+    if (!itemId) {
+      const existing = await sql`
+        SELECT id FROM inventory_items
+        WHERE paper_type = ${imp.paper_type}
+          AND COALESCE(size,'')  = COALESCE(${imp.size},  '')
+          AND COALESCE(gsm,'')   = COALESCE(${imp.gsm},   '')
+          AND COALESCE(brand,'') = COALESCE(${imp.brand}, '')
+        LIMIT 1
+      `;
+      if (existing[0]) itemId = existing[0].id;
+      else {
+        const created = await sql`
+          INSERT INTO inventory_items (paper_type, size, gsm, brand)
+          VALUES (${imp.paper_type}, ${imp.size||null}, ${imp.gsm||null}, ${imp.brand||null})
+          RETURNING id
+        `;
+        itemId = created[0].id;
+      }
+    }
+
+    // Packets → sheets using the paper-type convention (Cards=100, Papers=500).
+    // Mirrors packetSize() in the frontend.
+    const reamSet = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
+    const perPack = reamSet.has(imp.paper_type) ? 500 : 100;
+    const pkts = Number.isFinite(overridePackets) && overridePackets > 0 ? overridePackets : parseFloat(imp.packets);
+    const sheets = Math.round(pkts * perPack);
+    if (!sheets || sheets <= 0) return res.status(400).json({ error: 'packets must be > 0' });
+
+    await applyInventoryChange(sql, {
+      itemId,
+      change: +sheets,
+      reason: 'import-received',
+      jobId: null,
+      notes: `Import #${imp.id}${imp.supplier ? ' · ' + imp.supplier : ''}${imp.notes ? ' · ' + imp.notes : ''}`,
+    });
+    const updated = await sql`
+      UPDATE inventory_imports SET
+        status='received', received_at=NOW(), inventory_item_id=${itemId}, packets=${pkts}
+      WHERE id=${id} RETURNING *
+    `;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // UPDATE stage/status only
