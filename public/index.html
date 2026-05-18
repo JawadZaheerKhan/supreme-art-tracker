@@ -237,6 +237,23 @@
 }
 .stk-input:focus { outline: none; border-color: #2563eb; }
 .stk-readonly { background: #f1f5f9; color: var(--text2); }
+
+/* Searchable combobox for the job picker */
+.stk-combobox { position: relative; }
+.stk-combobox-list {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+  background: var(--card); border: 1px solid var(--border); border-radius: 5px;
+  margin-top: 2px; max-height: 320px; overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+.stk-combobox-item {
+  padding: 8px 12px; font-size: 13px; cursor: pointer; color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.stk-combobox-item:last-child { border-bottom: none; }
+.stk-combobox-item:hover, .stk-combobox-item.active { background: #eff6ff; }
+.stk-combobox-item .ci-meta { font-size: 11px; color: var(--text2); margin-top: 2px; }
+.stk-combobox-empty { padding: 12px; font-size: 13px; color: var(--text2); text-align: center; }
 .stk-range { margin-top: 8px; padding-top: 12px; border-top: 1px dashed var(--border); }
 .stk-range-title { font-size: 12px; color: var(--text); font-weight: 600; margin-bottom: 8px; }
 .stk-actions { margin-top: 16px; display: flex; align-items: center; }
@@ -436,9 +453,16 @@
 
       <div class="stk-row">
         <label class="stk-label">Job</label>
-        <select id="stk-job" class="stk-input" onchange="onStickerJobChange()">
-          <option value="">— Select a job —</option>
-        </select>
+        <div class="stk-combobox" id="stk-job-combo">
+          <input type="hidden" id="stk-job">
+          <input type="text" id="stk-job-search" class="stk-input"
+                 placeholder="Search by ID, job code, name, or client…"
+                 autocomplete="off"
+                 oninput="filterStickerJobs()"
+                 onfocus="openStickerJobList()"
+                 onkeydown="onStickerJobKey(event)">
+          <div id="stk-job-list" class="stk-combobox-list" style="display:none;"></div>
+        </div>
       </div>
 
       <div class="stk-grid2">
@@ -2389,23 +2413,17 @@ function printStockMovement(direction) {
 // Despatch To / P.O. No. / Description fields auto-fill from the job card —
 // the user only enters quantity per carton and total cases, then prints
 // stickers 1..N (or a sub-range for reprints). One sticker per A4 page.
-function initStickersTab() {
-  // Populate the job dropdown from the cached jobs list. Most-recent first
-  // so the latest job is easy to pick. Includes job code + name + client
-  // so a user can find the right one at a glance.
-  const sel = document.getElementById('stk-job');
-  // Preserve the current selection across reloads (e.g. when the user comes
-  // back to the Stickers tab after editing a job).
-  const prev = sel.value;
-  const sorted = [...jobs].sort((a, b) => (b.id || 0) - (a.id || 0));
-  sel.innerHTML = '<option value="">— Select a job —</option>' +
-    sorted.map(j => {
-      const label = `E-${j.id}` + (j.jobcode ? ` · ${j.jobcode}` : '') + ` — ${j.name || ''} (${j.client || ''})`;
-      return `<option value="${j.id}">${esc(label)}</option>`;
-    }).join('');
-  if (prev) sel.value = prev;
+// Stickers combobox state — separate from the job model so we can do
+// instant client-side filtering across the full jobs list.
+let stickerJobList = [];          // jobs sorted most-recent first (cached)
+let stickerActiveIdx = -1;        // keyboard-highlighted item in the dropdown
 
-  // Default date = today
+function initStickersTab() {
+  // Cache the jobs sorted most-recent first so the searchable dropdown
+  // shows the freshest job at the top by default.
+  stickerJobList = [...jobs].sort((a, b) => (b.id || 0) - (a.id || 0));
+
+  // Default date = today (only if not already set so we keep user's tweak)
   const today = new Date();
   const yyyy = today.getFullYear();
   const mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -2413,12 +2431,117 @@ function initStickersTab() {
   const dateInput = document.getElementById('stk-date');
   if (!dateInput.value) dateInput.value = `${yyyy}-${mm}-${dd}`;
 
-  onStickerJobChange();
+  // If a job was previously selected, restore its label in the search input
+  const prevId = +document.getElementById('stk-job').value;
+  const prev = prevId ? jobs.find(j => j.id === prevId) : null;
+  if (prev) document.getElementById('stk-job-search').value = stickerJobLabel(prev);
+
+  // Trigger the autofill in case prior values are stale
+  applyStickerJob(prev || null);
+
+  // Close the dropdown when clicking anywhere outside the combobox.
+  // Idempotent — only attach the listener once.
+  if (!window._stkOutsideHandler) {
+    window._stkOutsideHandler = (e) => {
+      const combo = document.getElementById('stk-job-combo');
+      if (combo && !combo.contains(e.target)) closeStickerJobList();
+    };
+    document.addEventListener('mousedown', window._stkOutsideHandler);
+  }
 }
 
-function onStickerJobChange() {
-  const id = +document.getElementById('stk-job').value;
+// One-line summary of a job for the dropdown — same format used for the
+// input's display value once a job is picked.
+function stickerJobLabel(j) {
+  if (!j) return '';
+  return `E-${j.id}` + (j.jobcode ? ` · ${j.jobcode}` : '') + ` — ${j.name || ''} (${j.client || ''})`;
+}
+
+function openStickerJobList() {
+  filterStickerJobs();
+  document.getElementById('stk-job-list').style.display = 'block';
+}
+function closeStickerJobList() {
+  document.getElementById('stk-job-list').style.display = 'none';
+  stickerActiveIdx = -1;
+}
+
+// Filter the cached jobs against the current query. Matches across id,
+// jobcode, name, client and ref — the four fields users actually search by.
+function filterStickerJobs() {
+  const q = document.getElementById('stk-job-search').value.trim().toLowerCase();
+  const list = document.getElementById('stk-job-list');
+  const matches = stickerJobList.filter(j => {
+    if (!q) return true;
+    const hay = [
+      'e-' + j.id,
+      String(j.id),
+      j.jobcode || '',
+      j.name || '',
+      j.client || '',
+      j.ref || '',
+    ].join(' ').toLowerCase();
+    return hay.includes(q);
+  }).slice(0, 50); // cap at 50 results — keeps the dropdown snappy on huge job lists
+
+  if (!matches.length) {
+    list.innerHTML = '<div class="stk-combobox-empty">No matching jobs</div>';
+  } else {
+    list.innerHTML = matches.map((j, i) =>
+      `<div class="stk-combobox-item${i === stickerActiveIdx ? ' active' : ''}" data-id="${j.id}" onmousedown="selectStickerJob(${j.id})">
+        <div>${esc(stickerJobLabel(j))}</div>
+        ${j.ref ? `<div class="ci-meta">P.O. ${esc(j.ref)}</div>` : ''}
+      </div>`
+    ).join('');
+  }
+  list.style.display = 'block';
+  // Reset highlight so arrow-keys start fresh after each keystroke
+  stickerActiveIdx = matches.length ? 0 : -1;
+  highlightStickerActive();
+}
+
+function highlightStickerActive() {
+  const items = document.querySelectorAll('#stk-job-list .stk-combobox-item');
+  items.forEach((el, i) => el.classList.toggle('active', i === stickerActiveIdx));
+  // Keep the active item visible inside the scrollable dropdown
+  if (stickerActiveIdx >= 0 && items[stickerActiveIdx]) {
+    items[stickerActiveIdx].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+// Arrow-key + Enter + Escape handling for the search input
+function onStickerJobKey(e) {
+  const items = document.querySelectorAll('#stk-job-list .stk-combobox-item');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    stickerActiveIdx = Math.min(stickerActiveIdx + 1, items.length - 1);
+    highlightStickerActive();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    stickerActiveIdx = Math.max(stickerActiveIdx - 1, 0);
+    highlightStickerActive();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (stickerActiveIdx >= 0 && items[stickerActiveIdx]) {
+      selectStickerJob(+items[stickerActiveIdx].dataset.id);
+    }
+  } else if (e.key === 'Escape') {
+    closeStickerJobList();
+  }
+}
+
+function selectStickerJob(id) {
   const j = jobs.find(x => x.id === id);
+  document.getElementById('stk-job').value = id;
+  document.getElementById('stk-job-search').value = stickerJobLabel(j);
+  closeStickerJobList();
+  applyStickerJob(j);
+}
+
+// Apply a selected job's fields to the read-only autofill inputs and
+// refresh the preview. Pulled out of selectStickerJob so initStickersTab
+// can call it during state restoration.
+function applyStickerJob(j) {
   document.getElementById('stk-despatch').value = j ? (j.client || '') : '';
   document.getElementById('stk-po').value       = j ? (j.ref || '')    : '';
   document.getElementById('stk-desc').value     = j ? (j.name || '')   : '';
