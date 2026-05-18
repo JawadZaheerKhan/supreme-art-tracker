@@ -63,6 +63,7 @@
   .inv-balance { text-align: right; }
   .inv-balance-num { font-size: 22px; font-weight: 600; color: var(--text); line-height: 1; }
   .inv-balance-unit { font-size: 11px; color: var(--text2); text-transform: uppercase; }
+  .inv-balance-sub  { font-size: 12px; color: var(--text2); margin-top: 2px; }
   .inv-badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.04em; margin-left: 8px; }
   .inv-badge.low { background: #fef3c7; color: #92400e; }
   .inv-badge.out { background: #fee2e2; color: #991b1b; }
@@ -1018,6 +1019,13 @@ function renderInventoryList() {
     const badge = state === 'out' ? '<span class="inv-badge out">Out</span>'
                 : state === 'low' ? '<span class="inv-badge low">Low</span>' : '';
     const sub = [it.size, it.gsm ? it.gsm + ' gsm' : '', it.brand].filter(Boolean).map(esc).join(' · ');
+    // Pretty-print the balance also in packets/reams so users get the unit
+    // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
+    const sheets = it.current_balance || 0;
+    const ps     = packetSize(it.paper_type);
+    const unit   = packetUnitLabel(it.paper_type).toLowerCase();
+    const pkts   = sheets / ps;
+    const pktsStr = (Number.isInteger(pkts) ? pkts : +pkts.toFixed(2)).toLocaleString();
     return `
     <div class="inv-card ${state}">
       <div class="inv-main">
@@ -1025,8 +1033,9 @@ function renderInventoryList() {
         <div class="inv-sub">${sub || '—'}${it.reorder_threshold ? ' · Reorder at ' + it.reorder_threshold.toLocaleString() : ''}</div>
       </div>
       <div class="inv-balance">
-        <div class="inv-balance-num">${(it.current_balance||0).toLocaleString()}</div>
+        <div class="inv-balance-num">${sheets.toLocaleString()}</div>
         <div class="inv-balance-unit">${esc(it.unit||'sheets')}</div>
+        <div class="inv-balance-sub">${pktsStr} ${unit}</div>
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm btn-primary" onclick="openInvAddStock(${it.id})">+ Stock</button>
