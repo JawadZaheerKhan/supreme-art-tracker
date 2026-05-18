@@ -33,6 +33,10 @@
   .report-card-icon { font-size: 28px; }
   .report-card-title { font-size: 17px; font-weight: 600; color: var(--text); }
   .report-card-desc { font-size: 13px; color: var(--text2); line-height: 1.45; }
+  .dash-flbl { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+  .dash-panel { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+  .dash-h { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--text); }
+  @media (max-width: 900px) { #dash-breakdowns { grid-template-columns: 1fr !important; } }
   .inv-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; display: flex; align-items: center; gap: 16px; border-left: 4px solid var(--border); }
   .inv-card.low { border-left-color: #d97706; }
   .inv-card.out { border-left-color: #A32D2D; }
@@ -307,10 +311,16 @@
 </div>
 
 <div class="main" id="reports-mode" style="display:none;">
-  <div style="max-width:1100px;margin:24px auto;">
+  <!-- Landing — list of report types. Hidden when a specific report (e.g. Dashboard) is open. -->
+  <div id="reports-landing" style="max-width:1100px;margin:24px auto;">
     <h2 style="margin-bottom:6px;font-size:22px;">Reports</h2>
     <p style="color:var(--text2);margin-bottom:24px;font-size:14px;">Stock movement, summaries, and pending imports — all printable.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">
+      <button class="report-card" onclick="openDashboard()">
+        <div class="report-card-icon">&#128200;</div>
+        <div class="report-card-title">Dashboard</div>
+        <div class="report-card-desc">At-a-glance overview: totals in/out, breakdown by paper type, by size+GSM, and recent activity. Filter by date, paper type, size, and GSM.</div>
+      </button>
       <button class="report-card" onclick="openStockReport()">
         <div class="report-card-icon">&#128202;</div>
         <div class="report-card-title">Stock Report</div>
@@ -328,6 +338,8 @@
       </button>
     </div>
   </div>
+  <!-- Dashboard view — full-page (not modal) so the data has room to breathe. -->
+  <div id="dashboard-view" style="display:none;max-width:1400px;margin:18px auto;padding:0 12px;"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -1893,6 +1905,229 @@ async function receiveImport(id) {
     await loadInventory(); // refresh balances
     openImports();
   } catch (e) { notify('Error: ' + e.message); }
+}
+
+// ── Dashboard ────────────────────────────────────────────────
+// Full-page overview of stock movement. Filters: date range + paper type +
+// size + gsm. Sections: 4 summary tiles, "by paper type" table with bar
+// visualisations, "by size+gsm" drill-down, "recent activity" list.
+let dashboardState = { from: '', to: '', paperType: '', size: '', gsm: '', txs: [], allInv: [] };
+
+function openDashboard() {
+  // Default: last 30 days. Picks a wider window than Stock Report's "month"
+  // default so first-load isn't blank.
+  const today = new Date();
+  const start = new Date(today); start.setDate(today.getDate() - 29);
+  const iso = d => d.toISOString().slice(0, 10);
+  dashboardState = { from: iso(start), to: iso(today), paperType: '', size: '', gsm: '', txs: [], allInv: [] };
+  document.getElementById('reports-landing').style.display = 'none';
+  const view = document.getElementById('dashboard-view');
+  view.style.display = 'block';
+  view.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+      <button class="btn btn-sm" onclick="closeDashboard()">&#8592; Back to Reports</button>
+      <h2 style="margin:0;font-size:20px;">Dashboard</h2>
+      <span style="margin-left:auto;color:var(--text2);font-size:12px;" id="dash-meta"></span>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">From</div>
+        <input class="filter" type="date" id="dash-from" value="${dashboardState.from}" onchange="setDashFrom(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">To</div>
+        <input class="filter" type="date" id="dash-to" value="${dashboardState.to}" onchange="setDashTo(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="dash-paper-type" onchange="setDashPaperType(this.value)">
+          <option value="">All paper types</option>
+          ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Size</div>
+        <select class="filter" id="dash-size" onchange="setDashSize(this.value)"><option value="">All sizes</option></select>
+      </div>
+      <div>
+        <div class="dash-flbl">GSM</div>
+        <select class="filter" id="dash-gsm" onchange="setDashGsm(this.value)"><option value="">All GSM</option></select>
+      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetDashFilters()">Reset filters</button>
+    </div>
+    <div id="dash-tiles" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px;margin-bottom:14px;"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;" id="dash-breakdowns">
+      <div class="dash-panel"><h3 class="dash-h">By Paper Type</h3><div id="dash-by-type">Loading…</div></div>
+      <div class="dash-panel"><h3 class="dash-h">By Size · GSM</h3><div id="dash-by-sg">Loading…</div></div>
+    </div>
+    <div class="dash-panel"><h3 class="dash-h">Recent Activity (latest 15)</h3><div id="dash-recent">Loading…</div></div>
+  `;
+  loadDashboard();
+}
+
+function closeDashboard() {
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('reports-landing').style.display = 'block';
+}
+
+function setDashFrom(v)      { dashboardState.from = v; loadDashboard(); }
+function setDashTo(v)        { dashboardState.to   = v; loadDashboard(); }
+function setDashPaperType(v) { dashboardState.paperType = v; dashboardState.size = ''; dashboardState.gsm = ''; refreshDashFilterOptions(); renderDashboard(); }
+function setDashSize(v)      { dashboardState.size = v; renderDashboard(); }
+function setDashGsm(v)       { dashboardState.gsm  = v; renderDashboard(); }
+function resetDashFilters() {
+  dashboardState.paperType = ''; dashboardState.size = ''; dashboardState.gsm = '';
+  document.getElementById('dash-paper-type').value = '';
+  refreshDashFilterOptions();
+  renderDashboard();
+}
+
+async function loadDashboard() {
+  try {
+    // Fetch every transaction in the period — paper-type / size / gsm
+    // filtering happens client-side so the user can flip filters instantly.
+    const { from, to } = dashboardState;
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to)   qs.set('to',   to);
+    const [txs] = await Promise.all([api('GET', `/api/inventory/transactions?${qs.toString()}`)]);
+    dashboardState.txs = txs;
+    dashboardState.allInv = inventory;
+    refreshDashFilterOptions();
+    renderDashboard();
+  } catch (e) {
+    const el = document.getElementById('dash-tiles');
+    if (el) el.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// Populate Size and GSM dropdowns based on the current paper-type selection
+// — only show options that actually appear in the loaded transactions, so
+// the user never picks a combination that returns zero rows.
+function refreshDashFilterOptions() {
+  const pt = dashboardState.paperType;
+  const pool = pt ? dashboardState.txs.filter(t => t.paper_type === pt) : dashboardState.txs;
+  const sizes = [...new Set(pool.map(t => t.item_size).filter(Boolean))].sort();
+  const gsms  = [...new Set(pool.map(t => t.item_gsm ).filter(Boolean))].sort((a,b)=>parseFloat(a)-parseFloat(b));
+  const sizeEl = document.getElementById('dash-size');
+  const gsmEl  = document.getElementById('dash-gsm');
+  if (sizeEl) sizeEl.innerHTML = `<option value="">All sizes</option>` + sizes.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  if (gsmEl)  gsmEl.innerHTML  = `<option value="">All GSM</option>`  + gsms .map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('');
+  if (sizeEl) sizeEl.value = dashboardState.size || '';
+  if (gsmEl)  gsmEl.value  = dashboardState.gsm  || '';
+}
+
+function dashFilteredTxs() {
+  const { paperType, size, gsm, txs } = dashboardState;
+  return txs.filter(t =>
+    (!paperType || t.paper_type === paperType) &&
+    (!size      || t.item_size  === size) &&
+    (!gsm       || t.item_gsm   === gsm)
+  );
+}
+
+function renderDashboard() {
+  const txs = dashFilteredTxs();
+  let totalIn = 0, totalOut = 0;
+  const itemSet = new Set();
+  for (const t of txs) {
+    if (t.change > 0) totalIn += t.change; else totalOut += -t.change;
+    if (t.item_id) itemSet.add(t.item_id);
+  }
+  const net = totalIn - totalOut;
+
+  // Tiles
+  const tile = (label, value, color, sub) =>
+    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;">
+       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
+       <div style="font-size:22px;font-weight:600;color:${color};margin-top:2px;line-height:1.1;">${value}</div>
+       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
+     </div>`;
+  document.getElementById('dash-tiles').innerHTML =
+      tile('Total Stock In',  '+' + totalIn.toLocaleString(),  '#166534', `${txs.filter(t=>t.change>0).length} txs`)
+    + tile('Total Stock Out', '−' + totalOut.toLocaleString(), '#A32D2D', `${txs.filter(t=>t.change<0).length} txs`)
+    + tile('Net Change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D', 'sheets')
+    + tile('Items Active',    itemSet.size.toLocaleString(), 'var(--text)', 'with movement in range')
+    + tile('Transactions',    txs.length.toLocaleString(),   'var(--text)', 'in filtered range');
+
+  // Period meta line
+  document.getElementById('dash-meta').textContent = `${dashboardState.from} → ${dashboardState.to}`;
+
+  // ── Breakdown: by paper type
+  // Aggregate in/out per paper_type and render a mini-table with proportional
+  // bars (CSS only, no chart lib). Bar width = share of the largest in-or-out.
+  const byType = new Map();
+  for (const t of txs) {
+    const k = t.paper_type || '(unknown)';
+    if (!byType.has(k)) byType.set(k, { in:0, out:0, items:new Set() });
+    const o = byType.get(k);
+    if (t.change > 0) o.in += t.change; else o.out += -t.change;
+    if (t.item_id) o.items.add(t.item_id);
+  }
+  const typeRows = [...byType.entries()].sort((a,b) => (b[1].in+b[1].out) - (a[1].in+a[1].out));
+  const maxAbs = Math.max(1, ...typeRows.map(([,v]) => Math.max(v.in, v.out)));
+  const byTypeHtml = typeRows.length === 0
+    ? '<div class="empty" style="padding:14px 0;">No transactions in range.</div>'
+    : `<table class="ledger-table" style="font-size:12px;">
+        <tr><th>Paper Type</th><th>Items</th><th style="text-align:right;">In</th><th>&nbsp;</th><th style="text-align:right;">Out</th><th>&nbsp;</th><th style="text-align:right;">Net</th></tr>
+        ${typeRows.map(([k, v]) => `<tr>
+          <td>${esc(k)}</td>
+          <td style="text-align:right;">${v.items.size}</td>
+          <td style="text-align:right;color:#166534;font-weight:600;">+${v.in.toLocaleString()}</td>
+          <td style="width:80px;"><div style="height:8px;background:#dcfce7;border-radius:4px;overflow:hidden;"><div style="height:100%;width:${(v.in/maxAbs*100).toFixed(1)}%;background:#166534;"></div></div></td>
+          <td style="text-align:right;color:#A32D2D;font-weight:600;">−${v.out.toLocaleString()}</td>
+          <td style="width:80px;"><div style="height:8px;background:#fee2e2;border-radius:4px;overflow:hidden;"><div style="height:100%;width:${(v.out/maxAbs*100).toFixed(1)}%;background:#A32D2D;"></div></div></td>
+          <td style="text-align:right;font-weight:600;color:${(v.in-v.out)>=0?'#166534':'#A32D2D'};">${(v.in-v.out)>=0?'+':'−'}${Math.abs(v.in-v.out).toLocaleString()}</td>
+        </tr>`).join('')}
+      </table>`;
+  document.getElementById('dash-by-type').innerHTML = byTypeHtml;
+
+  // ── Breakdown: by size·gsm (within current filters)
+  // Key includes paper_type so two paper types with the same size/gsm stay
+  // separated (different products in reality).
+  const bySG = new Map();
+  for (const t of txs) {
+    const key = `${t.paper_type||''}|${t.item_size||''}|${t.item_gsm||''}`;
+    if (!bySG.has(key)) bySG.set(key, { paper:t.paper_type, size:t.item_size, gsm:t.item_gsm, in:0, out:0 });
+    const o = bySG.get(key);
+    if (t.change > 0) o.in += t.change; else o.out += -t.change;
+  }
+  const sgRows = [...bySG.values()].sort((a,b) => (b.in+b.out) - (a.in+a.out)).slice(0, 25);
+  const bySGHtml = sgRows.length === 0
+    ? '<div class="empty" style="padding:14px 0;">No transactions in range.</div>'
+    : `<table class="ledger-table" style="font-size:12px;">
+        <tr><th>Type · Size · GSM</th><th style="text-align:right;">In</th><th style="text-align:right;">Out</th><th style="text-align:right;">Net</th></tr>
+        ${sgRows.map(r => `<tr>
+          <td>${esc(r.paper||'—')} · ${esc(r.size||'—')} · ${esc(r.gsm||'—')}</td>
+          <td style="text-align:right;color:#166534;font-weight:600;">+${r.in.toLocaleString()}</td>
+          <td style="text-align:right;color:#A32D2D;font-weight:600;">−${r.out.toLocaleString()}</td>
+          <td style="text-align:right;font-weight:600;color:${(r.in-r.out)>=0?'#166534':'#A32D2D'};">${(r.in-r.out)>=0?'+':'−'}${Math.abs(r.in-r.out).toLocaleString()}</td>
+        </tr>`).join('')}
+      </table>
+      ${bySG.size > 25 ? `<div style="font-size:11px;color:var(--text2);margin-top:6px;">Showing top 25 of ${bySG.size} combinations by activity.</div>` : ''}`;
+  document.getElementById('dash-by-sg').innerHTML = bySGHtml;
+
+  // ── Recent activity
+  const recent = [...txs].slice(0, 15);
+  document.getElementById('dash-recent').innerHTML = recent.length === 0
+    ? '<div class="empty" style="padding:14px 0;">No transactions in range.</div>'
+    : `<table class="ledger-table" style="font-size:12px;">
+         <tr><th>When</th><th>Item</th><th style="text-align:right;">Change</th><th>Reason</th><th>Job</th></tr>
+         ${recent.map(t => {
+           const date = new Date(t.created_at).toLocaleString('en-PK');
+           const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
+           const sign = t.change > 0 ? '+' : '';
+           const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
+           const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+           return `<tr>
+             <td>${date}</td>
+             <td>${item || '<span style="color:var(--text3)">(deleted)</span>'}</td>
+             <td class="${cls}" style="text-align:right;">${sign}${t.change.toLocaleString()}</td>
+             <td>${esc(t.reason||'')}</td>
+             <td>${job}</td>
+           </tr>`;
+         }).join('')}
+       </table>`;
 }
 
 async function cancelImport(id) {
