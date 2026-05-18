@@ -1187,10 +1187,24 @@ function renderStockReport(from, to) {
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    // Convert sheets → packets/reams using the item's paper-type convention.
+    // Show 2dp when fractional, integer otherwise, so "exactly 50 packets" reads cleanly.
+    const ps    = packetSize(t.paper_type || '');
+    const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
+    const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+    const pkts  = t.change / ps;
+    // Look up the item's CURRENT balance from the cached inventory list. May
+    // be null if the item was deleted after this transaction was recorded.
+    const inv   = inventory.find(i => i.id === t.item_id);
+    const bal   = inv ? (inv.current_balance || 0) : null;
+    const balCell = bal === null
+      ? '<span style="color:var(--text3)">—</span>'
+      : `${bal.toLocaleString()} sheets<br><span style="color:var(--text2);font-size:11px;">${fmt(bal/ps)} ${unit}</span>`;
     return `<tr>
       <td>${date}</td>
       <td>${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
-      <td class="${cls}">${sign}${t.change.toLocaleString()}</td>
+      <td class="${cls}">${sign}${t.change.toLocaleString()} sheets<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${sign}${fmt(pkts)} ${unit}</span></td>
+      <td>${balCell}</td>
       <td>${esc(t.reason||'')}</td>
       <td>${job}</td>
       <td>${esc(t.notes||'')}</td>
@@ -1199,7 +1213,7 @@ function renderStockReport(from, to) {
   document.getElementById('sr-content').innerHTML = txs.length
     ? `<div style="font-size:11px;color:var(--text2);margin-bottom:6px;">Period: ${from || '(any)'} to ${to || '(any)'} · ${txs.length} transaction${txs.length===1?'':'s'}</div>
        <table class="ledger-table">
-         <tr><th>When</th><th>Item</th><th>Change</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+         <tr><th>When</th><th>Item</th><th>Change</th><th>Current Balance</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
          ${rows}
        </table>`
     : '<div class="empty">No transactions in this period.</div>';
@@ -1226,13 +1240,26 @@ function printStockReport() {
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const ps   = packetSize(t.paper_type || '');
+    const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
+    const fmt  = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+    const pkts = t.change / ps;
+    const inv  = inventory.find(i => i.id === t.item_id);
+    const bal  = inv ? (inv.current_balance || 0) : null;
+    const balCell = bal === null
+      ? '—'
+      : `${bal.toLocaleString()}<br><span style="font-size:8pt;">${fmt(bal/ps)} ${unit}</span>`;
+    const tdL = 'style="border:1px solid #000;padding:4px;"';
+    const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+    const tdChg = `style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};"`;
     return `<tr>
-      <td>${date}</td>
-      <td>${item}</td>
-      <td style="text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};">${sign}${t.change.toLocaleString()}</td>
-      <td>${esc(t.reason||'')}</td>
-      <td>${job}</td>
-      <td>${esc(t.notes||'')}</td>
+      <td ${tdL}>${date}</td>
+      <td ${tdL}>${item}</td>
+      <td ${tdChg}>${sign}${t.change.toLocaleString()}<br><span style="font-size:8pt;font-weight:normal;">${sign}${fmt(pkts)} ${unit}</span></td>
+      <td ${tdR}>${balCell}</td>
+      <td ${tdL}>${esc(t.reason||'')}</td>
+      <td ${tdL}>${job}</td>
+      <td ${tdL}>${esc(t.notes||'')}</td>
     </tr>`;
   }).join('');
 
@@ -1270,12 +1297,13 @@ function printStockReport() {
         <tr style="background:#eee;">
           <th style="border:1px solid #000;padding:4px;text-align:left;">When</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Item</th>
-          <th style="border:1px solid #000;padding:4px;text-align:right;">Change</th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Change<br><span style="font-weight:normal;font-size:8pt;">(sheets / pkts·reams)</span></th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Current Balance</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Reason</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Notes</th>
         </tr>
-        ${tableRows.replace(/<td>/g, '<td style="border:1px solid #000;padding:4px;">').replace(/<td style="text-align:right;font-weight:bold;color:/g, '<td style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:')}
+        ${tableRows}
       </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No transactions in this period.</div>'}
     </div>
   `;
