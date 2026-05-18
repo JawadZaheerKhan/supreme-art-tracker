@@ -296,6 +296,7 @@
       <option value="out">Out of stock</option>
     </select>
     <button class="btn btn-sm" style="margin-left:auto;" onclick="openStockReport()">&#128202; Stock Report</button>
+    <button class="btn btn-sm" onclick="openStockSummary()">&#128203; Stock Summary</button>
     <button class="btn btn-sm" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
@@ -1333,6 +1334,325 @@ function printStockReport() {
     : new Promise(res => { img.onload = img.onerror = () => res(); }));
   const timeout = new Promise(res => setTimeout(res, 1500));
   Promise.race([Promise.all(waits), timeout]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
+// ── Stock Summary ────────────────────────────────────────────
+// Per-paper-type "stock position" report: one row per size/gsm combo, columns
+// for opening balance, then IN/OUT/balance buckets across the chosen range
+// (monthly OR weekly), then totals (consumption, current stock, weight) and
+// projections (stock required next period, total imports).
+let stockSummaryState = { paperType: 'Bleach Card', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+
+// Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
+// {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
+// "A4", empty). Decimals are allowed: "8.5x11" works.
+function parseSizeInches(size) {
+  if (!size) return null;
+  const m = String(size).match(/(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  return { w: parseFloat(m[1]), h: parseFloat(m[2]) };
+}
+
+// Weight of ONE pack (packet for cards, ream for papers) in kg.
+// Formula from Hamza/Jawad:
+//   Cards : (size_in² × gsm) / 15500   (100 sheets/packet)
+//   Papers: (size_in² × gsm) / 3100    (500 sheets/ream)
+function packWeightKg(paperType, size, gsm) {
+  const dim = parseSizeInches(size);
+  const g = parseFloat(gsm);
+  if (!dim || !Number.isFinite(g)) return null;
+  const area = dim.w * dim.h;
+  const divisor = isReamPaper(paperType) ? 3100 : 15500;
+  return (area * g) / divisor;
+}
+
+// Build the list of period buckets covering [from, to]. Monthly = whole calendar
+// months. Weekly = 7-day blocks counted from `from` (so "Week 1" is days 1-7,
+// "Week 2" is 8-14, etc.) — matches what Hamza asked for.
+// Each bucket has { label, start (Date), end (Date, exclusive) }.
+function buildSummaryBuckets(from, to, granularity) {
+  const buckets = [];
+  const fromD = new Date(from + 'T00:00:00');
+  const toD   = new Date(to   + 'T23:59:59');
+  if (isNaN(fromD) || isNaN(toD) || fromD > toD) return buckets;
+  if (granularity === 'monthly') {
+    let cur = new Date(fromD.getFullYear(), fromD.getMonth(), 1);
+    const end = new Date(toD.getFullYear(), toD.getMonth(), 1);
+    while (cur <= end) {
+      const next = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+      const monthName = cur.toLocaleString('en-US', { month: 'short' });
+      buckets.push({ label: `${monthName} ${cur.getFullYear()}`, start: new Date(cur), end: next });
+      cur = next;
+    }
+  } else { // weekly
+    let cur = new Date(fromD);
+    let n = 1;
+    while (cur <= toD) {
+      const next = new Date(cur); next.setDate(cur.getDate() + 7);
+      buckets.push({ label: `Week ${n}`, start: new Date(cur), end: next });
+      cur = next; n++;
+    }
+  }
+  return buckets;
+}
+
+function openStockSummary() {
+  // Default to last 5 months ending today, monthly granularity, first paper type.
+  const today = new Date();
+  const start = new Date(today.getFullYear(), today.getMonth() - 4, 1);
+  const iso = d => d.toISOString().slice(0, 10);
+  stockSummaryState = {
+    paperType: PAPERS[0],
+    from: iso(start),
+    to:   iso(today),
+    granularity: 'monthly',
+    items: [], txs: []
+  };
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${p===PAPERS[0]?' selected':''}>${esc(p)}</option>`).join('');
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>Stock Summary</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:14px;">
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Paper Type</div>
+        <select class="filter" id="ss-paper-type" onchange="setSummaryPaperType(this.value)">${paperOpts}</select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">From</div>
+        <input class="filter" type="date" id="ss-from" value="${stockSummaryState.from}" onchange="setSummaryFrom(this.value)">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">To</div>
+        <input class="filter" type="date" id="ss-to" value="${stockSummaryState.to}" onchange="setSummaryTo(this.value)">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Group by</div>
+        <select class="filter" id="ss-granularity" onchange="setSummaryGranularity(this.value)">
+          <option value="monthly" selected>Monthly</option>
+          <option value="weekly">Weekly</option>
+        </select>
+      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="printStockSummary()">&#128424; Print Summary</button>
+    </div>
+    <div id="ss-content" style="font-size:12px;color:var(--text2);overflow-x:auto;">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  loadStockSummary();
+}
+
+function setSummaryPaperType(v) { stockSummaryState.paperType = v; loadStockSummary(); }
+function setSummaryFrom(v)      { stockSummaryState.from = v; loadStockSummary(); }
+function setSummaryTo(v)        { stockSummaryState.to   = v; loadStockSummary(); }
+function setSummaryGranularity(v){stockSummaryState.granularity = v; renderStockSummary(); }
+
+async function loadStockSummary() {
+  const el = document.getElementById('ss-content');
+  if (el) el.textContent = 'Loading…';
+  try {
+    // Pull ALL transactions for this paper type (no date filter), then
+    // compute opening balance and bucket sums client-side. Cheap for typical
+    // inventory sizes and avoids a custom aggregation endpoint.
+    const allTxs = await api('GET', '/api/inventory/transactions');
+    stockSummaryState.txs   = allTxs.filter(t => t.paper_type === stockSummaryState.paperType);
+    stockSummaryState.items = inventory.filter(i => i.paper_type === stockSummaryState.paperType);
+    renderStockSummary();
+  } catch (e) {
+    if (el) el.innerHTML = 'Error: ' + esc(e.message);
+  }
+}
+
+// Compute the per-item rows shown in the summary table. Returns an array of
+// row objects, one per inventory item belonging to the selected paper type.
+// Each row has: item, opening, periods (array of {in, out, balance}), totalOut,
+// stockNow, weightKg, requiredNext, importPkts, importKg.
+function computeSummaryRows() {
+  const { paperType, from, to, granularity, items, txs } = stockSummaryState;
+  const buckets = buildSummaryBuckets(from, to, granularity);
+  const fromD = new Date(from + 'T00:00:00');
+  const ps    = packetSize(paperType);
+  const rows  = items.map(it => {
+    const itemTxs = txs.filter(t => t.item_id === it.id);
+    // Opening balance (in sheets) = sum of every change recorded BEFORE the from date.
+    let openingSheets = 0;
+    for (const t of itemTxs) if (new Date(t.created_at) < fromD) openingSheets += t.change;
+    // Per-bucket in/out (in sheets) + running balance.
+    let runningSheets = openingSheets;
+    const periods = buckets.map(b => {
+      let inSh = 0, outSh = 0;
+      for (const t of itemTxs) {
+        const d = new Date(t.created_at);
+        if (d >= b.start && d < b.end) {
+          if (t.change > 0) inSh += t.change; else outSh += -t.change;
+        }
+      }
+      runningSheets += (inSh - outSh);
+      return { in: inSh, out: outSh, balance: runningSheets };
+    });
+    // Total Consumption — sum of OUT across buckets.
+    const totalOutSheets = periods.reduce((a, p) => a + p.out, 0);
+    // Total Import — every positive transaction in [from, to] except the
+    // opening-balance entries (those represent the initial seed, not real
+    // procurement). Date range is inclusive.
+    const toD = new Date(to + 'T23:59:59');
+    let importSheets = 0;
+    for (const t of itemTxs) {
+      const d = new Date(t.created_at);
+      if (d >= fromD && d <= toD && t.change > 0 && t.reason !== 'opening-balance') {
+        importSheets += t.change;
+      }
+    }
+    const stockNowSheets = it.current_balance || 0;
+    const wPerPack = packWeightKg(paperType, it.size, it.gsm);
+    return {
+      item: it,
+      openingPkts: openingSheets / ps,
+      periods: periods.map(p => ({ in: p.in / ps, out: p.out / ps, balance: p.balance / ps })),
+      totalOutPkts:   totalOutSheets / ps,
+      stockNowPkts:   stockNowSheets / ps,
+      weightKg:       wPerPack === null ? null : (stockNowSheets / ps) * wPerPack,
+      requiredNextPkts: totalOutSheets / ps, // = total consumption — replace what was used
+      importPkts:     importSheets / ps,
+      importKg:       wPerPack === null ? null : (importSheets / ps) * wPerPack,
+    };
+  });
+  return { rows, buckets };
+}
+
+// Format a packet count: integer when whole, 2dp otherwise. Empty string for 0
+// so the table doesn't get noisy with zeros everywhere.
+function fmtPkts(n, opts = {}) {
+  if (!n) return opts.keepZero ? '0' : '';
+  const r = Number.isInteger(n) ? n : +n.toFixed(2);
+  return r.toLocaleString();
+}
+function fmtKg(n) {
+  if (n === null || n === undefined) return '—';
+  if (!n) return '0';
+  return (+n.toFixed(2)).toLocaleString();
+}
+
+function renderStockSummary() {
+  const { paperType } = stockSummaryState;
+  const { rows, buckets } = computeSummaryRows();
+  const el = document.getElementById('ss-content');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty">No inventory items of type "${esc(paperType)}".</div>`;
+    return;
+  }
+  const unit = packetUnitLabel(paperType); // "Packets" or "Reams"
+  // Header — two rows so each period column has IN / OUT / Balance under one period label.
+  const periodHeaders = buckets.map(b =>
+    `<th colspan="3" style="text-align:center;background:var(--bg2);">${esc(b.label)}</th>`).join('');
+  const periodSubHeaders = buckets.map(() =>
+    `<th>IN</th><th>OUT</th><th>Bal</th>`).join('');
+  const tbody = rows.map(r => {
+    const periodCells = r.periods.map(p =>
+      `<td style="text-align:right;color:#166534;">${fmtPkts(p.in)}</td>
+       <td style="text-align:right;color:#A32D2D;">${fmtPkts(p.out)}</td>
+       <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+    return `<tr>
+      <td>${esc(r.item.gsm || '—')}</td>
+      <td>${esc(r.item.size || '—')}</td>
+      <td style="text-align:right;">${fmtPkts(r.openingPkts, {keepZero:true})}</td>
+      ${periodCells}
+      <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
+      <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}</td>
+      <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
+      <td style="text-align:right;">${fmtPkts(r.requiredNextPkts)}</td>
+      <td style="text-align:right;">${fmtPkts(r.importPkts)}</td>
+      <td style="text-align:right;">${fmtKg(r.importKg)}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${esc(paperType)} · ${esc(stockSummaryState.from)} to ${esc(stockSummaryState.to)} · ${rows.length} item${rows.length===1?'':'s'} · units: ${esc(unit.toLowerCase())}</div>
+    <table class="ledger-table" style="font-size:12px;min-width:max-content;">
+      <tr>
+        <th rowspan="2">GSM</th>
+        <th rowspan="2">Size (in)</th>
+        <th rowspan="2">Opening</th>
+        ${periodHeaders}
+        <th rowspan="2">Total Out</th>
+        <th rowspan="2">Stock Now</th>
+        <th rowspan="2">Weight (kg)</th>
+        <th rowspan="2">Required Next</th>
+        <th rowspan="2">Total Import</th>
+        <th rowspan="2">Import (kg)</th>
+      </tr>
+      <tr>${periodSubHeaders}</tr>
+      ${tbody}
+    </table>`;
+}
+
+// Print version — landscape A4, same numbers but with company header.
+function printStockSummary() {
+  const { paperType, from, to, granularity } = stockSummaryState;
+  const { rows, buckets } = computeSummaryRows();
+  const unit = packetUnitLabel(paperType);
+  const periodHeaders = buckets.map(b =>
+    `<th colspan="3" style="border:1px solid #000;padding:3px;text-align:center;background:#eee;">${esc(b.label)}</th>`).join('');
+  const periodSubHeaders = buckets.map(() =>
+    `<th style="border:1px solid #000;padding:3px;background:#eee;">IN</th>
+     <th style="border:1px solid #000;padding:3px;background:#eee;">OUT</th>
+     <th style="border:1px solid #000;padding:3px;background:#eee;">Bal</th>`).join('');
+  const tdL = 'style="border:1px solid #000;padding:3px;"';
+  const tdR = 'style="border:1px solid #000;padding:3px;text-align:right;"';
+  const body = rows.map(r => {
+    const periodCells = r.periods.map(p =>
+      `<td ${tdR}>${fmtPkts(p.in)}</td><td ${tdR}>${fmtPkts(p.out)}</td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+    return `<tr>
+      <td ${tdL}>${esc(r.item.gsm || '—')}</td>
+      <td ${tdL}>${esc(r.item.size || '—')}</td>
+      <td ${tdR}>${fmtPkts(r.openingPkts, {keepZero:true})}</td>
+      ${periodCells}
+      <td ${tdR}><b>${fmtPkts(r.totalOutPkts)}</b></td>
+      <td ${tdR}><b>${fmtPkts(r.stockNowPkts, {keepZero:true})}</b></td>
+      <td ${tdR}>${fmtKg(r.weightKg)}</td>
+      <td ${tdR}>${fmtPkts(r.requiredNextPkts)}</td>
+      <td ${tdR}>${fmtPkts(r.importPkts)}</td>
+      <td ${tdR}>${fmtKg(r.importKg)}</td>
+    </tr>`;
+  }).join('');
+  const html = `
+    <style>@media print { @page { size: A4 landscape; margin: 0; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:10pt;">Stock Summary — ${esc(paperType)}</div>
+        </div>
+        <div style="margin-left:auto;font-size:8pt;text-align:right;">
+          <div><b>From:</b> ${esc(from)} &nbsp; <b>To:</b> ${esc(to)}</div>
+          <div><b>Group by:</b> ${granularity} &nbsp; <b>Units:</b> ${esc(unit)}</div>
+          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+        </div>
+      </div>
+      ${rows.length ? `
+      <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
+        <tr>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">GSM</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Size (in)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Opening</th>
+          ${periodHeaders}
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Out</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Stock Now</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Weight (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required Next</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Import</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Import (kg)</th>
+        </tr>
+        <tr>${periodSubHeaders}</tr>
+        ${body}
+      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items of this paper type.</div>'}
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
