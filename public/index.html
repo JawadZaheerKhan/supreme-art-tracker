@@ -1323,10 +1323,19 @@ function printStockReport() {
   `;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
-  setTimeout(() => {
+  // Wait for the logo image (and any other <img>s) to finish loading before
+  // calling window.print() — otherwise the print dialog can open with the
+  // image still blank. Hard 1.5s cap so a missing/broken image doesn't hang
+  // the print flow forever.
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete
+    ? Promise.resolve()
+    : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  const timeout = new Promise(res => setTimeout(res, 1500));
+  Promise.race([Promise.all(waits), timeout]).then(() => {
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
-  }, 50);
+  });
 }
 
 function setDateRange(v) {
