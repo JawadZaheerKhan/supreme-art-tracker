@@ -1033,9 +1033,9 @@ function renderInventoryList() {
         <div class="inv-sub">${sub || '—'}${it.reorder_threshold ? ' · Reorder at ' + it.reorder_threshold.toLocaleString() : ''}</div>
       </div>
       <div class="inv-balance">
-        <div class="inv-balance-num">${sheets.toLocaleString()}</div>
-        <div class="inv-balance-unit">${esc(it.unit||'sheets')}</div>
-        <div class="inv-balance-sub">${pktsStr} ${unit}</div>
+        <div class="inv-balance-num">${pktsStr}</div>
+        <div class="inv-balance-unit">${unit}</div>
+        <div class="inv-balance-sub">${sheets.toLocaleString()} ${esc(it.unit||'sheets')}</div>
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm btn-primary" onclick="openInvAddStock(${it.id})">+ Stock</button>
@@ -1401,6 +1401,12 @@ async function saveBulkStockIn() {
     }
   }
   await loadInventory();
+  // If the Reports → Stock In pane is currently visible, reload it so the
+  // newly created transactions show up in the list without a manual refresh.
+  const stockInPane = document.getElementById('rt-stock-in');
+  if (stockInPane && stockInPane.style.display !== 'none' && mode === 'reports') {
+    loadStockMovement('in');
+  }
   closeModal();
   showSaving(false);
   if (errored === 0) notify(`Stock in saved · ${saved} row${saved===1?'':'s'}`);
@@ -1879,17 +1885,6 @@ function computeSummaryRows() {
     });
     // Total Consumption — sum of OUT across buckets.
     const totalOutSheets = periods.reduce((a, p) => a + p.out, 0);
-    // Total Import — every positive transaction in [from, to] except the
-    // opening-balance entries (those represent the initial seed, not real
-    // procurement). Date range is inclusive.
-    const toD = new Date(to + 'T23:59:59');
-    let importSheets = 0;
-    for (const t of itemTxs) {
-      const d = new Date(t.created_at);
-      if (d >= fromD && d <= toD && t.change > 0 && t.reason !== 'opening-balance') {
-        importSheets += t.change;
-      }
-    }
     const stockNowSheets = it.current_balance || 0;
     const wPerPack = packWeightKg(paperType, it.size, it.gsm);
     // Pending imports for this item — match on size+gsm+brand (allowing nulls
@@ -1899,11 +1894,17 @@ function computeSummaryRows() {
                  && (im.gsm||'')  === (it.gsm||'')
                  && (im.brand||'')=== (it.brand||''))
       .reduce((a, im) => a + parseFloat(im.packets || 0), 0);
-    const stockNowPkts    = stockNowSheets / ps;
-    const requiredNextPkts = totalOutSheets / ps;
-    // Required After Import: surplus (+) or deficit (−) once pending imports
-    // arrive AND we've consumed what we're projecting to need next period.
-    const requiredAfterImportPkts = stockNowPkts + pendingPkts - requiredNextPkts;
+    const stockNowPkts     = stockNowSheets / ps;
+    // After Import = what we'll have once all pending imports arrive.
+    // Simple sum: current on-hand + pending.
+    const afterImportPkts  = stockNowPkts + pendingPkts;
+    // Required Next = how much MORE we still need to order to cover the
+    // total consumption (Total Out) once Pending Import is taken into account.
+    // Floored at 0 — if After Import already covers consumption, nothing
+    // more is needed (no negative "required").
+    // Example: consumed 100, have 0 on hand, ordered 50 → still need 50.
+    //          consumed 100, have 0 on hand, ordered 0  → still need 100.
+    const requiredNextPkts = Math.max(0, (totalOutSheets / ps) - afterImportPkts);
     return {
       item: it,
       openingPkts: openingSheets / ps,
@@ -1911,11 +1912,13 @@ function computeSummaryRows() {
       totalOutPkts:   totalOutSheets / ps,
       stockNowPkts,
       weightKg:       wPerPack === null ? null : stockNowPkts * wPerPack,
-      requiredNextPkts,
       pendingImportPkts: pendingPkts,
-      requiredAfterImportPkts,
-      importPkts:     importSheets / ps,
-      importKg:       wPerPack === null ? null : (importSheets / ps) * wPerPack,
+      afterImportPkts,
+      // Import weight = kg-per-pack × the After Import packet count, so the
+      // Import (kg) column reflects the same total the After Import column shows.
+      importKg:       wPerPack === null ? null : afterImportPkts * wPerPack,
+      requiredNextPkts,
+      requiredKg:     wPerPack === null ? null : requiredNextPkts * wPerPack,
     };
   });
   // Sort: GSM ascending (numeric), then size — width then height, numeric-aware
@@ -1965,10 +1968,6 @@ function renderStockSummary() {
       `<td style="text-align:right;color:#166534;">${fmtPkts(p.in)}</td>
        <td style="text-align:right;color:#A32D2D;">${fmtPkts(p.out)}</td>
        <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
-    // Surplus = green, deficit = red, zero = neutral. Helps the eye spot rows
-    // that need restocking even after pending imports.
-    const afterImp = r.requiredAfterImportPkts;
-    const afterClr = afterImp > 0 ? '#166534' : afterImp < 0 ? '#A32D2D' : 'inherit';
     return `<tr>
       <td>${esc(r.item.gsm || '—')}</td>
       <td>${esc(r.item.size || '—')}</td>
@@ -1977,11 +1976,11 @@ function renderStockSummary() {
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
-      <td style="text-align:right;">${fmtPkts(r.requiredNextPkts)}</td>
       <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
-      <td style="text-align:right;font-weight:600;color:${afterClr};">${afterImp>0?'+':''}${fmtPkts(afterImp, {keepZero:true})}</td>
-      <td style="text-align:right;">${fmtPkts(r.importPkts)}</td>
+      <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.importKg)}</td>
+      <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':'inherit'};">${fmtPkts(r.requiredNextPkts)}</td>
+      <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':'inherit'};">${fmtKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   el.innerHTML = `
@@ -1995,11 +1994,11 @@ function renderStockSummary() {
         <th rowspan="2">Total Out</th>
         <th rowspan="2">Stock Now</th>
         <th rowspan="2">Weight (kg)</th>
-        <th rowspan="2">Required Next</th>
         <th rowspan="2">Pending Import</th>
         <th rowspan="2">After Import</th>
-        <th rowspan="2">Total Import</th>
         <th rowspan="2">Import (kg)</th>
+        <th rowspan="2">Required Next</th>
+        <th rowspan="2">Required (kg)</th>
       </tr>
       <tr>${periodSubHeaders}</tr>
       ${tbody}
@@ -2022,8 +2021,6 @@ function printStockSummary() {
   const body = rows.map(r => {
     const periodCells = r.periods.map(p =>
       `<td ${tdR}>${fmtPkts(p.in)}</td><td ${tdR}>${fmtPkts(p.out)}</td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
-    const afterImp = r.requiredAfterImportPkts;
-    const afterClr = afterImp > 0 ? '#166534' : afterImp < 0 ? '#A32D2D' : '#000';
     return `<tr>
       <td ${tdL}>${esc(r.item.gsm || '—')}</td>
       <td ${tdL}>${esc(r.item.size || '—')}</td>
@@ -2032,11 +2029,11 @@ function printStockSummary() {
       <td ${tdR}><b>${fmtPkts(r.totalOutPkts)}</b></td>
       <td ${tdR}><b>${fmtPkts(r.stockNowPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.weightKg)}</td>
-      <td ${tdR}>${fmtPkts(r.requiredNextPkts)}</td>
       <td ${tdR}>${fmtPkts(r.pendingImportPkts)}</td>
-      <td style="border:1px solid #000;padding:3px;text-align:right;font-weight:bold;color:${afterClr};">${afterImp>0?'+':''}${fmtPkts(afterImp, {keepZero:true})}</td>
-      <td ${tdR}>${fmtPkts(r.importPkts)}</td>
+      <td ${tdR}><b>${fmtPkts(r.afterImportPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
+      <td ${tdR}><b>${fmtPkts(r.requiredNextPkts)}</b></td>
+      <td ${tdR}>${fmtKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   const html = `
@@ -2064,11 +2061,11 @@ function printStockSummary() {
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Out</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Stock Now</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Weight (kg)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required Next</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Pending Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">After Import</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Import (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required Next</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required (kg)</th>
         </tr>
         <tr>${periodSubHeaders}</tr>
         ${body}
@@ -2170,11 +2167,15 @@ function renderImportsTable() {
 function openImportAdd(id) {
   const editing = id ? importsCache.find(i => i.id === id) : null;
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${editing && editing.paper_type===p?' selected':''}>${esc(p)}</option>`).join('');
+  // Pre-compute sheets for editing rows so the sheets field is pre-filled too.
+  const editingSheets = editing && editing.packets
+    ? Math.round(parseFloat(editing.packets) * packetSize(editing.paper_type))
+    : '';
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>${editing ? 'Edit Import' : 'New Import'}</h2>
     <div class="form-grid">
       <div><label class="form-label">Paper Type *</label>
-        <select id="imp-paper-type">${paperOpts}</select></div>
+        <select id="imp-paper-type" onchange="impPktSync('packets')">${paperOpts}</select></div>
       <div><label class="form-label">Size (in)</label>
         <input type="text" id="imp-size" placeholder="25x30" value="${esc(editing?.size || '')}"></div>
       <div><label class="form-label">GSM</label>
@@ -2182,7 +2183,9 @@ function openImportAdd(id) {
       <div><label class="form-label">Brand</label>
         <input type="text" id="imp-brand" placeholder="optional" value="${esc(editing?.brand || '')}"></div>
       <div><label class="form-label">Quantity (packets/reams)</label>
-        <input type="number" id="imp-packets" step="any" min="0" value="${editing?.packets ?? ''}"></div>
+        <input type="number" id="imp-packets" step="any" min="0" value="${editing?.packets ?? ''}" oninput="impPktSync('packets')"></div>
+      <div><label class="form-label">Quantity (sheets)</label>
+        <input type="number" id="imp-sheets" step="any" min="0" value="${editingSheets}" oninput="impPktSync('sheets')"></div>
       <div><label class="form-label">Weight (kg, optional)</label>
         <input type="number" id="imp-weight" step="any" min="0" value="${editing?.weight_kg ?? ''}"></div>
       <div><label class="form-label">Supplier</label>
@@ -2201,6 +2204,25 @@ function openImportAdd(id) {
   </div>`);
 }
 function editImport(id) { openImportAdd(id); }
+
+// Two-way Packets/Reams ↔ Sheets sync on the Imports form. Same pattern as
+// invOpeningSync / stockQtySync / bulkRowSync — source = which field the
+// user just typed in (or 'packets' when paper type changes, to recompute
+// sheets from the existing packet count).
+function impPktSync(source) {
+  const ptEl      = document.getElementById('imp-paper-type');
+  const packetsEl = document.getElementById('imp-packets');
+  const sheetsEl  = document.getElementById('imp-sheets');
+  if (!ptEl || !packetsEl || !sheetsEl) return;
+  const ps = packetSize(ptEl.value);
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
+  } else {
+    const s = parseFloat(sheetsEl.value);
+    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  }
+}
 
 async function saveImport(id) {
   const body = {
@@ -2243,7 +2265,7 @@ async function receiveImport(id) {
 // Full-page overview of stock movement. Filters: date range + paper type +
 // size + gsm. Sections: 4 summary tiles, "by paper type" table with bar
 // visualisations, "by size+gsm" drill-down, "recent activity" list.
-let dashboardState = { from: '', to: '', paperType: '', size: '', gsm: '', txs: [], allInv: [] };
+let dashboardState = { from: '', to: '', paperType: '', size: '', gsm: '', search: '', txs: [], allInv: [] };
 
 // Open the Dashboard pane (called when entering Reports tab, or when the
 // Dashboard sidebar item is clicked). Renders into the inline #rt-dashboard
@@ -2254,45 +2276,27 @@ function openDashboard() {
   const today = new Date();
   const start = new Date(today); start.setDate(today.getDate() - 29);
   const iso = d => d.toISOString().slice(0, 10);
-  dashboardState = { from: iso(start), to: iso(today), paperType: '', size: '', gsm: '', txs: [], allInv: [] };
+  dashboardState = { from: iso(start), to: iso(today), paperType: '', size: '', gsm: '', search: '', txs: [], allInv: [] };
   const view = document.getElementById('rt-dashboard');
   view.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
-      <h2 style="margin:0;font-size:20px;">Dashboard</h2>
-      <span style="margin-left:auto;color:var(--text2);font-size:12px;" id="dash-meta"></span>
-    </div>
-    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
-      <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="dash-from" value="${dashboardState.from}" onchange="setDashFrom(this.value)">
+    <div class="stats-row" id="dash-stats-row"></div>
+    <div class="toolbar">
+      <div class="search-wrap" style="flex:1;min-width:200px;">
+        <input type="text" id="dash-search" placeholder="Search paper type, size, brand…" oninput="setDashSearch(this.value)">
+        <span class="search-icon">&#128269;</span>
       </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="dash-to" value="${dashboardState.to}" onchange="setDashTo(this.value)">
-      </div>
-      <div>
-        <div class="dash-flbl">Paper Type</div>
-        <select class="filter" id="dash-paper-type" onchange="setDashPaperType(this.value)">
-          <option value="">All paper types</option>
-          ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
-        </select>
-      </div>
-      <div>
-        <div class="dash-flbl">Size</div>
-        <select class="filter" id="dash-size" onchange="setDashSize(this.value)"><option value="">All sizes</option></select>
-      </div>
-      <div>
-        <div class="dash-flbl">GSM</div>
-        <select class="filter" id="dash-gsm" onchange="setDashGsm(this.value)"><option value="">All GSM</option></select>
-      </div>
+      <input class="filter" type="date" id="dash-from" value="${dashboardState.from}" onchange="setDashFrom(this.value)" title="From date">
+      <span style="color:var(--text2);font-size:12px;">to</span>
+      <input class="filter" type="date" id="dash-to" value="${dashboardState.to}" onchange="setDashTo(this.value)" title="To date">
+      <select class="filter" id="dash-paper-type" onchange="setDashPaperType(this.value)">
+        <option value="">All paper types</option>
+        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+      </select>
+      <select class="filter" id="dash-size" onchange="setDashSize(this.value)"><option value="">All sizes</option></select>
+      <select class="filter" id="dash-gsm" onchange="setDashGsm(this.value)"><option value="">All GSM</option></select>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetDashFilters()">Reset filters</button>
     </div>
-    <div id="dash-tiles" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px;margin-bottom:14px;"></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;" id="dash-breakdowns">
-      <div class="dash-panel"><h3 class="dash-h">By Paper Type</h3><div id="dash-by-type">Loading…</div></div>
-      <div class="dash-panel"><h3 class="dash-h">By Size · GSM</h3><div id="dash-by-sg">Loading…</div></div>
-    </div>
-    <div class="dash-panel"><h3 class="dash-h">Recent Activity (latest 15)</h3><div id="dash-recent">Loading…</div></div>
+    <div class="inventory-list" id="dash-items-list"></div>
   `;
   loadDashboard();
 }
@@ -2319,8 +2323,8 @@ function setReportsTab(name) {
 // paper type + period (today/week/month/custom). Each direction owns its own
 // state so flipping between tabs doesn't lose your filters.
 const stockMovementStates = {
-  in:  { period: 'month', from: '', to: '', paperType: '', rows: [] },
-  out: { period: 'month', from: '', to: '', paperType: '', rows: [] },
+  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', rows: [] },
+  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', rows: [] },
 };
 
 // Generic period-to-date-range helper, decoupled from any global state. Used
@@ -2350,11 +2354,19 @@ function openStockMovementPane(direction) {
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
+  // "+ Stock In" button only on the Stock In pane — Stock Out movements are
+  // generated by job consumption / manual adjustments, not entered here.
+  const addBtn = direction === 'in'
+    ? `<button class="btn btn-sm btn-primary" onclick="openBulkStockInFromPane()">&#128230; + Stock In</button>`
+    : '';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
       <h2 style="margin:0;font-size:20px;">${title}</h2>
       <span style="color:var(--text2);font-size:12px;">${direction === 'in' ? 'Every stock addition (deliveries, imports received, opening balances).' : 'Every stock deduction (job consumption, manual adjustments).'}</span>
-      <button class="btn btn-sm" style="margin-left:auto;" onclick="printStockMovement('${direction}')">&#128424; Print Report</button>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        ${addBtn}
+        <button class="btn btn-sm" onclick="printStockMovement('${direction}')">&#128424; Print Report</button>
+      </div>
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
@@ -2365,6 +2377,14 @@ function openStockMovementPane(direction) {
         </select>
       </div>
       <div>
+        <div class="dash-flbl">Size</div>
+        <select class="filter" id="sm-${direction}-size" onchange="setMovementSize('${direction}', this.value)"><option value="">All sizes</option></select>
+      </div>
+      <div>
+        <div class="dash-flbl">GSM</div>
+        <select class="filter" id="sm-${direction}-gsm" onchange="setMovementGsm('${direction}', this.value)"><option value="">All GSM</option></select>
+      </div>
+      <div>
         <div class="dash-flbl">Period</div>
         <select class="filter" id="sm-${direction}-period" onchange="setMovementPeriod('${direction}', this.value)">${periodOpts}</select>
       </div>
@@ -2372,6 +2392,7 @@ function openStockMovementPane(direction) {
         <div><div class="dash-flbl">From</div><input class="filter" type="date" id="sm-${direction}-from" value="${state.from}" onchange="setMovementCustom('${direction}')"></div>
         <div><div class="dash-flbl">To</div><input class="filter" type="date" id="sm-${direction}-to" value="${state.to}" onchange="setMovementCustom('${direction}')"></div>
       </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetMovementFilters('${direction}')">Reset filters</button>
     </div>
     <div id="sm-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
     <div id="sm-${direction}-content" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -2379,7 +2400,30 @@ function openStockMovementPane(direction) {
   loadStockMovement(direction);
 }
 
-function setMovementPaperType(dir, v) { stockMovementStates[dir].paperType = v; loadStockMovement(dir); }
+function setMovementPaperType(dir, v) {
+  // Changing the paper type invalidates the prior size/gsm picks — they'd
+  // likely point at a different paper's combos. Reset and re-render so the
+  // Size/GSM dropdowns repopulate from the new subset.
+  const state = stockMovementStates[dir];
+  state.paperType = v; state.size = ''; state.gsm = '';
+  renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+}
+function setMovementSize(dir, v) {
+  stockMovementStates[dir].size = v;
+  const state = stockMovementStates[dir];
+  renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+}
+function setMovementGsm(dir, v) {
+  stockMovementStates[dir].gsm = v;
+  const state = stockMovementStates[dir];
+  renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+}
+function resetMovementFilters(dir) {
+  const state = stockMovementStates[dir];
+  state.paperType = ''; state.size = ''; state.gsm = '';
+  const pt = document.getElementById(`sm-${dir}-paper-type`); if (pt) pt.value = '';
+  renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+}
 function setMovementPeriod(dir, v) {
   stockMovementStates[dir].period = v;
   const custom = document.getElementById(`sm-${dir}-custom`);
@@ -2391,6 +2435,36 @@ function setMovementCustom(dir) {
   state.from = document.getElementById(`sm-${dir}-from`).value;
   state.to   = document.getElementById(`sm-${dir}-to`).value;
   if (state.from && state.to) loadStockMovement(dir);
+}
+
+// Open the Bulk Stock In modal from the Reports → Stock In pane. After the
+// modal saves, saveBulkStockIn() will refresh inventory and we re-render the
+// movement pane so the new transactions appear immediately.
+function openBulkStockInFromPane() {
+  openBulkStockIn();
+}
+
+// Repopulate the Size + GSM dropdowns based on the rows currently loaded,
+// optionally narrowed by the active paper-type filter. Preserves the user's
+// existing selection if the value is still valid in the new set.
+function refreshMovementFilterOptions(direction) {
+  const state = stockMovementStates[direction];
+  // Narrow to the active paper type so the user only sees relevant sizes/gsms.
+  const subset = state.paperType ? state.rows.filter(t => t.paper_type === state.paperType) : state.rows;
+  const sizes = [...new Set(subset.map(t => t.item_size).filter(Boolean))].sort();
+  const gsms  = [...new Set(subset.map(t => t.item_gsm ).filter(Boolean))].sort((a,b) => (+a) - (+b));
+  const sizeEl = document.getElementById(`sm-${direction}-size`);
+  const gsmEl  = document.getElementById(`sm-${direction}-gsm`);
+  if (sizeEl) {
+    if (state.size && !sizes.includes(state.size)) state.size = '';
+    sizeEl.innerHTML = '<option value="">All sizes</option>' +
+      sizes.map(s => `<option value="${esc(s)}"${state.size===s?' selected':''}>${esc(s)}</option>`).join('');
+  }
+  if (gsmEl) {
+    if (state.gsm && !gsms.map(String).includes(String(state.gsm))) state.gsm = '';
+    gsmEl.innerHTML = '<option value="">All GSM</option>' +
+      gsms.map(g => `<option value="${esc(g)}"${String(state.gsm)===String(g)?' selected':''}>${esc(g)}</option>`).join('');
+  }
 }
 
 async function loadStockMovement(direction) {
@@ -2411,14 +2485,29 @@ async function loadStockMovement(direction) {
 
 function renderStockMovement(direction, from, to) {
   const state = stockMovementStates[direction];
-  // Apply the paper-type filter (client-side) before totals.
-  const txs = state.paperType ? state.rows.filter(t => t.paper_type === state.paperType) : state.rows;
+  // Populate Size + GSM dropdowns from the data, scoped to the currently
+  // selected paper type (so dropdowns only show options that exist in this
+  // subset — no dead "5,000gsm" options).
+  refreshMovementFilterOptions(direction);
+  // Apply all three filters (paper type / size / gsm) client-side before totals.
+  const txs = state.rows.filter(t =>
+       (!state.paperType || t.paper_type === state.paperType)
+    && (!state.size      || (t.item_size || '') === state.size)
+    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+  );
   // Direction is fixed so there's only one total to show. Net change column
   // would just duplicate that — skip it.
   let total = 0;
-  for (const t of txs) total += direction === 'in' ? t.change : -t.change;
+  let totalKg = 0;     // sum of |change|_in_packs × kg_per_pack, when weight is computable
+  for (const t of txs) {
+    total += direction === 'in' ? t.change : -t.change;
+    const ps = packetSize(t.paper_type || '');
+    const w  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
+    if (w !== null) totalKg += w * (Math.abs(t.change) / ps);
+  }
   const color = direction === 'in' ? '#166534' : '#A32D2D';
   const sign  = direction === 'in' ? '+' : '−';
+  const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
   const tile = (label, value, c, sub) =>
     `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
        <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
@@ -2426,7 +2515,7 @@ function renderStockMovement(direction, from, to) {
        ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
      </div>`;
   document.getElementById(`sm-${direction}-summary`).innerHTML =
-      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + total.toLocaleString() + ' sheets', color, 'all paper types in filter')
+      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + total.toLocaleString() + ' sheets', color, `${sign}${fmt(totalKg)} kg · all paper types in filter`)
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
   const rows = txs.map(t => {
@@ -2437,18 +2526,27 @@ function renderStockMovement(direction, from, to) {
     const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
-    const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
     const pkts  = t.change / ps;
     const inv   = inventory.find(i => i.id === t.item_id);
     const bal   = inv ? (inv.current_balance || 0) : null;
     const balCell = bal === null
       ? '<span style="color:var(--text3)">—</span>'
-      : `${bal.toLocaleString()} sheets<br><span style="color:var(--text2);font-size:11px;">${fmt(bal/ps)} ${unit}</span>`;
+      : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
+    // Weight column — kg for THIS transaction. Shows both the change-weight
+    // (big, signed) and the current balance's weight (small, neutral) so the
+    // user can see both "how much moved" and "how much is on hand right now".
+    const txWperPack  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
+    const txKg        = txWperPack !== null ? txWperPack * Math.abs(pkts) : null;
+    const balKg       = (txWperPack !== null && bal !== null) ? txWperPack * (bal / ps) : null;
+    const weightCell  = txKg === null
+      ? '<span style="color:var(--text3)">—</span>'
+      : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
     return `<tr>
       <td>${date}</td>
       <td>${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
-      <td class="${cls}">${s}${t.change.toLocaleString()} sheets<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${fmt(pkts)} ${unit}</span></td>
+      <td class="${cls}">${s}${fmt(pkts)} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${t.change.toLocaleString()} sheets</span></td>
       <td>${balCell}</td>
+      <td>${weightCell}</td>
       <td>${esc(t.reason||'')}</td>
       <td>${job}</td>
       <td>${esc(t.notes||'')}</td>
@@ -2456,7 +2554,7 @@ function renderStockMovement(direction, from, to) {
   }).join('');
   document.getElementById(`sm-${direction}-content`).innerHTML = txs.length
     ? `<table class="ledger-table">
-         <tr><th>When</th><th>Item</th><th>Change</th><th>Current Balance</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+         <tr><th>When</th><th>Item</th><th>Change</th><th>Current Balance</th><th>Weight</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
          ${rows}
        </table>`
     : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`;
@@ -2486,14 +2584,14 @@ function printStockMovement(direction) {
     const pkts = t.change / ps;
     const inv  = inventory.find(i => i.id === t.item_id);
     const bal  = inv ? (inv.current_balance || 0) : null;
-    const balCell = bal === null ? '—' : `${bal.toLocaleString()}<br><span style="font-size:8pt;">${fmt(bal/ps)} ${unit}</span>`;
+    const balCell = bal === null ? '—' : `${fmt(bal/ps)} ${unit}<br><span style="font-size:8pt;">${bal.toLocaleString()} sheets</span>`;
     const tdL = 'style="border:1px solid #000;padding:4px;"';
     const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
     const tdChg = `style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};"`;
     return `<tr>
       <td ${tdL}>${date}</td>
       <td ${tdL}>${item}</td>
-      <td ${tdChg}>${s}${t.change.toLocaleString()}<br><span style="font-size:8pt;font-weight:normal;">${s}${fmt(pkts)} ${unit}</span></td>
+      <td ${tdChg}>${s}${fmt(pkts)} ${unit}<br><span style="font-size:8pt;font-weight:normal;">${s}${t.change.toLocaleString()} sheets</span></td>
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
       <td ${tdL}>${job}</td>
@@ -2831,9 +2929,11 @@ function setDashTo(v)        { dashboardState.to   = v; loadDashboard(); }
 function setDashPaperType(v) { dashboardState.paperType = v; dashboardState.size = ''; dashboardState.gsm = ''; refreshDashFilterOptions(); renderDashboard(); }
 function setDashSize(v)      { dashboardState.size = v; renderDashboard(); }
 function setDashGsm(v)       { dashboardState.gsm  = v; renderDashboard(); }
+function setDashSearch(v)    { dashboardState.search = v; renderDashboard(); }
 function resetDashFilters() {
-  dashboardState.paperType = ''; dashboardState.size = ''; dashboardState.gsm = '';
+  dashboardState.paperType = ''; dashboardState.size = ''; dashboardState.gsm = ''; dashboardState.search = '';
   document.getElementById('dash-paper-type').value = '';
+  const s = document.getElementById('dash-search'); if (s) s.value = '';
   refreshDashFilterOptions();
   renderDashboard();
 }
@@ -2884,106 +2984,123 @@ function dashFilteredTxs() {
 
 function renderDashboard() {
   const txs = dashFilteredTxs();
+  const fmt = n => (Number.isInteger(n) ? n : +n.toFixed(2)).toLocaleString();
+  const kg  = n => fmt(n) + ' kg';
+
+  // Aggregate per inventory item — one card per item that had any movement
+  // in the period. Item meta is pulled from the matching inventory row so
+  // it stays consistent with the Inventory tab (size · gsm · brand).
+  // We also track packets/reams/weight totals here so the top tiles can
+  // show them without a second pass.
+  const byItem = new Map();
   let totalIn = 0, totalOut = 0;
-  const itemSet = new Set();
+  let inPkts = 0, inReams = 0, outPkts = 0, outReams = 0;
+  let inKg = 0, outKg = 0;
   for (const t of txs) {
     if (t.change > 0) totalIn += t.change; else totalOut += -t.change;
-    if (t.item_id) itemSet.add(t.item_id);
-  }
-  const net = totalIn - totalOut;
-
-  // Tiles
-  const tile = (label, value, color, sub) =>
-    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;">
-       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
-       <div style="font-size:22px;font-weight:600;color:${color};margin-top:2px;line-height:1.1;">${value}</div>
-       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
-     </div>`;
-  document.getElementById('dash-tiles').innerHTML =
-      tile('Total Stock In',  '+' + totalIn.toLocaleString(),  '#166534', `${txs.filter(t=>t.change>0).length} txs`)
-    + tile('Total Stock Out', '−' + totalOut.toLocaleString(), '#A32D2D', `${txs.filter(t=>t.change<0).length} txs`)
-    + tile('Net Change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D', 'sheets')
-    + tile('Items Active',    itemSet.size.toLocaleString(), 'var(--text)', 'with movement in range')
-    + tile('Transactions',    txs.length.toLocaleString(),   'var(--text)', 'in filtered range');
-
-  // Period meta line
-  document.getElementById('dash-meta').textContent = `${dashboardState.from} → ${dashboardState.to}`;
-
-  // ── Breakdown: by paper type
-  // Aggregate in/out per paper_type and render a mini-table with proportional
-  // bars (CSS only, no chart lib). Bar width = share of the largest in-or-out.
-  const byType = new Map();
-  for (const t of txs) {
-    const k = t.paper_type || '(unknown)';
-    if (!byType.has(k)) byType.set(k, { in:0, out:0, items:new Set() });
-    const o = byType.get(k);
-    if (t.change > 0) o.in += t.change; else o.out += -t.change;
-    if (t.item_id) o.items.add(t.item_id);
-  }
-  const typeRows = [...byType.entries()].sort((a,b) => (b[1].in+b[1].out) - (a[1].in+a[1].out));
-  const maxAbs = Math.max(1, ...typeRows.map(([,v]) => Math.max(v.in, v.out)));
-  const byTypeHtml = typeRows.length === 0
-    ? '<div class="empty" style="padding:14px 0;">No transactions in range.</div>'
-    : `<table class="ledger-table" style="font-size:12px;">
-        <tr><th>Paper Type</th><th>Items</th><th style="text-align:right;">In</th><th>&nbsp;</th><th style="text-align:right;">Out</th><th>&nbsp;</th><th style="text-align:right;">Net</th></tr>
-        ${typeRows.map(([k, v]) => `<tr>
-          <td>${esc(k)}</td>
-          <td style="text-align:right;">${v.items.size}</td>
-          <td style="text-align:right;color:#166534;font-weight:600;">+${v.in.toLocaleString()}</td>
-          <td style="width:80px;"><div style="height:8px;background:#dcfce7;border-radius:4px;overflow:hidden;"><div style="height:100%;width:${(v.in/maxAbs*100).toFixed(1)}%;background:#166534;"></div></div></td>
-          <td style="text-align:right;color:#A32D2D;font-weight:600;">−${v.out.toLocaleString()}</td>
-          <td style="width:80px;"><div style="height:8px;background:#fee2e2;border-radius:4px;overflow:hidden;"><div style="height:100%;width:${(v.out/maxAbs*100).toFixed(1)}%;background:#A32D2D;"></div></div></td>
-          <td style="text-align:right;font-weight:600;color:${(v.in-v.out)>=0?'#166534':'#A32D2D'};">${(v.in-v.out)>=0?'+':'−'}${Math.abs(v.in-v.out).toLocaleString()}</td>
-        </tr>`).join('')}
-      </table>`;
-  document.getElementById('dash-by-type').innerHTML = byTypeHtml;
-
-  // ── Breakdown: by size·gsm (within current filters)
-  // Key includes paper_type so two paper types with the same size/gsm stay
-  // separated (different products in reality).
-  const bySG = new Map();
-  for (const t of txs) {
-    const key = `${t.paper_type||''}|${t.item_size||''}|${t.item_gsm||''}`;
-    if (!bySG.has(key)) bySG.set(key, { paper:t.paper_type, size:t.item_size, gsm:t.item_gsm, in:0, out:0 });
-    const o = bySG.get(key);
+    const ps   = packetSize(t.paper_type);
+    const ream = isReamPaper(t.paper_type);
+    const w    = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
+    if (t.change > 0) {
+      if (ream) inReams += t.change / ps; else inPkts += t.change / ps;
+      if (w !== null) inKg += w * (t.change / ps);
+    } else {
+      if (ream) outReams += (-t.change) / ps; else outPkts += (-t.change) / ps;
+      if (w !== null) outKg += w * ((-t.change) / ps);
+    }
+    const k = t.item_id || `__del_${t.paper_type}|${t.item_size}|${t.item_gsm}|${t.item_brand}`;
+    if (!byItem.has(k)) byItem.set(k, {
+      itemId: t.item_id,
+      paper: t.paper_type,
+      size:  t.item_size,
+      gsm:   t.item_gsm,
+      brand: t.item_brand,
+      in: 0, out: 0,
+    });
+    const o = byItem.get(k);
     if (t.change > 0) o.in += t.change; else o.out += -t.change;
   }
-  const sgRows = [...bySG.values()].sort((a,b) => (b.in+b.out) - (a.in+a.out)).slice(0, 25);
-  const bySGHtml = sgRows.length === 0
-    ? '<div class="empty" style="padding:14px 0;">No transactions in range.</div>'
-    : `<table class="ledger-table" style="font-size:12px;">
-        <tr><th>Type · Size · GSM</th><th style="text-align:right;">In</th><th style="text-align:right;">Out</th><th style="text-align:right;">Net</th></tr>
-        ${sgRows.map(r => `<tr>
-          <td>${esc(r.paper||'—')} · ${esc(r.size||'—')} · ${esc(r.gsm||'—')}</td>
-          <td style="text-align:right;color:#166534;font-weight:600;">+${r.in.toLocaleString()}</td>
-          <td style="text-align:right;color:#A32D2D;font-weight:600;">−${r.out.toLocaleString()}</td>
-          <td style="text-align:right;font-weight:600;color:${(r.in-r.out)>=0?'#166534':'#A32D2D'};">${(r.in-r.out)>=0?'+':'−'}${Math.abs(r.in-r.out).toLocaleString()}</td>
-        </tr>`).join('')}
-      </table>
-      ${bySG.size > 25 ? `<div style="font-size:11px;color:var(--text2);margin-top:6px;">Showing top 25 of ${bySG.size} combinations by activity.</div>` : ''}`;
-  document.getElementById('dash-by-sg').innerHTML = bySGHtml;
+  const net      = totalIn - totalOut;
+  const netPkts  = inPkts  - outPkts;
+  const netReams = inReams - outReams;
+  const netKg    = inKg    - outKg;
 
-  // ── Recent activity
-  const recent = [...txs].slice(0, 15);
-  document.getElementById('dash-recent').innerHTML = recent.length === 0
-    ? '<div class="empty" style="padding:14px 0;">No transactions in range.</div>'
-    : `<table class="ledger-table" style="font-size:12px;">
-         <tr><th>When</th><th>Item</th><th style="text-align:right;">Change</th><th>Reason</th><th>Job</th></tr>
-         ${recent.map(t => {
-           const date = new Date(t.created_at).toLocaleString('en-PK');
-           const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
-           const sign = t.change > 0 ? '+' : '';
-           const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-           const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
-           return `<tr>
-             <td>${date}</td>
-             <td>${item || '<span style="color:var(--text3)">(deleted)</span>'}</td>
-             <td class="${cls}" style="text-align:right;">${sign}${t.change.toLocaleString()}</td>
-             <td>${esc(t.reason||'')}</td>
-             <td>${job}</td>
-           </tr>`;
-         }).join('')}
-       </table>`;
+  // Render value as "X packets" / "Y reams" / "X packets · Y reams" depending
+  // on what's non-zero. When both are zero, returns "0".
+  function pktReamLabel(pkts, reams, sign) {
+    const parts = [];
+    if (pkts)  parts.push(`${sign}${fmt(Math.abs(pkts))} packets`);
+    if (reams) parts.push(`${sign}${fmt(Math.abs(reams))} reams`);
+    return parts.length ? parts.join(' · ') : '0';
+  }
+
+  // ── Top stats row (matches the Inventory tab's stats-row layout)
+  // Each stock tile shows: big packets/reams · weight in kg sub · sheets sub.
+  const statTile = (label, valueHtml, color, subKg, subSheets) => `
+    <div class="stat">
+      <div class="stat-label">${label}</div>
+      <div class="stat-value" style="font-size:18px;line-height:1.15;${color?'color:'+color+';':''}">${valueHtml}</div>
+      ${subKg     ? `<div style="font-size:12px;color:${color||'var(--text2)'};margin-top:3px;font-weight:500;">${subKg}</div>` : ''}
+      ${subSheets ? `<div style="font-size:11px;color:var(--text2);margin-top:1px;">${subSheets}</div>` : ''}
+    </div>`;
+  const netSign = net >= 0 ? '+' : '−';
+  document.getElementById('dash-stats-row').innerHTML =
+      `<div class="stat"><div class="stat-label">Items Active</div><div class="stat-value">${byItem.size.toLocaleString()}</div></div>`
+    + statTile('Total Stock In',  pktReamLabel(inPkts, inReams, '+'),  '#166534', `+${kg(inKg)}`,  `+${totalIn.toLocaleString()} sheets`)
+    + statTile('Total Stock Out', pktReamLabel(outPkts, outReams, '−'), '#A32D2D', `−${kg(outKg)}`, `−${totalOut.toLocaleString()} sheets`)
+    + statTile('Net Change',      pktReamLabel(netPkts, netReams, netSign), net>=0?'#166534':'#A32D2D', `${netSign}${kg(Math.abs(netKg))}`, `${netSign}${Math.abs(net).toLocaleString()} sheets`)
+    + `<div class="stat"><div class="stat-label">Transactions</div><div class="stat-value">${txs.length.toLocaleString()}</div></div>`;
+
+  // ── Item cards (matches Inventory tab's .inv-card layout)
+  // Each card shows the paper item plus its in/out/net for the period.
+  // Sort by absolute total activity (in + out) so the busiest items rise.
+  const rows = [...byItem.values()].sort((a, b) => (b.in + b.out) - (a.in + a.out));
+  const q = (dashboardState.search || '').trim().toLowerCase();
+  const filtered = q
+    ? rows.filter(r => [r.paper, r.size, r.gsm, r.brand].filter(Boolean).join(' ').toLowerCase().includes(q))
+    : rows;
+
+  const listEl = document.getElementById('dash-items-list');
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<div class="empty" style="padding:30px;text-align:center;color:var(--text2);">No movement in the selected range.</div>';
+    return;
+  }
+  listEl.innerHTML = filtered.map(r => {
+    const ps    = packetSize(r.paper);
+    const unit  = packetUnitLabel(r.paper).toLowerCase();
+    const sub   = [r.size, r.gsm ? r.gsm + ' gsm' : '', r.brand].filter(Boolean).map(esc).join(' · ');
+    const rowNet = r.in - r.out;
+    const sign  = rowNet >= 0 ? '+' : '−';
+    const color = rowNet >= 0 ? '#166534' : '#A32D2D';
+
+    // Weight: kg per pack × number of packs. Falls back to null when size or
+    // gsm is missing (older items) — we just omit the weight line in that case.
+    const wPerPack = packWeightKg(r.paper, r.size, r.gsm);
+    const wIn   = wPerPack !== null ? wPerPack * (r.in  / ps) : null;
+    const wOut  = wPerPack !== null ? wPerPack * (r.out / ps) : null;
+    const wNet  = wPerPack !== null ? wPerPack * (Math.abs(rowNet) / ps) : null;
+    const inWeight  = wIn  !== null ? ` <span style="color:var(--text2);font-weight:400;">(${kg(wIn)})</span>`  : '';
+    const outWeight = wOut !== null ? ` <span style="color:var(--text2);font-weight:400;">(${kg(wOut)})</span>` : '';
+
+    return `
+    <div class="inv-card">
+      <div class="inv-main">
+        <div class="inv-name">${esc(r.paper || '(unknown)')}</div>
+        <div class="inv-sub">${sub || '—'}</div>
+        <div class="inv-sub" style="margin-top:4px;">
+          <span style="color:#166534;font-weight:500;">In: +${fmt(r.in/ps)} ${unit}${inWeight}</span>
+          &nbsp;·&nbsp;
+          <span style="color:#A32D2D;font-weight:500;">Out: −${fmt(r.out/ps)} ${unit}${outWeight}</span>
+        </div>
+      </div>
+      <div class="inv-balance">
+        <div class="inv-balance-num" style="color:${color};">${sign}${fmt(Math.abs(rowNet)/ps)}</div>
+        <div class="inv-balance-unit">net ${unit}</div>
+        ${wNet !== null ? `<div class="inv-balance-sub" style="color:${color};font-weight:500;">${sign}${kg(wNet)}</div>` : ''}
+        <div class="inv-balance-sub">${sign}${Math.abs(rowNet).toLocaleString()} sheets</div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 async function cancelImport(id) {
@@ -3099,7 +3216,7 @@ function jobForm(j={}) {
           <span class="jc-lbl">Machine Name</span>
           <select id="f-machine"><option value="">—</option>${MACHINES.map(m=>`<option ${j.machine===m?'selected':''}>${m}</option>`).join('')}</select>
         </td>
-        <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4"></td>
+        <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
         <td>
           <span class="jc-lbl">Job Priority</span>
           <select id="f-priority">
@@ -3116,11 +3233,23 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
-        <td colspan="3"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50"></td>
+        <td colspan="3"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50" oninput="jobPktSync('packets')"></td>
       </tr>
       <tr>
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
-        <td colspan="2"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="updateStockHint()"></td>
+        <td colspan="2">
+          <span class="jc-lbl">Sheets Qty</span>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobPktSync('sheets'); jobCartonQtySync(); updateStockHint();" style="flex:1;min-width:0;">
+            <select id="f-sheet-cut" onchange="jobCartonQtySync()" title="Cut — pieces per sheet"
+                    style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
+              ${['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
+                const sel = ((j.particulars||{}).sheet_cut || '1/1') === c ? ' selected' : '';
+                return `<option value="${c}"${sel}>${c}</option>`;
+              }).join('')}
+            </select>
+          </div>
+        </td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
@@ -3182,6 +3311,7 @@ function collectParticulars() {
   });
   out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
+  out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
   return out;
 }
@@ -3260,6 +3390,56 @@ function paperSelect(itemId) {
   }
   paperClose();
   updateStockHint();
+  // The packet⇄sheet multiplier depends on the paper type (100 vs 500),
+  // so a paper change must recompute. Prefer recomputing sheets from
+  // packets so the user's "I'm ordering 50 packets" intent wins.
+  jobPktSync('packets');
+}
+
+// Auto-compute Unit Carton Qty from Sheets × cut-pieces × UPS.
+// Cut "1/N" means each sheet is cut into N pieces; each piece has UPS units.
+// So total units = sheets × pieces × ups.
+// Triggered whenever the cut dropdown, UPS, or Sheets Qty changes.
+function jobCartonQtySync() {
+  const cutEl     = document.getElementById('f-sheet-cut');
+  const upsEl     = document.getElementById('f-ups');
+  const sheetsEl  = document.getElementById('f-sheets');
+  const ctnEl     = document.getElementById('f-cartonqty');
+  if (!cutEl || !upsEl || !sheetsEl || !ctnEl) return;
+  const cut = cutEl.value || '1/1';
+  const m = cut.match(/^1\s*\/\s*(\d+)$/);
+  const pieces = m ? parseInt(m[1], 10) : 1;
+  const ups    = parseFloat(upsEl.value);
+  const sheets = parseFloat(sheetsEl.value);
+  // Need all three (sheets, ups, pieces) to compute — otherwise leave alone.
+  if (!Number.isFinite(ups) || ups <= 0)       return;
+  if (!Number.isFinite(sheets) || sheets <= 0) return;
+  ctnEl.value = String(Math.round(sheets * pieces * ups));
+}
+
+// Two-way Packets ↔ Sheets sync on the Job Card form. Uses the paper type
+// from the selected inventory item (f-inventory-item) — without a paper
+// pick, no conversion is possible so we leave both fields alone.
+//   source='packets' → user typed in the Packets field; sheets follows
+//   source='sheets'  → user typed in the Sheets field; packets follows
+function jobPktSync(source) {
+  const itemEl    = document.getElementById('f-inventory-item');
+  const packetsEl = document.getElementById('f-packets');
+  const sheetsEl  = document.getElementById('f-sheets');
+  if (!itemEl || !packetsEl || !sheetsEl) return;
+  const itemId = parseInt(itemEl.value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  if (!it) return; // No paper selected yet → user enters both manually.
+  const ps = packetSize(it.paper_type);
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    if (!isNaN(p)) sheetsEl.value = Math.round(p * ps);
+    else if (packetsEl.value === '') sheetsEl.value = '';
+  } else {
+    const s = parseFloat(sheetsEl.value);
+    if (!isNaN(s)) packetsEl.value = +(s / ps).toFixed(2);
+    else if (sheetsEl.value === '') packetsEl.value = '';
+  }
 }
 function paperKey(e) {
   if (e.key === 'Escape') { paperClose(); return; }
@@ -3531,7 +3711,7 @@ function buildPrintCard(j) {
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
 
   const dataRow = r => `
-    <tr>
+    <tr class="pp-data-row">
       <td class="pp-row-label">${r.label}</td>
       <td>${v(p[r.key]?.details)}</td>
       <td>${v(p[r.key]?.quantity)}</td>
@@ -3549,13 +3729,42 @@ function buildPrintCard(j) {
     </td></tr>`;
   const specsRows = papersRow + coatRow(PRINT_COATINGS_ROW1) + coatRow(PRINT_COATINGS_ROW2);
   const commentsRow = `
-    <tr>
-      <td class="pp-row-label">Comments</td>
-      <td colspan="4" style="min-height:32px;">${v(p.comments)}</td>
+    <tr class="pp-comments-row">
+      <td class="pp-row-label" style="vertical-align:top;">Comments</td>
+      <td colspan="4" style="vertical-align:top;">${v(p.comments)}</td>
     </tr>`;
   const partRows = PARTICULARS_ROWS.map(dataRow).join('') + commentsRow;
 
   return `
+    <!-- Job-card-specific print styles. The shop's job-card paper is 8.5"×12.5"
+         (taller than A4), so we override the global @page rule. We also make
+         the Particulars rows tall enough to write into by hand, and give the
+         Comments row a generous block. !important is necessary because the
+         global #print-area / .pp-table rules use plain selectors.
+         CRITICAL: the global rule forbids page breaks inside ANY table, which
+         pushes our taller particulars table onto a blank page 2. We override
+         that here so individual rows are kept together but the table itself
+         is allowed to flow — though with our heights it should still fit on
+         one page. -->
+    <style>
+      @media print {
+        @page { size: 8.5in 12.5in; margin: 0; }
+        /* Tighter top/bottom padding so the bottom "Signature:" line fits
+           on page 1 alongside the bigger header. */
+        #print-area { width: 8.5in !important; padding: 0.22in 0.4in !important; }
+        #print-area table { page-break-inside: auto !important; break-inside: auto !important; }
+        #print-area tr    { page-break-inside: avoid !important; break-inside: avoid !important; }
+      }
+      /* Bigger header so the logo + job-id don't get lost in white space. */
+      .pc-logo   { height: 80px !important; }
+      .pc-serial { font-size: 18pt !important; }
+      /* Trim the title margin and the row heights — collectively saves
+         ~0.5in of vertical space so the Signature line stays on page 1. */
+      .pc-title  { margin: 0 0 2px !important; }
+      .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pc-sig { margin-top: 4px !important; }
+    </style>
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
