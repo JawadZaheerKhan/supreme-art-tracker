@@ -139,6 +139,11 @@
   .badge-done { background: var(--green-bg); color: var(--green-text); }
   .badge-blocked { background: var(--red-bg); color: var(--red-text); }
   .badge-new { background: var(--amber-bg); color: var(--amber-text); }
+  /* Pending stock issuance — orange to stand out from the regular flow */
+  .badge-pending { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; }
+  /* Green "Issue Stock" action button */
+  .btn-success { background: #166534; color: #fff; border-color: #166534; }
+  .btn-success:hover { background: #14532d; border-color: #14532d; }
   .pipeline { display: flex; align-items: center; gap: 3px; margin-top: 10px; flex-wrap: wrap; }
   .stage-pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid; white-space: nowrap; font-weight: 500; }
   .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
@@ -698,6 +703,9 @@ async function api(method, path, body) {
 // ── Auth state ────────────────────────────────────────────────
 let currentUser = null;
 function isAdmin() { return currentUser && currentUser.role === 'admin'; }
+// Stock-role users plus admins can issue stock for pending jobs.
+function canIssueStock() { return currentUser && (currentUser.role === 'admin' || currentUser.role === 'stock'); }
+function isPendingIssuance(j) { return j && j.issuance_status === 'pending'; }
 
 function showLogin(errorMsg) {
   document.getElementById('login-screen').style.display = 'flex';
@@ -843,7 +851,10 @@ function getFiltered() {
     if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
     if (filterClient && j.client !== filterClient) return false;
     if (!inDateRange(j)) return false;
-    if (view === 'active')  return !isDone(j) && !isStorage(j) && !isBlocked(j);
+    if (view === 'pending') return isPendingIssuance(j);
+    // Pending jobs are excluded from "active" so the queue stays clean —
+    // they show up explicitly under Pending Stock instead.
+    if (view === 'active')  return !isPendingIssuance(j) && !isDone(j) && !isStorage(j) && !isBlocked(j);
     if (view === 'storage') return isStorage(j);
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
@@ -855,13 +866,15 @@ function getFiltered() {
 function renderStats() {
   const s = {
     total: jobs.length,
-    active: jobs.filter(j=>!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
+    pending: jobs.filter(isPendingIssuance).length,
+    active: jobs.filter(j=>!isPendingIssuance(j)&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
     storage: jobs.filter(isStorage).length,
     done: jobs.filter(isDone).length,
     blocked: jobs.filter(isBlocked).length
   };
   document.getElementById('stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Total Jobs</div><div class="stat-value">${s.total}</div></div>
+    <div class="stat"><div class="stat-label">Pending Stock</div><div class="stat-value ${s.pending>0?'warn':''}" style="${s.pending>0?'color:#9a3412;':''}">${s.pending}</div></div>
     <div class="stat"><div class="stat-label">In Progress</div><div class="stat-value">${s.active}</div></div>
     <div class="stat"><div class="stat-label">Storage</div><div class="stat-value">${s.storage}</div></div>
     <div class="stat"><div class="stat-label">Completed</div><div class="stat-value">${s.done}</div></div>
@@ -870,7 +883,7 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['active','In Progress'],['storage','Storage'],['blocked','Blocked'],['done','Done']];
+  const views = [['all','All'],['pending','Pending Stock'],['active','In Progress'],['storage','Storage'],['blocked','Blocked'],['done','Done']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -889,7 +902,12 @@ function renderJobs() {
   el.innerHTML = filtered.map(j => {
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
-    const badge = done ? `<span class="badge badge-done">Delivered</span>` :
+    const pending = isPendingIssuance(j);
+    // Status badge: 'Pending Stock' takes priority over everything else
+    // (it means the job hasn't started consuming stock yet — nothing else
+    // is meaningful until that happens).
+    const badge = pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
+      done ? `<span class="badge badge-done">Delivered</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
@@ -930,6 +948,7 @@ function renderJobs() {
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
         <div class="job-actions">
+          ${pending && canIssueStock() ? `<button class="btn btn-sm btn-success" onclick="issueStock(${j.id})" title="Issue stock and start this job">&#10003; Issue Stock</button>` : ''}
           <button class="btn btn-sm btn-primary" onclick="openUpdate(${j.id})">Update</button>
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit</button>
@@ -3537,6 +3556,12 @@ async function saveEdit(id) {
 function openUpdate(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // Block stage advancement while stock issuance is still pending — the
+  // job hasn't actually started yet, so updating a stage would be meaningless.
+  if (isPendingIssuance(j)) {
+    notify('Stock must be issued before updating stages on this job.');
+    return;
+  }
   const si = j.stage_index || 0;
   const cur = STAGES[si];
   selSection = cur;
@@ -3596,6 +3621,12 @@ async function saveUpdate(id) {
 async function moveToStage(id, target) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // Same guard as openUpdate — clicking a pipeline pill shouldn't bypass
+  // the issuance step.
+  if (isPendingIssuance(j)) {
+    notify('Stock must be issued before moving this job to a stage.');
+    return;
+  }
   const prevSi = j.stage_index || 0;
   if (target === prevSi) return;
   const time = new Date().toLocaleString('en-PK');
@@ -3668,6 +3699,36 @@ async function deleteJob(id) {
     await loadInventory();
     notify('Job deleted'); render();
   } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Issue stock for a pending job — admin/stock role only (server enforces
+// too). Confirms with the user since this deducts real inventory.
+async function issueStock(id) {
+  if (!canIssueStock()) { notify('Only stock or admin role can issue stock.'); return; }
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  const sheets = parseInt(String(j.sheets || '').replace(/,/g, ''), 10) || 0;
+  if (!j.inventory_item_id || sheets <= 0) {
+    notify('This job has no paper picked or zero sheets — cannot issue stock.');
+    return;
+  }
+  const it = inventory.find(i => i.id === j.inventory_item_id);
+  const label = it ? `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}` : '(unknown)';
+  if (!confirm(`Issue ${sheets.toLocaleString()} sheets for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/issue-stock`);
+    // Replace the local job copy with the updated one from the server so
+    // the badge flips from Pending to whatever stage applies next.
+    const idx = jobs.findIndex(x => x.id === id);
+    if (idx >= 0) jobs[idx] = updated;
+    await loadInventory(); // balances changed — refresh
+    render();
+    notify(`Stock issued · ${sheets.toLocaleString()} sheets deducted`);
+  } catch (e) {
+    notify('Error: ' + e.message);
+  }
   showSaving(false);
 }
 
@@ -3892,6 +3953,7 @@ function renderUsersTab() {
       <div class="inv-balance">
         <select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:110px;">
           <option value="user" ${u.role==='user'?'selected':''}>User</option>
+          <option value="stock" ${u.role==='stock'?'selected':''}>Stock</option>
           <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
         </select>
       </div>
@@ -3922,6 +3984,7 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Role</label>
       <select id="invite-role">
         <option value="user" selected>User</option>
+        <option value="stock">Stock</option>
         <option value="admin">Admin</option>
       </select>
     </div>

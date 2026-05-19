@@ -67,6 +67,14 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mrp         TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS particulars JSONB DEFAULT '{}'`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS inventory_item_id INTEGER`;
+    // Stock issuance workflow: jobs start 'pending' until a stock-role user
+    // (or admin) issues stock, which deducts inventory and flips to 'issued'.
+    // Existing rows backfill to 'issued' since their stock was already
+    // consumed in the previous auto-deduct flow.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issuance_status TEXT NOT NULL DEFAULT 'issued'`;
+    await sql`ALTER TABLE jobs ALTER COLUMN issuance_status SET DEFAULT 'pending'`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_at  TIMESTAMPTZ`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_by_id INTEGER`;
 
     // Inventory: paper (and future ink/etc) catalog + append-only ledger
     await sql`
@@ -136,12 +144,18 @@ async function initDb() {
         email         TEXT NOT NULL UNIQUE,
         name          TEXT,
         picture       TEXT,
-        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user','stock')),
         invited_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at    TIMESTAMPTZ DEFAULT NOW(),
         last_login_at TIMESTAMPTZ
       )
     `;
+    // Migrate the role CHECK constraint on existing DBs that were created
+    // before 'stock' was a valid role. Drop the old constraint and add the
+    // new one; idempotent because the second add fails silently if the
+    // constraint already permits 'stock'.
+    await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock'))`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -203,6 +217,15 @@ function requireAuth(req, res, next) {
 function requireAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+// Stock issuance — admins and the dedicated 'stock' role can both issue.
+// Plain users (job people) get a 403.
+function requireStockOrAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (req.user.role !== 'admin' && req.user.role !== 'stock') {
+    return res.status(403).json({ error: 'Stock or admin role required' });
+  }
   next();
 }
 
@@ -332,7 +355,8 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
-    const role = req.body.role === 'admin' ? 'admin' : 'user';
+    // Allow 'admin', 'stock', or 'user' (default). Anything else falls back to user.
+    const role = ['admin','stock','user'].includes(req.body.role) ? req.body.role : 'user';
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     const inserted = await sql`
       INSERT INTO users (email, role, invited_by) VALUES (${email}, ${role}, ${req.user.id})
@@ -352,7 +376,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const role = req.body.role === 'admin' ? 'admin' : 'user';
+    const role = ['admin','stock','user'].includes(req.body.role) ? req.body.role : 'user';
     // Guardrail: don't allow demoting yourself — locks you out of admin tools.
     if (parseInt(id, 10) === req.user.id && role !== 'admin') {
       return res.status(400).json({ error: "You can't change your own role away from admin." });
@@ -442,23 +466,16 @@ app.post('/api/jobs', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id } = req.body;
+    // New jobs are created with issuance_status='pending'. Stock is NOT
+    // deducted at creation time — a stock-role user (or admin) must call
+    // POST /api/jobs/:id/issue-stock to deduct inventory and flip status.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Medium'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null})
+      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, issuance_status)
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Medium'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, 'pending')
       RETURNING *
     `;
     const job = result[0];
-    const sheetsUsed = parseSheets(sheets);
-    if (inventory_item_id && sheetsUsed > 0) {
-      await applyInventoryChange(sql, {
-        itemId: inventory_item_id,
-        change: -sheetsUsed,
-        reason: 'job-consumed',
-        jobId: job.id,
-        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name}`,
-      });
-    }
-    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client})` });
+    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — pending stock issuance` });
     res.json(job);
   } catch (err) {
     console.error(err);
@@ -474,9 +491,11 @@ app.put('/api/jobs/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
     const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id } = req.body;
 
-    // Read the prior values so we can auto-adjust the inventory ledger when
-    // either the paper item or the sheets quantity changed.
-    const prior = await sql`SELECT inventory_item_id, sheets FROM jobs WHERE id = ${id}`;
+    // Read prior values for inventory adjustment AND issuance status — if the
+    // job is still 'pending' (stock never issued), edits don't touch inventory
+    // at all. Once 'issued', edits auto-adjust the ledger as before.
+    const prior = await sql`SELECT inventory_item_id, sheets, issuance_status FROM jobs WHERE id = ${id}`;
+    const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const oldSheets  = parseSheets(prior[0]?.sheets);
     const newItemId  = inventory_item_id || null;
@@ -495,28 +514,77 @@ app.put('/api/jobs/:id', requireAuth, async (req, res) => {
     `;
     const job = result[0];
 
-    // Adjust inventory: return the old consumption, charge the new.
-    // No-op when both legs are zero or identical.
-    if (oldItemId && oldSheets > 0) {
-      await applyInventoryChange(sql, {
-        itemId: oldItemId,
-        change: +oldSheets,
-        reason: 'job-edit-revert',
-        jobId: job.id,
-        notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
-      });
-    }
-    if (newItemId && newSheets > 0) {
-      await applyInventoryChange(sql, {
-        itemId: newItemId,
-        change: -newSheets,
-        reason: 'job-edit-apply',
-        jobId: job.id,
-        notes: `Edit on Job E-${job.id}: consumed ${newSheets} sheets`,
-      });
+    // Only adjust inventory if the job was already issued — pending jobs
+    // haven't taken any stock yet, so there's nothing to revert.
+    if (wasIssued) {
+      if (oldItemId && oldSheets > 0) {
+        await applyInventoryChange(sql, {
+          itemId: oldItemId,
+          change: +oldSheets,
+          reason: 'job-edit-revert',
+          jobId: job.id,
+          notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
+        });
+      }
+      if (newItemId && newSheets > 0) {
+        await applyInventoryChange(sql, {
+          itemId: newItemId,
+          change: -newSheets,
+          reason: 'job-edit-apply',
+          jobId: job.id,
+          notes: `Edit on Job E-${job.id}: consumed ${newSheets} sheets`,
+        });
+      }
     }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
     res.json(job);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Issue stock for a pending job. Deducts inventory and flips status to
+// 'issued'. Admin or stock role only — the job person can't self-approve.
+app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status === 'issued') {
+      return res.status(400).json({ error: 'Stock already issued for this job' });
+    }
+    const sheetsUsed = parseSheets(job.sheets);
+    if (!job.inventory_item_id || sheetsUsed <= 0) {
+      return res.status(400).json({ error: 'Job has no paper or zero sheets — nothing to issue' });
+    }
+    // Deduct inventory using the same helper edits use, so the ledger entry
+    // looks identical to the original auto-deduct flow.
+    await applyInventoryChange(sql, {
+      itemId: job.inventory_item_id,
+      change: -sheetsUsed,
+      reason: 'job-consumed',
+      jobId: job.id,
+      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} (issued by ${req.user.email})`,
+    });
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status = 'issued',
+             issued_at = NOW(),
+             issued_by_id = ${req.user.id || null}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.issue_stock',
+      entityType: 'job',
+      entityId: id,
+      summary: `Issued ${sheetsUsed} sheets for Job E-${id}: ${job.name}`,
+    });
+    res.json(updated[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
