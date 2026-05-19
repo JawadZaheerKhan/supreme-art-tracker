@@ -175,7 +175,16 @@ const dbReady = initDb();
 
 // Parses our session cookie and attaches req.user if valid. Never errors —
 // downstream handlers use requireAuth/requireAdmin to enforce.
+//
+// LOCAL DEV ONLY: when DEV_BYPASS_AUTH=1 is set in the environment, every
+// request is treated as an admin user. This lets developers run the app
+// against a real DB without setting up Google OAuth locally. The env var
+// is never set on Vercel, so production remains fully protected.
 function authMiddleware(req, res, next) {
+  if (process.env.DEV_BYPASS_AUTH === '1') {
+    req.user = { id: 0, email: 'dev@local', role: 'admin', name: 'Local Dev', picture: '' };
+    return next();
+  }
   const token = req.cookies && req.cookies[SESSION_COOKIE];
   if (token) {
     try {
