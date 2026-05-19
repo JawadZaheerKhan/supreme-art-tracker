@@ -3255,8 +3255,9 @@ function jobForm(j={}) {
         <td colspan="3">
           <span class="jc-lbl">Sheets Qty</span>
           <div style="display:flex;gap:6px;align-items:center;">
-            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); updateStockHint();" style="flex:1;min-width:0;">
-            <select id="f-sheet-cut" title="Cut — pieces per sheet (recorded only, no auto-calc)"
+            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="flex:1;min-width:0;">
+            <select id="f-sheet-cut" title="Cut — pieces per sheet; affects Packets auto-fill"
+                    onchange="jobPacketsSync()"
                     style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
               ${['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
                 const sel = ((j.particulars||{}).sheet_cut || '1/1') === c ? ' selected' : '';
@@ -3409,9 +3410,10 @@ function paperSelect(itemId) {
   }
   paperClose();
   updateStockHint();
-  // Packets <-> Sheets auto-sync is intentionally disabled on the Job Card —
-  // the cut multiplier (1/2, 1/4, etc.) and other production factors make a
-  // straight ×100/×500 conversion misleading. User fills both fields manually.
+  // Paper selection unlocks packet-size for the one-way auto-fill:
+  //   packets = sheets ÷ (packetSize × cut_pieces)
+  // Refresh Packets in case Sheets/Cut were filled before paper was picked.
+  jobPacketsSync();
 }
 
 // Auto-compute Unit Carton Qty from Sheets × UPS.
@@ -3430,29 +3432,37 @@ function jobCartonQtySync() {
   ctnEl.value = String(Math.round(sheets * ups));
 }
 
-// Two-way Packets ↔ Sheets sync on the Job Card form. Uses the paper type
-// from the selected inventory item (f-inventory-item) — without a paper
-// pick, no conversion is possible so we leave both fields alone.
-//   source='packets' → user typed in the Packets field; sheets follows
-//   source='sheets'  → user typed in the Sheets field; packets follows
-function jobPktSync(source) {
+// One-way auto-fill of Packets on the Job Card form. Computes from:
+//   Sheets Qty (post-cut working sheets)
+//   Cut dropdown (1/N → N pieces per raw sheet)
+//   Paper type (cards = 100/packet, reams = 500/packet)
+//
+// Formula:  packets = sheets ÷ (packetSize × cut_pieces)
+// Example:  1000 sheets @ 1/2 cut on Cards → 1000 ÷ (100 × 2) = 5 packets
+//
+// One-way ONLY: typing in the Packets field does NOT push back to Sheets,
+// because cut math depends on direction. Triggers fire on Sheets input,
+// Cut change, and paper selection.
+function jobPacketsSync() {
   const itemEl    = document.getElementById('f-inventory-item');
   const packetsEl = document.getElementById('f-packets');
   const sheetsEl  = document.getElementById('f-sheets');
+  const cutEl     = document.getElementById('f-sheet-cut');
   if (!itemEl || !packetsEl || !sheetsEl) return;
   const itemId = parseInt(itemEl.value, 10);
   const it = itemId ? inventory.find(x => x.id === itemId) : null;
-  if (!it) return; // No paper selected yet → user enters both manually.
-  const ps = packetSize(it.paper_type);
-  if (source === 'packets') {
-    const p = parseFloat(packetsEl.value);
-    if (!isNaN(p)) sheetsEl.value = Math.round(p * ps);
-    else if (packetsEl.value === '') sheetsEl.value = '';
-  } else {
-    const s = parseFloat(sheetsEl.value);
-    if (!isNaN(s)) packetsEl.value = +(s / ps).toFixed(2);
-    else if (sheetsEl.value === '') packetsEl.value = '';
+  if (!it) return; // No paper selected → can't determine packet size, skip.
+  const sheets = parseFloat(sheetsEl.value);
+  if (!Number.isFinite(sheets) || sheets <= 0) {
+    if (sheetsEl.value === '') packetsEl.value = '';
+    return;
   }
+  const ps = packetSize(it.paper_type);
+  const cutStr = (cutEl && cutEl.value) || '1/1';
+  const cutPieces = parseInt(cutStr.split('/')[1], 10) || 1;
+  const denom = ps * cutPieces;
+  if (denom <= 0) return;
+  packetsEl.value = +(sheets / denom).toFixed(2);
 }
 function paperKey(e) {
   if (e.key === 'Escape') { paperClose(); return; }
