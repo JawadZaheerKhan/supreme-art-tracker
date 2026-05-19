@@ -3256,7 +3256,7 @@ function jobForm(j={}) {
           <span class="jc-lbl">Sheets Qty</span>
           <div style="display:flex;gap:6px;align-items:center;">
             <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); updateStockHint();" style="flex:1;min-width:0;">
-            <select id="f-sheet-cut" onchange="jobCartonQtySync()" title="Cut — pieces per sheet"
+            <select id="f-sheet-cut" title="Cut — pieces per sheet (recorded only, no auto-calc)"
                     style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
               ${['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
                 const sel = ((j.particulars||{}).sheet_cut || '1/1') === c ? ' selected' : '';
@@ -3414,25 +3414,20 @@ function paperSelect(itemId) {
   // straight ×100/×500 conversion misleading. User fills both fields manually.
 }
 
-// Auto-compute Unit Carton Qty from Sheets × cut-pieces × UPS.
-// Cut "1/N" means each sheet is cut into N pieces; each piece has UPS units.
-// So total units = sheets × pieces × ups.
-// Triggered whenever the cut dropdown, UPS, or Sheets Qty changes.
+// Auto-compute Unit Carton Qty from Sheets × UPS.
+// Sheets Qty is the WORKING/post-cut sheet count (already accounts for the
+// cut multiplier), so we don't multiply by pieces here. UPS = units per
+// working sheet. Triggered whenever UPS or Sheets Qty changes.
 function jobCartonQtySync() {
-  const cutEl     = document.getElementById('f-sheet-cut');
   const upsEl     = document.getElementById('f-ups');
   const sheetsEl  = document.getElementById('f-sheets');
   const ctnEl     = document.getElementById('f-cartonqty');
-  if (!cutEl || !upsEl || !sheetsEl || !ctnEl) return;
-  const cut = cutEl.value || '1/1';
-  const m = cut.match(/^1\s*\/\s*(\d+)$/);
-  const pieces = m ? parseInt(m[1], 10) : 1;
+  if (!upsEl || !sheetsEl || !ctnEl) return;
   const ups    = parseFloat(upsEl.value);
   const sheets = parseFloat(sheetsEl.value);
-  // Need all three (sheets, ups, pieces) to compute — otherwise leave alone.
   if (!Number.isFinite(ups) || ups <= 0)       return;
   if (!Number.isFinite(sheets) || sheets <= 0) return;
-  ctnEl.value = String(Math.round(sheets * pieces * ups));
+  ctnEl.value = String(Math.round(sheets * ups));
 }
 
 // Two-way Packets ↔ Sheets sync on the Job Card form. Uses the paper type
@@ -3710,21 +3705,19 @@ async function issueStock(id) {
   if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
   const it = inventory.find(i => i.id === j.inventory_item_id);
   if (!it) { notify('Paper item missing from inventory.'); return; }
-  // Packet-based deduction (matches the server logic): prefer Quantity of
-  // Packets if present, else fall back to Sheets Qty.
+  // Inventory deduction is always Quantity of Packets × packetSize (raw
+  // sheets in inventory). Sheets Qty is the working post-cut count and is
+  // NOT used for deduction. If packets is empty, surface a clear error.
   const ps        = packetSize(it.paper_type);
   const unit      = packetUnitLabel(it.paper_type).toLowerCase();
   const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets);
-  const sheetsFromPackets = Number.isFinite(packetsIn) && packetsIn > 0 ? Math.round(packetsIn * ps) : 0;
-  const sheetsFromField   = parseInt(String(j.sheets || '').replace(/,/g, ''), 10) || 0;
-  const sheets = sheetsFromPackets || sheetsFromField;
-  if (sheets <= 0) {
-    notify('Enter Quantity of Packets (or Sheets Qty) on the job before issuing stock.');
+  if (!Number.isFinite(packetsIn) || packetsIn <= 0) {
+    notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
-  const packs = sheets / ps;
+  const sheets = Math.round(packetsIn * ps);
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
-  if (!confirm(`Issue ${packs} ${unit} (${sheets.toLocaleString()} sheets) for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
+  if (!confirm(`Issue ${packetsIn} ${unit} (${sheets.toLocaleString()} raw sheets) for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
   showSaving(true);
   try {
     const updated = await api('POST', `/api/jobs/${id}/issue-stock`);

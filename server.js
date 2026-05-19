@@ -446,18 +446,19 @@ function parseSheets(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// Packet-aware sheets calculation for job inventory deduction. The job card
-// now treats Quantity of Packets as the canonical amount (the cut multiplier
-// on Sheets Qty makes a straight conversion misleading). So we look at
-// particulars.quantity_of_packets first; if present we multiply by the
-// paper's packetSize. Otherwise we fall back to the raw Sheets Qty field.
+// Inventory deduction for jobs is ALWAYS computed from Quantity of Packets
+// times the paper's raw packetSize. Reason: Sheets Qty is the working/post-cut
+// sheet count (e.g. 1000 working 20x15 sheets from 500 raw 20x30 sheets at
+// 1/2 cut). Inventory tracks RAW sheets, so we must deduct in raw units —
+// and Quantity of Packets is the only field that maps cleanly to raw stock.
+// Returns 0 if packets is missing/zero; caller must surface a clear error.
 const REAM_PAPERS = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
 function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
-function jobDeductionSheets({ paperType, particulars, sheets }) {
+function jobDeductionSheets({ paperType, particulars }) {
   const ps      = packetSize(paperType || '');
   const packets = parseFloat((particulars || {}).quantity_of_packets);
-  const fromPackets = Number.isFinite(packets) && packets > 0 ? Math.round(packets * ps) : 0;
-  return fromPackets || parseSheets(sheets);
+  if (!Number.isFinite(packets) || packets <= 0) return 0;
+  return Math.round(packets * ps);
 }
 
 // Helper: apply a stock change (+/-) and write a ledger row. Must be called
@@ -525,8 +526,8 @@ app.put('/api/jobs/:id', requireAuth, async (req, res) => {
       const r = await sql`SELECT paper_type FROM inventory_items WHERE id = ${newItemId}`;
       newPaperType = r[0]?.paper_type || '';
     }
-    const oldSheets = jobDeductionSheets({ paperType: oldPaperType, particulars: prior[0]?.particulars, sheets: prior[0]?.sheets });
-    const newSheets = jobDeductionSheets({ paperType: newPaperType, particulars, sheets });
+    const oldSheets = jobDeductionSheets({ paperType: oldPaperType, particulars: prior[0]?.particulars });
+    const newSheets = jobDeductionSheets({ paperType: newPaperType, particulars });
 
     const result = await sql`
       UPDATE jobs SET
@@ -589,9 +590,9 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
     }
     const inv = await sql`SELECT paper_type FROM inventory_items WHERE id = ${job.inventory_item_id}`;
     const paperType = inv[0]?.paper_type || '';
-    const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars, sheets: job.sheets });
+    const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars });
     if (sheetsUsed <= 0) {
-      return res.status(400).json({ error: 'Job has no Quantity of Packets or Sheets Qty — nothing to issue' });
+      return res.status(400).json({ error: 'Job has no Quantity of Packets — set the packets count on the job, then try again. (Inventory is deducted in raw packets/reams.)' });
     }
     const ps   = packetSize(paperType);
     const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
