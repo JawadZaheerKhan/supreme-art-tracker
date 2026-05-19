@@ -3228,7 +3228,7 @@ function jobForm(j={}) {
     <div class="jc-title">JOB CARD</div>
     <table class="jc-form">
       <tr>
-        <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued)}"></td>
+        <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : new Date().toISOString().slice(0,10)))}"></td>
         <td><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
         <td><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
         <td>
@@ -3252,15 +3252,12 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
-        <td colspan="3"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50" oninput="jobPktSync('packets')"></td>
-      </tr>
-      <tr>
-        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
-        <td colspan="2">
+        <td colspan="3">
           <span class="jc-lbl">Sheets Qty</span>
           <div style="display:flex;gap:6px;align-items:center;">
-            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobPktSync('sheets'); jobCartonQtySync(); updateStockHint();" style="flex:1;min-width:0;">
-            <select id="f-sheet-cut" onchange="jobCartonQtySync()" title="Cut — pieces per sheet"
+            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="flex:1;min-width:0;">
+            <select id="f-sheet-cut" title="Cut — pieces per sheet; affects Packets auto-fill"
+                    onchange="jobPacketsSync()"
                     style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
               ${['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
                 const sel = ((j.particulars||{}).sheet_cut || '1/1') === c ? ' selected' : '';
@@ -3269,6 +3266,10 @@ function jobForm(j={}) {
             </select>
           </div>
         </td>
+      </tr>
+      <tr>
+        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
+        <td colspan="2"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50"></td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
@@ -3409,56 +3410,59 @@ function paperSelect(itemId) {
   }
   paperClose();
   updateStockHint();
-  // The packet⇄sheet multiplier depends on the paper type (100 vs 500),
-  // so a paper change must recompute. Prefer recomputing sheets from
-  // packets so the user's "I'm ordering 50 packets" intent wins.
-  jobPktSync('packets');
+  // Paper selection unlocks packet-size for the one-way auto-fill:
+  //   packets = sheets ÷ (packetSize × cut_pieces)
+  // Refresh Packets in case Sheets/Cut were filled before paper was picked.
+  jobPacketsSync();
 }
 
-// Auto-compute Unit Carton Qty from Sheets × cut-pieces × UPS.
-// Cut "1/N" means each sheet is cut into N pieces; each piece has UPS units.
-// So total units = sheets × pieces × ups.
-// Triggered whenever the cut dropdown, UPS, or Sheets Qty changes.
+// Auto-compute Unit Carton Qty from Sheets × UPS.
+// Sheets Qty is the WORKING/post-cut sheet count (already accounts for the
+// cut multiplier), so we don't multiply by pieces here. UPS = units per
+// working sheet. Triggered whenever UPS or Sheets Qty changes.
 function jobCartonQtySync() {
-  const cutEl     = document.getElementById('f-sheet-cut');
   const upsEl     = document.getElementById('f-ups');
   const sheetsEl  = document.getElementById('f-sheets');
   const ctnEl     = document.getElementById('f-cartonqty');
-  if (!cutEl || !upsEl || !sheetsEl || !ctnEl) return;
-  const cut = cutEl.value || '1/1';
-  const m = cut.match(/^1\s*\/\s*(\d+)$/);
-  const pieces = m ? parseInt(m[1], 10) : 1;
+  if (!upsEl || !sheetsEl || !ctnEl) return;
   const ups    = parseFloat(upsEl.value);
   const sheets = parseFloat(sheetsEl.value);
-  // Need all three (sheets, ups, pieces) to compute — otherwise leave alone.
   if (!Number.isFinite(ups) || ups <= 0)       return;
   if (!Number.isFinite(sheets) || sheets <= 0) return;
-  ctnEl.value = String(Math.round(sheets * pieces * ups));
+  ctnEl.value = String(Math.round(sheets * ups));
 }
 
-// Two-way Packets ↔ Sheets sync on the Job Card form. Uses the paper type
-// from the selected inventory item (f-inventory-item) — without a paper
-// pick, no conversion is possible so we leave both fields alone.
-//   source='packets' → user typed in the Packets field; sheets follows
-//   source='sheets'  → user typed in the Sheets field; packets follows
-function jobPktSync(source) {
+// One-way auto-fill of Packets on the Job Card form. Computes from:
+//   Sheets Qty (post-cut working sheets)
+//   Cut dropdown (1/N → N pieces per raw sheet)
+//   Paper type (cards = 100/packet, reams = 500/packet)
+//
+// Formula:  packets = sheets ÷ (packetSize × cut_pieces)
+// Example:  1000 sheets @ 1/2 cut on Cards → 1000 ÷ (100 × 2) = 5 packets
+//
+// One-way ONLY: typing in the Packets field does NOT push back to Sheets,
+// because cut math depends on direction. Triggers fire on Sheets input,
+// Cut change, and paper selection.
+function jobPacketsSync() {
   const itemEl    = document.getElementById('f-inventory-item');
   const packetsEl = document.getElementById('f-packets');
   const sheetsEl  = document.getElementById('f-sheets');
+  const cutEl     = document.getElementById('f-sheet-cut');
   if (!itemEl || !packetsEl || !sheetsEl) return;
   const itemId = parseInt(itemEl.value, 10);
   const it = itemId ? inventory.find(x => x.id === itemId) : null;
-  if (!it) return; // No paper selected yet → user enters both manually.
-  const ps = packetSize(it.paper_type);
-  if (source === 'packets') {
-    const p = parseFloat(packetsEl.value);
-    if (!isNaN(p)) sheetsEl.value = Math.round(p * ps);
-    else if (packetsEl.value === '') sheetsEl.value = '';
-  } else {
-    const s = parseFloat(sheetsEl.value);
-    if (!isNaN(s)) packetsEl.value = +(s / ps).toFixed(2);
-    else if (sheetsEl.value === '') packetsEl.value = '';
+  if (!it) return; // No paper selected → can't determine packet size, skip.
+  const sheets = parseFloat(sheetsEl.value);
+  if (!Number.isFinite(sheets) || sheets <= 0) {
+    if (sheetsEl.value === '') packetsEl.value = '';
+    return;
   }
+  const ps = packetSize(it.paper_type);
+  const cutStr = (cutEl && cutEl.value) || '1/1';
+  const cutPieces = parseInt(cutStr.split('/')[1], 10) || 1;
+  const denom = ps * cutPieces;
+  if (denom <= 0) return;
+  packetsEl.value = +(sheets / denom).toFixed(2);
 }
 function paperKey(e) {
   if (e.key === 'Escape') { paperClose(); return; }
@@ -3708,14 +3712,22 @@ async function issueStock(id) {
   if (!canIssueStock()) { notify('Only stock or admin role can issue stock.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  const sheets = parseInt(String(j.sheets || '').replace(/,/g, ''), 10) || 0;
-  if (!j.inventory_item_id || sheets <= 0) {
-    notify('This job has no paper picked or zero sheets — cannot issue stock.');
+  if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
+  const it = inventory.find(i => i.id === j.inventory_item_id);
+  if (!it) { notify('Paper item missing from inventory.'); return; }
+  // Inventory deduction is always Quantity of Packets × packetSize (raw
+  // sheets in inventory). Sheets Qty is the working post-cut count and is
+  // NOT used for deduction. If packets is empty, surface a clear error.
+  const ps        = packetSize(it.paper_type);
+  const unit      = packetUnitLabel(it.paper_type).toLowerCase();
+  const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets);
+  if (!Number.isFinite(packetsIn) || packetsIn <= 0) {
+    notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
-  const it = inventory.find(i => i.id === j.inventory_item_id);
-  const label = it ? `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}` : '(unknown)';
-  if (!confirm(`Issue ${sheets.toLocaleString()} sheets for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
+  const sheets = Math.round(packetsIn * ps);
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  if (!confirm(`Issue ${packetsIn} ${unit} (${sheets.toLocaleString()} raw sheets) for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
   showSaving(true);
   try {
     const updated = await api('POST', `/api/jobs/${id}/issue-stock`);
@@ -3767,9 +3779,19 @@ function buildPrintCard(j) {
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperTypes = invItem ? [invItem.paper_type] : (Array.isArray(p.paper_types) ? p.paper_types : []);
   const paperBrand = invItem ? (invItem.brand || '') : (p.brand || '');
-  const coatLabel = name => `<span class="pc-coat-box">${coatings.includes(name) ? '✓' : ''}</span>${name === 'Color Seal' ? 'Colour Seal' : name}`;
+  const coatLabel = name => {
+    const on = coatings.includes(name);
+    const label = name === 'Color Seal' ? 'Colour Seal' : name;
+    return `<span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${label}</span>`;
+  };
   const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
+  // Priority cell — colored by level: Low=blue, Medium=green, High=red.
+  // Class names map to print-CSS rules below.
+  const priorityCell = (label, val) => {
+    const cls = val === 'High' ? 'pc-prio-high' : val === 'Low' ? 'pc-prio-low' : val === 'Medium' ? 'pc-prio-med' : '';
+    return `<td><div class="pc-label">${label}</div><div class="pc-value ${cls}">${v(val)}</div></td>`;
+  };
 
   const dataRow = r => `
     <tr class="pp-data-row">
@@ -3781,8 +3803,11 @@ function buildPrintCard(j) {
     </tr>`;
   const papersRow = `
     <tr><td colspan="5" class="pp-spec">
-      ${PAPER_TYPES.map(t => `<span style="margin-right:14px;"><span class="pc-coat-box">${paperTypes.includes(t)?'✓':''}</span>${t}</span>`).join('')}
-      <span style="margin-left:6px;">Brand: ${v(paperBrand)}</span>
+      ${PAPER_TYPES.map(t => {
+        const on = paperTypes.includes(t);
+        return `<span style="margin-right:14px;"><span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${t}</span></span>`;
+      }).join('')}
+      <span style="margin-left:6px;">Brand: <span class="pc-value" style="display:inline;">${v(paperBrand)}</span></span>
     </td></tr>`;
   const coatRow = list => `
     <tr><td colspan="5" class="pp-spec" style="text-align:center;">
@@ -3825,6 +3850,39 @@ function buildPrintCard(j) {
       .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
       .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
       .pc-sig { margin-top: 4px !important; }
+
+      /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
+         Force exact-color so browsers don't strip ink-saving colors. */
+      .pc-value, .pp-data-row td:not(.pp-row-label),
+      .pp-comments-row td:not(.pp-row-label), .pc-cut {
+        color: #1e40af !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      /* Cut selection beside Sheets Qty — make it pop a touch more. */
+      .pc-cut { font-weight: 700 !important; }
+      /* Ticked coatings print in red so the active ones stand out. */
+      .pc-coat-on {
+        color: #b91c1c !important;
+        border-color: #b91c1c !important;
+        font-weight: 700 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      .pc-coat-label-on {
+        color: #b91c1c !important;
+        font-weight: 700 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      /* Job priority — colored by level. Overrides the blue .pc-value rule. */
+      .pc-value.pc-prio-low  { color: #1e40af !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-med  { color: #166534 !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-high { color: #b91c1c !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-low, .pc-value.pc-prio-med, .pc-value.pc-prio-high {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
     </style>
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
@@ -3840,7 +3898,7 @@ function buildPrintCard(j) {
         ${cell('P.O. Qty', j.qty)}
         ${cell('Machine Name', j.machine)}
         ${cell('Ups', j.ups)}
-        ${cell('Job Priority', j.priority)}
+        ${priorityCell('Job Priority', j.priority)}
       </tr>
       <tr>
         <td colspan="3"><div class="pc-label">Job Name</div><div class="pc-value">${v(j.name)}</div></td>
@@ -3853,7 +3911,7 @@ function buildPrintCard(j) {
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
-        <td colspan="2"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
+        <td colspan="2"><div class="pc-label">Sheets Qty / Cut</div><div class="pc-value">${v(j.sheets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
         <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
       </tr>
       <tr>
