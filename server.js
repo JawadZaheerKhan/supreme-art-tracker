@@ -446,6 +446,20 @@ function parseSheets(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// Packet-aware sheets calculation for job inventory deduction. The job card
+// now treats Quantity of Packets as the canonical amount (the cut multiplier
+// on Sheets Qty makes a straight conversion misleading). So we look at
+// particulars.quantity_of_packets first; if present we multiply by the
+// paper's packetSize. Otherwise we fall back to the raw Sheets Qty field.
+const REAM_PAPERS = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
+function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
+function jobDeductionSheets({ paperType, particulars, sheets }) {
+  const ps      = packetSize(paperType || '');
+  const packets = parseFloat((particulars || {}).quantity_of_packets);
+  const fromPackets = Number.isFinite(packets) && packets > 0 ? Math.round(packets * ps) : 0;
+  return fromPackets || parseSheets(sheets);
+}
+
 // Helper: apply a stock change (+/-) and write a ledger row. Must be called
 // after dbReady. Assumes the item exists. Updates current_balance atomically
 // in the same UPDATE so balance always matches the sum of ledger changes.
@@ -493,13 +507,26 @@ app.put('/api/jobs/:id', requireAuth, async (req, res) => {
 
     // Read prior values for inventory adjustment AND issuance status — if the
     // job is still 'pending' (stock never issued), edits don't touch inventory
-    // at all. Once 'issued', edits auto-adjust the ledger as before.
-    const prior = await sql`SELECT inventory_item_id, sheets, issuance_status FROM jobs WHERE id = ${id}`;
+    // at all. Once 'issued', edits auto-adjust the ledger using the same
+    // packet-first formula as initial issuance.
+    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status FROM jobs WHERE id = ${id}`;
     const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
-    const oldSheets  = parseSheets(prior[0]?.sheets);
     const newItemId  = inventory_item_id || null;
-    const newSheets  = parseSheets(sheets);
+    // Look up paper types so the packet-multiplier matches what was actually
+    // deducted at issuance time (and what the new state would deduct).
+    let oldPaperType = '';
+    let newPaperType = '';
+    if (oldItemId) {
+      const r = await sql`SELECT paper_type FROM inventory_items WHERE id = ${oldItemId}`;
+      oldPaperType = r[0]?.paper_type || '';
+    }
+    if (newItemId) {
+      const r = await sql`SELECT paper_type FROM inventory_items WHERE id = ${newItemId}`;
+      newPaperType = r[0]?.paper_type || '';
+    }
+    const oldSheets = jobDeductionSheets({ paperType: oldPaperType, particulars: prior[0]?.particulars, sheets: prior[0]?.sheets });
+    const newSheets = jobDeductionSheets({ paperType: newPaperType, particulars, sheets });
 
     const result = await sql`
       UPDATE jobs SET
@@ -557,10 +584,18 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
     if (job.issuance_status === 'issued') {
       return res.status(400).json({ error: 'Stock already issued for this job' });
     }
-    const sheetsUsed = parseSheets(job.sheets);
-    if (!job.inventory_item_id || sheetsUsed <= 0) {
-      return res.status(400).json({ error: 'Job has no paper or zero sheets — nothing to issue' });
+    if (!job.inventory_item_id) {
+      return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
     }
+    const inv = await sql`SELECT paper_type FROM inventory_items WHERE id = ${job.inventory_item_id}`;
+    const paperType = inv[0]?.paper_type || '';
+    const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars, sheets: job.sheets });
+    if (sheetsUsed <= 0) {
+      return res.status(400).json({ error: 'Job has no Quantity of Packets or Sheets Qty — nothing to issue' });
+    }
+    const ps   = packetSize(paperType);
+    const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+    const packs = sheetsUsed / ps;
     // Deduct inventory using the same helper edits use, so the ledger entry
     // looks identical to the original auto-deduct flow.
     await applyInventoryChange(sql, {
@@ -568,7 +603,7 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
       change: -sheetsUsed,
       reason: 'job-consumed',
       jobId: job.id,
-      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} (issued by ${req.user.email})`,
+      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${sheetsUsed} sheets) issued by ${req.user.email}`,
     });
     const updated = await sql`
       UPDATE jobs

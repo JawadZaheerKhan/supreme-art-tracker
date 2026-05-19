@@ -3252,14 +3252,10 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
-        <td colspan="3"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50" oninput="jobPktSync('packets')"></td>
-      </tr>
-      <tr>
-        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
-        <td colspan="2">
+        <td colspan="3">
           <span class="jc-lbl">Sheets Qty</span>
           <div style="display:flex;gap:6px;align-items:center;">
-            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobPktSync('sheets'); jobCartonQtySync(); updateStockHint();" style="flex:1;min-width:0;">
+            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); updateStockHint();" style="flex:1;min-width:0;">
             <select id="f-sheet-cut" onchange="jobCartonQtySync()" title="Cut — pieces per sheet"
                     style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
               ${['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
@@ -3269,6 +3265,10 @@ function jobForm(j={}) {
             </select>
           </div>
         </td>
+      </tr>
+      <tr>
+        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
+        <td colspan="2"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50"></td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
@@ -3409,10 +3409,9 @@ function paperSelect(itemId) {
   }
   paperClose();
   updateStockHint();
-  // The packet⇄sheet multiplier depends on the paper type (100 vs 500),
-  // so a paper change must recompute. Prefer recomputing sheets from
-  // packets so the user's "I'm ordering 50 packets" intent wins.
-  jobPktSync('packets');
+  // Packets <-> Sheets auto-sync is intentionally disabled on the Job Card —
+  // the cut multiplier (1/2, 1/4, etc.) and other production factors make a
+  // straight ×100/×500 conversion misleading. User fills both fields manually.
 }
 
 // Auto-compute Unit Carton Qty from Sheets × cut-pieces × UPS.
@@ -3708,14 +3707,24 @@ async function issueStock(id) {
   if (!canIssueStock()) { notify('Only stock or admin role can issue stock.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  const sheets = parseInt(String(j.sheets || '').replace(/,/g, ''), 10) || 0;
-  if (!j.inventory_item_id || sheets <= 0) {
-    notify('This job has no paper picked or zero sheets — cannot issue stock.');
+  if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
+  const it = inventory.find(i => i.id === j.inventory_item_id);
+  if (!it) { notify('Paper item missing from inventory.'); return; }
+  // Packet-based deduction (matches the server logic): prefer Quantity of
+  // Packets if present, else fall back to Sheets Qty.
+  const ps        = packetSize(it.paper_type);
+  const unit      = packetUnitLabel(it.paper_type).toLowerCase();
+  const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets);
+  const sheetsFromPackets = Number.isFinite(packetsIn) && packetsIn > 0 ? Math.round(packetsIn * ps) : 0;
+  const sheetsFromField   = parseInt(String(j.sheets || '').replace(/,/g, ''), 10) || 0;
+  const sheets = sheetsFromPackets || sheetsFromField;
+  if (sheets <= 0) {
+    notify('Enter Quantity of Packets (or Sheets Qty) on the job before issuing stock.');
     return;
   }
-  const it = inventory.find(i => i.id === j.inventory_item_id);
-  const label = it ? `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}` : '(unknown)';
-  if (!confirm(`Issue ${sheets.toLocaleString()} sheets for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
+  const packs = sheets / ps;
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  if (!confirm(`Issue ${packs} ${unit} (${sheets.toLocaleString()} sheets) for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
   showSaving(true);
   try {
     const updated = await api('POST', `/api/jobs/${id}/issue-stock`);
