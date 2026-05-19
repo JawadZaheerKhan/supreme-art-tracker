@@ -3228,7 +3228,7 @@ function jobForm(j={}) {
     <div class="jc-title">JOB CARD</div>
     <table class="jc-form">
       <tr>
-        <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued)}"></td>
+        <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : new Date().toISOString().slice(0,10)))}"></td>
         <td><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
         <td><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
         <td>
@@ -3779,7 +3779,11 @@ function buildPrintCard(j) {
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperTypes = invItem ? [invItem.paper_type] : (Array.isArray(p.paper_types) ? p.paper_types : []);
   const paperBrand = invItem ? (invItem.brand || '') : (p.brand || '');
-  const coatLabel = name => `<span class="pc-coat-box">${coatings.includes(name) ? '✓' : ''}</span>${name === 'Color Seal' ? 'Colour Seal' : name}`;
+  const coatLabel = name => {
+    const on = coatings.includes(name);
+    const label = name === 'Color Seal' ? 'Colour Seal' : name;
+    return `<span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${label}</span>`;
+  };
   const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
 
@@ -3837,6 +3841,31 @@ function buildPrintCard(j) {
       .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
       .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
       .pc-sig { margin-top: 4px !important; }
+
+      /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
+         Force exact-color so browsers don't strip ink-saving colors. */
+      .pc-value, .pp-data-row td:not(.pp-row-label),
+      .pp-comments-row td:not(.pp-row-label), .pc-cut {
+        color: #1e40af !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      /* Cut selection beside Sheets Qty — make it pop a touch more. */
+      .pc-cut { font-weight: 700 !important; }
+      /* Ticked coatings print in red so the active ones stand out. */
+      .pc-coat-on {
+        color: #b91c1c !important;
+        border-color: #b91c1c !important;
+        font-weight: 700 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      .pc-coat-label-on {
+        color: #b91c1c !important;
+        font-weight: 700 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
     </style>
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
@@ -3865,7 +3894,7 @@ function buildPrintCard(j) {
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
-        <td colspan="2"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
+        <td colspan="2"><div class="pc-label">Sheets Qty / Cut</div><div class="pc-value">${v(j.sheets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
         <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
       </tr>
       <tr>
