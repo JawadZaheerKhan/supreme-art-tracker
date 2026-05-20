@@ -4145,7 +4145,13 @@ async function toggleBlock(id) {
   showSaving(false);
 }
 
-function buildPrintCard(j) {
+function buildPrintCard(j, paperSize = 'std') {
+  // paperSize options:
+  //   'std'    — Standard 8.5in × 12.5in (the shop's job-card paper). Comfy
+  //              row heights, generous comments row, full-size header.
+  //   'letter' — Letter 8.5in × 11in / A4 8.27in × 11.69in. Tighter layout
+  //              that compresses by ~1.5in so the bottom "Signature" line
+  //              survives on the shorter page.
   const v = x => esc(x || '');
   const fmt = d => d ? new Date(d).toLocaleDateString('en-PK') : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
@@ -4211,23 +4217,26 @@ function buildPrintCard(j) {
          one page. -->
     <style>
       @media print {
-        @page { size: 8.5in 12.5in; margin: 0; }
+        ${paperSize === 'letter'
+          ? '@page { size: letter; margin: 0; }'
+          : '@page { size: 8.5in 12.5in; margin: 0; }'}
         /* Tighter top/bottom padding so the bottom "Signature:" line fits
            on page 1 alongside the bigger header. */
-        #print-area { width: 8.5in !important; padding: 0.18in 0.4in !important; }
+        #print-area { width: 8.5in !important; padding: ${paperSize === 'letter' ? '0.12in 0.4in' : '0.18in 0.4in'} !important; }
         #print-area table { page-break-inside: auto !important; break-inside: auto !important; }
         #print-area tr    { page-break-inside: avoid !important; break-inside: avoid !important; }
       }
-      /* Bigger header so the logo + job-id don't get lost in white space. */
-      .pc-logo   { height: 80px !important; }
-      .pc-serial { font-size: 18pt !important; }
+      /* Header sizes — compact when targeting letter so the logo + serial
+         don't crowd the rest of the card. */
+      .pc-logo   { height: ${paperSize === 'letter' ? '60px' : '80px'} !important; }
+      .pc-serial { font-size: ${paperSize === 'letter' ? '15pt' : '18pt'} !important; }
       /* Trim the title margin and the row heights — collectively saves
-         ~1in of vertical space so the Signature line fits even when the
-         printer's paper-size override forces letter/A4 instead of 8.5x12.5. */
-      .pc-title  { margin: 0 0 2px !important; }
-      .pp-table .pp-data-row td     { height: 30px !important; padding: 4px 10px !important; font-size: 11pt; }
-      .pp-table .pp-comments-row td { height: 55px !important; padding: 4px 10px !important; font-size: 11pt; }
-      .pc-sig { margin-top: 4px !important; }
+         ~1.5in of vertical space on the "letter" variant so the
+         Signature line fits on 8.5x11 / A4. */
+      .pc-title  { margin: 0 0 2px !important; ${paperSize === 'letter' ? 'font-size: 18pt !important;' : ''} }
+      .pp-table .pp-data-row td     { height: ${paperSize === 'letter' ? '24px' : '30px'} !important; padding: ${paperSize === 'letter' ? '3px 10px' : '4px 10px'} !important; font-size: ${paperSize === 'letter' ? '10pt' : '11pt'}; }
+      .pp-table .pp-comments-row td { height: ${paperSize === 'letter' ? '42px' : '55px'} !important; padding: ${paperSize === 'letter' ? '3px 10px' : '4px 10px'} !important; font-size: ${paperSize === 'letter' ? '10pt' : '11pt'}; }
+      .pc-sig { margin-top: 4px !important; ${paperSize === 'letter' ? 'font-size: 11pt !important;' : ''} }
 
       /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
          Force exact-color so browsers don't strip ink-saving colors. */
@@ -4322,11 +4331,46 @@ function buildPrintCard(j) {
   `;
 }
 
+// Job-card print is gated by a tiny paper-size picker so the user
+// commits to which paper they're using BEFORE Chrome's print dialog
+// opens. Choice is remembered in localStorage so subsequent prints
+// skip straight through after a confirmation.
 function printJobCard(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
+  const remembered = localStorage.getItem('jobCardPaperSize'); // 'std' | 'letter' | null
+  const pickerHtml = `
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:480px;">
+      <h2 style="margin-top:0;">Print Job Card — Pick Paper Size</h2>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px;">Choose the paper you're loading into the printer. <b>Make sure to select the matching size in Chrome's print dialog</b> when it opens.</div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <button class="btn btn-primary" style="text-align:left;padding:14px 16px;" onclick="doPrintJobCard(${id}, 'std')">
+          <div style="font-weight:600;">Standard — 8.5 × 12.5 in</div>
+          <div style="font-size:12px;opacity:0.85;margin-top:2px;">Shop's job-card paper. Full-size header, comfortable row heights.</div>
+        </button>
+        <button class="btn" style="text-align:left;padding:14px 16px;border:1px solid var(--border);" onclick="doPrintJobCard(${id}, 'letter')">
+          <div style="font-weight:600;">Letter / A4 — 8.5 × 11 in (compact)</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px;">Tighter layout to fit on standard letter / A4 without cutting off the Signature line.</div>
+        </button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>`;
+  openModal(pickerHtml);
+  // Pre-focus the remembered choice's button if any (improves keyboard flow).
+  if (remembered === 'letter') setTimeout(() => document.querySelectorAll('.modal .btn')[1]?.focus(), 50);
+}
+
+// Actually fires the print. Saves the chosen paper size so future
+// prints can be one click faster (Cancel still works to bail).
+function doPrintJobCard(id, paperSize) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  localStorage.setItem('jobCardPaperSize', paperSize);
+  closeModal();
   const area = document.getElementById('print-area');
-  area.innerHTML = buildPrintCard(j);
+  area.innerHTML = buildPrintCard(j, paperSize);
   // Browsers print the document.title in the page header by default
   // ("Job Tracker Supreme Art"). Blank the title for the duration of
   // the print so the header is empty — the timestamp Chrome adds
