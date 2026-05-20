@@ -125,9 +125,16 @@
   .jobs-list { display: flex; flex-direction: column; gap: 8px; }
   .job-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; border-left: 4px solid var(--border); transition: box-shadow 0.12s; }
   .job-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.07); }
-  .job-card.p-high { border-left-color: #E24B4A; }
-  .job-card.p-medium { border-left-color: #EF9F27; }
-  .job-card.p-low { border-left-color: #97C459; }
+  /* Priority left-border accents on job cards. New names map to:
+       Normal = black, Urgent = dark blue, Most Urgent = green.
+     Legacy class names (p-high / p-medium / p-low) kept for back-compat
+     in case any older code paths still reference them. */
+  .job-card.p-normal      { border-left-color: #000000; }
+  .job-card.p-urgent      { border-left-color: #1e40af; }
+  .job-card.p-most-urgent { border-left-color: #166534; }
+  .job-card.p-high   { border-left-color: #166534; }
+  .job-card.p-medium { border-left-color: #1e40af; }
+  .job-card.p-low    { border-left-color: #000000; }
   .job-card.is-done { opacity: 0.72; }
   .job-top { display: flex; align-items: flex-start; gap: 12px; }
   .job-meta { flex: 1; }
@@ -648,6 +655,20 @@ function isReamPaper(paperType) { return PAPER_TYPES_REAM.has(paperType); }
 function packetSize(paperType)  { return isReamPaper(paperType) ? 500 : 100; }
 function packetUnitLabel(paperType) { return isReamPaper(paperType) ? 'Reams' : 'Packets'; }
 
+// Priority naming: form uses Normal / Urgent / Most Urgent. Old job rows
+// in the DB may still have Low / Medium / High — this maps them to the
+// new names so display stays consistent without a data migration.
+//   Low    → Normal       (black)
+//   Medium → Urgent       (dark blue)
+//   High   → Most Urgent  (green)
+const PRIORITY_LEVELS = ['Normal', 'Urgent', 'Most Urgent'];
+function normalizePriority(p) {
+  if (p === 'Low')    return 'Normal';
+  if (p === 'Medium') return 'Urgent';
+  if (p === 'High')   return 'Most Urgent';
+  return PRIORITY_LEVELS.includes(p) ? p : 'Normal';
+}
+
 // Particulars table — every row of the paper card's bottom section.
 // 'data' rows have Details/Quantity/Name/Signature inputs.
 // Specials handle the multi-checkbox rows that span those 4 columns.
@@ -973,7 +994,13 @@ function renderJobs() {
       return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="moveToStage(${j.id},${i})" style="cursor:pointer">${SHORT[i]}</span>`;
     }).join('');
     const note = j.stages?.[si]?.notes;
-    const pc = j.priority==='High'?'p-high':j.priority==='Medium'?'p-medium':'p-low';
+    // Priority class — map both the new names (Normal / Urgent / Most Urgent)
+    // AND any legacy values (Low / Medium / High) to the same set of CSS
+    // classes. Legacy → new: Low→Normal, Medium→Urgent, High→Most Urgent.
+    const priNorm = normalizePriority(j.priority);
+    const pc = priNorm === 'Most Urgent' ? 'p-most-urgent'
+             : priNorm === 'Urgent'      ? 'p-urgent'
+             :                              'p-normal';
     const coatings = Array.isArray(j.coatings) ? j.coatings : [];
     return `
     <div class="job-card ${pc} ${done?'is-done':''}">
@@ -982,7 +1009,7 @@ function renderJobs() {
           <div class="job-id-row">
             <span class="job-id">#${j.id}</span>
             ${badge}
-            ${j.priority==='High'?'<span class="badge badge-blocked" style="font-size:10px;">HIGH PRIORITY</span>':''}
+            ${priNorm === 'Most Urgent' ? '<span class="badge" style="font-size:10px;background:#166534;color:#fff;">MOST URGENT</span>' : ''}
           </div>
           <div class="job-name">${esc(j.name)}</div>
           <div class="job-sub">${esc(j.client)}${j.qty?' &middot; '+esc(j.qty)+' pcs':''}${j.deadline?' &middot; Due: '+esc(j.deadline):''}</div>
@@ -3616,9 +3643,10 @@ function jobForm(j={}) {
         <td>
           <span class="jc-lbl">Job Priority</span>
           <select id="f-priority">
-            <option ${(j.priority||'Medium')==='Low'?'selected':''}>Low</option>
-            <option ${(j.priority||'Medium')==='Medium'?'selected':''}>Medium</option>
-            <option ${(j.priority||'Medium')==='High'?'selected':''}>High</option>
+            ${(() => {
+              const cur = normalizePriority(j.priority);
+              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
+            })()}
           </select>
         </td>
       </tr>
@@ -4166,11 +4194,16 @@ function buildPrintCard(j) {
   };
   const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
-  // Priority cell — colored by level: Low=blue, Medium=green, High=red.
-  // Class names map to print-CSS rules below.
+  // Priority cell — colored by level. Normal=black, Urgent=dark blue,
+  // Most Urgent=green. Legacy Low/Medium/High values are normalized to
+  // the new names before picking the class so old job cards still print
+  // correctly.
   const priorityCell = (label, val) => {
-    const cls = val === 'High' ? 'pc-prio-high' : val === 'Low' ? 'pc-prio-low' : val === 'Medium' ? 'pc-prio-med' : '';
-    return `<td><div class="pc-label">${label}</div><div class="pc-value ${cls}">${v(val)}</div></td>`;
+    const norm = normalizePriority(val);
+    const cls  = norm === 'Most Urgent' ? 'pc-prio-most-urgent'
+               : norm === 'Urgent'      ? 'pc-prio-urgent'
+               :                          'pc-prio-normal';
+    return `<td><div class="pc-label">${label}</div><div class="pc-value ${cls}">${v(norm)}</div></td>`;
   };
 
   const dataRow = r => `
@@ -4237,25 +4270,27 @@ function buildPrintCard(j) {
       }
       /* Cut selection beside Sheets Qty — make it pop a touch more. */
       .pc-cut { font-weight: 700 !important; }
-      /* Ticked coatings print in red so the active ones stand out. */
+      /* Ticked checkboxes (coatings + paper-type) print in GREEN so the
+         active ones stand out without clashing with the priority colors. */
       .pc-coat-on {
-        color: #b91c1c !important;
-        border-color: #b91c1c !important;
+        color: #166534 !important;
+        border-color: #166534 !important;
         font-weight: 700 !important;
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
       .pc-coat-label-on {
-        color: #b91c1c !important;
+        color: #166534 !important;
         font-weight: 700 !important;
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
-      /* Job priority — colored by level. Overrides the blue .pc-value rule. */
-      .pc-value.pc-prio-low  { color: #1e40af !important; font-weight: 700 !important; }
-      .pc-value.pc-prio-med  { color: #166534 !important; font-weight: 700 !important; }
-      .pc-value.pc-prio-high { color: #b91c1c !important; font-weight: 700 !important; }
-      .pc-value.pc-prio-low, .pc-value.pc-prio-med, .pc-value.pc-prio-high {
+      /* Job priority — colored by new level names. Overrides the blue
+         .pc-value rule. Normal=black, Urgent=dark blue, Most Urgent=green. */
+      .pc-value.pc-prio-normal      { color: #000000 !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-urgent      { color: #1e40af !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-most-urgent { color: #166534 !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-normal, .pc-value.pc-prio-urgent, .pc-value.pc-prio-most-urgent {
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
