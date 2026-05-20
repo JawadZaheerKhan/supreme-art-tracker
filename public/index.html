@@ -2840,19 +2840,15 @@ function getStickerQtyForCase(caseNo) {
   return '';
 }
 
-// Rebuild the variants form block from `stickerVariants` state. Each row
-// shows the (qty, total) inputs, an inline case-range hint, and a remove
-// button on rows 2+ (first variant can't be removed).
+// Rebuild the variants form block from `stickerVariants` state. Called on
+// initial render, add, and remove — NOT on every keystroke (that destroys
+// focus). Each row has stable ids (stk-var-qty-N, stk-var-total-N) and a
+// hint span (stk-var-range-N) that the lightweight `syncStickerHints`
+// updates in place while the user types.
 function renderStickerVariants() {
   const wrap = document.getElementById('stk-variants');
   if (!wrap) return;
   wrap.innerHTML = stickerVariants.map((v, i) => {
-    const t = +v.total || 0;
-    const start = stickerVariants.slice(0, i).reduce((a, x) => a + (+x.total || 0), 0) + 1;
-    const end = start + t - 1;
-    const rangeNote = t > 0
-      ? `<span style="color:var(--text2);font-weight:400;font-size:12px;margin-left:6px;">(cases ${start}–${end})</span>`
-      : '';
     const removeBtn = i > 0
       ? `<button type="button" onclick="removeStickerVariant(${i})" title="Remove this variant"
                  style="margin-bottom:2px;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--text2);font-size:14px;">&times;</button>`
@@ -2866,13 +2862,13 @@ function renderStickerVariants() {
         <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end;">
           <div class="stk-row" style="margin:0;">
             <label class="stk-label">${variantLabel}</label>
-            <input type="number" class="stk-input" placeholder="e.g. 600" min="0"
+            <input type="number" id="stk-var-qty-${i}" class="stk-input" placeholder="e.g. 600" min="0"
                    value="${esc(String(v.qty || ''))}"
                    oninput="updateStickerVariant(${i}, 'qty', this.value)">
           </div>
           <div class="stk-row" style="margin:0;">
-            <label class="stk-label">Total Cases ${rangeNote}</label>
-            <input type="number" class="stk-input" placeholder="e.g. 10" min="1"
+            <label class="stk-label">Total Cases <span id="stk-var-range-${i}" style="color:var(--text2);font-weight:400;font-size:12px;margin-left:6px;"></span></label>
+            <input type="number" id="stk-var-total-${i}" class="stk-input" placeholder="e.g. 10" min="1"
                    value="${esc(String(v.total || ''))}"
                    oninput="updateStickerVariant(${i}, 'total', this.value)">
           </div>
@@ -2881,8 +2877,32 @@ function renderStickerVariants() {
       </div>`;
   }).join('');
 
-  // Auto-bump the reprint "To #" to the new grand total when the user hasn't
-  // customised the range — keeps "print all" frictionless across variant edits.
+  syncStickerHints();
+}
+
+// Update the case-range hints and the reprint "To #" total without
+// touching the input elements themselves — preserves caret/focus while
+// the user types into a variant field.
+function syncStickerHints() {
+  // 1) Per-variant case-range hint ("cases 1–10")
+  let cursor = 1;
+  stickerVariants.forEach((v, i) => {
+    const t = +v.total || 0;
+    const span = document.getElementById(`stk-var-range-${i}`);
+    if (span) {
+      if (t > 0) {
+        const start = cursor;
+        const end   = cursor + t - 1;
+        span.textContent = `(cases ${start}–${end})`;
+      } else {
+        span.textContent = '';
+      }
+    }
+    cursor += t;
+  });
+
+  // 2) Auto-bump reprint "To #" to the new grand total when the user
+  // hasn't customised the range — keeps "print all" frictionless.
   const toInput   = document.getElementById('stk-to');
   const fromInput = document.getElementById('stk-from');
   const grandTotal = getStickerTotalCases();
@@ -2894,6 +2914,8 @@ function renderStickerVariants() {
     toInput.dataset.lastTotal = grandTotal;
   }
   if (fromInput && !fromInput.value) fromInput.value = 1;
+
+  // 3) Refresh the live preview.
   renderStickerPreview();
 }
 
@@ -2908,10 +2930,13 @@ function removeStickerVariant(i) {
   renderStickerVariants();
 }
 
+// Called from each variant input's oninput. Only updates state and the
+// lightweight hints — does NOT rebuild the variants HTML, so focus and
+// caret position stay on the input the user is typing into.
 function updateStickerVariant(i, field, value) {
   if (!stickerVariants[i]) return;
   stickerVariants[i][field] = value;
-  renderStickerVariants();
+  syncStickerHints();
 }
 
 // Format date as DD-MM-YYYY (matches the sample sticker's "15-12-2022")
