@@ -2083,13 +2083,16 @@ function computeSummaryRows() {
     // After Import = what we'll have once all pending imports arrive.
     // Simple sum: current on-hand + pending.
     const afterImportPkts  = stockNowPkts + pendingPkts;
-    // Required Next = how much MORE we still need to order to cover the
-    // total consumption (Total Out) once Pending Import is taken into account.
-    // Floored at 0 — if After Import already covers consumption, nothing
-    // more is needed (no negative "required").
-    // Example: consumed 100, have 0 on hand, ordered 50 → still need 50.
-    //          consumed 100, have 0 on hand, ordered 0  → still need 100.
-    const requiredNextPkts = Math.max(0, (totalOutSheets / ps) - afterImportPkts);
+    // Required Next = balance after consumption.
+    //   positive  → still need to order this much MORE to cover Total Out
+    //               (rendered red as a shortfall)
+    //   negative  → surplus; After Import covers Total Out with extra stock
+    //               left over (rendered green as +N)
+    //   zero      → exactly covered
+    // Sign convention: requiredNextPkts > 0 means short, < 0 means surplus.
+    // Formula stays the same — we just drop the Math.max() floor so the
+    // sign is preserved for display.
+    const requiredNextPkts = (totalOutSheets / ps) - afterImportPkts;
     return {
       item: it,
       openingPkts: openingSheets / ps,
@@ -2138,6 +2141,25 @@ function fmtKg(n) {
   return (+n.toFixed(2)).toLocaleString();
 }
 
+// Signed variants for the Required Next / Required (kg) columns where a
+// surplus needs to be visible (not floored at 0). Positive = shortfall
+// (rendered red by the caller), negative = surplus (rendered green by
+// the caller). The "+" is added for surplus values so the sign reads
+// unambiguously e.g. "+12 surplus" vs "8 short".
+function fmtSignedPkts(n) {
+  if (!n) return '0';
+  const r = Number.isInteger(n) ? n : +n.toFixed(2);
+  if (r < 0) return `+${Math.abs(r).toLocaleString()}`;
+  return r.toLocaleString();
+}
+function fmtSignedKg(n) {
+  if (n === null || n === undefined) return '—';
+  if (!n) return '0';
+  const r = +n.toFixed(2);
+  if (r < 0) return `+${Math.abs(r).toLocaleString()}`;
+  return r.toLocaleString();
+}
+
 function renderStockSummary() {
   const { paperType } = stockSummaryState;
   const { rows, buckets, orphanImports } = computeSummaryRows();
@@ -2169,8 +2191,8 @@ function renderStockSummary() {
       <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.importKg)}</td>
-      <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':'inherit'};">${fmtPkts(r.requiredNextPkts)}</td>
-      <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':'inherit'};">${fmtKg(r.requiredKg)}</td>
+      <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedPkts(r.requiredNextPkts)}</td>
+      <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   el.innerHTML = `
@@ -2240,8 +2262,8 @@ function printStockSummary() {
       <td ${tdR}>${fmtPkts(r.pendingImportPkts)}</td>
       <td ${tdR}><b>${fmtPkts(r.afterImportPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
-      <td ${tdR}><b>${fmtPkts(r.requiredNextPkts)}</b></td>
-      <td ${tdR}>${fmtKg(r.requiredKg)}</td>
+      <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};"><b>${fmtSignedPkts(r.requiredNextPkts)}</b></td>
+      <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   const html = `
