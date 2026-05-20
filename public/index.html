@@ -1222,6 +1222,20 @@ async function saveInvAdd() {
 
 function openInvEdit(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
+  const curBal  = it.current_balance || 0;
+  const unit    = esc(it.unit || 'sheets');
+  // Admin-only: direct balance correction. The server writes a
+  // reason='correction' transaction (visible in History, hidden from
+  // Stock In/Out and Dashboard movement totals).
+  const balanceSection = isAdmin()
+    ? `<div class="form-group" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;">
+         <label class="form-label" style="color:#A32D2D;">Current Balance <span style="font-weight:400;font-size:11px;color:var(--text2);">(admin only — corrections won't show in Stock In/Out reports)</span></label>
+         <input type="number" id="inv-balance" value="${curBal}" min="0" step="1" data-original="${curBal}">
+         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBal.toLocaleString()}</b> ${unit}. Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
+         <label class="form-label" style="margin-top:8px;font-size:11px;">Reason for correction <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+         <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 200 sheets">
+       </div>`
+    : `<div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${curBal.toLocaleString()}</b> ${unit}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Edit Paper Item</h2>
     ${invDatalistsHtml()}
@@ -1236,7 +1250,7 @@ function openInvEdit(id) {
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
     <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
-    <div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${(it.current_balance||0).toLocaleString()}</b> ${esc(it.unit||'sheets')}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>
+    ${balanceSection}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvEdit(${id})">Save Changes</button>
@@ -1252,6 +1266,21 @@ async function saveInvEdit(id) {
     reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
+  // Admin-only balance correction. Only send current_balance if it
+  // actually changed — server treats omitted/unchanged as no-op.
+  const balEl = document.getElementById('inv-balance');
+  if (balEl && isAdmin()) {
+    const newBal = parseInt(balEl.value, 10);
+    const oldBal = parseInt(balEl.dataset.original, 10) || 0;
+    if (Number.isFinite(newBal) && newBal !== oldBal) {
+      const delta = newBal - oldBal;
+      const sign  = delta > 0 ? '+' : '';
+      if (!confirm(`Correct balance from ${oldBal.toLocaleString()} to ${newBal.toLocaleString()} (${sign}${delta.toLocaleString()})?\n\nThis writes a "correction" entry to the item's History and will NOT appear in Stock In / Stock Out reports.`)) return;
+      data.current_balance = newBal;
+      const notesEl = document.getElementById('inv-correction-notes');
+      if (notesEl && notesEl.value.trim()) data.correction_notes = notesEl.value.trim();
+    }
+  }
   showSaving(true);
   try {
     await api('PUT', `/api/inventory/${id}`, data);

@@ -701,7 +701,14 @@ app.put('/api/inventory/:id', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { paper_type, size, gsm, brand, reorder_threshold } = req.body;
+    const { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes } = req.body;
+
+    // Snapshot the pre-edit balance — needed so an admin-only balance
+    // correction below can compute the delta.
+    const before = await sql`SELECT current_balance FROM inventory_items WHERE id=${id}`;
+    if (!before[0]) return res.status(404).json({ error: 'Item not found' });
+    const oldBalance = before[0].current_balance || 0;
+
     const result = await sql`
       UPDATE inventory_items SET
         paper_type=${paper_type}, size=${size||null}, gsm=${gsm||null},
@@ -709,11 +716,38 @@ app.put('/api/inventory/:id', requireAuth, async (req, res) => {
       WHERE id=${id} RETURNING *
     `;
     const item = result[0];
+
+    // Admin-only direct balance correction. We write a transaction with
+    // reason='correction' so the per-item History modal still shows the
+    // change (full audit trail), but the aggregate movement report
+    // (Stock In / Stock Out / Dashboard) filters this reason out so it
+    // doesn't pollute the in/out totals.
+    if (req.user && req.user.role === 'admin' && current_balance !== undefined && current_balance !== null && current_balance !== '') {
+      const newBalance = parseInt(current_balance, 10);
+      if (Number.isFinite(newBalance) && newBalance !== oldBalance) {
+        const delta = newBalance - oldBalance;
+        await applyInventoryChange(sql, {
+          itemId: parseInt(id, 10),
+          change: delta,
+          reason: 'correction',
+          jobId: null,
+          notes: correction_notes || 'Balance edit from inventory form',
+        });
+        if (item) {
+          const label = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
+          const sign = delta > 0 ? '+' : '';
+          await logAudit(sql, req, { action: 'inventory.correction', entityType: 'inventory', entityId: item.id, summary: `Balance corrected: ${oldBalance.toLocaleString()} -> ${newBalance.toLocaleString()} sheets (${sign}${delta.toLocaleString()}) · ${label}` });
+        }
+      }
+    }
+
     if (item) {
       const label = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
       await logAudit(sql, req, { action: 'inventory.update', entityType: 'inventory', entityId: item.id, summary: `Edited paper item: ${label}` });
     }
-    res.json(item);
+    // Re-fetch so the returned row reflects any balance correction above.
+    const refreshed = await sql`SELECT * FROM inventory_items WHERE id=${id}`;
+    res.json(refreshed[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -768,6 +802,10 @@ app.get('/api/inventory/transactions', async (req, res) => {
               : 'all';
     // Inclusive end-of-day on `to` so a date like 2026-05-31 matches transactions
     // recorded at 2026-05-31 18:00:00. Without this, same-day queries miss data.
+    // reason='correction' is an admin-only balance edit (data fix). It
+    // shows in the per-item History modal but is intentionally excluded
+    // from movement reports so Stock In / Stock Out / Dashboard totals
+    // reflect actual material flow only.
     const txs = await sql`
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
              i.paper_type, i.size AS item_size, i.gsm AS item_gsm,
@@ -777,6 +815,7 @@ app.get('/api/inventory/transactions', async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
         AND (${to}::timestamptz   IS NULL OR t.created_at <  (${to}::timestamptz + INTERVAL '1 day'))
+        AND t.reason != 'correction'
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
