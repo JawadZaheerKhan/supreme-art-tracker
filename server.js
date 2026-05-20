@@ -50,7 +50,7 @@ async function initDb() {
         paper       TEXT,
         machine     TEXT,
         coatings    TEXT[],
-        priority    TEXT DEFAULT 'Medium',
+        priority    TEXT DEFAULT 'Normal',
         delqty      TEXT,
         cartonqty   TEXT,
         notes       TEXT,
@@ -486,7 +486,7 @@ app.post('/api/jobs', requireAuth, async (req, res) => {
     // POST /api/jobs/:id/issue-stock to deduct inventory and flip status.
     const result = await sql`
       INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Medium'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, 'pending')
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, 'pending')
       RETURNING *
     `;
     const job = result[0];
@@ -534,7 +534,7 @@ app.put('/api/jobs/:id', requireAuth, async (req, res) => {
         name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
         dateissued=${dateissued||null}, deadline=${deadline||null}, size=${size||null},
         ups=${ups||null}, sheets=${sheets||null}, qty=${qty||null}, paper=${paper||null},
-        machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Medium'},
+        machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Normal'},
         delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
         bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
         particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId}
