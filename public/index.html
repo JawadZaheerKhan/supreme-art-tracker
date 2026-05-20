@@ -41,6 +41,8 @@
   .rsb-item:hover { background: var(--bg2); }
   .rsb-item.active { background: var(--text); color: var(--bg); }
   .rsb-item.active .rsb-icon { color: var(--bg) !important; }
+  .rsb-back { background: transparent; border: 1px solid var(--border); padding: 7px 10px; border-radius: 6px; text-align: left; font-family: var(--font); font-size: 12px; color: var(--text2); cursor: pointer; margin-bottom: 6px; transition: all 0.12s; }
+  .rsb-back:hover { background: var(--bg2); color: var(--text); border-color: var(--text2); }
   .rsb-icon { font-size: 15px; width: 18px; text-align: center; }
   .reports-content { flex: 1; padding: 18px 24px; overflow-x: auto; min-width: 0; }
   .rt-pane { max-width: 1400px; }
@@ -275,7 +277,8 @@
 
 /* The actual sticker — used both in preview and in print. Fixed physical
    size 3.5in × 2.5in so it prints true-to-life for pasting on cartons.
-   On A4 portrait we fit 6 per page (2 columns × 3 rows). */
+   On A4 portrait we fit 8 per page (2 columns × 4 rows) with a small gap
+   between them so they're easy to cut apart. */
 .sticker {
   border: 1.5px solid #000; box-sizing: border-box;
   width: 3.5in; height: 2.5in;
@@ -283,31 +286,42 @@
   display: flex; flex-direction: column;
   overflow: hidden;
 }
-.sticker-header { display: flex; align-items: center; border-bottom: 1.5px solid #000; padding: 4px 6px; flex: 0 0 auto; }
-.sticker-header-left { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
-.sticker-logo { height: 22px; width: auto; flex: 0 0 auto; }
-.sticker-brand { font-size: 7pt; font-weight: 700; letter-spacing: 0.2px; line-height: 1.1; }
-.sticker-date  { font-size: 7pt; font-weight: 500; white-space: nowrap; }
+.sticker-header { display: flex; align-items: center; border-bottom: 1.5px solid #000; padding: 4px 8px; gap: 10px; flex: 0 0 auto; }
+.sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 4px; }
+.sticker-logo {
+  height: 50px; width: auto; flex: 0 0 auto;
+  /* Bump contrast + saturation so the (already small) printed logo
+     keeps its black/red punch instead of fading to gray. exact-color
+     stops browsers from stripping it for ink-saving. */
+  filter: contrast(1.35) saturate(1.5);
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
+}
+.sticker-brand { font-size: 11pt; font-weight: 700; letter-spacing: 0.2px; line-height: 1.1; white-space: nowrap; }
+.sticker-date  { font-size: 10pt; font-weight: 700; white-space: nowrap; }
 .sticker-row { display: flex; border-bottom: 1.5px solid #000; flex: 1 1 0; min-height: 0; }
 .sticker-row:last-child { border-bottom: none; }
-.sticker-row-label { width: 34%; padding: 2px 6px; font-size: 7.5pt; font-weight: 500; border-right: 1.5px solid #000; box-sizing: border-box; display: flex; align-items: center; }
-.sticker-row-value { flex: 1; padding: 2px 6px; font-size: 9pt; font-weight: 700; box-sizing: border-box; display: flex; align-items: center; }
-.sticker-row-value.big { font-size: 13pt; }
+.sticker-row-label { width: 26%; padding: 3px 8px; font-size: 9.5pt; font-weight: 500; border-right: 1.5px solid #000; box-sizing: border-box; display: flex; align-items: center; }
+.sticker-row-value { flex: 1; padding: 3px 8px; font-size: 11pt; font-weight: 700; box-sizing: border-box; display: flex; align-items: center; }
+.sticker-row-value.big { font-size: 15pt; }
 
 /* On-screen preview: gray backdrop helps users see the white sticker edge */
 .stk-preview .sticker { box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
 
-/* Print sheet — A4 portrait with a 2×3 grid of stickers (6 per page).
+/* Print sheet — A4 portrait with a 2×4 grid of stickers (8 per page).
    The spacer divs (not padding) reserve top/bottom breathing room — browsers
    drop padding-top when an element starts a fresh page, but they always
-   honour an actual block child with a fixed height. */
+   honour an actual block child with a fixed height.
+   Layout budget on A4 portrait (11.69in tall, margin:0):
+     0.25in top spacer + 4 × 2.5in (=10in) + 3 × 0.08in row gaps (=0.24in)
+     + 0.25in bottom spacer = 10.74in — comfortably under 11.69in. */
 .stickers-sheet { box-sizing: border-box; }
-.stickers-sheet-spacer-top, .stickers-sheet-spacer-bottom { height: 0.4in; width: 100%; }
+.stickers-sheet-spacer-top, .stickers-sheet-spacer-bottom { height: 0.25in; width: 100%; }
 .stickers-sheet-grid {
   display: grid;
   grid-template-columns: 3.5in 3.5in;
-  grid-template-rows: 2.5in 2.5in 2.5in;
-  gap: 0;
+  grid-template-rows: 2.5in 2.5in 2.5in 2.5in;
+  gap: 0.08in;
   justify-content: center;
   align-content: start;
 }
@@ -447,33 +461,73 @@
 </div>
 
 <div class="main" id="reports-mode" style="display:none;">
-  <div class="reports-layout">
-    <!-- Sidebar — five sections; Dashboard / Stock In / Stock Out render inline,
-         Stock Summary / Imports still open as modals (unchanged from before). -->
-    <aside class="reports-sidebar">
-      <div class="rsb-section">Movement</div>
-      <button class="rsb-item active" data-rt="dashboard" onclick="setReportsTab('dashboard')">
-        <span class="rsb-icon">&#128200;</span> Dashboard
+  <!-- Landing: three clickable cards. Click one to enter its grouped view.
+       Imports doesn't have sub-views so it opens its modal directly. -->
+  <div id="reports-landing" style="max-width:1100px;margin:28px auto;padding:0 16px;">
+    <h2 style="margin:0 0 6px;font-size:22px;">Reports</h2>
+    <p style="color:var(--text2);margin:0 0 22px;font-size:14px;">Stock movement, summaries, and pending imports — all printable.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">
+      <button class="report-card" onclick="openReportsGroup('dashboard-group')">
+        <div class="report-card-icon">&#128200;</div>
+        <div class="report-card-title">Dashboard</div>
+        <div class="report-card-desc">Movement overview: totals in / out, per-item breakdown, and the Stock In / Stock Out detail views — all in one place.</div>
       </button>
-      <button class="rsb-item" data-rt="stock-in" onclick="setReportsTab('stock-in')">
-        <span class="rsb-icon" style="color:#166534;">&#8595;</span> Stock In
+      <button class="report-card" onclick="openReportsGroup('analysis-group')">
+        <div class="report-card-icon">&#128203;</div>
+        <div class="report-card-title">Reports</div>
+        <div class="report-card-desc">Stock Summary — per-paper-type position with opening balance, in/out, after-import, and required-next.</div>
       </button>
-      <button class="rsb-item" data-rt="stock-out" onclick="setReportsTab('stock-out')">
-        <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Stock Out
+      <button class="report-card" onclick="openImports()">
+        <div class="report-card-icon">&#128666;</div>
+        <div class="report-card-title">Imports</div>
+        <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders and mark them received to feed Stock Summary.</div>
       </button>
-      <div class="rsb-section">Analysis</div>
-      <button class="rsb-item" data-rt="summary" onclick="setReportsTab('summary'); openStockSummary();">
-        <span class="rsb-icon">&#128203;</span> Stock Summary
-      </button>
-      <button class="rsb-item" data-rt="imports" onclick="setReportsTab('imports'); openImports();">
-        <span class="rsb-icon">&#128666;</span> Imports
-      </button>
-    </aside>
-    <main class="reports-content">
-      <div id="rt-dashboard" class="rt-pane"></div>
-      <div id="rt-stock-in"  class="rt-pane" style="display:none;"></div>
-      <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
-    </main>
+    </div>
+  </div>
+
+  <!-- Dashboard group — sidebar nav: Dashboard / Stock In / Stock Out -->
+  <div id="dashboard-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Movement</div>
+        <button class="rsb-item active" data-rt="dashboard" onclick="setReportsTab('dashboard')">
+          <span class="rsb-icon">&#128200;</span> Dashboard
+        </button>
+        <button class="rsb-item" data-rt="stock-in" onclick="setReportsTab('stock-in')">
+          <span class="rsb-icon" style="color:#166534;">&#8595;</span> Stock In
+        </button>
+        <button class="rsb-item" data-rt="stock-out" onclick="setReportsTab('stock-out')">
+          <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Stock Out
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-dashboard" class="rt-pane"></div>
+        <div id="rt-stock-in"  class="rt-pane" style="display:none;"></div>
+        <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Analysis (Reports card) group — sidebar nav: Stock Summary.
+       The Stock Summary view still uses its existing modal; clicking
+       the sidebar item launches it. Room to add more analysis reports
+       to the sidebar later without restructuring. -->
+  <div id="analysis-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Analysis</div>
+        <button class="rsb-item active" data-rt="summary" onclick="openStockSummary()">
+          <span class="rsb-icon">&#128203;</span> Stock Summary
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div style="padding:60px 20px;text-align:center;color:var(--text2);font-size:14px;">
+          Pick a report from the sidebar to open it.
+        </div>
+      </main>
+    </div>
   </div>
 </div>
 
@@ -513,19 +567,18 @@
         <input type="text" id="stk-desc" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
       </div>
 
-      <div class="stk-grid3">
-        <div class="stk-row">
-          <label class="stk-label">Quantity (per carton)</label>
-          <input type="number" id="stk-qty" class="stk-input" placeholder="e.g. 600" min="0" oninput="renderStickerPreview()">
-        </div>
-        <div class="stk-row">
-          <label class="stk-label">Total Cases</label>
-          <input type="number" id="stk-total" class="stk-input" placeholder="e.g. 10" min="1" oninput="onStickerTotalChange()">
-        </div>
-        <div class="stk-row">
-          <label class="stk-label">Date</label>
-          <input type="date" id="stk-date" class="stk-input">
-        </div>
+      <div class="stk-row">
+        <label class="stk-label">Date</label>
+        <input type="date" id="stk-date" class="stk-input" style="max-width:240px;" oninput="renderStickerPreview()">
+      </div>
+
+      <!-- Variants — one row per (qty-per-carton + total-cases) pair.
+           Same-job batches sometimes need an extra carton with a different qty
+           (e.g. 10 full at 600/each + 1 partial at 200). Add as many as needed;
+           case numbers are continuous across the whole batch. -->
+      <div id="stk-variants"></div>
+      <div style="margin-top:8px;">
+        <button type="button" class="btn btn-ghost" onclick="addStickerVariant()" style="font-size:13px;padding:6px 12px;">+ Add another quantity</button>
       </div>
 
       <div class="stk-range">
@@ -823,9 +876,10 @@ function setMode(m) {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     refreshBtn.style.display = 'none';
-    // Default to the Dashboard pane every time the user lands on Reports
-    // (avoids stale state if they had Stock In/Out open from a prior visit).
-    setReportsTab('dashboard');
+    // Always land on the 3-card landing when entering Reports — leaves
+    // any sub-view state intact in case the user navigates back into a
+    // group, but presents the same starting screen every time.
+    exitReportsGroup();
   } else if (m === 'stickers') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -1090,14 +1144,18 @@ function openInvAdd() {
     ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
-        <select id="inv-paper-type" onchange="invOpeningSync()">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+        <select id="inv-paper-type" onchange="invOpeningSync(); checkInvDuplicate();">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century"></div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century" oninput="checkInvDuplicate()"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36"></div>
-      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
     </div>
+    <!-- Live duplicate hint — turns yellow when the typed fields already
+         match an existing inventory item, so the user knows the "Opening"
+         will top up the existing item rather than create a new row. -->
+    <div id="inv-dup-hint" style="display:none;margin:-6px 0 4px;padding:8px 10px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:12px;color:#78350f;"></div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label" id="inv-opening-packets-label">Opening — Packets</label>
@@ -1118,6 +1176,45 @@ function openInvAdd() {
     </div>
   </div>`);
   invOpeningSync();
+  checkInvDuplicate();
+}
+
+// Live check: if (paper_type, size, gsm, brand) already exists in
+// inventory, surface a yellow hint that this submission will TOP UP the
+// existing item instead of creating a new row. Normalized to match the
+// server's COALESCE/case behavior.
+function checkInvDuplicate() {
+  const hint = document.getElementById('inv-dup-hint');
+  if (!hint) return;
+  const norm = s => String(s || '').trim().toLowerCase();
+  const pt    = (document.getElementById('inv-paper-type')||{}).value || '';
+  const size  = (document.getElementById('inv-size')||{}).value || '';
+  const gsm   = (document.getElementById('inv-gsm')||{}).value || '';
+  const brand = (document.getElementById('inv-brand')||{}).value || '';
+  // Only match exactly the way the server's unique index does — case sensitive,
+  // trimmed. Lower-case fallback flagged separately.
+  const exact = inventory.find(i =>
+    i.paper_type === pt &&
+    (i.size||'').trim()  === size.trim() &&
+    (i.gsm||'').trim()   === gsm.trim() &&
+    (i.brand||'').trim() === brand.trim()
+  );
+  const fuzzy = !exact && inventory.find(i =>
+    norm(i.paper_type) === norm(pt) &&
+    norm(i.size)  === norm(size) &&
+    norm(i.gsm)   === norm(gsm) &&
+    norm(i.brand) === norm(brand)
+  );
+  if (exact) {
+    hint.style.display = 'block';
+    hint.innerHTML = `<b>Already exists.</b> Saving will add the Opening amount to <b>${esc(exact.paper_type)}${exact.size?' · '+esc(exact.size):''}${exact.gsm?' · '+esc(exact.gsm)+'gsm':''}${exact.brand?' · '+esc(exact.brand):''}</b> (current balance: ${(exact.current_balance||0).toLocaleString()} sheets) instead of creating a new row.`;
+  } else if (fuzzy) {
+    hint.style.display = 'block';
+    hint.innerHTML = `<b>Similar item exists</b> with slightly different formatting (case/whitespace): <b>${esc(fuzzy.paper_type)}${fuzzy.size?' · '+esc(fuzzy.size):''}${fuzzy.gsm?' · '+esc(fuzzy.gsm)+'gsm':''}${fuzzy.brand?' · '+esc(fuzzy.brand):''}</b>. To merge, match the formatting exactly.`;
+  } else {
+    hint.style.display = 'none';
+    hint.innerHTML = '';
+  }
 }
 // Two-way sync between the Packets and Sheets inputs in the Add Item modal.
 // Called with 'packets' or 'sheets' to indicate which the user just edited,
@@ -1159,15 +1256,40 @@ async function saveInvAdd() {
   if (!data.paper_type) { alert('Paper type is required'); return; }
   showSaving(true);
   try {
-    await api('POST', '/api/inventory', data);
+    // Server returns { _merged: true, _added_sheets: N } when it merged
+    // into an existing item — show a different toast so the user knows
+    // their input topped up an existing row instead of creating a new one.
+    const result = await api('POST', '/api/inventory', data);
     await loadInventory();
-    closeModal(); notify('Paper item added');
+    closeModal();
+    if (result && result._merged) {
+      const added = result._added_sheets || 0;
+      notify(added > 0
+        ? `Stock added to existing item (+${added.toLocaleString()} sheets)`
+        : 'Item already exists — no change made');
+    } else {
+      notify('Paper item added');
+    }
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
 
 function openInvEdit(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
+  const curBal  = it.current_balance || 0;
+  const unit    = esc(it.unit || 'sheets');
+  // Admin-only: direct balance correction. The server writes a
+  // reason='correction' transaction (visible in History, hidden from
+  // Stock In/Out and Dashboard movement totals).
+  const balanceSection = isAdmin()
+    ? `<div class="form-group" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;">
+         <label class="form-label" style="color:#A32D2D;">Current Balance <span style="font-weight:400;font-size:11px;color:var(--text2);">(admin only — corrections won't show in Stock In/Out reports)</span></label>
+         <input type="number" id="inv-balance" value="${curBal}" min="0" step="1" data-original="${curBal}">
+         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBal.toLocaleString()}</b> ${unit}. Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
+         <label class="form-label" style="margin-top:8px;font-size:11px;">Reason for correction <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+         <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 200 sheets">
+       </div>`
+    : `<div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${curBal.toLocaleString()}</b> ${unit}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Edit Paper Item</h2>
     ${invDatalistsHtml()}
@@ -1182,7 +1304,7 @@ function openInvEdit(id) {
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
     <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
-    <div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${(it.current_balance||0).toLocaleString()}</b> ${esc(it.unit||'sheets')}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>
+    ${balanceSection}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvEdit(${id})">Save Changes</button>
@@ -1198,6 +1320,21 @@ async function saveInvEdit(id) {
     reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
+  // Admin-only balance correction. Only send current_balance if it
+  // actually changed — server treats omitted/unchanged as no-op.
+  const balEl = document.getElementById('inv-balance');
+  if (balEl && isAdmin()) {
+    const newBal = parseInt(balEl.value, 10);
+    const oldBal = parseInt(balEl.dataset.original, 10) || 0;
+    if (Number.isFinite(newBal) && newBal !== oldBal) {
+      const delta = newBal - oldBal;
+      const sign  = delta > 0 ? '+' : '';
+      if (!confirm(`Correct balance from ${oldBal.toLocaleString()} to ${newBal.toLocaleString()} (${sign}${delta.toLocaleString()})?\n\nThis writes a "correction" entry to the item's History and will NOT appear in Stock In / Stock Out reports.`)) return;
+      data.current_balance = newBal;
+      const notesEl = document.getElementById('inv-correction-notes');
+      if (notesEl && notesEl.value.trim()) data.correction_notes = notesEl.value.trim();
+    }
+  }
   showSaving(true);
   try {
     await api('PUT', `/api/inventory/${id}`, data);
@@ -1435,6 +1572,17 @@ async function saveBulkStockIn() {
 async function openInvHistory(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  // Inventory is stored as raw sheets, but the user thinks in packets/reams.
+  // Display the change as packets (big) with the raw sheet count as a small
+  // sub-line so it stays auditable.
+  const ps   = packetSize(it.paper_type);
+  const unit = packetUnitLabel(it.paper_type).toLowerCase();
+  // Format packets with up to 2 decimals only when needed (12.5, 500, 0.5).
+  const fmtPackets = (sheets) => {
+    const p = sheets / ps;
+    const rounded = Math.round(p * 100) / 100;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+  };
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History · ${esc(label)}</h2>
     <div id="ledger-content" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -1447,9 +1595,13 @@ async function openInvHistory(id) {
       const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
       const sign = t.change > 0 ? '+' : '';
       const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+      const packets = fmtPackets(t.change);
       return `<tr>
         <td>${date}</td>
-        <td class="${cls}">${sign}${t.change.toLocaleString()}</td>
+        <td class="${cls}">
+          <div style="font-weight:600;">${sign}${packets} ${unit}</div>
+          <div style="font-size:11px;color:var(--text2);font-weight:400;">${sign}${t.change.toLocaleString()} sheets</div>
+        </td>
         <td>${esc(t.reason||'')}</td>
         <td>${job}</td>
         <td>${esc(t.notes||'')}</td>
@@ -1457,7 +1609,7 @@ async function openInvHistory(id) {
     }).join('');
     document.getElementById('ledger-content').innerHTML = txs.length
       ? `<table class="ledger-table">
-           <tr><th>When</th><th>Change</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+           <tr><th>When</th><th>Change (${unit})</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
@@ -1884,6 +2036,10 @@ function computeSummaryRows() {
   const buckets = buildSummaryBuckets(from, to, granularity);
   const fromD = new Date(from + 'T00:00:00');
   const ps    = packetSize(paperType);
+  // Track which imports got attributed to an inventory row, so we can flag
+  // any orphans (e.g. an import booked with blank/mismatched size/gsm/brand
+  // that doesn't link to any item). Surfaced under the table as a warning.
+  const claimedImportIds = new Set();
   const rows  = items.map(it => {
     const itemTxs = txs.filter(t => t.item_id === it.id);
     // Opening balance (in sheets) = sum of every change recorded BEFORE the from date.
@@ -1906,24 +2062,37 @@ function computeSummaryRows() {
     const totalOutSheets = periods.reduce((a, p) => a + p.out, 0);
     const stockNowSheets = it.current_balance || 0;
     const wPerPack = packWeightKg(paperType, it.size, it.gsm);
-    // Pending imports for this item — match on size+gsm+brand (allowing nulls
-    // to be equivalent to empty strings, same as the unique-item index).
-    const pendingPkts = (imports || [])
-      .filter(im => (im.size||'') === (it.size||'')
-                 && (im.gsm||'')  === (it.gsm||'')
-                 && (im.brand||'')=== (it.brand||''))
-      .reduce((a, im) => a + parseFloat(im.packets || 0), 0);
+    // Pending imports for this item. Prefer the inventory_item_id the
+    // server stored at import time (most reliable), and fall back to a
+    // normalized paper_type + size + gsm + brand match for legacy or
+    // unlinked rows. Normalization handles whitespace and case mismatches
+    // that previously caused imports to silently drop out of the column.
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const matchedImports = (imports || []).filter(im => {
+      if (im.inventory_item_id != null) return im.inventory_item_id === it.id;
+      // Fallback — require paper_type to match so a 25x30/300 import for
+      // Bleach Card doesn't accidentally count under Art Card.
+      return norm(im.paper_type) === norm(it.paper_type)
+          && norm(im.size)  === norm(it.size)
+          && norm(im.gsm)   === norm(it.gsm)
+          && norm(im.brand) === norm(it.brand);
+    });
+    matchedImports.forEach(im => claimedImportIds.add(im.id));
+    const pendingPkts = matchedImports.reduce((a, im) => a + parseFloat(im.packets || 0), 0);
     const stockNowPkts     = stockNowSheets / ps;
     // After Import = what we'll have once all pending imports arrive.
     // Simple sum: current on-hand + pending.
     const afterImportPkts  = stockNowPkts + pendingPkts;
-    // Required Next = how much MORE we still need to order to cover the
-    // total consumption (Total Out) once Pending Import is taken into account.
-    // Floored at 0 — if After Import already covers consumption, nothing
-    // more is needed (no negative "required").
-    // Example: consumed 100, have 0 on hand, ordered 50 → still need 50.
-    //          consumed 100, have 0 on hand, ordered 0  → still need 100.
-    const requiredNextPkts = Math.max(0, (totalOutSheets / ps) - afterImportPkts);
+    // Required Next = balance after consumption.
+    //   positive  → still need to order this much MORE to cover Total Out
+    //               (rendered red as a shortfall)
+    //   negative  → surplus; After Import covers Total Out with extra stock
+    //               left over (rendered green as +N)
+    //   zero      → exactly covered
+    // Sign convention: requiredNextPkts > 0 means short, < 0 means surplus.
+    // Formula stays the same — we just drop the Math.max() floor so the
+    // sign is preserved for display.
+    const requiredNextPkts = (totalOutSheets / ps) - afterImportPkts;
     return {
       item: it,
       openingPkts: openingSheets / ps,
@@ -1951,7 +2120,12 @@ function computeSummaryRows() {
     if (ad.h !== bd.h) return ad.h - bd.h;
     return String(a.item.size||'').localeCompare(String(b.item.size||''));
   });
-  return { rows, buckets };
+  // Imports that didn't get attributed to any item — usually because the
+  // user left size/gsm/brand blank or typed them slightly differently from
+  // what's on the inventory item. We list these under the table so the user
+  // can edit the import (or add the matching inventory item).
+  const orphanImports = (imports || []).filter(im => !claimedImportIds.has(im.id));
+  return { rows, buckets, orphanImports };
 }
 
 // Format a packet count: integer when whole, 2dp otherwise. Empty string for 0
@@ -1967,9 +2141,28 @@ function fmtKg(n) {
   return (+n.toFixed(2)).toLocaleString();
 }
 
+// Signed variants for the Required Next / Required (kg) columns where a
+// surplus needs to be visible (not floored at 0). Positive = shortfall
+// (rendered red by the caller), negative = surplus (rendered green by
+// the caller). The "+" is added for surplus values so the sign reads
+// unambiguously e.g. "+12 surplus" vs "8 short".
+function fmtSignedPkts(n) {
+  if (!n) return '0';
+  const r = Number.isInteger(n) ? n : +n.toFixed(2);
+  if (r < 0) return `+${Math.abs(r).toLocaleString()}`;
+  return r.toLocaleString();
+}
+function fmtSignedKg(n) {
+  if (n === null || n === undefined) return '—';
+  if (!n) return '0';
+  const r = +n.toFixed(2);
+  if (r < 0) return `+${Math.abs(r).toLocaleString()}`;
+  return r.toLocaleString();
+}
+
 function renderStockSummary() {
   const { paperType } = stockSummaryState;
-  const { rows, buckets } = computeSummaryRows();
+  const { rows, buckets, orphanImports } = computeSummaryRows();
   const el = document.getElementById('ss-content');
   if (!el) return;
   if (!rows.length) {
@@ -1998,8 +2191,8 @@ function renderStockSummary() {
       <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.importKg)}</td>
-      <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':'inherit'};">${fmtPkts(r.requiredNextPkts)}</td>
-      <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':'inherit'};">${fmtKg(r.requiredKg)}</td>
+      <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedPkts(r.requiredNextPkts)}</td>
+      <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   el.innerHTML = `
@@ -2021,7 +2214,25 @@ function renderStockSummary() {
       </tr>
       <tr>${periodSubHeaders}</tr>
       ${tbody}
-    </table>`;
+    </table>
+    ${orphanImports && orphanImports.length ? `
+      <div style="margin-top:14px;padding:10px 12px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:12px;">
+        <div style="font-weight:600;color:#92400e;margin-bottom:6px;">&#9888; ${orphanImports.length} pending import${orphanImports.length===1?'':'s'} not attributed to any inventory row</div>
+        <div style="color:#78350f;margin-bottom:8px;">These imports don't match any item above (usually because Size, GSM, or Brand was left blank or typed slightly differently from the inventory item). Edit the import or add a matching inventory item.</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;">
+          <tr style="background:#fde68a;"><th style="text-align:left;padding:4px 8px;">Paper</th><th style="text-align:left;padding:4px 8px;">Size</th><th style="text-align:left;padding:4px 8px;">GSM</th><th style="text-align:left;padding:4px 8px;">Brand</th><th style="text-align:right;padding:4px 8px;">Quantity</th><th style="text-align:left;padding:4px 8px;">Supplier</th><th style="padding:4px 8px;"></th></tr>
+          ${orphanImports.map(im => `<tr>
+            <td style="padding:4px 8px;">${esc(im.paper_type||'—')}</td>
+            <td style="padding:4px 8px;">${esc(im.size||'(blank)')}</td>
+            <td style="padding:4px 8px;">${esc(im.gsm||'(blank)')}</td>
+            <td style="padding:4px 8px;">${esc(im.brand||'(blank)')}</td>
+            <td style="padding:4px 8px;text-align:right;">${fmtPkts(parseFloat(im.packets||0))}</td>
+            <td style="padding:4px 8px;">${esc(im.supplier||'—')}</td>
+            <td style="padding:4px 8px;"><button class="btn btn-sm" onclick="closeModal(); openImports();">Open Imports</button></td>
+          </tr>`).join('')}
+        </table>
+      </div>
+    ` : ''}`;
 }
 
 // Print version — landscape A4, same numbers but with company header.
@@ -2051,8 +2262,8 @@ function printStockSummary() {
       <td ${tdR}>${fmtPkts(r.pendingImportPkts)}</td>
       <td ${tdR}><b>${fmtPkts(r.afterImportPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
-      <td ${tdR}><b>${fmtPkts(r.requiredNextPkts)}</b></td>
-      <td ${tdR}>${fmtKg(r.requiredKg)}</td>
+      <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};"><b>${fmtSignedPkts(r.requiredNextPkts)}</b></td>
+      <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   const html = `
@@ -2321,12 +2532,40 @@ function openDashboard() {
 }
 
 // ── Reports tab navigation ───────────────────────────────────
-// Switch which pane is visible inside the Reports tab. The Summary and
-// Imports tabs still launch their modals (kept unchanged from before), so
-// for those we update the active-state styling but don't swap panes.
+// ── Reports navigation ───────────────────────────────────────
+// Reports has a 3-card landing (Dashboard / Reports / Imports). Each card
+// opens a grouped view: Dashboard group hosts Dashboard + Stock In + Stock
+// Out in its own sidebar; Analysis group hosts Stock Summary (room for
+// more later). Imports skips the group concept and opens its modal
+// directly from the card.
+
+// Show one of the grouped views, hide the landing and other groups.
+// Pass the wrapper id ('dashboard-group' or 'analysis-group').
+function openReportsGroup(groupId) {
+  const landing = document.getElementById('reports-landing');
+  if (landing) landing.style.display = 'none';
+  document.querySelectorAll('#reports-mode .reports-group').forEach(g => {
+    g.style.display = g.id === groupId ? 'block' : 'none';
+  });
+  // Default each group to its first pane on entry so the user sees data
+  // immediately rather than an empty sidebar+blank area.
+  if (groupId === 'dashboard-group') setReportsTab('dashboard');
+}
+
+// Return to the 3-card landing — hides every group.
+function exitReportsGroup() {
+  const landing = document.getElementById('reports-landing');
+  if (landing) landing.style.display = 'block';
+  document.querySelectorAll('#reports-mode .reports-group').forEach(g => {
+    g.style.display = 'none';
+  });
+}
+
+// Switch which pane is visible inside the Dashboard group's sidebar.
+// Updates the .active state and shows the matching #rt-* container.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
-  // Only the inline panes have a #rt-* container; Summary/Imports skip this.
+  // Only the inline panes have a #rt-* container; Summary skips this.
   const inlinePanes = ['dashboard', 'stock-in', 'stock-out'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
@@ -2676,6 +2915,13 @@ function printStockMovement(direction) {
 let stickerJobList = [];          // jobs sorted most-recent first (cached)
 let stickerActiveIdx = -1;        // keyboard-highlighted item in the dropdown
 
+// Multiple sticker "variants" for the same job — each variant is one
+// (qty-per-carton, total-cases) pair. Case numbers run continuously across
+// all variants (variant 1: 1..N1, variant 2: N1+1..N1+N2, ...).
+// Default to a single variant so the form looks identical to the old
+// single-batch UI until the user clicks "+ Add another quantity".
+let stickerVariants = [{ qty: '', total: '' }];
+
 function initStickersTab() {
   // Cache the jobs sorted most-recent first so the searchable dropdown
   // shows the freshest job at the top by default.
@@ -2696,6 +2942,14 @@ function initStickersTab() {
 
   // Trigger the autofill in case prior values are stale
   applyStickerJob(prev || null);
+
+  // Render the (qty/total) variants block. Defaults to one variant so the
+  // form looks the same as the old single-batch UI; users hit
+  // "+ Add another quantity" to add more rows.
+  if (!stickerVariants || !stickerVariants.length) {
+    stickerVariants = [{ qty: '', total: '' }];
+  }
+  renderStickerVariants();
 
   // Close the dropdown when clicking anywhere outside the combobox.
   // Idempotent — only attach the listener once.
@@ -2806,18 +3060,123 @@ function applyStickerJob(j) {
   renderStickerPreview();
 }
 
-function onStickerTotalChange() {
-  // When total changes, also bump 'to' to match if the user hasn't customised
-  // the range. Keeps the default behaviour ("print all 1..N") frictionless.
-  const total = +document.getElementById('stk-total').value || 0;
-  const toInput = document.getElementById('stk-to');
-  const fromInput = document.getElementById('stk-from');
-  if (!toInput.value || +toInput.value > total || +toInput.value === +toInput.dataset.lastTotal) {
-    toInput.value = total;
+// ── Sticker variants ─────────────────────────────────────────
+// Sum of `total` across all variants — used as the master case count.
+function getStickerTotalCases() {
+  return stickerVariants.reduce((a, v) => a + (+v.total || 0), 0);
+}
+
+// Walk the variants in order and return the qty-per-carton that applies to
+// a given case number (1-indexed). Cases 1..N1 belong to variant 0,
+// N1+1..N1+N2 to variant 1, etc.
+function getStickerQtyForCase(caseNo) {
+  let start = 1;
+  for (const v of stickerVariants) {
+    const t = +v.total || 0;
+    if (t <= 0) continue;
+    if (caseNo >= start && caseNo < start + t) return v.qty;
+    start += t;
   }
-  toInput.dataset.lastTotal = total;
-  if (!fromInput.value) fromInput.value = 1;
+  return '';
+}
+
+// Rebuild the variants form block from `stickerVariants` state. Called on
+// initial render, add, and remove — NOT on every keystroke (that destroys
+// focus). Each row has stable ids (stk-var-qty-N, stk-var-total-N) and a
+// hint span (stk-var-range-N) that the lightweight `syncStickerHints`
+// updates in place while the user types.
+function renderStickerVariants() {
+  const wrap = document.getElementById('stk-variants');
+  if (!wrap) return;
+  wrap.innerHTML = stickerVariants.map((v, i) => {
+    const removeBtn = i > 0
+      ? `<button type="button" onclick="removeStickerVariant(${i})" title="Remove this variant"
+                 style="margin-bottom:2px;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--text2);font-size:14px;">&times;</button>`
+      : '';
+    const variantLabel = stickerVariants.length === 1
+      ? 'Quantity (per carton)'
+      : `Variant ${i + 1} — Quantity per carton`;
+    const sep = i > 0 ? 'border-top:1px dashed var(--border);padding-top:10px;margin-top:10px;' : '';
+    return `
+      <div class="stk-variant-row" style="${sep}">
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end;">
+          <div class="stk-row" style="margin:0;">
+            <label class="stk-label">${variantLabel}</label>
+            <input type="number" id="stk-var-qty-${i}" class="stk-input" placeholder="e.g. 600" min="0"
+                   value="${esc(String(v.qty || ''))}"
+                   oninput="updateStickerVariant(${i}, 'qty', this.value)">
+          </div>
+          <div class="stk-row" style="margin:0;">
+            <label class="stk-label">Total Cases <span id="stk-var-range-${i}" style="color:var(--text2);font-weight:400;font-size:12px;margin-left:6px;"></span></label>
+            <input type="number" id="stk-var-total-${i}" class="stk-input" placeholder="e.g. 10" min="1"
+                   value="${esc(String(v.total || ''))}"
+                   oninput="updateStickerVariant(${i}, 'total', this.value)">
+          </div>
+          <div>${removeBtn}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  syncStickerHints();
+}
+
+// Update the case-range hints and the reprint "To #" total without
+// touching the input elements themselves — preserves caret/focus while
+// the user types into a variant field.
+function syncStickerHints() {
+  // 1) Per-variant case-range hint ("cases 1–10")
+  let cursor = 1;
+  stickerVariants.forEach((v, i) => {
+    const t = +v.total || 0;
+    const span = document.getElementById(`stk-var-range-${i}`);
+    if (span) {
+      if (t > 0) {
+        const start = cursor;
+        const end   = cursor + t - 1;
+        span.textContent = `(cases ${start}–${end})`;
+      } else {
+        span.textContent = '';
+      }
+    }
+    cursor += t;
+  });
+
+  // 2) Auto-bump reprint "To #" to the new grand total when the user
+  // hasn't customised the range — keeps "print all" frictionless.
+  const toInput   = document.getElementById('stk-to');
+  const fromInput = document.getElementById('stk-from');
+  const grandTotal = getStickerTotalCases();
+  if (toInput) {
+    const last = +toInput.dataset.lastTotal || 0;
+    if (!toInput.value || +toInput.value === last || +toInput.value > grandTotal) {
+      toInput.value = grandTotal || '';
+    }
+    toInput.dataset.lastTotal = grandTotal;
+  }
+  if (fromInput && !fromInput.value) fromInput.value = 1;
+
+  // 3) Refresh the live preview.
   renderStickerPreview();
+}
+
+function addStickerVariant() {
+  stickerVariants.push({ qty: '', total: '' });
+  renderStickerVariants();
+}
+
+function removeStickerVariant(i) {
+  if (i <= 0 || i >= stickerVariants.length) return; // never remove the first
+  stickerVariants.splice(i, 1);
+  renderStickerVariants();
+}
+
+// Called from each variant input's oninput. Only updates state and the
+// lightweight hints — does NOT rebuild the variants HTML, so focus and
+// caret position stay on the input the user is typing into.
+function updateStickerVariant(i, field, value) {
+  if (!stickerVariants[i]) return;
+  stickerVariants[i][field] = value;
+  syncStickerHints();
 }
 
 // Format date as DD-MM-YYYY (matches the sample sticker's "15-12-2022")
@@ -2832,11 +3191,11 @@ function buildStickerHTML(opts) {
   return `
     <div class="sticker">
       <div class="sticker-header">
-        <div class="sticker-header-left">
-          <img src="/logo.png" class="sticker-logo" onerror="this.style.display='none'">
-          <div class="sticker-brand">SUPREME ART<br>(PRIVATE) LIMITED</div>
+        <img src="/logo.png" class="sticker-logo" onerror="this.style.display='none'">
+        <div class="sticker-header-right">
+          <div class="sticker-brand">Supreme Art.pvt</div>
+          <div class="sticker-date">Date: ${esc(fmtStickerDate(opts.date))}</div>
         </div>
-        <div class="sticker-date">Date: ${esc(fmtStickerDate(opts.date))}</div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Despatch To</div>
@@ -2865,9 +3224,8 @@ function renderStickerPreview() {
   const despatch = document.getElementById('stk-despatch').value.trim();
   const po       = document.getElementById('stk-po').value.trim();
   const desc     = document.getElementById('stk-desc').value.trim();
-  const qty      = document.getElementById('stk-qty').value.trim();
   const date     = document.getElementById('stk-date').value;
-  const total    = +document.getElementById('stk-total').value || 0;
+  const total    = getStickerTotalCases();
   const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
   const to       = +document.getElementById('stk-to').value || total;
 
@@ -2876,16 +3234,23 @@ function renderStickerPreview() {
 
   if (!total || total < 1) {
     previewBox.innerHTML = '<div style="color:#94a3b8;padding:40px;text-align:center;font-size:13px;">Fill in the form to see a sticker preview…</div>';
-    hint.textContent = '';
+    if (hint) hint.textContent = '';
     return;
   }
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
   const count = validTo - validFrom + 1;
-  hint.textContent = `${count} sticker${count === 1 ? '' : 's'} will print (case #${validFrom} → #${validTo} of ${total}).`;
+  // Preview shows the qty that applies to the first case in the chosen range.
+  const previewQty = getStickerQtyForCase(validFrom);
+  if (hint) {
+    const variantNote = stickerVariants.length > 1
+      ? ` · ${stickerVariants.length} variants`
+      : '';
+    hint.textContent = `${count} sticker${count === 1 ? '' : 's'} will print (case #${validFrom} → #${validTo} of ${total}${variantNote}).`;
+  }
 
   previewBox.innerHTML = buildStickerHTML({
-    despatch, po, desc, qty, date,
+    despatch, po, desc, qty: previewQty, date,
     caseNo: validFrom,
     caseTotal: total,
   });
@@ -2895,26 +3260,34 @@ function printStickers() {
   const despatch = document.getElementById('stk-despatch').value.trim();
   const po       = document.getElementById('stk-po').value.trim();
   const desc     = document.getElementById('stk-desc').value.trim();
-  const qty      = document.getElementById('stk-qty').value.trim();
   const date     = document.getElementById('stk-date').value;
-  const total    = +document.getElementById('stk-total').value || 0;
+  const total    = getStickerTotalCases();
   const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
   const to       = +document.getElementById('stk-to').value || total;
 
   // Validation — give the user a clear message rather than printing junk.
   if (!despatch) return notify('Select a job first (Despatch To is empty).');
-  if (!qty)      return notify('Enter the quantity per carton.');
-  if (!total || total < 1) return notify('Enter the total number of cases.');
+  if (!total || total < 1) return notify('Enter total cases for at least one variant.');
+  // Each variant must have a qty if it has cases > 0.
+  for (let i = 0; i < stickerVariants.length; i++) {
+    const v = stickerVariants[i];
+    const t = +v.total || 0;
+    if (t > 0 && (!v.qty || String(v.qty).trim() === '')) {
+      return notify(`Enter the quantity per carton for variant ${i + 1}.`);
+    }
+  }
 
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
 
-  // Build stickers and chunk them into A4 sheets of 6 (2 columns × 3 rows).
+  // Build stickers and chunk them into A4 sheets of 8 (2 columns × 4 rows).
   // Each .stickers-sheet div is a separate print page via the @media print
   // rule above. This keeps the 3.5" × 2.5" sticker size true-to-life.
-  const STICKERS_PER_SHEET = 6;
+  // Each case picks its qty from the variant whose range it falls into.
+  const STICKERS_PER_SHEET = 8;
   const all = [];
   for (let i = validFrom; i <= validTo; i++) {
+    const qty = getStickerQtyForCase(i);
     all.push(buildStickerHTML({
       despatch, po, desc, qty, date,
       caseNo: i, caseTotal: total,
@@ -3063,11 +3436,15 @@ function renderDashboard() {
       ${subSheets ? `<div style="font-size:11px;color:var(--text2);margin-top:1px;">${subSheets}</div>` : ''}
     </div>`;
   const netSign = net >= 0 ? '+' : '−';
+  // Weight (kg) line removed from the top dashboard tiles per the
+  // shop's preference — packets/reams is the primary unit they think
+  // in, and sheets stays as the auditable sub-line. The kg helper is
+  // still defined so we can reintroduce it later without code churn.
   document.getElementById('dash-stats-row').innerHTML =
       `<div class="stat"><div class="stat-label">Items Active</div><div class="stat-value">${byItem.size.toLocaleString()}</div></div>`
-    + statTile('Total Stock In',  pktReamLabel(inPkts, inReams, '+'),  '#166534', `+${kg(inKg)}`,  `+${totalIn.toLocaleString()} sheets`)
-    + statTile('Total Stock Out', pktReamLabel(outPkts, outReams, '−'), '#A32D2D', `−${kg(outKg)}`, `−${totalOut.toLocaleString()} sheets`)
-    + statTile('Net Change',      pktReamLabel(netPkts, netReams, netSign), net>=0?'#166534':'#A32D2D', `${netSign}${kg(Math.abs(netKg))}`, `${netSign}${Math.abs(net).toLocaleString()} sheets`)
+    + statTile('Total Stock In',  pktReamLabel(inPkts, inReams, '+'),  '#166534', '',  `+${totalIn.toLocaleString()} sheets`)
+    + statTile('Total Stock Out', pktReamLabel(outPkts, outReams, '−'), '#A32D2D', '', `−${totalOut.toLocaleString()} sheets`)
+    + statTile('Net Change',      pktReamLabel(netPkts, netReams, netSign), net>=0?'#166534':'#A32D2D', '', `${netSign}${Math.abs(net).toLocaleString()} sheets`)
     + `<div class="stat"><div class="stat-label">Transactions</div><div class="stat-value">${txs.length.toLocaleString()}</div></div>`;
 
   // ── Item cards (matches Inventory tab's .inv-card layout)
@@ -3252,10 +3629,14 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
-        <td colspan="3">
-          <span class="jc-lbl">Sheets Qty</span>
+        <td colspan="3"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
+      </tr>
+      <tr>
+        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
+        <td colspan="2">
+          <span class="jc-lbl">Quantity of Packets</span>
           <div style="display:flex;gap:6px;align-items:center;">
-            <input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="flex:1;min-width:0;">
+            <input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50" style="flex:1;min-width:0;">
             <select id="f-sheet-cut" title="Cut — pieces per sheet; affects Packets auto-fill"
                     onchange="jobPacketsSync()"
                     style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
@@ -3266,10 +3647,6 @@ function jobForm(j={}) {
             </select>
           </div>
         </td>
-      </tr>
-      <tr>
-        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
-        <td colspan="2"><span class="jc-lbl">Quantity of Packets</span><input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50"></td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
@@ -3837,7 +4214,7 @@ function buildPrintCard(j) {
         @page { size: 8.5in 12.5in; margin: 0; }
         /* Tighter top/bottom padding so the bottom "Signature:" line fits
            on page 1 alongside the bigger header. */
-        #print-area { width: 8.5in !important; padding: 0.22in 0.4in !important; }
+        #print-area { width: 8.5in !important; padding: 0.18in 0.4in !important; }
         #print-area table { page-break-inside: auto !important; break-inside: auto !important; }
         #print-area tr    { page-break-inside: avoid !important; break-inside: avoid !important; }
       }
@@ -3845,10 +4222,11 @@ function buildPrintCard(j) {
       .pc-logo   { height: 80px !important; }
       .pc-serial { font-size: 18pt !important; }
       /* Trim the title margin and the row heights — collectively saves
-         ~0.5in of vertical space so the Signature line stays on page 1. */
+         ~1in of vertical space so the Signature line fits even when the
+         printer's paper-size override forces letter/A4 instead of 8.5x12.5. */
       .pc-title  { margin: 0 0 2px !important; }
-      .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
-      .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pp-table .pp-data-row td     { height: 30px !important; padding: 4px 10px !important; font-size: 11pt; }
+      .pp-table .pp-comments-row td { height: 55px !important; padding: 4px 10px !important; font-size: 11pt; }
       .pc-sig { margin-top: 4px !important; }
 
       /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
@@ -3887,7 +4265,7 @@ function buildPrintCard(j) {
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-      <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}${j.jobcode ? ' &middot; ' + v(j.jobcode) : ''}</div>
+      <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}</div>
       <img class="pc-logo" src="/logo.png" alt="Supreme Art">
     </div>
     <h1 class="pc-title">JOB CARD</h1>
@@ -3907,11 +4285,11 @@ function buildPrintCard(j) {
       </tr>
       <tr>
         <td colspan="3"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
-        <td colspan="3"><div class="pc-label">Quantity of Packets</div><div class="pc-value">${v(p.quantity_of_packets)}</div></td>
+        <td colspan="3"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${v(p.quantity_of_packets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
-        <td colspan="2"><div class="pc-label">Sheets Qty / Cut</div><div class="pc-value">${v(j.sheets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
+        <td colspan="2"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
         <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
       </tr>
       <tr>
@@ -3949,9 +4327,18 @@ function printJobCard(id) {
   if (!j) return;
   const area = document.getElementById('print-area');
   area.innerHTML = buildPrintCard(j);
+  // Browsers print the document.title in the page header by default
+  // ("Job Tracker Supreme Art"). Blank the title for the duration of
+  // the print so the header is empty — the timestamp Chrome adds
+  // alongside is suppressed only by unchecking "Headers and footers"
+  // in the print dialog.
+  const prevTitle = document.title;
+  document.title = ' ';
+  const restoreTitle = () => { document.title = prevTitle; window.removeEventListener('afterprint', restoreTitle); };
+  window.addEventListener('afterprint', restoreTitle);
   setTimeout(() => {
     window.print();
-    setTimeout(() => { area.innerHTML = ''; }, 500);
+    setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
   }, 50);
 }
 
