@@ -513,19 +513,18 @@
         <input type="text" id="stk-desc" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
       </div>
 
-      <div class="stk-grid3">
-        <div class="stk-row">
-          <label class="stk-label">Quantity (per carton)</label>
-          <input type="number" id="stk-qty" class="stk-input" placeholder="e.g. 600" min="0" oninput="renderStickerPreview()">
-        </div>
-        <div class="stk-row">
-          <label class="stk-label">Total Cases</label>
-          <input type="number" id="stk-total" class="stk-input" placeholder="e.g. 10" min="1" oninput="onStickerTotalChange()">
-        </div>
-        <div class="stk-row">
-          <label class="stk-label">Date</label>
-          <input type="date" id="stk-date" class="stk-input">
-        </div>
+      <div class="stk-row">
+        <label class="stk-label">Date</label>
+        <input type="date" id="stk-date" class="stk-input" style="max-width:240px;" oninput="renderStickerPreview()">
+      </div>
+
+      <!-- Variants — one row per (qty-per-carton + total-cases) pair.
+           Same-job batches sometimes need an extra carton with a different qty
+           (e.g. 10 full at 600/each + 1 partial at 200). Add as many as needed;
+           case numbers are continuous across the whole batch. -->
+      <div id="stk-variants"></div>
+      <div style="margin-top:8px;">
+        <button type="button" class="btn btn-ghost" onclick="addStickerVariant()" style="font-size:13px;padding:6px 12px;">+ Add another quantity</button>
       </div>
 
       <div class="stk-range">
@@ -2676,6 +2675,13 @@ function printStockMovement(direction) {
 let stickerJobList = [];          // jobs sorted most-recent first (cached)
 let stickerActiveIdx = -1;        // keyboard-highlighted item in the dropdown
 
+// Multiple sticker "variants" for the same job — each variant is one
+// (qty-per-carton, total-cases) pair. Case numbers run continuously across
+// all variants (variant 1: 1..N1, variant 2: N1+1..N1+N2, ...).
+// Default to a single variant so the form looks identical to the old
+// single-batch UI until the user clicks "+ Add another quantity".
+let stickerVariants = [{ qty: '', total: '' }];
+
 function initStickersTab() {
   // Cache the jobs sorted most-recent first so the searchable dropdown
   // shows the freshest job at the top by default.
@@ -2696,6 +2702,14 @@ function initStickersTab() {
 
   // Trigger the autofill in case prior values are stale
   applyStickerJob(prev || null);
+
+  // Render the (qty/total) variants block. Defaults to one variant so the
+  // form looks the same as the old single-batch UI; users hit
+  // "+ Add another quantity" to add more rows.
+  if (!stickerVariants || !stickerVariants.length) {
+    stickerVariants = [{ qty: '', total: '' }];
+  }
+  renderStickerVariants();
 
   // Close the dropdown when clicking anywhere outside the combobox.
   // Idempotent — only attach the listener once.
@@ -2806,18 +2820,98 @@ function applyStickerJob(j) {
   renderStickerPreview();
 }
 
-function onStickerTotalChange() {
-  // When total changes, also bump 'to' to match if the user hasn't customised
-  // the range. Keeps the default behaviour ("print all 1..N") frictionless.
-  const total = +document.getElementById('stk-total').value || 0;
-  const toInput = document.getElementById('stk-to');
-  const fromInput = document.getElementById('stk-from');
-  if (!toInput.value || +toInput.value > total || +toInput.value === +toInput.dataset.lastTotal) {
-    toInput.value = total;
+// ── Sticker variants ─────────────────────────────────────────
+// Sum of `total` across all variants — used as the master case count.
+function getStickerTotalCases() {
+  return stickerVariants.reduce((a, v) => a + (+v.total || 0), 0);
+}
+
+// Walk the variants in order and return the qty-per-carton that applies to
+// a given case number (1-indexed). Cases 1..N1 belong to variant 0,
+// N1+1..N1+N2 to variant 1, etc.
+function getStickerQtyForCase(caseNo) {
+  let start = 1;
+  for (const v of stickerVariants) {
+    const t = +v.total || 0;
+    if (t <= 0) continue;
+    if (caseNo >= start && caseNo < start + t) return v.qty;
+    start += t;
   }
-  toInput.dataset.lastTotal = total;
-  if (!fromInput.value) fromInput.value = 1;
+  return '';
+}
+
+// Rebuild the variants form block from `stickerVariants` state. Each row
+// shows the (qty, total) inputs, an inline case-range hint, and a remove
+// button on rows 2+ (first variant can't be removed).
+function renderStickerVariants() {
+  const wrap = document.getElementById('stk-variants');
+  if (!wrap) return;
+  wrap.innerHTML = stickerVariants.map((v, i) => {
+    const t = +v.total || 0;
+    const start = stickerVariants.slice(0, i).reduce((a, x) => a + (+x.total || 0), 0) + 1;
+    const end = start + t - 1;
+    const rangeNote = t > 0
+      ? `<span style="color:var(--text2);font-weight:400;font-size:12px;margin-left:6px;">(cases ${start}–${end})</span>`
+      : '';
+    const removeBtn = i > 0
+      ? `<button type="button" onclick="removeStickerVariant(${i})" title="Remove this variant"
+                 style="margin-bottom:2px;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--text2);font-size:14px;">&times;</button>`
+      : '';
+    const variantLabel = stickerVariants.length === 1
+      ? 'Quantity (per carton)'
+      : `Variant ${i + 1} — Quantity per carton`;
+    const sep = i > 0 ? 'border-top:1px dashed var(--border);padding-top:10px;margin-top:10px;' : '';
+    return `
+      <div class="stk-variant-row" style="${sep}">
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end;">
+          <div class="stk-row" style="margin:0;">
+            <label class="stk-label">${variantLabel}</label>
+            <input type="number" class="stk-input" placeholder="e.g. 600" min="0"
+                   value="${esc(String(v.qty || ''))}"
+                   oninput="updateStickerVariant(${i}, 'qty', this.value)">
+          </div>
+          <div class="stk-row" style="margin:0;">
+            <label class="stk-label">Total Cases ${rangeNote}</label>
+            <input type="number" class="stk-input" placeholder="e.g. 10" min="1"
+                   value="${esc(String(v.total || ''))}"
+                   oninput="updateStickerVariant(${i}, 'total', this.value)">
+          </div>
+          <div>${removeBtn}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  // Auto-bump the reprint "To #" to the new grand total when the user hasn't
+  // customised the range — keeps "print all" frictionless across variant edits.
+  const toInput   = document.getElementById('stk-to');
+  const fromInput = document.getElementById('stk-from');
+  const grandTotal = getStickerTotalCases();
+  if (toInput) {
+    const last = +toInput.dataset.lastTotal || 0;
+    if (!toInput.value || +toInput.value === last || +toInput.value > grandTotal) {
+      toInput.value = grandTotal || '';
+    }
+    toInput.dataset.lastTotal = grandTotal;
+  }
+  if (fromInput && !fromInput.value) fromInput.value = 1;
   renderStickerPreview();
+}
+
+function addStickerVariant() {
+  stickerVariants.push({ qty: '', total: '' });
+  renderStickerVariants();
+}
+
+function removeStickerVariant(i) {
+  if (i <= 0 || i >= stickerVariants.length) return; // never remove the first
+  stickerVariants.splice(i, 1);
+  renderStickerVariants();
+}
+
+function updateStickerVariant(i, field, value) {
+  if (!stickerVariants[i]) return;
+  stickerVariants[i][field] = value;
+  renderStickerVariants();
 }
 
 // Format date as DD-MM-YYYY (matches the sample sticker's "15-12-2022")
@@ -2865,9 +2959,8 @@ function renderStickerPreview() {
   const despatch = document.getElementById('stk-despatch').value.trim();
   const po       = document.getElementById('stk-po').value.trim();
   const desc     = document.getElementById('stk-desc').value.trim();
-  const qty      = document.getElementById('stk-qty').value.trim();
   const date     = document.getElementById('stk-date').value;
-  const total    = +document.getElementById('stk-total').value || 0;
+  const total    = getStickerTotalCases();
   const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
   const to       = +document.getElementById('stk-to').value || total;
 
@@ -2876,16 +2969,23 @@ function renderStickerPreview() {
 
   if (!total || total < 1) {
     previewBox.innerHTML = '<div style="color:#94a3b8;padding:40px;text-align:center;font-size:13px;">Fill in the form to see a sticker preview…</div>';
-    hint.textContent = '';
+    if (hint) hint.textContent = '';
     return;
   }
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
   const count = validTo - validFrom + 1;
-  hint.textContent = `${count} sticker${count === 1 ? '' : 's'} will print (case #${validFrom} → #${validTo} of ${total}).`;
+  // Preview shows the qty that applies to the first case in the chosen range.
+  const previewQty = getStickerQtyForCase(validFrom);
+  if (hint) {
+    const variantNote = stickerVariants.length > 1
+      ? ` · ${stickerVariants.length} variants`
+      : '';
+    hint.textContent = `${count} sticker${count === 1 ? '' : 's'} will print (case #${validFrom} → #${validTo} of ${total}${variantNote}).`;
+  }
 
   previewBox.innerHTML = buildStickerHTML({
-    despatch, po, desc, qty, date,
+    despatch, po, desc, qty: previewQty, date,
     caseNo: validFrom,
     caseTotal: total,
   });
@@ -2895,16 +2995,22 @@ function printStickers() {
   const despatch = document.getElementById('stk-despatch').value.trim();
   const po       = document.getElementById('stk-po').value.trim();
   const desc     = document.getElementById('stk-desc').value.trim();
-  const qty      = document.getElementById('stk-qty').value.trim();
   const date     = document.getElementById('stk-date').value;
-  const total    = +document.getElementById('stk-total').value || 0;
+  const total    = getStickerTotalCases();
   const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
   const to       = +document.getElementById('stk-to').value || total;
 
   // Validation — give the user a clear message rather than printing junk.
   if (!despatch) return notify('Select a job first (Despatch To is empty).');
-  if (!qty)      return notify('Enter the quantity per carton.');
-  if (!total || total < 1) return notify('Enter the total number of cases.');
+  if (!total || total < 1) return notify('Enter total cases for at least one variant.');
+  // Each variant must have a qty if it has cases > 0.
+  for (let i = 0; i < stickerVariants.length; i++) {
+    const v = stickerVariants[i];
+    const t = +v.total || 0;
+    if (t > 0 && (!v.qty || String(v.qty).trim() === '')) {
+      return notify(`Enter the quantity per carton for variant ${i + 1}.`);
+    }
+  }
 
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
@@ -2912,9 +3018,11 @@ function printStickers() {
   // Build stickers and chunk them into A4 sheets of 6 (2 columns × 3 rows).
   // Each .stickers-sheet div is a separate print page via the @media print
   // rule above. This keeps the 3.5" × 2.5" sticker size true-to-life.
+  // Each case picks its qty from the variant whose range it falls into.
   const STICKERS_PER_SHEET = 6;
   const all = [];
   for (let i = validFrom; i <= validTo; i++) {
+    const qty = getStickerQtyForCase(i);
     all.push(buildStickerHTML({
       despatch, po, desc, qty, date,
       caseNo: i, caseTotal: total,
