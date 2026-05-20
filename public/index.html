@@ -1982,6 +1982,10 @@ function computeSummaryRows() {
   const buckets = buildSummaryBuckets(from, to, granularity);
   const fromD = new Date(from + 'T00:00:00');
   const ps    = packetSize(paperType);
+  // Track which imports got attributed to an inventory row, so we can flag
+  // any orphans (e.g. an import booked with blank/mismatched size/gsm/brand
+  // that doesn't link to any item). Surfaced under the table as a warning.
+  const claimedImportIds = new Set();
   const rows  = items.map(it => {
     const itemTxs = txs.filter(t => t.item_id === it.id);
     // Opening balance (in sheets) = sum of every change recorded BEFORE the from date.
@@ -2004,13 +2008,23 @@ function computeSummaryRows() {
     const totalOutSheets = periods.reduce((a, p) => a + p.out, 0);
     const stockNowSheets = it.current_balance || 0;
     const wPerPack = packWeightKg(paperType, it.size, it.gsm);
-    // Pending imports for this item — match on size+gsm+brand (allowing nulls
-    // to be equivalent to empty strings, same as the unique-item index).
-    const pendingPkts = (imports || [])
-      .filter(im => (im.size||'') === (it.size||'')
-                 && (im.gsm||'')  === (it.gsm||'')
-                 && (im.brand||'')=== (it.brand||''))
-      .reduce((a, im) => a + parseFloat(im.packets || 0), 0);
+    // Pending imports for this item. Prefer the inventory_item_id the
+    // server stored at import time (most reliable), and fall back to a
+    // normalized paper_type + size + gsm + brand match for legacy or
+    // unlinked rows. Normalization handles whitespace and case mismatches
+    // that previously caused imports to silently drop out of the column.
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const matchedImports = (imports || []).filter(im => {
+      if (im.inventory_item_id != null) return im.inventory_item_id === it.id;
+      // Fallback — require paper_type to match so a 25x30/300 import for
+      // Bleach Card doesn't accidentally count under Art Card.
+      return norm(im.paper_type) === norm(it.paper_type)
+          && norm(im.size)  === norm(it.size)
+          && norm(im.gsm)   === norm(it.gsm)
+          && norm(im.brand) === norm(it.brand);
+    });
+    matchedImports.forEach(im => claimedImportIds.add(im.id));
+    const pendingPkts = matchedImports.reduce((a, im) => a + parseFloat(im.packets || 0), 0);
     const stockNowPkts     = stockNowSheets / ps;
     // After Import = what we'll have once all pending imports arrive.
     // Simple sum: current on-hand + pending.
@@ -2049,7 +2063,12 @@ function computeSummaryRows() {
     if (ad.h !== bd.h) return ad.h - bd.h;
     return String(a.item.size||'').localeCompare(String(b.item.size||''));
   });
-  return { rows, buckets };
+  // Imports that didn't get attributed to any item — usually because the
+  // user left size/gsm/brand blank or typed them slightly differently from
+  // what's on the inventory item. We list these under the table so the user
+  // can edit the import (or add the matching inventory item).
+  const orphanImports = (imports || []).filter(im => !claimedImportIds.has(im.id));
+  return { rows, buckets, orphanImports };
 }
 
 // Format a packet count: integer when whole, 2dp otherwise. Empty string for 0
@@ -2067,7 +2086,7 @@ function fmtKg(n) {
 
 function renderStockSummary() {
   const { paperType } = stockSummaryState;
-  const { rows, buckets } = computeSummaryRows();
+  const { rows, buckets, orphanImports } = computeSummaryRows();
   const el = document.getElementById('ss-content');
   if (!el) return;
   if (!rows.length) {
@@ -2119,7 +2138,25 @@ function renderStockSummary() {
       </tr>
       <tr>${periodSubHeaders}</tr>
       ${tbody}
-    </table>`;
+    </table>
+    ${orphanImports && orphanImports.length ? `
+      <div style="margin-top:14px;padding:10px 12px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:12px;">
+        <div style="font-weight:600;color:#92400e;margin-bottom:6px;">&#9888; ${orphanImports.length} pending import${orphanImports.length===1?'':'s'} not attributed to any inventory row</div>
+        <div style="color:#78350f;margin-bottom:8px;">These imports don't match any item above (usually because Size, GSM, or Brand was left blank or typed slightly differently from the inventory item). Edit the import or add a matching inventory item.</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;">
+          <tr style="background:#fde68a;"><th style="text-align:left;padding:4px 8px;">Paper</th><th style="text-align:left;padding:4px 8px;">Size</th><th style="text-align:left;padding:4px 8px;">GSM</th><th style="text-align:left;padding:4px 8px;">Brand</th><th style="text-align:right;padding:4px 8px;">Quantity</th><th style="text-align:left;padding:4px 8px;">Supplier</th><th style="padding:4px 8px;"></th></tr>
+          ${orphanImports.map(im => `<tr>
+            <td style="padding:4px 8px;">${esc(im.paper_type||'—')}</td>
+            <td style="padding:4px 8px;">${esc(im.size||'(blank)')}</td>
+            <td style="padding:4px 8px;">${esc(im.gsm||'(blank)')}</td>
+            <td style="padding:4px 8px;">${esc(im.brand||'(blank)')}</td>
+            <td style="padding:4px 8px;text-align:right;">${fmtPkts(parseFloat(im.packets||0))}</td>
+            <td style="padding:4px 8px;">${esc(im.supplier||'—')}</td>
+            <td style="padding:4px 8px;"><button class="btn btn-sm" onclick="closeModal(); openImports();">Open Imports</button></td>
+          </tr>`).join('')}
+        </table>
+      </div>
+    ` : ''}`;
 }
 
 // Print version — landscape A4, same numbers but with company header.
