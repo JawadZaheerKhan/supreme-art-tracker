@@ -1144,14 +1144,18 @@ function openInvAdd() {
     ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
-        <select id="inv-paper-type" onchange="invOpeningSync()">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+        <select id="inv-paper-type" onchange="invOpeningSync(); checkInvDuplicate();">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century"></div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century" oninput="checkInvDuplicate()"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36"></div>
-      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
     </div>
+    <!-- Live duplicate hint — turns yellow when the typed fields already
+         match an existing inventory item, so the user knows the "Opening"
+         will top up the existing item rather than create a new row. -->
+    <div id="inv-dup-hint" style="display:none;margin:-6px 0 4px;padding:8px 10px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:12px;color:#78350f;"></div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label" id="inv-opening-packets-label">Opening — Packets</label>
@@ -1172,6 +1176,45 @@ function openInvAdd() {
     </div>
   </div>`);
   invOpeningSync();
+  checkInvDuplicate();
+}
+
+// Live check: if (paper_type, size, gsm, brand) already exists in
+// inventory, surface a yellow hint that this submission will TOP UP the
+// existing item instead of creating a new row. Normalized to match the
+// server's COALESCE/case behavior.
+function checkInvDuplicate() {
+  const hint = document.getElementById('inv-dup-hint');
+  if (!hint) return;
+  const norm = s => String(s || '').trim().toLowerCase();
+  const pt    = (document.getElementById('inv-paper-type')||{}).value || '';
+  const size  = (document.getElementById('inv-size')||{}).value || '';
+  const gsm   = (document.getElementById('inv-gsm')||{}).value || '';
+  const brand = (document.getElementById('inv-brand')||{}).value || '';
+  // Only match exactly the way the server's unique index does — case sensitive,
+  // trimmed. Lower-case fallback flagged separately.
+  const exact = inventory.find(i =>
+    i.paper_type === pt &&
+    (i.size||'').trim()  === size.trim() &&
+    (i.gsm||'').trim()   === gsm.trim() &&
+    (i.brand||'').trim() === brand.trim()
+  );
+  const fuzzy = !exact && inventory.find(i =>
+    norm(i.paper_type) === norm(pt) &&
+    norm(i.size)  === norm(size) &&
+    norm(i.gsm)   === norm(gsm) &&
+    norm(i.brand) === norm(brand)
+  );
+  if (exact) {
+    hint.style.display = 'block';
+    hint.innerHTML = `<b>Already exists.</b> Saving will add the Opening amount to <b>${esc(exact.paper_type)}${exact.size?' · '+esc(exact.size):''}${exact.gsm?' · '+esc(exact.gsm)+'gsm':''}${exact.brand?' · '+esc(exact.brand):''}</b> (current balance: ${(exact.current_balance||0).toLocaleString()} sheets) instead of creating a new row.`;
+  } else if (fuzzy) {
+    hint.style.display = 'block';
+    hint.innerHTML = `<b>Similar item exists</b> with slightly different formatting (case/whitespace): <b>${esc(fuzzy.paper_type)}${fuzzy.size?' · '+esc(fuzzy.size):''}${fuzzy.gsm?' · '+esc(fuzzy.gsm)+'gsm':''}${fuzzy.brand?' · '+esc(fuzzy.brand):''}</b>. To merge, match the formatting exactly.`;
+  } else {
+    hint.style.display = 'none';
+    hint.innerHTML = '';
+  }
 }
 // Two-way sync between the Packets and Sheets inputs in the Add Item modal.
 // Called with 'packets' or 'sheets' to indicate which the user just edited,
@@ -1213,9 +1256,20 @@ async function saveInvAdd() {
   if (!data.paper_type) { alert('Paper type is required'); return; }
   showSaving(true);
   try {
-    await api('POST', '/api/inventory', data);
+    // Server returns { _merged: true, _added_sheets: N } when it merged
+    // into an existing item — show a different toast so the user knows
+    // their input topped up an existing row instead of creating a new one.
+    const result = await api('POST', '/api/inventory', data);
     await loadInventory();
-    closeModal(); notify('Paper item added');
+    closeModal();
+    if (result && result._merged) {
+      const added = result._added_sheets || 0;
+      notify(added > 0
+        ? `Stock added to existing item (+${added.toLocaleString()} sheets)`
+        : 'Item already exists — no change made');
+    } else {
+      notify('Paper item added');
+    }
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
