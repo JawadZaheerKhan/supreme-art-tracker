@@ -4145,13 +4145,10 @@ async function toggleBlock(id) {
   showSaving(false);
 }
 
-function buildPrintCard(j, paperSize = 'letter') {
-  // paperSize is now always 'letter' (the only caller). We size the
-  // content tightly enough to fit on letter / A4 (the smallest common
-  // print papers), and DON'T hard-pin @page size — so the browser uses
-  // whatever paper the user picks in the print dialog. On the shop's
-  // taller 8.5x12.5 paper, there'll just be extra blank space at the
-  // bottom, which is fine.
+function buildPrintCard(j) {
+  // Print template is sized for the shop's 8.5in × 12.5in job-card paper
+  // (the original layout — restored after a brief experiment with a
+  // tighter letter-friendly version that didn't fit the existing card stock).
   const v = x => esc(x || '');
   const fmt = d => d ? new Date(d).toLocaleDateString('en-PK') : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
@@ -4217,21 +4214,18 @@ function buildPrintCard(j, paperSize = 'letter') {
          one page. -->
     <style>
       @media print {
-        /* No @page size: let the browser use whatever paper the user
-           selected in the print dialog. Margin:0 maximises usable
-           area on every paper size. */
-        @page { margin: 0; }
-        #print-area { width: 8.5in !important; padding: 0.12in 0.4in !important; }
+        @page { size: 8.5in 12.5in; margin: 0; }
+        #print-area { width: 8.5in !important; padding: 0.22in 0.4in !important; }
         #print-area table { page-break-inside: auto !important; break-inside: auto !important; }
         #print-area tr    { page-break-inside: avoid !important; break-inside: avoid !important; }
       }
-      /* Compact header sizes — tuned to fit on letter / A4. */
-      .pc-logo   { height: 60px !important; }
-      .pc-serial { font-size: 15pt !important; }
-      .pc-title  { margin: 0 0 2px !important; font-size: 18pt !important; }
-      .pp-table .pp-data-row td     { height: 24px !important; padding: 3px 10px !important; font-size: 10pt; }
-      .pp-table .pp-comments-row td { height: 42px !important; padding: 3px 10px !important; font-size: 10pt; }
-      .pc-sig { margin-top: 4px !important; font-size: 11pt !important; }
+      /* Original pre-10am layout — bigger header, comfortable row heights. */
+      .pc-logo   { height: 80px !important; }
+      .pc-serial { font-size: 18pt !important; }
+      .pc-title  { margin: 0 0 2px !important; }
+      .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pc-sig { margin-top: 4px !important; }
 
       /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
          Force exact-color so browsers don't strip ink-saving colors. */
@@ -4326,16 +4320,14 @@ function buildPrintCard(j, paperSize = 'letter') {
   `;
 }
 
-// Direct print — no picker. The print template always uses the
-// "compact" layout, which fits Letter / A4 / 8.5x12.5 alike. That way
-// the Signature line survives no matter what paper the user selects in
-// Chrome's print dialog. On the shop's taller 8.5x12.5 paper there'll
-// be ~1.5in of blank space at the bottom; that's acceptable.
+// Direct print — opens Chrome's print dialog with the card laid out
+// for 8.5in × 12.5in paper. User should pick that same paper size in
+// the print dialog for the cleanest result.
 function printJobCard(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   const area = document.getElementById('print-area');
-  area.innerHTML = buildPrintCard(j, 'letter');
+  area.innerHTML = buildPrintCard(j);
   // Browsers print the document.title in the page header by default
   // ("Job Tracker Supreme Art"). Blank the title for the duration of
   // the print so the header is empty. Date + URL + page number can
