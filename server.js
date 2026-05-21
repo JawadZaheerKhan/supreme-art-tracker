@@ -812,8 +812,13 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier } = req.body;
+    let { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
+    // Brand is stored uppercase for consistency — Ningbo / ningbo / NINGBO
+    // all save as NINGBO. The case-insensitive duplicate check below still
+    // catches dupes against the existing data even if old rows aren't
+    // yet uppercase.
+    if (brand) brand = String(brand).trim().toUpperCase();
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
 
@@ -877,7 +882,10 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier } = req.body;
+    let { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier } = req.body;
+    // Same uppercase normalization as POST — keeps brand storage consistent
+    // (Ningbo / ningbo / NINGBO all save as NINGBO).
+    if (brand) brand = String(brand).trim().toUpperCase();
 
     // Snapshot the pre-edit balance — needed so an admin-only balance
     // correction below can compute the delta.
