@@ -1159,6 +1159,7 @@ function renderInventoryList() {
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
+        ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
     </div>`;
   }).join('');
@@ -1386,6 +1387,36 @@ async function saveInvEdit(id) {
     await loadInventory();
     closeModal(); notify('Item updated');
   } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Admin-only hard delete of an inventory item. Server blocks the delete if
+// any pending-issuance jobs still reference the item; otherwise it cascades
+// the full stock-transaction history. Two-step confirm because there's no
+// undo button — the ledger goes with it.
+async function deleteInvItem(id) {
+  if (!isAdmin()) return;
+  const it = inventory.find(x => x.id === id);
+  if (!it) return;
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  const bal   = it.current_balance || 0;
+  const ok = confirm(
+    `Permanently delete this inventory item?\n\n` +
+    `  ${label}\n` +
+    `  Current balance: ${bal.toLocaleString()} sheets\n\n` +
+    `This removes the item AND its full stock-in / stock-out / correction history.\n` +
+    `There is no undo. Pending jobs that reference this item will block the delete.\n\n` +
+    `Type OK by clicking Cancel to abort, or click OK to delete.`
+  );
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/inventory/${id}`);
+    await loadInventory();
+    notify('Item deleted');
+  } catch (e) {
+    notify('Delete failed: ' + e.message);
+  }
   showSaving(false);
 }
 

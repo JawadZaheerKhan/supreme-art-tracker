@@ -797,6 +797,60 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
   }
 });
 
+// DELETE an inventory item. Admin only. Refused if any pending-issuance
+// jobs still reference this item (their stock hasn't been deducted yet, so
+// losing the link would orphan them). Issued/in-progress/delivered jobs are
+// fine to lose the live link — their deductions already happened. Cascades
+// the full transaction history (intentional — admin saw the warning).
+app.delete('/api/inventory/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { id } = req.params;
+    const itemId = parseInt(id, 10);
+    if (!Number.isFinite(itemId)) return res.status(400).json({ error: 'Invalid id' });
+
+    // Block delete if any still-pending jobs depend on this item.
+    const blockers = await sql`
+      SELECT id, jobcode, name FROM jobs
+      WHERE inventory_item_id = ${itemId} AND issuance_status = 'pending'
+      ORDER BY id
+    `;
+    if (blockers.length > 0) {
+      const list = blockers.map(j => `E-${j.id}${j.jobcode ? ' ('+j.jobcode+')' : ''}`).join(', ');
+      return res.status(409).json({
+        error: `Cannot delete — used by ${blockers.length} pending job${blockers.length>1?'s':''}: ${list}. Issue stock for those jobs first or delete them.`,
+        pending_jobs: blockers,
+      });
+    }
+
+    // Snapshot for audit log before delete.
+    const existing = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
+    if (!existing[0]) return res.status(404).json({ error: 'Item not found' });
+    const it = existing[0];
+    const label = `${it.paper_type}${it.size?' '+it.size:''}${it.gsm?' '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+
+    // Clear the link on any non-pending jobs that still pointed at this item
+    // (no FK on jobs.inventory_item_id, so we tidy up manually). Their
+    // historical paper data stays in the jobs row, just the live link is gone.
+    await sql`UPDATE jobs SET inventory_item_id = NULL WHERE inventory_item_id = ${itemId}`;
+    // Cascades inventory_transactions; sets inventory_imports.inventory_item_id NULL.
+    await sql`DELETE FROM inventory_items WHERE id = ${itemId}`;
+
+    await logAudit(sql, req, {
+      action: 'inventory.delete',
+      entityType: 'inventory',
+      entityId: itemId,
+      summary: `Deleted paper item: ${label} (balance was ${it.current_balance||0} sheets)`,
+    });
+
+    res.json({ ok: true, deleted_id: itemId });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ADD/ADJUST stock — used for deliveries and manual corrections.
 app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) => {
   try {
