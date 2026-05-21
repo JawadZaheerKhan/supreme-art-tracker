@@ -489,6 +489,11 @@
         <div class="report-card-title">Imports</div>
         <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders and mark them received to feed Stock Summary.</div>
       </button>
+      <button class="report-card" onclick="openCalculator()">
+        <div class="report-card-icon">&#129518;</div>
+        <div class="report-card-title">Calculator</div>
+        <div class="report-card-desc">Paper math: enter size + gsm, then any of weight / sheets / packets — the other two fill in automatically.</div>
+      </button>
     </div>
   </div>
 
@@ -3552,6 +3557,195 @@ function setDateCustom() {
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
 function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
 function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
+
+// ── Paper Calculator ──────────────────────────────────────────
+// 3-way connected calculator: weight ⇄ sheets ⇄ packets.
+// Inputs: paper type (determines packet size — 100 for cards, 500 for reams),
+// sheet size (inches or mm), and gsm. Edit any one of weight/sheets/packets
+// and the other two recompute live based on the formula:
+//   weight per sheet (g) = (size_in_sq_inches × gsm) ÷ 1550
+//   packet weight  (kg) = (size_in_sq_inches × gsm × packSize) ÷ 1,550,000
+// (mm path divides each dimension by 25.4 first.)
+let calcUnit = 'in';        // 'in' or 'mm'
+let calcLastEdit = null;    // 'weight' | 'sheets' | 'packets' — source-of-truth field
+
+function openCalculator() {
+  calcUnit = 'in';
+  calcLastEdit = null;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Paper Calculator <span style="font-size:13px;color:var(--text2);font-weight:normal;">— weight, sheets &amp; packets</span></h2>
+    <p style="font-size:12px;color:var(--text2);margin:0 0 14px;">Pick paper type + size + gsm. Then type any one of weight / sheets / packets — the other two fill in automatically.</p>
+
+    <div class="form-group">
+      <label class="form-label">Paper Type</label>
+      <select id="calc-paper-type" onchange="calcRecalc()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+        <option value="">— Select paper type —</option>
+        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)} (${packetUnitLabel(p)} of ${packetSize(p)})</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Sheet Size</span>
+        <span style="display:inline-flex;gap:4px;text-transform:none;letter-spacing:0;">
+          <button type="button" class="btn btn-sm" id="calc-unit-in-btn" onclick="setCalcUnit('in')" style="background:#1e40af;color:#fff;border-color:#1e40af;">inches</button>
+          <button type="button" class="btn btn-sm" id="calc-unit-mm-btn" onclick="setCalcUnit('mm')">mm</button>
+        </span>
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="number" id="calc-w" placeholder="Width"  step="0.01" min="0" oninput="calcRecalc()" style="flex:1;">
+        <span style="color:var(--text2);font-weight:600;">×</span>
+        <input type="number" id="calc-h" placeholder="Height" step="0.01" min="0" oninput="calcRecalc()" style="flex:1;">
+        <span id="calc-unit-label" style="color:var(--text2);min-width:42px;font-size:13px;">inches</span>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">GSM</label>
+      <input type="number" id="calc-gsm" step="1" min="0" placeholder="e.g. 300" oninput="calcRecalc()">
+    </div>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0;">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;">Type any one — the other two fill in</div>
+
+    <div class="form-group">
+      <label class="form-label" style="color:#A32D2D;">Weight (kg)</label>
+      <input type="number" id="calc-weight" step="0.01" min="0" placeholder="Total weight in kg" oninput="calcSetEdit('weight')">
+    </div>
+    <div class="form-group">
+      <label class="form-label" style="color:#1e40af;">Sheets</label>
+      <input type="number" id="calc-sheets" step="1" min="0" placeholder="Total number of sheets" oninput="calcSetEdit('sheets')">
+    </div>
+    <div class="form-group">
+      <label class="form-label" style="color:#166534;"><span id="calc-pack-label">Packets / Reams</span></label>
+      <input type="number" id="calc-packets" step="0.01" min="0" placeholder="Number of packets / reams" oninput="calcSetEdit('packets')">
+    </div>
+
+    <div id="calc-info" style="background:#f9fafb;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;color:var(--text2);line-height:1.5;">
+      Fill paper type, size, and GSM to start.
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn" onclick="calcReset()">Reset</button>
+      <button class="btn btn-primary" onclick="closeModal()">Close</button>
+    </div>
+  </div>`);
+}
+
+function setCalcUnit(u) {
+  calcUnit = u;
+  const inBtn = document.getElementById('calc-unit-in-btn');
+  const mmBtn = document.getElementById('calc-unit-mm-btn');
+  if (inBtn) {
+    inBtn.style.background   = u === 'in' ? '#1e40af' : '';
+    inBtn.style.color        = u === 'in' ? '#fff'    : '';
+    inBtn.style.borderColor  = u === 'in' ? '#1e40af' : '';
+  }
+  if (mmBtn) {
+    mmBtn.style.background   = u === 'mm' ? '#1e40af' : '';
+    mmBtn.style.color        = u === 'mm' ? '#fff'    : '';
+    mmBtn.style.borderColor  = u === 'mm' ? '#1e40af' : '';
+  }
+  const lbl = document.getElementById('calc-unit-label');
+  if (lbl) lbl.textContent = u === 'in' ? 'inches' : 'mm';
+  calcRecalc();
+}
+
+function calcSetEdit(field) {
+  calcLastEdit = field;
+  calcRecalc();
+}
+
+function calcReset() {
+  ['calc-paper-type','calc-w','calc-h','calc-gsm','calc-weight','calc-sheets','calc-packets'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  calcLastEdit = null;
+  const info = document.getElementById('calc-info');
+  if (info) info.innerHTML = 'Fill paper type, size, and GSM to start.';
+  const lbl = document.getElementById('calc-pack-label');
+  if (lbl) lbl.textContent = 'Packets / Reams';
+}
+
+function calcRecalc() {
+  const paperType = (document.getElementById('calc-paper-type')||{}).value || '';
+  const w   = parseFloat((document.getElementById('calc-w')  ||{}).value);
+  const h   = parseFloat((document.getElementById('calc-h')  ||{}).value);
+  const gsm = parseFloat((document.getElementById('calc-gsm')||{}).value);
+  const info = document.getElementById('calc-info');
+  const packLabel = document.getElementById('calc-pack-label');
+  if (!info) return;
+
+  // Update the packets/reams label based on chosen paper type
+  if (paperType && packLabel) {
+    packLabel.textContent = packetUnitLabel(paperType);
+  } else if (packLabel) {
+    packLabel.textContent = 'Packets / Reams';
+  }
+
+  // Need everything before we can compute
+  if (!paperType) { info.innerHTML = 'Pick a paper type to continue.'; return; }
+  if (!isFinite(w) || w <= 0 || !isFinite(h) || h <= 0) { info.innerHTML = 'Enter sheet width and height.'; return; }
+  if (!isFinite(gsm) || gsm <= 0) { info.innerHTML = 'Enter GSM.'; return; }
+
+  // Convert size to square inches (formula divisor 1550 is sq-in per m²)
+  const sqIn = calcUnit === 'in' ? (w * h) : ((w * h) / 645.16);   // 25.4² = 645.16
+  const packSize  = packetSize(paperType);                          // 100 or 500
+  const gPerSheet = (sqIn * gsm) / 1550;                            // grams per sheet
+  const kgPerPack = (gPerSheet * packSize) / 1000;                  // kg per packet/ream
+
+  // Pick the source-of-truth field
+  let source = calcLastEdit;
+  const wEl = document.getElementById('calc-weight');
+  const sEl = document.getElementById('calc-sheets');
+  const pEl = document.getElementById('calc-packets');
+  if (!source) {
+    if (wEl && wEl.value !== '') source = 'weight';
+    else if (sEl && sEl.value !== '') source = 'sheets';
+    else if (pEl && pEl.value !== '') source = 'packets';
+  }
+
+  // Helper: round to N decimals, strip trailing zeros
+  const round2 = (x) => Math.round(x * 100) / 100;
+
+  let sheets = null, kg = null, packets = null;
+  if (source === 'weight') {
+    kg = parseFloat(wEl.value);
+    if (!isFinite(kg) || kg < 0) { renderCalcInfo(); return; }
+    sheets  = (kg * 1000) / gPerSheet;
+    packets = sheets / packSize;
+    sEl.value = Math.round(sheets);
+    pEl.value = round2(packets);
+  } else if (source === 'sheets') {
+    sheets = parseFloat(sEl.value);
+    if (!isFinite(sheets) || sheets < 0) { renderCalcInfo(); return; }
+    kg      = (sheets * gPerSheet) / 1000;
+    packets = sheets / packSize;
+    wEl.value = round2(kg);
+    pEl.value = round2(packets);
+  } else if (source === 'packets') {
+    packets = parseFloat(pEl.value);
+    if (!isFinite(packets) || packets < 0) { renderCalcInfo(); return; }
+    sheets = packets * packSize;
+    kg     = (sheets * gPerSheet) / 1000;
+    wEl.value = round2(kg);
+    sEl.value = Math.round(sheets);
+  }
+
+  renderCalcInfo();
+
+  function renderCalcInfo() {
+    const unitName = packetUnitLabel(paperType).toLowerCase().replace(/s$/, '');
+    info.innerHTML = `
+      <div><b>Per sheet:</b> ${gPerSheet.toFixed(2)} g &nbsp;·&nbsp;
+           <b>Per ${unitName}:</b> ${kgPerPack.toFixed(2)} kg (${packSize} sheets)</div>
+      <div style="margin-top:4px;color:var(--text2);font-size:11px;">
+        Area = ${sqIn.toFixed(2)} sq in &nbsp;·&nbsp; (sq in × gsm) ÷ 1550 = g/sheet
+      </div>
+    `;
+  }
+}
 
 function specsSection(p, coatings, j) {
   // Searchable paper combobox — replaces the old free-text checkbox row.
