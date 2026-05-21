@@ -28,6 +28,9 @@
   .mode-btn.active { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
   .mode-btn:hover:not(.active) { color: var(--text); }
   .inventory-list { display: flex; flex-direction: column; gap: 8px; }
+  /* Read-only CEO role: any element tagged with class="ceo-hide" disappears.
+     Backend still enforces the lock; this is just the UI nicety. */
+  body.role-ceo .ceo-hide { display: none !important; }
   .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
   .report-card:hover { border-color: var(--blue-border); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-2px); }
   .report-card-icon { font-size: 28px; }
@@ -684,7 +687,10 @@ const PARTICULARS_ROWS = [
   { key: 'no_of_colors',             label: 'No. of Colors' },
   { key: 'printed_sheets_qty',       label: 'Printed Sheets Qty' },
   { key: 'printed_waste_sheets',     label: 'Printed Waste Sheets' },
-  { key: 'uv_waste_sheets',          label: 'U.V Waste Sheets' },
+  // Renamed from "U.V Waste Sheets" — DB key kept as uv_waste_sheets so
+  // existing job rows still match. Only the display label changed.
+  { key: 'uv_waste_sheets',          label: 'Coating Waste Sheets' },
+  { key: 'die_cutting_sheets',       label: 'Die Cutting Sheets' },
   { key: 'die_cutting_waste',        label: 'Die Cutting Waste' },
   { key: 'sorted_cartons_qty',       label: 'Sorted Cartons Qty' },
   { key: 'sorted_cartons_waste',     label: 'Sorted Cartons Waste' },
@@ -784,6 +790,10 @@ let currentUser = null;
 function isAdmin() { return currentUser && currentUser.role === 'admin'; }
 // Stock-role users plus admins can issue stock for pending jobs.
 function canIssueStock() { return currentUser && (currentUser.role === 'admin' || currentUser.role === 'stock'); }
+// Read-only executive view. CEOs can browse the whole app but every write
+// button is hidden from them and the server blocks mutations anyway.
+function isCeo() { return currentUser && currentUser.role === 'ceo'; }
+function canWrite() { return currentUser && currentUser.role !== 'ceo'; }
 function isPendingIssuance(j) { return j && j.issuance_status === 'pending'; }
 
 function showLogin(errorMsg) {
@@ -811,6 +821,9 @@ function renderUserChip() {
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
   document.getElementById('mode-users-btn').style.display = isAdmin() ? 'block' : 'none';
+  // CEOs see a read-only version of the app — flip a body class so the CSS
+  // rule below hides every element tagged .ceo-hide in one go.
+  document.body.classList.toggle('role-ceo', isCeo());
 }
 
 // Google Identity Services — renders the official Sign In button into our
@@ -887,13 +900,13 @@ function setMode(m) {
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('topbar-refresh');
   if (m === 'jobs') {
-    addBtn.style.display = '';
+    addBtn.style.display = isCeo() ? 'none' : '';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
     exportBtn.style.display = '';
     refreshBtn.style.display = '';
     render();
   } else if (m === 'inventory') {
-    addBtn.style.display = '';
+    addBtn.style.display = isCeo() ? 'none' : '';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
@@ -1035,11 +1048,11 @@ function renderJobs() {
         </div>
         <div class="job-actions">
           ${pending && canIssueStock() ? `<button class="btn btn-sm btn-success" onclick="issueStock(${j.id})" title="Issue stock and start this job">&#10003; Issue Stock</button>` : ''}
-          <button class="btn btn-sm btn-primary" onclick="openUpdate(${j.id})">Update</button>
+          <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
-          <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit</button>
+          <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
           <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
-          ${!done?`<button class="btn btn-sm btn-danger" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
+          ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
           ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
         </div>
       </div>
@@ -1143,9 +1156,9 @@ function renderInventoryList() {
         <div class="inv-balance-sub">${sheets.toLocaleString()} ${esc(it.unit||'sheets')}</div>
       </div>
       <div class="inv-actions">
-        <button class="btn btn-sm btn-primary" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History</button>
-        <button class="btn btn-sm" onclick="openInvEdit(${it.id})">Edit</button>
+        <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
       </div>
     </div>`;
   }).join('');
@@ -2363,7 +2376,7 @@ function openImports() {
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Imports <span style="font-size:13px;color:var(--text2);font-weight:normal;">— booked-but-not-arrived shipments</span></h2>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-      <button class="btn btn-sm btn-primary" onclick="openImportAdd()">+ New Import</button>
+      <button class="btn btn-sm btn-primary ceo-hide" onclick="openImportAdd()">+ New Import</button>
       <div id="import-filter-wrap" style="margin-left:8px;">
         <select class="filter" id="import-status-filter" onchange="renderImportsTable()">
           <option value="pending" selected>Pending only</option>
@@ -2403,9 +2416,9 @@ function renderImportsTable() {
       ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
       : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
     const actions = i.status === 'pending'
-      ? `<button class="btn btn-sm" onclick="receiveImport(${i.id})">Receive</button>
-         <button class="btn btn-sm" onclick="editImport(${i.id})">Edit</button>
-         <button class="btn btn-sm" onclick="cancelImport(${i.id})">Cancel</button>`
+      ? `<button class="btn btn-sm ceo-hide" onclick="receiveImport(${i.id})">Receive</button>
+         <button class="btn btn-sm ceo-hide" onclick="editImport(${i.id})">Edit</button>
+         <button class="btn btn-sm ceo-hide" onclick="cancelImport(${i.id})">Cancel</button>`
       : '';
     const unit = packetUnitLabel(i.paper_type).toLowerCase();
     return `<tr>
@@ -2647,7 +2660,7 @@ function openStockMovementPane(direction) {
   // "+ Stock In" button only on the Stock In pane — Stock Out movements are
   // generated by job consumption / manual adjustments, not entered here.
   const addBtn = direction === 'in'
-    ? `<button class="btn btn-sm btn-primary" onclick="openBulkStockInFromPane()">&#128230; + Stock In</button>`
+    ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openBulkStockInFromPane()">&#128230; + Stock In</button>`
     : '';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
@@ -4631,6 +4644,7 @@ function renderUsersTab() {
         <select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:110px;">
           <option value="user" ${u.role==='user'?'selected':''}>User</option>
           <option value="stock" ${u.role==='stock'?'selected':''}>Stock</option>
+          <option value="ceo" ${u.role==='ceo'?'selected':''}>CEO (view-only)</option>
           <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
         </select>
       </div>
@@ -4662,6 +4676,7 @@ function openInviteUser() {
       <select id="invite-role">
         <option value="user" selected>User</option>
         <option value="stock">Stock</option>
+        <option value="ceo">CEO (view-only)</option>
         <option value="admin">Admin</option>
       </select>
     </div>

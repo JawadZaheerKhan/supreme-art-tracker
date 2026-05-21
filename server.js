@@ -144,18 +144,17 @@ async function initDb() {
         email         TEXT NOT NULL UNIQUE,
         name          TEXT,
         picture       TEXT,
-        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user','stock')),
+        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user','stock','ceo')),
         invited_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at    TIMESTAMPTZ DEFAULT NOW(),
         last_login_at TIMESTAMPTZ
       )
     `;
-    // Migrate the role CHECK constraint on existing DBs that were created
-    // before 'stock' was a valid role. Drop the old constraint and add the
-    // new one; idempotent because the second add fails silently if the
-    // constraint already permits 'stock'.
+    // Migrate the role CHECK constraint on existing DBs to include the
+    // latest allowed roles ('stock' was added later, then 'ceo' for the
+    // read-only executive view). Idempotent — drop+re-add every boot.
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock'))`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo'))`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -225,6 +224,17 @@ function requireStockOrAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (req.user.role !== 'admin' && req.user.role !== 'stock') {
     return res.status(403).json({ error: 'Stock or admin role required' });
+  }
+  next();
+}
+// Any signed-in user EXCEPT the read-only 'ceo' role. Use this on every
+// write endpoint so CEOs can browse the app freely but can't mutate state.
+// Admins/users/stock all still go through; the UI hides the write buttons
+// for CEOs as well, but this is the real enforcement.
+function requireWriteUser(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (req.user.role === 'ceo') {
+    return res.status(403).json({ error: 'Read-only account — changes are not allowed' });
   }
   next();
 }
@@ -356,7 +366,7 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
     // Allow 'admin', 'stock', or 'user' (default). Anything else falls back to user.
-    const role = ['admin','stock','user'].includes(req.body.role) ? req.body.role : 'user';
+    const role = ['admin','stock','user','ceo'].includes(req.body.role) ? req.body.role : 'user';
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     const inserted = await sql`
       INSERT INTO users (email, role, invited_by) VALUES (${email}, ${role}, ${req.user.id})
@@ -376,7 +386,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const role = ['admin','stock','user'].includes(req.body.role) ? req.body.role : 'user';
+    const role = ['admin','stock','user','ceo'].includes(req.body.role) ? req.body.role : 'user';
     // Guardrail: don't allow demoting yourself — locks you out of admin tools.
     if (parseInt(id, 10) === req.user.id && role !== 'admin') {
       return res.status(400).json({ error: "You can't change your own role away from admin." });
@@ -476,7 +486,7 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes 
 }
 
 // CREATE a job
-app.post('/api/jobs', requireAuth, async (req, res) => {
+app.post('/api/jobs', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -499,7 +509,7 @@ app.post('/api/jobs', requireAuth, async (req, res) => {
 });
 
 // UPDATE job details
-app.put('/api/jobs/:id', requireAuth, async (req, res) => {
+app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -661,7 +671,7 @@ app.get('/api/inventory', requireAuth, async (req, res) => {
 
 // CREATE an inventory item. Initial balance, if provided, is recorded as an
 // "opening-balance" ledger row so the audit trail is complete from day one.
-app.post('/api/inventory', requireAuth, async (req, res) => {
+app.post('/api/inventory', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -729,7 +739,7 @@ app.post('/api/inventory', requireAuth, async (req, res) => {
 });
 
 // UPDATE inventory item fields (not balance — balance is ledger-driven)
-app.put('/api/inventory/:id', requireAuth, async (req, res) => {
+app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -788,7 +798,7 @@ app.put('/api/inventory/:id', requireAuth, async (req, res) => {
 });
 
 // ADD/ADJUST stock — used for deliveries and manual corrections.
-app.post('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
+app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -905,7 +915,7 @@ app.get('/api/imports', async (req, res) => {
 // CREATE an import. Auto-links to a matching inventory_item if one exists
 // (same paper_type + size + gsm + brand). No match → leave the link NULL;
 // receiving the import later will create the item.
-app.post('/api/imports', async (req, res) => {
+app.post('/api/imports', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -933,7 +943,7 @@ app.post('/api/imports', async (req, res) => {
 });
 
 // UPDATE import fields. Status changes go through /receive or /cancel below.
-app.put('/api/imports/:id', async (req, res) => {
+app.put('/api/imports/:id', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -951,7 +961,7 @@ app.put('/api/imports/:id', async (req, res) => {
 });
 
 // CANCEL an import (status → cancelled, no inventory change).
-app.post('/api/imports/:id/cancel', async (req, res) => {
+app.post('/api/imports/:id/cancel', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -968,7 +978,7 @@ app.post('/api/imports/:id/cancel', async (req, res) => {
 // import has no linked inventory_item, we create one on the fly using the
 // import's paper_type/size/gsm/brand. The body may override `packets` (e.g.,
 // when the actual delivery differs from the booked quantity).
-app.post('/api/imports/:id/receive', async (req, res) => {
+app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1028,7 +1038,7 @@ app.post('/api/imports/:id/receive', async (req, res) => {
 });
 
 // UPDATE stage/status only
-app.patch('/api/jobs/:id/stage', requireAuth, async (req, res) => {
+app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
