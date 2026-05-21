@@ -1322,20 +1322,31 @@ async function saveInvAdd() {
 
 function openInvEdit(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
-  const curBal  = it.current_balance || 0;
-  const unit    = esc(it.unit || 'sheets');
+  const curBalSheets = it.current_balance || 0;
+  const sheetsUnit   = esc(it.unit || 'sheets');
+  // The DB stores sheets, but admins think in packets / reams. Convert for
+  // display, convert back on save. ps is 100 for cards, 500 for reams.
+  const ps        = packetSize(it.paper_type);
+  const packUnit  = packetUnitLabel(it.paper_type);              // "Packets" or "Reams"
+  const packUnitL = packUnit.toLowerCase();
+  const curBalPkts = curBalSheets / ps;
+  // Trim trailing zeros for clean display (207.75 not 207.7500).
+  const curBalPktsStr = Number.isInteger(curBalPkts) ? String(curBalPkts) : (+curBalPkts.toFixed(2)).toString();
   // Admin-only: direct balance correction. The server writes a
   // reason='correction' transaction (visible in History, hidden from
   // Stock In/Out and Dashboard movement totals).
   const balanceSection = isAdmin()
     ? `<div class="form-group" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;">
          <label class="form-label" style="color:#A32D2D;">Current Balance <span style="font-weight:400;font-size:11px;color:var(--text2);">(admin only — corrections won't show in Stock In/Out reports)</span></label>
-         <input type="number" id="inv-balance" value="${curBal}" min="0" step="1" data-original="${curBal}">
-         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBal.toLocaleString()}</b> ${unit}. Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
+         <div style="display:flex;gap:8px;align-items:center;">
+           <input type="number" id="inv-balance" value="${curBalPktsStr}" min="0" step="0.01" data-original-pkts="${curBalPktsStr}" data-pack-size="${ps}" style="flex:1;">
+           <span style="color:var(--text2);font-size:13px;white-space:nowrap;">${packUnit.toLowerCase()}</span>
+         </div>
+         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBalPktsStr}</b> ${packUnitL} (${curBalSheets.toLocaleString()} ${sheetsUnit}). Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
          <label class="form-label" style="margin-top:8px;font-size:11px;">Reason for correction <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
-         <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 200 sheets">
+         <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 2 ${packUnitL}">
        </div>`
-    : `<div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${curBal.toLocaleString()}</b> ${unit}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>`;
+    : `<div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${curBalPktsStr}</b> ${packUnitL} (${curBalSheets.toLocaleString()} ${sheetsUnit}). Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Edit Paper Item</h2>
     ${invDatalistsHtml()}
@@ -1366,17 +1377,29 @@ async function saveInvEdit(id) {
     reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
-  // Admin-only balance correction. Only send current_balance if it
-  // actually changed — server treats omitted/unchanged as no-op.
+  // Admin-only balance correction. Field is in PACKETS / REAMS for usability,
+  // but the DB column stores sheets — so convert before sending. Only fire
+  // the correction transaction if the rounded sheet count actually changed.
   const balEl = document.getElementById('inv-balance');
   if (balEl && isAdmin()) {
-    const newBal = parseInt(balEl.value, 10);
-    const oldBal = parseInt(balEl.dataset.original, 10) || 0;
-    if (Number.isFinite(newBal) && newBal !== oldBal) {
-      const delta = newBal - oldBal;
+    const ps        = parseInt(balEl.dataset.packSize, 10) || 100;
+    const newPkts   = parseFloat(balEl.value);
+    const oldPkts   = parseFloat(balEl.dataset.originalPkts);
+    const newSheets = Number.isFinite(newPkts) ? Math.round(newPkts * ps) : null;
+    const oldSheets = Number.isFinite(oldPkts) ? Math.round(oldPkts * ps) : 0;
+    if (Number.isFinite(newPkts) && newSheets !== oldSheets) {
+      const delta     = newSheets - oldSheets;
+      const deltaPkts = (delta / ps);
+      const deltaPktsStr = Number.isInteger(deltaPkts) ? String(deltaPkts) : (+deltaPkts.toFixed(2)).toString();
       const sign  = delta > 0 ? '+' : '';
-      if (!confirm(`Correct balance from ${oldBal.toLocaleString()} to ${newBal.toLocaleString()} (${sign}${delta.toLocaleString()})?\n\nThis writes a "correction" entry to the item's History and will NOT appear in Stock In / Stock Out reports.`)) return;
-      data.current_balance = newBal;
+      const unitL = ps === 500 ? 'reams' : 'packets';
+      if (!confirm(
+          `Correct balance from ${oldPkts.toLocaleString()} to ${newPkts.toLocaleString()} ${unitL} ` +
+          `(${sign}${deltaPktsStr} ${unitL} · ${sign}${delta.toLocaleString()} sheets)?\n\n` +
+          `This writes a "correction" entry to the item's History and will NOT appear in ` +
+          `Stock In / Stock Out reports.`
+      )) return;
+      data.current_balance = newSheets;
       const notesEl = document.getElementById('inv-correction-notes');
       if (notesEl && notesEl.value.trim()) data.correction_notes = notesEl.value.trim();
     }
