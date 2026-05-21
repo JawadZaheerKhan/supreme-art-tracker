@@ -139,12 +139,18 @@
        Normal = black, Urgent = dark blue, Most Urgent = green.
      Legacy class names (p-high / p-medium / p-low) kept for back-compat
      in case any older code paths still reference them. */
-  .job-card.p-normal      { border-left-color: #000000; }
-  .job-card.p-urgent      { border-left-color: #1e40af; }
-  .job-card.p-most-urgent { border-left-color: #166534; }
-  .job-card.p-high   { border-left-color: #166534; }
-  .job-card.p-medium { border-left-color: #1e40af; }
-  .job-card.p-low    { border-left-color: #000000; }
+  /* Priority strip on the LEFT of each job card. Two levels only.
+     Normal = no colour (default grey-ish, matches a plain card).
+     Urgent = red. Legacy names map to the same scheme. */
+  .job-card.p-normal      { /* default border-left color from .job-card */ }
+  .job-card.p-urgent      { border-left-color: #dc2626; }
+  /* Legacy: existing rows with Most Urgent / High / Medium / Low all map
+     to the two-level scheme via normalizePriority(); these CSS classes
+     would only apply if any stale rendering bypassed the helper. */
+  .job-card.p-most-urgent { border-left-color: #dc2626; }
+  .job-card.p-low         { /* default */ }
+  .job-card.p-medium      { border-left-color: #dc2626; }
+  .job-card.p-high        { border-left-color: #dc2626; }
   .job-card.is-done { opacity: 0.72; }
   .job-top { display: flex; align-items: flex-start; gap: 12px; }
   .job-meta { flex: 1; }
@@ -677,14 +683,19 @@ function packetUnitLabel(paperType) { return isReamPaper(paperType) ? 'Reams' : 
 // Priority naming: form uses Normal / Urgent / Most Urgent. Old job rows
 // in the DB may still have Low / Medium / High — this maps them to the
 // new names so display stays consistent without a data migration.
-//   Low    → Normal       (black)
-//   Medium → Urgent       (dark blue)
-//   High   → Most Urgent  (green)
-const PRIORITY_LEVELS = ['Normal', 'Urgent', 'Most Urgent'];
+// Priority is now a two-level scheme: Normal (default, no strip) and Urgent
+// (red strip + red badge). Legacy values map in so old jobs keep working:
+//   Low / Medium    → Normal
+//   High / Most Urgent → Urgent
+// In the PRINT layout, the old CSS rules for pc-prio-most-urgent stay
+// (in case any job still has that exact value), but the form/dropdown
+// only offers Normal and Urgent going forward.
+const PRIORITY_LEVELS = ['Normal', 'Urgent'];
 function normalizePriority(p) {
-  if (p === 'Low')    return 'Normal';
-  if (p === 'Medium') return 'Urgent';
-  if (p === 'High')   return 'Most Urgent';
+  if (p === 'Low')         return 'Normal';
+  if (p === 'Medium')      return 'Normal';
+  if (p === 'High')        return 'Urgent';
+  if (p === 'Most Urgent') return 'Urgent';
   return PRIORITY_LEVELS.includes(p) ? p : 'Normal';
 }
 
@@ -1024,13 +1035,10 @@ function renderJobs() {
       return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="moveToStage(${j.id},${i})" style="cursor:pointer">${SHORT[i]}</span>`;
     }).join('');
     const note = j.stages?.[si]?.notes;
-    // Priority class — map both the new names (Normal / Urgent / Most Urgent)
-    // AND any legacy values (Low / Medium / High) to the same set of CSS
-    // classes. Legacy → new: Low→Normal, Medium→Urgent, High→Most Urgent.
+    // Priority class — two-level scheme (Normal / Urgent). Anything legacy
+    // (Low / Medium / High / Most Urgent) is mapped by normalizePriority.
     const priNorm = normalizePriority(j.priority);
-    const pc = priNorm === 'Most Urgent' ? 'p-most-urgent'
-             : priNorm === 'Urgent'      ? 'p-urgent'
-             :                              'p-normal';
+    const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
     const coatings = Array.isArray(j.coatings) ? j.coatings : [];
     return `
     <div class="job-card ${pc} ${done?'is-done':''}">
@@ -1039,7 +1047,7 @@ function renderJobs() {
           <div class="job-id-row">
             <span class="job-id">#${j.id}</span>
             ${badge}
-            ${priNorm === 'Most Urgent' ? '<span class="badge" style="font-size:10px;background:#166534;color:#fff;">MOST URGENT</span>' : ''}
+            ${priNorm === 'Urgent' ? '<span class="badge" style="font-size:10px;background:#dc2626;color:#fff;">URGENT</span>' : ''}
           </div>
           <div class="job-name">${esc(j.name)}</div>
           <div class="job-sub">${esc(j.client)}${j.qty?' &middot; '+esc(j.qty)+' pcs':''}${j.deadline?' &middot; Due: '+esc(j.deadline):''}</div>
