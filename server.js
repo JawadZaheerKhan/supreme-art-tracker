@@ -755,7 +755,27 @@ app.get('/api/inventory', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const items = await sql`SELECT * FROM inventory_items ORDER BY paper_type, size, gsm, brand`;
+    // Also attach the most recent stock-in and stock-out per item so the
+    // inventory cards can show small green "+N" and red "-N" pills at a
+    // glance. Subqueries are scoped to one item_id each (the per-item index
+    // makes them cheap) and return NULL for items that have never moved.
+    const items = await sql`
+      SELECT i.*,
+        (SELECT change     FROM inventory_transactions
+           WHERE item_id = i.id AND change > 0
+           ORDER BY created_at DESC LIMIT 1) AS latest_in_sheets,
+        (SELECT created_at FROM inventory_transactions
+           WHERE item_id = i.id AND change > 0
+           ORDER BY created_at DESC LIMIT 1) AS latest_in_at,
+        (SELECT change     FROM inventory_transactions
+           WHERE item_id = i.id AND change < 0
+           ORDER BY created_at DESC LIMIT 1) AS latest_out_sheets,
+        (SELECT created_at FROM inventory_transactions
+           WHERE item_id = i.id AND change < 0
+           ORDER BY created_at DESC LIMIT 1) AS latest_out_at
+      FROM inventory_items i
+      ORDER BY paper_type, size, gsm, brand
+    `;
     res.json(items);
   } catch (err) {
     console.error(err);
