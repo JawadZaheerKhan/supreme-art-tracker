@@ -87,9 +87,12 @@ async function initDb() {
         unit               TEXT DEFAULT 'sheets',
         current_balance    INTEGER DEFAULT 0,
         reorder_threshold  INTEGER DEFAULT 0,
+        supplier           TEXT,
         created_at         TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Add supplier on pre-existing DBs that were created before the column.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS supplier TEXT`;
     // (paper_type, size, gsm, brand) uniquely identifies an inventory line.
     // COALESCE keeps NULLs from defeating uniqueness — Postgres treats NULL as not-equal otherwise.
     await sql`
@@ -675,7 +678,7 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes } = req.body;
+    const { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
@@ -713,8 +716,8 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
 
     // No match — fresh item.
     const inserted = await sql`
-      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold)
-      VALUES (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${reorder_threshold||0})
+      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier)
+      VALUES (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${reorder_threshold||0}, ${supplier||null})
       RETURNING *
     `;
     const item = inserted[0];
@@ -744,7 +747,7 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes } = req.body;
+    const { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier } = req.body;
 
     // Snapshot the pre-edit balance — needed so an admin-only balance
     // correction below can compute the delta.
@@ -755,7 +758,8 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     const result = await sql`
       UPDATE inventory_items SET
         paper_type=${paper_type}, size=${size||null}, gsm=${gsm||null},
-        brand=${brand||null}, reorder_threshold=${reorder_threshold||0}
+        brand=${brand||null}, reorder_threshold=${reorder_threshold||0},
+        supplier=${supplier||null}
       WHERE id=${id} RETURNING *
     `;
     const item = result[0];

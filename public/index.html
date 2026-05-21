@@ -1184,19 +1184,72 @@ function invDatalistsHtml() {
     <datalist id="inv-brands">${brands.map(b=>`<option value="${esc(b)}">`).join('')}</datalist>`;
 }
 
+// Renders a "pick from list OR add new" combobox. The effective value is
+// always readable via document.getElementById(id).value — there's a hidden
+// input under that id which the select / text input both write into.
+// Picking "+ Add new…" from the dropdown reveals a text input below it.
+// onChange runs whenever either side updates the value (chain extra hooks
+// like checkInvDuplicate via this param).
+function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+ Add new…', onChange = '' }) {
+  const inList = !!value && options.includes(value);
+  const onChangeCall = onChange ? `; ${onChange}` : '';
+  return `
+    <input type="hidden" id="${id}" value="${esc(value)}">
+    <select id="${id}__select"
+            onchange="invComboPick(this, '${id}')${onChangeCall}"
+            style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+      ${!value ? `<option value="">— Select —</option>` : ''}
+      ${options.map(o => `<option value="${esc(o)}"${o === value ? ' selected' : ''}>${esc(o)}</option>`).join('')}
+      ${(!inList && value) ? `<option value="${esc(value)}" selected>${esc(value)}</option>` : ''}
+      <option value="__add_new__">${addLabel}</option>
+    </select>
+    <input type="text" id="${id}__new"
+           placeholder="${esc(placeholder)}"
+           oninput="document.getElementById('${id}').value=this.value${onChangeCall}"
+           style="display:none;margin-top:6px;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;">
+  `;
+}
+// Click handler shared by every invComboHtml combo. Toggles the text input
+// based on whether the user picked "+ Add new…" or an existing option.
+function invComboPick(sel, hiddenId) {
+  const hidden = document.getElementById(hiddenId);
+  const textEl = document.getElementById(hiddenId + '__new');
+  if (!hidden || !textEl) return;
+  if (sel.value === '__add_new__') {
+    textEl.style.display = '';
+    textEl.value = '';
+    hidden.value = '';
+    setTimeout(() => textEl.focus(), 0);
+  } else {
+    textEl.style.display = 'none';
+    textEl.value = '';
+    hidden.value = sel.value;
+  }
+}
+
 function openInvAdd() {
+  // Default the paper-type combo to the first known type so the form opens
+  // with a populated value (matches the old behavior of an auto-selected
+  // first <option>). Brand and Supplier start blank — there's no sensible
+  // default for either.
+  const defaultPaperType = PAPER_TYPES[0] || '';
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Add Paper Item</h2>
     ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
-        <select id="inv-paper-type" onchange="invOpeningSync(); checkInvDuplicate();">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+        ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: defaultPaperType, placeholder: 'New paper type', onChange: 'invOpeningSync(); checkInvDuplicate();' })}
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century" oninput="checkInvDuplicate()"></div>
+      <div class="form-group"><label class="form-label">Brand</label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), placeholder: 'New brand (e.g. Century)', onChange: 'checkInvDuplicate();' })}
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Supplier</label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), placeholder: 'New supplier' })}
     </div>
     <!-- Live duplicate hint — turns yellow when the typed fields already
          match an existing inventory item, so the user knows the "Opening"
@@ -1291,10 +1344,11 @@ function invOpeningSync(source) {
 }
 async function saveInvAdd() {
   const data = {
-    paper_type: document.getElementById('inv-paper-type').value,
+    paper_type: (document.getElementById('inv-paper-type').value || '').trim(),
     size:       document.getElementById('inv-size').value.trim(),
     gsm:        document.getElementById('inv-gsm').value.trim(),
-    brand:      document.getElementById('inv-brand').value.trim(),
+    brand:      (document.getElementById('inv-brand').value || '').trim(),
+    supplier:   (document.getElementById('inv-supplier').value || '').trim(),
     reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
     opening_balance:   parseInt(document.getElementById('inv-opening').value, 10) || 0,
     opening_notes:     document.getElementById('inv-opening-notes').value.trim(),
@@ -1352,13 +1406,18 @@ function openInvEdit(id) {
     ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
-        <select id="inv-paper-type">${PAPER_TYPES.map(t=>`<option ${it.paper_type===t?'selected':''}>${t}</option>`).join('')}</select>
+        ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: it.paper_type || '', placeholder: 'New paper type' })}
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" value="${esc(it.brand||'')}"></div>
+      <div class="form-group"><label class="form-label">Brand</label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), value: it.brand || '', placeholder: 'New brand' })}
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" value="${esc(it.size||'')}"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Supplier</label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier' })}
     </div>
     <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
     ${balanceSection}
@@ -1370,10 +1429,11 @@ function openInvEdit(id) {
 }
 async function saveInvEdit(id) {
   const data = {
-    paper_type: document.getElementById('inv-paper-type').value,
+    paper_type: (document.getElementById('inv-paper-type').value || '').trim(),
     size:       document.getElementById('inv-size').value.trim(),
     gsm:        document.getElementById('inv-gsm').value.trim(),
-    brand:      document.getElementById('inv-brand').value.trim(),
+    brand:      (document.getElementById('inv-brand').value || '').trim(),
+    supplier:   (document.getElementById('inv-supplier').value || '').trim(),
     reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
