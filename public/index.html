@@ -468,6 +468,11 @@
       <option value="">All stock levels</option>
       <option value="out">Out of stock</option>
     </select>
+    <select class="filter" id="inv-offcut-filter" onchange="setInvOffcutFilter(this.value)">
+      <option value="">All (fresh + offcut)</option>
+      <option value="fresh">Fresh only</option>
+      <option value="offcut">Offcut only</option>
+    </select>
     <button class="btn btn-sm" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
@@ -713,10 +718,11 @@ let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
 let invFilterText  = '';
-let invFilterType  = '';
-let invFilterSize  = '';
-let invFilterGsm   = '';
-let invFilterStock = '';
+let invFilterType   = '';
+let invFilterSize   = '';
+let invFilterGsm    = '';
+let invFilterStock  = '';
+let invFilterOffcut = '';   // '' = all, 'fresh' = is_offcut=false, 'offcut' = is_offcut=true
 let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -1070,10 +1076,11 @@ function setFilter(v) { filterText=v; renderJobs(); }
 function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
-function setInvTypeFilter(v)  { invFilterType  = v; renderInventory(); }
-function setInvSizeFilter(v)  { invFilterSize  = v; renderInventory(); }
-function setInvGsmFilter(v)   { invFilterGsm   = v; renderInventory(); }
-function setInvStockFilter(v) { invFilterStock = v; renderInventory(); }
+function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
+function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
+function setInvGsmFilter(v)    { invFilterGsm    = v; renderInventory(); }
+function setInvStockFilter(v)  { invFilterStock  = v; renderInventory(); }
+function setInvOffcutFilter(v) { invFilterOffcut = v; renderInventory(); }
 
 // ── Inventory rendering ──────────────────────────────────────
 function invStockState(item) {
@@ -1090,6 +1097,8 @@ function getInventoryFiltered() {
     if (invFilterType && it.paper_type !== invFilterType) return false;
     if (invFilterSize && (it.size||'') !== invFilterSize) return false;
     if (invFilterGsm  && (it.gsm||'')  !== invFilterGsm)  return false;
+    if (invFilterOffcut === 'fresh'  && it.is_offcut)  return false;
+    if (invFilterOffcut === 'offcut' && !it.is_offcut) return false;
     const state = invStockState(it);
     if (invFilterStock === 'out' && state !== 'out') return false;
     return true;
@@ -1369,7 +1378,12 @@ function checkInvDuplicate() {
     if (addBtn) addBtn.style.display = '';
     return;
   }
+  // Only block against fresh-stock items (is_offcut = false / null). The
+  // "Add Paper Item" form always creates fresh stock; offcut items are only
+  // born via the cut-sheets workflow at issuance time. So a fresh 20x15 is
+  // legitimately distinct from an existing offcut 20x15.
   const match = inventory.find(i =>
+    !i.is_offcut &&
     norm(i.paper_type) === norm(pt) &&
     norm(i.size)  === norm(size) &&
     norm(i.gsm)   === norm(gsm) &&
