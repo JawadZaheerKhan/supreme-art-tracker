@@ -778,9 +778,14 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
     // case-insensitively and trimmed, so "ningbo" / "Ningbo" / "NINGBO" all
     // count as the same brand. Refuse the add with a 409 instead of merging.
     // The user uses "+ Stock" on the existing card to top up instead.
+    //
+    // Only blocks against FRESH-STOCK rows (is_offcut = false). Offcut items
+    // are managed by the cut-sheets workflow at issuance time and may legitimately
+    // share dimensions with fresh stock — they're tracked as separate lines.
     const existing = await sql`
       SELECT * FROM inventory_items
-      WHERE lower(trim(paper_type))          = lower(trim(${paper_type}))
+      WHERE is_offcut = false
+        AND lower(trim(paper_type))          = lower(trim(${paper_type}))
         AND lower(trim(COALESCE(size,'')))   = lower(trim(COALESCE(${size||null},  '')))
         AND lower(trim(COALESCE(gsm,'')))    = lower(trim(COALESCE(${gsm||null},   '')))
         AND lower(trim(COALESCE(brand,'')))  = lower(trim(COALESCE(${brand||null}, '')))
