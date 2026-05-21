@@ -801,6 +801,35 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
   }
 });
 
+// Admin-only: clear a brand or supplier value across the whole inventory.
+// Used by the "Manage Brands / Manage Suppliers" cleanup UI to fix typo
+// duplicates (e.g. "century" vs "Century") without per-item editing. The
+// items themselves stay — just the brand/supplier column is NULLed where it
+// matched. Doesn't touch paper_type (required column, can't be NULLed).
+app.delete('/api/inventory/dropdown/:field/:value', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const field = req.params.field;
+    const value = req.params.value;
+    if (!['brand', 'supplier'].includes(field)) {
+      return res.status(400).json({ error: 'Field must be brand or supplier' });
+    }
+    // Tagged-template SQL can't interpolate column names, so we branch.
+    const result = field === 'brand'
+      ? await sql`UPDATE inventory_items SET brand    = NULL WHERE brand    = ${value} RETURNING id`
+      : await sql`UPDATE inventory_items SET supplier = NULL WHERE supplier = ${value} RETURNING id`;
+    await logAudit(sql, req, {
+      action: 'inventory.clear-dropdown',
+      summary: `Cleared ${field}="${value}" from ${result.length} item${result.length !== 1 ? 's' : ''}`,
+    });
+    res.json({ ok: true, cleared_from: result.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE an inventory item. Admin only. Refused if any pending-issuance
 // jobs still reference this item (their stock hasn't been deducted yet, so
 // losing the link would orphan them). Issued/in-progress/delivered jobs are

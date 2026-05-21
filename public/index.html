@@ -1226,6 +1226,65 @@ function invComboPick(sel, hiddenId) {
   }
 }
 
+// Admin-only manage modal — lists every distinct brand / supplier with how
+// many inventory items use it and a Delete button. Clicking Delete clears
+// that value from ALL matching items (the items themselves stay; only the
+// brand/supplier tag is cleared). Lets the user clean up typo duplicates
+// like "century" vs "Century" without one-by-one edits.
+function openManageInvField(field) {
+  if (!isAdmin()) return;
+  const fieldLabel = field === 'brand' ? 'Brand' : 'Supplier';
+  const values = invDistinct(field);
+  const rows = values.map(v => {
+    const count = inventory.filter(i => (i[field] || '') === v).length;
+    const esc1 = String(v).replace(/'/g, "\\'");
+    return `<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);">${esc(v)}</td>
+      <td style="padding:6px 10px;text-align:right;color:var(--text2);border-bottom:1px solid var(--border);">${count} item${count !== 1 ? 's' : ''}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;">
+        <button class="btn btn-sm btn-danger" onclick="deleteInvFieldValue('${field}', '${esc1}')">&#128465; Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Manage ${fieldLabel}s</h2>
+    <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">
+      Delete a ${fieldLabel.toLowerCase()} to clear it from every inventory item that currently uses it.
+      The items stay in inventory — they just lose this ${fieldLabel.toLowerCase()} tag.
+      Useful for fixing typo duplicates.
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <tr style="background:#f9fafb;">
+        <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);">${fieldLabel}</th>
+        <th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--border);">Usage</th>
+        <th style="padding:6px 10px;border-bottom:1px solid var(--border);"></th>
+      </tr>
+      ${rows || `<tr><td colspan="3" style="padding:18px;text-align:center;color:var(--text2);">No ${fieldLabel.toLowerCase()}s yet.</td></tr>`}
+    </table>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>
+  </div>`);
+}
+
+async function deleteInvFieldValue(field, value) {
+  if (!isAdmin()) return;
+  const count = inventory.filter(i => (i[field] || '') === value).length;
+  const fieldLabel = field === 'brand' ? 'brand' : 'supplier';
+  if (!confirm(
+    `Remove "${value}" from the ${fieldLabel} list?\n\n` +
+    `It will be cleared from ${count} item${count !== 1 ? 's' : ''}. ` +
+    `The items themselves stay in inventory — they just lose this ${fieldLabel} tag.\n\n` +
+    `This cannot be undone.`
+  )) return;
+  try {
+    await api('DELETE', `/api/inventory/dropdown/${encodeURIComponent(field)}/${encodeURIComponent(value)}`);
+    await loadInventory();
+    openManageInvField(field);  // re-render with the value gone
+    notify(`"${value}" removed from ${fieldLabel} list`);
+  } catch (e) {
+    notify('Failed to remove: ' + e.message);
+  }
+}
+
 function openInvAdd() {
   // Default the paper-type combo to the first known type so the form opens
   // with a populated value (matches the old behavior of an auto-selected
@@ -1239,7 +1298,11 @@ function openInvAdd() {
       <div class="form-group"><label class="form-label">Paper Type *</label>
         ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: defaultPaperType, placeholder: 'New paper type', onChange: 'invOpeningSync(); checkInvDuplicate();' })}
       </div>
-      <div class="form-group"><label class="form-label">Brand</label>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>Brand</span>
+          ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('brand')" title="Delete brands you no longer need">&#128465; Manage</button>` : ''}
+        </label>
         ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), placeholder: 'New brand (e.g. Century)', onChange: 'checkInvDuplicate();' })}
       </div>
     </div>
@@ -1247,7 +1310,11 @@ function openInvAdd() {
       <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
     </div>
-    <div class="form-group"><label class="form-label">Supplier</label>
+    <div class="form-group">
+      <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>Supplier</span>
+        ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('supplier')" title="Delete suppliers you no longer need">&#128465; Manage</button>` : ''}
+      </label>
       ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), placeholder: 'New supplier' })}
     </div>
     <!-- Live duplicate hint — turns yellow when the typed fields already
@@ -1403,7 +1470,11 @@ function openInvEdit(id) {
       <div class="form-group"><label class="form-label">Paper Type *</label>
         ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: it.paper_type || '', placeholder: 'New paper type' })}
       </div>
-      <div class="form-group"><label class="form-label">Brand</label>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>Brand</span>
+          ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('brand')" title="Delete brands you no longer need">&#128465; Manage</button>` : ''}
+        </label>
         ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), value: it.brand || '', placeholder: 'New brand' })}
       </div>
     </div>
@@ -1411,7 +1482,11 @@ function openInvEdit(id) {
       <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" value="${esc(it.size||'')}"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
-    <div class="form-group"><label class="form-label">Supplier</label>
+    <div class="form-group">
+      <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>Supplier</span>
+        ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('supplier')" title="Delete suppliers you no longer need">&#128465; Manage</button>` : ''}
+      </label>
       ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier' })}
     </div>
     ${balanceSection}
