@@ -129,6 +129,17 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_item_idx ON inventory_transactions(item_id)`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_job_idx  ON inventory_transactions(job_id)`;
+    // Reversal pointer: when an admin or stock keeper reverses a wrong
+    // stock-in within 24h, the new "undo" row stores the id of the original
+    // it cancels. Used to (a) hide the Reverse button on already-reversed
+    // entries and (b) highlight both rows in the History UI.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS reverses_tx_id INTEGER REFERENCES inventory_transactions(id) ON DELETE SET NULL`;
+    // Track WHO entered each transaction so the stock-keeper-within-24h rule
+    // can authorize reversals and the History UI can show the entrant. No FK
+    // on user_id because the users table is created further down — plain int
+    // is safer and we already denormalize the email anyway.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_id    INTEGER`;
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_email TEXT`;
 
     // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
     // pending → received (creates a stock-in transaction) or pending → cancelled.
@@ -494,15 +505,21 @@ function jobDeductionSheets({ paperType, particulars }) {
 // Helper: apply a stock change (+/-) and write a ledger row. Must be called
 // after dbReady. Assumes the item exists. Updates current_balance atomically
 // in the same UPDATE so balance always matches the sum of ledger changes.
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes }) {
-  if (!itemId || !change) return;
-  await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null})
+// user / reversesTxId are optional metadata used by the History UI to show
+// who entered the row and to link reversals to their originals.
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId }) {
+  if (!itemId || !change) return null;
+  const userId    = user && user.id    ? user.id    : null;
+  const userEmail = user && user.email ? user.email : null;
+  const inserted = await sql`
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null})
+    RETURNING id
   `;
   await sql`
     UPDATE inventory_items SET current_balance = current_balance + ${change} WHERE id = ${itemId}
   `;
+  return inserted[0] ? inserted[0].id : null;
 }
 
 // Look up an offcut inventory item matching the source's paper_type, gsm,
@@ -616,6 +633,7 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
           reason: 'job-edit-revert',
           jobId: job.id,
           notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
+          user: req.user,
         });
         // Revert the offcut +N too — compensating transaction keeps the
         // ledger append-only. We re-apply the new offcut below if the new
@@ -628,6 +646,7 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
             reason: 'job-edit-revert',
             jobId: job.id,
             notes: `Edit on Job E-${job.id}: removed previous ${oldSheets} sheets of ${oldOffcutSize} offcut`,
+            user: req.user,
           });
         }
       }
@@ -638,6 +657,7 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
           reason: 'job-edit-apply',
           jobId: job.id,
           notes: `Edit on Job E-${job.id}: consumed ${newSheets} sheets`,
+          user: req.user,
         });
         // Re-apply the offcut yield for the new state, if cut spec is set.
         if (newSourceItem && newOffcutSize) {
@@ -648,6 +668,7 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
             reason: 'job-edit-apply',
             jobId: job.id,
             notes: `Edit on Job E-${job.id}: added ${newSheets} sheets of ${newOffcutSize} offcut`,
+            user: req.user,
           });
         }
       }
@@ -694,6 +715,7 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
       reason: 'job-consumed',
       jobId: job.id,
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${sheetsUsed} sheets) issued by ${req.user.email}`,
+      user: req.user,
     });
     // Cut workflow: if the job specifies an offcut size, find-or-create the
     // matching offcut item and return the leftover to stock. Per source
@@ -707,6 +729,7 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
         reason: 'job-offcut',
         jobId: job.id,
         notes: `Job E-${job.id}: ${sheetsUsed} sheets of ${job.offcut_size} offcut returned to stock`,
+        user: req.user,
       });
       cutSummary = ` · cut to ${job.cut_size}, ${sheetsUsed} sheets of ${job.offcut_size} offcut returned to stock`;
     }
@@ -834,6 +857,7 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
         reason: 'opening-balance',
         jobId: null,
         notes: opening_notes || 'Opening balance',
+        user: req.user,
       });
       const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`;
       await logAudit(sql, req, { action: 'inventory.create', entityType: 'inventory', entityId: item.id, summary: `Added paper item: ${label} (opening ${opening.toLocaleString()} sheets)` });
@@ -885,6 +909,7 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
           reason: 'correction',
           jobId: null,
           notes: correction_notes || 'Balance edit from inventory form',
+          user: req.user,
         });
         if (item) {
           const label = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
@@ -1006,6 +1031,7 @@ app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) =
       reason: reason || (delta > 0 ? 'delivery' : 'adjustment'),
       jobId: null,
       notes: notes || null,
+      user: req.user,
     });
     const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
     const it = refreshed[0];
@@ -1015,6 +1041,82 @@ app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) =
       await logAudit(sql, req, { action: 'inventory.stock', entityType: 'inventory', entityId: it.id, summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${reason || (delta>0?'delivery':'adjustment')})` });
     }
     res.json(it);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// REVERSE a wrong stock-in transaction. Creates an opposite ledger row with
+// reason='correction' that nets out the original. Movement reports filter
+// out 'correction' so the day's totals stay clean.
+//
+// Permissions:
+//   • Admin can reverse any positive (stock-in) transaction, any time.
+//   • Stock keeper can only reverse stock-in entries from the last 24 hours.
+//   • CEO can't reach this endpoint at all (requireWriteUser blocks them).
+//
+// Refused if:
+//   • The transaction is a stock-OUT (change <= 0) — only stock-in is reversible
+//   • The transaction has already been reversed (no double-reversals)
+//   • The transaction is itself a reversal (no chain reversals)
+app.post('/api/inventory/transactions/:id/reverse', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const txId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(txId)) return res.status(400).json({ error: 'Invalid id' });
+
+    const rows = await sql`SELECT * FROM inventory_transactions WHERE id = ${txId} LIMIT 1`;
+    if (!rows[0]) return res.status(404).json({ error: 'Transaction not found' });
+    const tx = rows[0];
+
+    if (tx.change <= 0) {
+      return res.status(400).json({ error: 'Only stock-in entries can be reversed. Stock-OUT mistakes (job consumption, adjustments) must be fixed by editing the source.' });
+    }
+    if (tx.reverses_tx_id) {
+      return res.status(400).json({ error: 'This row is itself a reversal — cannot reverse a reversal.' });
+    }
+    // Is the original already reversed?
+    const existingReversal = await sql`SELECT id FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`;
+    if (existingReversal[0]) {
+      return res.status(409).json({ error: 'This entry has already been reversed.' });
+    }
+
+    // 24-hour window applies to stock keepers but not admins.
+    if (req.user.role !== 'admin') {
+      const ageMs = Date.now() - new Date(tx.created_at).getTime();
+      const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
+      if (ageMs > TWENTY_FOUR_HRS) {
+        return res.status(403).json({ error: 'Stock keepers can only reverse entries from the last 24 hours. Ask an admin to reverse older entries.' });
+      }
+    }
+
+    const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${tx.item_id} LIMIT 1`;
+    const item     = itemRows[0];
+    const label    = item ? `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}` : `item ${tx.item_id}`;
+    const origNote = tx.notes ? ` (orig note: "${tx.notes}")` : '';
+    const origBy   = tx.user_email ? ` entered by ${tx.user_email}` : '';
+    const note     = `Reversal of TX #${tx.id}${origBy} on ${new Date(tx.created_at).toLocaleString('en-PK')}${origNote}`;
+
+    const newTxId = await applyInventoryChange(sql, {
+      itemId: tx.item_id,
+      change: -tx.change,            // exact opposite of original
+      reason: 'correction',          // filtered out of Stock In / Stock Out reports
+      jobId: null,
+      notes: note,
+      user: req.user,
+      reversesTxId: tx.id,
+    });
+
+    await logAudit(sql, req, {
+      action: 'inventory.reverse',
+      entityType: 'inventory',
+      entityId: tx.item_id,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}`,
+    });
+
+    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -1070,8 +1172,12 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
+    // has_been_reversed: a later tx pointing back at this one. Used by the
+    // History UI to hide the Reverse button on rows that have already been
+    // undone (prevents accidental double-reversals).
     const txs = await sql`
-      SELECT t.*, j.name AS job_name, j.jobcode AS job_code
+      SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+        EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed
       FROM inventory_transactions t
       LEFT JOIN jobs j ON j.id = t.job_id
       WHERE t.item_id = ${id}
@@ -1220,6 +1326,7 @@ app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
       reason: 'import-received',
       jobId: null,
       notes: `Import #${imp.id}${imp.supplier ? ' · ' + imp.supplier : ''}${imp.notes ? ' · ' + imp.notes : ''}`,
+      user: req.user,
     });
     const updated = await sql`
       UPDATE inventory_imports SET

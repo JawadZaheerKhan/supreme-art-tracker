@@ -80,8 +80,9 @@
   .ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .ledger-table th, .ledger-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   .ledger-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); }
-  .ledger-pos { color: #166534; font-weight: 600; }
-  .ledger-neg { color: #A32D2D; font-weight: 600; }
+  .ledger-pos      { color: #166534; font-weight: 600; }
+  .ledger-neg      { color: #A32D2D; font-weight: 600; }
+  .ledger-reversal { color: #9a3412; font-weight: 600; }   /* orange — reversal/undo entry */
   .bulk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .bulk-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); padding: 6px 8px; text-align: left; }
   .bulk-table td { padding: 4px 4px; vertical-align: top; }
@@ -1851,34 +1852,97 @@ async function openInvHistory(id) {
     <div id="ledger-content" style="font-size:13px;color:var(--text2);">Loading…</div>
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
   </div>`);
+  await renderInvHistory(id);
+}
+
+// Render (or re-render after a reversal) the history table for one item.
+// Split out so reverseStockTx() can refresh in place without reopening.
+async function renderInvHistory(id) {
+  const it = inventory.find(x => x.id === id);
+  const ps   = packetSize(it ? it.paper_type : '');
+  const unit = packetUnitLabel(it ? it.paper_type : '').toLowerCase();
+  const fmtPackets = (sheets) => {
+    const p = sheets / ps;
+    const rounded = Math.round(p * 100) / 100;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+  };
   try {
     const txs = await api('GET', `/api/inventory/${id}/transactions`);
+    const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
     const rows = txs.map(t => {
       const date = new Date(t.created_at).toLocaleString('en-PK');
-      const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
+      const isReversal      = !!t.reverses_tx_id;
+      const hasBeenReversed = !!t.has_been_reversed;
+      // Color: positive=green, negative=red, reversal row=orange tint
+      const cls  = isReversal ? 'ledger-reversal' : (t.change > 0 ? 'ledger-pos' : 'ledger-neg');
       const sign = t.change > 0 ? '+' : '';
       const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
       const packets = fmtPackets(t.change);
-      return `<tr>
+
+      // Reason cell — show a "REVERSAL" badge when this row undoes another.
+      const reasonHtml = isReversal
+        ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
+        : esc(t.reason || '');
+
+      // Reverse button — admin always, stock keeper within 24h. Only for stock-in
+      // (positive change). Hidden if this row IS a reversal or HAS been reversed.
+      const ageMs    = Date.now() - new Date(t.created_at).getTime();
+      const within24 = ageMs <= TWENTY_FOUR_HRS;
+      const canReverse =
+        t.change > 0 &&
+        !isReversal &&
+        !hasBeenReversed &&
+        (isAdmin() || (canIssueStock() && within24));
+      const reverseBtn = canReverse
+        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="Undo this stock-in entry. Creates a -${packets} ${unit} correction.">&#8634; Reverse</button>`
+        : (hasBeenReversed
+            ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
+            : '');
+
+      const by = t.user_email ? esc(t.user_email) : '—';
+      // Faded look for the original row that has been undone, so the eye
+      // immediately reads "this didn't actually count".
+      const rowStyle = hasBeenReversed
+        ? 'background:#fff7ed;opacity:0.7;'
+        : (isReversal ? 'background:#fff7ed;' : '');
+      return `<tr style="${rowStyle}">
         <td>${date}</td>
         <td class="${cls}">
-          <div style="font-weight:600;">${sign}${packets} ${unit}</div>
-          <div style="font-size:11px;color:var(--text2);font-weight:400;">${sign}${t.change.toLocaleString()} sheets</div>
+          <div style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</div>
+          <div style="font-size:11px;color:var(--text2);font-weight:400;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${t.change.toLocaleString()} sheets</div>
         </td>
-        <td>${esc(t.reason||'')}</td>
+        <td>${reasonHtml}</td>
         <td>${job}</td>
+        <td>${by}</td>
         <td>${esc(t.notes||'')}</td>
+        <td>${reverseBtn}</td>
       </tr>`;
     }).join('');
     document.getElementById('ledger-content').innerHTML = txs.length
       ? `<table class="ledger-table">
-           <tr><th>When</th><th>Change (${unit})</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+           <tr><th>When</th><th>Change (${unit})</th><th>Reason</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
   } catch(e) {
     document.getElementById('ledger-content').innerHTML = 'Error: ' + e.message;
   }
+}
+
+// Reverse a wrong stock-in entry. Confirms, hits the server, then reloads
+// inventory (balance changed) and re-renders the History modal in place.
+async function reverseStockTx(txId, itemId) {
+  if (!confirm('Reverse this stock-in entry?\n\nA -correction will be added that cancels it out. The original row stays for the audit trail but shows as struck-through.')) return;
+  showSaving(true);
+  try {
+    await api('POST', `/api/inventory/transactions/${txId}/reverse`);
+    await loadInventory();           // current_balance changed
+    await renderInvHistory(itemId);  // re-render the open modal in place
+    notify('Entry reversed');
+  } catch (e) {
+    notify('Reverse failed: ' + e.message);
+  }
+  showSaving(false);
 }
 
 // ── Stock Report ─────────────────────────────────────────────
