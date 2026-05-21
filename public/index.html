@@ -1152,6 +1152,20 @@ function renderInventoryList() {
     const subParts = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc);
     if (it.is_offcut && it.cut_from_size) subParts.push('originally cut from ' + esc(it.cut_from_size));
     const subLine = subParts.join(' · ') || '—';
+    // Latest IN / OUT at a glance — small green / red pills with the most
+    // recent transaction quantity in packets/reams. Hidden when an item has
+    // no movement of that direction yet (server returns null).
+    const unitShort = packetUnitLabel(it.paper_type).toLowerCase().replace(/s$/, '');
+    const fmtMove = (sheets) => {
+      if (!sheets) return null;
+      const pkts = Math.abs(sheets) / ps;
+      return (Number.isInteger(pkts) ? pkts : +pkts.toFixed(2)).toLocaleString();
+    };
+    const lastIn  = fmtMove(it.latest_in_sheets);
+    const lastOut = fmtMove(it.latest_out_sheets);
+    const movePills =
+      (lastIn  ? `<span title="Last stock IN: +${lastIn} ${unitShort}${it.latest_in_at  ? ' on ' + new Date(it.latest_in_at ).toLocaleDateString('en-PK') : ''}" style="display:inline-block;background:#dcfce7;color:#166534;font-weight:600;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:8px;">&#8595;+${lastIn}</span>` : '') +
+      (lastOut ? `<span title="Last stock OUT: -${lastOut} ${unitShort}${it.latest_out_at ? ' on ' + new Date(it.latest_out_at).toLocaleDateString('en-PK') : ''}" style="display:inline-block;background:#fee2e2;color:#991b1b;font-weight:600;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px;">&#8593;−${lastOut}</span>` : '');
     // Pretty-print the balance also in packets/reams so users get the unit
     // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
     const sheets = it.current_balance || 0;
@@ -1164,7 +1178,7 @@ function renderInventoryList() {
       <div class="inv-main">
         <div class="inv-name">${esc(it.paper_type)}${badge}</div>
         ${it.brand ? `<div class="inv-brand">${esc(it.brand)}</div>` : ''}
-        <div class="inv-sub">${subLine}</div>
+        <div class="inv-sub">${subLine}${movePills}</div>
       </div>
       <div class="inv-balance">
         <div class="inv-balance-num">${pktsStr}</div>
