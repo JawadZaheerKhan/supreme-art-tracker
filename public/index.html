@@ -465,7 +465,6 @@
     </select>
     <select class="filter" id="inv-stock-filter" onchange="setInvStockFilter(this.value)">
       <option value="">All stock levels</option>
-      <option value="low">Low stock only</option>
       <option value="out">Out of stock</option>
     </select>
     <button class="btn btn-sm" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
@@ -1077,10 +1076,7 @@ function setInvStockFilter(v) { invFilterStock = v; renderInventory(); }
 // ── Inventory rendering ──────────────────────────────────────
 function invStockState(item) {
   const bal = item.current_balance || 0;
-  const thr = item.reorder_threshold || 0;
-  if (bal <= 0) return 'out';
-  if (thr > 0 && bal <= thr) return 'low';
-  return 'ok';
+  return bal <= 0 ? 'out' : 'ok';
 }
 function getInventoryFiltered() {
   return inventory.filter(it => {
@@ -1093,7 +1089,6 @@ function getInventoryFiltered() {
     if (invFilterSize && (it.size||'') !== invFilterSize) return false;
     if (invFilterGsm  && (it.gsm||'')  !== invFilterGsm)  return false;
     const state = invStockState(it);
-    if (invFilterStock === 'low' && state === 'ok') return false;
     if (invFilterStock === 'out' && state !== 'out') return false;
     return true;
   });
@@ -1109,14 +1104,12 @@ function invDistinct(field) {
 function renderInventoryStats() {
   const s = {
     total: inventory.length,
-    low:   inventory.filter(i => invStockState(i) === 'low').length,
     out:   inventory.filter(i => invStockState(i) === 'out').length,
     sheets: inventory.reduce((a, i) => a + (i.current_balance || 0), 0),
   };
   document.getElementById('inv-stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Paper Items</div><div class="stat-value">${s.total}</div></div>
     <div class="stat"><div class="stat-label">Total Sheets</div><div class="stat-value">${s.sheets.toLocaleString()}</div></div>
-    <div class="stat"><div class="stat-label">Low Stock</div><div class="stat-value ${s.low>0?'warn':''}">${s.low}</div></div>
     <div class="stat"><div class="stat-label">Out of Stock</div><div class="stat-value ${s.out>0?'warn':''}">${s.out}</div></div>
   `;
 }
@@ -1137,13 +1130,11 @@ function renderInventoryList() {
   }
   el.innerHTML = filtered.map(it => {
     const state = invStockState(it);
-    const badge = state === 'out' ? '<span class="inv-badge out">Out</span>'
-                : state === 'low' ? '<span class="inv-badge low">Low</span>' : '';
-    // Brand gets its own bold line; size/gsm/reorder go on the smaller
-    // grey sub line so the visual hierarchy reads top-to-bottom: paper >
-    // brand > details.
+    const badge = state === 'out' ? '<span class="inv-badge out">Out</span>' : '';
+    // Brand gets its own bold line; size/gsm go on the smaller sub line so
+    // the visual hierarchy reads top-to-bottom: paper > brand > details.
     const sub = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc).join(' · ');
-    const subLine = (sub || '—') + (it.reorder_threshold ? ' · Reorder at ' + it.reorder_threshold.toLocaleString() : '');
+    const subLine = sub || '—';
     // Pretty-print the balance also in packets/reams so users get the unit
     // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
     const sheets = it.current_balance || 0;
@@ -1273,10 +1264,7 @@ function openInvAdd() {
         <input type="number" id="inv-opening" placeholder="0" min="0" oninput="invOpeningSync('sheets')">
       </div>
     </div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Reorder Threshold (sheets)</label><input type="number" id="inv-threshold" placeholder="0" min="0"></div>
-      <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. Initial stock count"></div>
-    </div>
+    <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. Initial stock count"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvAdd()">Add Item</button>
@@ -1357,7 +1345,6 @@ async function saveInvAdd() {
     gsm:        document.getElementById('inv-gsm').value.trim(),
     brand:      (document.getElementById('inv-brand').value || '').trim(),
     supplier:   (document.getElementById('inv-supplier').value || '').trim(),
-    reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
     opening_balance:   parseInt(document.getElementById('inv-opening').value, 10) || 0,
     opening_notes:     document.getElementById('inv-opening-notes').value.trim(),
   };
@@ -1427,7 +1414,6 @@ function openInvEdit(id) {
     <div class="form-group"><label class="form-label">Supplier</label>
       ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier' })}
     </div>
-    <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
     ${balanceSection}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -1442,7 +1428,6 @@ async function saveInvEdit(id) {
     gsm:        document.getElementById('inv-gsm').value.trim(),
     brand:      (document.getElementById('inv-brand').value || '').trim(),
     supplier:   (document.getElementById('inv-supplier').value || '').trim(),
-    reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
   // Admin-only balance correction. Field is in PACKETS / REAMS for usability,
