@@ -683,35 +683,25 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
 
-    // Auto-merge: if a paper item with the same (paper_type, size, gsm,
-    // brand) already exists, add the new opening balance to it as a
-    // stock-in transaction rather than failing on the unique index.
-    // Uses COALESCE so NULL and '' are treated the same (matches the
-    // unique index definition).
+    // Hard duplicate check: same (paper_type, size, gsm, brand) — compared
+    // case-insensitively and trimmed, so "ningbo" / "Ningbo" / "NINGBO" all
+    // count as the same brand. Refuse the add with a 409 instead of merging.
+    // The user uses "+ Stock" on the existing card to top up instead.
     const existing = await sql`
       SELECT * FROM inventory_items
-      WHERE paper_type = ${paper_type}
-        AND COALESCE(size,'')  = COALESCE(${size||null}, '')
-        AND COALESCE(gsm,'')   = COALESCE(${gsm||null},  '')
-        AND COALESCE(brand,'') = COALESCE(${brand||null},'')
+      WHERE lower(trim(paper_type))          = lower(trim(${paper_type}))
+        AND lower(trim(COALESCE(size,'')))   = lower(trim(COALESCE(${size||null},  '')))
+        AND lower(trim(COALESCE(gsm,'')))    = lower(trim(COALESCE(${gsm||null},   '')))
+        AND lower(trim(COALESCE(brand,'')))  = lower(trim(COALESCE(${brand||null}, '')))
       LIMIT 1
     `;
     if (existing[0]) {
       const item = existing[0];
-      if (opening > 0) {
-        await applyInventoryChange(sql, {
-          itemId: item.id,
-          change: +opening,
-          reason: 'stock-in',
-          jobId: null,
-          notes: opening_notes || 'Stock added via New Paper form (merged into existing item)',
-        });
-        await logAudit(sql, req, { action: 'inventory.merge', entityType: 'inventory', entityId: item.id, summary: `Topped up ${label} by ${opening.toLocaleString()} sheets (merged with existing item)` });
-      } else {
-        await logAudit(sql, req, { action: 'inventory.merge', entityType: 'inventory', entityId: item.id, summary: `Attempted to add ${label} — already exists; no opening balance` });
-      }
-      const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`;
-      return res.json({ ...refreshed[0], _merged: true, _added_sheets: opening });
+      const existingLabel = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
+      return res.status(409).json({
+        error: `This paper item already exists: ${existingLabel}. Use "+ Stock" on the existing card to add more.`,
+        existing_item: item,
+      });
     }
 
     // No match — fresh item.

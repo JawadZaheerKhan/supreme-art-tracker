@@ -1334,48 +1334,55 @@ function openInvAdd() {
     <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. Initial stock count"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveInvAdd()">Add Item</button>
+      <button id="inv-add-btn" class="btn btn-primary" onclick="saveInvAdd()">Add Item</button>
     </div>
   </div>`);
   invOpeningSync();
   checkInvDuplicate();
 }
 
-// Live check: if (paper_type, size, gsm, brand) already exists in
-// inventory, surface a yellow hint that this submission will TOP UP the
-// existing item instead of creating a new row. Normalized to match the
-// server's COALESCE/case behavior.
+// Live duplicate check, case-insensitive. "ningbo" / "Ningbo" / "NINGBO" all
+// match. If a duplicate exists in (paper_type, size, gsm, brand), hide the
+// "Add Item" button and show a red warning with a button to open the existing
+// item's Edit modal instead. Server enforces the same rule with a 409.
 function checkInvDuplicate() {
-  const hint = document.getElementById('inv-dup-hint');
+  const hint  = document.getElementById('inv-dup-hint');
+  const addBtn = document.getElementById('inv-add-btn');
   if (!hint) return;
   const norm = s => String(s || '').trim().toLowerCase();
   const pt    = (document.getElementById('inv-paper-type')||{}).value || '';
   const size  = (document.getElementById('inv-size')||{}).value || '';
   const gsm   = (document.getElementById('inv-gsm')||{}).value || '';
   const brand = (document.getElementById('inv-brand')||{}).value || '';
-  // Only match exactly the way the server's unique index does — case sensitive,
-  // trimmed. Lower-case fallback flagged separately.
-  const exact = inventory.find(i =>
-    i.paper_type === pt &&
-    (i.size||'').trim()  === size.trim() &&
-    (i.gsm||'').trim()   === gsm.trim() &&
-    (i.brand||'').trim() === brand.trim()
-  );
-  const fuzzy = !exact && inventory.find(i =>
+  // Skip the check until at least the paper type has a value — empty form
+  // shouldn't match anything.
+  if (!pt) {
+    hint.style.display = 'none'; hint.innerHTML = '';
+    if (addBtn) addBtn.style.display = '';
+    return;
+  }
+  const match = inventory.find(i =>
     norm(i.paper_type) === norm(pt) &&
     norm(i.size)  === norm(size) &&
     norm(i.gsm)   === norm(gsm) &&
     norm(i.brand) === norm(brand)
   );
-  if (exact) {
+  if (match) {
     hint.style.display = 'block';
-    hint.innerHTML = `<b>Already exists.</b> Saving will add the Opening amount to <b>${esc(exact.paper_type)}${exact.size?' · '+esc(exact.size):''}${exact.gsm?' · '+esc(exact.gsm)+'gsm':''}${exact.brand?' · '+esc(exact.brand):''}</b> (current balance: ${(exact.current_balance||0).toLocaleString()} sheets) instead of creating a new row.`;
-  } else if (fuzzy) {
-    hint.style.display = 'block';
-    hint.innerHTML = `<b>Similar item exists</b> with slightly different formatting (case/whitespace): <b>${esc(fuzzy.paper_type)}${fuzzy.size?' · '+esc(fuzzy.size):''}${fuzzy.gsm?' · '+esc(fuzzy.gsm)+'gsm':''}${fuzzy.brand?' · '+esc(fuzzy.brand):''}</b>. To merge, match the formatting exactly.`;
+    hint.style.background = '#fee2e2';
+    hint.style.borderColor = '#dc2626';
+    hint.style.color = '#7f1d1d';
+    hint.innerHTML =
+      `<b>This paper item already exists.</b><br>` +
+      `<b>${esc(match.paper_type)}${match.size?' · '+esc(match.size):''}${match.gsm?' · '+esc(match.gsm)+'gsm':''}${match.brand?' · '+esc(match.brand):''}</b> ` +
+      `(current balance: ${(match.current_balance||0).toLocaleString()} sheets).<br>` +
+      `<span style="font-size:11px;">Use <b>+ Stock</b> on the existing card to add more, or click below to open it.</span>` +
+      `<div style="margin-top:8px;"><button type="button" class="btn btn-sm" onclick="closeModal(); openInvEdit(${match.id});">Open existing item</button></div>`;
+    if (addBtn) addBtn.style.display = 'none';   // hard refusal — no add allowed
   } else {
     hint.style.display = 'none';
     hint.innerHTML = '';
+    if (addBtn) addBtn.style.display = '';
   }
 }
 // Two-way sync between the Packets and Sheets inputs in the Add Item modal.
@@ -1418,20 +1425,13 @@ async function saveInvAdd() {
   if (!data.paper_type) { alert('Paper type is required'); return; }
   showSaving(true);
   try {
-    // Server returns { _merged: true, _added_sheets: N } when it merged
-    // into an existing item — show a different toast so the user knows
-    // their input topped up an existing row instead of creating a new one.
-    const result = await api('POST', '/api/inventory', data);
+    // Server returns 409 if the exact paper item already exists (case- and
+    // whitespace-insensitive). The thrown error message includes which item
+    // collided, so we can surface it directly.
+    await api('POST', '/api/inventory', data);
     await loadInventory();
     closeModal();
-    if (result && result._merged) {
-      const added = result._added_sheets || 0;
-      notify(added > 0
-        ? `Stock added to existing item (+${added.toLocaleString()} sheets)`
-        : 'Item already exists — no change made');
-    } else {
-      notify('Paper item added');
-    }
+    notify('Paper item added');
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
