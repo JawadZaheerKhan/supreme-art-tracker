@@ -63,8 +63,11 @@
   .inv-card.low { border-left-color: #d97706; }
   .inv-card.out { border-left-color: #A32D2D; }
   .inv-main { flex: 1; }
-  .inv-name { font-size: 15px; font-weight: 600; color: var(--text); }
-  .inv-sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  /* Inventory card hierarchy: paper type (biggest, bold) > brand (medium,
+     bold) > size/gsm/reorder line (smallest, regular). */
+  .inv-name  { font-size: 18px; font-weight: 700; color: var(--text); }
+  .inv-brand { font-size: 15px; font-weight: 600; color: var(--text); margin-top: 2px; }
+  .inv-sub   { font-size: 13px; color: var(--text); margin-top: 2px; font-weight: 400; }
   .inv-balance { text-align: right; }
   .inv-balance-num { font-size: 22px; font-weight: 600; color: var(--text); line-height: 1; }
   .inv-balance-unit { font-size: 11px; color: var(--text2); text-transform: uppercase; }
@@ -463,7 +466,6 @@
     </select>
     <select class="filter" id="inv-stock-filter" onchange="setInvStockFilter(this.value)">
       <option value="">All stock levels</option>
-      <option value="low">Low stock only</option>
       <option value="out">Out of stock</option>
     </select>
     <button class="btn btn-sm" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
@@ -1076,10 +1078,7 @@ function setInvStockFilter(v) { invFilterStock = v; renderInventory(); }
 // ── Inventory rendering ──────────────────────────────────────
 function invStockState(item) {
   const bal = item.current_balance || 0;
-  const thr = item.reorder_threshold || 0;
-  if (bal <= 0) return 'out';
-  if (thr > 0 && bal <= thr) return 'low';
-  return 'ok';
+  return bal <= 0 ? 'out' : 'ok';
 }
 function getInventoryFiltered() {
   return inventory.filter(it => {
@@ -1092,7 +1091,6 @@ function getInventoryFiltered() {
     if (invFilterSize && (it.size||'') !== invFilterSize) return false;
     if (invFilterGsm  && (it.gsm||'')  !== invFilterGsm)  return false;
     const state = invStockState(it);
-    if (invFilterStock === 'low' && state === 'ok') return false;
     if (invFilterStock === 'out' && state !== 'out') return false;
     return true;
   });
@@ -1108,14 +1106,12 @@ function invDistinct(field) {
 function renderInventoryStats() {
   const s = {
     total: inventory.length,
-    low:   inventory.filter(i => invStockState(i) === 'low').length,
     out:   inventory.filter(i => invStockState(i) === 'out').length,
     sheets: inventory.reduce((a, i) => a + (i.current_balance || 0), 0),
   };
   document.getElementById('inv-stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Paper Items</div><div class="stat-value">${s.total}</div></div>
     <div class="stat"><div class="stat-label">Total Sheets</div><div class="stat-value">${s.sheets.toLocaleString()}</div></div>
-    <div class="stat"><div class="stat-label">Low Stock</div><div class="stat-value ${s.low>0?'warn':''}">${s.low}</div></div>
     <div class="stat"><div class="stat-label">Out of Stock</div><div class="stat-value ${s.out>0?'warn':''}">${s.out}</div></div>
   `;
 }
@@ -1136,13 +1132,17 @@ function renderInventoryList() {
   }
   el.innerHTML = filtered.map(it => {
     const state = invStockState(it);
-    const stockBadge = state === 'out' ? '<span class="inv-badge out">Out</span>'
-                     : state === 'low' ? '<span class="inv-badge low">Low</span>' : '';
-    const offcutBadge = it.is_offcut ? '<span class="inv-badge offcut">Offcut</span>' : '';
+    // Stock state on this branch only has 'out' or 'ok' (reorder-threshold
+    // was removed). Combine the Out-of-Stock badge with the Offcut badge
+    // from the cut-sheets work — both can appear together.
+    const stockBadge  = state === 'out' ? '<span class="inv-badge out">Out of Stock</span>' : '';
+    const offcutBadge = it.is_offcut    ? '<span class="inv-badge offcut">Offcut</span>'    : '';
     const badge = offcutBadge + stockBadge;
-    const subParts = [it.size, it.gsm ? it.gsm + ' gsm' : '', it.brand].filter(Boolean).map(esc);
+    // Brand gets its own bold line below. The sub line shows size/gsm plus,
+    // for offcut items, the parent-sheet origin (e.g. "originally cut from 24x32").
+    const subParts = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc);
     if (it.is_offcut && it.cut_from_size) subParts.push('originally cut from ' + esc(it.cut_from_size));
-    const sub = subParts.join(' · ');
+    const subLine = subParts.join(' · ') || '—';
     // Pretty-print the balance also in packets/reams so users get the unit
     // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
     const sheets = it.current_balance || 0;
@@ -1154,7 +1154,8 @@ function renderInventoryList() {
     <div class="inv-card ${state}">
       <div class="inv-main">
         <div class="inv-name">${esc(it.paper_type)}${badge}</div>
-        <div class="inv-sub">${sub || '—'}${it.reorder_threshold ? ' · Reorder at ' + it.reorder_threshold.toLocaleString() : ''}</div>
+        ${it.brand ? `<div class="inv-brand">${esc(it.brand)}</div>` : ''}
+        <div class="inv-sub">${subLine}</div>
       </div>
       <div class="inv-balance">
         <div class="inv-balance-num">${pktsStr}</div>
@@ -1190,19 +1191,139 @@ function invDatalistsHtml() {
     <datalist id="inv-brands">${brands.map(b=>`<option value="${esc(b)}">`).join('')}</datalist>`;
 }
 
+// Renders a "pick from list OR add new" combobox. The effective value is
+// always readable via document.getElementById(id).value — there's a hidden
+// input under that id which the select / text input both write into.
+// Picking "+ Add new…" from the dropdown reveals a text input below it.
+// onChange runs whenever either side updates the value (chain extra hooks
+// like checkInvDuplicate via this param).
+function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+ Add new…', onChange = '' }) {
+  const inList = !!value && options.includes(value);
+  const onChangeCall = onChange ? `; ${onChange}` : '';
+  return `
+    <input type="hidden" id="${id}" value="${esc(value)}">
+    <select id="${id}__select"
+            onchange="invComboPick(this, '${id}')${onChangeCall}"
+            style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+      ${!value ? `<option value="">— Select —</option>` : ''}
+      ${options.map(o => `<option value="${esc(o)}"${o === value ? ' selected' : ''}>${esc(o)}</option>`).join('')}
+      ${(!inList && value) ? `<option value="${esc(value)}" selected>${esc(value)}</option>` : ''}
+      <option value="__add_new__">${addLabel}</option>
+    </select>
+    <input type="text" id="${id}__new"
+           placeholder="${esc(placeholder)}"
+           oninput="document.getElementById('${id}').value=this.value${onChangeCall}"
+           style="display:none;margin-top:6px;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;">
+  `;
+}
+// Click handler shared by every invComboHtml combo. Toggles the text input
+// based on whether the user picked "+ Add new…" or an existing option.
+function invComboPick(sel, hiddenId) {
+  const hidden = document.getElementById(hiddenId);
+  const textEl = document.getElementById(hiddenId + '__new');
+  if (!hidden || !textEl) return;
+  if (sel.value === '__add_new__') {
+    textEl.style.display = '';
+    textEl.value = '';
+    hidden.value = '';
+    setTimeout(() => textEl.focus(), 0);
+  } else {
+    textEl.style.display = 'none';
+    textEl.value = '';
+    hidden.value = sel.value;
+  }
+}
+
+// Admin-only manage modal — lists every distinct brand / supplier with how
+// many inventory items use it and a Delete button. Clicking Delete clears
+// that value from ALL matching items (the items themselves stay; only the
+// brand/supplier tag is cleared). Lets the user clean up typo duplicates
+// like "century" vs "Century" without one-by-one edits.
+function openManageInvField(field) {
+  if (!isAdmin()) return;
+  const fieldLabel = field === 'brand' ? 'Brand' : 'Supplier';
+  const values = invDistinct(field);
+  const rows = values.map(v => {
+    const count = inventory.filter(i => (i[field] || '') === v).length;
+    const esc1 = String(v).replace(/'/g, "\\'");
+    return `<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);">${esc(v)}</td>
+      <td style="padding:6px 10px;text-align:right;color:var(--text2);border-bottom:1px solid var(--border);">${count} item${count !== 1 ? 's' : ''}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;">
+        <button class="btn btn-sm btn-danger" onclick="deleteInvFieldValue('${field}', '${esc1}')">&#128465; Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Manage ${fieldLabel}s</h2>
+    <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">
+      Delete a ${fieldLabel.toLowerCase()} to clear it from every inventory item that currently uses it.
+      The items stay in inventory — they just lose this ${fieldLabel.toLowerCase()} tag.
+      Useful for fixing typo duplicates.
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <tr style="background:#f9fafb;">
+        <th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);">${fieldLabel}</th>
+        <th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--border);">Usage</th>
+        <th style="padding:6px 10px;border-bottom:1px solid var(--border);"></th>
+      </tr>
+      ${rows || `<tr><td colspan="3" style="padding:18px;text-align:center;color:var(--text2);">No ${fieldLabel.toLowerCase()}s yet.</td></tr>`}
+    </table>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>
+  </div>`);
+}
+
+async function deleteInvFieldValue(field, value) {
+  if (!isAdmin()) return;
+  const count = inventory.filter(i => (i[field] || '') === value).length;
+  const fieldLabel = field === 'brand' ? 'brand' : 'supplier';
+  if (!confirm(
+    `Remove "${value}" from the ${fieldLabel} list?\n\n` +
+    `It will be cleared from ${count} item${count !== 1 ? 's' : ''}. ` +
+    `The items themselves stay in inventory — they just lose this ${fieldLabel} tag.\n\n` +
+    `This cannot be undone.`
+  )) return;
+  try {
+    await api('DELETE', `/api/inventory/dropdown/${encodeURIComponent(field)}/${encodeURIComponent(value)}`);
+    await loadInventory();
+    openManageInvField(field);  // re-render with the value gone
+    notify(`"${value}" removed from ${fieldLabel} list`);
+  } catch (e) {
+    notify('Failed to remove: ' + e.message);
+  }
+}
+
 function openInvAdd() {
+  // Default the paper-type combo to the first known type so the form opens
+  // with a populated value (matches the old behavior of an auto-selected
+  // first <option>). Brand and Supplier start blank — there's no sensible
+  // default for either.
+  const defaultPaperType = PAPER_TYPES[0] || '';
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Add Paper Item</h2>
     ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
-        <select id="inv-paper-type" onchange="invOpeningSync(); checkInvDuplicate();">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+        ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: defaultPaperType, placeholder: 'New paper type', onChange: 'invOpeningSync(); checkInvDuplicate();' })}
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" placeholder="e.g. Century" oninput="checkInvDuplicate()"></div>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>Brand</span>
+          ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('brand')" title="Delete brands you no longer need">&#128465; Manage</button>` : ''}
+        </label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), placeholder: 'New brand (e.g. Century)', onChange: 'checkInvDuplicate();' })}
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>Supplier</span>
+        ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('supplier')" title="Delete suppliers you no longer need">&#128465; Manage</button>` : ''}
+      </label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), placeholder: 'New supplier' })}
     </div>
     <!-- Live duplicate hint — turns yellow when the typed fields already
          match an existing inventory item, so the user knows the "Opening"
@@ -1218,54 +1339,58 @@ function openInvAdd() {
         <input type="number" id="inv-opening" placeholder="0" min="0" oninput="invOpeningSync('sheets')">
       </div>
     </div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Reorder Threshold (sheets)</label><input type="number" id="inv-threshold" placeholder="0" min="0"></div>
-      <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. Initial stock count"></div>
-    </div>
+    <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. Initial stock count"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveInvAdd()">Add Item</button>
+      <button id="inv-add-btn" class="btn btn-primary" onclick="saveInvAdd()">Add Item</button>
     </div>
   </div>`);
   invOpeningSync();
   checkInvDuplicate();
 }
 
-// Live check: if (paper_type, size, gsm, brand) already exists in
-// inventory, surface a yellow hint that this submission will TOP UP the
-// existing item instead of creating a new row. Normalized to match the
-// server's COALESCE/case behavior.
+// Live duplicate check, case-insensitive. "ningbo" / "Ningbo" / "NINGBO" all
+// match. If a duplicate exists in (paper_type, size, gsm, brand), hide the
+// "Add Item" button and show a red warning with a button to open the existing
+// item's Edit modal instead. Server enforces the same rule with a 409.
 function checkInvDuplicate() {
-  const hint = document.getElementById('inv-dup-hint');
+  const hint  = document.getElementById('inv-dup-hint');
+  const addBtn = document.getElementById('inv-add-btn');
   if (!hint) return;
   const norm = s => String(s || '').trim().toLowerCase();
   const pt    = (document.getElementById('inv-paper-type')||{}).value || '';
   const size  = (document.getElementById('inv-size')||{}).value || '';
   const gsm   = (document.getElementById('inv-gsm')||{}).value || '';
   const brand = (document.getElementById('inv-brand')||{}).value || '';
-  // Only match exactly the way the server's unique index does — case sensitive,
-  // trimmed. Lower-case fallback flagged separately.
-  const exact = inventory.find(i =>
-    i.paper_type === pt &&
-    (i.size||'').trim()  === size.trim() &&
-    (i.gsm||'').trim()   === gsm.trim() &&
-    (i.brand||'').trim() === brand.trim()
-  );
-  const fuzzy = !exact && inventory.find(i =>
+  // Skip the check until at least the paper type has a value — empty form
+  // shouldn't match anything.
+  if (!pt) {
+    hint.style.display = 'none'; hint.innerHTML = '';
+    if (addBtn) addBtn.style.display = '';
+    return;
+  }
+  const match = inventory.find(i =>
     norm(i.paper_type) === norm(pt) &&
     norm(i.size)  === norm(size) &&
     norm(i.gsm)   === norm(gsm) &&
     norm(i.brand) === norm(brand)
   );
-  if (exact) {
+  if (match) {
     hint.style.display = 'block';
-    hint.innerHTML = `<b>Already exists.</b> Saving will add the Opening amount to <b>${esc(exact.paper_type)}${exact.size?' · '+esc(exact.size):''}${exact.gsm?' · '+esc(exact.gsm)+'gsm':''}${exact.brand?' · '+esc(exact.brand):''}</b> (current balance: ${(exact.current_balance||0).toLocaleString()} sheets) instead of creating a new row.`;
-  } else if (fuzzy) {
-    hint.style.display = 'block';
-    hint.innerHTML = `<b>Similar item exists</b> with slightly different formatting (case/whitespace): <b>${esc(fuzzy.paper_type)}${fuzzy.size?' · '+esc(fuzzy.size):''}${fuzzy.gsm?' · '+esc(fuzzy.gsm)+'gsm':''}${fuzzy.brand?' · '+esc(fuzzy.brand):''}</b>. To merge, match the formatting exactly.`;
+    hint.style.background = '#fee2e2';
+    hint.style.borderColor = '#dc2626';
+    hint.style.color = '#7f1d1d';
+    hint.innerHTML =
+      `<b>This paper item already exists.</b><br>` +
+      `<b>${esc(match.paper_type)}${match.size?' · '+esc(match.size):''}${match.gsm?' · '+esc(match.gsm)+'gsm':''}${match.brand?' · '+esc(match.brand):''}</b> ` +
+      `(current balance: ${(match.current_balance||0).toLocaleString()} sheets).<br>` +
+      `<span style="font-size:11px;">Use <b>+ Stock</b> on the existing card to add more, or click below to open it.</span>` +
+      `<div style="margin-top:8px;"><button type="button" class="btn btn-sm" onclick="closeModal(); openInvEdit(${match.id});">Open existing item</button></div>`;
+    if (addBtn) addBtn.style.display = 'none';   // hard refusal — no add allowed
   } else {
     hint.style.display = 'none';
     hint.innerHTML = '';
+    if (addBtn) addBtn.style.display = '';
   }
 }
 // Two-way sync between the Packets and Sheets inputs in the Add Item modal.
@@ -1297,65 +1422,81 @@ function invOpeningSync(source) {
 }
 async function saveInvAdd() {
   const data = {
-    paper_type: document.getElementById('inv-paper-type').value,
+    paper_type: (document.getElementById('inv-paper-type').value || '').trim(),
     size:       document.getElementById('inv-size').value.trim(),
     gsm:        document.getElementById('inv-gsm').value.trim(),
-    brand:      document.getElementById('inv-brand').value.trim(),
-    reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
+    brand:      (document.getElementById('inv-brand').value || '').trim(),
+    supplier:   (document.getElementById('inv-supplier').value || '').trim(),
     opening_balance:   parseInt(document.getElementById('inv-opening').value, 10) || 0,
     opening_notes:     document.getElementById('inv-opening-notes').value.trim(),
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
   showSaving(true);
   try {
-    // Server returns { _merged: true, _added_sheets: N } when it merged
-    // into an existing item — show a different toast so the user knows
-    // their input topped up an existing row instead of creating a new one.
-    const result = await api('POST', '/api/inventory', data);
+    // Server returns 409 if the exact paper item already exists (case- and
+    // whitespace-insensitive). The thrown error message includes which item
+    // collided, so we can surface it directly.
+    await api('POST', '/api/inventory', data);
     await loadInventory();
     closeModal();
-    if (result && result._merged) {
-      const added = result._added_sheets || 0;
-      notify(added > 0
-        ? `Stock added to existing item (+${added.toLocaleString()} sheets)`
-        : 'Item already exists — no change made');
-    } else {
-      notify('Paper item added');
-    }
+    notify('Paper item added');
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
 
 function openInvEdit(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
-  const curBal  = it.current_balance || 0;
-  const unit    = esc(it.unit || 'sheets');
+  const curBalSheets = it.current_balance || 0;
+  const sheetsUnit   = esc(it.unit || 'sheets');
+  // The DB stores sheets, but admins think in packets / reams. Convert for
+  // display, convert back on save. ps is 100 for cards, 500 for reams.
+  const ps        = packetSize(it.paper_type);
+  const packUnit  = packetUnitLabel(it.paper_type);              // "Packets" or "Reams"
+  const packUnitL = packUnit.toLowerCase();
+  const curBalPkts = curBalSheets / ps;
+  // Trim trailing zeros for clean display (207.75 not 207.7500).
+  const curBalPktsStr = Number.isInteger(curBalPkts) ? String(curBalPkts) : (+curBalPkts.toFixed(2)).toString();
   // Admin-only: direct balance correction. The server writes a
   // reason='correction' transaction (visible in History, hidden from
   // Stock In/Out and Dashboard movement totals).
   const balanceSection = isAdmin()
     ? `<div class="form-group" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;">
          <label class="form-label" style="color:#A32D2D;">Current Balance <span style="font-weight:400;font-size:11px;color:var(--text2);">(admin only — corrections won't show in Stock In/Out reports)</span></label>
-         <input type="number" id="inv-balance" value="${curBal}" min="0" step="1" data-original="${curBal}">
-         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBal.toLocaleString()}</b> ${unit}. Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
+         <div style="display:flex;gap:8px;align-items:center;">
+           <input type="number" id="inv-balance" value="${curBalPktsStr}" min="0" step="0.01" data-original-pkts="${curBalPktsStr}" data-pack-size="${ps}" style="flex:1;">
+           <span style="color:var(--text2);font-size:13px;white-space:nowrap;">${packUnit.toLowerCase()}</span>
+         </div>
+         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBalPktsStr}</b> ${packUnitL} (${curBalSheets.toLocaleString()} ${sheetsUnit}). Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
          <label class="form-label" style="margin-top:8px;font-size:11px;">Reason for correction <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
-         <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 200 sheets">
+         <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 2 ${packUnitL}">
        </div>`
-    : `<div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${curBal.toLocaleString()}</b> ${unit}. Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>`;
+    : `<div style="font-size:12px;color:var(--text2);margin-top:8px;">Current balance: <b>${curBalPktsStr}</b> ${packUnitL} (${curBalSheets.toLocaleString()} ${sheetsUnit}). Use "+ Stock" or manual adjustment to change the balance — the ledger stays honest that way.</div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Edit Paper Item</h2>
     ${invDatalistsHtml()}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paper Type *</label>
-        <select id="inv-paper-type">${PAPER_TYPES.map(t=>`<option ${it.paper_type===t?'selected':''}>${t}</option>`).join('')}</select>
+        ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: it.paper_type || '', placeholder: 'New paper type' })}
       </div>
-      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="inv-brand" list="inv-brands" value="${esc(it.brand||'')}"></div>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>Brand</span>
+          ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('brand')" title="Delete brands you no longer need">&#128465; Manage</button>` : ''}
+        </label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), value: it.brand || '', placeholder: 'New brand' })}
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" value="${esc(it.size||'')}"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
-    <div class="form-group"><label class="form-label">Reorder Threshold</label><input type="number" id="inv-threshold" value="${it.reorder_threshold||0}" min="0"></div>
+    <div class="form-group">
+      <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>Supplier</span>
+        ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('supplier')" title="Delete suppliers you no longer need">&#128465; Manage</button>` : ''}
+      </label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier' })}
+    </div>
     ${balanceSection}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -1365,24 +1506,36 @@ function openInvEdit(id) {
 }
 async function saveInvEdit(id) {
   const data = {
-    paper_type: document.getElementById('inv-paper-type').value,
+    paper_type: (document.getElementById('inv-paper-type').value || '').trim(),
     size:       document.getElementById('inv-size').value.trim(),
     gsm:        document.getElementById('inv-gsm').value.trim(),
-    brand:      document.getElementById('inv-brand').value.trim(),
-    reorder_threshold: parseInt(document.getElementById('inv-threshold').value, 10) || 0,
+    brand:      (document.getElementById('inv-brand').value || '').trim(),
+    supplier:   (document.getElementById('inv-supplier').value || '').trim(),
   };
   if (!data.paper_type) { alert('Paper type is required'); return; }
-  // Admin-only balance correction. Only send current_balance if it
-  // actually changed — server treats omitted/unchanged as no-op.
+  // Admin-only balance correction. Field is in PACKETS / REAMS for usability,
+  // but the DB column stores sheets — so convert before sending. Only fire
+  // the correction transaction if the rounded sheet count actually changed.
   const balEl = document.getElementById('inv-balance');
   if (balEl && isAdmin()) {
-    const newBal = parseInt(balEl.value, 10);
-    const oldBal = parseInt(balEl.dataset.original, 10) || 0;
-    if (Number.isFinite(newBal) && newBal !== oldBal) {
-      const delta = newBal - oldBal;
+    const ps        = parseInt(balEl.dataset.packSize, 10) || 100;
+    const newPkts   = parseFloat(balEl.value);
+    const oldPkts   = parseFloat(balEl.dataset.originalPkts);
+    const newSheets = Number.isFinite(newPkts) ? Math.round(newPkts * ps) : null;
+    const oldSheets = Number.isFinite(oldPkts) ? Math.round(oldPkts * ps) : 0;
+    if (Number.isFinite(newPkts) && newSheets !== oldSheets) {
+      const delta     = newSheets - oldSheets;
+      const deltaPkts = (delta / ps);
+      const deltaPktsStr = Number.isInteger(deltaPkts) ? String(deltaPkts) : (+deltaPkts.toFixed(2)).toString();
       const sign  = delta > 0 ? '+' : '';
-      if (!confirm(`Correct balance from ${oldBal.toLocaleString()} to ${newBal.toLocaleString()} (${sign}${delta.toLocaleString()})?\n\nThis writes a "correction" entry to the item's History and will NOT appear in Stock In / Stock Out reports.`)) return;
-      data.current_balance = newBal;
+      const unitL = ps === 500 ? 'reams' : 'packets';
+      if (!confirm(
+          `Correct balance from ${oldPkts.toLocaleString()} to ${newPkts.toLocaleString()} ${unitL} ` +
+          `(${sign}${deltaPktsStr} ${unitL} · ${sign}${delta.toLocaleString()} sheets)?\n\n` +
+          `This writes a "correction" entry to the item's History and will NOT appear in ` +
+          `Stock In / Stock Out reports.`
+      )) return;
+      data.current_balance = newSheets;
       const notesEl = document.getElementById('inv-correction-notes');
       if (notesEl && notesEl.value.trim()) data.correction_notes = notesEl.value.trim();
     }

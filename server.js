@@ -92,9 +92,12 @@ async function initDb() {
         unit               TEXT DEFAULT 'sheets',
         current_balance    INTEGER DEFAULT 0,
         reorder_threshold  INTEGER DEFAULT 0,
+        supplier           TEXT,
         created_at         TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Add supplier on pre-existing DBs that were created before the column.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS supplier TEXT`;
     // Distinguish offcut items (reclaimed leftovers from cutting parent
     // sheets) from fresh stock of the same dimensions. A 24x18 offcut and a
     // 24x18 fresh sheet are different inventory lines.
@@ -766,46 +769,36 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes } = req.body;
+    const { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
 
-    // Auto-merge: if a paper item with the same (paper_type, size, gsm,
-    // brand) already exists, add the new opening balance to it as a
-    // stock-in transaction rather than failing on the unique index.
-    // Uses COALESCE so NULL and '' are treated the same (matches the
-    // unique index definition).
+    // Hard duplicate check: same (paper_type, size, gsm, brand) — compared
+    // case-insensitively and trimmed, so "ningbo" / "Ningbo" / "NINGBO" all
+    // count as the same brand. Refuse the add with a 409 instead of merging.
+    // The user uses "+ Stock" on the existing card to top up instead.
     const existing = await sql`
       SELECT * FROM inventory_items
-      WHERE paper_type = ${paper_type}
-        AND COALESCE(size,'')  = COALESCE(${size||null}, '')
-        AND COALESCE(gsm,'')   = COALESCE(${gsm||null},  '')
-        AND COALESCE(brand,'') = COALESCE(${brand||null},'')
+      WHERE lower(trim(paper_type))          = lower(trim(${paper_type}))
+        AND lower(trim(COALESCE(size,'')))   = lower(trim(COALESCE(${size||null},  '')))
+        AND lower(trim(COALESCE(gsm,'')))    = lower(trim(COALESCE(${gsm||null},   '')))
+        AND lower(trim(COALESCE(brand,'')))  = lower(trim(COALESCE(${brand||null}, '')))
       LIMIT 1
     `;
     if (existing[0]) {
       const item = existing[0];
-      if (opening > 0) {
-        await applyInventoryChange(sql, {
-          itemId: item.id,
-          change: +opening,
-          reason: 'stock-in',
-          jobId: null,
-          notes: opening_notes || 'Stock added via New Paper form (merged into existing item)',
-        });
-        await logAudit(sql, req, { action: 'inventory.merge', entityType: 'inventory', entityId: item.id, summary: `Topped up ${label} by ${opening.toLocaleString()} sheets (merged with existing item)` });
-      } else {
-        await logAudit(sql, req, { action: 'inventory.merge', entityType: 'inventory', entityId: item.id, summary: `Attempted to add ${label} — already exists; no opening balance` });
-      }
-      const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`;
-      return res.json({ ...refreshed[0], _merged: true, _added_sheets: opening });
+      const existingLabel = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
+      return res.status(409).json({
+        error: `This paper item already exists: ${existingLabel}. Use "+ Stock" on the existing card to add more.`,
+        existing_item: item,
+      });
     }
 
     // No match — fresh item.
     const inserted = await sql`
-      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold)
-      VALUES (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${reorder_threshold||0})
+      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier)
+      VALUES (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${reorder_threshold||0}, ${supplier||null})
       RETURNING *
     `;
     const item = inserted[0];
@@ -835,7 +828,7 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes } = req.body;
+    const { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier } = req.body;
 
     // Snapshot the pre-edit balance — needed so an admin-only balance
     // correction below can compute the delta.
@@ -846,7 +839,8 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     const result = await sql`
       UPDATE inventory_items SET
         paper_type=${paper_type}, size=${size||null}, gsm=${gsm||null},
-        brand=${brand||null}, reorder_threshold=${reorder_threshold||0}
+        brand=${brand||null}, reorder_threshold=${reorder_threshold||0},
+        supplier=${supplier||null}
       WHERE id=${id} RETURNING *
     `;
     const item = result[0];
@@ -882,6 +876,35 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     // Re-fetch so the returned row reflects any balance correction above.
     const refreshed = await sql`SELECT * FROM inventory_items WHERE id=${id}`;
     res.json(refreshed[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-only: clear a brand or supplier value across the whole inventory.
+// Used by the "Manage Brands / Manage Suppliers" cleanup UI to fix typo
+// duplicates (e.g. "century" vs "Century") without per-item editing. The
+// items themselves stay — just the brand/supplier column is NULLed where it
+// matched. Doesn't touch paper_type (required column, can't be NULLed).
+app.delete('/api/inventory/dropdown/:field/:value', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const field = req.params.field;
+    const value = req.params.value;
+    if (!['brand', 'supplier'].includes(field)) {
+      return res.status(400).json({ error: 'Field must be brand or supplier' });
+    }
+    // Tagged-template SQL can't interpolate column names, so we branch.
+    const result = field === 'brand'
+      ? await sql`UPDATE inventory_items SET brand    = NULL WHERE brand    = ${value} RETURNING id`
+      : await sql`UPDATE inventory_items SET supplier = NULL WHERE supplier = ${value} RETURNING id`;
+    await logAudit(sql, req, {
+      action: 'inventory.clear-dropdown',
+      summary: `Cleared ${field}="${value}" from ${result.length} item${result.length !== 1 ? 's' : ''}`,
+    });
+    res.json({ ok: true, cleared_from: result.length });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
