@@ -75,6 +75,11 @@ async function initDb() {
     await sql`ALTER TABLE jobs ALTER COLUMN issuance_status SET DEFAULT 'pending'`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_at  TIMESTAMPTZ`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_by_id INTEGER`;
+    // Cut workflow: a job may consume a source sheet at one size (cut_size,
+    // what the job prints on) and return the leftover to stock at another
+    // size (offcut_size). NULL on both = no cut, issue normally.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cut_size    TEXT`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offcut_size TEXT`;
 
     // Inventory: paper (and future ink/etc) catalog + append-only ledger
     await sql`
@@ -90,11 +95,19 @@ async function initDb() {
         created_at         TIMESTAMPTZ DEFAULT NOW()
       )
     `;
-    // (paper_type, size, gsm, brand) uniquely identifies an inventory line.
-    // COALESCE keeps NULLs from defeating uniqueness — Postgres treats NULL as not-equal otherwise.
+    // Distinguish offcut items (reclaimed leftovers from cutting parent
+    // sheets) from fresh stock of the same dimensions. A 24x18 offcut and a
+    // 24x18 fresh sheet are different inventory lines.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS is_offcut BOOLEAN NOT NULL DEFAULT false`;
+
+    // (paper_type, size, gsm, brand, is_offcut) uniquely identifies an
+    // inventory line. COALESCE keeps NULLs from defeating uniqueness —
+    // Postgres treats NULL as not-equal otherwise. Drop+recreate is
+    // idempotent: existing rows all have is_offcut=false, so no collisions.
+    await sql`DROP INDEX IF EXISTS inventory_items_unique_idx`;
     await sql`
       CREATE UNIQUE INDEX IF NOT EXISTS inventory_items_unique_idx
-        ON inventory_items (paper_type, COALESCE(size,''), COALESCE(gsm,''), COALESCE(brand,''))
+        ON inventory_items (paper_type, COALESCE(size,''), COALESCE(gsm,''), COALESCE(brand,''), is_offcut)
     `;
     await sql`
       CREATE TABLE IF NOT EXISTS inventory_transactions (
@@ -485,18 +498,44 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes 
   `;
 }
 
+// Look up an offcut inventory item matching the source's paper_type, gsm,
+// brand and the cut-leftover size, or create one if none exists. The match
+// is intentionally strict (is_offcut=true) so we never accidentally top up
+// fresh stock with reclaimed offcuts. Returns the item row.
+async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
+  const existing = await sql`
+    SELECT * FROM inventory_items
+    WHERE paper_type = ${sourceItem.paper_type}
+      AND COALESCE(size,'')  = COALESCE(${offcutSize||null}, '')
+      AND COALESCE(gsm,'')   = COALESCE(${sourceItem.gsm||null}, '')
+      AND COALESCE(brand,'') = COALESCE(${sourceItem.brand||null},'')
+      AND is_offcut = true
+    LIMIT 1
+  `;
+  if (existing[0]) return existing[0];
+  const inserted = await sql`
+    INSERT INTO inventory_items (paper_type, size, gsm, brand, is_offcut, reorder_threshold)
+    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, true, 0)
+    RETURNING *
+  `;
+  return inserted[0];
+}
+
 // CREATE a job
 app.post('/api/jobs', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id } = req.body;
+    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
     // New jobs are created with issuance_status='pending'. Stock is NOT
     // deducted at creation time — a stock-role user (or admin) must call
     // POST /api/jobs/:id/issue-stock to deduct inventory and flip status.
+    // cut_size/offcut_size describe an optional cut performed at issuance:
+    // the source sheet is cut, the job uses cut_size, the leftover at
+    // offcut_size is returned to inventory as a +N transaction.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, 'pending')
+      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, issuance_status)
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, 'pending')
       RETURNING *
     `;
     const job = result[0];
@@ -514,28 +553,32 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id } = req.body;
+    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
 
     // Read prior values for inventory adjustment AND issuance status — if the
     // job is still 'pending' (stock never issued), edits don't touch inventory
     // at all. Once 'issued', edits auto-adjust the ledger using the same
     // packet-first formula as initial issuance.
-    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status FROM jobs WHERE id = ${id}`;
+    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size FROM jobs WHERE id = ${id}`;
     const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const newItemId  = inventory_item_id || null;
+    const oldOffcutSize = prior[0]?.offcut_size || null;
+    const newOffcutSize = offcut_size || null;
     // Look up paper types so the packet-multiplier matches what was actually
     // deducted at issuance time (and what the new state would deduct).
-    let oldPaperType = '';
-    let newPaperType = '';
+    let oldSourceItem = null;
+    let newSourceItem = null;
     if (oldItemId) {
-      const r = await sql`SELECT paper_type FROM inventory_items WHERE id = ${oldItemId}`;
-      oldPaperType = r[0]?.paper_type || '';
+      const r = await sql`SELECT * FROM inventory_items WHERE id = ${oldItemId}`;
+      oldSourceItem = r[0] || null;
     }
     if (newItemId) {
-      const r = await sql`SELECT paper_type FROM inventory_items WHERE id = ${newItemId}`;
-      newPaperType = r[0]?.paper_type || '';
+      const r = await sql`SELECT * FROM inventory_items WHERE id = ${newItemId}`;
+      newSourceItem = r[0] || null;
     }
+    const oldPaperType = oldSourceItem?.paper_type || '';
+    const newPaperType = newSourceItem?.paper_type || '';
     const oldSheets = jobDeductionSheets({ paperType: oldPaperType, particulars: prior[0]?.particulars });
     const newSheets = jobDeductionSheets({ paperType: newPaperType, particulars });
 
@@ -547,7 +590,8 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
         machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Normal'},
         delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
         bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
-        particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId}
+        particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId},
+        cut_size=${cut_size||null}, offcut_size=${newOffcutSize}
       WHERE id=${id} RETURNING *
     `;
     const job = result[0];
@@ -563,6 +607,19 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
           jobId: job.id,
           notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
         });
+        // Revert the offcut +N too — compensating transaction keeps the
+        // ledger append-only. We re-apply the new offcut below if the new
+        // state also has a cut.
+        if (oldSourceItem && oldOffcutSize) {
+          const oldOffcutItem = await findOrCreateOffcutItem(sql, oldSourceItem, oldOffcutSize);
+          await applyInventoryChange(sql, {
+            itemId: oldOffcutItem.id,
+            change: -oldSheets,
+            reason: 'job-edit-revert',
+            jobId: job.id,
+            notes: `Edit on Job E-${job.id}: removed previous ${oldSheets} sheets of ${oldOffcutSize} offcut`,
+          });
+        }
       }
       if (newItemId && newSheets > 0) {
         await applyInventoryChange(sql, {
@@ -572,6 +629,17 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
           jobId: job.id,
           notes: `Edit on Job E-${job.id}: consumed ${newSheets} sheets`,
         });
+        // Re-apply the offcut yield for the new state, if cut spec is set.
+        if (newSourceItem && newOffcutSize) {
+          const newOffcutItem = await findOrCreateOffcutItem(sql, newSourceItem, newOffcutSize);
+          await applyInventoryChange(sql, {
+            itemId: newOffcutItem.id,
+            change: +newSheets,
+            reason: 'job-edit-apply',
+            jobId: job.id,
+            notes: `Edit on Job E-${job.id}: added ${newSheets} sheets of ${newOffcutSize} offcut`,
+          });
+        }
       }
     }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
@@ -598,8 +666,9 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
     if (!job.inventory_item_id) {
       return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
     }
-    const inv = await sql`SELECT paper_type FROM inventory_items WHERE id = ${job.inventory_item_id}`;
-    const paperType = inv[0]?.paper_type || '';
+    const inv = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
+    const sourceItem = inv[0];
+    const paperType = sourceItem?.paper_type || '';
     const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars });
     if (sheetsUsed <= 0) {
       return res.status(400).json({ error: 'Job has no Quantity of Packets — set the packets count on the job, then try again. (Inventory is deducted in raw packets/reams.)' });
@@ -616,6 +685,21 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
       jobId: job.id,
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${sheetsUsed} sheets) issued by ${req.user.email}`,
     });
+    // Cut workflow: if the job specifies an offcut size, find-or-create the
+    // matching offcut item and return the leftover to stock. Per source
+    // sheet, exactly one offcut is produced.
+    let cutSummary = '';
+    if (job.cut_size && job.offcut_size && sourceItem) {
+      const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+      await applyInventoryChange(sql, {
+        itemId: offcutItem.id,
+        change: +sheetsUsed,
+        reason: 'job-offcut',
+        jobId: job.id,
+        notes: `Job E-${job.id}: ${sheetsUsed} sheets of ${job.offcut_size} offcut returned to stock`,
+      });
+      cutSummary = ` · cut to ${job.cut_size}, ${sheetsUsed} sheets of ${job.offcut_size} offcut returned to stock`;
+    }
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'issued',
@@ -628,7 +712,7 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
       action: 'job.issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Issued ${sheetsUsed} sheets for Job E-${id}: ${job.name}`,
+      summary: `Issued ${sheetsUsed} sheets for Job E-${id}: ${job.name}${cutSummary}`,
     });
     res.json(updated[0]);
   } catch (err) {
