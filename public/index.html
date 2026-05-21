@@ -2344,9 +2344,15 @@ function computeSummaryRows() {
       requiredKg:     wPerPack === null ? null : requiredNextPkts * wPerPack,
     };
   });
+  // Group brand-agnostic: multiple inventory items that share the same
+  // paper_type + size + gsm (e.g. one row per brand: Century / Ningbo / etc.)
+  // collapse into a single summary row whose numbers are the sum across
+  // brands. is_offcut is kept separate — an offcut and a fresh sheet at the
+  // same dimensions are still two different rows.
+  const groupedRows = aggregateSummaryRowsByGsmSize(rows, paperType);
   // Sort: GSM ascending (numeric), then size — width then height, numeric-aware
   // so "9x12" comes before "10x15" rather than after.
-  rows.sort((a, b) => {
+  groupedRows.sort((a, b) => {
     const ag = parseFloat(a.item.gsm) || 0, bg = parseFloat(b.item.gsm) || 0;
     if (ag !== bg) return ag - bg;
     const ad = parseSizeInches(a.item.size) || { w: 0, h: 0 };
@@ -2360,7 +2366,68 @@ function computeSummaryRows() {
   // what's on the inventory item. We list these under the table so the user
   // can edit the import (or add the matching inventory item).
   const orphanImports = (imports || []).filter(im => !claimedImportIds.has(im.id));
-  return { rows, buckets, orphanImports };
+  return { rows: groupedRows, buckets, orphanImports };
+}
+
+// Collapse per-item rows into one row per (gsm, size, is_offcut) group. All
+// numeric columns are summed; brands are joined with " / " for the display.
+// The Weight / Import (kg) / Required (kg) columns are recomputed from the
+// aggregated packet counts (same formula as the per-item rows) since items
+// in a group share size+gsm and therefore share weight-per-pack.
+function aggregateSummaryRowsByGsmSize(rows, paperType) {
+  const groups = new Map();
+  for (const r of rows) {
+    const key = `${r.item.gsm || ''}|${r.item.size || ''}|${r.item.is_offcut ? '1' : '0'}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        item: {
+          gsm: r.item.gsm,
+          size: r.item.size,
+          paper_type: r.item.paper_type,
+          is_offcut: r.item.is_offcut,
+          cut_from_size: r.item.cut_from_size,
+          brand: '',          // filled at the end from the brands set
+        },
+        _brands: [],
+        openingPkts: 0,
+        totalOutPkts: 0,
+        stockNowPkts: 0,
+        pendingImportPkts: 0,
+        afterImportPkts: 0,
+        requiredNextPkts: 0,
+        // Periods: zero-init with the same shape as the input rows so we can
+        // accumulate element-wise below.
+        periods: r.periods.map(() => ({ in: 0, out: 0, balance: 0 })),
+      });
+    }
+    const g = groups.get(key);
+    g.openingPkts        += r.openingPkts;
+    g.totalOutPkts       += r.totalOutPkts;
+    g.stockNowPkts       += r.stockNowPkts;
+    g.pendingImportPkts  += r.pendingImportPkts;
+    g.afterImportPkts    += r.afterImportPkts;
+    g.requiredNextPkts   += r.requiredNextPkts;
+    // Periods sum element-wise. Running balance per bucket is additive
+    // because each item's balance is already opening + cumulative in/out.
+    r.periods.forEach((p, i) => {
+      g.periods[i].in      += p.in;
+      g.periods[i].out     += p.out;
+      g.periods[i].balance += p.balance;
+    });
+    if (r.item.brand && !g._brands.includes(r.item.brand)) g._brands.push(r.item.brand);
+  }
+  // Finalize: brand string + kg fields recomputed from packet totals.
+  const out = [];
+  for (const g of groups.values()) {
+    g.item.brand = g._brands.join(' / ');
+    delete g._brands;
+    const wPerPack = packWeightKg(g.item.paper_type, g.item.size, g.item.gsm);
+    g.weightKg   = wPerPack === null ? null : g.stockNowPkts     * wPerPack;
+    g.importKg   = wPerPack === null ? null : g.afterImportPkts  * wPerPack;
+    g.requiredKg = wPerPack === null ? null : g.requiredNextPkts * wPerPack;
+    out.push(g);
+  }
+  return out;
 }
 
 // Format a packet count: integer when whole, 2dp otherwise. Empty string for 0
@@ -2418,6 +2485,7 @@ function renderStockSummary() {
     return `<tr>
       <td>${esc(r.item.gsm || '—')}</td>
       <td>${esc(r.item.size || '—')}</td>
+      <td>${esc(r.item.brand || '—')}</td>
       <td style="text-align:right;">${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
@@ -2436,6 +2504,7 @@ function renderStockSummary() {
       <tr>
         <th rowspan="2">GSM</th>
         <th rowspan="2">Size (in)</th>
+        <th rowspan="2">Brand(s)</th>
         <th rowspan="2">Opening</th>
         ${periodHeaders}
         <th rowspan="2">Total Out</th>
@@ -2444,8 +2513,8 @@ function renderStockSummary() {
         <th rowspan="2">Pending Import</th>
         <th rowspan="2">After Import</th>
         <th rowspan="2">Import (kg)</th>
-        <th rowspan="2">Required Next</th>
-        <th rowspan="2">Required (kg)</th>
+        <th rowspan="2">Status</th>
+        <th rowspan="2">Status (kg)</th>
       </tr>
       <tr>${periodSubHeaders}</tr>
       ${tbody}
@@ -2489,6 +2558,7 @@ function printStockSummary() {
     return `<tr>
       <td ${tdL}>${esc(r.item.gsm || '—')}</td>
       <td ${tdL}>${esc(r.item.size || '—')}</td>
+      <td ${tdL}>${esc(r.item.brand || '—')}</td>
       <td ${tdR}>${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
       <td ${tdR}><b>${fmtPkts(r.totalOutPkts)}</b></td>
@@ -2521,6 +2591,7 @@ function printStockSummary() {
         <tr>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">GSM</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Size (in)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Brand(s)</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Opening</th>
           ${periodHeaders}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Out</th>
@@ -2529,8 +2600,8 @@ function printStockSummary() {
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Pending Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">After Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Import (kg)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required Next</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Required (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Status</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Status (kg)</th>
         </tr>
         <tr>${periodSubHeaders}</tr>
         ${body}
