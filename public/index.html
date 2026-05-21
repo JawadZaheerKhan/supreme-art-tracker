@@ -75,6 +75,7 @@
   .inv-badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.04em; margin-left: 8px; }
   .inv-badge.low { background: #fef3c7; color: #92400e; }
   .inv-badge.out { background: #fee2e2; color: #991b1b; }
+  .inv-badge.offcut { background: #e0e7ff; color: #3730a3; }
   .inv-actions { display: flex; gap: 6px; }
   .ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .ledger-table th, .ledger-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
@@ -1044,6 +1045,7 @@ function renderJobs() {
             ${coatings.length?`<span><b style="color:var(--text)">Coatings:</b> ${coatings.map(esc).join(', ')}</span>`:''}
             ${j.delqty?`<span><b style="color:var(--text)">Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
             ${j.cartonqty?`<span><b style="color:var(--text)">Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
+            ${j.cut_size?`<span><b style="color:var(--text)">Cut to:</b> ${esc(j.cut_size)}${j.offcut_size?' (offcut: '+esc(j.offcut_size)+')':''}</span>`:''}
           </div>
           <div class="pipeline">${pipeline}</div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
@@ -1130,11 +1132,17 @@ function renderInventoryList() {
   }
   el.innerHTML = filtered.map(it => {
     const state = invStockState(it);
-    const badge = state === 'out' ? '<span class="inv-badge out">Out of Stock</span>' : '';
-    // Brand gets its own bold line; size/gsm go on the smaller sub line so
-    // the visual hierarchy reads top-to-bottom: paper > brand > details.
-    const sub = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc).join(' · ');
-    const subLine = sub || '—';
+    // Stock state on this branch only has 'out' or 'ok' (reorder-threshold
+    // was removed). Combine the Out-of-Stock badge with the Offcut badge
+    // from the cut-sheets work — both can appear together.
+    const stockBadge  = state === 'out' ? '<span class="inv-badge out">Out of Stock</span>' : '';
+    const offcutBadge = it.is_offcut    ? '<span class="inv-badge offcut">Offcut</span>'    : '';
+    const badge = offcutBadge + stockBadge;
+    // Brand gets its own bold line below. The sub line shows size/gsm plus,
+    // for offcut items, the parent-sheet origin (e.g. "originally cut from 24x32").
+    const subParts = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc);
+    if (it.is_offcut && it.cut_from_size) subParts.push('originally cut from ' + esc(it.cut_from_size));
+    const subLine = subParts.join(' · ') || '—';
     // Pretty-print the balance also in packets/reams so users get the unit
     // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
     const sheets = it.current_balance || 0;
@@ -3970,6 +3978,20 @@ function specsSection(p, coatings, j) {
         <span class="stock-hint" id="stock-hint"></span>
       </div>
     </td></tr>`;
+  // Cut workflow: a single opt-in toggle. cut_size and offcut_size are NOT
+  // separate inputs — they're derived live from "Cutting Size / GSM" (top
+  // form) and "Size / GSM" respectively, so users don't enter the same
+  // dimensions twice. The live preview below the toggle just shows what
+  // will be sent on save. See getFormData() and renderCutPreview().
+  const cutEnabled = !!(j && (j.cut_size || j.offcut_size));
+  const cutRow = `
+    <tr class="jc-spec-row"><td colspan="5">
+      <label style="display:inline-flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="f-cut-toggle" ${cutEnabled?'checked':''} onchange="renderCutPreview()">
+        <span style="font-size:12px;">Cut this sheet (keep the leftover as offcut stock)</span>
+      </label>
+      <span id="cut-preview" style="font-size:12px;margin-left:14px;color:var(--text2);"></span>
+    </td></tr>`;
   const coatRow = list => `
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
       ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
@@ -3977,9 +3999,69 @@ function specsSection(p, coatings, j) {
   return `
     <table class="jc-part jc-specs">
       ${papersRow}
+      ${cutRow}
       ${coatRow(PRINT_COATINGS_ROW1)}
       ${coatRow(PRINT_COATINGS_ROW2)}
     </table>`;
+}
+
+// Strip any "/ NNNgsm" suffix from a size string so the dimensions stand
+// alone (e.g. "20x15 / 200gsm" → "20x15"). Used to derive cut/offcut sizes
+// from the form's Cutting Size/GSM and Size/GSM fields.
+function dimsOnly(s) { return String(s || '').split('/')[0].trim(); }
+
+// Parse "25x30" / "25 x 30" / "25x30 / 300gsm" → {w:25, h:30}. Null if unparseable.
+function parseSizeDims(s) {
+  if (!s) return null;
+  const m = String(s).match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+  if (!m) return null;
+  return { w: parseFloat(m[1]), h: parseFloat(m[2]) };
+}
+
+// Compute the offcut dimensions when `cutSize` is taken out of `sourceSize`.
+// The cut must share one dimension with the source; the leftover on the
+// other dimension is the offcut's non-shared side. Handles rotated cuts
+// (where width matches height). Returns a "WxH" string, or null if the
+// shapes don't match (no shared dimension, or cut larger than source).
+function computeOffcutSize(sourceSize, cutSize) {
+  const src = parseSizeDims(sourceSize);
+  const cut = parseSizeDims(cutSize);
+  if (!src || !cut) return null;
+  if (src.w === cut.w) { const rem = src.h - cut.h; return rem > 0 ? `${src.w}x${rem}` : null; }
+  if (src.h === cut.h) { const rem = src.w - cut.w; return rem > 0 ? `${rem}x${src.h}` : null; }
+  // Rotated cut: source dim matches cut's transposed dim.
+  if (src.w === cut.h) { const rem = src.h - cut.w; return rem > 0 ? `${src.w}x${rem}` : null; }
+  if (src.h === cut.w) { const rem = src.w - cut.h; return rem > 0 ? `${rem}x${src.h}` : null; }
+  return null;
+}
+
+// Render the live preview next to the Cut toggle. cut_size comes from
+// Cutting Size / GSM; offcut_size is computed as (source - cut) so the user
+// never has to type it. Called by oninput on Cutting Size/GSM and when the
+// modal first opens.
+function renderCutPreview() {
+  const on = (document.getElementById('f-cut-toggle')||{}).checked;
+  const el = document.getElementById('cut-preview');
+  if (!el) return;
+  if (!on) { el.textContent = ''; return; }
+  const hidden  = document.getElementById('f-inventory-item');
+  const itemId  = hidden && parseInt(hidden.value, 10);
+  const source  = itemId ? inventory.find(i => i.id === itemId) : null;
+  const cutSize = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  if (!source || !source.size) {
+    el.innerHTML = `<span style="color:#A32D2D;">Pick a paper item above to enable cut.</span>`;
+    return;
+  }
+  if (!cutSize) {
+    el.innerHTML = `<span style="color:#A32D2D;">Fill in Cutting Size / GSM to enable cut.</span>`;
+    return;
+  }
+  const offcut = computeOffcutSize(source.size, cutSize);
+  if (!offcut) {
+    el.innerHTML = `<span style="color:#A32D2D;">Can't compute offcut — Cutting Size must share a dimension with the source ${esc(source.size)} (and be smaller).</span>`;
+    return;
+  }
+  el.innerHTML = `Cut to: <b>${esc(cutSize)}</b> &middot; Offcut size: <b>${esc(offcut)}</b> <span style="color:var(--text3);">(auto-computed from source ${esc(source.size)})</span>`;
 }
 
 function particularsTable(p) {
@@ -4041,11 +4123,11 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
-        <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm"></td>
+        <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
         <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" value="${v(j.client)}" placeholder="National Foods"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
+        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="3"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
       </tr>
       <tr>
@@ -4089,6 +4171,17 @@ function jobForm(j={}) {
 function getFormData() {
   const itemEl = document.getElementById('f-inventory-item');
   const inventory_item_id = itemEl && itemEl.value ? parseInt(itemEl.value, 10) : null;
+  // Cut workflow: cut_size = dimensions from "Cutting Size / GSM"; offcut_size
+  // is computed as (source - cut). Both null if toggle is off OR we can't
+  // resolve a valid offcut from the source — that way the server's "no cut"
+  // path runs cleanly instead of recording half-set state.
+  const cutToggle  = (document.getElementById('f-cut-toggle')||{}).checked;
+  const cutSizeRaw = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  const sourceItem = inventory_item_id ? inventory.find(i => i.id === inventory_item_id) : null;
+  const computedOffcut = (cutToggle && sourceItem && cutSizeRaw)
+    ? computeOffcutSize(sourceItem.size, cutSizeRaw)
+    : null;
+  const sendCut = !!(cutToggle && cutSizeRaw && computedOffcut);
   return {
     name: document.getElementById('f-name').value.trim(),
     client: document.getElementById('f-client').value.trim(),
@@ -4112,6 +4205,8 @@ function getFormData() {
     mrp: document.getElementById('f-mrp').value.trim(),
     particulars: collectParticulars(),
     inventory_item_id,
+    cut_size:    sendCut ? cutSizeRaw     : null,
+    offcut_size: sendCut ? computedOffcut : null,
   };
 }
 
@@ -4152,7 +4247,8 @@ function updateStockHint() {
 // A simple typeahead over the inventory list. Hidden input holds the chosen
 // item id so getFormData()/updateStockHint() can read it unchanged.
 function paperItemLabel(it) {
-  return `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  const prefix = it.is_offcut ? 'OFFCUT · ' : '';
+  return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
 }
 function paperOpen() {
   const list = document.getElementById('paper-list');
@@ -4301,6 +4397,7 @@ function openAdd() {
     </div>
   </div>`);
   updateStockHint();
+  renderCutPreview();
 }
 
 async function saveAdd() {
@@ -4330,6 +4427,7 @@ function openEdit(id) {
     </div>
   </div>`);
   updateStockHint();
+  renderCutPreview();
 }
 
 async function saveEdit(id) {
