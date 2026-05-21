@@ -99,6 +99,10 @@ async function initDb() {
     // sheets) from fresh stock of the same dimensions. A 24x18 offcut and a
     // 24x18 fresh sheet are different inventory lines.
     await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS is_offcut BOOLEAN NOT NULL DEFAULT false`;
+    // For offcut items, record the dimensions of the parent sheet they were
+    // cut from (e.g. "24x32"). Set on first create; not overwritten on
+    // subsequent matches — the first source stays as the canonical origin.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS cut_from_size TEXT`;
 
     // (paper_type, size, gsm, brand, is_offcut) uniquely identifies an
     // inventory line. COALESCE keeps NULLs from defeating uniqueness —
@@ -501,7 +505,10 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes 
 // Look up an offcut inventory item matching the source's paper_type, gsm,
 // brand and the cut-leftover size, or create one if none exists. The match
 // is intentionally strict (is_offcut=true) so we never accidentally top up
-// fresh stock with reclaimed offcuts. Returns the item row.
+// fresh stock with reclaimed offcuts. Stores the source's size on first
+// create as cut_from_size so the inventory list can show provenance. Does
+// not update cut_from_size on subsequent matches — the original parent
+// stays as the canonical origin label.
 async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   const existing = await sql`
     SELECT * FROM inventory_items
@@ -514,8 +521,8 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   `;
   if (existing[0]) return existing[0];
   const inserted = await sql`
-    INSERT INTO inventory_items (paper_type, size, gsm, brand, is_offcut, reorder_threshold)
-    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, true, 0)
+    INSERT INTO inventory_items (paper_type, size, gsm, brand, is_offcut, cut_from_size, reorder_threshold)
+    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, true, ${sourceItem.size||null}, 0)
     RETURNING *
   `;
   return inserted[0];

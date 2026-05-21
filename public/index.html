@@ -1140,7 +1140,9 @@ function renderInventoryList() {
                      : state === 'low' ? '<span class="inv-badge low">Low</span>' : '';
     const offcutBadge = it.is_offcut ? '<span class="inv-badge offcut">Offcut</span>' : '';
     const badge = offcutBadge + stockBadge;
-    const sub = [it.size, it.gsm ? it.gsm + ' gsm' : '', it.brand].filter(Boolean).map(esc).join(' · ');
+    const subParts = [it.size, it.gsm ? it.gsm + ' gsm' : '', it.brand].filter(Boolean).map(esc);
+    if (it.is_offcut && it.cut_from_size) subParts.push('originally cut from ' + esc(it.cut_from_size));
+    const sub = subParts.join(' · ');
     // Pretty-print the balance also in packets/reams so users get the unit
     // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
     const sheets = it.current_balance || 0;
@@ -3823,30 +3825,19 @@ function specsSection(p, coatings, j) {
         <span class="stock-hint" id="stock-hint"></span>
       </div>
     </td></tr>`;
-  // Cut workflow: optional toggle that, when on, asks for the size the job
-  // prints on (cut_size) and the size of the leftover (offcut_size). On
-  // issuance the source is deducted by sheets-qty and the offcut item is
-  // topped up by the same count. See server.js POST /api/jobs/:id/issue-stock.
-  const cutSize    = j && j.cut_size    ? j.cut_size    : '';
-  const offcutSize = j && j.offcut_size ? j.offcut_size : '';
-  const cutEnabled = !!(cutSize || offcutSize);
-  const sourceSize = currentItem ? (currentItem.size || '') : '';
+  // Cut workflow: a single opt-in toggle. cut_size and offcut_size are NOT
+  // separate inputs — they're derived live from "Cutting Size / GSM" (top
+  // form) and "Size / GSM" respectively, so users don't enter the same
+  // dimensions twice. The live preview below the toggle just shows what
+  // will be sent on save. See getFormData() and renderCutPreview().
+  const cutEnabled = !!(j && (j.cut_size || j.offcut_size));
   const cutRow = `
     <tr class="jc-spec-row"><td colspan="5">
       <label style="display:inline-flex;align-items:center;gap:6px;">
-        <input type="checkbox" id="f-cut-toggle" ${cutEnabled?'checked':''} onchange="toggleCutFields()">
+        <input type="checkbox" id="f-cut-toggle" ${cutEnabled?'checked':''} onchange="renderCutPreview()">
         <span style="font-size:12px;">Cut this sheet (keep the leftover as offcut stock)</span>
       </label>
-      <div id="cut-fields" style="display:${cutEnabled?'inline-flex':'none'};gap:14px;align-items:center;margin-left:16px;">
-        <span style="font-size:12px;">
-          Cut to:
-          <input type="text" id="f-cut-size" value="${esc(cutSize || sourceSize)}" placeholder="e.g. 24x18" style="width:90px;margin-left:4px;">
-        </span>
-        <span style="font-size:12px;">
-          Offcut size:
-          <input type="text" id="f-offcut-size" value="${esc(offcutSize || sourceSize)}" placeholder="e.g. 24x18" style="width:90px;margin-left:4px;">
-        </span>
-      </div>
+      <span id="cut-preview" style="font-size:12px;margin-left:14px;color:var(--text2);"></span>
     </td></tr>`;
   const coatRow = list => `
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
@@ -3861,22 +3852,27 @@ function specsSection(p, coatings, j) {
     </table>`;
 }
 
-// Show/hide the cut size + offcut size fields when the toggle is flipped.
-// When turning the toggle ON for the first time, pre-fill both inputs with
-// the source paper's full size so the user only adjusts what changes.
-function toggleCutFields() {
-  const on    = document.getElementById('f-cut-toggle').checked;
-  const wrap  = document.getElementById('cut-fields');
-  wrap.style.display = on ? 'inline-flex' : 'none';
-  if (on) {
-    const hidden  = document.getElementById('f-inventory-item');
-    const itemId  = hidden && parseInt(hidden.value, 10);
-    const source  = itemId ? inventory.find(i => i.id === itemId) : null;
-    const cutEl   = document.getElementById('f-cut-size');
-    const offEl   = document.getElementById('f-offcut-size');
-    if (source && cutEl && !cutEl.value) cutEl.value = source.size || '';
-    if (source && offEl && !offEl.value) offEl.value = source.size || '';
+// Strip any "/ NNNgsm" suffix from a size string so the dimensions stand
+// alone (e.g. "20x15 / 200gsm" → "20x15"). Used to derive cut/offcut sizes
+// from the form's Cutting Size/GSM and Size/GSM fields.
+function dimsOnly(s) { return String(s || '').split('/')[0].trim(); }
+
+// Render the live preview next to the Cut toggle. Reads Cutting Size/GSM
+// for cut_size and Size/GSM for offcut_size — no separate inputs needed.
+// Also called from oninput on those source fields so the preview stays in
+// sync as the user types.
+function renderCutPreview() {
+  const on = (document.getElementById('f-cut-toggle')||{}).checked;
+  const el = document.getElementById('cut-preview');
+  if (!el) return;
+  if (!on) { el.textContent = ''; return; }
+  const cutSize    = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  const offcutSize = dimsOnly((document.getElementById('f-size')||{}).value);
+  if (!cutSize || !offcutSize) {
+    el.innerHTML = `<span style="color:#A32D2D;">Fill in Cutting Size / GSM and Size / GSM above to enable cut.</span>`;
+    return;
   }
+  el.innerHTML = `Cut to: <b>${esc(cutSize)}</b> &middot; Offcut size: <b>${esc(offcutSize)}</b>`;
 }
 
 function particularsTable(p) {
@@ -3938,11 +3934,11 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
-        <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm"></td>
+        <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
         <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" value="${v(j.client)}" placeholder="National Foods"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm"></td>
+        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="3"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
       </tr>
       <tr>
@@ -4009,13 +4005,17 @@ function getFormData() {
     mrp: document.getElementById('f-mrp').value.trim(),
     particulars: collectParticulars(),
     inventory_item_id,
-    // Cut spec: only sent when the toggle is checked AND both fields have
-    // values. Server treats null on either as "no cut".
+    // Cut spec is derived live from the existing form fields so users don't
+    // type the same dimensions twice:
+    //   cut_size    ← dimensions from "Cutting Size / GSM"
+    //   offcut_size ← dimensions from "Size / GSM"
+    // Both null when the toggle is off or either source field is empty;
+    // server treats null as "no cut".
     cut_size:    (document.getElementById('f-cut-toggle')||{}).checked
-                   ? (document.getElementById('f-cut-size')||{}).value?.trim() || null
+                   ? (dimsOnly((document.getElementById('f-cutting-size')||{}).value) || null)
                    : null,
     offcut_size: (document.getElementById('f-cut-toggle')||{}).checked
-                   ? (document.getElementById('f-offcut-size')||{}).value?.trim() || null
+                   ? (dimsOnly((document.getElementById('f-size')||{}).value) || null)
                    : null,
   };
 }
@@ -4207,6 +4207,7 @@ function openAdd() {
     </div>
   </div>`);
   updateStockHint();
+  renderCutPreview();
 }
 
 async function saveAdd() {
@@ -4236,6 +4237,7 @@ function openEdit(id) {
     </div>
   </div>`);
   updateStockHint();
+  renderCutPreview();
 }
 
 async function saveEdit(id) {
@@ -4630,11 +4632,6 @@ function buildPrintCard(j) {
         <td colspan="3"><div class="pc-label">Deadline</div><div class="pc-value">${fmt(j.deadline)}</div></td>
         <td colspan="3"><div class="pc-label">Delivered PO Qty</div><div class="pc-value">${v(j.delqty)}</div></td>
       </tr>
-      ${j.cut_size || j.offcut_size ? `
-      <tr>
-        <td colspan="3"><div class="pc-label">Cut To</div><div class="pc-value">${v(j.cut_size)}</div></td>
-        <td colspan="3"><div class="pc-label">Offcut Size (returned to stock)</div><div class="pc-value">${v(j.offcut_size)}</div></td>
-      </tr>` : ''}
     </table>
     <table class="pp-table">
       ${specsRows}
