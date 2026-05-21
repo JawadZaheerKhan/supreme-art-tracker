@@ -3857,22 +3857,58 @@ function specsSection(p, coatings, j) {
 // from the form's Cutting Size/GSM and Size/GSM fields.
 function dimsOnly(s) { return String(s || '').split('/')[0].trim(); }
 
-// Render the live preview next to the Cut toggle. Reads Cutting Size/GSM
-// for cut_size and Size/GSM for offcut_size — no separate inputs needed.
-// Also called from oninput on those source fields so the preview stays in
-// sync as the user types.
+// Parse "25x30" / "25 x 30" / "25x30 / 300gsm" → {w:25, h:30}. Null if unparseable.
+function parseSizeDims(s) {
+  if (!s) return null;
+  const m = String(s).match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+  if (!m) return null;
+  return { w: parseFloat(m[1]), h: parseFloat(m[2]) };
+}
+
+// Compute the offcut dimensions when `cutSize` is taken out of `sourceSize`.
+// The cut must share one dimension with the source; the leftover on the
+// other dimension is the offcut's non-shared side. Handles rotated cuts
+// (where width matches height). Returns a "WxH" string, or null if the
+// shapes don't match (no shared dimension, or cut larger than source).
+function computeOffcutSize(sourceSize, cutSize) {
+  const src = parseSizeDims(sourceSize);
+  const cut = parseSizeDims(cutSize);
+  if (!src || !cut) return null;
+  if (src.w === cut.w) { const rem = src.h - cut.h; return rem > 0 ? `${src.w}x${rem}` : null; }
+  if (src.h === cut.h) { const rem = src.w - cut.w; return rem > 0 ? `${rem}x${src.h}` : null; }
+  // Rotated cut: source dim matches cut's transposed dim.
+  if (src.w === cut.h) { const rem = src.h - cut.w; return rem > 0 ? `${src.w}x${rem}` : null; }
+  if (src.h === cut.w) { const rem = src.w - cut.h; return rem > 0 ? `${rem}x${src.h}` : null; }
+  return null;
+}
+
+// Render the live preview next to the Cut toggle. cut_size comes from
+// Cutting Size / GSM; offcut_size is computed as (source - cut) so the user
+// never has to type it. Called by oninput on Cutting Size/GSM and when the
+// modal first opens.
 function renderCutPreview() {
   const on = (document.getElementById('f-cut-toggle')||{}).checked;
   const el = document.getElementById('cut-preview');
   if (!el) return;
   if (!on) { el.textContent = ''; return; }
-  const cutSize    = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
-  const offcutSize = dimsOnly((document.getElementById('f-size')||{}).value);
-  if (!cutSize || !offcutSize) {
-    el.innerHTML = `<span style="color:#A32D2D;">Fill in Cutting Size / GSM and Size / GSM above to enable cut.</span>`;
+  const hidden  = document.getElementById('f-inventory-item');
+  const itemId  = hidden && parseInt(hidden.value, 10);
+  const source  = itemId ? inventory.find(i => i.id === itemId) : null;
+  const cutSize = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  if (!source || !source.size) {
+    el.innerHTML = `<span style="color:#A32D2D;">Pick a paper item above to enable cut.</span>`;
     return;
   }
-  el.innerHTML = `Cut to: <b>${esc(cutSize)}</b> &middot; Offcut size: <b>${esc(offcutSize)}</b>`;
+  if (!cutSize) {
+    el.innerHTML = `<span style="color:#A32D2D;">Fill in Cutting Size / GSM to enable cut.</span>`;
+    return;
+  }
+  const offcut = computeOffcutSize(source.size, cutSize);
+  if (!offcut) {
+    el.innerHTML = `<span style="color:#A32D2D;">Can't compute offcut — Cutting Size must share a dimension with the source ${esc(source.size)} (and be smaller).</span>`;
+    return;
+  }
+  el.innerHTML = `Cut to: <b>${esc(cutSize)}</b> &middot; Offcut size: <b>${esc(offcut)}</b> <span style="color:var(--text3);">(auto-computed from source ${esc(source.size)})</span>`;
 }
 
 function particularsTable(p) {
@@ -3982,6 +4018,17 @@ function jobForm(j={}) {
 function getFormData() {
   const itemEl = document.getElementById('f-inventory-item');
   const inventory_item_id = itemEl && itemEl.value ? parseInt(itemEl.value, 10) : null;
+  // Cut workflow: cut_size = dimensions from "Cutting Size / GSM"; offcut_size
+  // is computed as (source - cut). Both null if toggle is off OR we can't
+  // resolve a valid offcut from the source — that way the server's "no cut"
+  // path runs cleanly instead of recording half-set state.
+  const cutToggle  = (document.getElementById('f-cut-toggle')||{}).checked;
+  const cutSizeRaw = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  const sourceItem = inventory_item_id ? inventory.find(i => i.id === inventory_item_id) : null;
+  const computedOffcut = (cutToggle && sourceItem && cutSizeRaw)
+    ? computeOffcutSize(sourceItem.size, cutSizeRaw)
+    : null;
+  const sendCut = !!(cutToggle && cutSizeRaw && computedOffcut);
   return {
     name: document.getElementById('f-name').value.trim(),
     client: document.getElementById('f-client').value.trim(),
@@ -4005,18 +4052,8 @@ function getFormData() {
     mrp: document.getElementById('f-mrp').value.trim(),
     particulars: collectParticulars(),
     inventory_item_id,
-    // Cut spec is derived live from the existing form fields so users don't
-    // type the same dimensions twice:
-    //   cut_size    ← dimensions from "Cutting Size / GSM"
-    //   offcut_size ← dimensions from "Size / GSM"
-    // Both null when the toggle is off or either source field is empty;
-    // server treats null as "no cut".
-    cut_size:    (document.getElementById('f-cut-toggle')||{}).checked
-                   ? (dimsOnly((document.getElementById('f-cutting-size')||{}).value) || null)
-                   : null,
-    offcut_size: (document.getElementById('f-cut-toggle')||{}).checked
-                   ? (dimsOnly((document.getElementById('f-size')||{}).value) || null)
-                   : null,
+    cut_size:    sendCut ? cutSizeRaw     : null,
+    offcut_size: sendCut ? computedOffcut : null,
   };
 }
 
