@@ -3967,15 +3967,27 @@ function renderStockMovement(direction, from, to) {
   // would just duplicate that — skip it.
   let total = 0;
   let totalKg = 0;     // sum of |change|_in_packs × kg_per_pack, when weight is computable
+  // Track totals in both unit families: cards are counted as packets (100/pkt),
+  // ream papers as reams (500/ream). Sheets total stays as the audit sub-line.
+  let totalCards = 0;   // packets across card-type transactions
+  let totalReams = 0;   // reams   across paper-type transactions
   for (const t of txs) {
     total += direction === 'in' ? t.change : -t.change;
-    const ps = packetSize(t.paper_type || '');
+    const ps   = packetSize(t.paper_type || '');
+    const units = Math.abs(t.change) / ps;
+    if (isReamPaper(t.paper_type || '')) totalReams += units; else totalCards += units;
     const w  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
-    if (w !== null) totalKg += w * (Math.abs(t.change) / ps);
+    if (w !== null) totalKg += w * units;
   }
   const color = direction === 'in' ? '#166534' : '#A32D2D';
   const sign  = direction === 'in' ? '+' : '−';
   const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  // Headline reads as a mixed-unit total: "X packets + Y reams". Sheets and
+  // kg go to the sub-line so the audit-friendly count stays one glance away.
+  const pktReamHead = (totalCards && totalReams)
+    ? `${fmt(totalCards)} pkts + ${fmt(totalReams)} reams`
+    : totalReams ? `${fmt(totalReams)} reams`
+    : `${fmt(totalCards)} pkts`;
   const tile = (label, value, c, sub) =>
     `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
        <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
@@ -3983,7 +3995,7 @@ function renderStockMovement(direction, from, to) {
        ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
      </div>`;
   document.getElementById(`sm-${direction}-summary`).innerHTML =
-      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + total.toLocaleString() + ' sheets', color, `${sign}${fmt(totalKg)} kg · all paper types in filter`)
+      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + pktReamHead, color, `${sign}${total.toLocaleString()} sheets · ${sign}${fmt(totalKg)} kg`)
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
   const rows = txs.map(t => {
