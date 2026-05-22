@@ -555,8 +555,11 @@
       <aside class="reports-sidebar">
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
         <div class="rsb-section">Analysis</div>
-        <button class="rsb-item active" data-rt="summary" onclick="openStockSummary()">
+        <button class="rsb-item active" data-rt="summary" onclick="setReportsTab('summary'); openStockSummary();">
           <span class="rsb-icon">&#128203;</span> Stock Summary
+        </button>
+        <button class="rsb-item" data-rt="inventory-report" onclick="setReportsTab('inventory-report'); openInventoryReport();">
+          <span class="rsb-icon">&#128230;</span> Inventory Report
         </button>
       </aside>
       <main class="reports-content">
@@ -2311,6 +2314,205 @@ function buildSummaryBuckets(from, to, granularity) {
     }
   }
   return buckets;
+}
+
+// ── Inventory Report ─────────────────────────────────────────
+// Tabular view of current inventory grouped one of three ways. Different
+// from the Inventory tab's card list: this is dense, sortable, exportable,
+// and aggregates quantities across whatever you tell it to ignore (e.g.
+// "show me 25x36 200gsm Bleach Card across all brands, summed").
+let invReportState = { groupBy: 'consolidated', paperType: '', includeOffcuts: true };
+
+function openInventoryReport() {
+  openModal(`<div class="modal modal-wide ir-modal" onclick="event.stopPropagation()" style="max-width:1100px !important;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2 style="margin:0;">Inventory Report</h2>
+      <button class="btn btn-sm" onclick="closeModal()" style="padding:4px 10px;">&times; Close</button>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin:14px 0;flex-wrap:wrap;">
+      <label style="font-size:12px;color:var(--text2);">Group by:</label>
+      <select class="filter" id="ir-group" onchange="setIRGroup(this.value)">
+        <option value="consolidated"${invReportState.groupBy==='consolidated'?' selected':''}>Consolidated (ignore brand & supplier)</option>
+        <option value="brand"${invReportState.groupBy==='brand'?' selected':''}>Segmented by Brand</option>
+        <option value="supplier"${invReportState.groupBy==='supplier'?' selected':''}>Segmented by Supplier</option>
+      </select>
+      <select class="filter" id="ir-paper-type" onchange="setIRPaperType(this.value)">
+        <option value=""${!invReportState.paperType?' selected':''}>All paper types</option>
+        ${PAPER_TYPES.map(t => `<option value="${esc(t)}"${invReportState.paperType===t?' selected':''}>${esc(t)}</option>`).join('')}
+      </select>
+      <label style="font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:4px;">
+        <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
+        Include offcuts
+      </label>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="exportInventoryReport()">&#128202; Export to Excel</button>
+    </div>
+    <div id="ir-content" style="max-height:calc(85vh - 160px);overflow:auto;"></div>
+  </div>`);
+  renderInventoryReport();
+}
+function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
+function setIRPaperType(v)       { invReportState.paperType = v;      renderInventoryReport(); }
+function setIRIncludeOffcuts(v)  { invReportState.includeOffcuts = !!v; renderInventoryReport(); }
+
+// Build report rows from the cached `inventory` list. Groups by the key
+// implied by groupBy. is_offcut is always part of the key — fresh and
+// offcut of the same dimensions stay separate so users can see them apart.
+function buildInventoryReportRows() {
+  const { groupBy, paperType, includeOffcuts } = invReportState;
+  let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
+  if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
+  const keyOf = (i) => {
+    const parts = [i.paper_type, i.size || '', i.gsm || '', i.is_offcut ? 'offcut' : 'fresh'];
+    if (groupBy === 'brand')    parts.push(i.brand || '');
+    if (groupBy === 'supplier') parts.push(i.supplier || '');
+    return parts.join('||');
+  };
+  const groups = new Map();
+  for (const i of items) {
+    const k = keyOf(i);
+    if (!groups.has(k)) groups.set(k, { rep: i, totalSheets: 0, itemCount: 0, brands: new Set(), suppliers: new Set() });
+    const g = groups.get(k);
+    g.totalSheets += (i.current_balance || 0);
+    g.itemCount++;
+    if (i.brand)    g.brands.add(i.brand);
+    if (i.supplier) g.suppliers.add(i.supplier);
+  }
+  const rows = [...groups.values()].map(g => {
+    const ps = packetSize(g.rep.paper_type);
+    const wPerPack = packWeightKg(g.rep.paper_type, g.rep.size, g.rep.gsm);
+    return {
+      paperType:  g.rep.paper_type,
+      size:       g.rep.size || '',
+      gsm:        g.rep.gsm || '',
+      isOffcut:   !!g.rep.is_offcut,
+      brand:      g.rep.brand || '',
+      supplier:   g.rep.supplier || '',
+      brandCount: g.brands.size,
+      supplierCount: g.suppliers.size,
+      itemCount:  g.itemCount,
+      packets:    g.totalSheets / ps,
+      sheets:     g.totalSheets,
+      weightKg:   wPerPack === null ? null : (g.totalSheets / ps) * wPerPack,
+      unit:       packetUnitLabel(g.rep.paper_type),
+    };
+  });
+  // Sort: paper type → size (numeric) → gsm (numeric) → fresh-before-offcut → brand/supplier.
+  rows.sort((a, b) => {
+    if (a.paperType !== b.paperType) return a.paperType.localeCompare(b.paperType);
+    const ad = parseSizeInches(a.size) || { w: 0, h: 0 };
+    const bd = parseSizeInches(b.size) || { w: 0, h: 0 };
+    if (ad.w !== bd.w) return ad.w - bd.w;
+    if (ad.h !== bd.h) return ad.h - bd.h;
+    const ag = parseFloat(a.gsm) || 0, bg = parseFloat(b.gsm) || 0;
+    if (ag !== bg) return ag - bg;
+    if (a.isOffcut !== b.isOffcut) return a.isOffcut ? 1 : -1;
+    if (groupBy === 'brand'    && a.brand    !== b.brand)    return a.brand.localeCompare(b.brand);
+    if (groupBy === 'supplier' && a.supplier !== b.supplier) return a.supplier.localeCompare(b.supplier);
+    return 0;
+  });
+  return rows;
+}
+
+function renderInventoryReport() {
+  const rows = buildInventoryReportRows();
+  const { groupBy } = invReportState;
+  const el = document.getElementById('ir-content');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">No inventory items match this filter.</div>`;
+    return;
+  }
+  // Totals across all rows for the footer.
+  const total = rows.reduce((a, r) => ({
+    sheets: a.sheets + r.sheets,
+    weight: a.weight + (r.weightKg || 0),
+    items:  a.items  + r.itemCount,
+  }), { sheets: 0, weight: 0, items: 0 });
+  // Column layout depends on group mode.
+  const extraCol = groupBy === 'brand' ? '<th style="text-align:left;">Brand</th>'
+                 : groupBy === 'supplier' ? '<th style="text-align:left;">Supplier</th>'
+                 : '<th style="text-align:right;">Brands</th>';
+  const extraCell = (r) => groupBy === 'brand'    ? `<td>${esc(r.brand)    || '—'}</td>`
+                         : groupBy === 'supplier' ? `<td>${esc(r.supplier) || '—'}</td>`
+                         : `<td style="text-align:right;color:var(--text2);">${r.brandCount}</td>`;
+  el.innerHTML = `
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">
+      ${rows.length} row${rows.length===1?'':'s'} &middot; ${total.items} item${total.items===1?'':'s'} &middot;
+      ${total.sheets.toLocaleString()} sheets total &middot; ${fmtKg(total.weight)} kg total
+    </div>
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead>
+        <tr style="background:var(--bg2);">
+          <th style="text-align:left;padding:8px;">Paper Type</th>
+          <th style="text-align:left;padding:8px;">Size</th>
+          <th style="text-align:right;padding:8px;">GSM</th>
+          <th style="text-align:left;padding:8px;">Fresh / Offcut</th>
+          ${extraCol}
+          <th style="text-align:right;padding:8px;">Items</th>
+          <th style="text-align:right;padding:8px;">Packets / Reams</th>
+          <th style="text-align:right;padding:8px;">Sheets</th>
+          <th style="text-align:right;padding:8px;">Weight (kg)</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:6px 8px;">${esc(r.paperType)}</td>
+            <td style="padding:6px 8px;">${esc(r.size) || '—'}</td>
+            <td style="padding:6px 8px;text-align:right;">${esc(r.gsm) || '—'}</td>
+            <td style="padding:6px 8px;">${r.isOffcut ? '<span style="color:#A32D2D;font-weight:600;">Offcut</span>' : 'Fresh'}</td>
+            ${extraCell(r)}
+            <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.itemCount}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.packets, {keepZero:true})}</td>
+            <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
+            <td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>
+          </tr>`).join('')}
+      </tbody>
+      <tfoot>
+        <tr style="background:var(--bg2);font-weight:600;">
+          <td colspan="${groupBy === 'consolidated' ? 5 : 5}" style="padding:8px;">Total</td>
+          <td style="padding:8px;text-align:right;">${total.items}</td>
+          <td style="padding:8px;text-align:right;">—</td>
+          <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
+          <td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>
+        </tr>
+      </tfoot>
+    </table>`;
+}
+
+function exportInventoryReport() {
+  const rows = buildInventoryReportRows();
+  if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
+  const { groupBy } = invReportState;
+  // Build header matching the on-screen columns.
+  const header = ['Paper Type', 'Size', 'GSM', 'Fresh / Offcut'];
+  if (groupBy === 'brand')         header.push('Brand');
+  else if (groupBy === 'supplier') header.push('Supplier');
+  else                             header.push('Brands (count)');
+  header.push('Items', 'Packets / Reams', 'Sheets', 'Weight (kg)');
+  const aoa = [header];
+  for (const r of rows) {
+    const extra = groupBy === 'brand'    ? (r.brand    || '')
+                : groupBy === 'supplier' ? (r.supplier || '')
+                : r.brandCount;
+    aoa.push([
+      r.paperType, r.size, r.gsm, r.isOffcut ? 'Offcut' : 'Fresh',
+      extra, r.itemCount,
+      +(r.packets.toFixed(2)), r.sheets,
+      r.weightKg === null ? '' : +r.weightKg.toFixed(2),
+    ]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Auto-width per column based on contents.
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
+  const stamp = new Date().toISOString().slice(0, 10);
+  const suffix = groupBy === 'consolidated' ? 'consolidated' : `by-${groupBy}`;
+  XLSX.writeFile(wb, `supreme-art-inventory-${suffix}-${stamp}.xlsx`);
+  notify('Exported!');
 }
 
 function openStockSummary() {
