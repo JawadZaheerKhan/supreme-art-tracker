@@ -913,7 +913,12 @@ async function loadJobs() {
 async function loadInventory() {
   try {
     inventory = await api('GET', '/api/inventory');
-    if (mode === 'inventory') renderInventory();
+    if (mode === 'inventory') {
+      renderInventory();
+      // Refresh daily stats whenever inventory reloads (after edits, deletes,
+      // adding stock, etc.). Runs in the background — render isn't blocked.
+      loadDailyStats();
+    }
   } catch(e) {
     notify('Error loading inventory: ' + e.message);
   }
@@ -946,6 +951,7 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
     renderInventory();
+    loadDailyStats();   // fetch today's activity in the background
   } else if (m === 'reports') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -1135,17 +1141,69 @@ function invDistinct(field) {
     return String(a).localeCompare(String(b));
   });
 }
+// Daily activity stats. Populated by loadDailyStats() on inventory entry
+// and after refresh. Numbers are inert until the first load completes; the
+// stat tiles show "—" during that brief window.
+let dailyStats = { packets: 0, cards: 0, reams: 0, cartons: 0, loaded: false };
+
 function renderInventoryStats() {
   const s = {
     total: inventory.length,
     out:   inventory.filter(i => invStockState(i) === 'out').length,
-    sheets: inventory.reduce((a, i) => a + (i.current_balance || 0), 0),
   };
+  // Daily packets/reams used — total stock consumed today by jobs (reason=
+  // 'job-consumed'), split between packets (cards) and reams (papers) in
+  // the breakdown line so the unit ambiguity is obvious to the reader.
+  const fmtN = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const packetsCell = !dailyStats.loaded
+    ? `<div class="stat-value">—</div>`
+    : `<div class="stat-value">${fmtN(dailyStats.packets)}</div>` +
+      (dailyStats.cards || dailyStats.reams
+        ? `<div style="font-size:11px;color:var(--text2);margin-top:2px;">${fmtN(dailyStats.cards)} pkts &middot; ${fmtN(dailyStats.reams)} reams</div>`
+        : '');
   document.getElementById('inv-stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Paper Items</div><div class="stat-value">${s.total}</div></div>
-    <div class="stat"><div class="stat-label">Total Sheets</div><div class="stat-value">${s.sheets.toLocaleString()}</div></div>
+    <div class="stat"><div class="stat-label">Daily Packets / Reams Used</div>${packetsCell}</div>
+    <div class="stat"><div class="stat-label">Daily Cartons (Printing started today)</div><div class="stat-value">${dailyStats.loaded ? dailyStats.cartons.toLocaleString() : '—'}</div></div>
     <div class="stat"><div class="stat-label">Out of Stock</div><div class="stat-value ${s.out>0?'warn':''}">${s.out}</div></div>
   `;
+}
+
+// Fetch today's stock-out transactions + scan jobs for today's CTP→Printing
+// transitions. Cheap enough to run on each Inventory-tab entry and refresh.
+async function loadDailyStats() {
+  const today = new Date().toISOString().slice(0, 10);
+  // 1) Packets/Reams used: sum |change|/packetSize across job-consumed today.
+  let cards = 0, reams = 0;
+  try {
+    const txs = await api('GET', `/api/inventory/transactions?from=${today}&to=${today}&direction=out`);
+    for (const t of txs) {
+      if (t.reason !== 'job-consumed') continue;
+      const pt = t.paper_type || '';
+      const ps = packetSize(pt);
+      const units = Math.abs(t.change) / ps;
+      if (isReamPaper(pt)) reams += units; else cards += units;
+    }
+  } catch (e) { /* leave at zero on error — header still renders */ }
+  dailyStats.cards   = cards;
+  dailyStats.reams   = reams;
+  dailyStats.packets = cards + reams;
+  // 2) Cartons "started printing today" — jobs whose stages[1].time has today's
+  // date. stages[1] is the Printing stage (index 1 in STAGES). The time string
+  // is what moveToStage() writes via new Date().toLocaleString('en-PK'); we
+  // compare just the date part using the same locale so the comparison is
+  // stable regardless of time.
+  const todayDay = new Date().toLocaleString('en-PK').split(',')[0].trim();
+  let cartons = 0;
+  for (const j of jobs) {
+    const t = j.stages && j.stages[1] && j.stages[1].time;
+    if (!t) continue;
+    const day = String(t).split(',')[0].trim();
+    if (day === todayDay) cartons += parseFloat(j.cartonqty) || 0;
+  }
+  dailyStats.cartons = cartons;
+  dailyStats.loaded  = true;
+  renderInventoryStats();
 }
 function renderInventoryFilters() {
   const types = invDistinct('paper_type');
