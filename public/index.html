@@ -192,6 +192,30 @@
   .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
   .empty { text-align: center; padding: 3rem 1rem; color: var(--text2); font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
+  /* Floating calculator popover — sits ABOVE any open modal so it can be used
+     while editing a job card or other form. Top-right corner with a small
+     offset; scrolls internally if the viewport is short. */
+  #calc-popover {
+    position: fixed; top: 70px; right: 20px;
+    width: 360px; max-height: calc(100vh - 90px);
+    overflow-y: auto;
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 14px 36px rgba(0,0,0,0.25);
+    padding: 18px; z-index: 300;
+  }
+  /* Floating round Calculator launcher — bottom-right corner. z-index 250
+     sits ABOVE the modal overlay (200) but BELOW the calculator popover (300)
+     so it's always clickable, even while a job card / form is open. */
+  #calc-launcher {
+    position: fixed; bottom: 24px; right: 24px;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: #1e40af; color: #fff; border: none;
+    font-size: 24px; line-height: 1; cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.28);
+    z-index: 250; transition: background 0.12s, transform 0.12s;
+  }
+  #calc-launcher:hover { background: #1e3a8a; transform: scale(1.06); }
+  #calc-launcher:active { transform: scale(0.97); }
   .modal { background: var(--bg); border-radius: var(--radius); border: 1px solid var(--border); padding: 1.5rem; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; }
   .modal h2 { font-size: 17px; font-weight: 600; margin-bottom: 1rem; }
   .form-group { margin-bottom: 14px; }
@@ -421,10 +445,8 @@
   </div>
   <div class="topbar-right">
     <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
-    <!-- Always-visible calculator. Lives in the topbar so it's reachable
-         from Jobs / Inventory / Reports / Stickers / Users without leaving
-         the current screen. Opens the same modal as the old Reports card. -->
-    <button class="btn btn-sm" id="topbar-calc" onclick="openCalculator()" title="Paper Calculator — weight / sheets / packets">&#129518; Calculator</button>
+    <!-- Calculator is now reached via the floating round 🧮 launcher in the
+         bottom-right corner — see #calc-launcher. Topbar button removed. -->
     <button class="btn btn-sm" id="topbar-refresh" onclick="refreshCurrent()">&#8635; Refresh</button>
     <button class="btn btn-sm" id="topbar-export" onclick="exportCSV()">Export to Excel</button>
     <button class="btn btn-primary" id="topbar-add" onclick="openAdd()">+ New Job</button>
@@ -672,6 +694,12 @@
 </div>
 
 <div id="modal-root"></div>
+<!-- Floating calculator popover. Stays above modals so it can be opened
+     while a job card / inventory form is being edited. See toggleCalculator(). -->
+<div id="calc-popover" style="display:none;"></div>
+<!-- Always-visible floating launcher. Clicking it toggles the calculator
+     popover. Sits above modal overlays so it's reachable mid-edit. -->
+<button id="calc-launcher" onclick="toggleCalculator()" title="Paper Calculator">&#129518;</button>
 <div id="print-area"></div>
 <div class="notif" id="notif"></div>
 
@@ -4804,12 +4832,21 @@ function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
 let calcUnit = 'in';        // 'in' or 'mm'
 let calcLastEdit = null;    // 'weight' | 'sheets' | 'packets' — source-of-truth field
 
+// Show the floating calculator popover. Lives in #calc-popover (z-index 300),
+// ABOVE any open modal — so the user can compute weight/sheets/packets while
+// still editing a job card or stock-in form. Clicking the topbar Calculator
+// button again hides it (toggle behaviour).
 function openCalculator() {
+  const pop = document.getElementById('calc-popover');
+  if (!pop) return;
   calcUnit = 'in';
   calcLastEdit = null;
-  openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2>Paper Calculator <span style="font-size:13px;color:var(--text2);font-weight:normal;">— weight, sheets &amp; packets</span></h2>
-    <p style="font-size:12px;color:var(--text2);margin:0 0 14px;">Pick paper type + size + gsm. Then type any one of weight / sheets / packets — the other two fill in automatically.</p>
+  pop.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+      <h2 style="margin:0;font-size:16px;">&#129518; Paper Calculator</h2>
+      <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
+    </div>
+    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Type any one of weight / sheets / packets — the other two fill in.</p>
 
     <div class="form-group">
       <label class="form-label">Paper Type</label>
@@ -4840,7 +4877,7 @@ function openCalculator() {
       <input type="number" id="calc-gsm" step="1" min="0" placeholder="e.g. 300" oninput="calcRecalc()">
     </div>
 
-    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0;">
+    <hr style="border:none;border-top:1px solid var(--border);margin:12px 0;">
     <div style="font-size:11px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;">Type any one — the other two fill in</div>
 
     <div class="form-group">
@@ -4860,11 +4897,24 @@ function openCalculator() {
       Fill paper type, size, and GSM to start.
     </div>
 
-    <div class="modal-actions">
-      <button class="btn" onclick="calcReset()">Reset</button>
-      <button class="btn btn-primary" onclick="closeModal()">Close</button>
-    </div>
-  </div>`);
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+      <button class="btn btn-sm" onclick="calcReset()">Reset</button>
+      <button class="btn btn-sm btn-primary" onclick="closeCalculator()">Close</button>
+    </div>`;
+  pop.style.display = 'block';
+}
+
+// Hide the floating calculator popover without touching any open modal.
+function closeCalculator() {
+  const pop = document.getElementById('calc-popover');
+  if (pop) pop.style.display = 'none';
+}
+
+// Toggle wrapper used by the topbar button — click again to dismiss.
+function toggleCalculator() {
+  const pop = document.getElementById('calc-popover');
+  if (pop && pop.style.display === 'block') closeCalculator();
+  else openCalculator();
 }
 
 function setCalcUnit(u) {
