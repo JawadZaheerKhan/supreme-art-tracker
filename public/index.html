@@ -1243,9 +1243,16 @@ function invDatalistsHtml() {
 // Picking "+ Add new…" from the dropdown reveals a text input below it.
 // onChange runs whenever either side updates the value (chain extra hooks
 // like checkInvDuplicate via this param).
-function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+ Add new…', onChange = '' }) {
+function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+ Add new…', onChange = '', manageField = null }) {
   const inList = !!value && options.includes(value);
   const onChangeCall = onChange ? `; ${onChange}` : '';
+  // Admin-only "Manage…" option inline at the bottom of the dropdown. Folded
+  // into the combo (rather than a separate floating button) so there's one
+  // coherent control for everything brand/supplier-related.
+  const showManage = manageField && isAdmin();
+  const manageOption = showManage
+    ? `<option value="__manage:${manageField}__">&#9881;&#65039; Manage ${manageField}s…</option>`
+    : '';
   return `
     <input type="hidden" id="${id}" value="${esc(value)}">
     <select id="${id}__select"
@@ -1255,6 +1262,7 @@ function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+
       ${options.map(o => `<option value="${esc(o)}"${o === value ? ' selected' : ''}>${esc(o)}</option>`).join('')}
       ${(!inList && value) ? `<option value="${esc(value)}" selected>${esc(value)}</option>` : ''}
       <option value="__add_new__">${addLabel}</option>
+      ${manageOption}
     </select>
     <input type="text" id="${id}__new"
            placeholder="${esc(placeholder)}"
@@ -1263,11 +1271,21 @@ function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+
   `;
 }
 // Click handler shared by every invComboHtml combo. Toggles the text input
-// based on whether the user picked "+ Add new…" or an existing option.
+// based on whether the user picked "+ Add new…" or an existing option, and
+// opens the management modal when the inline "⚙ Manage…" option is picked.
 function invComboPick(sel, hiddenId) {
   const hidden = document.getElementById(hiddenId);
   const textEl = document.getElementById(hiddenId + '__new');
   if (!hidden || !textEl) return;
+  // Inline Manage… — open the field's management modal, revert the select
+  // back to whatever the saved value was so the dropdown doesn't show the
+  // pseudo-option as the active choice.
+  const manageMatch = String(sel.value).match(/^__manage:(\w+)__$/);
+  if (manageMatch) {
+    sel.value = hidden.value || '';
+    openManageInvField(manageMatch[1]);
+    return;
+  }
   if (sel.value === '__add_new__') {
     textEl.style.display = '';
     textEl.value = '';
@@ -1353,11 +1371,8 @@ function openInvAdd() {
         ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: defaultPaperType, placeholder: 'New paper type', onChange: 'invOpeningSync(); checkInvDuplicate();' })}
       </div>
       <div class="form-group">
-        <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>Brand</span>
-          ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('brand')" title="Delete brands you no longer need">&#128465; Manage</button>` : ''}
-        </label>
-        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), placeholder: 'New brand (e.g. Century)', onChange: 'checkInvDuplicate();' })}
+        <label class="form-label">Brand</label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), placeholder: 'New brand (e.g. Century)', onChange: 'checkInvDuplicate();', manageField: 'brand' })}
       </div>
     </div>
     <div class="form-row">
@@ -1365,11 +1380,8 @@ function openInvAdd() {
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
     </div>
     <div class="form-group">
-      <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
-        <span>Supplier</span>
-        ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('supplier')" title="Delete suppliers you no longer need">&#128465; Manage</button>` : ''}
-      </label>
-      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), placeholder: 'New supplier' })}
+      <label class="form-label">Supplier</label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), placeholder: 'New supplier', manageField: 'supplier' })}
     </div>
     <!-- Live duplicate hint — turns yellow when the typed fields already
          match an existing inventory item, so the user knows the "Opening"
@@ -1530,11 +1542,8 @@ function openInvEdit(id) {
         ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: it.paper_type || '', placeholder: 'New paper type' })}
       </div>
       <div class="form-group">
-        <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>Brand</span>
-          ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('brand')" title="Delete brands you no longer need">&#128465; Manage</button>` : ''}
-        </label>
-        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), value: it.brand || '', placeholder: 'New brand' })}
+        <label class="form-label">Brand</label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), value: it.brand || '', placeholder: 'New brand', manageField: 'brand' })}
       </div>
     </div>
     <div class="form-row">
@@ -1542,11 +1551,8 @@ function openInvEdit(id) {
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
     <div class="form-group">
-      <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
-        <span>Supplier</span>
-        ${isAdmin() ? `<button type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;" onclick="openManageInvField('supplier')" title="Delete suppliers you no longer need">&#128465; Manage</button>` : ''}
-      </label>
-      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier' })}
+      <label class="form-label">Supplier</label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier', manageField: 'supplier' })}
     </div>
     ${balanceSection}
     <div class="modal-actions">
