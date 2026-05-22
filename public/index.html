@@ -65,11 +65,19 @@
   .inv-main { flex: 1; }
   /* Inventory card hierarchy: paper type (biggest, bold) > brand (medium,
      bold) > size/gsm/reorder line (smallest, regular). */
-  .inv-name  { font-size: 18px; font-weight: 700; color: var(--text); }
+  .inv-name  { font-size: 18px; font-weight: 700; color: var(--text); display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .inv-brand { font-size: 15px; font-weight: 600; color: var(--text); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.03em; }
   .inv-sub   { font-size: 13px; color: var(--text); margin-top: 2px; font-weight: 400; }
   /* Reusable: any brand string shown inline (Stock Summary cell, labels). */
   .brand-upper { text-transform: uppercase; letter-spacing: 0.03em; }
+  /* Size + GSM chip — sits inline with the paper-type heading so it reads
+     as a single "what is this paper" line: 'Art Paper  25x38 · 270 gsm'. */
+  .inv-spec-chip {
+    display: inline-block; background: var(--bg2); color: var(--text);
+    padding: 3px 11px; border-radius: 6px;
+    font-size: 14px; font-weight: 600; letter-spacing: 0.01em;
+    vertical-align: middle;
+  }
   .inv-balance { text-align: right; }
   .inv-balance-num { font-size: 22px; font-weight: 600; color: var(--text); line-height: 1; }
   .inv-balance-unit { font-size: 11px; color: var(--text2); text-transform: uppercase; }
@@ -1162,11 +1170,14 @@ function renderInventoryList() {
     const stockBadge  = state === 'out' ? '<span class="inv-badge out">Out of Stock</span>' : '';
     const offcutBadge = it.is_offcut    ? '<span class="inv-badge offcut">Offcut</span>'    : '';
     const badge = offcutBadge + stockBadge;
-    // Brand gets its own bold line below. The sub line shows size/gsm plus,
-    // for offcut items, the parent-sheet origin (e.g. "originally cut from 24x32").
-    const subParts = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc);
+    // Size + GSM live in a chip inline with the paper-type heading so they
+    // get prominence as a primary identifier. The sub line below now only
+    // carries the offcut origin (for offcut items) and the in/out pills.
+    const specStr = [it.size, it.gsm ? it.gsm + ' gsm' : ''].filter(Boolean).map(esc).join(' · ');
+    const specChip = specStr ? `<span class="inv-spec-chip">${specStr}</span>` : '';
+    const subParts = [];
     if (it.is_offcut && it.cut_from_size) subParts.push('originally cut from ' + esc(it.cut_from_size));
-    const subLine = subParts.join(' · ') || '—';
+    const subLine = subParts.join(' · ');
     // Pretty-print the balance also in packets/reams so users get the unit
     // they actually order/sell in. Round to 2 decimals; drop trailing zeros.
     const sheets = it.current_balance || 0;
@@ -1195,12 +1206,15 @@ function renderInventoryList() {
     const brandSupplierLine = (it.brand || it.supplier)
       ? `<div class="inv-brand">${it.brand ? esc(it.brand) : ''}${it.brand && it.supplier ? '<span style="text-transform:none;letter-spacing:0;color:var(--text2);font-weight:500;"> · '+esc(it.supplier)+'</span>' : (it.supplier ? '<span style="text-transform:none;letter-spacing:0;color:var(--text2);font-weight:500;">'+esc(it.supplier)+'</span>' : '')}</div>`
       : '';
+    // Sub line only renders if there's content (offcut origin or move pills).
+    const subInner = subLine + movePills;
+    const subLineHtml = subInner.trim() ? `<div class="inv-sub">${subInner}</div>` : '';
     return `
     <div class="inv-card ${state}">
       <div class="inv-main">
-        <div class="inv-name">${esc(it.paper_type)}${badge}</div>
+        <div class="inv-name">${esc(it.paper_type)}${specChip}${badge}</div>
         ${brandSupplierLine}
-        <div class="inv-sub">${subLine}${movePills}</div>
+        ${subLineHtml}
       </div>
       <div class="inv-balance">
         <div class="inv-balance-num">${pktsStr}</div>
