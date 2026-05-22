@@ -2340,7 +2340,10 @@ function openInventoryReport() {
         <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
         Include offcuts
       </label>
-      <button class="btn btn-sm" style="margin-left:auto;" onclick="exportInventoryReport()">&#128202; Export to Excel</button>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportInventoryReport()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printInventoryReport()">&#128424; Print Report</button>
+      </div>
     </div>
     <div id="ir-content" style="max-height:calc(85vh - 160px);overflow:auto;"></div>
   </div>`);
@@ -2511,6 +2514,73 @@ function exportInventoryReport() {
   notify('Exported!');
 }
 
+// Print the Inventory Report — A4 landscape, same rows as on-screen. Brand
+// or Supplier column is shown based on the current grouping mode.
+function printInventoryReport() {
+  const rows = buildInventoryReportRows();
+  if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
+  const { groupBy, paperType, includeOffcuts } = invReportState;
+  const groupLabel = groupBy === 'brand'    ? 'Brand'
+                   : groupBy === 'supplier' ? 'Supplier'
+                   :                          'Brands';
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+  const fmt = n => n === null || n === undefined ? '—' : (Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString());
+  const tableRows = rows.map(r => {
+    const extra = groupBy === 'brand'    ? (r.brand    || '—')
+                : groupBy === 'supplier' ? (r.supplier || '—')
+                :                          (r.brandCount + ' brand' + (r.brandCount === 1 ? '' : 's'));
+    return `<tr>
+      <td ${tdL}>${esc(r.paperType)}</td>
+      <td ${tdL}>${esc(r.size || '—')}</td>
+      <td ${tdL}>${esc(r.gsm || '—')}</td>
+      <td ${tdL}>${r.isOffcut ? 'Offcut' : 'Fresh'}</td>
+      <td ${tdL}>${esc(String(extra))}</td>
+      <td ${tdR}>${r.itemCount}</td>
+      <td ${tdR}>${fmt(+r.packets.toFixed(2))}</td>
+      <td ${tdR}>${r.sheets.toLocaleString()}</td>
+      <td ${tdR}>${fmt(r.weightKg)}</td>
+    </tr>`;
+  }).join('');
+  const html = `
+    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:10pt;">Inventory Report — ${groupBy === 'consolidated' ? 'Consolidated' : 'Segmented by ' + groupLabel}</div>
+        </div>
+        <div style="margin-left:auto;font-size:8pt;text-align:right;">
+          <div><b>Paper:</b> ${paperType || 'All'} &nbsp; <b>Offcuts:</b> ${includeOffcuts ? 'Included' : 'Excluded'}</div>
+          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+        </div>
+      </div>
+      <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th ${tdL}>Paper Type</th>
+          <th ${tdL}>Size</th>
+          <th ${tdL}>GSM</th>
+          <th ${tdL}>Fresh / Offcut</th>
+          <th ${tdL}>${groupLabel}</th>
+          <th ${tdR}>Items</th>
+          <th ${tdR}>Packets / Reams</th>
+          <th ${tdR}>Sheets</th>
+          <th ${tdR}>Weight (kg)</th>
+        </tr>
+        ${tableRows}
+      </table>
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
 function openStockSummary() {
   // Default to last 5 months ending today, monthly granularity, first paper type.
   const today = new Date();
@@ -2546,7 +2616,10 @@ function openStockSummary() {
           <option value="weekly">Weekly</option>
         </select>
       </div>
-      <button class="btn btn-sm" style="margin-left:auto;" onclick="printStockSummary()">&#128424; Print Summary</button>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportStockSummary()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printStockSummary()">&#128424; Print Summary</button>
+      </div>
     </div>
     <div id="ss-content" style="font-size:12px;color:var(--text2);overflow-x:auto;">Loading…</div>
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
@@ -2935,6 +3008,44 @@ function printStockSummary() {
   });
 }
 
+// Export Stock Summary to .xlsx. Same grouped rows the on-screen table uses
+// (brand-agnostic — multiple brands collapse into one row). One sheet, one
+// row per (gsm, size, is_offcut) group, plus per-period IN/OUT/Bal columns.
+function exportStockSummary() {
+  const { paperType, from, to, granularity } = stockSummaryState;
+  const { rows, buckets } = computeSummaryRows();
+  if (!rows.length) { notify('Nothing to export — no items in this view.'); return; }
+  const unit = packetUnitLabel(paperType);
+  // Header: fixed columns + IN/OUT/Bal triplet per bucket.
+  const header = ['GSM', 'Size', 'Brand(s)', `Opening (${unit})`];
+  for (const b of buckets) {
+    header.push(`${b.label} IN`, `${b.label} OUT`, `${b.label} Bal`);
+  }
+  header.push(`Total Out (${unit})`, `Stock Now (${unit})`, 'Weight (kg)',
+              `Pending Import (${unit})`, `After Import (${unit})`, 'Import (kg)',
+              `Status (${unit})`, 'Status (kg)');
+  const aoa = [header];
+  const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
+  for (const r of rows) {
+    const row = [r.item.gsm || '', r.item.size || '', r.item.brand || '', round2(r.openingPkts)];
+    for (const p of r.periods) row.push(round2(p.in), round2(p.out), round2(p.balance));
+    row.push(round2(r.totalOutPkts), round2(r.stockNowPkts), round2(r.weightKg),
+             round2(r.pendingImportPkts), round2(r.afterImportPkts), round2(r.importKg),
+             round2(r.requiredNextPkts), round2(r.requiredKg));
+    aoa.push(row);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Stock Summary');
+  const stamp = new Date().toISOString().slice(0, 10);
+  const typeTag = paperType.replace(/\s+/g, '-').toLowerCase();
+  XLSX.writeFile(wb, `supreme-art-summary-${typeTag}-${stamp}.xlsx`);
+  notify('Exported!');
+}
+
 // ── Imports (booked-but-not-arrived shipments) ───────────────
 // Imports sit alongside inventory but represent future stock. When an import
 // is "Received" the server creates a stock-in transaction on the matching
@@ -2963,6 +3074,10 @@ function openImports() {
           <option value="received">Received only</option>
           <option value="cancelled">Cancelled only</option>
         </select>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportImports()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printImports()">&#128424; Print</button>
       </div>
     </div>
     <div id="imports-table" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -3015,6 +3130,113 @@ function renderImportsTable() {
     <tr><th>Status</th><th>Item</th><th>Quantity</th><th>Supplier</th><th>Booked</th><th>Expected</th><th>Notes</th><th></th></tr>
     ${rows}
   </table>`;
+}
+
+// Return the imports rows currently visible (after the status filter) so the
+// Print and Export helpers reuse the exact same dataset the user sees.
+function visibleImportsForExport() {
+  const filter = document.getElementById('import-status-filter')?.value || 'pending';
+  const list = filter === 'all' ? importsCache : importsCache.filter(i => i.status === filter);
+  return { list: [...list].sort((a, b) => {
+    if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+    const ad = a.expected_arrival || '9999-12-31';
+    const bd = b.expected_arrival || '9999-12-31';
+    return ad.localeCompare(bd);
+  }), filterLabel: filter };
+}
+
+// Export the Imports table (whatever status filter is active) to .xlsx.
+function exportImports() {
+  const { list, filterLabel } = visibleImportsForExport();
+  if (!list.length) { notify('Nothing to export — no imports in this view.'); return; }
+  const header = ['Status', 'Paper Type', 'Size', 'GSM', 'Brand', 'Packets/Reams', 'Weight (kg)', 'Supplier', 'Booked', 'Expected', 'Received At', 'Notes'];
+  const aoa = [header];
+  for (const i of list) {
+    aoa.push([
+      i.status || '',
+      i.paper_type || '',
+      i.size || '',
+      i.gsm || '',
+      i.brand || '',
+      +(parseFloat(i.packets || 0).toFixed(2)),
+      i.weight_kg === null || i.weight_kg === undefined ? '' : +(parseFloat(i.weight_kg).toFixed(2)),
+      i.supplier || '',
+      i.booked_date || '',
+      i.expected_arrival || '',
+      i.received_at ? new Date(i.received_at).toLocaleString('en-PK') : '',
+      i.notes || '',
+    ]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Imports');
+  const stamp = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `supreme-art-imports-${filterLabel}-${stamp}.xlsx`);
+  notify('Exported!');
+}
+
+// Print the Imports table — A4 landscape, mirroring the on-screen rows.
+function printImports() {
+  const { list, filterLabel } = visibleImportsForExport();
+  if (!list.length) { notify('Nothing to print — no imports in this view.'); return; }
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+  const fmt = n => n === null || n === undefined || n === '' ? '—' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  const tableRows = list.map(i => `<tr>
+    <td ${tdL}>${esc((i.status || '').toUpperCase())}</td>
+    <td ${tdL}>${esc(i.paper_type || '—')}</td>
+    <td ${tdL}>${esc(i.size || '—')}</td>
+    <td ${tdL}>${esc(i.gsm || '—')}</td>
+    <td ${tdL}>${esc(i.brand || '—')}</td>
+    <td ${tdR}>${fmt(i.packets)}</td>
+    <td ${tdR}>${fmt(i.weight_kg)}</td>
+    <td ${tdL}>${esc(i.supplier || '—')}</td>
+    <td ${tdL}>${esc(i.booked_date || '—')}</td>
+    <td ${tdL}>${esc(i.expected_arrival || '—')}</td>
+    <td ${tdL}>${esc(i.notes || '')}</td>
+  </tr>`).join('');
+  const html = `
+    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:10pt;">Imports — ${filterLabel.charAt(0).toUpperCase()+filterLabel.slice(1)}</div>
+        </div>
+        <div style="margin-left:auto;font-size:8pt;text-align:right;">
+          <div>${list.length} import${list.length===1?'':'s'}</div>
+          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+        </div>
+      </div>
+      <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th ${tdL}>Status</th>
+          <th ${tdL}>Paper Type</th>
+          <th ${tdL}>Size</th>
+          <th ${tdL}>GSM</th>
+          <th ${tdL}>Brand</th>
+          <th ${tdR}>Packets/Reams</th>
+          <th ${tdR}>Weight (kg)</th>
+          <th ${tdL}>Supplier</th>
+          <th ${tdL}>Booked</th>
+          <th ${tdL}>Expected</th>
+          <th ${tdL}>Notes</th>
+        </tr>
+        ${tableRows}
+      </table>
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
 }
 
 // Open the add/edit form. If `id` is supplied, prefill from importsCache.
@@ -3240,6 +3462,7 @@ function openStockMovementPane(direction) {
       <h2 style="margin:0;font-size:20px;">${title}</h2>
       <span style="color:var(--text2);font-size:12px;">${direction === 'in' ? 'Every stock addition (deliveries, imports received, opening balances).' : 'Every stock deduction (job consumption, manual adjustments).'}</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportStockMovement('${direction}')">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printStockMovement('${direction}')">&#128424; Print Report</button>
       </div>
     </div>
@@ -3520,6 +3743,51 @@ function printStockMovement(direction) {
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
+}
+
+// Export the Stock In / Stock Out pane (whichever direction is open) to an
+// .xlsx file. Same filter rules as the on-screen table — paper type / size /
+// gsm / date range — so the file mirrors what the user sees. One sheet per
+// direction; the filename includes the direction and a date stamp.
+function exportStockMovement(direction) {
+  const state = stockMovementStates[direction];
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  // Same filter chain as renderStockMovement()
+  const txs = state.rows.filter(t =>
+       (!state.paperType || t.paper_type === state.paperType)
+    && (!state.size      || (t.item_size || '') === state.size)
+    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+  );
+  if (!txs.length) { notify('Nothing to export — empty filter result.'); return; }
+  const header = ['When', 'Item', 'Change (Sheets)', 'Change (Packets/Reams)', 'Reason', 'Job', 'Entered by', 'Notes'];
+  const aoa = [header];
+  for (const t of txs) {
+    const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).join(' · ');
+    const job  = t.job_id ? `E-${t.job_id}${t.job_code ? ' · ' + t.job_code : ''}` : '';
+    const ps   = packetSize(t.paper_type || '');
+    const pkts = +(t.change / ps).toFixed(2);
+    aoa.push([
+      new Date(t.created_at).toLocaleString('en-PK'),
+      item,
+      t.change,
+      pkts,
+      t.reason || '',
+      job,
+      t.user_email || '',
+      t.notes || '',
+    ]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  const sheetName = direction === 'in' ? 'Stock In' : 'Stock Out';
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const filterTag = state.paperType ? `-${state.paperType.replace(/\s+/g,'-').toLowerCase()}` : '';
+  XLSX.writeFile(wb, `supreme-art-stock-${direction}${filterTag}-${stamp}.xlsx`);
+  notify('Exported!');
 }
 
 // ── Stickers tab ─────────────────────────────────────────────
