@@ -3185,14 +3185,9 @@ async function loadImports() {
 }
 
 // Page-level state for the Imports view (full page, not modal).
-// dateField: which date column the period filter applies to ('expected' or 'booked').
 const importsPageState = {
   status: 'pending',
   paperType: '',
-  dateField: 'expected',
-  period: 'all',
-  from: '',
-  to: '',
 };
 
 // Open the Imports full-page view. Routes through openReportsGroup so the
@@ -3212,8 +3207,6 @@ function renderImportsPage() {
   const pane  = document.getElementById('rt-imports');
   if (!pane) return;
   const paperOpts  = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['all','All time'],['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
-    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Imports</h2>
@@ -3241,21 +3234,6 @@ function renderImportsPage() {
           ${paperOpts}
         </select>
       </div>
-      <div>
-        <div class="dash-flbl">Date Field</div>
-        <select class="filter" id="imp-date-field" onchange="setImportsFilter('dateField', this.value)">
-          <option value="expected"${state.dateField==='expected'?' selected':''}>Expected Arrival</option>
-          <option value="booked"${state.dateField==='booked'?' selected':''}>Booked Date</option>
-        </select>
-      </div>
-      <div>
-        <div class="dash-flbl">Period</div>
-        <select class="filter" id="imp-period" onchange="setImportsFilter('period', this.value)">${periodOpts}</select>
-      </div>
-      <div id="imp-custom-wrap" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
-        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="imp-from" value="${state.from}" onchange="setImportsCustom()"></div>
-        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="imp-to" value="${state.to}" onchange="setImportsCustom()"></div>
-      </div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetImportsFilters()">Reset filters</button>
     </div>
     <div id="imports-table" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -3264,21 +3242,10 @@ function renderImportsPage() {
 
 function setImportsFilter(key, value) {
   importsPageState[key] = value;
-  if (key === 'period') {
-    const wrap = document.getElementById('imp-custom-wrap');
-    if (wrap) wrap.style.display = value === 'custom' ? 'flex' : 'none';
-    if (value !== 'custom') renderImportsTable();
-    return;
-  }
   renderImportsTable();
 }
-function setImportsCustom() {
-  importsPageState.from = document.getElementById('imp-from').value;
-  importsPageState.to   = document.getElementById('imp-to').value;
-  if (importsPageState.from && importsPageState.to) renderImportsTable();
-}
 function resetImportsFilters() {
-  Object.assign(importsPageState, { status: 'pending', paperType: '', dateField: 'expected', period: 'all', from: '', to: '' });
+  Object.assign(importsPageState, { status: 'pending', paperType: '' });
   renderImportsPage();
   renderImportsTable();
 }
@@ -3301,26 +3268,14 @@ function fmtImpDate(d) {
   return s;
 }
 
-// Apply all active filters (status + paper type + date period on the chosen
-// date field) and return the visible rows in display order. Centralised so
-// the table, Print, and Excel export all see the exact same dataset.
+// Apply all active filters (status + paper type) and return the visible rows
+// in display order. Centralised so the table, Print, and Excel export all see
+// the exact same dataset.
 function filterImportsList() {
   const state = importsPageState;
   let list = importsCache.slice();
   if (state.status !== 'all') list = list.filter(i => i.status === state.status);
   if (state.paperType)        list = list.filter(i => (i.paper_type || '') === state.paperType);
-  const { from, to } = periodToDateRange(state.period, state.from, state.to);
-  if (from || to) {
-    const fieldKey = state.dateField === 'booked' ? 'booked_date' : 'expected_arrival';
-    list = list.filter(i => {
-      const raw = i[fieldKey];
-      if (!raw) return false;
-      const day = String(raw).slice(0, 10);
-      if (from && day < from) return false;
-      if (to   && day > to)   return false;
-      return true;
-    });
-  }
   // Sort: pending first, then by expected_arrival ascending.
   list.sort((a, b) => {
     if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
