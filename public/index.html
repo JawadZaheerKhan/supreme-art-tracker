@@ -872,6 +872,39 @@ function inDateRange(j) {
   return b && issued >= b.from && issued < b.to;
 }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// Format any date-ish value as dd/mm/yyyy. Handles:
+//   - plain 'YYYY-MM-DD'      → '22/05/2026' (no timezone conversion)
+//   - ISO with time            → '22/05/2026'
+//   - JS Date / parseable str  → '22/05/2026'
+// Empty / unparsable input returns '' (or '—' when forDash=true).
+// One central place so the whole app reads dd/mm/yyyy without each call
+// site needing its own locale logic.
+function fmtDMY(d, forDash) {
+  if (!d) return forDash ? '—' : '';
+  const s = String(d).trim();
+  // Plain YYYY-MM-DD — parse without timezone shift so 2026-05-22 stays 22/05.
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  const dt = new Date(s);
+  if (isNaN(dt)) return s;
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}/${dt.getFullYear()}`;
+}
+
+// Same as fmtDMY but appends hh:mm (24-hour). For transaction timestamps,
+// audit log entries, etc. where the time-of-day matters.
+function fmtDMYT(d) {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt)) return String(d);
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const HH = String(dt.getHours()).padStart(2, '0');
+  const MM = String(dt.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${dt.getFullYear()} ${HH}:${MM}`;
+}
 function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
 function notify(msg) {
   const el = document.getElementById('notif');
@@ -1156,7 +1189,7 @@ function renderJobs() {
           <div class="job-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' &middot; ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>
           <div class="job-facts">
             ${j.qty?`<span><b>PO Qty:</b> ${esc(j.qty)} pcs</span>`:''}
-            ${j.dateissued?`<span><b>Issued:</b> ${esc(j.dateissued)}</span>`:''}
+            ${j.dateissued?`<span><b>Issued:</b> ${esc(fmtDMY(j.dateissued))}</span>`:''}
             ${j.size?`<span><b>Size/GSM:</b> ${esc(j.size)}</span>`:''}
             ${j.ups?`<span><b>Ups:</b> ${esc(j.ups)}</span>`:''}
             ${j.sheets?`<span><b>Sheets:</b> ${esc(j.sheets)}</span>`:''}
@@ -1165,7 +1198,7 @@ function renderJobs() {
             ${coatings.length?`<span><b>Coatings:</b> ${coatings.map(esc).join(', ')}</span>`:''}
             ${j.cartonqty?`<span><b>Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
             ${j.delqty?`<span><b>Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
-            ${j.deadline?`<span><b>Deadline:</b> ${esc(j.deadline)}</span>`:''}
+            ${j.deadline?`<span><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
           </div>
           <div class="pipeline">${pipeline}</div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
@@ -1277,17 +1310,23 @@ async function loadDailyStats() {
   dailyStats.reams   = reams;
   dailyStats.packets = cards + reams;
   // 2) Cartons "started printing today" — jobs whose stages[1].time has today's
-  // date. stages[1] is the Printing stage (index 1 in STAGES). The time string
-  // is what moveToStage() writes via new Date().toLocaleString('en-PK'); we
-  // compare just the date part using the same locale so the comparison is
-  // stable regardless of time.
-  const todayDay = new Date().toLocaleString('en-PK').split(',')[0].trim();
+  // date. stages[1] is the Printing stage (index 1 in STAGES). We compare
+  // just the date part. Old stage timestamps were stored as en-PK locale
+  // strings like "22/5/2026, 17:30:00 PM" (with comma + variable digits),
+  // newer ones use fmtDMYT ("22/05/2026 17:30" with space). Handle both
+  // by extracting the leading "d/m/yyyy" pattern as the comparison key.
+  const dateKey = s => {
+    const str = String(s || '');
+    const m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (!m) return '';
+    return `${m[1].padStart(2,'0')}/${m[2].padStart(2,'0')}/${m[3]}`;
+  };
+  const todayDay = dateKey(fmtDMYT(new Date()));
   let cartons = 0;
   for (const j of jobs) {
     const t = j.stages && j.stages[1] && j.stages[1].time;
     if (!t) continue;
-    const day = String(t).split(',')[0].trim();
-    if (day === todayDay) cartons += parseFloat(j.cartonqty) || 0;
+    if (dateKey(t) === todayDay) cartons += parseFloat(j.cartonqty) || 0;
   }
   dailyStats.cartons = cartons;
   dailyStats.loaded  = true;
@@ -1343,8 +1382,8 @@ function renderInventoryList() {
     const lastIn  = fmtMove(it.latest_in_sheets);
     const lastOut = fmtMove(it.latest_out_sheets);
     const movePills =
-      (lastIn  ? `<span title="Last stock IN: +${lastIn} ${unitShort}${it.latest_in_at  ? ' on ' + new Date(it.latest_in_at ).toLocaleDateString('en-PK') : ''}" style="display:inline-block;background:#dcfce7;color:#166534;font-weight:600;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:8px;">&#8593;+${lastIn}</span>` : '') +
-      (lastOut ? `<span title="Last stock OUT: -${lastOut} ${unitShort}${it.latest_out_at ? ' on ' + new Date(it.latest_out_at).toLocaleDateString('en-PK') : ''}" style="display:inline-block;background:#fee2e2;color:#991b1b;font-weight:600;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px;">&#8595;−${lastOut}</span>` : '');
+      (lastIn  ? `<span title="Last stock IN: +${lastIn} ${unitShort}${it.latest_in_at  ? ' on ' + new Date(it.latest_in_at ).toLocaleDateString('en-GB') : ''}" style="display:inline-block;background:#dcfce7;color:#166534;font-weight:600;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:8px;">&#8593;+${lastIn}</span>` : '') +
+      (lastOut ? `<span title="Last stock OUT: -${lastOut} ${unitShort}${it.latest_out_at ? ' on ' + new Date(it.latest_out_at).toLocaleDateString('en-GB') : ''}" style="display:inline-block;background:#fee2e2;color:#991b1b;font-weight:600;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px;">&#8595;−${lastOut}</span>` : '');
     // Brand + supplier appear on the same bold line so the user can see
     // "who's the brand" and "who delivered it" at a glance. Brand uses the
     // existing uppercase styling; supplier is shown in slightly lighter
@@ -2057,7 +2096,7 @@ async function renderInvHistory(id) {
     const txs = await api('GET', `/api/inventory/${id}/transactions`);
     const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
     const rows = txs.map(t => {
-      const date = new Date(t.created_at).toLocaleString('en-PK');
+      const date = fmtDMYT(t.created_at);
       const isReversal      = !!t.reverses_tx_id;
       const hasBeenReversed = !!t.has_been_reversed;
       // Color: positive=green, negative=red, reversal row=orange tint
@@ -2272,7 +2311,7 @@ function renderStockReport(from, to) {
     + tile('Net change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D');
 
   const rows = txs.map(t => {
-    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const date = fmtDMYT(t.created_at);
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
@@ -2327,7 +2366,7 @@ function printStockReport() {
   const net = totalIn - totalOut;
 
   const tableRows = rows.map(t => {
-    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const date = fmtDMYT(t.created_at);
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
@@ -2363,7 +2402,7 @@ function printStockReport() {
           <div style="font-size:11pt;">Inventory Stock Report</div>
         </div>
         <div style="margin-left:auto;font-size:9pt;text-align:right;">
-          Generated: ${new Date().toLocaleString('en-PK')}
+          Generated: ${fmtDMYT(new Date())}
         </div>
       </div>
       <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
@@ -2722,7 +2761,7 @@ function printInventoryReport() {
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
           <div><b>Paper:</b> ${paperType || 'All'} &nbsp; <b>Offcuts:</b> ${includeOffcuts ? 'Included' : 'Excluded'}</div>
-          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+          <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
@@ -3063,7 +3102,7 @@ function renderStockSummary() {
     </tr>`;
   }).join('');
   el.innerHTML = `
-    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${esc(paperType)} · ${esc(stockSummaryState.from)} to ${esc(stockSummaryState.to)} · ${rows.length} item${rows.length===1?'':'s'} · units: ${esc(unit.toLowerCase())}</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${esc(paperType)} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · units: ${esc(unit.toLowerCase())}</div>
     <table class="ledger-table" style="font-size:12px;min-width:max-content;">
       <tr>
         <th rowspan="2">GSM</th>
@@ -3147,7 +3186,7 @@ function printStockSummary() {
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
           <div><b>From:</b> ${esc(from)} &nbsp; <b>To:</b> ${esc(to)}</div>
           <div><b>Group by:</b> ${granularity} &nbsp; <b>Units:</b> ${esc(unit)}</div>
-          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+          <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
       ${rows.length ? `
@@ -3322,18 +3361,9 @@ function resetImportsFilters() {
 // openImports(). Route them through the new page.
 function openImports() { openImportsPage(); }
 
-// Format an ISO/date-only string as a clean local date (no time zone fluff).
-// '2026-05-01T00:00:00.000Z' → '2026-05-01'.
-function fmtImpDate(d) {
-  if (!d) return '—';
-  const s = String(d);
-  // Handle plain 'YYYY-MM-DD' already
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // Trim any timestamp portion to just the date for display
-  const dt = new Date(s);
-  if (!isNaN(dt)) return dt.toISOString().slice(0, 10);
-  return s;
-}
+// Back-compat alias for fmtDMY with dash fallback. Kept so older render
+// call sites don't need to change at once.
+function fmtImpDate(d) { return fmtDMY(d, true); }
 
 // Apply all active filters (status + paper type + exact-match expected and
 // booked dates) and return the visible rows in display order. Centralised so
@@ -3454,7 +3484,7 @@ function exportImports() {
       i.supplier || '',
       i.booked_date || '',
       i.expected_arrival || '',
-      i.received_at ? new Date(i.received_at).toLocaleString('en-PK') : '',
+      i.received_at ? fmtDMYT(i.received_at) : '',
       i.notes || '',
     ]);
   }
@@ -3500,7 +3530,7 @@ function printImports() {
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
           <div>${list.length} import${list.length===1?'':'s'}</div>
-          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+          <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
@@ -3634,7 +3664,7 @@ function buildJobsReportRows() {
     out.push({
       id: j.id,
       jobcode: j.jobcode || '',
-      createdAt: createdAt ? createdAt.toLocaleDateString('en-PK') : '',
+      createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
       deliveredAt: deliveryTime,
       client: j.client || '',
@@ -3794,9 +3824,9 @@ function printJobsReport() {
           <div style="font-size:10pt;">Jobs Report — Delivered</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>From:</b> ${esc(jobsReportState.from)} &nbsp; <b>To:</b> ${esc(jobsReportState.to)}</div>
+          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.from))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.to))}</div>
           <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
-          <div>Generated: ${new Date().toLocaleString('en-PK')}</div>
+          <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
@@ -4269,7 +4299,7 @@ function renderStockMovement(direction, from, to) {
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
   const rows = txs.map(t => {
-    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const date = fmtDMYT(t.created_at);
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const s    = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
@@ -4329,7 +4359,7 @@ function printStockMovement(direction) {
   const color = direction === 'in' ? '#166534' : '#A32D2D';
 
   const tableRows = rows.map(t => {
-    const date = new Date(t.created_at).toLocaleString('en-PK');
+    const date = fmtDMYT(t.created_at);
     const s = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
@@ -4361,7 +4391,7 @@ function printStockMovement(direction) {
           <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
           <div style="font-size:11pt;">${direction === 'in' ? 'Stock In Report' : 'Stock Out Report'}</div>
         </div>
-        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${new Date().toLocaleString('en-PK')}</div>
+        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
       </div>
       <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
         <tr>
@@ -4424,7 +4454,7 @@ function exportStockMovement(direction) {
     const ps   = packetSize(t.paper_type || '');
     const pkts = +(t.change / ps).toFixed(2);
     aoa.push([
-      new Date(t.created_at).toLocaleString('en-PK'),
+      fmtDMYT(t.created_at),
       item,
       t.change,
       pkts,
@@ -5820,7 +5850,7 @@ async function saveUpdate(id) {
   const target = STAGES.indexOf(selSection);
   if (target < 0) { alert('Please pick a stage.'); return; }
   const by = STAGES[target];
-  const time = new Date().toLocaleString('en-PK');
+  const time = fmtDMYT(new Date());
   const prevSi = j.stage_index || 0;
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
@@ -5855,7 +5885,7 @@ async function moveToStage(id, target) {
   }
   const prevSi = j.stage_index || 0;
   if (target === prevSi) return;
-  const time = new Date().toLocaleString('en-PK');
+  const time = fmtDMYT(new Date());
   const by = STAGES[target];
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
@@ -5903,7 +5933,7 @@ async function openHistory(id) {
   try {
     const audit = await api('GET', `/api/audit?entity_type=job&entity_id=${id}`);
     document.getElementById('job-audit-content').innerHTML = audit.length
-      ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${audit.map(a=>`<tr><td>${new Date(a.created_at).toLocaleString('en-PK')}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
+      ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${audit.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
       : '<div class="empty">No audit entries yet.</div>';
   } catch(e) {
     document.getElementById('job-audit-content').innerHTML = 'Error: ' + e.message;
@@ -5974,7 +6004,7 @@ async function toggleBlock(id) {
   const action = currentlyBlocked ? 'Unblock' : 'Block';
   const reason = prompt(`${action} this job — add a reason (optional):`, '');
   if (reason === null) return;
-  const time = new Date().toLocaleString('en-PK');
+  const time = fmtDMYT(new Date());
   const by = STAGES[si];
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
@@ -5995,7 +6025,9 @@ function buildPrintCard(j) {
   // (the original layout — restored after a brief experiment with a
   // tighter letter-friendly version that didn't fit the existing card stock).
   const v = x => esc(x || '');
-  const fmt = d => d ? new Date(d).toLocaleDateString('en-PK') : '';
+  // Render plain YYYY-MM-DD as dd/mm/yyyy without timezone shift, matching
+  // the app-wide convention.
+  const fmt = d => d ? fmtDMY(d) : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const p = j.particulars || {};
   // Paper checkmark sources: prefer the live inventory item the job points to;
@@ -6201,7 +6233,7 @@ function exportCSV() {
   const header = ['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created'];
   const rows = jobs.map(j => {
     const coatings = Array.isArray(j.coatings) ? j.coatings.join('; ') : '';
-    return [j.id, j.jobcode||'', j.name, j.client, j.dateissued||'', j.size||'', j.ups||'', j.sheets||'', j.qty||'', j.paper||'', j.machine||'', coatings, j.priority||'', j.ref||'', j.deadline||'', j.delqty||'', j.cartonqty||'', STAGES[j.stage_index||0]||'Delivered', isDone(j)?'Delivered':isBlocked(j)?'Blocked':'In Progress', j.created_at?new Date(j.created_at).toLocaleDateString('en-PK'):''];
+    return [j.id, j.jobcode||'', j.name, j.client, j.dateissued||'', j.size||'', j.ups||'', j.sheets||'', j.qty||'', j.paper||'', j.machine||'', coatings, j.priority||'', j.ref||'', j.deadline||'', j.delqty||'', j.cartonqty||'', STAGES[j.stage_index||0]||'Delivered', isDone(j)?'Delivered':isBlocked(j)?'Blocked':'In Progress', j.created_at?new Date(j.created_at).toLocaleDateString('en-GB'):''];
   });
   const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
   ws['!cols'] = header.map((h,i) => ({ wch: Math.max(h.length, ...rows.map(r => String(r[i]||'').length)) + 2 }));
@@ -6241,7 +6273,7 @@ function renderUsersTab() {
     <div class="stat"><div class="stat-label">Users</div><div class="stat-value">${stats.users}</div></div>
   `;
   document.getElementById('users-list').innerHTML = usersList.map(u => {
-    const last = u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-PK') : 'never';
+    const last = u.last_login_at ? fmtDMYT(u.last_login_at) : 'never';
     const isMe = currentUser && u.id === currentUser.id;
     return `
     <div class="inv-card">
@@ -6267,7 +6299,7 @@ function renderUsersTab() {
 
   // Recent activity feed — top 50 entries across everything.
   document.getElementById('audit-list').innerHTML = auditList.length ? auditList.map(a => {
-    const when = new Date(a.created_at).toLocaleString('en-PK');
+    const when = fmtDMYT(a.created_at);
     return `
     <div class="inv-card">
       <div class="inv-main">
@@ -6338,7 +6370,7 @@ async function openUserActivity(userId) {
   try {
     const rows = await api('GET', `/api/audit?user_id=${userId}&limit=200`);
     document.getElementById('user-audit-content').innerHTML = rows.length
-      ? `<table class="ledger-table"><tr><th>When</th><th>Action</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${new Date(a.created_at).toLocaleString('en-PK')}</td><td>${esc(a.action)}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
+      ? `<table class="ledger-table"><tr><th>When</th><th>Action</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.action)}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
       : '<div class="empty">No activity yet.</div>';
   } catch(e) {
     document.getElementById('user-audit-content').innerHTML = 'Error: ' + e.message;
