@@ -5149,15 +5149,24 @@ function openCalculator() {
           <button type="button" class="btn btn-sm" id="calc-unit-mm-btn" onclick="setCalcUnit('mm')">mm</button>
         </span>
       </label>
-      <!-- Compound size input: two number fields joined visually by an
-           always-visible × separator. User types just digits — the × is
-           non-editable. The outer wrapper carries the border so the whole
-           thing reads as a single input box. -->
+      <!-- Compound size input: two text fields (digits only) joined by a
+           non-editable × separator. Auto-advances from W to H once the
+           expected number of digits is typed — like the segments of a
+           date input. inches mode expects 2 digits, mm mode 3. Backspace
+           on an empty H jumps focus back to W. -->
       <div style="display:flex;gap:8px;align-items:center;">
         <div style="flex:1;display:flex;align-items:center;border:1px solid var(--border);border-radius:var(--radius-sm);background:#fff;">
-          <input type="number" id="calc-w" placeholder="20" step="0.01" min="0" oninput="calcRecalc()" style="flex:1;border:none;background:transparent;padding:8px 10px;min-width:0;outline:none;font:inherit;color:inherit;-moz-appearance:textfield;">
+          <input type="text" inputmode="numeric" pattern="[0-9]*" id="calc-w"
+                 placeholder="20" maxlength="3"
+                 oninput="calcSizeInput('w', this)"
+                 onkeydown="calcSizeKey(event, 'w')"
+                 style="flex:1;border:none;background:transparent;padding:8px 10px;min-width:0;outline:none;font:inherit;color:inherit;text-align:center;">
           <span style="color:var(--text2);font-weight:600;padding:0 4px;user-select:none;">×</span>
-          <input type="number" id="calc-h" placeholder="30" step="0.01" min="0" oninput="calcRecalc()" style="flex:1;border:none;background:transparent;padding:8px 10px;min-width:0;outline:none;font:inherit;color:inherit;-moz-appearance:textfield;">
+          <input type="text" inputmode="numeric" pattern="[0-9]*" id="calc-h"
+                 placeholder="30" maxlength="3"
+                 oninput="calcSizeInput('h', this)"
+                 onkeydown="calcSizeKey(event, 'h')"
+                 style="flex:1;border:none;background:transparent;padding:8px 10px;min-width:0;outline:none;font:inherit;color:inherit;text-align:center;">
         </div>
         <span id="calc-unit-label" style="color:var(--text2);min-width:42px;font-size:13px;">inches</span>
       </div>
@@ -5230,6 +5239,32 @@ function setCalcUnit(u) {
 function calcSetEdit(field) {
   calcLastEdit = field;
   calcRecalc();
+}
+
+// How many digits we expect per dimension at the current unit. inches
+// papers are virtually always 2-digit (20, 25, 32 …); mm sizes need 3
+// (500, 700, …). Drives the auto-advance from W → H.
+function calcSizeMaxDigits() { return calcUnit === 'mm' ? 3 : 2; }
+
+// Strip anything non-digit, recompute, and auto-jump from W → H once the
+// expected length is reached. Mirrors the segment behaviour of a native
+// date input (after the day fills, focus moves to month, etc.).
+function calcSizeInput(which, el) {
+  el.value = el.value.replace(/[^0-9]/g, '');
+  if (which === 'w' && el.value.length >= calcSizeMaxDigits()) {
+    const next = document.getElementById('calc-h');
+    if (next) { next.focus(); next.select(); }
+  }
+  calcRecalc();
+}
+
+// Backspace on an empty H jumps the cursor back to W (mirrors how date
+// inputs let you walk segments with backspace).
+function calcSizeKey(e, which) {
+  if (e.key === 'Backspace' && which === 'h' && !e.target.value) {
+    const prev = document.getElementById('calc-w');
+    if (prev) { prev.focus(); const v = prev.value; prev.setSelectionRange(v.length, v.length); }
+  }
 }
 
 function calcReset() {
