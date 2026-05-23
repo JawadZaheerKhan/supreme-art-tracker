@@ -3601,6 +3601,13 @@ function buildJobsReportRows() {
       const ps     = packetSize(j.paper || '');
       if (sheets && ps) packets = sheets / ps;
     }
+    // Wastage = Unit Carton Qty − Delivered Qty (how much was produced beyond
+    // what got delivered). Only meaningful when both values are present.
+    const cartonQtyNum = parseFloat(j.cartonqty);
+    const delQtyNum    = parseFloat(j.delqty);
+    const wastage = (Number.isFinite(cartonQtyNum) && Number.isFinite(delQtyNum))
+      ? (cartonQtyNum - delQtyNum)
+      : null;
     out.push({
       id: j.id,
       jobcode: j.jobcode || '',
@@ -3610,7 +3617,9 @@ function buildJobsReportRows() {
       client: j.client || '',
       poNo: j.ref || '',
       poQty: j.qty || '',
+      cartonQty: j.cartonqty || '',
       deliveredQty: j.delqty || '',
+      wastage,
       packets,
       paper: j.paper || '',
       machine: j.machine || '',
@@ -3639,20 +3648,30 @@ function renderJobsReport() {
   const td  = 'style="padding:8px 10px;"';
   const tdR = 'style="padding:8px 10px;text-align:right;"';
   const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
-  const tbody = rows.map(r => `<tr style="border-bottom:1px solid var(--border);">
-    <td ${td}>E-${r.id}</td>
-    <td ${td}>${esc(r.jobcode)}</td>
-    <td ${tdN}>${esc(r.createdAt)}</td>
-    <td ${tdN}>${esc(r.deliveredAt)}</td>
-    <td ${td}>${esc(r.client)}</td>
-    <td ${td}>${esc(r.poNo)}</td>
-    <td ${tdR}>${esc(r.poQty)}</td>
-    <td ${tdR}>${esc(r.deliveredQty)}</td>
-    <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
-    <td ${td}>${esc(r.paper)}</td>
-    <td ${td}>${esc(r.machine)}</td>
-    <td ${td}>${esc(r.coatings)}</td>
-  </tr>`).join('');
+  const tbody = rows.map(r => {
+    // Color-code wastage: red when production exceeded delivery (positive),
+    // green when delivery exceeded production (negative), neutral when zero
+    // or unknown.
+    const wastageCell = r.wastage === null
+      ? '<td ' + tdR + '>—</td>'
+      : `<td style="padding:8px 10px;text-align:right;font-weight:600;color:${r.wastage>0?'#A32D2D':r.wastage<0?'#166534':'inherit'};">${fmt(r.wastage)}</td>`;
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td ${td}>E-${r.id}</td>
+      <td ${td}>${esc(r.jobcode)}</td>
+      <td ${tdN}>${esc(r.createdAt)}</td>
+      <td ${tdN}>${esc(r.deliveredAt)}</td>
+      <td ${td}>${esc(r.client)}</td>
+      <td ${td}>${esc(r.poNo)}</td>
+      <td ${tdR}>${esc(r.poQty)}</td>
+      <td ${tdR}>${esc(r.cartonQty)}</td>
+      <td ${tdR}>${esc(r.deliveredQty)}</td>
+      ${wastageCell}
+      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
+      <td ${td}>${esc(r.paper)}</td>
+      <td ${td}>${esc(r.machine)}</td>
+      <td ${td}>${esc(r.coatings)}</td>
+    </tr>`;
+  }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   el.innerHTML = `
@@ -3668,7 +3687,9 @@ function renderJobsReport() {
           <th ${th}>Company</th>
           <th ${th}>PO No.</th>
           <th ${thR}>PO Qty</th>
+          <th ${thR}>Unit Carton Qty</th>
           <th ${thR}>Delivered Qty</th>
+          <th ${thR}>Wastage</th>
           <th ${thR}>Packets</th>
           <th ${th}>Paper</th>
           <th ${th}>Machine</th>
@@ -3684,7 +3705,7 @@ function renderJobsReport() {
 function exportJobsReport() {
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Job ID', 'Code', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Delivered Qty', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+  const header = ['Job ID', 'Code', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
     aoa.push([
@@ -3695,7 +3716,9 @@ function exportJobsReport() {
       r.client,
       r.poNo,
       r.poQty,
+      r.cartonQty,
       r.deliveredQty,
+      r.wastage === null ? '' : r.wastage,
       r.packets ? +r.packets.toFixed(2) : '',
       r.paper,
       r.machine,
@@ -3729,7 +3752,9 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.client)}</td>
     <td ${tdL}>${esc(r.poNo)}</td>
     <td ${tdR}>${esc(r.poQty)}</td>
+    <td ${tdR}>${esc(r.cartonQty)}</td>
     <td ${tdR}>${esc(r.deliveredQty)}</td>
+    <td ${tdR}>${r.wastage === null ? '—' : fmt(r.wastage)}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
@@ -3759,7 +3784,9 @@ function printJobsReport() {
           <th ${tdL}>Company</th>
           <th ${tdL}>PO No.</th>
           <th ${tdR}>PO Qty</th>
+          <th ${tdR}>Unit Carton Qty</th>
           <th ${tdR}>Delivered Qty</th>
+          <th ${tdR}>Wastage</th>
           <th ${tdR}>Packets</th>
           <th ${tdL}>Paper</th>
           <th ${tdL}>Machine</th>
