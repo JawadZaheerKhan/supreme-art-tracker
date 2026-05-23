@@ -3185,9 +3185,13 @@ async function loadImports() {
 }
 
 // Page-level state for the Imports view (full page, not modal).
+// dateField picks which date column the From/To range filters against.
 const importsPageState = {
   status: 'pending',
   paperType: '',
+  dateField: 'expected',
+  from: '',
+  to: '',
 };
 
 // Open the Imports full-page view. Routes through openReportsGroup so the
@@ -3234,6 +3238,21 @@ function renderImportsPage() {
           ${paperOpts}
         </select>
       </div>
+      <div>
+        <div class="dash-flbl">Date Field</div>
+        <select class="filter" id="imp-date-field" onchange="setImportsFilter('dateField', this.value)">
+          <option value="expected"${state.dateField==='expected'?' selected':''}>Expected Arrival</option>
+          <option value="booked"${state.dateField==='booked'?' selected':''}>Booked Date</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">From</div>
+        <input class="filter" type="date" id="imp-from" value="${state.from}" onchange="setImportsDate('from', this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">To</div>
+        <input class="filter" type="date" id="imp-to" value="${state.to}" onchange="setImportsDate('to', this.value)">
+      </div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetImportsFilters()">Reset filters</button>
     </div>
     <div id="imports-table" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -3244,8 +3263,12 @@ function setImportsFilter(key, value) {
   importsPageState[key] = value;
   renderImportsTable();
 }
+function setImportsDate(which, value) {
+  importsPageState[which] = value;
+  renderImportsTable();
+}
 function resetImportsFilters() {
-  Object.assign(importsPageState, { status: 'pending', paperType: '' });
+  Object.assign(importsPageState, { status: 'pending', paperType: '', dateField: 'expected', from: '', to: '' });
   renderImportsPage();
   renderImportsTable();
 }
@@ -3268,14 +3291,25 @@ function fmtImpDate(d) {
   return s;
 }
 
-// Apply all active filters (status + paper type) and return the visible rows
-// in display order. Centralised so the table, Print, and Excel export all see
-// the exact same dataset.
+// Apply all active filters (status + paper type + date range on the chosen
+// date field) and return the visible rows in display order. Centralised so
+// the table, Print, and Excel export all see the exact same dataset.
 function filterImportsList() {
   const state = importsPageState;
   let list = importsCache.slice();
   if (state.status !== 'all') list = list.filter(i => i.status === state.status);
   if (state.paperType)        list = list.filter(i => (i.paper_type || '') === state.paperType);
+  if (state.from || state.to) {
+    const fieldKey = state.dateField === 'booked' ? 'booked_date' : 'expected_arrival';
+    list = list.filter(i => {
+      const raw = i[fieldKey];
+      if (!raw) return false;
+      const day = String(raw).slice(0, 10);
+      if (state.from && day < state.from) return false;
+      if (state.to   && day > state.to)   return false;
+      return true;
+    });
+  }
   // Sort: pending first, then by expected_arrival ascending.
   list.sort((a, b) => {
     if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
@@ -3307,19 +3341,23 @@ function renderImportsTable() {
          <button class="btn btn-sm ceo-hide" onclick="cancelImport(${i.id})">Cancel</button>`
       : '';
     const unit = packetUnitLabel(i.paper_type).toLowerCase();
+    const weight = (i.weight_kg === null || i.weight_kg === undefined || i.weight_kg === '')
+      ? '—'
+      : (+i.weight_kg).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg';
     return `<tr>
       <td>${status}</td>
       <td>${item}</td>
-      <td style="text-align:right;">${(+i.packets).toLocaleString()} ${unit}</td>
+      <td style="text-align:right;white-space:nowrap;">${(+i.packets).toLocaleString()} ${unit}</td>
+      <td style="text-align:right;white-space:nowrap;">${weight}</td>
       <td>${esc(i.supplier || '—')}</td>
-      <td>${esc(fmtImpDate(i.booked_date))}</td>
-      <td>${esc(fmtImpDate(i.expected_arrival))}</td>
+      <td style="white-space:nowrap;">${esc(fmtImpDate(i.booked_date))}</td>
+      <td style="white-space:nowrap;">${esc(fmtImpDate(i.expected_arrival))}</td>
       <td>${esc(i.notes || '')}</td>
       <td>${actions}</td>
     </tr>`;
   }).join('');
   el.innerHTML = `<table class="ledger-table">
-    <tr><th>Status</th><th>Item</th><th>Quantity</th><th>Supplier</th><th>Booked</th><th>Expected</th><th>Notes</th><th></th></tr>
+    <tr><th>Status</th><th>Item</th><th>Quantity</th><th style="text-align:right;">Weight</th><th>Supplier</th><th>Booked</th><th>Expected</th><th>Notes</th><th></th></tr>
     ${rows}
   </table>`;
 }
