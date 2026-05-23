@@ -5120,10 +5120,11 @@ function openCalculator() {
   calcUnit = 'in';
   calcLastEdit = null;
   pop.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-      <h2 style="margin:0;font-size:16px;">&#129518; Paper Calculator</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <h2 style="margin:0;font-size:16px;">&#129518; Calculator</h2>
       <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
     </div>
+    ${calcTabsHTML('paper')}
     <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Type any one of weight / sheets / packets — the other two fill in.</p>
 
     <div class="form-group">
@@ -5308,6 +5309,183 @@ function calcRecalc() {
       </div>
     `;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ── Job Calculator (PO → Sheets → Unit Carton → Packets/Weight) ──
+// ──────────────────────────────────────────────────────────────────
+// Self-contained module. Open via the tab strip rendered by calcTabsHTML.
+// Workflow:
+//   1. Client gives PO Qty
+//   2. Add tolerance % so production has a buffer
+//   3. Adjusted Qty ÷ Ups → Sheets (rounded up)
+//   4. Sheets × Ups       → Unit Carton (the actual produced qty)
+//   5. Sheets + paper details → Packets, Weight (kg)
+//
+// To remove: delete this section (down to closing block) and remove the
+// case branches in calcTabsHTML / setCalcTab. Nothing else depends on it.
+let jcalcUnit = 'in';        // 'in' or 'mm'
+
+function calcTabsHTML(active) {
+  // Two-button switcher rendered at the top of the popover. Active tab
+  // gets the dark fill; the other is outlined. Keeps both modes
+  // discoverable from a glance.
+  const onStyle  = 'background:#111;color:#fff;border-color:#111;';
+  const offStyle = 'background:#fff;color:var(--text);';
+  return `
+    <div style="display:flex;gap:6px;margin-bottom:10px;">
+      <button class="btn btn-sm" style="flex:1;${active==='paper'?onStyle:offStyle}" onclick="openCalculator()">Paper</button>
+      <button class="btn btn-sm" style="flex:1;${active==='job'?onStyle:offStyle}" onclick="openCalculatorJobMode()">Job (PO)</button>
+    </div>`;
+}
+
+function openCalculatorJobMode() {
+  const pop = document.getElementById('calc-popover');
+  if (!pop) return;
+  jcalcUnit = 'in';
+  pop.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <h2 style="margin:0;font-size:16px;">&#129518; Calculator</h2>
+      <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
+    </div>
+    ${calcTabsHTML('job')}
+    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Enter PO qty + tolerance + ups → sheets, unit carton, packets, weight.</p>
+
+    <div class="form-group">
+      <label class="form-label">PO Quantity (pcs)</label>
+      <input type="number" id="jc-po" step="1" min="0" placeholder="e.g. 1000" oninput="jcalcRecalc()">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Tolerance (%)</label>
+      <input type="number" id="jc-tol" step="0.1" min="0" placeholder="e.g. 2" value="0" oninput="jcalcRecalc()">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Ups (pcs per sheet)</label>
+      <input type="number" id="jc-ups" step="1" min="1" placeholder="e.g. 4" oninput="jcalcRecalc()">
+    </div>
+
+    <div id="jc-out" style="background:#f9fafb;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:13px;color:var(--text);line-height:1.7;margin-bottom:12px;">
+      Enter PO Qty + Ups to see the result.
+    </div>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:12px 0;">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;">Paper details (optional — for packets / weight)</div>
+
+    <div class="form-group">
+      <label class="form-label">Paper Type</label>
+      <select id="jc-paper-type" onchange="jcalcRecalc()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+        <option value="">— Select paper type —</option>
+        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)} (${packetUnitLabel(p)} of ${packetSize(p)})</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Sheet Size</span>
+        <span style="display:inline-flex;gap:4px;text-transform:none;letter-spacing:0;">
+          <button type="button" class="btn btn-sm" id="jc-unit-in-btn" onclick="setJcalcUnit('in')" style="background:#1e40af;color:#fff;border-color:#1e40af;">inches</button>
+          <button type="button" class="btn btn-sm" id="jc-unit-mm-btn" onclick="setJcalcUnit('mm')">mm</button>
+        </span>
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="number" id="jc-w" placeholder="Width"  step="0.01" min="0" oninput="jcalcRecalc()" style="flex:1;">
+        <span style="color:var(--text2);font-weight:600;">×</span>
+        <input type="number" id="jc-h" placeholder="Height" step="0.01" min="0" oninput="jcalcRecalc()" style="flex:1;">
+        <span id="jc-unit-label" style="color:var(--text2);min-width:42px;font-size:13px;">inches</span>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">GSM</label>
+      <input type="number" id="jc-gsm" step="1" min="0" placeholder="e.g. 300" oninput="jcalcRecalc()">
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;padding-top:12px;border-top:1px solid var(--border);">
+      <button class="btn btn-sm" onclick="jcalcReset()">Reset</button>
+      <button class="btn btn-sm btn-primary" onclick="closeCalculator()">Close</button>
+    </div>`;
+  pop.style.display = 'block';
+}
+
+function setJcalcUnit(u) {
+  jcalcUnit = u;
+  const inBtn = document.getElementById('jc-unit-in-btn');
+  const mmBtn = document.getElementById('jc-unit-mm-btn');
+  if (inBtn) {
+    inBtn.style.background  = u === 'in' ? '#1e40af' : '';
+    inBtn.style.color       = u === 'in' ? '#fff'    : '';
+    inBtn.style.borderColor = u === 'in' ? '#1e40af' : '';
+  }
+  if (mmBtn) {
+    mmBtn.style.background  = u === 'mm' ? '#1e40af' : '';
+    mmBtn.style.color       = u === 'mm' ? '#fff'    : '';
+    mmBtn.style.borderColor = u === 'mm' ? '#1e40af' : '';
+  }
+  const lbl = document.getElementById('jc-unit-label');
+  if (lbl) lbl.textContent = u === 'in' ? 'inches' : 'mm';
+  jcalcRecalc();
+}
+
+function jcalcReset() {
+  ['jc-po','jc-tol','jc-ups','jc-paper-type','jc-w','jc-h','jc-gsm'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = id === 'jc-tol' ? '0' : '';
+  });
+  const out = document.getElementById('jc-out');
+  if (out) out.innerHTML = 'Enter PO Qty + Ups to see the result.';
+}
+
+function jcalcRecalc() {
+  const po  = parseFloat((document.getElementById('jc-po') ||{}).value);
+  const tol = parseFloat((document.getElementById('jc-tol')||{}).value);
+  const ups = parseFloat((document.getElementById('jc-ups')||{}).value);
+  const out = document.getElementById('jc-out');
+  if (!out) return;
+
+  // Need PO + Ups to compute anything. Tolerance defaults to 0.
+  if (!isFinite(po) || po <= 0)    { out.innerHTML = 'Enter PO Qty.'; return; }
+  if (!isFinite(ups) || ups <= 0)  { out.innerHTML = 'Enter Ups.'; return; }
+  const tolerance = isFinite(tol) && tol >= 0 ? tol : 0;
+
+  // 1) Add tolerance to PO → adjusted qty (the target production amount)
+  const adjusted = po * (1 + tolerance / 100);
+  // 2) Sheets = ceil(adjusted / ups) — round UP so we never produce less
+  //    than PO + tolerance after rounding.
+  const sheets   = Math.ceil(adjusted / ups);
+  // 3) Unit Carton = sheets × ups — the actual quantity we'll produce
+  //    after the sheet-rounding (slightly more than adjusted because of
+  //    the ceiling).
+  const unitCarton = sheets * ups;
+
+  // Optional paper-derived figures
+  const paperType = (document.getElementById('jc-paper-type')||{}).value || '';
+  const w   = parseFloat((document.getElementById('jc-w')  ||{}).value);
+  const h   = parseFloat((document.getElementById('jc-h')  ||{}).value);
+  const gsm = parseFloat((document.getElementById('jc-gsm')||{}).value);
+  let paperBlock = '';
+  if (paperType && isFinite(w) && w > 0 && isFinite(h) && h > 0 && isFinite(gsm) && gsm > 0) {
+    const sqIn      = jcalcUnit === 'in' ? (w * h) : ((w * h) / 645.16);
+    const packSize  = packetSize(paperType);
+    const unitLabel = packetUnitLabel(paperType);
+    const gPerSheet = (sqIn * gsm) / 1550;
+    const totalKg   = (sheets * gPerSheet) / 1000;
+    const packets   = sheets / packSize;
+    const round2    = (x) => Math.round(x * 100) / 100;
+    paperBlock = `
+      <hr style="border:none;border-top:1px dashed var(--border);margin:8px 0;">
+      <div><b style="color:#166534;">${unitLabel}:</b> <b>${round2(packets).toLocaleString()}</b> (${packSize} sheets per ${unitLabel.toLowerCase().replace(/s$/, '')})</div>
+      <div><b style="color:#A32D2D;">Weight:</b> <b>${round2(totalKg).toLocaleString()}</b> kg</div>
+    `;
+  }
+
+  const round2 = (x) => Math.round(x * 100) / 100;
+  out.innerHTML = `
+    <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;margin-bottom:4px;">Production Plan</div>
+    <div><b>Adjusted Qty:</b> <b>${round2(adjusted).toLocaleString()}</b> pcs <span style="color:var(--text2);font-size:11px;">(PO × ${tolerance}% tolerance)</span></div>
+    <div><b style="color:#1e40af;">Sheets needed:</b> <b>${sheets.toLocaleString()}</b> <span style="color:var(--text2);font-size:11px;">(ceil ÷ ups)</span></div>
+    <div><b>Unit Carton:</b> <b>${unitCarton.toLocaleString()}</b> pcs <span style="color:var(--text2);font-size:11px;">(sheets × ups)</span></div>
+    ${paperBlock}
+  `;
 }
 
 function specsSection(p, coatings, j) {
