@@ -3335,12 +3335,20 @@ function filterImportsList() {
       return true;
     });
   }
-  // Sort: pending first, then by expected_arrival ascending.
+  // Sort: latest first by default (newest id = most recently booked).
+  // When viewing All, still bubble Pending to the top (they're actionable),
+  // but within each group order by id desc so the latest entry is on top.
   list.sort((a, b) => {
-    if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
-    const ad = a.expected_arrival || '9999-12-31';
-    const bd = b.expected_arrival || '9999-12-31';
-    return ad.localeCompare(bd);
+    if (state.status === 'all' && (a.status === 'pending') !== (b.status === 'pending')) {
+      return a.status === 'pending' ? -1 : 1;
+    }
+    // Pick the most-relevant date for the current status, fall back to id.
+    const dateA = a.received_at || a.booked_date || a.expected_arrival || '';
+    const dateB = b.received_at || b.booked_date || b.expected_arrival || '';
+    const da = String(dateA).slice(0, 19);
+    const db = String(dateB).slice(0, 19);
+    if (da !== db) return db.localeCompare(da);   // newer date first
+    return (b.id || 0) - (a.id || 0);             // tiebreak: newer id first
   });
   return list;
 }
