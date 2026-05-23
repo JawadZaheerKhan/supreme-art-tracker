@@ -1107,7 +1107,13 @@ app.post('/api/inventory/transactions/:id/reverse', requireWriteUser, async (req
     const label    = item ? `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}` : `item ${tx.item_id}`;
     const origNote = tx.notes ? ` (orig note: "${tx.notes}")` : '';
     const origBy   = tx.user_email ? ` entered by ${tx.user_email}` : '';
-    const note     = `Reversal of TX #${tx.id}${origBy} on ${new Date(tx.created_at).toLocaleString('en-PK')}${origNote}`;
+    // Format the original timestamp as dd/mm/yyyy hh:mm for the audit note —
+    // matches the app-wide dd/mm/yyyy display convention.
+    const _d        = new Date(tx.created_at);
+    const _pad      = (n) => String(n).padStart(2, '0');
+    const _stamp    = isNaN(_d) ? String(tx.created_at) :
+      `${_pad(_d.getDate())}/${_pad(_d.getMonth()+1)}/${_d.getFullYear()} ${_pad(_d.getHours())}:${_pad(_d.getMinutes())}`;
+    const note     = `Reversal of TX #${tx.id}${origBy} on ${_stamp}${origNote}`;
 
     const newTxId = await applyInventoryChange(sql, {
       itemId: tx.item_id,
