@@ -1091,12 +1091,14 @@ app.post('/api/inventory/transactions/:id/reverse', requireWriteUser, async (req
       return res.status(409).json({ error: 'This entry has already been reversed.' });
     }
 
-    // 24-hour window applies to stock keepers but not admins.
+    // 24-hour window applies to everyone except admin. Stock keepers and
+    // regular users can self-correct recent stock-in mistakes; anything
+    // older needs an admin to keep the audit trail intact.
     if (req.user.role !== 'admin') {
       const ageMs = Date.now() - new Date(tx.created_at).getTime();
       const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
       if (ageMs > TWENTY_FOUR_HRS) {
-        return res.status(403).json({ error: 'Stock keepers can only reverse entries from the last 24 hours. Ask an admin to reverse older entries.' });
+        return res.status(403).json({ error: 'You can only reverse entries from the last 24 hours. Ask an admin to reverse older entries.' });
       }
     }
 
