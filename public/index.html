@@ -548,7 +548,7 @@
         <div class="report-card-title">Imports</div>
         <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders and mark them received to feed Stock Summary.</div>
       </button>
-      <button class="report-card" onclick="openJobsReport()">
+      <button class="report-card" onclick="openJobsReportPage()">
         <div class="report-card-icon">&#128196;</div>
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
@@ -594,26 +594,39 @@
     </div>
   </div>
 
-  <!-- Analysis (Reports card) group — sidebar nav: Stock Summary.
-       The Stock Summary view still uses its existing modal; clicking
-       the sidebar item launches it. Room to add more analysis reports
-       to the sidebar later without restructuring. -->
+  <!-- Analysis group — sidebar nav: Stock Summary + Inventory Report.
+       Both render inline (no more modal). -->
   <div id="analysis-group" class="reports-group" style="display:none;">
     <div class="reports-layout">
       <aside class="reports-sidebar">
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
         <div class="rsb-section">Analysis</div>
-        <button class="rsb-item active" data-rt="summary" onclick="setReportsTab('summary'); openStockSummary();">
+        <button class="rsb-item active" data-rt="summary" onclick="setReportsTab('summary')">
           <span class="rsb-icon">&#128203;</span> Stock Summary
         </button>
-        <button class="rsb-item" data-rt="inventory-report" onclick="setReportsTab('inventory-report'); openInventoryReport();">
+        <button class="rsb-item" data-rt="inventory-report" onclick="setReportsTab('inventory-report')">
           <span class="rsb-icon">&#128230;</span> Inventory Report
         </button>
       </aside>
       <main class="reports-content">
-        <div style="padding:60px 20px;text-align:center;color:var(--text2);font-size:14px;">
-          Pick a report from the sidebar to open it.
-        </div>
+        <div id="rt-summary"          class="rt-pane"></div>
+        <div id="rt-inventory-report" class="rt-pane" style="display:none;"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Jobs Report group — single-item sidebar, full-page view of delivered jobs. -->
+  <div id="jobs-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Jobs</div>
+        <button class="rsb-item active" data-rt="jobs-report">
+          <span class="rsb-icon">&#128196;</span> Delivered Jobs
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-jobs-report" class="rt-pane"></div>
       </main>
     </div>
   </div>
@@ -2442,33 +2455,40 @@ function buildSummaryBuckets(from, to, granularity) {
 let invReportState = { groupBy: 'consolidated', paperType: '', includeOffcuts: true };
 
 function openInventoryReport() {
-  openModal(`<div class="modal modal-wide ir-modal" onclick="event.stopPropagation()" style="max-width:1100px !important;">
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <h2 style="margin:0;">Inventory Report</h2>
-      <button class="btn btn-sm" onclick="closeModal()" style="padding:4px 10px;">&times; Close</button>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center;margin:14px 0;flex-wrap:wrap;">
-      <label style="font-size:12px;color:var(--text2);">Group by:</label>
-      <select class="filter" id="ir-group" onchange="setIRGroup(this.value)">
-        <option value="consolidated"${invReportState.groupBy==='consolidated'?' selected':''}>Consolidated (ignore brand & supplier)</option>
-        <option value="brand"${invReportState.groupBy==='brand'?' selected':''}>Segmented by Brand</option>
-        <option value="supplier"${invReportState.groupBy==='supplier'?' selected':''}>Segmented by Supplier</option>
-      </select>
-      <select class="filter" id="ir-paper-type" onchange="setIRPaperType(this.value)">
-        <option value=""${!invReportState.paperType?' selected':''}>All paper types</option>
-        ${PAPER_TYPES.map(t => `<option value="${esc(t)}"${invReportState.paperType===t?' selected':''}>${esc(t)}</option>`).join('')}
-      </select>
-      <label style="font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:4px;">
-        <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
-        Include offcuts
-      </label>
+  const pane = document.getElementById('rt-inventory-report');
+  if (!pane) return;
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Inventory Report</h2>
+      <span style="color:var(--text2);font-size:12px;">Current stock position grouped by paper type, size, and gsm.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportInventoryReport()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printInventoryReport()">&#128424; Print Report</button>
       </div>
     </div>
-    <div id="ir-content" style="max-height:calc(85vh - 160px);overflow:auto;"></div>
-  </div>`);
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Group by</div>
+        <select class="filter" id="ir-group" onchange="setIRGroup(this.value)">
+          <option value="consolidated"${invReportState.groupBy==='consolidated'?' selected':''}>Consolidated (ignore brand & supplier)</option>
+          <option value="brand"${invReportState.groupBy==='brand'?' selected':''}>Segmented by Brand</option>
+          <option value="supplier"${invReportState.groupBy==='supplier'?' selected':''}>Segmented by Supplier</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="ir-paper-type" onchange="setIRPaperType(this.value)">
+          <option value=""${!invReportState.paperType?' selected':''}>All paper types</option>
+          ${PAPER_TYPES.map(t => `<option value="${esc(t)}"${invReportState.paperType===t?' selected':''}>${esc(t)}</option>`).join('')}
+        </select>
+      </div>
+      <label style="font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:6px;padding-bottom:8px;">
+        <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
+        Include offcuts
+      </label>
+    </div>
+    <div id="ir-content"></div>
+  `;
   renderInventoryReport();
 }
 function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
@@ -2705,47 +2725,51 @@ function printInventoryReport() {
 
 function openStockSummary() {
   // Default to last 5 months ending today, monthly granularity, first paper type.
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth() - 4, 1);
-  const iso = d => d.toISOString().slice(0, 10);
-  stockSummaryState = {
-    paperType: PAPERS[0],
-    from: iso(start),
-    to:   iso(today),
-    granularity: 'monthly',
-    items: [], txs: []
-  };
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${p===PAPERS[0]?' selected':''}>${esc(p)}</option>`).join('');
-  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
-    <h2>Stock Summary</h2>
-    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:14px;">
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Paper Type</div>
-        <select class="filter" id="ss-paper-type" onchange="setSummaryPaperType(this.value)">${paperOpts}</select>
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">From</div>
-        <input class="filter" type="date" id="ss-from" value="${stockSummaryState.from}" onchange="setSummaryFrom(this.value)">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">To</div>
-        <input class="filter" type="date" id="ss-to" value="${stockSummaryState.to}" onchange="setSummaryTo(this.value)">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Group by</div>
-        <select class="filter" id="ss-granularity" onchange="setSummaryGranularity(this.value)">
-          <option value="monthly" selected>Monthly</option>
-          <option value="weekly">Weekly</option>
-        </select>
-      </div>
+  // Only initialize date defaults on first open (from === '') — preserving
+  // filters across tab switches keeps the user's context.
+  if (!stockSummaryState.from) {
+    const today = new Date();
+    const start = new Date(today.getFullYear(), today.getMonth() - 4, 1);
+    const iso = d => d.toISOString().slice(0, 10);
+    stockSummaryState.from = iso(start);
+    stockSummaryState.to   = iso(today);
+    if (!stockSummaryState.paperType) stockSummaryState.paperType = PAPERS[0];
+  }
+  const pane = document.getElementById('rt-summary');
+  if (!pane) return;
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${p===stockSummaryState.paperType?' selected':''}>${esc(p)}</option>`).join('');
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Stock Summary</h2>
+      <span style="color:var(--text2);font-size:12px;">Per-paper-type position with opening balance, in/out, and required-next.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportStockSummary()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printStockSummary()">&#128424; Print Summary</button>
       </div>
     </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="ss-paper-type" onchange="setSummaryPaperType(this.value)">${paperOpts}</select>
+      </div>
+      <div>
+        <div class="dash-flbl">From</div>
+        <input class="filter" type="date" id="ss-from" value="${stockSummaryState.from}" onchange="setSummaryFrom(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">To</div>
+        <input class="filter" type="date" id="ss-to" value="${stockSummaryState.to}" onchange="setSummaryTo(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">Group by</div>
+        <select class="filter" id="ss-granularity" onchange="setSummaryGranularity(this.value)">
+          <option value="monthly"${stockSummaryState.granularity==='monthly'?' selected':''}>Monthly</option>
+          <option value="weekly"${stockSummaryState.granularity==='weekly'?' selected':''}>Weekly</option>
+        </select>
+      </div>
+    </div>
     <div id="ss-content" style="font-size:12px;color:var(--text2);overflow-x:auto;">Loading…</div>
-    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
-  </div>`);
+  `;
   loadStockSummary();
 }
 
@@ -3045,7 +3069,7 @@ function renderStockSummary() {
             <td style="padding:4px 8px;">${esc(im.brand||'(blank)')}</td>
             <td style="padding:4px 8px;text-align:right;">${fmtPkts(parseFloat(im.packets||0))}</td>
             <td style="padding:4px 8px;">${esc(im.supplier||'—')}</td>
-            <td style="padding:4px 8px;"><button class="btn btn-sm" onclick="closeModal(); openImports();">Open Imports</button></td>
+            <td style="padding:4px 8px;"><button class="btn btn-sm" onclick="openImportsPage()">Open Imports</button></td>
           </tr>`).join('')}
         </table>
       </div>
@@ -3344,21 +3368,33 @@ function renderImportsTable() {
     const weight = (i.weight_kg === null || i.weight_kg === undefined || i.weight_kg === '')
       ? '—'
       : (+i.weight_kg).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg';
-    return `<tr>
-      <td>${status}</td>
-      <td>${item}</td>
-      <td style="text-align:right;white-space:nowrap;">${(+i.packets).toLocaleString()} ${unit}</td>
-      <td style="text-align:right;white-space:nowrap;">${weight}</td>
-      <td>${esc(i.supplier || '—')}</td>
-      <td style="white-space:nowrap;">${esc(fmtImpDate(i.booked_date))}</td>
-      <td style="white-space:nowrap;">${esc(fmtImpDate(i.expected_arrival))}</td>
-      <td>${esc(i.notes || '')}</td>
-      <td>${actions}</td>
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:8px 10px;">${status}</td>
+      <td style="padding:8px 10px;">${item}</td>
+      <td style="padding:8px 10px;text-align:right;white-space:nowrap;font-weight:600;">${(+i.packets).toLocaleString()} ${unit}</td>
+      <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${weight}</td>
+      <td style="padding:8px 10px;">${esc(i.supplier || '—')}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.booked_date))}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.expected_arrival))}</td>
+      <td style="padding:8px 10px;">${esc(i.notes || '')}</td>
+      <td style="padding:8px 10px;">${actions}</td>
     </tr>`;
   }).join('');
-  el.innerHTML = `<table class="ledger-table">
-    <tr><th>Status</th><th>Item</th><th>Quantity</th><th style="text-align:right;">Weight</th><th>Supplier</th><th>Booked</th><th>Expected</th><th>Notes</th><th></th></tr>
-    ${rows}
+  el.innerHTML = `<table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead>
+      <tr style="background:var(--bg2);">
+        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Status</th>
+        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Item</th>
+        <th style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Quantity</th>
+        <th style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Weight</th>
+        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Supplier</th>
+        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Booked</th>
+        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Expected</th>
+        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);">Notes</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
   </table>`;
 }
 
@@ -3469,46 +3505,56 @@ function printImports() {
 // paper consumed, on which press, with what finishing.
 const jobsReportState = { from: '', to: '', client: '' };
 
+// Open the Jobs Report full-page view. Same shape as openImportsPage —
+// route through openReportsGroup so the sidebar/back/etc. all work.
+function openJobsReportPage() {
+  openReportsGroup('jobs-group');
+}
+
 function openJobsReport() {
-  // Default window: last 30 days through today.
-  const today = new Date();
-  const start = new Date(today); start.setDate(today.getDate() - 29);
-  const iso = d => d.toISOString().slice(0, 10);
-  jobsReportState.from = iso(start);
-  jobsReportState.to   = iso(today);
-  jobsReportState.client = '';
+  const pane = document.getElementById('rt-jobs-report');
+  if (!pane) return;
+  // Default window: last 30 days through today. Only initialize on first open
+  // (from === '') so the user's filters persist across navigations.
+  if (!jobsReportState.from) {
+    const today = new Date();
+    const start = new Date(today); start.setDate(today.getDate() - 29);
+    const iso = d => d.toISOString().slice(0, 10);
+    jobsReportState.from = iso(start);
+    jobsReportState.to   = iso(today);
+  }
   // Distinct client list for the company filter — only from jobs that ARE
   // delivered, since this report only shows delivered jobs.
   const deliveredJobs = jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1);
   const clients = [...new Set(deliveredJobs.map(j => j.client).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width:1200px !important;">
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <h2 style="margin:0;">Jobs Report <span style="font-size:13px;color:var(--text2);font-weight:normal;">— delivered jobs only</span></h2>
-      <button class="btn btn-sm" onclick="closeModal()" style="padding:4px 10px;">&times; Close</button>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center;margin:14px 0;flex-wrap:wrap;">
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">From</div>
-        <input class="filter" type="date" id="jr-from" value="${jobsReportState.from}" onchange="setJrFrom(this.value)">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">To</div>
-        <input class="filter" type="date" id="jr-to" value="${jobsReportState.to}" onchange="setJrTo(this.value)">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Company</div>
-        <select class="filter" id="jr-client" onchange="setJrClient(this.value)">
-          <option value="">All companies</option>
-          ${clients.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
-        </select>
-      </div>
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Jobs Report</h2>
+      <span style="color:var(--text2);font-size:12px;">Delivered jobs only — date, company, PO, quantities, paper, machine, coatings.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportJobsReport()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printJobsReport()">&#128424; Print Report</button>
       </div>
     </div>
-    <div id="jr-content" style="max-height:calc(85vh - 160px);overflow:auto;font-size:12px;"></div>
-  </div>`);
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">From</div>
+        <input class="filter" type="date" id="jr-from" value="${jobsReportState.from}" onchange="setJrFrom(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">To</div>
+        <input class="filter" type="date" id="jr-to" value="${jobsReportState.to}" onchange="setJrTo(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">Company</div>
+        <select class="filter" id="jr-client" onchange="setJrClient(this.value)">
+          <option value="">All companies</option>
+          ${clients.map(c => `<option value="${esc(c)}"${jobsReportState.client===c?' selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div id="jr-content" style="font-size:12px;"></div>
+  `;
   renderJobsReport();
 }
 function setJrFrom(v)   { jobsReportState.from = v;   renderJobsReport(); }
@@ -3581,39 +3627,48 @@ function renderJobsReport() {
     return;
   }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
-  const tbody = rows.map(r => `<tr>
-    <td>E-${r.id}</td>
-    <td>${esc(r.jobcode)}</td>
-    <td>${esc(r.createdAt)}</td>
-    <td>${esc(r.deliveredAt)}</td>
-    <td>${esc(r.client)}</td>
-    <td>${esc(r.poNo)}</td>
-    <td style="text-align:right;">${esc(r.poQty)}</td>
-    <td style="text-align:right;">${esc(r.deliveredQty)}</td>
-    <td style="text-align:right;">${fmt(r.packets)}</td>
-    <td>${esc(r.paper)}</td>
-    <td>${esc(r.machine)}</td>
-    <td>${esc(r.coatings)}</td>
+  const td  = 'style="padding:8px 10px;"';
+  const tdR = 'style="padding:8px 10px;text-align:right;"';
+  const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
+  const tbody = rows.map(r => `<tr style="border-bottom:1px solid var(--border);">
+    <td ${td}>E-${r.id}</td>
+    <td ${td}>${esc(r.jobcode)}</td>
+    <td ${tdN}>${esc(r.createdAt)}</td>
+    <td ${tdN}>${esc(r.deliveredAt)}</td>
+    <td ${td}>${esc(r.client)}</td>
+    <td ${td}>${esc(r.poNo)}</td>
+    <td ${tdR}>${esc(r.poQty)}</td>
+    <td ${tdR}>${esc(r.deliveredQty)}</td>
+    <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
+    <td ${td}>${esc(r.paper)}</td>
+    <td ${td}>${esc(r.machine)}</td>
+    <td ${td}>${esc(r.coatings)}</td>
   </tr>`).join('');
+  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);"';
   el.innerHTML = `
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} delivered job${rows.length===1?'':'s'} in window</div>
-    <table class="ledger-table" style="font-size:12px;min-width:max-content;">
-      <tr>
-        <th>Job ID</th>
-        <th>Code</th>
-        <th>Created</th>
-        <th>Delivered</th>
-        <th>Company</th>
-        <th>PO No.</th>
-        <th>PO Qty</th>
-        <th>Delivered Qty</th>
-        <th>Packets</th>
-        <th>Paper</th>
-        <th>Machine</th>
-        <th>Coatings</th>
-      </tr>
-      ${tbody}
-    </table>`;
+    <div style="overflow-x:auto;">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+      <thead>
+        <tr style="background:var(--bg2);">
+          <th ${th}>Job ID</th>
+          <th ${th}>Code</th>
+          <th ${th}>Created</th>
+          <th ${th}>Delivered</th>
+          <th ${th}>Company</th>
+          <th ${th}>PO No.</th>
+          <th ${thR}>PO Qty</th>
+          <th ${thR}>Delivered Qty</th>
+          <th ${thR}>Packets</th>
+          <th ${th}>Paper</th>
+          <th ${th}>Machine</th>
+          <th ${th}>Coatings</th>
+        </tr>
+      </thead>
+      <tbody>${tbody}</tbody>
+    </table>
+    </div>`;
 }
 
 // Export the Jobs Report to .xlsx.
@@ -3914,7 +3969,9 @@ function openReportsGroup(groupId) {
   });
   // Default each group to its first pane on entry so the user sees data
   // immediately rather than an empty sidebar+blank area.
-  if (groupId === 'stocks-group') setReportsTab('stock-in');
+  if (groupId === 'stocks-group')   setReportsTab('stock-in');
+  if (groupId === 'analysis-group') setReportsTab('summary');
+  if (groupId === 'jobs-group')     setReportsTab('jobs-report');
 }
 
 // Return to the 3-card landing — hides every group.
@@ -3926,18 +3983,22 @@ function exitReportsGroup() {
   });
 }
 
-// Switch which pane is visible inside the Stocks group's sidebar.
+// Switch which pane is visible inside whichever report group is open.
 // Updates the .active state and shows the matching #rt-* container.
+// All report views render inline now (no modals), so every tab name maps
+// to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
-  // Only the inline panes have a #rt-* container; Summary skips this.
-  const inlinePanes = ['stock-in', 'stock-out'];
+  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
-  if (name === 'stock-in')  openStockMovementPane('in');
-  if (name === 'stock-out') openStockMovementPane('out');
+  if (name === 'stock-in')        openStockMovementPane('in');
+  if (name === 'stock-out')       openStockMovementPane('out');
+  if (name === 'summary')         openStockSummary();
+  if (name === 'inventory-report') openInventoryReport();
+  if (name === 'jobs-report')     openJobsReport();
 }
 
 // ── Stock In / Stock Out panes ───────────────────────────────
@@ -4170,21 +4231,26 @@ function renderStockMovement(direction, from, to) {
     const weightCell  = txKg === null
       ? '<span style="color:var(--text3)">—</span>'
       : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
-    return `<tr>
-      <td>${date}</td>
-      <td>${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
-      <td class="${cls}">${s}${fmt(pkts)} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${t.change.toLocaleString()} sheets</span></td>
-      <td>${balCell}</td>
-      <td>${weightCell}</td>
-      <td>${esc(t.reason||'')}</td>
-      <td>${job}</td>
-      <td>${esc(t.notes||'')}</td>
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
+      <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
+      <td style="padding:8px 10px;font-weight:600;" class="${cls}">${s}${fmt(pkts)} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${t.change.toLocaleString()} sheets</span></td>
+      <td style="padding:8px 10px;">${balCell}</td>
+      <td style="padding:8px 10px;">${weightCell}</td>
+      <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
+      <td style="padding:8px 10px;">${job}</td>
+      <td style="padding:8px 10px;">${esc(t.notes||'')}</td>
     </tr>`;
   }).join('');
+  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text2);"';
   document.getElementById(`sm-${direction}-content`).innerHTML = txs.length
-    ? `<table class="ledger-table">
-         <tr><th>When</th><th>Item</th><th>Change</th><th>Current Balance</th><th>Weight</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
-         ${rows}
+    ? `<table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+         <thead>
+           <tr style="background:var(--bg2);">
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Notes</th>
+           </tr>
+         </thead>
+         <tbody>${rows}</tbody>
        </table>`
     : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`;
 }
