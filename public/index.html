@@ -3236,13 +3236,13 @@ async function loadImports() {
 }
 
 // Page-level state for the Imports view (full page, not modal).
-// dateField picks which date column the From/To range filters against.
+// Two independent single-date filters: expected arrival, and booking date.
+// Either can be set on its own; setting both narrows to rows matching both.
 const importsPageState = {
   status: 'pending',
   paperType: '',
-  dateField: 'expected',
-  from: '',
-  to: '',
+  expectedDate: '',
+  bookedDate: '',
 };
 
 // Open the Imports full-page view. Routes through openReportsGroup so the
@@ -3290,19 +3290,12 @@ function renderImportsPage() {
         </select>
       </div>
       <div>
-        <div class="dash-flbl">Date Field</div>
-        <select class="filter" id="imp-date-field" onchange="setImportsFilter('dateField', this.value)">
-          <option value="expected"${state.dateField==='expected'?' selected':''}>Expected Arrival</option>
-          <option value="booked"${state.dateField==='booked'?' selected':''}>Booked Date</option>
-        </select>
+        <div class="dash-flbl">Expected Date</div>
+        <input class="filter" type="date" id="imp-expected-date" value="${state.expectedDate}" onchange="setImportsDate('expectedDate', this.value)">
       </div>
       <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="imp-from" value="${state.from}" onchange="setImportsDate('from', this.value)">
-      </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="imp-to" value="${state.to}" onchange="setImportsDate('to', this.value)">
+        <div class="dash-flbl">Booking Date</div>
+        <input class="filter" type="date" id="imp-booked-date" value="${state.bookedDate}" onchange="setImportsDate('bookedDate', this.value)">
       </div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetImportsFilters()">Reset filters</button>
     </div>
@@ -3319,7 +3312,7 @@ function setImportsDate(which, value) {
   renderImportsTable();
 }
 function resetImportsFilters() {
-  Object.assign(importsPageState, { status: 'pending', paperType: '', dateField: 'expected', from: '', to: '' });
+  Object.assign(importsPageState, { status: 'pending', paperType: '', expectedDate: '', bookedDate: '' });
   renderImportsPage();
   renderImportsTable();
 }
@@ -3342,24 +3335,19 @@ function fmtImpDate(d) {
   return s;
 }
 
-// Apply all active filters (status + paper type + date range on the chosen
-// date field) and return the visible rows in display order. Centralised so
+// Apply all active filters (status + paper type + exact-match expected and
+// booked dates) and return the visible rows in display order. Centralised so
 // the table, Print, and Excel export all see the exact same dataset.
 function filterImportsList() {
   const state = importsPageState;
   let list = importsCache.slice();
   if (state.status !== 'all') list = list.filter(i => i.status === state.status);
   if (state.paperType)        list = list.filter(i => (i.paper_type || '') === state.paperType);
-  if (state.from || state.to) {
-    const fieldKey = state.dateField === 'booked' ? 'booked_date' : 'expected_arrival';
-    list = list.filter(i => {
-      const raw = i[fieldKey];
-      if (!raw) return false;
-      const day = String(raw).slice(0, 10);
-      if (state.from && day < state.from) return false;
-      if (state.to   && day > state.to)   return false;
-      return true;
-    });
+  if (state.expectedDate) {
+    list = list.filter(i => i.expected_arrival && String(i.expected_arrival).slice(0, 10) === state.expectedDate);
+  }
+  if (state.bookedDate) {
+    list = list.filter(i => i.booked_date && String(i.booked_date).slice(0, 10) === state.bookedDate);
   }
   // Sort: latest first by default (newest id = most recently booked).
   // When viewing All, still bubble Pending to the top (they're actionable),
