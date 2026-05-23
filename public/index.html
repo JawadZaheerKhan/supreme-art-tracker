@@ -543,7 +543,7 @@
         <div class="report-card-title">Summary</div>
         <div class="report-card-desc">Stock Summary — per-paper-type position with opening balance, in/out, after-import, and required-next.</div>
       </button>
-      <button class="report-card" onclick="openImports()">
+      <button class="report-card" onclick="openImportsPage()">
         <div class="report-card-icon">&#128666;</div>
         <div class="report-card-title">Imports</div>
         <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders and mark them received to feed Stock Summary.</div>
@@ -573,6 +573,23 @@
       <main class="reports-content">
         <div id="rt-stock-in"  class="rt-pane"></div>
         <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Imports group — full-page view (no modal). Sidebar lists "Imports".
+       Filters live inline on the page: status + paper type + date period. -->
+  <div id="imports-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Imports</div>
+        <button class="rsb-item active" data-rt="imports">
+          <span class="rsb-icon">&#128666;</span> Pending Shipments
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-imports" class="rt-pane"></div>
       </main>
     </div>
   </div>
@@ -3167,38 +3184,142 @@ async function loadImports() {
   }
 }
 
-function openImports() {
-  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
-    <h2>Imports <span style="font-size:13px;color:var(--text2);font-weight:normal;">— booked-but-not-arrived shipments</span></h2>
-    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-      <button class="btn btn-sm btn-primary ceo-hide" onclick="openImportAdd()">+ New Import</button>
-      <div id="import-filter-wrap" style="margin-left:8px;">
-        <select class="filter" id="import-status-filter" onchange="renderImportsTable()">
-          <option value="pending" selected>Pending only</option>
-          <option value="all">All</option>
-          <option value="received">Received only</option>
-          <option value="cancelled">Cancelled only</option>
-        </select>
-      </div>
+// Page-level state for the Imports view (full page, not modal).
+// dateField: which date column the period filter applies to ('expected' or 'booked').
+const importsPageState = {
+  status: 'pending',
+  paperType: '',
+  dateField: 'expected',
+  period: 'all',
+  from: '',
+  to: '',
+};
+
+// Open the Imports full-page view. Routes through openReportsGroup so the
+// reports landing hides and the sidebar/back button work like the other
+// report sections (Stocks, Analysis).
+function openImportsPage() {
+  openReportsGroup('imports-group');
+  renderImportsPage();
+  loadImports().then(renderImportsTable);
+}
+
+// Build the page chrome (header, filters, table container) into #rt-imports
+// each time we open. We rebuild rather than reuse so a filter reset is just
+// a re-open and the markup always reflects current state.
+function renderImportsPage() {
+  const state = importsPageState;
+  const pane  = document.getElementById('rt-imports');
+  if (!pane) return;
+  const paperOpts  = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const periodOpts = [['all','All time'],['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Imports</h2>
+      <span style="color:var(--text2);font-size:12px;">Booked-but-not-arrived shipments.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm btn-primary ceo-hide" onclick="openImportAdd()">+ New Import</button>
         <button class="btn btn-sm" onclick="exportImports()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printImports()">&#128424; Print</button>
       </div>
     </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Status</div>
+        <select class="filter" id="imp-status" onchange="setImportsFilter('status', this.value)">
+          <option value="pending"${state.status==='pending'?' selected':''}>Pending only</option>
+          <option value="all"${state.status==='all'?' selected':''}>All</option>
+          <option value="received"${state.status==='received'?' selected':''}>Received only</option>
+          <option value="cancelled"${state.status==='cancelled'?' selected':''}>Cancelled only</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="imp-paper-filter" onchange="setImportsFilter('paperType', this.value)">
+          <option value="">All paper types</option>
+          ${paperOpts}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Date Field</div>
+        <select class="filter" id="imp-date-field" onchange="setImportsFilter('dateField', this.value)">
+          <option value="expected"${state.dateField==='expected'?' selected':''}>Expected Arrival</option>
+          <option value="booked"${state.dateField==='booked'?' selected':''}>Booked Date</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="imp-period" onchange="setImportsFilter('period', this.value)">${periodOpts}</select>
+      </div>
+      <div id="imp-custom-wrap" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="imp-from" value="${state.from}" onchange="setImportsCustom()"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="imp-to" value="${state.to}" onchange="setImportsCustom()"></div>
+      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetImportsFilters()">Reset filters</button>
+    </div>
     <div id="imports-table" style="font-size:13px;color:var(--text2);">Loading…</div>
-    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
-  </div>`);
-  loadImports().then(renderImportsTable);
+  `;
 }
 
-function renderImportsTable() {
-  const filter = document.getElementById('import-status-filter')?.value || 'pending';
-  const list = filter === 'all' ? importsCache : importsCache.filter(i => i.status === filter);
-  const el = document.getElementById('imports-table');
-  if (!el) return;
-  if (!list.length) {
-    el.innerHTML = `<div class="empty">No imports in this view. Click <b>+ New Import</b> to book one.</div>`;
+function setImportsFilter(key, value) {
+  importsPageState[key] = value;
+  if (key === 'period') {
+    const wrap = document.getElementById('imp-custom-wrap');
+    if (wrap) wrap.style.display = value === 'custom' ? 'flex' : 'none';
+    if (value !== 'custom') renderImportsTable();
     return;
+  }
+  renderImportsTable();
+}
+function setImportsCustom() {
+  importsPageState.from = document.getElementById('imp-from').value;
+  importsPageState.to   = document.getElementById('imp-to').value;
+  if (importsPageState.from && importsPageState.to) renderImportsTable();
+}
+function resetImportsFilters() {
+  Object.assign(importsPageState, { status: 'pending', paperType: '', dateField: 'expected', period: 'all', from: '', to: '' });
+  renderImportsPage();
+  renderImportsTable();
+}
+
+// Back-compat shim: a few places (openImportAdd Cancel, saveImport,
+// receiveImport, the Stock Summary "Open Imports" link) still call
+// openImports(). Route them through the new page.
+function openImports() { openImportsPage(); }
+
+// Format an ISO/date-only string as a clean local date (no time zone fluff).
+// '2026-05-01T00:00:00.000Z' → '2026-05-01'.
+function fmtImpDate(d) {
+  if (!d) return '—';
+  const s = String(d);
+  // Handle plain 'YYYY-MM-DD' already
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // Trim any timestamp portion to just the date for display
+  const dt = new Date(s);
+  if (!isNaN(dt)) return dt.toISOString().slice(0, 10);
+  return s;
+}
+
+// Apply all active filters (status + paper type + date period on the chosen
+// date field) and return the visible rows in display order. Centralised so
+// the table, Print, and Excel export all see the exact same dataset.
+function filterImportsList() {
+  const state = importsPageState;
+  let list = importsCache.slice();
+  if (state.status !== 'all') list = list.filter(i => i.status === state.status);
+  if (state.paperType)        list = list.filter(i => (i.paper_type || '') === state.paperType);
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  if (from || to) {
+    const fieldKey = state.dateField === 'booked' ? 'booked_date' : 'expected_arrival';
+    list = list.filter(i => {
+      const raw = i[fieldKey];
+      if (!raw) return false;
+      const day = String(raw).slice(0, 10);
+      if (from && day < from) return false;
+      if (to   && day > to)   return false;
+      return true;
+    });
   }
   // Sort: pending first, then by expected_arrival ascending.
   list.sort((a, b) => {
@@ -3207,6 +3328,17 @@ function renderImportsTable() {
     const bd = b.expected_arrival || '9999-12-31';
     return ad.localeCompare(bd);
   });
+  return list;
+}
+
+function renderImportsTable() {
+  const el = document.getElementById('imports-table');
+  if (!el) return;
+  const list = filterImportsList();
+  if (!list.length) {
+    el.innerHTML = `<div class="empty">No imports match these filters. Try resetting them, or click <b>+ New Import</b> to book one.</div>`;
+    return;
+  }
   const rows = list.map(i => {
     const item = [i.paper_type, i.size, i.gsm && (i.gsm + 'gsm'), i.brand].filter(Boolean).map(esc).join(' · ');
     const status = i.status === 'pending'
@@ -3225,8 +3357,8 @@ function renderImportsTable() {
       <td>${item}</td>
       <td style="text-align:right;">${(+i.packets).toLocaleString()} ${unit}</td>
       <td>${esc(i.supplier || '—')}</td>
-      <td>${esc(i.booked_date || '—')}</td>
-      <td>${esc(i.expected_arrival || '—')}</td>
+      <td>${esc(fmtImpDate(i.booked_date))}</td>
+      <td>${esc(fmtImpDate(i.expected_arrival))}</td>
       <td>${esc(i.notes || '')}</td>
       <td>${actions}</td>
     </tr>`;
@@ -3237,17 +3369,10 @@ function renderImportsTable() {
   </table>`;
 }
 
-// Return the imports rows currently visible (after the status filter) so the
-// Print and Export helpers reuse the exact same dataset the user sees.
+// Return the imports rows currently visible so Print and Export reuse the
+// exact same dataset the user sees on screen.
 function visibleImportsForExport() {
-  const filter = document.getElementById('import-status-filter')?.value || 'pending';
-  const list = filter === 'all' ? importsCache : importsCache.filter(i => i.status === filter);
-  return { list: [...list].sort((a, b) => {
-    if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
-    const ad = a.expected_arrival || '9999-12-31';
-    const bd = b.expected_arrival || '9999-12-31';
-    return ad.localeCompare(bd);
-  }), filterLabel: filter };
+  return { list: filterImportsList(), filterLabel: importsPageState.status };
 }
 
 // Export the Imports table (whatever status filter is active) to .xlsx.
@@ -3631,7 +3756,7 @@ function openImportAdd(id) {
         <textarea id="imp-notes" rows="2">${esc(editing?.notes || '')}</textarea></div>
     </div>
     <div class="modal-actions">
-      <button class="btn" onclick="openImports()">Cancel</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveImport(${id || 'null'})">${editing ? 'Save' : 'Book Import'}</button>
     </div>
   </div>`);
@@ -3716,7 +3841,9 @@ async function saveImport(id) {
     if (id) await api('PUT', `/api/imports/${id}`, body);
     else    await api('POST', '/api/imports',       body);
     notify(id ? 'Import updated' : 'Import booked');
-    openImports();
+    closeModal();
+    await loadImports();
+    renderImportsTable();
   } catch (e) { notify('Error: ' + e.message); }
 }
 
@@ -3731,7 +3858,8 @@ async function receiveImport(id) {
     await api('POST', `/api/imports/${id}/receive`, { packets });
     notify('Import received · stock added');
     await loadInventory(); // refresh balances
-    openImports();
+    await loadImports();
+    renderImportsTable();
   } catch (e) { notify('Error: ' + e.message); }
 }
 
@@ -4799,7 +4927,8 @@ async function cancelImport(id) {
   try {
     await api('POST', `/api/imports/${id}/cancel`);
     notify('Import cancelled');
-    openImports();
+    await loadImports();
+    renderImportsTable();
   } catch (e) { notify('Error: ' + e.message); }
 }
 
