@@ -166,13 +166,27 @@
      classes are present on the same card. */
   .job-card.is-pending    { border-left-color: #166534; }
   .job-card.is-done { opacity: 0.72; }
-  .job-top { display: flex; align-items: flex-start; gap: 12px; }
-  .job-meta { flex: 1; }
+  .job-top { display: flex; align-items: flex-start; gap: 16px; }
+  .job-meta { flex: 1; min-width: 0; }
   .job-id-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-  .job-id { font-size: 12px; font-weight: 600; color: var(--text2); }
-  .job-name { font-size: 15px; font-weight: 600; color: var(--text); }
-  .job-sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
-  .job-actions { display: flex; gap: 5px; align-items: flex-start; flex-wrap: wrap; }
+  /* Job ID is the primary identifier — a bit larger, bolder, and tinted
+     with the brand blue so it pops against the all-black labels. */
+  .job-id { font-size: 15px; font-weight: 700; color: var(--blue-text); letter-spacing: -0.01em; }
+  .job-name { font-size: 18px; font-weight: 700; color: var(--text); line-height: 1.3; }
+  .job-sub { font-size: 13px; color: var(--text); margin-top: 3px; font-weight: 500; }
+  /* Meta facts row — all text black; the "Code:", "Issued:" labels render
+     extra bold (700) and the values render normal weight so the eye can
+     separate label from value at a glance. */
+  .job-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; font-size: 14px; color: var(--text); line-height: 1.5; font-weight: 500; }
+  .job-facts b { color: var(--text); font-weight: 700; }
+  .job-actions { display: flex; gap: 5px; align-items: flex-start; flex-wrap: wrap; justify-content: flex-end; }
+  /* Right-side info panel — no background or border. Just a small column
+     of labelled facts. Labels are bold uppercase, values are normal-weight
+     black; contrast comes from the weight difference, not from a box. */
+  .job-side { display: flex; flex-direction: column; gap: 6px; min-width: 180px; font-size: 14px; color: var(--text); line-height: 1.4; }
+  .job-side .lbl { font-size: 10px; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 0.05em; }
+  .job-side .val { font-size: 14px; font-weight: 500; color: var(--text); }
+  .job-right { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
   .badge { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
   .badge-active { background: var(--blue-bg); color: var(--blue-text); }
   .badge-done { background: var(--green-bg); color: var(--green-text); }
@@ -1122,6 +1136,11 @@ function renderJobs() {
     const priNorm = normalizePriority(j.priority);
     const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
     const coatings = Array.isArray(j.coatings) ? j.coatings : [];
+    // Right-side panel now holds ONLY the Cut-to / offcut info — everything
+    // else (Unit Carton, Delivered PO, Deadline) lives in the left meta row.
+    const sidePanel = j.cut_size
+      ? `<div class="job-side"><div><div class="lbl">Cut to</div><div class="val">${esc(j.cut_size)}${j.offcut_size?` <span style="font-weight:500;">(offcut ${esc(j.offcut_size)})</span>`:''}</div></div></div>`
+      : '';
     return `
     <div class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''}">
       <div class="job-top">
@@ -1132,31 +1151,36 @@ function renderJobs() {
             ${priNorm === 'Urgent' ? '<span class="badge" style="font-size:10px;background:#dc2626;color:#fff;">URGENT</span>' : ''}
           </div>
           <div class="job-name">${esc(j.name)}</div>
-          <div class="job-sub">${esc(j.client)}${j.qty?' &middot; '+esc(j.qty)+' pcs':''}${j.deadline?' &middot; Due: '+esc(j.deadline):''}</div>
-          <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:12px;color:var(--text2);">
-            ${j.jobcode?`<span><b style="color:var(--text)">Code:</b> ${esc(j.jobcode)}</span>`:''}
-            ${j.dateissued?`<span><b style="color:var(--text)">Issued:</b> ${esc(j.dateissued)}</span>`:''}
-            ${j.size?`<span><b style="color:var(--text)">Size/GSM:</b> ${esc(j.size)}</span>`:''}
-            ${j.ups?`<span><b style="color:var(--text)">Ups:</b> ${esc(j.ups)}</span>`:''}
-            ${j.sheets?`<span><b style="color:var(--text)">Sheets:</b> ${esc(j.sheets)}</span>`:''}
-            ${j.paper?`<span><b style="color:var(--text)">Paper:</b> ${esc(j.paper)}</span>`:''}
-            ${j.machine?`<span><b style="color:var(--text)">Machine:</b> ${esc(j.machine)}</span>`:''}
-            ${coatings.length?`<span><b style="color:var(--text)">Coatings:</b> ${coatings.map(esc).join(', ')}</span>`:''}
-            ${j.delqty?`<span><b style="color:var(--text)">Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
-            ${j.cartonqty?`<span><b style="color:var(--text)">Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
-            ${j.cut_size?`<span><b style="color:var(--text)">Cut to:</b> ${esc(j.cut_size)}${j.offcut_size?' (offcut: '+esc(j.offcut_size)+')':''}</span>`:''}
+          <!-- Sub-line: Company first, then Code. PO Qty moves into the
+               facts row below so it groups with the production numbers. -->
+          <div class="job-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' &middot; ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>
+          <div class="job-facts">
+            ${j.qty?`<span><b>PO Qty:</b> ${esc(j.qty)} pcs</span>`:''}
+            ${j.dateissued?`<span><b>Issued:</b> ${esc(j.dateissued)}</span>`:''}
+            ${j.size?`<span><b>Size/GSM:</b> ${esc(j.size)}</span>`:''}
+            ${j.ups?`<span><b>Ups:</b> ${esc(j.ups)}</span>`:''}
+            ${j.sheets?`<span><b>Sheets:</b> ${esc(j.sheets)}</span>`:''}
+            ${j.paper?`<span><b>Paper:</b> ${esc(j.paper)}</span>`:''}
+            ${j.machine?`<span><b>Machine:</b> ${esc(j.machine)}</span>`:''}
+            ${coatings.length?`<span><b>Coatings:</b> ${coatings.map(esc).join(', ')}</span>`:''}
+            ${j.cartonqty?`<span><b>Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
+            ${j.delqty?`<span><b>Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
+            ${j.deadline?`<span><b>Deadline:</b> ${esc(j.deadline)}</span>`:''}
           </div>
           <div class="pipeline">${pipeline}</div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
-        <div class="job-actions">
-          ${pending && canIssueStock() ? `<button class="btn btn-sm btn-success" onclick="issueStock(${j.id})" title="Issue stock and start this job">&#10003; Issue Stock</button>` : ''}
-          <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
-          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
-          <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
-          <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
-          ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
-          ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+        <div class="job-right">
+          <div class="job-actions">
+            ${pending && canIssueStock() ? `<button class="btn btn-sm btn-success" onclick="issueStock(${j.id})" title="Issue stock and start this job">&#10003; Issue Stock</button>` : ''}
+            <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
+            <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+            <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
+            <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
+            ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
+            ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+          </div>
+          ${sidePanel}
         </div>
       </div>
     </div>`;
@@ -3212,13 +3236,13 @@ async function loadImports() {
 }
 
 // Page-level state for the Imports view (full page, not modal).
-// dateField picks which date column the From/To range filters against.
+// Two independent single-date filters: expected arrival, and booking date.
+// Either can be set on its own; setting both narrows to rows matching both.
 const importsPageState = {
   status: 'pending',
   paperType: '',
-  dateField: 'expected',
-  from: '',
-  to: '',
+  expectedDate: '',
+  bookedDate: '',
 };
 
 // Open the Imports full-page view. Routes through openReportsGroup so the
@@ -3266,19 +3290,12 @@ function renderImportsPage() {
         </select>
       </div>
       <div>
-        <div class="dash-flbl">Date Field</div>
-        <select class="filter" id="imp-date-field" onchange="setImportsFilter('dateField', this.value)">
-          <option value="expected"${state.dateField==='expected'?' selected':''}>Expected Arrival</option>
-          <option value="booked"${state.dateField==='booked'?' selected':''}>Booked Date</option>
-        </select>
+        <div class="dash-flbl">Expected Date</div>
+        <input class="filter" type="date" id="imp-expected-date" value="${state.expectedDate}" onchange="setImportsDate('expectedDate', this.value)">
       </div>
       <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="imp-from" value="${state.from}" onchange="setImportsDate('from', this.value)">
-      </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="imp-to" value="${state.to}" onchange="setImportsDate('to', this.value)">
+        <div class="dash-flbl">Booking Date</div>
+        <input class="filter" type="date" id="imp-booked-date" value="${state.bookedDate}" onchange="setImportsDate('bookedDate', this.value)">
       </div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetImportsFilters()">Reset filters</button>
     </div>
@@ -3295,7 +3312,7 @@ function setImportsDate(which, value) {
   renderImportsTable();
 }
 function resetImportsFilters() {
-  Object.assign(importsPageState, { status: 'pending', paperType: '', dateField: 'expected', from: '', to: '' });
+  Object.assign(importsPageState, { status: 'pending', paperType: '', expectedDate: '', bookedDate: '' });
   renderImportsPage();
   renderImportsTable();
 }
@@ -3318,24 +3335,19 @@ function fmtImpDate(d) {
   return s;
 }
 
-// Apply all active filters (status + paper type + date range on the chosen
-// date field) and return the visible rows in display order. Centralised so
+// Apply all active filters (status + paper type + exact-match expected and
+// booked dates) and return the visible rows in display order. Centralised so
 // the table, Print, and Excel export all see the exact same dataset.
 function filterImportsList() {
   const state = importsPageState;
   let list = importsCache.slice();
   if (state.status !== 'all') list = list.filter(i => i.status === state.status);
   if (state.paperType)        list = list.filter(i => (i.paper_type || '') === state.paperType);
-  if (state.from || state.to) {
-    const fieldKey = state.dateField === 'booked' ? 'booked_date' : 'expected_arrival';
-    list = list.filter(i => {
-      const raw = i[fieldKey];
-      if (!raw) return false;
-      const day = String(raw).slice(0, 10);
-      if (state.from && day < state.from) return false;
-      if (state.to   && day > state.to)   return false;
-      return true;
-    });
+  if (state.expectedDate) {
+    list = list.filter(i => i.expected_arrival && String(i.expected_arrival).slice(0, 10) === state.expectedDate);
+  }
+  if (state.bookedDate) {
+    list = list.filter(i => i.booked_date && String(i.booked_date).slice(0, 10) === state.bookedDate);
   }
   // Sort: latest first by default (newest id = most recently booked).
   // When viewing All, still bubble Pending to the top (they're actionable),
@@ -3364,7 +3376,6 @@ function renderImportsTable() {
     return;
   }
   const rows = list.map(i => {
-    const item = [i.paper_type, i.size, i.gsm && (i.gsm + 'gsm'), i.brand].filter(Boolean).map(esc).join(' · ');
     const status = i.status === 'pending'
       ? '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Pending</span>'
       : i.status === 'received'
@@ -3381,7 +3392,10 @@ function renderImportsTable() {
       : (+i.weight_kg).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg';
     return `<tr style="border-bottom:1px solid var(--border);">
       <td style="padding:8px 10px;">${status}</td>
-      <td style="padding:8px 10px;">${item}</td>
+      <td style="padding:8px 10px;font-weight:500;">${esc(i.paper_type || '—')}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${esc(i.size || '—')}</td>
+      <td style="padding:8px 10px;text-align:right;">${esc(i.gsm || '—')}</td>
+      <td style="padding:8px 10px;">${esc(i.brand || '—')}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;font-weight:600;">${(+i.packets).toLocaleString()} ${unit}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${weight}</td>
       <td style="padding:8px 10px;">${esc(i.supplier || '—')}</td>
@@ -3391,22 +3405,29 @@ function renderImportsTable() {
       <td style="padding:8px 10px;">${actions}</td>
     </tr>`;
   }).join('');
-  el.innerHTML = `<table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+  // Shared header style — kept inline so it also applies inside printed/
+  // popped windows that don't load our stylesheet.
+  const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  el.innerHTML = `<div style="overflow-x:auto;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
     <thead>
       <tr style="background:var(--bg2);">
-        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Status</th>
-        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Item</th>
-        <th style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Quantity</th>
-        <th style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Weight</th>
-        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Supplier</th>
-        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Booked</th>
-        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Expected</th>
-        <th style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;">Notes</th>
+        <th ${thL}>Status</th>
+        <th ${thL}>Paper Type</th>
+        <th ${thL}>Size</th>
+        <th ${thR}>GSM</th>
+        <th ${thL}>Brand</th>
+        <th ${thR}>Quantity</th>
+        <th ${thR}>Weight</th>
+        <th ${thL}>Supplier</th>
+        <th ${thL}>Booked</th>
+        <th ${thL}>Expected</th>
+        <th ${thL}>Notes</th>
         <th></th>
       </tr>
     </thead>
     <tbody>${rows}</tbody>
-  </table>`;
+  </table></div>`;
 }
 
 // Return the imports rows currently visible so Print and Export reuse the
