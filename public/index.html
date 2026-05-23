@@ -115,6 +115,12 @@
   .combo-bal { color: var(--text2); font-size: 12px; white-space: nowrap; }
   .combo-empty { padding: 10px 12px; color: var(--text2); font-size: 12px; font-style: italic; }
   .stock-hint { font-size: 12px; color: var(--text2); }
+  /* Hide the native spinner arrows on number inputs INSIDE the calculator
+     popover — the up/down arrows steal horizontal space and look noisy in
+     the compact size box. Keyboard still works fine. */
+  #calc-popover input[type="number"]::-webkit-inner-spin-button,
+  #calc-popover input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  #calc-popover input[type="number"] { -moz-appearance: textfield; }
   .stock-hint.low { color: #d97706; font-weight: 600; }
   .stock-hint.out { color: #A32D2D; font-weight: 600; }
   .main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
@@ -5143,11 +5149,16 @@ function openCalculator() {
           <button type="button" class="btn btn-sm" id="calc-unit-mm-btn" onclick="setCalcUnit('mm')">mm</button>
         </span>
       </label>
-      <!-- Single text input accepting '20x30' (or '20X30', '20 x 30'). Same
-           format used elsewhere in the app (Imports, +Stock modal, etc.) so
-           it's instantly familiar. -->
+      <!-- Compound size input: two number fields joined visually by an
+           always-visible × separator. User types just digits — the × is
+           non-editable. The outer wrapper carries the border so the whole
+           thing reads as a single input box. -->
       <div style="display:flex;gap:8px;align-items:center;">
-        <input type="text" id="calc-size" placeholder="20x30" oninput="calcRecalc()" style="flex:1;">
+        <div style="flex:1;display:flex;align-items:center;border:1px solid var(--border);border-radius:var(--radius-sm);background:#fff;">
+          <input type="number" id="calc-w" placeholder="20" step="0.01" min="0" oninput="calcRecalc()" style="flex:1;border:none;background:transparent;padding:8px 10px;min-width:0;outline:none;font:inherit;color:inherit;-moz-appearance:textfield;">
+          <span style="color:var(--text2);font-weight:600;padding:0 4px;user-select:none;">×</span>
+          <input type="number" id="calc-h" placeholder="30" step="0.01" min="0" oninput="calcRecalc()" style="flex:1;border:none;background:transparent;padding:8px 10px;min-width:0;outline:none;font:inherit;color:inherit;-moz-appearance:textfield;">
+        </div>
         <span id="calc-unit-label" style="color:var(--text2);min-width:42px;font-size:13px;">inches</span>
       </div>
     </div>
@@ -5222,7 +5233,7 @@ function calcSetEdit(field) {
 }
 
 function calcReset() {
-  ['calc-paper-type','calc-size','calc-gsm','calc-weight','calc-sheets','calc-packets'].forEach(id => {
+  ['calc-paper-type','calc-w','calc-h','calc-gsm','calc-weight','calc-sheets','calc-packets'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
@@ -5235,10 +5246,8 @@ function calcReset() {
 
 function calcRecalc() {
   const paperType = (document.getElementById('calc-paper-type')||{}).value || '';
-  const sizeStr   = (document.getElementById('calc-size')||{}).value || '';
-  const dims      = parseSizeDims(sizeStr);
-  const w         = dims ? dims.w : NaN;
-  const h         = dims ? dims.h : NaN;
+  const w   = parseFloat((document.getElementById('calc-w')||{}).value);
+  const h   = parseFloat((document.getElementById('calc-h')||{}).value);
   const gsm = parseFloat((document.getElementById('calc-gsm')||{}).value);
   const info = document.getElementById('calc-info');
   const packLabel = document.getElementById('calc-pack-label');
