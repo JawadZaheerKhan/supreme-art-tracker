@@ -87,6 +87,21 @@
   .inv-badge.out { background: #fee2e2; color: #991b1b; }
   .inv-badge.offcut { background: #e0e7ff; color: #3730a3; }
   .inv-actions { display: flex; gap: 6px; }
+  /* Grouped card — one paper with multiple brand variants. Vertical
+     layout: header (paper + total), then one row per brand below. */
+  .inv-card-grouped { display: block; padding: 14px 18px 10px; }
+  .inv-group-head   { display: flex; align-items: flex-start; gap: 16px; padding-bottom: 10px; border-bottom: 1px dashed var(--border); }
+  .inv-group-head .inv-name { flex: 1; }
+  .inv-group-total  { text-align: right; min-width: 110px; }
+  .inv-group-count  { font-size: 11px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; background: var(--bg2); padding: 2px 8px; border-radius: 10px; }
+  .inv-group-body   { display: flex; flex-direction: column; }
+  .inv-brand-row    { display: flex; align-items: center; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .inv-brand-row:last-child { border-bottom: none; }
+  .ibr-brand { flex: 1; font-size: 14px; color: var(--text); }
+  .ibr-bal   { text-align: right; min-width: 110px; }
+  .ibr-bal-num { font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.1; }
+  .ibr-bal-sub { font-size: 11px; color: var(--text2); margin-top: 2px; }
+  .ibr-actions { display: flex; gap: 6px; }
   .ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .ledger-table th, .ledger-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   .ledger-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); font-weight: 700; }
@@ -114,6 +129,12 @@
   .combo-item.out { color: var(--text2); }
   .combo-bal { color: var(--text2); font-size: 12px; white-space: nowrap; }
   .combo-empty { padding: 10px 12px; color: var(--text2); font-size: 12px; font-style: italic; }
+  /* Paper picker — group header row (non-clickable) plus indented brand
+     rows under it. Visual cue: header has a slightly darker background
+     and tighter padding; brand rows are indented via padding-left. */
+  .combo-group-head { padding: 6px 12px; font-size: 12px; font-weight: 700; color: var(--text); background: var(--bg2); display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); }
+  .combo-group-tag  { font-size: 10px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; margin-left: 8px; padding: 1px 6px; border-radius: 9px; background: var(--bg); }
+  .combo-brand-row  { font-size: 13px; }
   .stock-hint { font-size: 12px; color: var(--text2); }
   /* Hide the native spinner arrows on number inputs INSIDE the calculator
      popover — the up/down arrows steal horizontal space and look noisy in
@@ -1346,14 +1367,10 @@ function renderInventoryFilters() {
   document.getElementById('inv-size-filter').innerHTML = `<option value="">All sizes</option>` + sizes.map(s => `<option value="${esc(s)}" ${invFilterSize===s?'selected':''}>${esc(s)}</option>`).join('');
   document.getElementById('inv-gsm-filter').innerHTML  = `<option value="">All GSM</option>` + gsms.map(g => `<option value="${esc(g)}" ${invFilterGsm===g?'selected':''}>${esc(g)} gsm</option>`).join('');
 }
-function renderInventoryList() {
-  const filtered = getInventoryFiltered();
-  const el = document.getElementById('inventory-list');
-  if (!filtered.length) {
-    el.innerHTML = `<div class="empty">${inventory.length===0?'No inventory items yet. Click <b>+ New Paper</b> to add the first one.':'No items match this filter.'}</div>`;
-    return;
-  }
-  el.innerHTML = filtered.map(it => {
+// Single-row card body for one inventory item. Pulled out as a helper so
+// the grouped multi-brand card (renderInvBrandRow) can reuse the same
+// pill / spec / brand-line logic for each brand row inside the group.
+function renderInvCardHtml(it) {
     const state = invStockState(it);
     // Stock state on this branch only has 'out' or 'ok' (reorder-threshold
     // was removed). Combine the Out-of-Stock badge with the Offcut badge
@@ -1419,6 +1436,111 @@ function renderInventoryList() {
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
     </div>`;
+}
+
+// One row inside a multi-brand group card. Compact: brand · supplier on the
+// left, packets + sheets in the middle, per-brand action buttons on the
+// right. Shares the +Stock / History / Edit / Delete handlers with the
+// standalone card — they target this specific inventory item by id.
+function renderInvBrandRow(it) {
+  const sheets = it.current_balance || 0;
+  const ps     = packetSize(it.paper_type);
+  const unit   = packetUnitLabel(it.paper_type).toLowerCase();
+  const pkts   = sheets / ps;
+  const pktsStr = (Number.isInteger(pkts) ? pkts : +pkts.toFixed(2)).toLocaleString();
+  const brandText = it.brand
+    ? `<b style="text-transform:uppercase;letter-spacing:0.03em;">${esc(it.brand)}</b>`
+    : '<span style="color:var(--text2);font-style:italic;">No brand</span>';
+  const supplierText = it.supplier
+    ? `<span style="color:var(--text2);font-weight:500;"> · ${esc(it.supplier)}</span>`
+    : '';
+  // Movement pills (per-brand, since each brand has its own ledger).
+  const unitShort = unit.replace(/s$/, '');
+  const fmtMove = (s) => {
+    if (!s) return null;
+    const m = Math.abs(s) / ps;
+    return (Number.isInteger(m) ? m : +m.toFixed(2)).toLocaleString();
+  };
+  const lastIn  = fmtMove(it.latest_in_sheets);
+  const lastOut = fmtMove(it.latest_out_sheets);
+  const pills =
+    (lastIn  ? `<span title="Last IN: +${lastIn} ${unitShort}" style="display:inline-block;background:#dcfce7;color:#166534;font-weight:600;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:6px;">&#8593;+${lastIn}</span>` : '') +
+    (lastOut ? `<span title="Last OUT: -${lastOut} ${unitShort}" style="display:inline-block;background:#fee2e2;color:#991b1b;font-weight:600;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:3px;">&#8595;−${lastOut}</span>` : '');
+  return `
+    <div class="inv-brand-row">
+      <div class="ibr-brand">${brandText}${supplierText}${pills}</div>
+      <div class="ibr-bal">
+        <div class="ibr-bal-num">${pktsStr}</div>
+        <div class="ibr-bal-sub">${sheets.toLocaleString()} sheets</div>
+      </div>
+      <div class="ibr-actions">
+        <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History</button>
+        <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
+        ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
+      </div>
+    </div>`;
+}
+
+// Card that groups multiple brand variants of the same paper into one
+// visual block. Header shows the paper / size / gsm + TOTAL balance
+// across all brands; body lists each brand as a sub-row with its own
+// quantity + action buttons.
+function renderInvGroupCardHtml(items) {
+  const rep = items[0];
+  // Group state = worst stock state across brands (out wins). Visually the
+  // group is "out" only if ALL brands are out.
+  const allOut = items.every(it => invStockState(it) === 'out');
+  const state  = allOut ? 'out' : 'ok';
+  const stockBadge  = state === 'out' ? '<span class="inv-badge out">Out of Stock</span>' : '';
+  const offcutBadge = rep.is_offcut    ? '<span class="inv-badge offcut">Offcut</span>'    : '';
+  const badge = offcutBadge + stockBadge;
+  const specStr = [rep.size, rep.gsm ? rep.gsm + ' gsm' : ''].filter(Boolean).map(esc).join(' · ');
+  const specChip = specStr ? `<span class="inv-spec-chip">${specStr}</span>` : '';
+  const totalSheets = items.reduce((a, it) => a + (it.current_balance || 0), 0);
+  const ps    = packetSize(rep.paper_type);
+  const unit  = packetUnitLabel(rep.paper_type).toLowerCase();
+  const pkts  = totalSheets / ps;
+  const pktsStr = (Number.isInteger(pkts) ? pkts : +pkts.toFixed(2)).toLocaleString();
+  // Sort brand rows by brand name so the order is stable run-to-run.
+  const sortedItems = [...items].sort((a, b) => (a.brand || '').localeCompare(b.brand || ''));
+  return `
+    <div class="inv-card ${state} inv-card-grouped">
+      <div class="inv-group-head">
+        <div class="inv-name">${esc(rep.paper_type)}${specChip}${badge}<span class="inv-group-count">${items.length} brands</span></div>
+        <div class="inv-group-total">
+          <div class="inv-balance-num">${pktsStr}</div>
+          <div class="inv-balance-unit">total ${unit}</div>
+          <div class="inv-balance-sub">${totalSheets.toLocaleString()} sheets</div>
+        </div>
+      </div>
+      <div class="inv-group-body">
+        ${sortedItems.map(renderInvBrandRow).join('')}
+      </div>
+    </div>`;
+}
+
+function renderInventoryList() {
+  const filtered = getInventoryFiltered();
+  const el = document.getElementById('inventory-list');
+  if (!filtered.length) {
+    el.innerHTML = `<div class="empty">${inventory.length===0?'No inventory items yet. Click <b>+ New Paper</b> to add the first one.':'No items match this filter.'}</div>`;
+    return;
+  }
+  // Group filtered items by (paper_type, size, gsm, is_offcut). Items
+  // sharing all four are brand variants of the same logical paper and get
+  // rendered as a single grouped card. Singletons render as before.
+  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || '', it.is_offcut ? 'offcut' : 'fresh'].join('||');
+  const groupOrder = [];   // preserves filtered-list order on first encounter
+  const groups     = new Map();
+  for (const it of filtered) {
+    const k = keyOf(it);
+    if (!groups.has(k)) { groups.set(k, []); groupOrder.push(k); }
+    groups.get(k).push(it);
+  }
+  el.innerHTML = groupOrder.map(k => {
+    const items = groups.get(k);
+    return items.length === 1 ? renderInvCardHtml(items[0]) : renderInvGroupCardHtml(items);
   }).join('');
 }
 function renderInventory() {
@@ -5399,7 +5521,6 @@ function calcTabsHTML(active) {
 function openCalculatorJobMode() {
   const pop = document.getElementById('calc-popover');
   if (!pop) return;
-  jcalcUnit = 'in';
   pop.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <h2 style="margin:0;font-size:16px;">&#129518; Calculator</h2>
@@ -5789,20 +5910,58 @@ function paperFilter() {
   const q = (input.value || '').toLowerCase().trim();
   const filtered = inventory.filter(it => {
     if (!q) return true;
-    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''}`.toLowerCase();
+    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
     return hay.includes(q);
   });
   if (!filtered.length) {
     list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
     return;
   }
-  list.innerHTML = filtered.map(it => {
-    const bal = (it.current_balance || 0).toLocaleString();
-    const cls = (it.current_balance || 0) <= 0 ? 'combo-item out' : 'combo-item';
-    return `<div class="${cls}" onclick="paperSelect(${it.id})">
-      <span>${esc(paperItemLabel(it))}</span>
-      <span class="combo-bal">${bal} sheets</span>
-    </div>`;
+  // Group items by (paper_type, size, gsm, is_offcut). Within each group,
+  // brand variants render as indented rows. Singletons collapse the group
+  // header into the row (no extra heading row) to keep the list compact.
+  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || '', it.is_offcut ? 'offcut' : 'fresh'].join('||');
+  const order  = [];
+  const groups = new Map();
+  for (const it of filtered) {
+    const k = keyOf(it);
+    if (!groups.has(k)) { groups.set(k, []); order.push(k); }
+    groups.get(k).push(it);
+  }
+  list.innerHTML = order.map(k => {
+    const items = groups.get(k);
+    const rep   = items[0];
+    if (items.length === 1) {
+      // Singleton — render the original single-line row.
+      const bal = (rep.current_balance || 0).toLocaleString();
+      const cls = (rep.current_balance || 0) <= 0 ? 'combo-item out' : 'combo-item';
+      return `<div class="${cls}" onclick="paperSelect(${rep.id})">
+        <span>${esc(paperItemLabel(rep))}</span>
+        <span class="combo-bal">${bal} sheets</span>
+      </div>`;
+    }
+    // Multi-brand group — non-clickable header + one clickable row per brand.
+    const totalSheets = items.reduce((a, it) => a + (it.current_balance || 0), 0);
+    const headerLabel = [rep.paper_type, rep.size, rep.gsm && (rep.gsm + 'gsm')].filter(Boolean).map(esc).join(' · ');
+    const sorted = [...items].sort((a, b) => (a.brand || '').localeCompare(b.brand || ''));
+    const brandRows = sorted.map(it => {
+      const bal = (it.current_balance || 0).toLocaleString();
+      const cls = (it.current_balance || 0) <= 0 ? 'combo-item combo-brand-row out' : 'combo-item combo-brand-row';
+      const brandText = it.brand
+        ? `<b style="text-transform:uppercase;letter-spacing:0.03em;">${esc(it.brand)}</b>`
+        : '<span style="font-style:italic;color:var(--text2);">no brand</span>';
+      const supplierText = it.supplier ? `<span style="color:var(--text2);"> · ${esc(it.supplier)}</span>` : '';
+      return `<div class="${cls}" onclick="paperSelect(${it.id})">
+        <span style="padding-left:16px;">${brandText}${supplierText}</span>
+        <span class="combo-bal">${bal} sheets</span>
+      </div>`;
+    }).join('');
+    return `
+      <div class="combo-group-head">
+        <span>${headerLabel}<span class="combo-group-tag">${items.length} brands</span></span>
+        <span class="combo-bal" style="font-weight:600;">${totalSheets.toLocaleString()} sheets total</span>
+      </div>
+      ${brandRows}`;
   }).join('');
 }
 function paperSelect(itemId) {
