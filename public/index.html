@@ -2593,6 +2593,10 @@ function buildInventoryReportRows() {
   const rows = [...groups.values()].map(g => {
     const ps = packetSize(g.rep.paper_type);
     const wPerPack = packWeightKg(g.rep.paper_type, g.rep.size, g.rep.gsm);
+    // Items count == 1 per group (one logical paper). Multiple brand
+    // variants of the same paper/size/gsm/fresh-offcut are not separate
+    // items — they're a single item with several brands. The Brands
+    // column already surfaces the variant count.
     return {
       paperType:  g.rep.paper_type,
       size:       g.rep.size || '',
@@ -2602,7 +2606,8 @@ function buildInventoryReportRows() {
       supplier:   g.rep.supplier || '',
       brandCount: g.brands.size,
       supplierCount: g.suppliers.size,
-      itemCount:  g.itemCount,
+      itemCount:  1,                  // always 1 — see comment above
+      rawRowCount: g.itemCount,        // kept for export/audit reference
       packets:    g.totalSheets / ps,
       sheets:     g.totalSheets,
       weightKg:   wPerPack === null ? null : (g.totalSheets / ps) * wPerPack,
@@ -2635,12 +2640,16 @@ function renderInventoryReport() {
     el.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">No inventory items match this filter.</div>`;
     return;
   }
-  // Totals across all rows for the footer.
+  // Totals across all rows for the footer. Note: packets sums across paper
+  // types — cards (100/pkt) and reams (500/ream) get added together, so the
+  // figure is "total packing units" rather than a single physical unit. Fine
+  // for a glance; for precise math filter by paper type first.
   const total = rows.reduce((a, r) => ({
-    sheets: a.sheets + r.sheets,
-    weight: a.weight + (r.weightKg || 0),
-    items:  a.items  + r.itemCount,
-  }), { sheets: 0, weight: 0, items: 0 });
+    sheets:  a.sheets  + r.sheets,
+    weight:  a.weight  + (r.weightKg || 0),
+    items:   a.items   + r.itemCount,
+    packets: a.packets + (r.packets || 0),
+  }), { sheets: 0, weight: 0, items: 0, packets: 0 });
   // Column layout depends on group mode.
   const extraCol = groupBy === 'brand' ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand</th>'
                  : groupBy === 'supplier' ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Supplier</th>'
@@ -2685,7 +2694,7 @@ function renderInventoryReport() {
         <tr style="background:var(--bg2);font-weight:600;">
           <td colspan="${groupBy === 'consolidated' ? 5 : 5}" style="padding:8px;">Total</td>
           <td style="padding:8px;text-align:right;">${total.items}</td>
-          <td style="padding:8px;text-align:right;">—</td>
+          <td style="padding:8px;text-align:right;">${fmtPkts(total.packets, {keepZero:true})}</td>
           <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
           <td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>
         </tr>
