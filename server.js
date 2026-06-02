@@ -902,12 +902,14 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     `;
     const item = result[0];
 
-    // Admin-only direct balance correction. We write a transaction with
-    // reason='correction' so the per-item History modal still shows the
-    // change (full audit trail), but the aggregate movement report
+    // Direct balance correction — any writeable role (admin, stock, user)
+    // can adjust the balance. We write a transaction with reason='correction'
+    // so the per-item History modal still shows the change with the editor's
+    // identity (full audit trail), but the aggregate movement report
     // (Stock In / Stock Out / Dashboard) filters this reason out so it
-    // doesn't pollute the in/out totals.
-    if (req.user && req.user.role === 'admin' && current_balance !== undefined && current_balance !== null && current_balance !== '') {
+    // doesn't pollute the in/out totals. CEO is blocked upstream by
+    // requireWriteUser, so they never reach this code path.
+    if (req.user && current_balance !== undefined && current_balance !== null && current_balance !== '') {
       const newBalance = parseInt(current_balance, 10);
       if (Number.isFinite(newBalance) && newBalance !== oldBalance) {
         const delta = newBalance - oldBalance;
