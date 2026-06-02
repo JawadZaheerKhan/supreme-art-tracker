@@ -2738,15 +2738,17 @@ function buildInventoryReportRows() {
       unit:       packetUnitLabel(g.rep.paper_type),
     };
   });
-  // Sort: paper type → size (numeric) → gsm (numeric) → fresh-before-offcut → brand/supplier.
+  // Sort: paper type → gsm (numeric) → size (numeric) → fresh-before-offcut → brand/supplier.
+  // GSM leads inside each paper type so all 208 gsm rows cluster together
+  // (then 230, 250, …), and size becomes the secondary key inside each gsm.
   rows.sort((a, b) => {
     if (a.paperType !== b.paperType) return a.paperType.localeCompare(b.paperType);
+    const ag = parseFloat(a.gsm) || 0, bg = parseFloat(b.gsm) || 0;
+    if (ag !== bg) return ag - bg;
     const ad = parseSizeInches(a.size) || { w: 0, h: 0 };
     const bd = parseSizeInches(b.size) || { w: 0, h: 0 };
     if (ad.w !== bd.w) return ad.w - bd.w;
     if (ad.h !== bd.h) return ad.h - bd.h;
-    const ag = parseFloat(a.gsm) || 0, bg = parseFloat(b.gsm) || 0;
-    if (ag !== bg) return ag - bg;
     if (a.isOffcut !== b.isOffcut) return a.isOffcut ? 1 : -1;
     if (groupBy === 'brand'    && a.brand    !== b.brand)    return a.brand.localeCompare(b.brand);
     if (groupBy === 'supplier' && a.supplier !== b.supplier) return a.supplier.localeCompare(b.supplier);
