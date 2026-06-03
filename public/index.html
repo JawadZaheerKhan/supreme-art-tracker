@@ -234,6 +234,21 @@
   .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
   .empty { text-align: center; padding: 3rem 1rem; color: var(--text2); font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
+  /* Branded dialogs (confirm / alert / prompt) — sit above the regular
+     modal overlay (z-index 200) so a dialog can interrupt a form modal.
+     The icon at the top is colour-coded by kind. Buttons live on the
+     bottom row, right-aligned. */
+  .dlg-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 400; padding: 1rem; animation: dlgFade 0.12s ease-out; }
+  @keyframes dlgFade { from { opacity: 0; } to { opacity: 1; } }
+  .dlg-box { background: var(--bg); border-radius: 12px; border: 1px solid var(--border); padding: 22px 24px 20px; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,0.25); animation: dlgPop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+  @keyframes dlgPop { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  .dlg-icon { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; margin-bottom: 14px; line-height: 1; }
+  .dlg-title { font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.3; margin-bottom: 6px; }
+  .dlg-msg { font-size: 14px; color: var(--text2); line-height: 1.5; margin-bottom: 18px; }
+  .dlg-input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; font-family: var(--font); background: var(--bg); color: var(--text); margin-bottom: 18px; outline: none; transition: border-color 0.12s; }
+  .dlg-input:focus { border-color: #1e40af; box-shadow: 0 0 0 3px rgba(30, 64, 175, 0.12); }
+  .dlg-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .dlg-actions .btn { min-width: 80px; }
   /* Floating calculator popover — sits ABOVE any open modal so it can be used
      while editing a job card or other form. Top-right corner with a small
      offset; scrolls internally if the viewport is short. */
@@ -1682,12 +1697,13 @@ async function deleteInvFieldValue(field, value) {
   if (!isAdmin()) return;
   const count = inventory.filter(i => (i[field] || '') === value).length;
   const fieldLabel = field === 'brand' ? 'brand' : 'supplier';
-  if (!confirm(
-    `Remove "${value}" from the ${fieldLabel} list?\n\n` +
-    `It will be cleared from ${count} item${count !== 1 ? 's' : ''}. ` +
-    `The items themselves stay in inventory — they just lose this ${fieldLabel} tag.\n\n` +
-    `This cannot be undone.`
-  )) return;
+  const ok = await confirmDialog({
+    title: `Remove "${value}" from ${fieldLabel}s?`,
+    message: `It will be cleared from ${count} item${count !== 1 ? 's' : ''}. The items themselves stay in inventory — they just lose this ${fieldLabel} tag.\n\nThis cannot be undone.`,
+    danger: true,
+    confirmText: 'Remove',
+  });
+  if (!ok) return;
   try {
     await api('DELETE', `/api/inventory/dropdown/${encodeURIComponent(field)}/${encodeURIComponent(value)}`);
     await loadInventory();
@@ -1834,7 +1850,7 @@ async function saveInvAdd() {
     opening_balance:   parseInt(document.getElementById('inv-opening').value, 10) || 0,
     opening_notes:     document.getElementById('inv-opening-notes').value.trim(),
   };
-  if (!data.paper_type) { alert('Paper type is required'); return; }
+  if (!data.paper_type) { await alertDialog({ title: 'Paper type is required', kind: 'warn' }); return; }
   showSaving(true);
   try {
     // Server returns 409 if the exact paper item already exists (case- and
@@ -1912,12 +1928,12 @@ async function saveInvEdit(id) {
     brand:      (document.getElementById('inv-brand').value || '').trim(),
     supplier:   (document.getElementById('inv-supplier').value || '').trim(),
   };
-  if (!data.paper_type) { alert('Paper type is required'); return; }
-  // Admin-only balance correction. Field is in PACKETS / REAMS for usability,
+  if (!data.paper_type) { await alertDialog({ title: 'Paper type is required', kind: 'warn' }); return; }
+  // Balance correction. Field is in PACKETS / REAMS for usability,
   // but the DB column stores sheets — so convert before sending. Only fire
   // the correction transaction if the rounded sheet count actually changed.
   const balEl = document.getElementById('inv-balance');
-  if (balEl && isAdmin()) {
+  if (balEl && canWrite()) {
     const ps        = parseInt(balEl.dataset.packSize, 10) || 100;
     const newPkts   = parseFloat(balEl.value);
     const oldPkts   = parseFloat(balEl.dataset.originalPkts);
@@ -1929,12 +1945,12 @@ async function saveInvEdit(id) {
       const deltaPktsStr = Number.isInteger(deltaPkts) ? String(deltaPkts) : (+deltaPkts.toFixed(2)).toString();
       const sign  = delta > 0 ? '+' : '';
       const unitL = ps === 500 ? 'reams' : 'packets';
-      if (!confirm(
-          `Correct balance from ${oldPkts.toLocaleString()} to ${newPkts.toLocaleString()} ${unitL} ` +
-          `(${sign}${deltaPktsStr} ${unitL} · ${sign}${delta.toLocaleString()} sheets)?\n\n` +
-          `This writes a "correction" entry to the item's History and will NOT appear in ` +
-          `Stock In / Stock Out reports.`
-      )) return;
+      const ok = await confirmDialog({
+        title: 'Correct balance?',
+        message: `${oldPkts.toLocaleString()} → ${newPkts.toLocaleString()} ${unitL} (${sign}${deltaPktsStr} ${unitL} · ${sign}${delta.toLocaleString()} sheets)\n\nThis writes a "correction" entry to the item's History and will NOT appear in Stock In / Stock Out reports.`,
+        confirmText: 'Save correction',
+      });
+      if (!ok) return;
       data.current_balance = newSheets;
       const notesEl = document.getElementById('inv-correction-notes');
       if (notesEl && notesEl.value.trim()) data.correction_notes = notesEl.value.trim();
@@ -1959,14 +1975,12 @@ async function deleteInvItem(id) {
   if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
   const bal   = it.current_balance || 0;
-  const ok = confirm(
-    `Permanently delete this inventory item?\n\n` +
-    `  ${label}\n` +
-    `  Current balance: ${bal.toLocaleString()} sheets\n\n` +
-    `This removes the item AND its full stock-in / stock-out / correction history.\n` +
-    `There is no undo. Pending jobs that reference this item will block the delete.\n\n` +
-    `Type OK by clicking Cancel to abort, or click OK to delete.`
-  );
+  const ok = await confirmDialog({
+    title: 'Permanently delete this inventory item?',
+    message: `${label}\nCurrent balance: ${bal.toLocaleString()} sheets\n\nThis removes the item AND its full stock-in / stock-out / correction history. There is no undo. Pending jobs that reference this item will block the delete.`,
+    danger: true,
+    confirmText: 'Delete',
+  });
   if (!ok) return;
   showSaving(true);
   try {
@@ -2028,7 +2042,7 @@ function stockQtySync(source, ps) {
 }
 async function saveInvAddStock(id) {
   const qty = parseInt(document.getElementById('stock-qty').value, 10);
-  if (!qty || qty <= 0) { alert('Quantity must be a positive number'); return; }
+  if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
   const data = {
     change: qty,
     reason: document.getElementById('stock-reason').value,
@@ -2155,11 +2169,11 @@ async function saveBulkStockIn() {
     const qty        = parseInt(tr.querySelector('.bulk-qty').value, 10) || 0;
     if (!size && !gsm && !brand && !qty) continue;  // empty row, skip
     if (!qty || qty <= 0) {
-      alert('Every row needs a positive Quantity (or remove the row).'); return;
+      await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
     rows.push({ paper_type, size, gsm, brand, qty });
   }
-  if (!rows.length) { alert('Add at least one row with a quantity.'); return; }
+  if (!rows.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
 
   showSaving(true);
   let saved = 0, errored = 0;
@@ -2305,7 +2319,12 @@ async function renderInvHistory(id) {
 // Reverse a wrong stock-in entry. Confirms, hits the server, then reloads
 // inventory (balance changed) and re-renders the History modal in place.
 async function reverseStockTx(txId, itemId) {
-  if (!confirm('Reverse this stock-in entry?\n\nA -correction will be added that cancels it out. The original row stays for the audit trail but shows as struck-through.')) return;
+  const ok = await confirmDialog({
+    title: 'Reverse this stock-in entry?',
+    message: 'A "correction" entry will be added that cancels it out. The original row stays for the audit trail but shows as struck-through.',
+    confirmText: 'Reverse',
+  });
+  if (!ok) return;
   showSaving(true);
   try {
     await api('POST', `/api/inventory/transactions/${txId}/reverse`);
@@ -4144,7 +4163,12 @@ async function saveImport(id) {
 async function receiveImport(id) {
   const imp = importsCache.find(i => i.id === id); if (!imp) return;
   const unit = packetUnitLabel(imp.paper_type).toLowerCase();
-  const answer = prompt(`Received ${imp.packets} ${unit}? Enter the actual quantity received (or press OK to use the booked amount):`, imp.packets);
+  const answer = await promptDialog({
+    title: `Receive ${imp.packets} ${unit}?`,
+    message: 'Enter the actual quantity received (or click OK to accept the booked amount).',
+    defaultValue: String(imp.packets),
+    confirmText: 'Receive',
+  });
   if (answer === null) return; // cancelled
   const packets = parseFloat(answer);
   if (!packets || packets <= 0) { notify('Quantity must be > 0'); return; }
@@ -5228,7 +5252,14 @@ function renderDashboard() {
 }
 
 async function cancelImport(id) {
-  if (!confirm('Cancel this import? (You can still see it in the Cancelled filter afterward.)')) return;
+  const ok = await confirmDialog({
+    title: 'Cancel this import?',
+    message: 'You can still see it later under the Cancelled filter.',
+    danger: true,
+    confirmText: 'Cancel import',
+    cancelText: 'Keep',
+  });
+  if (!ok) return;
   try {
     await api('POST', `/api/imports/${id}/cancel`);
     notify('Import cancelled');
@@ -5254,6 +5285,99 @@ function setDateCustom() {
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
 function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
 function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
+
+// ── Branded Dialogs (confirm / alert / prompt replacements) ──────
+// Promise-returning replacements for the native browser dialogs. They
+// share the existing modal-root + overlay infrastructure but render into
+// a separate #dialog-root so a dialog can sit on top of an open modal
+// (e.g. "are you sure?" inside the Edit form) without nuking it.
+//
+//   await confirmDialog({ title, message, danger, confirmText, cancelText })
+//   await alertDialog({ title, message, kind })       // kind: 'info'|'warn'|'success'|'error'
+//   await promptDialog({ title, message, defaultValue, placeholder })
+//
+// Returns: confirm → boolean, alert → undefined, prompt → string|null.
+// Native confirm/alert/prompt have been removed throughout the app in
+// favour of these. Keep them async-friendly: every caller awaits.
+let _dialogResolve = null;
+function _dialogTpl({ kind, icon, iconBg, iconColor, title, message, body, buttons }) {
+  const msgHtml = message
+    ? `<div class="dlg-msg">${String(message).split('\n').map(l => esc(l)).join('<br>')}</div>`
+    : '';
+  return `<div class="dlg-overlay" id="dlg-overlay" onmousedown="dlgBackdrop(event)">
+    <div class="dlg-box dlg-${kind}" onmousedown="event.stopPropagation()">
+      <div class="dlg-icon" style="background:${iconBg};color:${iconColor};">${icon}</div>
+      <div class="dlg-title">${esc(title || '')}</div>
+      ${msgHtml}
+      ${body || ''}
+      <div class="dlg-actions">${buttons}</div>
+    </div>
+  </div>`;
+}
+function dlgBackdrop(e) {
+  // Click on the dim backdrop = cancel (false for confirm, null for prompt,
+  // undefined for alert).
+  if (e.target.id !== 'dlg-overlay') return;
+  dlgClose(_dialogResolve === null ? undefined : (_lastDialogKind === 'prompt' ? null : false));
+}
+function dlgClose(result) {
+  const root = document.getElementById('dialog-root');
+  if (root) root.innerHTML = '';
+  if (_dialogResolve) { const r = _dialogResolve; _dialogResolve = null; r(result); }
+}
+let _lastDialogKind = null;
+function _showDialog(html, kind, focusSelector) {
+  _lastDialogKind = kind;
+  let root = document.getElementById('dialog-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'dialog-root';
+    document.body.appendChild(root);
+  }
+  root.innerHTML = html;
+  // Focus the most relevant control so Enter / Esc work without clicking.
+  setTimeout(() => {
+    const el = focusSelector ? root.querySelector(focusSelector) : root.querySelector('.dlg-actions .btn-primary, .dlg-actions .btn-danger, .dlg-actions .btn');
+    if (el) el.focus();
+  }, 30);
+  return new Promise(r => { _dialogResolve = r; });
+}
+function confirmDialog({ title = 'Are you sure?', message = '', danger = false, confirmText = 'Confirm', cancelText = 'Cancel' } = {}) {
+  const icon     = danger ? '&#9888;' : '&#10067;';   // ⚠ for danger, ❓ for question
+  const iconBg   = danger ? '#fee2e2' : '#fef3c7';
+  const iconColor= danger ? '#991b1b' : '#92400e';
+  const btnClass = danger ? 'btn-danger' : 'btn-primary';
+  const buttons = `
+    <button class="btn" onclick="dlgClose(false)">${esc(cancelText)}</button>
+    <button class="btn ${btnClass}" onclick="dlgClose(true)">${esc(confirmText)}</button>`;
+  return _showDialog(_dialogTpl({ kind: danger ? 'danger' : 'confirm', icon, iconBg, iconColor, title, message, buttons }), 'confirm');
+}
+function alertDialog({ title = 'Notice', message = '', kind = 'info', okText = 'OK' } = {}) {
+  const map = {
+    info:    { icon: '&#9432;',  iconBg: '#dbeafe', iconColor: '#1e40af' },   // ⓘ
+    warn:    { icon: '&#9888;',  iconBg: '#fef3c7', iconColor: '#92400e' },   // ⚠
+    success: { icon: '&#10003;', iconBg: '#dcfce7', iconColor: '#166534' },   // ✓
+    error:   { icon: '&#10007;', iconBg: '#fee2e2', iconColor: '#991b1b' },   // ✗
+  };
+  const m = map[kind] || map.info;
+  const buttons = `<button class="btn btn-primary" onclick="dlgClose()">${esc(okText)}</button>`;
+  return _showDialog(_dialogTpl({ kind, icon: m.icon, iconBg: m.iconBg, iconColor: m.iconColor, title, message, buttons }), 'alert');
+}
+function promptDialog({ title = 'Input', message = '', defaultValue = '', placeholder = '', confirmText = 'OK', cancelText = 'Cancel' } = {}) {
+  const body = `<input id="dlg-input" class="dlg-input" type="text" value="${esc(defaultValue)}" placeholder="${esc(placeholder)}" onkeydown="if(event.key==='Enter'){event.preventDefault();dlgClose(document.getElementById('dlg-input').value);}else if(event.key==='Escape'){dlgClose(null);}">`;
+  const buttons = `
+    <button class="btn" onclick="dlgClose(null)">${esc(cancelText)}</button>
+    <button class="btn btn-primary" onclick="dlgClose(document.getElementById('dlg-input').value)">${esc(confirmText)}</button>`;
+  return _showDialog(_dialogTpl({ kind: 'prompt', icon: '&#9998;', iconBg: '#dbeafe', iconColor: '#1e40af', title, message, body, buttons }), 'prompt', '#dlg-input');
+}
+// Global Escape closes the topmost dialog like the native one would.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const root = document.getElementById('dialog-root');
+  if (root && root.innerHTML) {
+    dlgClose(_lastDialogKind === 'prompt' ? null : (_lastDialogKind === 'confirm' ? false : undefined));
+  }
+});
 
 // ── Paper Calculator ──────────────────────────────────────────
 // 3-way connected calculator: weight ⇄ sheets ⇄ packets.
@@ -6076,7 +6200,7 @@ document.addEventListener('mousedown', (e) => {
 
 // Pre-save stock check — fires before POST/PUT. Returns true if okay to proceed,
 // false if the user chose to cancel after seeing the negative-stock warning.
-function checkStockBeforeSave(data) {
+async function checkStockBeforeSave(data) {
   if (!data.inventory_item_id) return true;
   const sheets = parseInt(data.sheets, 10) || 0;
   if (sheets <= 0) return true;
@@ -6084,7 +6208,12 @@ function checkStockBeforeSave(data) {
   if (!item) return true;
   if (sheets <= (item.current_balance || 0)) return true;
   const after = (item.current_balance || 0) - sheets;
-  return confirm(`Insufficient stock for ${item.paper_type}.\n\nAvailable: ${(item.current_balance||0).toLocaleString()} sheets\nNeeded: ${sheets.toLocaleString()} sheets\nBalance after: ${after.toLocaleString()} sheets\n\nProceed anyway?`);
+  return confirmDialog({
+    title: `Insufficient stock for ${item.paper_type}`,
+    message: `Available: ${(item.current_balance||0).toLocaleString()} sheets\nNeeded: ${sheets.toLocaleString()} sheets\nBalance after: ${after.toLocaleString()} sheets`,
+    danger: true,
+    confirmText: 'Proceed anyway',
+  });
 }
 
 function openAdd() {
@@ -6102,8 +6231,8 @@ function openAdd() {
 
 async function saveAdd() {
   const data = getFormData();
-  if (!data.name || !data.client) { alert('Job name and client are required.'); return; }
-  if (!checkStockBeforeSave(data)) return;
+  if (!data.name || !data.client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
+  if (!(await checkStockBeforeSave(data))) return;
   showSaving(true);
   try {
     const newJob = await api('POST', '/api/jobs', data);
@@ -6132,13 +6261,13 @@ function openEdit(id) {
 
 async function saveEdit(id) {
   const data = getFormData();
-  if (!data.name || !data.client) { alert('Name and client required.'); return; }
+  if (!data.name || !data.client) { await alertDialog({ title: 'Name and company are required', kind: 'warn' }); return; }
   // Stock warning only fires when the paper item or sheets qty actually changed
   // vs. what's saved on the job — otherwise editing unrelated fields wouldn't ask.
   const prior = jobs.find(j => j.id === id);
   const itemChanged   = prior && prior.inventory_item_id !== data.inventory_item_id;
   const sheetsChanged = prior && (prior.sheets || '') !== data.sheets;
-  if ((itemChanged || sheetsChanged) && !checkStockBeforeSave(data)) return;
+  if ((itemChanged || sheetsChanged) && !(await checkStockBeforeSave(data))) return;
   showSaving(true);
   try {
     const updated = await api('PUT', `/api/jobs/${id}`, data);
@@ -6188,7 +6317,7 @@ async function saveUpdate(id) {
   if (!j) return;
   const notes = document.getElementById('u-notes').value.trim();
   const target = STAGES.indexOf(selSection);
-  if (target < 0) { alert('Please pick a stage.'); return; }
+  if (target < 0) { await alertDialog({ title: 'Please pick a stage.', kind: 'warn' }); return; }
   const by = STAGES[target];
   const time = fmtDMYT(new Date());
   const prevSi = j.stage_index || 0;
@@ -6287,7 +6416,13 @@ async function deleteJob(id) {
   if (!isAdmin()) return;
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  if (!confirm(`Permanently delete Job E-${id}: "${j.name}"?\n\nThis cannot be undone. Inventory ledger entries will be preserved but their link to this job will be removed.`)) return;
+  const ok = await confirmDialog({
+    title: `Permanently delete Job E-${id}?`,
+    message: `"${j.name}"\n\nThis cannot be undone. Inventory ledger entries will be preserved but their link to this job will be removed.`,
+    danger: true,
+    confirmText: 'Delete',
+  });
+  if (!ok) return;
   showSaving(true);
   try {
     await api('DELETE', `/api/jobs/${id}`);
@@ -6319,7 +6454,12 @@ async function issueStock(id) {
   }
   const sheets = Math.round(packetsIn * ps);
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
-  if (!confirm(`Issue ${packetsIn} ${unit} (${sheets.toLocaleString()} raw sheets) for Job E-${id}: "${j.name}"?\n\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`)) return;
+  const ok = await confirmDialog({
+    title: `Issue stock for Job E-${id}?`,
+    message: `${packetsIn} ${unit} (${sheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`,
+    confirmText: 'Issue stock',
+  });
+  if (!ok) return;
   showSaving(true);
   try {
     const updated = await api('POST', `/api/jobs/${id}/issue-stock`);
@@ -6342,7 +6482,12 @@ async function toggleBlock(id) {
   const si = j.stage_index || 0;
   const currentlyBlocked = isBlocked(j);
   const action = currentlyBlocked ? 'Unblock' : 'Block';
-  const reason = prompt(`${action} this job — add a reason (optional):`, '');
+  const reason = await promptDialog({
+    title: `${action} this job`,
+    message: 'Add a reason (optional).',
+    placeholder: 'e.g. waiting on plate, customer hold, etc.',
+    confirmText: action,
+  });
   if (reason === null) return;
   const time = fmtDMYT(new Date());
   const by = STAGES[si];
@@ -6672,7 +6817,7 @@ function openInviteUser() {
 async function saveInvite() {
   const email = document.getElementById('invite-email').value.trim();
   const role  = document.getElementById('invite-role').value;
-  if (!email) { alert('Email required'); return; }
+  if (!email) { await alertDialog({ title: 'Email is required', kind: 'warn' }); return; }
   showSaving(true);
   try {
     await api('POST', '/api/users', { email, role });
@@ -6691,7 +6836,13 @@ async function changeUserRole(id, role) {
   showSaving(false);
 }
 async function removeUser(id) {
-  if (!confirm('Remove this user? They will no longer be able to sign in.')) return;
+  const ok = await confirmDialog({
+    title: 'Remove this user?',
+    message: 'They will no longer be able to sign in.',
+    danger: true,
+    confirmText: 'Remove',
+  });
+  if (!ok) return;
   showSaving(true);
   try {
     await api('DELETE', `/api/users/${id}`);
