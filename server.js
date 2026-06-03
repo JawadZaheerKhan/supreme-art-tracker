@@ -387,7 +387,12 @@ function publicUser(u) {
 
 // ── User management (admin only) ─────────────────────────────
 
-app.get('/api/users', requireAdmin, async (req, res) => {
+// GET users — admin + ceo (CEO is read-only; mutation endpoints below stay
+// requireAdmin so role change / invite / remove are still locked down).
+app.get('/api/users', requireAuth, async (req, res) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'ceo') {
+    return res.status(403).json({ error: 'Admin or CEO only' });
+  }
   try {
     await dbReady;
     const sql = getDb();
@@ -1326,8 +1331,12 @@ async function purgeExpiredTrash(sql) {
 }
 
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
-// frontend can show "Auto-purges in N days" per row.
-app.get('/api/trash', requireAdmin, async (req, res) => {
+// frontend can show "Auto-purges in N days" per row. Open to admin AND ceo
+// (CEO is read-only — the write endpoints below still require admin).
+app.get('/api/trash', requireAuth, async (req, res) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'ceo') {
+    return res.status(403).json({ error: 'Admin or CEO only' });
+  }
   try {
     await dbReady;
     const sql = getDb();
