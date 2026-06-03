@@ -109,6 +109,32 @@
   .ledger-pos      { color: #166534; font-weight: 600; }
   .ledger-neg      { color: #A32D2D; font-weight: 600; }
   .ledger-reversal { color: #9a3412; font-weight: 600; }   /* orange — reversal/undo entry */
+  /* Bulk-selection row checkbox + sticky action bar shared by Imports and
+     Stock In/Out panes. The bar appears above the table when ≥1 row is ticked. */
+  .bulk-actions {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 8px 12px; margin-bottom: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .bulk-actions .bulk-count { font-weight: 700; color: var(--text); font-size: 13px; }
+  .bulk-actions .bulk-spacer { flex: 1; }
+  .bulk-actions .btn { font-size: 12px; }
+  .bulk-actions .btn-clear { background: transparent; color: var(--text2); border-color: var(--border); }
+  .bulk-actions .btn-bulk-receive { background: #166534; color: #fff; border-color: #166534; font-weight: 600; }
+  .bulk-actions .btn-bulk-cancel  { background: #ea580c; color: #fff; border-color: #ea580c; font-weight: 600; }
+  .bulk-actions .btn-bulk-delete  { background: #A32D2D; color: #fff; border-color: #A32D2D; font-weight: 600; }
+  .bulk-actions .btn-bulk-reverse { background: #ea580c; color: #fff; border-color: #ea580c; font-weight: 600; }
+  th.bulk-th, td.bulk-td { width: 32px; padding: 8px 6px 8px 10px !important; text-align: center; }
+  .bulk-check { width: 16px; height: 16px; cursor: pointer; accent-color: #166534; vertical-align: middle; }
+  tr.bulk-row-selected { background: #ecfdf5; }
+  /* Per-row qty dialog (Receive Selected) — narrow table inside dlg-box. */
+  .recv-qty-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  .recv-qty-table th, .recv-qty-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+  .recv-qty-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); font-weight: 700; }
+  .recv-qty-table td.col-qty { width: 110px; text-align: right; }
+  .recv-qty-table td.col-qty input { width: 100%; padding: 4px 6px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); text-align: right; }
   .bulk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .bulk-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); padding: 6px 8px; text-align: left; }
   .bulk-table td { padding: 4px 4px; vertical-align: top; }
@@ -241,6 +267,8 @@
   .dlg-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 400; padding: 1rem; animation: dlgFade 0.12s ease-out; }
   @keyframes dlgFade { from { opacity: 0; } to { opacity: 1; } }
   .dlg-box { background: var(--bg); border-radius: 12px; border: 1px solid var(--border); padding: 22px 24px 20px; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,0.25); animation: dlgPop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+  /* Widen the dialog when it hosts the bulk-receive table (lots of horizontal data). */
+  .dlg-box:has(.recv-qty-table) { max-width: 720px; }
   @keyframes dlgPop { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
   .dlg-icon { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; margin-bottom: 14px; line-height: 1; }
   .dlg-title { font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.3; margin-bottom: 6px; }
@@ -610,6 +638,11 @@
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
       </button>
+      <button class="report-card ceo-hide" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
+        <div class="report-card-icon">&#128465;</div>
+        <div class="report-card-title">Trash</div>
+        <div class="report-card-desc">Deleted jobs and imports stay here for 30 days before being permanently removed. Admin can restore or empty the bin.</div>
+      </button>
     </div>
   </div>
 
@@ -684,6 +717,26 @@
       </aside>
       <main class="reports-content">
         <div id="rt-jobs-report" class="rt-pane"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Trash group — soft-deleted jobs + imports. Admin only. 30-day retention. -->
+  <div id="trash-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Trash</div>
+        <button class="rsb-item active" data-rt="trash-jobs" onclick="setReportsTab('trash-jobs')">
+          <span class="rsb-icon">&#128196;</span> Jobs
+        </button>
+        <button class="rsb-item" data-rt="trash-imports" onclick="setReportsTab('trash-imports')">
+          <span class="rsb-icon">&#128666;</span> Imports
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-trash-jobs"    class="rt-pane"></div>
+        <div id="rt-trash-imports" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -1009,6 +1062,8 @@ function renderUserChip() {
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
   document.getElementById('mode-users-btn').style.display = isAdmin() ? 'block' : 'none';
+  const trashBtn = document.getElementById('trash-card-btn');
+  if (trashBtn) trashBtn.style.display = isAdmin() ? 'flex' : 'none';
   // CEOs see a read-only version of the app — flip a body class so the CSS
   // rule below hides every element tagged .ceo-hide in one go.
   document.body.classList.toggle('role-ceo', isCeo());
@@ -3519,14 +3574,17 @@ function renderImportsPage() {
 
 function setImportsFilter(key, value) {
   importsPageState[key] = value;
+  importsBulkSel.clear();   // changing the visible set invalidates the selection
   renderImportsTable();
 }
 function setImportsDate(which, value) {
   importsPageState[which] = value;
+  importsBulkSel.clear();
   renderImportsTable();
 }
 function resetImportsFilters() {
   Object.assign(importsPageState, { status: 'pending', paperType: '', expectedDate: '', bookedDate: '' });
+  importsBulkSel.clear();
   renderImportsPage();
   renderImportsTable();
 }
@@ -3572,12 +3630,68 @@ function filterImportsList() {
   return list;
 }
 
+// ── Bulk selection (Imports) ─────────────────────────────────
+// Tick rows on the Imports page to Receive/Cancel/Delete them in one go. The
+// set holds import ids; we re-derive selected rows from importsCache each
+// render so deleted rows fall out automatically. Reset whenever the filter
+// changes — selections shouldn't survive when the visible set changes under
+// the user's feet.
+const importsBulkSel = new Set();
+function clearImportsSelection() { importsBulkSel.clear(); renderImportsTable(); }
+function toggleImportRow(id, checked) {
+  if (checked) importsBulkSel.add(id); else importsBulkSel.delete(id);
+  renderImportsBulkBar();
+  const tr = document.querySelector(`tr[data-imp-row="${id}"]`);
+  if (tr) tr.classList.toggle('bulk-row-selected', checked);
+  const headChk = document.getElementById('imp-bulk-all');
+  if (headChk) {
+    const visible = filterImportsList();
+    const allChecked = visible.length && visible.every(i => importsBulkSel.has(i.id));
+    headChk.checked = !!allChecked;
+    headChk.indeterminate = !allChecked && visible.some(i => importsBulkSel.has(i.id));
+  }
+}
+function toggleImportAll(checked) {
+  const visible = filterImportsList();
+  if (checked) visible.forEach(i => importsBulkSel.add(i.id));
+  else         visible.forEach(i => importsBulkSel.delete(i.id));
+  renderImportsTable();
+}
+
+// Render (or hide) the sticky action bar above the Imports table.
+function renderImportsBulkBar() {
+  const bar = document.getElementById('imp-bulk-bar');
+  if (!bar) return;
+  const selected = [...importsBulkSel];
+  if (!selected.length) { bar.style.display = 'none'; return; }
+  // Inspect the selection: on the Pending tab we enable Receive/Cancel; on
+  // other tabs only Delete makes sense (and only for non-received rows).
+  const selectedItems = selected.map(id => importsCache.find(i => i.id === id)).filter(Boolean);
+  const allPending = selectedItems.length && selectedItems.every(i => i.status === 'pending');
+  const noneReceived = selectedItems.every(i => i.status !== 'received');
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <span class="bulk-count">${selected.length} selected</span>
+    <button class="btn btn-sm btn-clear" onclick="clearImportsSelection()">Clear</button>
+    <span class="bulk-spacer"></span>
+    ${allPending ? `<button class="btn btn-sm btn-bulk-receive ceo-hide" onclick="bulkReceiveImports()">&#10003; Receive Selected</button>` : ''}
+    ${allPending ? `<button class="btn btn-sm btn-bulk-cancel  ceo-hide" onclick="bulkCancelImports()">&#10006; Cancel Selected</button>` : ''}
+    ${(isAdmin() && noneReceived) ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteImports()">&#128465; Delete from History</button>` : ''}
+  `;
+}
+
 function renderImportsTable() {
   const el = document.getElementById('imports-table');
   if (!el) return;
   const list = filterImportsList();
+  // Drop any selected ids that are no longer visible (filter changed, row
+  // received/cancelled by another action). Keeps the action bar honest.
+  for (const id of [...importsBulkSel]) {
+    if (!list.find(i => i.id === id)) importsBulkSel.delete(id);
+  }
   if (!list.length) {
-    el.innerHTML = `<div class="empty">No imports match these filters. Try resetting them, or click <b>+ New Import</b> to book one.</div>`;
+    el.innerHTML = `<div id="imp-bulk-bar" class="bulk-actions" style="display:none;"></div>
+      <div class="empty">No imports match these filters. Try resetting them, or click <b>+ New Import</b> to book one.</div>`;
     return;
   }
   const rows = list.map(i => {
@@ -3595,7 +3709,9 @@ function renderImportsTable() {
     const weight = (i.weight_kg === null || i.weight_kg === undefined || i.weight_kg === '')
       ? '—'
       : (+i.weight_kg).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg';
-    return `<tr style="border-bottom:1px solid var(--border);">
+    const isSel = importsBulkSel.has(i.id);
+    return `<tr data-imp-row="${i.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleImportRow(${i.id}, this.checked)"></td>
       <td style="padding:8px 10px;">${status}</td>
       <td style="padding:8px 10px;font-weight:500;">${esc(i.paper_type || '—')}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(i.size || '—')}</td>
@@ -3614,9 +3730,14 @@ function renderImportsTable() {
   // popped windows that don't load our stylesheet.
   const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
-  el.innerHTML = `<div style="overflow-x:auto;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+  // Header checkbox state: checked only when every visible row is selected.
+  const allVisSel = list.length && list.every(i => importsBulkSel.has(i.id));
+  const someVisSel = !allVisSel && list.some(i => importsBulkSel.has(i.id));
+  el.innerHTML = `<div id="imp-bulk-bar" class="bulk-actions" style="display:none;"></div>
+    <div style="overflow-x:auto;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
     <thead>
       <tr style="background:var(--bg2);">
+        <th class="bulk-th"><input type="checkbox" id="imp-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleImportAll(this.checked)" title="Select all visible"></th>
         <th ${thL}>Status</th>
         <th ${thL}>Paper Type</th>
         <th ${thL}>Size</th>
@@ -3633,6 +3754,9 @@ function renderImportsTable() {
     </thead>
     <tbody>${rows}</tbody>
   </table></div>`;
+  const headChk = document.getElementById('imp-bulk-all');
+  if (headChk) headChk.indeterminate = someVisSel;
+  renderImportsBulkBar();
 }
 
 // Return the imports rows currently visible so Print and Export reuse the
@@ -3794,9 +3918,75 @@ function openJobsReport() {
   `;
   renderJobsReport();
 }
-function setJrFrom(v)   { jobsReportState.from = v;   renderJobsReport(); }
-function setJrTo(v)     { jobsReportState.to = v;     renderJobsReport(); }
-function setJrClient(v) { jobsReportState.client = v; renderJobsReport(); }
+function setJrFrom(v)   { jobsReportState.from = v;   jobsReportSel.clear(); renderJobsReport(); }
+function setJrTo(v)     { jobsReportState.to = v;     jobsReportSel.clear(); renderJobsReport(); }
+function setJrClient(v) { jobsReportState.client = v; jobsReportSel.clear(); renderJobsReport(); }
+
+// ── Bulk selection (Jobs Report) ─────────────────────────────
+// Admin-only Delete from History — for clearing out delivered jobs after
+// 6+ months. Hard-deletes the jobs table row (same as the per-card delete
+// button, just in bulk).
+const jobsReportSel = new Set();
+function clearJobsReportSel() { jobsReportSel.clear(); renderJobsReport(); }
+function toggleJobsReportRow(id, checked) {
+  if (checked) jobsReportSel.add(id); else jobsReportSel.delete(id);
+  renderJobsReportBulkBar();
+  const tr = document.querySelector(`tr[data-jr-row="${id}"]`);
+  if (tr) tr.classList.toggle('bulk-row-selected', checked);
+  const headChk = document.getElementById('jr-bulk-all');
+  if (headChk) {
+    const visible = buildJobsReportRows();
+    const allChecked = visible.length && visible.every(r => jobsReportSel.has(r.id));
+    headChk.checked = !!allChecked;
+    headChk.indeterminate = !allChecked && visible.some(r => jobsReportSel.has(r.id));
+  }
+}
+function toggleJobsReportAll(checked) {
+  const visible = buildJobsReportRows();
+  if (checked) visible.forEach(r => jobsReportSel.add(r.id));
+  else         visible.forEach(r => jobsReportSel.delete(r.id));
+  renderJobsReport();
+}
+
+function renderJobsReportBulkBar() {
+  const bar = document.getElementById('jr-bulk-bar');
+  if (!bar) return;
+  const sel = [...jobsReportSel];
+  if (!sel.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <span class="bulk-count">${sel.length} selected</span>
+    <button class="btn btn-sm btn-clear" onclick="clearJobsReportSel()">Clear</button>
+    <span class="bulk-spacer"></span>
+    ${isAdmin()
+      ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteJobsReport()">&#128465; Delete from History</button>`
+      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History wipes old delivered jobs.</span>`}
+  `;
+}
+
+async function bulkDeleteJobsReport() {
+  if (!isAdmin()) { notify('Admin only.'); return; }
+  const ids = [...jobsReportSel];
+  if (!ids.length) { notify('Nothing selected.'); return; }
+  const ok = await confirmDialog({
+    title: `Move ${ids.length} delivered job${ids.length===1?'':'s'} to Trash?`,
+    message: 'They\'ll stay in Trash for 30 days where an admin can restore them, then auto-purge. Their issued stock is NOT returned. After 30 days they\'re gone for good.',
+    danger: true,
+    confirmText: 'Move to Trash',
+  });
+  if (!ok) return;
+  let good = 0, failed = 0;
+  showSaving(true);
+  for (const id of ids) {
+    try { await api('DELETE', `/api/jobs/${id}`); good++; }
+    catch (e) { failed++; console.error('Delete failed for job', id, e); }
+  }
+  showSaving(false);
+  jobsReportSel.clear();
+  await loadJobs();
+  renderJobsReport();
+  notify(`Deleted ${good}${failed?` · ${failed} failed`:''}`);
+}
 
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
@@ -3868,8 +4058,13 @@ function renderJobsReport() {
   const rows = buildJobsReportRows();
   const el = document.getElementById('jr-content');
   if (!el) return;
+  // Drop any selected ids that fell out of the current filter window.
+  for (const id of [...jobsReportSel]) {
+    if (!rows.find(r => r.id === id)) jobsReportSel.delete(id);
+  }
   if (!rows.length) {
-    el.innerHTML = `<div class="empty">No delivered jobs match these filters.</div>`;
+    el.innerHTML = `<div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
+      <div class="empty">No delivered jobs match these filters.</div>`;
     return;
   }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
@@ -3884,7 +4079,9 @@ function renderJobsReport() {
     const wastageCell = r.wastage === null
       ? '<td ' + tdR + '>—</td>'
       : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`;
-    return `<tr style="border-bottom:1px solid var(--border);">
+    const isSel = jobsReportSel.has(r.id);
+    return `<tr data-jr-row="${r.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>E-${r.id}</td>
       <td ${td}>${esc(r.jobcode)}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
@@ -3903,12 +4100,16 @@ function renderJobsReport() {
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const allVisSel  = rows.length && rows.every(r => jobsReportSel.has(r.id));
+  const someVisSel = !allVisSel && rows.some(r => jobsReportSel.has(r.id));
   el.innerHTML = `
+    <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} delivered job${rows.length===1?'':'s'} in window</div>
     <div style="overflow-x:auto;">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead>
         <tr style="background:var(--bg2);">
+          <th class="bulk-th"><input type="checkbox" id="jr-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleJobsReportAll(this.checked)" title="Select all visible"></th>
           <th ${th}>Job ID</th>
           <th ${th}>Code</th>
           <th ${th}>Created</th>
@@ -3928,6 +4129,9 @@ function renderJobsReport() {
       <tbody>${tbody}</tbody>
     </table>
     </div>`;
+  const headChk = document.getElementById('jr-bulk-all');
+  if (headChk) headChk.indeterminate = someVisSel;
+  renderJobsReportBulkBar();
 }
 
 // Export the Jobs Report to .xlsx.
@@ -4221,6 +4425,221 @@ function openDashboard() {
   loadDashboard();
 }
 
+// ── Trash (soft-deleted jobs + imports) ──────────────────────
+// Admin-only view of the bin. Items live here for 30 days (retention is
+// reported by the server so the frontend just shows it). Restore puts them
+// back; Delete Permanently hard-deletes; Empty Trash wipes everything.
+let trashCache = { jobs: [], imports: [], retention_days: 30 };
+
+function openTrashPage() {
+  if (!isAdmin()) { notify('Admin only.'); return; }
+  openReportsGroup('trash-group');
+}
+
+async function loadTrashAndRender(which) {
+  try {
+    trashCache = await api('GET', '/api/trash');
+  } catch (e) {
+    notify('Error loading trash: ' + e.message);
+    trashCache = { jobs: [], imports: [], retention_days: 30 };
+  }
+  if (which === 'jobs')    renderTrashJobs();
+  if (which === 'imports') renderTrashImports();
+}
+
+// Days remaining = retention_days - (now - deleted_at). Floor to whole days
+// so "Auto-purges in N days" reads cleanly.
+function trashDaysLeft(deletedAt) {
+  const dt = new Date(deletedAt);
+  const ms = Date.now() - dt.getTime();
+  const daysGone = Math.floor(ms / (24 * 60 * 60 * 1000));
+  return Math.max(0, trashCache.retention_days - daysGone);
+}
+
+// Shared header chrome (title, count, Empty Trash button). Stays at the top
+// of both panes.
+function trashPaneHeader(label, count) {
+  return `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Trash · ${label}</h2>
+      <span style="color:var(--text2);font-size:12px;">${count} item${count===1?'':'s'} · auto-purges after ${trashCache.retention_days} days</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="refreshTrash()">&#8635; Refresh</button>
+        <button class="btn btn-sm btn-danger" onclick="emptyTrash()">&#128465; Empty Trash</button>
+      </div>
+    </div>`;
+}
+
+function refreshTrash() {
+  const activeBtn = document.querySelector('#trash-group .rsb-item.active');
+  const which = activeBtn?.dataset?.rt === 'trash-imports' ? 'imports' : 'jobs';
+  loadTrashAndRender(which);
+}
+
+function renderTrashJobs() {
+  const el = document.getElementById('rt-trash-jobs');
+  if (!el) return;
+  const rows = trashCache.jobs || [];
+  if (!rows.length) {
+    el.innerHTML = trashPaneHeader('Jobs', 0)
+      + `<div class="empty">Trash is empty — no deleted jobs.</div>`;
+    return;
+  }
+  const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const tdL = 'style="padding:8px 10px;"';
+  const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
+  const body = rows.map(r => {
+    const left = trashDaysLeft(r.deleted_at);
+    const expiringSoon = left <= 3;
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td ${tdL} style="padding:8px 10px;font-weight:700;color:#1d4ed8;">E-${r.id}</td>
+      <td ${tdL}>${esc(r.jobcode || '')}</td>
+      <td ${tdL}>${esc(r.name || '')}</td>
+      <td ${tdL}>${esc(r.client || '')}</td>
+      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdL}>${esc(r.deleted_by || '—')}</td>
+      <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
+      <td ${tdN}>
+        <button class="btn btn-sm" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('job', ${r.id})">&#8635; Restore</button>
+        <button class="btn btn-sm btn-danger" onclick="purgeTrash('job', ${r.id})">&#128465; Delete Permanently</button>
+      </td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = trashPaneHeader('Jobs', rows.length) + `
+    <div style="overflow-x:auto;">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+      <thead><tr style="background:var(--bg2);">
+        <th ${thL}>Job ID</th>
+        <th ${thL}>Code</th>
+        <th ${thL}>Name</th>
+        <th ${thL}>Company</th>
+        <th ${thL}>Deleted</th>
+        <th ${thL}>By</th>
+        <th ${thL}>Auto-purge</th>
+        <th ${thL}></th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    </div>`;
+}
+
+function renderTrashImports() {
+  const el = document.getElementById('rt-trash-imports');
+  if (!el) return;
+  const rows = trashCache.imports || [];
+  if (!rows.length) {
+    el.innerHTML = trashPaneHeader('Imports', 0)
+      + `<div class="empty">Trash is empty — no deleted imports.</div>`;
+    return;
+  }
+  const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const tdL = 'style="padding:8px 10px;"';
+  const tdR = 'style="padding:8px 10px;text-align:right;"';
+  const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
+  const body = rows.map(r => {
+    const left = trashDaysLeft(r.deleted_at);
+    const expiringSoon = left <= 3;
+    const unit = packetUnitLabel(r.paper_type).toLowerCase();
+    const statusBadge = r.status === 'pending'
+      ? '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Pending</span>'
+      : r.status === 'received'
+      ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
+      : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td ${tdL}>${statusBadge}</td>
+      <td ${tdL}>${esc(r.paper_type || '—')}</td>
+      <td ${tdL}>${esc(r.size || '—')}</td>
+      <td ${tdR}>${esc(r.gsm || '—')}</td>
+      <td ${tdL}>${esc(r.brand || '—')}</td>
+      <td ${tdR} style="font-weight:600;">${(+r.packets).toLocaleString()} ${unit}</td>
+      <td ${tdL}>${esc(r.supplier || '—')}</td>
+      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdL}>${esc(r.deleted_by || '—')}</td>
+      <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
+      <td ${tdN}>
+        <button class="btn btn-sm" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('import', ${r.id})">&#8635; Restore</button>
+        <button class="btn btn-sm btn-danger" onclick="purgeTrash('import', ${r.id})">&#128465; Delete Permanently</button>
+      </td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = trashPaneHeader('Imports', rows.length) + `
+    <div style="overflow-x:auto;">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+      <thead><tr style="background:var(--bg2);">
+        <th ${thL}>Status</th>
+        <th ${thL}>Paper Type</th>
+        <th ${thL}>Size</th>
+        <th ${thR}>GSM</th>
+        <th ${thL}>Brand</th>
+        <th ${thR}>Quantity</th>
+        <th ${thL}>Supplier</th>
+        <th ${thL}>Deleted</th>
+        <th ${thL}>By</th>
+        <th ${thL}>Auto-purge</th>
+        <th ${thL}></th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    </div>`;
+}
+
+async function restoreTrash(type, id) {
+  const label = type === 'job' ? `Job E-${id}` : `Import #${id}`;
+  const ok = await confirmDialog({
+    title: `Restore ${label}?`,
+    message: 'It\'ll go back where it came from and show up in normal listings again.',
+    confirmText: 'Restore',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('POST', '/api/trash/restore', { type, id });
+    notify(`${label} restored`);
+    if (type === 'job') await loadJobs();
+    if (type === 'import') await loadImports();
+    refreshTrash();
+  } catch (e) { notify('Restore failed: ' + e.message); }
+  showSaving(false);
+}
+
+async function purgeTrash(type, id) {
+  const label = type === 'job' ? `Job E-${id}` : `Import #${id}`;
+  const ok = await confirmDialog({
+    title: `Permanently delete ${label}?`,
+    message: 'This wipes it from the database for good. Cannot be undone.',
+    danger: true,
+    confirmText: 'Delete forever',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/trash/${type}/${id}`);
+    notify(`${label} permanently deleted`);
+    refreshTrash();
+  } catch (e) { notify('Delete failed: ' + e.message); }
+  showSaving(false);
+}
+
+async function emptyTrash() {
+  const total = (trashCache.jobs?.length || 0) + (trashCache.imports?.length || 0);
+  if (!total) { notify('Trash is already empty.'); return; }
+  const ok = await confirmDialog({
+    title: `Empty Trash?`,
+    message: `Permanently delete all ${total} item${total===1?'':'s'} (${trashCache.jobs?.length || 0} job${(trashCache.jobs?.length||0)===1?'':'s'} + ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'}). Cannot be undone.`,
+    danger: true,
+    confirmText: 'Empty Trash',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const r = await api('POST', '/api/trash/empty');
+    notify(`Trash emptied · ${r.jobs} job${r.jobs===1?'':'s'} + ${r.imports} import${r.imports===1?'':'s'} deleted`);
+    refreshTrash();
+  } catch (e) { notify('Empty failed: ' + e.message); }
+  showSaving(false);
+}
+
 // ── Reports tab navigation ───────────────────────────────────
 // ── Reports navigation ───────────────────────────────────────
 // Reports has a 3-card landing (Dashboard / Reports / Imports). Each card
@@ -4242,6 +4661,7 @@ function openReportsGroup(groupId) {
   if (groupId === 'stocks-group')   setReportsTab('stock-in');
   if (groupId === 'analysis-group') setReportsTab('summary');
   if (groupId === 'jobs-group')     setReportsTab('jobs-report');
+  if (groupId === 'trash-group')    setReportsTab('trash-jobs');
 }
 
 // Return to the 3-card landing — hides every group.
@@ -4259,7 +4679,7 @@ function exitReportsGroup() {
 // to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
-  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report'];
+  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report', 'trash-jobs', 'trash-imports'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -4269,6 +4689,8 @@ function setReportsTab(name) {
   if (name === 'summary')         openStockSummary();
   if (name === 'inventory-report') openInventoryReport();
   if (name === 'jobs-report')     openJobsReport();
+  if (name === 'trash-jobs')      loadTrashAndRender('jobs');
+  if (name === 'trash-imports')   loadTrashAndRender('imports');
 }
 
 // ── Stock In / Stock Out panes ───────────────────────────────
@@ -4279,6 +4701,87 @@ const stockMovementStates = {
   in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', rows: [] },
   out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', rows: [] },
 };
+
+// Per-direction bulk selection. Independent sets so flipping tabs keeps the
+// other tab's selection intact (rare but harmless). Reset on filter changes.
+const stockMovementSel = { in: new Set(), out: new Set() };
+function clearStockMovementSel(dir) { stockMovementSel[dir].clear(); renderStockMovement(dir, periodToDateRange(stockMovementStates[dir].period, stockMovementStates[dir].from, stockMovementStates[dir].to).from, periodToDateRange(stockMovementStates[dir].period, stockMovementStates[dir].from, stockMovementStates[dir].to).to); }
+function toggleStockMovementRow(dir, txId, checked) {
+  if (checked) stockMovementSel[dir].add(txId); else stockMovementSel[dir].delete(txId);
+  renderStockMovementBulkBar(dir);
+  const tr = document.querySelector(`tr[data-sm-row="${dir}-${txId}"]`);
+  if (tr) tr.classList.toggle('bulk-row-selected', checked);
+  const headChk = document.getElementById(`sm-${dir}-bulk-all`);
+  if (headChk) {
+    const visible = currentVisibleStockMovement(dir);
+    const allChecked = visible.length && visible.every(t => stockMovementSel[dir].has(t.id));
+    headChk.checked = !!allChecked;
+    headChk.indeterminate = !allChecked && visible.some(t => stockMovementSel[dir].has(t.id));
+  }
+}
+function toggleStockMovementAll(dir, checked) {
+  const visible = currentVisibleStockMovement(dir);
+  if (checked) visible.forEach(t => stockMovementSel[dir].add(t.id));
+  else         visible.forEach(t => stockMovementSel[dir].delete(t.id));
+  const { from, to } = periodToDateRange(stockMovementStates[dir].period, stockMovementStates[dir].from, stockMovementStates[dir].to);
+  renderStockMovement(dir, from, to);
+}
+// Apply the in-pane filters to derive the "visible" subset (matches what
+// renderStockMovement actually draws).
+function currentVisibleStockMovement(dir) {
+  const state = stockMovementStates[dir];
+  return (state.rows || []).filter(t =>
+       (!state.paperType || t.paper_type === state.paperType)
+    && (!state.size      || (t.item_size || '') === state.size)
+    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+  );
+}
+
+function renderStockMovementBulkBar(dir) {
+  const bar = document.getElementById(`sm-${dir}-bulk-bar`);
+  if (!bar) return;
+  const sel = [...stockMovementSel[dir]];
+  if (!sel.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  // Admin-only "Delete from History" — pure archival cleanup for old rows.
+  // Does NOT change the current balance (use per-row Reverse on the inventory
+  // History modal if you actually want to undo a row's effect on stock).
+  bar.innerHTML = `
+    <span class="bulk-count">${sel.length} selected</span>
+    <button class="btn btn-sm btn-clear" onclick="clearStockMovementSel('${dir}')">Clear</button>
+    <span class="bulk-spacer"></span>
+    ${isAdmin()
+      ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteStockMovement('${dir}')">&#128465; Delete from History</button>`
+      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History wipes old rows from the audit log.</span>`}
+  `;
+}
+
+// Admin-only hard delete of selected transaction rows. Confirms with an
+// explicit warning that balances stay untouched — the user has to remember
+// that this is archival cleanup, not a fix.
+async function bulkDeleteStockMovement(dir) {
+  if (!isAdmin()) { notify('Admin only.'); return; }
+  const sel = [...stockMovementSel[dir]];
+  const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
+  if (!rows.length) { notify('Nothing selected.'); return; }
+  const ok = await confirmDialog({
+    title: `Delete ${rows.length} row${rows.length===1?'':'s'} from history?`,
+    message: 'These rows are wiped from the audit log. Current balances stay the same — to undo a row’s effect on stock, use Reverse on the inventory History modal instead. This cannot be undone.',
+    danger: true,
+    confirmText: 'Delete from history',
+  });
+  if (!ok) return;
+  let good = 0, failed = 0;
+  showSaving(true);
+  for (const t of rows) {
+    try { await api('DELETE', `/api/inventory/transactions/${t.id}`); good++; }
+    catch (e) { failed++; console.error('Delete failed for tx', t.id, e); }
+  }
+  showSaving(false);
+  stockMovementSel[dir].clear();
+  await loadStockMovement(dir);
+  notify(`Deleted ${good}${failed?` · ${failed} failed`:''}`);
+}
 
 // Generic period-to-date-range helper, decoupled from any global state. Used
 // by both the inline panes (here) and the older Stock Summary code if it ever
@@ -4354,21 +4857,25 @@ function setMovementPaperType(dir, v) {
   // Size/GSM dropdowns repopulate from the new subset.
   const state = stockMovementStates[dir];
   state.paperType = v; state.size = ''; state.gsm = '';
+  stockMovementSel[dir].clear();
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
 }
 function setMovementSize(dir, v) {
   stockMovementStates[dir].size = v;
+  stockMovementSel[dir].clear();
   const state = stockMovementStates[dir];
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
 }
 function setMovementGsm(dir, v) {
   stockMovementStates[dir].gsm = v;
+  stockMovementSel[dir].clear();
   const state = stockMovementStates[dir];
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
 }
 function resetMovementFilters(dir) {
   const state = stockMovementStates[dir];
   state.paperType = ''; state.size = ''; state.gsm = '';
+  stockMovementSel[dir].clear();
   const pt = document.getElementById(`sm-${dir}-paper-type`); if (pt) pt.value = '';
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
 }
@@ -4501,7 +5008,9 @@ function renderStockMovement(direction, from, to) {
     const weightCell  = txKg === null
       ? '<span style="color:var(--text3)">—</span>'
       : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
-    return `<tr style="border-bottom:1px solid var(--border);">
+    const isSel = stockMovementSel[direction].has(t.id);
+    return `<tr data-sm-row="${direction}-${t.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleStockMovementRow('${direction}', ${t.id}, this.checked)"></td>
       <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
       <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
       <td style="padding:8px 10px;font-weight:600;" class="${cls}">${s}${fmt(pkts)} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${t.change.toLocaleString()} sheets</span></td>
@@ -4513,16 +5022,27 @@ function renderStockMovement(direction, from, to) {
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  // Drop any selected ids that fell out of the visible subset.
+  for (const id of [...stockMovementSel[direction]]) {
+    if (!txs.find(t => t.id === id)) stockMovementSel[direction].delete(id);
+  }
+  const allVisSel  = txs.length && txs.every(t => stockMovementSel[direction].has(t.id));
+  const someVisSel = !allVisSel && txs.some(t => stockMovementSel[direction].has(t.id));
   document.getElementById(`sm-${direction}-content`).innerHTML = txs.length
-    ? `<table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+    ? `<div id="sm-${direction}-bulk-bar" class="bulk-actions" style="display:none;"></div>
+       <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
          <thead>
            <tr style="background:var(--bg2);">
+             <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
              <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Notes</th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
        </table>`
     : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`;
+  const headChk = document.getElementById(`sm-${direction}-bulk-all`);
+  if (headChk) headChk.indeterminate = someVisSel;
+  renderStockMovementBulkBar(direction);
 }
 
 // Print using the same A4 portrait layout as the old Stock Report — direction
@@ -5266,6 +5786,129 @@ async function cancelImport(id) {
     await loadImports();
     renderImportsTable();
   } catch (e) { notify('Error: ' + e.message); }
+}
+
+// ── Bulk Imports actions ─────────────────────────────────────
+// Receive Selected — opens a single dialog with a per-row qty input (default
+// = booked qty). On confirm we POST each /receive sequentially so the server
+// can fail fast if anything's off, and the user gets a clean total at the end.
+// Capture the per-row qty inputs from the bulk-receive dialog, then close it.
+// The dialog DOM is wiped by dlgClose, so we stash values on window first.
+function bulkRecvConfirm(count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const el = document.getElementById('recv-qty-' + i);
+    out.push(el ? el.value : '');
+  }
+  window._bulkRecvQtys = out;
+  dlgClose(true);
+}
+
+async function bulkReceiveImports() {
+  const ids = [...importsBulkSel];
+  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status === 'pending');
+  if (!rows.length) { notify('No pending rows selected.'); return; }
+  // Build per-row qty body — table inside the branded dialog.
+  const bodyHtml = `
+    <table class="recv-qty-table">
+      <thead><tr><th>Paper · Size · GSM · Brand</th><th style="text-align:right;">Booked</th><th>Receive</th></tr></thead>
+      <tbody>
+        ${rows.map((r, idx) => {
+          const lbl = [r.paper_type, r.size, r.gsm && (r.gsm + 'gsm'), r.brand].filter(Boolean).map(esc).join(' · ');
+          const unit = packetUnitLabel(r.paper_type).toLowerCase();
+          return `<tr>
+            <td>${lbl}</td>
+            <td style="text-align:right;">${(+r.packets).toLocaleString()} ${unit}</td>
+            <td class="col-qty"><input type="number" step="0.01" min="0" id="recv-qty-${idx}" value="${+r.packets}"></td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    <div style="margin-top:8px;font-size:12px;color:var(--text2);">Edit any quantity to match what actually arrived. Set to 0 to skip a row.</div>
+  `;
+  const buttons = `
+    <button class="btn" onclick="dlgClose(false)">Cancel</button>
+    <button class="btn btn-primary" onclick="bulkRecvConfirm(${rows.length})">Receive All</button>`;
+  const html = _dialogTpl({
+    kind: 'confirm',
+    icon: '&#10003;',
+    iconBg: '#dcfce7',
+    iconColor: '#166534',
+    title: `Receive ${rows.length} import${rows.length===1?'':'s'}?`,
+    message: '',
+    body: bodyHtml,
+    buttons,
+  });
+  const confirmed = await _showDialog(html, 'confirm', '#recv-qty-0');
+  if (!confirmed) return;
+  const finalQtys = (window._bulkRecvQtys || []).slice();
+  window._bulkRecvQtys = null;
+  let ok = 0, failed = 0;
+  showSaving(true);
+  for (let i = 0; i < rows.length; i++) {
+    const qty = parseFloat(finalQtys[i]);
+    if (!Number.isFinite(qty) || qty <= 0) continue; // skip
+    try {
+      await api('POST', `/api/imports/${rows[i].id}/receive`, { packets: qty });
+      ok++;
+    } catch (e) { failed++; console.error('Receive failed for', rows[i].id, e); }
+  }
+  showSaving(false);
+  importsBulkSel.clear();
+  await loadInventory();
+  await loadImports();
+  renderImportsTable();
+  notify(`Received ${ok}${failed?` · ${failed} failed`:''}`);
+}
+
+async function bulkCancelImports() {
+  const ids = [...importsBulkSel];
+  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status === 'pending');
+  if (!rows.length) { notify('No pending rows selected.'); return; }
+  const ok = await confirmDialog({
+    title: `Cancel ${rows.length} import${rows.length===1?'':'s'}?`,
+    message: 'They\'ll move to the Cancelled tab. No stock is touched (they hadn\'t arrived yet).',
+    danger: true,
+    confirmText: 'Cancel them',
+    cancelText: 'Keep',
+  });
+  if (!ok) return;
+  let good = 0, failed = 0;
+  showSaving(true);
+  for (const r of rows) {
+    try { await api('POST', `/api/imports/${r.id}/cancel`); good++; }
+    catch (e) { failed++; console.error('Cancel failed for', r.id, e); }
+  }
+  showSaving(false);
+  importsBulkSel.clear();
+  await loadImports();
+  renderImportsTable();
+  notify(`Cancelled ${good}${failed?` · ${failed} failed`:''}`);
+}
+
+async function bulkDeleteImports() {
+  if (!isAdmin()) { notify('Admin only.'); return; }
+  const ids = [...importsBulkSel];
+  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status !== 'received');
+  if (!rows.length) { notify('Nothing deletable selected (received rows must be reversed first).'); return; }
+  const ok = await confirmDialog({
+    title: `Move ${rows.length} import row${rows.length===1?'':'s'} to Trash?`,
+    message: 'They\'ll stay in Trash for 30 days where an admin can restore them, then auto-purge. (Received rows are skipped — reverse them from the inventory ledger instead.)',
+    danger: true,
+    confirmText: 'Move to Trash',
+  });
+  if (!ok) return;
+  let good = 0, failed = 0;
+  showSaving(true);
+  for (const r of rows) {
+    try { await api('DELETE', `/api/imports/${r.id}`); good++; }
+    catch (e) { failed++; console.error('Delete failed for', r.id, e); }
+  }
+  showSaving(false);
+  importsBulkSel.clear();
+  await loadImports();
+  renderImportsTable();
+  notify(`Deleted ${good}${failed?` · ${failed} failed`:''}`);
 }
 
 function setDateRange(v) {
@@ -6417,10 +7060,10 @@ async function deleteJob(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   const ok = await confirmDialog({
-    title: `Permanently delete Job E-${id}?`,
-    message: `"${j.name}"\n\nThis cannot be undone. Inventory ledger entries will be preserved but their link to this job will be removed.`,
+    title: `Move Job E-${id} to Trash?`,
+    message: `"${j.name}"\n\nIt'll stay in Trash for 30 days where you can restore it, then auto-purge. Inventory ledger entries are preserved.`,
     danger: true,
-    confirmText: 'Delete',
+    confirmText: 'Move to Trash',
   });
   if (!ok) return;
   showSaving(true);
@@ -6428,7 +7071,7 @@ async function deleteJob(id) {
     await api('DELETE', `/api/jobs/${id}`);
     jobs = jobs.filter(x => x.id !== id);
     await loadInventory();
-    notify('Job deleted'); render();
+    notify('Job moved to Trash'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
