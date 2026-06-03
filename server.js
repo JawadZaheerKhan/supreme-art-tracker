@@ -1291,6 +1291,25 @@ app.post('/api/imports/:id/cancel', requireWriteUser, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// DELETE an import row entirely (admin only). Used by the bulk Delete action
+// on the Imports page. Refuses to delete a "received" row because that would
+// orphan the stock-in transaction it created. Pending / Cancelled are fine to
+// hard-delete since they never touched inventory.
+app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { id } = req.params;
+    const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id}`)[0];
+    if (!imp) return res.status(404).json({ error: 'Import not found' });
+    if (imp.status === 'received') {
+      return res.status(400).json({ error: 'Cannot delete a received import — reverse the stock-in entry first.' });
+    }
+    await sql`DELETE FROM inventory_imports WHERE id=${id}`;
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // RECEIVE an import — converts it to a real stock-in transaction. If the
 // import has no linked inventory_item, we create one on the fly using the
 // import's paper_type/size/gsm/brand. The body may override `packets` (e.g.,
