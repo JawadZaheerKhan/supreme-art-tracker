@@ -1291,6 +1291,34 @@ app.post('/api/imports/:id/cancel', requireWriteUser, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// DELETE an inventory transaction row from history (admin only). Pure archival
+// cleanup — does NOT touch current_balance, since the row already happened and
+// its effect is baked into the running balance. Intended for wiping old rows
+// after months/years. To actually undo a row's effect on stock, use the
+// per-row Reverse on the inventory History modal instead (which posts a
+// proper correction entry).
+app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const tx = (await sql`SELECT id, item_id, change, reason FROM inventory_transactions WHERE id=${id}`)[0];
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    // reverses_tx_id has ON DELETE SET NULL so reversal rows pointing at this
+    // one (if any) survive — they just lose their back-link. Acceptable for
+    // archival purposes.
+    await sql`DELETE FROM inventory_transactions WHERE id=${id}`;
+    await logAudit(sql, req, {
+      action: 'inventory.tx.delete',
+      entityType: 'inventory_item',
+      entityId: tx.item_id,
+      summary: `Deleted tx #${id} from history (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // DELETE an import row entirely (admin only). Used by the bulk Delete action
 // on the Imports page. Refuses to delete a "received" row because that would
 // orphan the stock-in transaction it created. Pending / Cancelled are fine to

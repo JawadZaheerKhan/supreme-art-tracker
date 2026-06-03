@@ -3649,7 +3649,7 @@ function renderImportsBulkBar() {
     <span class="bulk-spacer"></span>
     ${allPending ? `<button class="btn btn-sm btn-bulk-receive ceo-hide" onclick="bulkReceiveImports()">&#10003; Receive Selected</button>` : ''}
     ${allPending ? `<button class="btn btn-sm btn-bulk-cancel  ceo-hide" onclick="bulkCancelImports()">&#10006; Cancel Selected</button>` : ''}
-    ${(isAdmin() && noneReceived) ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteImports()">&#128465; Delete Selected</button>` : ''}
+    ${(isAdmin() && noneReceived) ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteImports()">&#128465; Delete from History</button>` : ''}
   `;
 }
 
@@ -3891,9 +3891,75 @@ function openJobsReport() {
   `;
   renderJobsReport();
 }
-function setJrFrom(v)   { jobsReportState.from = v;   renderJobsReport(); }
-function setJrTo(v)     { jobsReportState.to = v;     renderJobsReport(); }
-function setJrClient(v) { jobsReportState.client = v; renderJobsReport(); }
+function setJrFrom(v)   { jobsReportState.from = v;   jobsReportSel.clear(); renderJobsReport(); }
+function setJrTo(v)     { jobsReportState.to = v;     jobsReportSel.clear(); renderJobsReport(); }
+function setJrClient(v) { jobsReportState.client = v; jobsReportSel.clear(); renderJobsReport(); }
+
+// ── Bulk selection (Jobs Report) ─────────────────────────────
+// Admin-only Delete from History — for clearing out delivered jobs after
+// 6+ months. Hard-deletes the jobs table row (same as the per-card delete
+// button, just in bulk).
+const jobsReportSel = new Set();
+function clearJobsReportSel() { jobsReportSel.clear(); renderJobsReport(); }
+function toggleJobsReportRow(id, checked) {
+  if (checked) jobsReportSel.add(id); else jobsReportSel.delete(id);
+  renderJobsReportBulkBar();
+  const tr = document.querySelector(`tr[data-jr-row="${id}"]`);
+  if (tr) tr.classList.toggle('bulk-row-selected', checked);
+  const headChk = document.getElementById('jr-bulk-all');
+  if (headChk) {
+    const visible = buildJobsReportRows();
+    const allChecked = visible.length && visible.every(r => jobsReportSel.has(r.id));
+    headChk.checked = !!allChecked;
+    headChk.indeterminate = !allChecked && visible.some(r => jobsReportSel.has(r.id));
+  }
+}
+function toggleJobsReportAll(checked) {
+  const visible = buildJobsReportRows();
+  if (checked) visible.forEach(r => jobsReportSel.add(r.id));
+  else         visible.forEach(r => jobsReportSel.delete(r.id));
+  renderJobsReport();
+}
+
+function renderJobsReportBulkBar() {
+  const bar = document.getElementById('jr-bulk-bar');
+  if (!bar) return;
+  const sel = [...jobsReportSel];
+  if (!sel.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <span class="bulk-count">${sel.length} selected</span>
+    <button class="btn btn-sm btn-clear" onclick="clearJobsReportSel()">Clear</button>
+    <span class="bulk-spacer"></span>
+    ${isAdmin()
+      ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteJobsReport()">&#128465; Delete from History</button>`
+      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History wipes old delivered jobs.</span>`}
+  `;
+}
+
+async function bulkDeleteJobsReport() {
+  if (!isAdmin()) { notify('Admin only.'); return; }
+  const ids = [...jobsReportSel];
+  if (!ids.length) { notify('Nothing selected.'); return; }
+  const ok = await confirmDialog({
+    title: `Delete ${ids.length} delivered job${ids.length===1?'':'s'} from history?`,
+    message: 'They\'re wiped from the database — gone from this report, the dashboard, audit logs, everywhere. Their issued stock is NOT returned. This cannot be undone.',
+    danger: true,
+    confirmText: 'Delete from history',
+  });
+  if (!ok) return;
+  let good = 0, failed = 0;
+  showSaving(true);
+  for (const id of ids) {
+    try { await api('DELETE', `/api/jobs/${id}`); good++; }
+    catch (e) { failed++; console.error('Delete failed for job', id, e); }
+  }
+  showSaving(false);
+  jobsReportSel.clear();
+  await loadJobs();
+  renderJobsReport();
+  notify(`Deleted ${good}${failed?` · ${failed} failed`:''}`);
+}
 
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
@@ -3965,8 +4031,13 @@ function renderJobsReport() {
   const rows = buildJobsReportRows();
   const el = document.getElementById('jr-content');
   if (!el) return;
+  // Drop any selected ids that fell out of the current filter window.
+  for (const id of [...jobsReportSel]) {
+    if (!rows.find(r => r.id === id)) jobsReportSel.delete(id);
+  }
   if (!rows.length) {
-    el.innerHTML = `<div class="empty">No delivered jobs match these filters.</div>`;
+    el.innerHTML = `<div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
+      <div class="empty">No delivered jobs match these filters.</div>`;
     return;
   }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
@@ -3981,7 +4052,9 @@ function renderJobsReport() {
     const wastageCell = r.wastage === null
       ? '<td ' + tdR + '>—</td>'
       : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`;
-    return `<tr style="border-bottom:1px solid var(--border);">
+    const isSel = jobsReportSel.has(r.id);
+    return `<tr data-jr-row="${r.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>E-${r.id}</td>
       <td ${td}>${esc(r.jobcode)}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
@@ -4000,12 +4073,16 @@ function renderJobsReport() {
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const allVisSel  = rows.length && rows.every(r => jobsReportSel.has(r.id));
+  const someVisSel = !allVisSel && rows.some(r => jobsReportSel.has(r.id));
   el.innerHTML = `
+    <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} delivered job${rows.length===1?'':'s'} in window</div>
     <div style="overflow-x:auto;">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead>
         <tr style="background:var(--bg2);">
+          <th class="bulk-th"><input type="checkbox" id="jr-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleJobsReportAll(this.checked)" title="Select all visible"></th>
           <th ${th}>Job ID</th>
           <th ${th}>Code</th>
           <th ${th}>Created</th>
@@ -4025,6 +4102,9 @@ function renderJobsReport() {
       <tbody>${tbody}</tbody>
     </table>
     </div>`;
+  const headChk = document.getElementById('jr-bulk-all');
+  if (headChk) headChk.indeterminate = someVisSel;
+  renderJobsReportBulkBar();
 }
 
 // Export the Jobs Report to .xlsx.
@@ -4417,52 +4497,45 @@ function renderStockMovementBulkBar(dir) {
   if (!bar) return;
   const sel = [...stockMovementSel[dir]];
   if (!sel.length) { bar.style.display = 'none'; return; }
-  // Only stock-in rows can be reversed (positive change). For stock-out we
-  // don't expose Reverse anyway — but we keep the bar so the user sees the
-  // selection count, just without action buttons (admin Delete is N/A too —
-  // we don't have a hard-delete endpoint for transactions on purpose).
-  const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
-  const selectedTxs = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
-  const reversibleCount = selectedTxs.filter(t =>
-    t.change > 0 && !t.reverses_tx_id && !t.has_been_reversed &&
-    (isAdmin() || (canWrite() && (Date.now() - new Date(t.created_at).getTime()) <= TWENTY_FOUR_HRS))
-  ).length;
   bar.style.display = 'flex';
+  // Admin-only "Delete from History" — pure archival cleanup for old rows.
+  // Does NOT change the current balance (use per-row Reverse on the inventory
+  // History modal if you actually want to undo a row's effect on stock).
   bar.innerHTML = `
     <span class="bulk-count">${sel.length} selected</span>
     <button class="btn btn-sm btn-clear" onclick="clearStockMovementSel('${dir}')">Clear</button>
     <span class="bulk-spacer"></span>
-    ${(dir === 'in' && reversibleCount > 0) ? `<button class="btn btn-sm btn-bulk-reverse ceo-hide" onclick="bulkReverseStockMovement('${dir}')">&#8634; Reverse Selected (${reversibleCount})</button>` : ''}
-    ${(dir === 'in' && reversibleCount === 0) ? `<span style="font-size:11px;color:var(--text2);">Selected rows can't be reversed (already-reversed, reversal entry, or past 24h window).</span>` : ''}
-    ${(dir === 'out') ? `<span style="font-size:11px;color:var(--text2);">Stock-out rows aren't directly reversible — they come from job issuance. Undo on the job itself.</span>` : ''}
+    ${isAdmin()
+      ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteStockMovement('${dir}')">&#128465; Delete from History</button>`
+      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History wipes old rows from the audit log.</span>`}
   `;
 }
 
-// Reverse each selected stock-in tx sequentially. Server enforces the same
-// permission rules per-row so a mixed selection just yields some failures.
-async function bulkReverseStockMovement(dir) {
-  if (dir !== 'in') return;
+// Admin-only hard delete of selected transaction rows. Confirms with an
+// explicit warning that balances stay untouched — the user has to remember
+// that this is archival cleanup, not a fix.
+async function bulkDeleteStockMovement(dir) {
+  if (!isAdmin()) { notify('Admin only.'); return; }
   const sel = [...stockMovementSel[dir]];
-  const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id))
-    .filter(t => t && t.change > 0 && !t.reverses_tx_id && !t.has_been_reversed);
-  if (!rows.length) { notify('Nothing reversible selected.'); return; }
+  const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
+  if (!rows.length) { notify('Nothing selected.'); return; }
   const ok = await confirmDialog({
-    title: `Reverse ${rows.length} entr${rows.length===1?'y':'ies'}?`,
-    message: 'A "correction" entry will be added for each that cancels it out. Original rows stay for the audit trail but show as struck-through.',
-    confirmText: 'Reverse all',
+    title: `Delete ${rows.length} row${rows.length===1?'':'s'} from history?`,
+    message: 'These rows are wiped from the audit log. Current balances stay the same — to undo a row’s effect on stock, use Reverse on the inventory History modal instead. This cannot be undone.',
+    danger: true,
+    confirmText: 'Delete from history',
   });
   if (!ok) return;
   let good = 0, failed = 0;
   showSaving(true);
   for (const t of rows) {
-    try { await api('POST', `/api/inventory/transactions/${t.id}/reverse`); good++; }
-    catch (e) { failed++; console.error('Reverse failed for tx', t.id, e); }
+    try { await api('DELETE', `/api/inventory/transactions/${t.id}`); good++; }
+    catch (e) { failed++; console.error('Delete failed for tx', t.id, e); }
   }
   showSaving(false);
   stockMovementSel[dir].clear();
-  await loadInventory();
   await loadStockMovement(dir);
-  notify(`Reversed ${good}${failed?` · ${failed} failed`:''}`);
+  notify(`Deleted ${good}${failed?` · ${failed} failed`:''}`);
 }
 
 // Generic period-to-date-range helper, decoupled from any global state. Used
