@@ -1334,6 +1334,14 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Cannot delete a received import — reverse the stock-in entry first.' });
     }
     await sql`DELETE FROM inventory_imports WHERE id=${id}`;
+    // Audit so the delete shows up in the Users → Recent Activity feed.
+    const label = [imp.paper_type, imp.size, imp.gsm && (imp.gsm + 'gsm'), imp.brand].filter(Boolean).join(' · ');
+    await logAudit(sql, req, {
+      action: 'import.delete',
+      entityType: 'import',
+      entityId: parseInt(id, 10),
+      summary: `Deleted ${imp.status} import #${imp.id}: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
+    });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
