@@ -81,6 +81,13 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cut_size    TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offcut_size TEXT`;
 
+    // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
+    // delivered job, we set deleted_at instead of dropping the row, so the
+    // admin has 30 days to recover it from the Trash page. Auto-purged later.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS jobs_deleted_at_idx ON jobs(deleted_at) WHERE deleted_at IS NOT NULL`;
+
     // Inventory: paper (and future ink/etc) catalog + append-only ledger
     await sql`
       CREATE TABLE IF NOT EXISTS inventory_items (
@@ -166,6 +173,11 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS inventory_imports_status_idx ON inventory_imports(status)`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_imports_type_idx   ON inventory_imports(paper_type)`;
+    // Soft-delete columns for the Trash page. Only non-received rows can be
+    // soft-deleted (received rows would orphan their stock-in tx).
+    await sql`ALTER TABLE inventory_imports ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE inventory_imports ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS imports_deleted_at_idx ON inventory_imports(deleted_at) WHERE deleted_at IS NOT NULL`;
 
     // Auth: allow-list of users keyed by email. role is enforced via CHECK so
     // the DB rejects typos. invited_by is just a breadcrumb for the Users tab.
@@ -473,7 +485,7 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const jobs = await sql`SELECT * FROM jobs ORDER BY id ASC`;
+    const jobs = await sql`SELECT * FROM jobs WHERE deleted_at IS NULL ORDER BY id ASC`;
     res.json(jobs);
   } catch (err) {
     console.error(err);
@@ -586,7 +598,7 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
     // job is still 'pending' (stock never issued), edits don't touch inventory
     // at all. Once 'issued', edits auto-adjust the ledger using the same
     // packet-first formula as initial issuance.
-    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size FROM jobs WHERE id = ${id}`;
+    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const newItemId  = inventory_item_id || null;
@@ -688,7 +700,7 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const rows = await sql`SELECT * FROM jobs WHERE id = ${id}`;
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
     if (job.issuance_status === 'issued') {
@@ -754,16 +766,22 @@ app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
   }
 });
 
-// DELETE a job — admin only. Inventory ledger entries keep their data
-// (the FK is ON DELETE SET NULL) so historical balances stay traceable.
+// DELETE a job — admin only. SOFT delete: flips deleted_at so the row stays
+// recoverable from the Trash page for 30 days. Inventory ledger entries are
+// unaffected (their FK is ON DELETE SET NULL and we don't actually delete).
 app.delete('/api/jobs/:id', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const deleted = await sql`DELETE FROM jobs WHERE id = ${id} RETURNING *`;
-    if (!deleted.length) return res.status(404).json({ error: 'Job not found' });
-    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Deleted Job E-${id}: ${deleted[0].name}` });
+    const by  = req.user?.email || 'unknown';
+    const updated = await sql`
+      UPDATE jobs SET deleted_at = NOW(), deleted_by = ${by}
+      WHERE id = ${id} AND deleted_at IS NULL
+      RETURNING *
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Job not found' });
+    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Trash: ${updated[0].name}` });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -984,10 +1002,12 @@ app.delete('/api/inventory/:id', requireAdmin, async (req, res) => {
     const itemId = parseInt(id, 10);
     if (!Number.isFinite(itemId)) return res.status(400).json({ error: 'Invalid id' });
 
-    // Block delete if any still-pending jobs depend on this item.
+    // Block delete if any still-pending jobs depend on this item. Trashed
+    // jobs don't block — they're conceptually gone.
     const blockers = await sql`
       SELECT id, jobcode, name FROM jobs
       WHERE inventory_item_id = ${itemId} AND issuance_status = 'pending'
+        AND deleted_at IS NULL
       ORDER BY id
     `;
     if (blockers.length > 0) {
@@ -1222,7 +1242,8 @@ app.get('/api/imports', async (req, res) => {
     const status = req.query.status || null; // null means all statuses
     const rows = await sql`
       SELECT * FROM inventory_imports
-      WHERE (${status}::text IS NULL OR status = ${status})
+      WHERE deleted_at IS NULL
+        AND (${status}::text IS NULL OR status = ${status})
       ORDER BY (status = 'pending') DESC, expected_arrival NULLS LAST, id DESC
     `;
     res.json(rows);
@@ -1271,7 +1292,7 @@ app.put('/api/imports/:id', requireWriteUser, async (req, res) => {
         paper_type=${paper_type}, size=${size||null}, gsm=${gsm||null}, brand=${brand||null},
         packets=${packets||0}, weight_kg=${weight_kg||null}, supplier=${supplier||null},
         booked_date=${booked_date||null}, expected_arrival=${expected_arrival||null}, notes=${notes||null}
-      WHERE id=${id} RETURNING *
+      WHERE id=${id} AND deleted_at IS NULL RETURNING *
     `;
     res.json(rows[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -1284,10 +1305,110 @@ app.post('/api/imports/:id/cancel', requireWriteUser, async (req, res) => {
     const sql = getDb();
     const { id } = req.params;
     const rows = await sql`
-      UPDATE inventory_imports SET status='cancelled' WHERE id=${id} AND status='pending' RETURNING *
+      UPDATE inventory_imports SET status='cancelled' WHERE id=${id} AND status='pending' AND deleted_at IS NULL RETURNING *
     `;
     if (!rows.length) return res.status(400).json({ error: 'Only pending imports can be cancelled' });
     res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Trash (soft-deleted jobs + imports) ─────────────────────
+// Items soft-deleted by the bulk "Delete from History" actions live here for
+// 30 days, then auto-purge. Lazy purge model: every GET /api/trash runs a
+// cleanup first so we don't need cron on Vercel.
+const TRASH_RETENTION_DAYS = 30;
+
+// Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
+// idempotent — safe to call on every list request.
+async function purgeExpiredTrash(sql) {
+  await sql`DELETE FROM jobs              WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+}
+
+// LIST everything in trash. Returns { jobs, imports, retention_days } so the
+// frontend can show "Auto-purges in N days" per row.
+app.get('/api/trash', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    await purgeExpiredTrash(sql);
+    const jobsRows = await sql`
+      SELECT id, name, jobcode, client, stage_index, deleted_at, deleted_by, created_at
+      FROM jobs WHERE deleted_at IS NOT NULL
+      ORDER BY deleted_at DESC
+    `;
+    const importsRows = await sql`
+      SELECT id, paper_type, size, gsm, brand, packets, supplier, status, deleted_at, deleted_by, booked_date, expected_arrival
+      FROM inventory_imports WHERE deleted_at IS NOT NULL
+      ORDER BY deleted_at DESC
+    `;
+    res.json({ jobs: jobsRows, imports: importsRows, retention_days: TRASH_RETENTION_DAYS });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// RESTORE one row from trash. Body: { type: 'job'|'import', id: 123 }.
+app.post('/api/trash/restore', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { type, id } = req.body || {};
+    const rowId = parseInt(id, 10);
+    if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
+    if (type === 'job') {
+      const updated = await sql`UPDATE jobs SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
+      if (!updated.length) return res.status(404).json({ error: 'Job not in trash' });
+      await logAudit(sql, req, { action: 'job.restore', entityType: 'job', entityId: rowId, summary: `Restored Job E-${rowId}: ${updated[0].name}` });
+      return res.json({ ok: true });
+    }
+    if (type === 'import') {
+      const updated = await sql`UPDATE inventory_imports SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type, status`;
+      if (!updated.length) return res.status(404).json({ error: 'Import not in trash' });
+      await logAudit(sql, req, { action: 'import.restore', entityType: 'import', entityId: rowId, summary: `Restored ${updated[0].status} import #${rowId}: ${updated[0].paper_type}` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job" or "import"' });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// PERMANENT delete from trash. Same shape as restore. Hard-deletes the row.
+app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const type = req.params.type;
+    const rowId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
+    if (type === 'job') {
+      const deleted = await sql`DELETE FROM jobs WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
+      if (!deleted.length) return res.status(404).json({ error: 'Job not in trash' });
+      await logAudit(sql, req, { action: 'job.purge', entityType: 'job', entityId: rowId, summary: `Permanently deleted Job E-${rowId}: ${deleted[0].name}` });
+      return res.json({ ok: true });
+    }
+    if (type === 'import') {
+      const deleted = await sql`DELETE FROM inventory_imports WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type`;
+      if (!deleted.length) return res.status(404).json({ error: 'Import not in trash' });
+      await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job" or "import"' });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes everything
+// currently in trash regardless of age.
+app.post('/api/trash/empty', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobsDel    = await sql`DELETE FROM jobs              WHERE deleted_at IS NOT NULL RETURNING id`;
+    const importsDel = await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL RETURNING id`;
+    await logAudit(sql, req, {
+      action: 'trash.empty',
+      entityType: 'system',
+      entityId: 0,
+      summary: `Emptied Trash: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
+    });
+    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -1328,19 +1449,21 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id}`)[0];
+    const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id} AND deleted_at IS NULL`)[0];
     if (!imp) return res.status(404).json({ error: 'Import not found' });
     if (imp.status === 'received') {
       return res.status(400).json({ error: 'Cannot delete a received import — reverse the stock-in entry first.' });
     }
-    await sql`DELETE FROM inventory_imports WHERE id=${id}`;
-    // Audit so the delete shows up in the Users → Recent Activity feed.
+    // SOFT delete: flip deleted_at. Recoverable from the Trash page for 30
+    // days; auto-purged after.
+    const by = req.user?.email || 'unknown';
+    await sql`UPDATE inventory_imports SET deleted_at = NOW(), deleted_by = ${by} WHERE id=${id}`;
     const label = [imp.paper_type, imp.size, imp.gsm && (imp.gsm + 'gsm'), imp.brand].filter(Boolean).join(' · ');
     await logAudit(sql, req, {
       action: 'import.delete',
       entityType: 'import',
       entityId: parseInt(id, 10),
-      summary: `Deleted ${imp.status} import #${imp.id}: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
+      summary: `Moved ${imp.status} import #${imp.id} to Trash: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -1356,7 +1479,7 @@ app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
     const sql = getDb();
     const { id } = req.params;
     const overridePackets = parseFloat(req.body?.packets);
-    const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id}`)[0];
+    const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id} AND deleted_at IS NULL`)[0];
     if (!imp) return res.status(404).json({ error: 'Import not found' });
     if (imp.status !== 'pending') return res.status(400).json({ error: 'Only pending imports can be received' });
 
