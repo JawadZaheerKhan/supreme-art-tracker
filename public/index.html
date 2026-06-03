@@ -1265,7 +1265,7 @@ function invStockState(item) {
   return bal <= 0 ? 'out' : 'ok';
 }
 function getInventoryFiltered() {
-  return inventory.filter(it => {
+  const filtered = inventory.filter(it => {
     const t = invFilterText.toLowerCase();
     if (t) {
       const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''}`.toLowerCase();
@@ -1280,6 +1280,21 @@ function getInventoryFiltered() {
     if (invFilterStock === 'out' && state !== 'out') return false;
     return true;
   });
+  // Sort: paper type → gsm (numeric) → size (numeric) → fresh-before-offcut → brand.
+  // Matches the Inventory Report ordering so the inventory page reads in the
+  // same way users scan the report (all 208 gsm cluster, then 230, etc.).
+  filtered.sort((a, b) => {
+    if (a.paper_type !== b.paper_type) return a.paper_type.localeCompare(b.paper_type);
+    const ag = parseFloat(a.gsm) || 0, bg = parseFloat(b.gsm) || 0;
+    if (ag !== bg) return ag - bg;
+    const ad = parseSizeInches(a.size) || { w: 0, h: 0 };
+    const bd = parseSizeInches(b.size) || { w: 0, h: 0 };
+    if (ad.w !== bd.w) return ad.w - bd.w;
+    if (ad.h !== bd.h) return ad.h - bd.h;
+    if (!!a.is_offcut !== !!b.is_offcut) return a.is_offcut ? 1 : -1;
+    return String(a.brand||'').localeCompare(String(b.brand||''));
+  });
+  return filtered;
 }
 // Distinct, sorted values for the size and GSM filter dropdowns.
 function invDistinct(field) {
