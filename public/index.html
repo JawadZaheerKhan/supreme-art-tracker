@@ -174,6 +174,11 @@
   .stock-hint.low { color: #d97706; font-weight: 600; }
   .stock-hint.out { color: #A32D2D; font-weight: 600; }
   .main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+  /* Reports has wide tables (imports, stock movement, jobs report) that
+     deserve more room on big monitors. Everything else — Jobs, Inventory,
+     Users, Stickers — stays at 1100px because their card layouts look
+     better tight. */
+  #reports-mode.main { max-width: 1500px; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-bottom: 1.25rem; }
   .stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; }
   .stat-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
@@ -846,8 +851,31 @@
 <div id="print-area"></div>
 <div class="notif" id="notif"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- XLSX library is NOT loaded eagerly anymore — it's ~1.5 MB and only needed
+     when a user clicks "Export to Excel". ensureXlsx() (below) lazy-loads it
+     on first export click so the initial page load stays light for everyone
+     (especially CEO / read-only users who never export). -->
 <script>
+// ── Lazy-load XLSX ──────────────────────────────────────────
+// The xlsx library is ~1.5 MB and we don't want to ship it to every user on
+// every page load — only ~10% of users (admins/storekeepers exporting reports)
+// ever touch it. ensureXlsx() injects the <script> on first call, returns
+// immediately on subsequent calls. Every export* function awaits this before
+// touching the global XLSX object.
+let _xlsxLoadPromise = null;
+function ensureXlsx() {
+  if (typeof XLSX !== 'undefined') return Promise.resolve();
+  if (_xlsxLoadPromise) return _xlsxLoadPromise;
+  _xlsxLoadPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload  = () => resolve();
+    s.onerror = () => { _xlsxLoadPromise = null; reject(new Error('Failed to load Excel library — check your connection and try again.')); };
+    document.head.appendChild(s);
+  });
+  return _xlsxLoadPromise;
+}
+
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
 const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delivered'];
 const PAPERS  = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
@@ -2923,7 +2951,8 @@ function renderInventoryReport() {
     </table>`;
 }
 
-function exportInventoryReport() {
+async function exportInventoryReport() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildInventoryReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const { groupBy } = invReportState;
@@ -3459,7 +3488,8 @@ function printStockSummary() {
 // Export Stock Summary to .xlsx. Same grouped rows the on-screen table uses
 // (brand-agnostic — multiple brands collapse into one row). One sheet, one
 // row per (gsm, size, is_offcut) group, plus per-period IN/OUT/Bal columns.
-function exportStockSummary() {
+async function exportStockSummary() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const { paperType, from, to, granularity } = stockSummaryState;
   const { rows, buckets } = computeSummaryRows();
   if (!rows.length) { notify('Nothing to export — no items in this view.'); return; }
@@ -3772,7 +3802,8 @@ function visibleImportsForExport() {
 }
 
 // Export the Imports table (whatever status filter is active) to .xlsx.
-function exportImports() {
+async function exportImports() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const { list, filterLabel } = visibleImportsForExport();
   if (!list.length) { notify('Nothing to export — no imports in this view.'); return; }
   const header = ['Status', 'Paper Type', 'Size', 'GSM', 'Brand', 'Packets/Reams', 'Weight (kg)', 'Supplier', 'Booked', 'Expected', 'Received At', 'Notes'];
@@ -4141,7 +4172,8 @@ function renderJobsReport() {
 }
 
 // Export the Jobs Report to .xlsx.
-function exportJobsReport() {
+async function exportJobsReport() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const header = ['Job ID', 'Code', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
@@ -5145,7 +5177,8 @@ function printStockMovement(direction) {
 // .xlsx file. Same filter rules as the on-screen table — paper type / size /
 // gsm / date range — so the file mirrors what the user sees. One sheet per
 // direction; the filename includes the direction and a date stamp.
-function exportStockMovement(direction) {
+async function exportStockMovement(direction) {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const state = stockMovementStates[direction];
   const { from, to } = periodToDateRange(state.period, state.from, state.to);
   // Same filter chain as renderStockMovement()
@@ -7366,7 +7399,8 @@ function printJobCard(id) {
   }, 50);
 }
 
-function exportCSV() {
+async function exportCSV() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const header = ['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created'];
   const rows = jobs.map(j => {
     const coatings = Array.isArray(j.coatings) ? j.coatings.join('; ') : '';
