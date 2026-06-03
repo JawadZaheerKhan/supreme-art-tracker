@@ -31,6 +31,9 @@
   /* Read-only CEO role: any element tagged with class="ceo-hide" disappears.
      Backend still enforces the lock; this is just the UI nicety. */
   body.role-ceo .ceo-hide { display: none !important; }
+  /* Inverse: .ceo-only elements only appear when role-ceo is active. */
+  .ceo-only { display: none; }
+  body.role-ceo .ceo-only { display: inline; }
   .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
   .report-card:hover { border-color: var(--blue-border); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-2px); }
   .report-card-icon { font-size: 28px; }
@@ -638,10 +641,10 @@
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
       </button>
-      <button class="report-card ceo-hide" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
+      <button class="report-card" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
         <div class="report-card-icon">&#128465;</div>
         <div class="report-card-title">Trash</div>
-        <div class="report-card-desc">Deleted jobs and imports stay here for 30 days before being permanently removed. Admin can restore or empty the bin.</div>
+        <div class="report-card-desc">Deleted jobs and imports stay here for 30 days before being permanently removed. Admin can restore or empty the bin; CEO can view.</div>
       </button>
     </div>
   </div>
@@ -824,7 +827,7 @@
   <div class="stats-row" id="users-stats-row"></div>
   <div class="toolbar">
     <div style="font-size:14px;font-weight:600;color:var(--text);">Authorized Users</div>
-    <button class="btn btn-sm btn-primary" style="margin-left:auto;" onclick="openInviteUser()">+ Invite User</button>
+    <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openInviteUser()">+ Invite User</button>
   </div>
   <div class="inventory-list" id="users-list"></div>
   <div style="margin-top:1.5rem;">
@@ -1061,9 +1064,11 @@ function renderUserChip() {
   const pic = document.getElementById('user-pic');
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
-  document.getElementById('mode-users-btn').style.display = isAdmin() ? 'block' : 'none';
+  // Users tab — visible to admin (full control) and CEO (read-only audit feed).
+  document.getElementById('mode-users-btn').style.display = (isAdmin() || isCeo()) ? 'block' : 'none';
+  // Trash card — same: admin can act, CEO can view.
   const trashBtn = document.getElementById('trash-card-btn');
-  if (trashBtn) trashBtn.style.display = isAdmin() ? 'flex' : 'none';
+  if (trashBtn) trashBtn.style.display = (isAdmin() || isCeo()) ? 'flex' : 'none';
   // CEOs see a read-only version of the app — flip a body class so the CSS
   // rule below hides every element tagged .ceo-hide in one go.
   document.body.classList.toggle('role-ceo', isCeo());
@@ -1135,8 +1140,9 @@ async function loadInventory() {
 // Mode (top-level page) switching — toggles between Jobs / Inventory / Users
 // and swaps the topbar's primary action button accordingly.
 function setMode(m) {
-  // Block non-admins from sneaking into the Users tab via dev tools.
-  if (m === 'users' && !isAdmin()) m = 'jobs';
+  // Block everyone except admin + ceo from the Users tab. CEO gets a
+  // read-only view (every write button inside is tagged .ceo-hide).
+  if (m === 'users' && !isAdmin() && !isCeo()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
@@ -4432,7 +4438,8 @@ function openDashboard() {
 let trashCache = { jobs: [], imports: [], retention_days: 30 };
 
 function openTrashPage() {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  // Admin can act, CEO can view (write buttons inside are .ceo-hide).
+  if (!isAdmin() && !isCeo()) { notify('Admin or CEO only.'); return; }
   openReportsGroup('trash-group');
 }
 
@@ -4465,7 +4472,7 @@ function trashPaneHeader(label, count) {
       <span style="color:var(--text2);font-size:12px;">${count} item${count===1?'':'s'} · auto-purges after ${trashCache.retention_days} days</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="refreshTrash()">&#8635; Refresh</button>
-        <button class="btn btn-sm btn-danger" onclick="emptyTrash()">&#128465; Empty Trash</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="emptyTrash()">&#128465; Empty Trash</button>
       </div>
     </div>`;
 }
@@ -4500,8 +4507,9 @@ function renderTrashJobs() {
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
       <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
       <td ${tdN}>
-        <button class="btn btn-sm" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('job', ${r.id})">&#8635; Restore</button>
-        <button class="btn btn-sm btn-danger" onclick="purgeTrash('job', ${r.id})">&#128465; Delete Permanently</button>
+        <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('job', ${r.id})">&#8635; Restore</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('job', ${r.id})">&#128465; Delete Permanently</button>
+        <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
       </td>
     </tr>`;
   }).join('');
@@ -4558,8 +4566,9 @@ function renderTrashImports() {
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
       <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
       <td ${tdN}>
-        <button class="btn btn-sm" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('import', ${r.id})">&#8635; Restore</button>
-        <button class="btn btn-sm btn-danger" onclick="purgeTrash('import', ${r.id})">&#128465; Delete Permanently</button>
+        <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('import', ${r.id})">&#8635; Restore</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('import', ${r.id})">&#128465; Delete Permanently</button>
+        <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
       </td>
     </tr>`;
   }).join('');
@@ -7411,16 +7420,18 @@ function renderUsersTab() {
         <div class="inv-sub">${esc(u.email)} · Last login: ${last}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
       </div>
       <div class="inv-balance">
-        <select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:110px;">
-          <option value="user" ${u.role==='user'?'selected':''}>User</option>
-          <option value="stock" ${u.role==='stock'?'selected':''}>Stock</option>
-          <option value="ceo" ${u.role==='ceo'?'selected':''}>CEO (view-only)</option>
-          <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
-        </select>
+        ${isCeo()
+          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(u.role)}</span>`
+          : `<select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:110px;">
+              <option value="user" ${u.role==='user'?'selected':''}>User</option>
+              <option value="stock" ${u.role==='stock'?'selected':''}>Stock</option>
+              <option value="ceo" ${u.role==='ceo'?'selected':''}>CEO (view-only)</option>
+              <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+            </select>`}
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>
-        ${isMe ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
+        ${(isMe || isCeo()) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
       </div>
     </div>`;
   }).join('') || '<div class="empty">No users yet.</div>';
