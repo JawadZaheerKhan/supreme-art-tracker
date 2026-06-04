@@ -2010,7 +2010,13 @@ async function saveInvAdd() {
   showSaving(false);
 }
 
-function openInvEdit(id) {
+async function openInvEdit(id) {
+  // Refresh inventory before showing the edit form so the "Was:" value
+  // reflects the real current balance, not a stale cached one. Without
+  // this a user can enter their new value based on an out-of-date
+  // display, leading to the wrong correction delta. The 409 guard on
+  // save is the backstop; this is the cheap proactive layer.
+  await loadInventory();
   const it = inventory.find(x => x.id === id); if (!it) return;
   const curBalSheets = it.current_balance || 0;
   const sheetsUnit   = esc(it.unit || 'sheets');
@@ -2098,6 +2104,12 @@ async function saveInvEdit(id) {
       });
       if (!ok) return;
       data.current_balance = newSheets;
+      // Concurrency guard: tell the server what we BELIEVED the current
+      // balance was when we opened the form. If a delivery / job issuance
+      // changed it since, the server rejects with 409 rather than silently
+      // applying the wrong delta. Prevents the "I deducted 33 but history
+      // shows 83" class of bug caused by a stale cached display.
+      data.expected_balance_sheets = oldSheets;
       const notesEl = document.getElementById('inv-correction-notes');
       if (notesEl && notesEl.value.trim()) data.correction_notes = notesEl.value.trim();
     }
@@ -2107,7 +2119,26 @@ async function saveInvEdit(id) {
     await api('PUT', `/api/inventory/${id}`, data);
     await loadInventory();
     closeModal(); notify('Item updated');
-  } catch(e) { notify('Error: ' + e.message); }
+  } catch(e) {
+    // 409 = stale balance. Show a friendly message + the actual current value
+    // so the user can redo with fresh numbers. The form auto-closes; they
+    // re-open and the displayed Was: will be the real one.
+    if (/balance changed|409/i.test(e.message)) {
+      await loadInventory();   // pull in the fresh number for next open
+      const fresh = inventory.find(x => x.id === id);
+      const freshPs   = fresh ? packetSize(fresh.paper_type) : 100;
+      const freshPkts = fresh ? (fresh.current_balance || 0) / freshPs : 0;
+      const unitFresh = freshPs === 500 ? 'reams' : 'packets';
+      await alertDialog({
+        kind: 'warn',
+        title: 'Stock changed while you were editing',
+        message: `Someone (or another tab) changed this item's balance between when you opened this form and now. Current balance is ${freshPkts.toLocaleString()} ${unitFresh}. Re-open Edit and try again. No correction was applied.`,
+      });
+      closeModal();
+    } else {
+      notify('Error: ' + e.message);
+    }
+  }
   showSaving(false);
 }
 
