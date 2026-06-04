@@ -258,6 +258,11 @@
   /* Green "Issue Stock" action button */
   .btn-success { background: #166534; color: #fff; border-color: #166534; }
   .btn-success:hover { background: #14532d; border-color: #14532d; }
+  /* Solid red — companion to btn-success for the "Waiting for Stock" state on
+     pending jobs. Different from btn-danger (which is the outlined Delete
+     style) because we need this one to read as a status badge at a glance. */
+  .btn-waiting { background: #A32D2D; color: #fff; border-color: #A32D2D; font-weight: 600; }
+  .btn-waiting:hover { background: #7f1d1d; border-color: #7f1d1d; }
   .pipeline { display: flex; align-items: center; gap: 3px; margin-top: 10px; flex-wrap: wrap; }
   .stage-pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid; white-space: nowrap; font-weight: 500; }
   .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
@@ -1188,6 +1193,10 @@ async function loadInventory() {
       // adding stock, etc.). Runs in the background — render isn't blocked.
       loadDailyStats();
     }
+    // When viewing Jobs, re-render so each pending job's "Issue Stock" button
+    // recomputes its red/green state against the freshly loaded balances.
+    // Cheap — renderJobs is a pure-render of an in-memory array.
+    if (mode === 'jobs') renderJobs();
   } catch(e) {
     notify('Error loading inventory: ' + e.message);
   }
@@ -1364,7 +1373,27 @@ function renderJobs() {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${pending && canIssueStock() ? `<button class="btn btn-sm btn-success" onclick="issueStock(${j.id})" title="Issue stock and start this job">&#10003; Issue Stock</button>` : ''}
+            ${pending && canIssueStock() ? (() => {
+              // Stock check: live balance on the linked inventory item vs the
+              // sheets this job needs. When short, the button stays clickable
+              // but flips red so it reads at a glance as "waiting for stock".
+              // Once stock arrives (via stock-in or import receive), the next
+              // render() automatically flips it back to green.
+              const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+              const have     = invIt ? (invIt.current_balance || 0) : 0;
+              const need     = parseFloat(j.sheets) || 0;
+              const enough   = !need || (invIt && have >= need);
+              const shortBy  = enough ? 0 : (need - have);
+              const cls      = enough ? 'btn-success' : 'btn-waiting';
+              const tip      = enough
+                ? 'Issue stock and start this job'
+                : (invIt
+                    ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}). Will turn green when stock arrives.`
+                    : 'No paper picked yet — open Edit to link an inventory item.');
+              const icon     = enough ? '&#10003;' : '&#9888;';
+              const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
+              return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
+            })() : ''}
             <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
@@ -7348,13 +7377,15 @@ function buildPrintCard(j) {
     ...PAPER_TYPES,
     ...paperTypes.filter(t => t && !PAPER_TYPES.includes(t)),
   ];
+  // Brand moved to its own cell next to Deadline / Delivered PO Qty so the
+  // whole row can be devoted to paper-type checkboxes. Helps fit custom
+  // additions like "Sticker" without crowding the brand label.
   const papersRow = `
     <tr><td colspan="5" class="pp-spec">
       ${printPaperTypes.map(t => {
         const on = paperTypes.includes(t);
         return `<span style="margin-right:14px;"><span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${t}</span></span>`;
       }).join('')}
-      <span style="margin-left:6px;">Brand: <span class="pc-value" style="display:inline;">${v(paperBrand)}</span></span>
     </td></tr>`;
   const coatRow = list => `
     <tr><td colspan="5" class="pp-spec" style="text-align:center;">
@@ -7439,7 +7470,7 @@ function buildPrintCard(j) {
     <table class="pc-table">
       <tr>
         ${dateCell('Date', j.dateissued)}
-        ${cell('Code', j.jobcode)}
+        ${dateCell('Deadline', j.deadline)}
         ${cell('P.O. Qty', j.qty)}
         ${cell('Machine Name', j.machine)}
         ${cell('Ups', j.ups)}
@@ -7466,8 +7497,9 @@ function buildPrintCard(j) {
         ${cell('MRP', j.mrp)}
       </tr>
       <tr>
-        <td colspan="3"><div class="pc-label">Deadline</div><div class="pc-value">${fmt(j.deadline)}</div></td>
-        <td colspan="3"><div class="pc-label">Delivered PO Qty</div><div class="pc-value">${v(j.delqty)}</div></td>
+        <td colspan="2"><div class="pc-label">Code</div><div class="pc-value">${v(j.jobcode)}</div></td>
+        <td colspan="2"><div class="pc-label">Brand</div><div class="pc-value">${v(paperBrand)}</div></td>
+        <td colspan="2"><div class="pc-label">Delivered PO Qty</div><div class="pc-value">${v(j.delqty)}</div></td>
       </tr>
     </table>
     <table class="pp-table">
