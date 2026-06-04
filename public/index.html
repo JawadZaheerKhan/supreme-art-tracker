@@ -3196,12 +3196,21 @@ function computeSummaryRows() {
     // Formula stays the same — we just drop the Math.max() floor so the
     // sign is preserved for display.
     const requiredNextPkts = (totalOutSheets / ps) - afterImportPkts;
+    // Gap between the running balance (built from real IN/OUT only) and
+    // Stock Now (the actual current_balance). When non-zero it usually means
+    // a balance correction was applied — corrections are excluded from the
+    // IN/OUT/Bal math by design so material flow stays clean, but the gap
+    // is real. We surface it as a small red dot next to Stock Now so the
+    // user knows that number reflects a correction (or post-period activity).
+    const lastBucketBalSheets = periods.length ? periods[periods.length - 1].balance : openingSheets;
+    const balDiffPkts = (stockNowSheets - lastBucketBalSheets) / ps;
     return {
       item: it,
       openingPkts: openingSheets / ps,
       periods: periods.map(p => ({ in: p.in / ps, out: p.out / ps, balance: p.balance / ps })),
       totalOutPkts:   totalOutSheets / ps,
       stockNowPkts,
+      balDiffPkts,
       weightKg:       wPerPack === null ? null : stockNowPkts * wPerPack,
       pendingImportPkts: pendingPkts,
       afterImportPkts,
@@ -3260,6 +3269,7 @@ function aggregateSummaryRowsByGsmSize(rows, paperType) {
         openingPkts: 0,
         totalOutPkts: 0,
         stockNowPkts: 0,
+        balDiffPkts: 0,
         pendingImportPkts: 0,
         afterImportPkts: 0,
         requiredNextPkts: 0,
@@ -3272,6 +3282,7 @@ function aggregateSummaryRowsByGsmSize(rows, paperType) {
     g.openingPkts        += r.openingPkts;
     g.totalOutPkts       += r.totalOutPkts;
     g.stockNowPkts       += r.stockNowPkts;
+    g.balDiffPkts        += r.balDiffPkts;
     g.pendingImportPkts  += r.pendingImportPkts;
     g.afterImportPkts    += r.afterImportPkts;
     g.requiredNextPkts   += r.requiredNextPkts;
@@ -3309,6 +3320,19 @@ function fmtKg(n) {
   if (n === null || n === undefined) return '—';
   if (!n) return '0';
   return (+n.toFixed(2)).toLocaleString();
+}
+
+// Small red dot rendered next to Stock Now when the actual current_balance
+// differs from the running balance built from real IN/OUT in the period.
+// Almost always means a balance correction was applied (corrections are
+// excluded from IN/OUT so material flow stays clean). Hover for the delta.
+function correctionDot(diffPkts) {
+  if (!diffPkts || Math.abs(diffPkts) < 0.01) return '';
+  const sign = diffPkts > 0 ? '+' : '−';
+  const abs  = Math.abs(diffPkts);
+  const num  = Number.isInteger(abs) ? abs : +abs.toFixed(2);
+  const tip  = `Reflects a balance correction: ${sign}${num.toLocaleString()} vs the running balance (corrections are excluded from IN/OUT by design).`;
+  return `<span title="${esc(tip)}" style="display:inline-block;width:8px;height:8px;background:#dc2626;border-radius:50%;margin-left:6px;vertical-align:middle;cursor:help;"></span>`;
 }
 
 // Signed variants for the Required Next / Required (kg) columns where a
@@ -3357,7 +3381,7 @@ function renderStockSummary() {
       <td style="text-align:right;">${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
-      <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}</td>
+      <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}${correctionDot(r.balDiffPkts)}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
       <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
