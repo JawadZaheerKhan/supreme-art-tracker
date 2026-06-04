@@ -261,15 +261,6 @@ function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
 }
-// Stock issuance — admins and the dedicated 'stock' role can both issue.
-// Plain users (job people) get a 403.
-function requireStockOrAdmin(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (req.user.role !== 'admin' && req.user.role !== 'stock') {
-    return res.status(403).json({ error: 'Stock or admin role required' });
-  }
-  next();
-}
 // Any signed-in user EXCEPT the read-only 'ceo' role. Use this on every
 // write endpoint so CEOs can browse the app freely but can't mutate state.
 // Admins/users/stock all still go through; the UI hides the write buttons
@@ -281,6 +272,12 @@ function requireWriteUser(req, res, next) {
   }
   next();
 }
+// Legacy: requireStockOrAdmin used to restrict stock issuance to admin + stock
+// roles. The 'user' role now has full write parity with 'stock' (only CEO is
+// read-only), so every endpoint that previously called this now uses
+// requireWriteUser instead. Middleware kept as a stub for any external code
+// that might still import it; new callers should always use requireWriteUser.
+const requireStockOrAdmin = requireWriteUser;
 
 app.use(authMiddleware);
 
