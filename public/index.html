@@ -1031,6 +1031,33 @@ function fmtDMYT(d) {
   const MM = String(dt.getMinutes()).padStart(2, '0');
   return `${dd}/${mm}/${dt.getFullYear()} ${HH}:${MM}`;
 }
+
+// Normalize a stage-time string for display. New entries write dd/mm/yyyy HH:MM
+// via fmtDMYT, but old (delivered before the format change) jobs have strings
+// like "05/05/2026, 3:53:00 pm" from the en-PK locale formatter. We detect
+// those and convert in place so the on-screen Jobs Report and stage log read
+// consistently. Anything unparseable falls back to the original string.
+function fmtStageTime(s) {
+  if (!s) return '';
+  const str = String(s).trim();
+  // Already in the new format (dd/mm/yyyy HH:MM with no comma or am/pm)? Leave it.
+  if (/^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}$/.test(str)) return str;
+  // en-PK legacy: "d/m/yyyy, h:mm:ss am/pm" (seconds optional).
+  const m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)$/i);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mm = m[2].padStart(2, '0');
+    let h = parseInt(m[4], 10);
+    const ampm = m[6].toLowerCase();
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    return `${dd}/${mm}/${m[3]} ${String(h).padStart(2,'0')}:${m[5]}`;
+  }
+  // Anything else (ISO, Date object, etc.) — let fmtDMYT have a go.
+  const dt = new Date(str);
+  if (!isNaN(dt)) return fmtDMYT(dt);
+  return str;
+}
 function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
 function notify(msg) {
   const el = document.getElementById('notif');
@@ -4089,10 +4116,12 @@ function buildJobsReportRows() {
     const createdAt = j.created_at ? new Date(j.created_at) : null;
     if (fromDate && (!createdAt || createdAt < fromDate)) continue;
     if (toDate   && (!createdAt || createdAt > toDate))   continue;
-    // Delivery date — stages[lastStageIdx].time stored in en-PK locale.
-    // Show as-is (we don't need to sort by it; sorting is by created_at).
+    // Delivery date — old jobs have stage.time in en-PK locale ("d/m/yyyy,
+    // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
+    // both into the app-wide dd/mm/yyyy HH:MM so the report column is
+    // consistent regardless of when the job was delivered.
     const deliveryTime = j.stages && j.stages[lastStageIdx] && j.stages[lastStageIdx].time
-      ? String(j.stages[lastStageIdx].time)
+      ? fmtStageTime(j.stages[lastStageIdx].time)
       : '';
     // Packets consumed — prefer the explicit Quantity of Packets entered on
     // the job; fall back to sheets / packetSize so older jobs without that
@@ -7128,7 +7157,7 @@ async function openHistory(id) {
         ${l.by?`<span style="margin:0 5px;color:#c0bdb4">&bull;</span><span style="color:#6b6960">${esc(l.by)}</span>`:''}
         ${l.notes?`<div class="h-note">${esc(l.notes)}</div>`:''}
       </div>
-      <div class="h-time">${esc(l.time||'')}</div>
+      <div class="h-time">${esc(fmtStageTime(l.time))}</div>
     </div>`).join('')}
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Audit Log</div>
     <div id="job-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
