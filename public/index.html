@@ -1087,8 +1087,9 @@ async function api(method, path, body) {
 // ── Auth state ────────────────────────────────────────────────
 let currentUser = null;
 function isAdmin() { return currentUser && currentUser.role === 'admin'; }
-// Stock-role users plus admins can issue stock for pending jobs.
-function canIssueStock() { return currentUser && (currentUser.role === 'admin' || currentUser.role === 'stock'); }
+// Anyone with write access can issue stock (admin / stock / user). CEO is
+// blocked because canWrite() is false for them. Server enforces the same.
+function canIssueStock() { return canWrite(); }
 // Read-only executive view. CEOs can browse the whole app but every write
 // button is hidden from them and the server blocks mutations anyway.
 function isCeo() { return currentUser && currentUser.role === 'ceo'; }
@@ -6434,7 +6435,7 @@ function openCalculatorJobMode() {
       <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
     </div>
     ${calcTabsHTML('job')}
-    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Enter PO qty + tolerance + ups → sheets, unit carton, packets, weight.</p>
+    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Enter PO qty + tolerance + ups → sheets, unit carton, packets.</p>
 
     <div class="form-group">
       <label class="form-label">PO Quantity (pcs)</label>
@@ -6447,6 +6448,13 @@ function openCalculatorJobMode() {
     <div class="form-group">
       <label class="form-label">Ups (pcs per sheet)</label>
       <input type="number" id="jc-ups" step="1" min="1" placeholder="e.g. 4" oninput="jcalcRecalc()">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Paper Type <span style="font-weight:400;font-size:11px;color:var(--text2);">(needed to compute packets/reams)</span></label>
+      <select id="jc-paper" onchange="jcalcRecalc()">
+        <option value="">— pick paper —</option>
+        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+      </select>
     </div>
 
     <div id="jc-out" style="background:#f9fafb;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:13px;color:var(--text);line-height:1.7;margin-bottom:12px;">
@@ -6465,14 +6473,17 @@ function jcalcReset() {
     const el = document.getElementById(id);
     if (el) el.value = id === 'jc-tol' ? '0' : '';
   });
+  const paperEl = document.getElementById('jc-paper');
+  if (paperEl) paperEl.value = '';
   const out = document.getElementById('jc-out');
   if (out) out.innerHTML = 'Enter PO Qty + Ups to see the result.';
 }
 
 function jcalcRecalc() {
-  const po  = parseFloat((document.getElementById('jc-po') ||{}).value);
-  const tol = parseFloat((document.getElementById('jc-tol')||{}).value);
-  const ups = parseFloat((document.getElementById('jc-ups')||{}).value);
+  const po    = parseFloat((document.getElementById('jc-po') ||{}).value);
+  const tol   = parseFloat((document.getElementById('jc-tol')||{}).value);
+  const ups   = parseFloat((document.getElementById('jc-ups')||{}).value);
+  const paper = (document.getElementById('jc-paper')||{}).value || '';
   const out = document.getElementById('jc-out');
   if (!out) return;
 
@@ -6491,12 +6502,29 @@ function jcalcRecalc() {
   //    the ceiling).
   const unitCarton = sheets * ups;
 
+  // 4) Packets / Reams — only computable once paper type is picked, since
+  //    Cards pack at 100 sheets, Papers (Art Paper / Off-White / Offset) at
+  //    500 sheets per ream. Same convention as the rest of the app via
+  //    packetSize(). Shown with the right unit label (packets vs reams) for
+  //    no-ambiguity ordering.
+  let packetLine = '';
+  if (paper) {
+    const ps   = packetSize(paper);
+    const unit = packetUnitLabel(paper).toLowerCase();
+    const packets = sheets / ps;
+    const pktsStr = Number.isInteger(packets) ? packets.toLocaleString() : packets.toFixed(2);
+    packetLine = `<div><b style="color:#7c3aed;">${unit.charAt(0).toUpperCase()+unit.slice(1)}:</b> <b>${pktsStr}</b> <span style="color:var(--text2);font-size:11px;">(${sheets.toLocaleString()} sheets ÷ ${ps}/${unit.slice(0,-1)})</span></div>`;
+  } else {
+    packetLine = `<div style="color:var(--text2);font-size:11px;font-style:italic;">Pick a paper type above to see packets / reams.</div>`;
+  }
+
   const round2 = (x) => Math.round(x * 100) / 100;
   out.innerHTML = `
     <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;margin-bottom:4px;">Production Plan</div>
     <div><b>Adjusted Qty:</b> <b>${round2(adjusted).toLocaleString()}</b> pcs <span style="color:var(--text2);font-size:11px;">(PO × ${tolerance}% tolerance)</span></div>
     <div><b style="color:#1e40af;">Sheets needed:</b> <b>${sheets.toLocaleString()}</b> <span style="color:var(--text2);font-size:11px;">(ceil ÷ ups)</span></div>
     <div><b>Unit Carton:</b> <b>${unitCarton.toLocaleString()}</b> pcs <span style="color:var(--text2);font-size:11px;">(sheets × ups)</span></div>
+    ${packetLine}
   `;
 }
 
@@ -7200,7 +7228,7 @@ async function deleteJob(id) {
 // Issue stock for a pending job — admin/stock role only (server enforces
 // too). Confirms with the user since this deducts real inventory.
 async function issueStock(id) {
-  if (!canIssueStock()) { notify('Only stock or admin role can issue stock.'); return; }
+  if (!canIssueStock()) { notify('Read-only — you can\'t issue stock.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
