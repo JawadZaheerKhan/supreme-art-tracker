@@ -1031,6 +1031,33 @@ function fmtDMYT(d) {
   const MM = String(dt.getMinutes()).padStart(2, '0');
   return `${dd}/${mm}/${dt.getFullYear()} ${HH}:${MM}`;
 }
+
+// Normalize a stage-time string for display. New entries write dd/mm/yyyy HH:MM
+// via fmtDMYT, but old (delivered before the format change) jobs have strings
+// like "05/05/2026, 3:53:00 pm" from the en-PK locale formatter. We detect
+// those and convert in place so the on-screen Jobs Report and stage log read
+// consistently. Anything unparseable falls back to the original string.
+function fmtStageTime(s) {
+  if (!s) return '';
+  const str = String(s).trim();
+  // Already in the new format (dd/mm/yyyy HH:MM with no comma or am/pm)? Leave it.
+  if (/^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}$/.test(str)) return str;
+  // en-PK legacy: "d/m/yyyy, h:mm:ss am/pm" (seconds optional).
+  const m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)$/i);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mm = m[2].padStart(2, '0');
+    let h = parseInt(m[4], 10);
+    const ampm = m[6].toLowerCase();
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    return `${dd}/${mm}/${m[3]} ${String(h).padStart(2,'0')}:${m[5]}`;
+  }
+  // Anything else (ISO, Date object, etc.) — let fmtDMYT have a go.
+  const dt = new Date(str);
+  if (!isNaN(dt)) return fmtDMYT(dt);
+  return str;
+}
 function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
 function notify(msg) {
   const el = document.getElementById('notif');
@@ -1060,8 +1087,9 @@ async function api(method, path, body) {
 // ── Auth state ────────────────────────────────────────────────
 let currentUser = null;
 function isAdmin() { return currentUser && currentUser.role === 'admin'; }
-// Stock-role users plus admins can issue stock for pending jobs.
-function canIssueStock() { return currentUser && (currentUser.role === 'admin' || currentUser.role === 'stock'); }
+// Anyone with write access can issue stock (admin / stock / user). CEO is
+// blocked because canWrite() is false for them. Server enforces the same.
+function canIssueStock() { return canWrite(); }
 // Read-only executive view. CEOs can browse the whole app but every write
 // button is hidden from them and the server blocks mutations anyway.
 function isCeo() { return currentUser && currentUser.role === 'ceo'; }
@@ -3901,8 +3929,8 @@ function printImports() {
     <td ${tdR}>${fmt(i.packets)}</td>
     <td ${tdR}>${fmt(i.weight_kg)}</td>
     <td ${tdL}>${esc(i.supplier || '—')}</td>
-    <td ${tdL}>${esc(i.booked_date || '—')}</td>
-    <td ${tdL}>${esc(i.expected_arrival || '—')}</td>
+    <td ${tdL}>${esc(fmtDMY(i.booked_date, true))}</td>
+    <td ${tdL}>${esc(fmtDMY(i.expected_arrival, true))}</td>
     <td ${tdL}>${esc(i.notes || '')}</td>
   </tr>`).join('');
   const html = `
@@ -4089,10 +4117,12 @@ function buildJobsReportRows() {
     const createdAt = j.created_at ? new Date(j.created_at) : null;
     if (fromDate && (!createdAt || createdAt < fromDate)) continue;
     if (toDate   && (!createdAt || createdAt > toDate))   continue;
-    // Delivery date — stages[lastStageIdx].time stored in en-PK locale.
-    // Show as-is (we don't need to sort by it; sorting is by created_at).
+    // Delivery date — old jobs have stage.time in en-PK locale ("d/m/yyyy,
+    // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
+    // both into the app-wide dd/mm/yyyy HH:MM so the report column is
+    // consistent regardless of when the job was delivered.
     const deliveryTime = j.stages && j.stages[lastStageIdx] && j.stages[lastStageIdx].time
-      ? String(j.stages[lastStageIdx].time)
+      ? fmtStageTime(j.stages[lastStageIdx].time)
       : '';
     // Packets consumed — prefer the explicit Quantity of Packets entered on
     // the job; fall back to sheets / packetSize so older jobs without that
@@ -6405,7 +6435,7 @@ function openCalculatorJobMode() {
       <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
     </div>
     ${calcTabsHTML('job')}
-    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Enter PO qty + tolerance + ups → sheets, unit carton, packets, weight.</p>
+    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Enter PO qty + tolerance + ups → sheets, unit carton, packets.</p>
 
     <div class="form-group">
       <label class="form-label">PO Quantity (pcs)</label>
@@ -6418,6 +6448,13 @@ function openCalculatorJobMode() {
     <div class="form-group">
       <label class="form-label">Ups (pcs per sheet)</label>
       <input type="number" id="jc-ups" step="1" min="1" placeholder="e.g. 4" oninput="jcalcRecalc()">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Paper Type <span style="font-weight:400;font-size:11px;color:var(--text2);">(needed to compute packets/reams)</span></label>
+      <select id="jc-paper" onchange="jcalcRecalc()">
+        <option value="">— pick paper —</option>
+        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+      </select>
     </div>
 
     <div id="jc-out" style="background:#f9fafb;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:13px;color:var(--text);line-height:1.7;margin-bottom:12px;">
@@ -6436,14 +6473,17 @@ function jcalcReset() {
     const el = document.getElementById(id);
     if (el) el.value = id === 'jc-tol' ? '0' : '';
   });
+  const paperEl = document.getElementById('jc-paper');
+  if (paperEl) paperEl.value = '';
   const out = document.getElementById('jc-out');
   if (out) out.innerHTML = 'Enter PO Qty + Ups to see the result.';
 }
 
 function jcalcRecalc() {
-  const po  = parseFloat((document.getElementById('jc-po') ||{}).value);
-  const tol = parseFloat((document.getElementById('jc-tol')||{}).value);
-  const ups = parseFloat((document.getElementById('jc-ups')||{}).value);
+  const po    = parseFloat((document.getElementById('jc-po') ||{}).value);
+  const tol   = parseFloat((document.getElementById('jc-tol')||{}).value);
+  const ups   = parseFloat((document.getElementById('jc-ups')||{}).value);
+  const paper = (document.getElementById('jc-paper')||{}).value || '';
   const out = document.getElementById('jc-out');
   if (!out) return;
 
@@ -6462,12 +6502,29 @@ function jcalcRecalc() {
   //    the ceiling).
   const unitCarton = sheets * ups;
 
+  // 4) Packets / Reams — only computable once paper type is picked, since
+  //    Cards pack at 100 sheets, Papers (Art Paper / Off-White / Offset) at
+  //    500 sheets per ream. Same convention as the rest of the app via
+  //    packetSize(). Shown with the right unit label (packets vs reams) for
+  //    no-ambiguity ordering.
+  let packetLine = '';
+  if (paper) {
+    const ps   = packetSize(paper);
+    const unit = packetUnitLabel(paper).toLowerCase();
+    const packets = sheets / ps;
+    const pktsStr = Number.isInteger(packets) ? packets.toLocaleString() : packets.toFixed(2);
+    packetLine = `<div><b style="color:#7c3aed;">${unit.charAt(0).toUpperCase()+unit.slice(1)}:</b> <b>${pktsStr}</b> <span style="color:var(--text2);font-size:11px;">(${sheets.toLocaleString()} sheets ÷ ${ps}/${unit.slice(0,-1)})</span></div>`;
+  } else {
+    packetLine = `<div style="color:var(--text2);font-size:11px;font-style:italic;">Pick a paper type above to see packets / reams.</div>`;
+  }
+
   const round2 = (x) => Math.round(x * 100) / 100;
   out.innerHTML = `
     <div style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;margin-bottom:4px;">Production Plan</div>
     <div><b>Adjusted Qty:</b> <b>${round2(adjusted).toLocaleString()}</b> pcs <span style="color:var(--text2);font-size:11px;">(PO × ${tolerance}% tolerance)</span></div>
     <div><b style="color:#1e40af;">Sheets needed:</b> <b>${sheets.toLocaleString()}</b> <span style="color:var(--text2);font-size:11px;">(ceil ÷ ups)</span></div>
     <div><b>Unit Carton:</b> <b>${unitCarton.toLocaleString()}</b> pcs <span style="color:var(--text2);font-size:11px;">(sheets × ups)</span></div>
+    ${packetLine}
   `;
 }
 
@@ -7128,7 +7185,7 @@ async function openHistory(id) {
         ${l.by?`<span style="margin:0 5px;color:#c0bdb4">&bull;</span><span style="color:#6b6960">${esc(l.by)}</span>`:''}
         ${l.notes?`<div class="h-note">${esc(l.notes)}</div>`:''}
       </div>
-      <div class="h-time">${esc(l.time||'')}</div>
+      <div class="h-time">${esc(fmtStageTime(l.time))}</div>
     </div>`).join('')}
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Audit Log</div>
     <div id="job-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -7171,7 +7228,7 @@ async function deleteJob(id) {
 // Issue stock for a pending job — admin/stock role only (server enforces
 // too). Confirms with the user since this deducts real inventory.
 async function issueStock(id) {
-  if (!canIssueStock()) { notify('Only stock or admin role can issue stock.'); return; }
+  if (!canIssueStock()) { notify('Read-only — you can\'t issue stock.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
@@ -7283,9 +7340,17 @@ function buildPrintCard(j) {
       <td>${v(p[r.key]?.name)}</td>
       <td>${v(p[r.key]?.signature)}</td>
     </tr>`;
+  // Show the standard 6 paper types always, plus any custom paper type this
+  // job is actually using (e.g. "Sticker" added through the inventory
+  // dropdown manager). Keeps the printed card consistent for normal jobs
+  // while still showing custom additions when they're relevant.
+  const printPaperTypes = [
+    ...PAPER_TYPES,
+    ...paperTypes.filter(t => t && !PAPER_TYPES.includes(t)),
+  ];
   const papersRow = `
     <tr><td colspan="5" class="pp-spec">
-      ${PAPER_TYPES.map(t => {
+      ${printPaperTypes.map(t => {
         const on = paperTypes.includes(t);
         return `<span style="margin-right:14px;"><span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${t}</span></span>`;
       }).join('')}

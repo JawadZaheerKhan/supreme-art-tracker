@@ -699,8 +699,10 @@ app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
 });
 
 // Issue stock for a pending job. Deducts inventory and flips status to
-// 'issued'. Admin or stock role only — the job person can't self-approve.
-app.post('/api/jobs/:id/issue-stock', requireStockOrAdmin, async (req, res) => {
+// 'issued'. Admin, stock, and user roles can all issue (CEO is blocked
+// upstream by requireWriteUser). The stock-keeper-only restriction was
+// relaxed once the workflow expanded so any non-readonly role can act.
+app.post('/api/jobs/:id/issue-stock', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
