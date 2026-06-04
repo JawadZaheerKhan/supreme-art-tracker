@@ -261,15 +261,6 @@ function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
 }
-// Stock issuance — admins and the dedicated 'stock' role can both issue.
-// Plain users (job people) get a 403.
-function requireStockOrAdmin(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (req.user.role !== 'admin' && req.user.role !== 'stock') {
-    return res.status(403).json({ error: 'Stock or admin role required' });
-  }
-  next();
-}
 // Any signed-in user EXCEPT the read-only 'ceo' role. Use this on every
 // write endpoint so CEOs can browse the app freely but can't mutate state.
 // Admins/users/stock all still go through; the UI hides the write buttons
@@ -281,6 +272,12 @@ function requireWriteUser(req, res, next) {
   }
   next();
 }
+// Legacy: requireStockOrAdmin used to restrict stock issuance to admin + stock
+// roles. The 'user' role now has full write parity with 'stock' (only CEO is
+// read-only), so every endpoint that previously called this now uses
+// requireWriteUser instead. Middleware kept as a stub for any external code
+// that might still import it; new callers should always use requireWriteUser.
+const requireStockOrAdmin = requireWriteUser;
 
 app.use(authMiddleware);
 
@@ -914,7 +911,7 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    let { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier } = req.body;
+    let { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier, expected_balance_sheets } = req.body;
     // Same uppercase normalization as POST — keeps brand storage consistent
     // (Ningbo / ningbo / NINGBO all save as NINGBO).
     if (brand) brand = String(brand).trim().toUpperCase();
@@ -924,6 +921,22 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
     const before = await sql`SELECT current_balance FROM inventory_items WHERE id=${id}`;
     if (!before[0]) return res.status(404).json({ error: 'Item not found' });
     const oldBalance = before[0].current_balance || 0;
+
+    // Concurrency check: when the frontend submits a balance correction, it
+    // also sends what it BELIEVED the current balance was at the moment the
+    // user opened the Edit form. If that's drifted from the DB (because
+    // someone received an import, issued stock for a job, or another tab
+    // edited the same item), reject — the delta would be computed against
+    // the wrong baseline and silently corrupt the running balance. The
+    // browser then prompts the user to re-open with fresh numbers.
+    if (expected_balance_sheets !== undefined && expected_balance_sheets !== null && expected_balance_sheets !== '') {
+      const expected = parseInt(expected_balance_sheets, 10);
+      if (Number.isFinite(expected) && expected !== oldBalance) {
+        return res.status(409).json({
+          error: `Stock balance changed since you opened this form (had ${expected.toLocaleString()} sheets, now ${oldBalance.toLocaleString()}). Refresh and try again.`,
+        });
+      }
+    }
 
     const result = await sql`
       UPDATE inventory_items SET
