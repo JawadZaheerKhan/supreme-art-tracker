@@ -1401,6 +1401,7 @@ function renderJobs() {
             <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
+            <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
             <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
@@ -6739,7 +6740,7 @@ function jobForm(j={}) {
   return `
     <img class="jc-watermark-screen" src="/logo.png" alt="">
     <div class="jc-header">
-      <div class="jc-serial">${j.id ? 'E-'+j.id : ''}${j.jobcode ? ' &middot; '+esc(j.jobcode) : ''}</div>
+      <div class="jc-serial">${j.id ? 'E-'+j.id : ''}</div>
       <img src="/logo.png" alt="Supreme Art">
     </div>
     <div class="jc-title">JOB CARD</div>
@@ -7076,6 +7077,86 @@ function openAdd() {
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD</h2>
     ${jobForm()}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
+    </div>
+  </div>`);
+  updateStockHint();
+  renderCutPreview();
+}
+
+// Given a source job code like "SA-2026-001" or "10400", figure out the next
+// free code in the same family. Strategy:
+//   - Split source into a non-digit prefix + trailing digits (e.g. "SA-2026-" + "001")
+//   - "Same family" = same prefix AND same digit width. This is the key
+//     constraint — without the width check, a 5-digit code like "10400" gets
+//     lumped together with a 10-digit barcode-style code like "4000007856"
+//     (both have empty prefix + pure digits), producing absurd next codes
+//   - Take max of those, add 1; pad back to the source width
+//   - If nothing else in the family yet (this is the first), fall back to
+//     source_number + 1 so the sequence still moves forward
+// Returns '' (let the user type one) if the source code doesn't end in digits.
+function nextJobCodeFromTemplate(sourceCode) {
+  if (!sourceCode) return '';
+  const m = String(sourceCode).match(/^(.*?)(\d+)$/);
+  if (!m) return '';
+  const prefix     = m[1];
+  const padWidth   = m[2].length;
+  const sourceNum  = parseInt(m[2], 10);
+  let maxNum = 0;
+  let matched = 0;
+  for (const j of jobs) {
+    const code = j.jobcode || '';
+    if (!code.startsWith(prefix)) continue;
+    const tail = code.slice(prefix.length);
+    if (!/^\d+$/.test(tail)) continue;     // must be only digits after the prefix
+    if (tail.length !== padWidth) continue; // tighten the family by digit width
+    const n = parseInt(tail, 10);
+    matched++;
+    if (n > maxNum) maxNum = n;
+  }
+  // No siblings in the family yet? Fall back to source + 1 so the sequence
+  // still advances instead of restarting at 1.
+  const base = matched > 0 ? maxNum : sourceNum;
+  const next = base + 1;
+  return prefix + String(next).padStart(padWidth, '0');
+}
+
+// Duplicate an existing job into a fresh New Job modal. Pre-fills most
+// fields from the source so a repeat order is one click + a few edits
+// (typically PO No. + Deadline). Original job is untouched.
+function openDuplicateJob(id) {
+  const source = jobs.find(j => j.id === id);
+  if (!source) { notify('Job not found.'); return; }
+
+  // Build the template by SHALLOW-cloning the source and clearing the fields
+  // that should never inherit on a repeat. JSON-roundtrip the particulars and
+  // coatings so editing the new job doesn't accidentally mutate the original.
+  const today = new Date().toISOString().slice(0, 10);
+  const template = {
+    ...source,
+    id:             undefined,           // new job, server assigns
+    jobcode:        nextJobCodeFromTemplate(source.jobcode),
+    ref:            '',                  // P.O. No. — different each order
+    deadline:       '',                  // set fresh per order
+    delqty:         '',                  // not delivered yet
+    notes:          '',                  // special instructions reset
+    dateissued:     today,               // today, not the original's date
+    stage_index:    0,                   // back to CTP
+    stages:         [],                  // no stage history yet
+    log:            [],                  // no log entries yet
+    issuance_status: 'pending',          // stock needs to be issued again
+    created_at:     undefined,           // server fills
+    // Deep-copy particulars + coatings so subsequent edits don't bleed back
+    // into the source job's in-memory representation.
+    particulars:    source.particulars ? JSON.parse(JSON.stringify(source.particulars)) : {},
+    coatings:       Array.isArray(source.coatings) ? [...source.coatings] : [],
+  };
+
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+    <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">· duplicating E-${source.id}${source.jobcode ? ' (' + esc(source.jobcode) + ')' : ''}</span></h2>
+    ${jobForm(template)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
