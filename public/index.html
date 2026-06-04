@@ -1401,6 +1401,7 @@ function renderJobs() {
             <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
+            <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
             <button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button>
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
@@ -7076,6 +7077,77 @@ function openAdd() {
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD</h2>
     ${jobForm()}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
+    </div>
+  </div>`);
+  updateStockHint();
+  renderCutPreview();
+}
+
+// Given a source job code like "SA-2026-001", figure out the next free code
+// in the same prefix family. Strategy:
+//   - Split source into a non-digit prefix + trailing digits (e.g. "SA-2026-" + "001")
+//   - Scan all existing jobs whose codes share that prefix, parse their
+//     trailing numbers, take the max, add 1
+//   - Pad the new number to the same width as the source (so "001" → "002",
+//     not "2") — keeps the visual sequence consistent
+// Returns '' (let the user type one) if the source code doesn't end in digits
+// or if there's no source code at all.
+function nextJobCodeFromTemplate(sourceCode) {
+  if (!sourceCode) return '';
+  const m = String(sourceCode).match(/^(.*?)(\d+)$/);
+  if (!m) return '';
+  const prefix    = m[1];
+  const padWidth  = m[2].length;
+  let maxNum = 0;
+  for (const j of jobs) {
+    const code = j.jobcode || '';
+    if (!code.startsWith(prefix)) continue;
+    const tail = code.slice(prefix.length);
+    if (!/^\d+$/.test(tail)) continue;     // must be only digits after the prefix
+    const n = parseInt(tail, 10);
+    if (n > maxNum) maxNum = n;
+  }
+  const next = maxNum + 1;
+  return prefix + String(next).padStart(padWidth, '0');
+}
+
+// Duplicate an existing job into a fresh New Job modal. Pre-fills most
+// fields from the source so a repeat order is one click + a few edits
+// (typically PO No. + Deadline). Original job is untouched.
+function openDuplicateJob(id) {
+  const source = jobs.find(j => j.id === id);
+  if (!source) { notify('Job not found.'); return; }
+
+  // Build the template by SHALLOW-cloning the source and clearing the fields
+  // that should never inherit on a repeat. JSON-roundtrip the particulars and
+  // coatings so editing the new job doesn't accidentally mutate the original.
+  const today = new Date().toISOString().slice(0, 10);
+  const template = {
+    ...source,
+    id:             undefined,           // new job, server assigns
+    jobcode:        nextJobCodeFromTemplate(source.jobcode),
+    ref:            '',                  // P.O. No. — different each order
+    deadline:       '',                  // set fresh per order
+    delqty:         '',                  // not delivered yet
+    notes:          '',                  // special instructions reset
+    dateissued:     today,               // today, not the original's date
+    stage_index:    0,                   // back to CTP
+    stages:         [],                  // no stage history yet
+    log:            [],                  // no log entries yet
+    issuance_status: 'pending',          // stock needs to be issued again
+    created_at:     undefined,           // server fills
+    // Deep-copy particulars + coatings so subsequent edits don't bleed back
+    // into the source job's in-memory representation.
+    particulars:    source.particulars ? JSON.parse(JSON.stringify(source.particulars)) : {},
+    coatings:       Array.isArray(source.coatings) ? [...source.coatings] : [],
+  };
+
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+    <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">· duplicating E-${source.id}${source.jobcode ? ' (' + esc(source.jobcode) + ')' : ''}</span></h2>
+    ${jobForm(template)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
