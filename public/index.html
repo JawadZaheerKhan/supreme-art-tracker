@@ -1550,7 +1550,7 @@ function renderInvCardHtml(it) {
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
-        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History</button>
+        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected in the last 24h. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
@@ -1594,7 +1594,7 @@ function renderInvBrandRow(it) {
       </div>
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
-        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History</button>
+        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected in the last 24h. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
@@ -3211,6 +3211,10 @@ function computeSummaryRows() {
       totalOutPkts:   totalOutSheets / ps,
       stockNowPkts,
       balDiffPkts,
+      // Recent-correction flag: only show the red dot for items where the
+      // adjustment happened within the last 24h. Beyond that the dot stops
+      // being noisy reminder and stale rows revert to clean.
+      hasRecentCorr: hasRecentCorrection(it),
       weightKg:       wPerPack === null ? null : stockNowPkts * wPerPack,
       pendingImportPkts: pendingPkts,
       afterImportPkts,
@@ -3270,6 +3274,7 @@ function aggregateSummaryRowsByGsmSize(rows, paperType) {
         totalOutPkts: 0,
         stockNowPkts: 0,
         balDiffPkts: 0,
+        hasRecentCorr: false,
         pendingImportPkts: 0,
         afterImportPkts: 0,
         requiredNextPkts: 0,
@@ -3283,6 +3288,9 @@ function aggregateSummaryRowsByGsmSize(rows, paperType) {
     g.totalOutPkts       += r.totalOutPkts;
     g.stockNowPkts       += r.stockNowPkts;
     g.balDiffPkts        += r.balDiffPkts;
+    // OR across brand variants — if any brand of this paper+gsm+size had
+    // a recent correction, the merged row gets the dot.
+    g.hasRecentCorr      = g.hasRecentCorr || r.hasRecentCorr;
     g.pendingImportPkts  += r.pendingImportPkts;
     g.afterImportPkts    += r.afterImportPkts;
     g.requiredNextPkts   += r.requiredNextPkts;
@@ -3322,16 +3330,34 @@ function fmtKg(n) {
   return (+n.toFixed(2)).toLocaleString();
 }
 
-// Small red dot rendered next to Stock Now when the actual current_balance
-// differs from the running balance built from real IN/OUT in the period.
-// Almost always means a balance correction was applied (corrections are
-// excluded from IN/OUT so material flow stays clean). Hover for the delta.
-function correctionDot(diffPkts) {
-  if (!diffPkts || Math.abs(diffPkts) < 0.01) return '';
-  const sign = diffPkts > 0 ? '+' : '−';
-  const abs  = Math.abs(diffPkts);
-  const num  = Number.isInteger(abs) ? abs : +abs.toFixed(2);
-  const tip  = `Reflects a balance correction: ${sign}${num.toLocaleString()} vs the running balance (corrections are excluded from IN/OUT by design).`;
+// True when this inventory item had a balance correction in the last 24h.
+// Drives the small red dot on the inventory card's History button AND
+// gates the Stock Summary correction dot — so the indicator is a fresh
+// "heads up, someone just adjusted this" signal that fades after a day,
+// not a permanent stain on the row.
+function hasRecentCorrection(it) {
+  if (!it || !it.latest_correction_at) return false;
+  const age = Date.now() - new Date(it.latest_correction_at).getTime();
+  return age >= 0 && age <= 24 * 60 * 60 * 1000;
+}
+
+// Small red dot. Used in two places:
+//   1. Stock Summary's Stock Now cell — when balDiffPkts != 0 AND any
+//      brand variant grouped into the row had a correction in the last 24h.
+//   2. Inventory card's History button — when this item had a correction
+//      in the last 24h.
+// Visible to everyone (admin, ceo, stock, user) — it's purely informational.
+function correctionDot(diffPkts, tipOverride) {
+  let tip;
+  if (tipOverride) {
+    tip = tipOverride;
+  } else {
+    if (!diffPkts || Math.abs(diffPkts) < 0.01) return '';
+    const sign = diffPkts > 0 ? '+' : '−';
+    const abs  = Math.abs(diffPkts);
+    const num  = Number.isInteger(abs) ? abs : +abs.toFixed(2);
+    tip = `Reflects a balance correction: ${sign}${num.toLocaleString()} vs the running balance (corrections are excluded from IN/OUT by design).`;
+  }
   return `<span title="${esc(tip)}" style="display:inline-block;width:8px;height:8px;background:#dc2626;border-radius:50%;margin-left:6px;vertical-align:middle;cursor:help;"></span>`;
 }
 
@@ -3381,7 +3407,7 @@ function renderStockSummary() {
       <td style="text-align:right;">${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
-      <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}${correctionDot(r.balDiffPkts)}</td>
+      <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}${r.hasRecentCorr ? correctionDot(r.balDiffPkts) : ''}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
       <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>

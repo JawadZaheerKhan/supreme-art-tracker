@@ -818,7 +818,14 @@ app.get('/api/inventory', requireAuth, async (req, res) => {
            ORDER BY created_at DESC LIMIT 1) AS latest_out_sheets,
         (SELECT created_at FROM inventory_transactions
            WHERE item_id = i.id AND change < 0
-           ORDER BY created_at DESC LIMIT 1) AS latest_out_at
+           ORDER BY created_at DESC LIMIT 1) AS latest_out_at,
+        -- Most recent balance correction (reason='correction'). Frontend
+        -- shows a small red dot for 24h after this timestamp so anyone
+        -- viewing the item knows the current balance reflects a recent
+        -- manual adjustment, not just delivery/issuance flow.
+        (SELECT created_at FROM inventory_transactions
+           WHERE item_id = i.id AND reason = 'correction'
+           ORDER BY created_at DESC LIMIT 1) AS latest_correction_at
       FROM inventory_items i
       ORDER BY paper_type, size, gsm, brand
     `;
