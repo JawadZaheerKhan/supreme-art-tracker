@@ -1711,7 +1711,19 @@ function renderInventoryList() {
   // Group filtered items by (paper_type, size, gsm, is_offcut). Items
   // sharing all four are brand variants of the same logical paper and get
   // rendered as a single grouped card. Singletons render as before.
-  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || '', it.is_offcut ? 'offcut' : 'fresh'].join('||');
+  // The key is aggressively normalized so two items the user thinks are
+  // identical actually collapse to the same group regardless of how they
+  // were typed: lowercase, strip ALL whitespace (including non-breaking
+  // spaces and the space in "29 x 25"), then strip a trailing "gsm". This
+  // catches the cases that the simple trim+lowercase version missed:
+  // "29X25" / "29x25" / "29 x 25" / "29x25 " (trailing space) / "29x25 "
+  // (non-breaking space) all collapse to the same family. Same for GSM:
+  // "250" / "250gsm" / "250 gsm" / " 250 " all become "250".
+  const norm = (s) => String(s || '')
+    .replace(/\s+/g, '')        // collapse all whitespace (incl. NBSP)
+    .toLowerCase()
+    .replace(/gsm$/, '');       // strip trailing 'gsm' if present
+  const keyOf = (it) => [norm(it.paper_type), norm(it.size), norm(it.gsm), it.is_offcut ? 'offcut' : 'fresh'].join('||');
   const groupOrder = [];   // preserves filtered-list order on first encounter
   const groups     = new Map();
   for (const it of filtered) {
@@ -2436,7 +2448,17 @@ async function renderInvHistory(id) {
   try {
     const txs = await api('GET', `/api/inventory/${id}/transactions`);
     const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
+    // Server returns transactions newest-first. To show "balance after this
+    // transaction" we walk newest → oldest, starting from the live
+    // current_balance: the newest row's "after" is current_balance, then we
+    // subtract each row's change to get the balance the next-older row left
+    // behind. Works correctly with reversals because t.change is the actual
+    // signed delta (reversals are separate rows with opposite signs).
+    let runningAfter = it ? (it.current_balance || 0) : 0;
     const rows = txs.map(t => {
+      const balanceAfterSheets = runningAfter;
+      runningAfter -= t.change;     // becomes "after" of the next older row
+      const balanceAfterPkts = fmtPackets(balanceAfterSheets);
       const date = fmtDMYT(t.created_at);
       const isReversal      = !!t.reverses_tx_id;
       const hasBeenReversed = !!t.has_been_reversed;
@@ -2480,6 +2502,10 @@ async function renderInvHistory(id) {
           <div style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</div>
           <div style="font-size:11px;color:var(--text2);font-weight:400;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${t.change.toLocaleString()} sheets</div>
         </td>
+        <td style="font-weight:600;">
+          <div>${balanceAfterPkts} ${unit}</div>
+          <div style="font-size:11px;color:var(--text2);font-weight:400;">${balanceAfterSheets.toLocaleString()} sheets</div>
+        </td>
         <td>${reasonHtml}</td>
         <td>${job}</td>
         <td>${by}</td>
@@ -2489,7 +2515,7 @@ async function renderInvHistory(id) {
     }).join('');
     document.getElementById('ledger-content').innerHTML = txs.length
       ? `<table class="ledger-table">
-           <tr><th>When</th><th>Change (${unit})</th><th>Reason</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
+           <tr><th>When</th><th>Change (${unit})</th><th>Balance After</th><th>Reason</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
