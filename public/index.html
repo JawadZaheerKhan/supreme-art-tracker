@@ -8246,17 +8246,43 @@ function capaFormHtml(capa) {
   `;
 }
 
-// General CAPA edit form — matches Supreme Art's office paper form (the
-// three-section A / B / C layout). Used only when capa.job_id is null.
-// All sections are editable while open/in_progress; locked when closed
-// for non-admins (same rule as the job-tied form).
+// General CAPA edit form — QMS aesthetic (dark section bars, grid cells)
+// but tailored for non-job complaints. 5 sections:
+//   1. Company Details (who raised the complaint)
+//   2. Problem Description (big description, smaller stage/by/date)
+//   3. Root Cause Analysis
+//   4. Actions (corrective + preventive together, with date/category/by)
+//   5. Verification & Closure (signatures + dedicated CEO section)
+// Used only when capa.job_id is null. Locked when closed for non-admins.
 function capaFormHtmlGeneral(capa) {
   const d = capa.data || {};
   const ro = (capa.status === 'closed' && !isAdmin());
   const disable = ro ? 'disabled' : '';
   const lock = ro ? `<div style="background:#fef3c7;color:#92400e;padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:12px;">&#128274; This CAPA is closed and locked. Only admin can edit it.</div>` : '';
-  const dateVal = capa.issue_date || '';
-  const chk = val => val === 'yes' ? 'checked' : '';
+
+  // Same cell helpers as the job-tied form.
+  const cell = (label, key, val, ph = '', extra = '') => `
+    <div class="capa-cell">
+      <div class="capa-lbl">${label}</div>
+      <input type="text" id="capa-${key}" value="${esc(val||'')}" placeholder="${esc(ph)}" ${disable} ${extra}>
+    </div>`;
+  const dateCell = (label, key, val) => `
+    <div class="capa-cell">
+      <div class="capa-lbl">${label}</div>
+      <input type="date" id="capa-${key}" value="${esc(val||'')}" ${disable}>
+    </div>`;
+  const ta = (label, key, val, ph = '', rows = 2) => `
+    <div class="capa-cell capa-full">
+      <div class="capa-lbl">${label}</div>
+      <textarea id="capa-${key}" rows="${rows}" placeholder="${esc(ph)}" ${disable}>${esc(val||'')}</textarea>
+    </div>`;
+  const dl = (label, key, val, options) => `
+    <div class="capa-cell">
+      <div class="capa-lbl">${label}</div>
+      <input type="text" id="capa-${key}" value="${esc(val||'')}" list="dl-${key}" placeholder="Pick or type…" ${disable}>
+      <datalist id="dl-${key}">${options.map(o => `<option value="${esc(o)}">`).join('')}</datalist>
+    </div>`;
+
   return `
     ${lock}
     <img class="jc-watermark-screen" src="/logo.png" alt="">
@@ -8264,81 +8290,71 @@ function capaFormHtmlGeneral(capa) {
     <div class="capa-modal-header">
       <img class="capa-modal-logo" src="/logo.png" alt="Supreme Art">
       <div class="capa-modal-title-block">
-        <div class="capa-modal-title">SUPREME ART (PRIVATE) LIMITED</div>
-        <div class="capa-modal-sub">Corrective and Preventive Action Request Form &middot; ${esc(capa.capa_ref)}</div>
+        <div class="capa-modal-title">CORRECTIVE &amp; PREVENTIVE ACTION REPORT</div>
+        <div class="capa-modal-sub">${esc(capa.capa_ref)} &middot; General CAPA</div>
       </div>
-      <div style="text-align:right;font-size:12px;">
-        <div style="color:var(--text2);">Date</div>
-        <input type="date" id="capa-snap_issue_date" value="${esc(dateVal)}" ${disable} style="font-size:13px;padding:4px;">
-        <div style="margin-top:6px;">${capaStatusChip(capa.status)}</div>
-      </div>
+      <div style="width:48px;"></div>
+    </div>
+    <div class="capa-header-bar">
+      <div>CAPA Reference: <b>${esc(capa.capa_ref)}</b></div>
+      <div>Issue Date: <b>${esc(capa.issue_date ? fmtDMY(capa.issue_date) : '—')}</b></div>
+      <div>Status: ${capaStatusChip(capa.status)}</div>
     </div>
 
-    <!-- SECTION A -->
-    <div class="capa-section-head">SECTION A</div>
-    <div class="capa-grid" style="grid-template-columns:1fr;">
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Name of Concerned / Customer raised Request</div>
-        <input type="text" id="capa-name_concerned" value="${esc(d.name_concerned||'')}" placeholder="e.g. Global Pharmaceuticals (Pvt) Ltd" ${disable}>
-      </div>
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Type of Non-Conformance</div>
-        <div style="display:flex;gap:22px;font-size:13px;align-items:center;flex-wrap:wrap;padding:4px 0;">
-          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="capa-noncon_product"  ${chk(d.noncon_product)} ${disable}> a) Product non-conformance</label>
-          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="capa-noncon_process"  ${chk(d.noncon_process)} ${disable}> b) Process non-conformance</label>
-          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="capa-noncon_customer" ${chk(d.noncon_customer)} ${disable}> c) Customer Complaint</label>
-        </div>
-      </div>
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Problem / Non-Conformity</div>
-        <input type="text" id="capa-problem_nonconformity" value="${esc(d.problem_nonconformity||'')}" placeholder="One-line summary of the issue" ${disable}>
-      </div>
+    <!-- Section 1: Company Details — who raised the complaint -->
+    <div class="capa-section-head">1. COMPANY DETAILS</div>
+    <div class="capa-grid">
+      ${cell('Company / Customer (raising the complaint)', 'company_name', d.company_name, 'e.g. Global Pharmaceuticals (Pvt) Ltd')}
+      ${cell('Contact Person', 'contact_person', d.contact_person, 'Name + designation')}
+      ${cell('Reference / PO No.', 'ref_no', d.ref_no, 'Optional')}
+      ${dateCell('Complaint Date', 'snap_issue_date', capa.issue_date)}
     </div>
 
-    <!-- SECTION B -->
-    <div class="capa-section-head">SECTION B</div>
-    <div class="capa-grid" style="grid-template-columns:1fr;">
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Brief Description of Complaint</div>
-        <textarea id="capa-brief_description" rows="4" placeholder="Describe the complaint in detail" ${disable}>${esc(d.brief_description||'')}</textarea>
-      </div>
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Actions taken to correct the problem (immediate actions)</div>
-        <textarea id="capa-actions_taken" rows="3" placeholder="What was done to contain / fix the issue" ${disable}>${esc(d.actions_taken||'')}</textarea>
-      </div>
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Actions to avoid recurrence / Preventive Actions</div>
-        <textarea id="capa-actions_preventive" rows="3" placeholder="Systematic changes to prevent this happening again" ${disable}>${esc(d.actions_preventive||'')}</textarea>
-      </div>
+    <!-- Section 2: Problem Description — big description, narrow metadata -->
+    <div class="capa-section-head">2. PROBLEM DESCRIPTION</div>
+    <div class="capa-grid">
+      ${ta('Description of Non-Conformance / Issue', 'problem_description', d.problem_description, 'Describe the observed defect, deviation, or quality issue in detail', 6)}
+      ${dl('Detected At Stage', 'detected_at_stage', d.detected_at_stage, CAPA_STAGES)}
+      ${cell('Detected By', 'detected_by', d.detected_by, 'Name')}
+      ${dateCell('Detection Date', 'detection_date', d.detection_date)}
     </div>
 
-    <!-- SECTION C -->
-    <div class="capa-section-head">SECTION C</div>
-    <div class="capa-grid" style="grid-template-columns:1fr;">
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Review of Corrective / Preventive Action</div>
-        <textarea id="capa-review_action" rows="3" placeholder="e.g. Request to CEO: extra resource required for monitoring…" ${disable}>${esc(d.review_action||'')}</textarea>
-      </div>
+    <!-- Section 3: Root Cause Analysis -->
+    <div class="capa-section-head">3. ROOT CAUSE ANALYSIS</div>
+    <div class="capa-grid">
+      ${ta('Root Cause (5-Why / Fishbone Analysis)', 'root_cause', d.root_cause, 'Why → Why → Why…', 4)}
+      ${dl('Category', 'category', d.category, CAPA_CATEGORIES)}
+      ${cell('Analysis Done By', 'analysis_done_by', d.analysis_done_by, 'Name')}
+      ${dateCell('Analysis Date', 'analysis_date', d.analysis_date)}
     </div>
 
-    <!-- Footer: Comments + Date + Prepared/Checked By + Status -->
-    <div class="capa-grid" style="margin-top:8px;">
-      <div class="capa-cell capa-full">
-        <div class="capa-lbl">Comments</div>
-        <textarea id="capa-comments" rows="2" ${disable}>${esc(d.comments||'')}</textarea>
-      </div>
-      <div class="capa-cell">
-        <div class="capa-lbl">Prepared and Checked By</div>
-        <input type="text" id="capa-prepared_by" value="${esc(d.prepared_by||'')}" placeholder="Name" ${disable}>
-      </div>
-      <div class="capa-cell">
-        <div class="capa-lbl">Date</div>
-        <input type="date" id="capa-prepared_date" value="${esc(d.prepared_date||'')}" ${disable}>
-      </div>
+    <!-- Section 4: Actions — corrective + preventive together -->
+    <div class="capa-section-head">4. ACTIONS</div>
+    <div class="capa-grid">
+      ${ta('Corrective Action (immediate steps to contain / correct)', 'corrective_action', d.corrective_action, '', 3)}
+      ${ta('Preventive Action (systematic changes to prevent recurrence)', 'preventive_action', d.preventive_action, '', 3)}
+      ${dateCell('Action Date', 'action_date', d.action_date)}
+      ${cell('Category', 'action_category', d.action_category, 'e.g. Process change, Training')}
+      ${cell('Action By', 'action_by', d.action_by, 'Name')}
     </div>
-    <!-- Hidden status — collectCapaForm reads from this input, but it's not
-         shown because the header chip + Close CAPA button already cover the
-         status flow. Kept so saveCapa() round-trips the current status. -->
+
+    <!-- Section 5: Verification & Closure — signatures + CEO -->
+    <div class="capa-section-head">5. VERIFICATION &amp; CLOSURE</div>
+    <div class="capa-grid">
+      ${ta('Effectiveness Verification', 'verification', d.verification, 'How was the corrective action verified as effective?', 3)}
+      ${cell('Verified By', 'verified_by', d.verified_by, 'Name')}
+      ${dateCell('Verification Date', 'verification_date', d.verification_date)}
+      ${cell('Prepared By', 'prepared_by', d.prepared_by, 'Name')}
+      ${dateCell('Prepared Date', 'prepared_date', d.prepared_date)}
+      ${cell('Reviewed By', 'reviewed_by', d.reviewed_by, 'Name')}
+      ${dateCell('Reviewed Date', 'reviewed_date', d.reviewed_date)}
+      ${cell('Approved By', 'approved_by', d.approved_by, 'Name')}
+      ${dateCell('Approved Date', 'approved_date', d.approved_date)}
+      ${ta('CEO Note / Review (for CEO to write)', 'ceo_note', d.ceo_note, 'CEO comments — additional review, resource requests, escalation notes', 3)}
+    </div>
+
+    <!-- Hidden status — header chip + Close CAPA button drive status changes;
+         this input just round-trips the value through saveCapa(). -->
     <input type="hidden" id="capa-status" value="${esc(capa.status)}">
 
     <div style="margin-top:10px;font-size:11px;color:var(--text2);">${esc(capa.capa_ref)} &middot; Form Rev: 01 &middot; This document is confidential and for internal use only.</div>
@@ -8369,30 +8385,30 @@ async function openCapaEdit(capaId) {
 // Read every input on the edit form back into a `data` object + status.
 function collectCapaForm() {
   const get = id => (document.getElementById(id) || {}).value || '';
-  const getCheck = id => (document.getElementById(id) || {}).checked ? 'yes' : '';
-  // Job-tied CAPA (QMS 7-section) fields.
-  const qmsKeys = [
+  // Field keys for both forms. Most are shared (the QMS-style aesthetic uses
+  // the same field names), with a few General-CAPA-only additions for the
+  // company/contact/CEO note bits. Get() returns '' for inputs that don't
+  // exist on the current form, so reading both sets is harmless.
+  const sharedKeys = [
     'problem_description','detected_at_stage','detected_by','detection_date',
     'root_cause','category','analysis_done_by','analysis_date',
-    'corrective_action','corrective_responsible','corrective_target_date','corrective_actual_date',
-    'preventive_action','preventive_responsible','preventive_target_date','preventive_actual_date',
+    'corrective_action','preventive_action',
     'verification','verified_by','verification_date',
     'prepared_by','prepared_date','reviewed_by','reviewed_date','approved_by','approved_date',
   ];
-  // General CAPA (Sections A/B/C) text fields. Checkboxes handled below.
-  const genKeys = [
-    'name_concerned','problem_nonconformity',
-    'brief_description','actions_taken','actions_preventive',
-    'review_action','comments',
+  const qmsOnlyKeys = [
+    'corrective_responsible','corrective_target_date','corrective_actual_date',
+    'preventive_responsible','preventive_target_date','preventive_actual_date',
+  ];
+  const generalOnlyKeys = [
+    'company_name','contact_person','ref_no',
+    'action_date','action_category','action_by',
+    'ceo_note',
   ];
   const data = {};
-  qmsKeys.forEach(k => { data[k] = get(`capa-${k}`).trim(); });
-  genKeys.forEach(k => { data[k] = get(`capa-${k}`).trim(); });
-  // Three checkboxes from Section A. Stored as 'yes' / '' so they round-trip
-  // through JSON cleanly and the Excel export reads as text.
-  data.noncon_product  = getCheck('capa-noncon_product');
-  data.noncon_process  = getCheck('capa-noncon_process');
-  data.noncon_customer = getCheck('capa-noncon_customer');
+  [...sharedKeys, ...qmsOnlyKeys, ...generalOnlyKeys].forEach(k => {
+    data[k] = get(`capa-${k}`).trim();
+  });
   // Section 1 fields. For job-tied CAPAs these inputs are readonly so the
   // collected values just round-trip the snapshot. For General CAPAs the
   // user types them and we save back into job_snapshot.
@@ -8551,17 +8567,20 @@ function buildCapaPrint(capa) {
     </div>`;
 }
 
-// General CAPA print — matches the Supreme Art office form. Two-column
-// SECTION-titled bands, with the date in the top-right of the header.
+// General CAPA print — same QMS aesthetic as job-tied CAPAs but with the
+// 5-section structure (Company / Problem / Analysis / Actions / Verification).
+// Single legal page, matches buildCapaPrint's style helpers.
 function buildCapaPrintGeneral(capa) {
   const d = capa.data || {};
   const dt = v => v ? fmtDMY(v) : '';
-  const tick = v => v === 'yes' ? '<span style="font-weight:700;font-size:14pt;">&#9745;</span>' : '<span style="display:inline-block;width:14px;height:14px;border:1px solid #000;vertical-align:middle;"></span>';
-  const sectHead = (letter) => `<div class="capa-print-head">SECTION ${letter}</div>`;
-  const block = (label, val, lines = 1) => `
-    <div class="capa-print-cell capa-print-wide">
-      <div class="capa-print-lbl">${label}</div>
-      <div class="capa-print-val capa-print-lines" style="min-height:${lines*22}px;">${esc(val || '')}</div>
+  const sectHead = (n, label) => `<div class="capa-print-head">${n}. ${label}</div>`;
+  const fld = (lbl, val) => `<div class="capa-print-cell"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val">${esc(val || '')}</div></div>`;
+  const fldWide = (lbl, val, lines = 2) => `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${lines*20}px;">${esc(val || '')}</div></div>`;
+  const sigBox = (lbl, name, date) => `
+    <div class="capa-print-sig">
+      <div class="capa-print-lbl">${lbl}</div>
+      <div class="capa-print-sig-line">${esc(name || '')}</div>
+      <div class="capa-print-lbl" style="margin-top:4px;">Date: ${esc(dt(date) || '')}</div>
     </div>`;
   const statusLabel = ({open:'OPEN', in_progress:'IN PROGRESS', closed:'CLOSED'})[capa.status] || 'OPEN';
 
@@ -8569,57 +8588,63 @@ function buildCapaPrintGeneral(capa) {
     <div class="capa-print">
       <img class="capa-print-watermark" src="/logo.png" alt="">
       <div class="capa-print-content">
-      <!-- Header: logo on the left, title centered, date on the right -->
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-        <img class="capa-print-logo" src="/logo.png" alt="Supreme Art" style="height:60px;">
-        <div style="flex:1;text-align:center;">
-          <div style="font-size:18pt;font-weight:700;letter-spacing:0.12em;">SUPREME ART (PRIVATE) LIMITED</div>
-          <div style="font-size:11pt;color:#444;margin-top:2px;">Corrective and Preventive Action Request Form</div>
-        </div>
-        <div style="text-align:right;font-size:10pt;min-width:130px;">
-          <div style="color:#555;">Date</div>
-          <div style="font-weight:700;font-size:12pt;border-bottom:1px solid #000;padding:2px 6px;">${esc(dt(capa.issue_date))}</div>
-          <div style="margin-top:4px;font-size:9pt;color:#444;">${esc(capa.capa_ref)} &middot; ${esc(statusLabel)}</div>
+      <div class="capa-print-header">
+        <img class="capa-print-logo" src="/logo.png" alt="Supreme Art">
+        <div class="capa-print-title-block">
+          <div class="capa-print-title">CORRECTIVE &amp; PREVENTIVE ACTION REPORT</div>
+          <div class="capa-print-subtitle">CAPA Reference: ${esc(capa.capa_ref)} &nbsp;|&nbsp; Issue Date: ${esc(dt(capa.issue_date))} &nbsp;|&nbsp; Status: ${esc(statusLabel)}</div>
         </div>
       </div>
+      <div class="capa-print-note">General CAPA &mdash; not tied to a specific job card. Fill in all action fields and obtain signatures before closure.</div>
 
-      ${sectHead('A')}
+      ${sectHead(1, 'COMPANY DETAILS')}
       <div class="capa-print-grid">
-        ${block('Name of Concerned / Customer raised Request', d.name_concerned)}
-        <div class="capa-print-cell capa-print-wide">
-          <div class="capa-print-lbl">Type of Non-Conformance</div>
-          <div style="display:flex;gap:24px;font-size:11pt;padding:3px 0;align-items:center;">
-            <span>${tick(d.noncon_product)} &nbsp;a) Product non-conformance</span>
-            <span>${tick(d.noncon_process)} &nbsp;b) Process non-conformance</span>
-            <span>${tick(d.noncon_customer)} &nbsp;c) Customer Complaint</span>
-          </div>
-        </div>
-        ${block('Problem / Non-Conformity', d.problem_nonconformity)}
+        ${fld('Company / Customer', d.company_name)}
+        ${fld('Contact Person', d.contact_person)}
+        ${fld('Reference / PO No.', d.ref_no)}
+        ${fld('Complaint Date', dt(capa.issue_date))}
       </div>
 
-      ${sectHead('B')}
+      ${sectHead(2, 'PROBLEM DESCRIPTION')}
       <div class="capa-print-grid">
-        ${block('Brief Description of Complaint', d.brief_description, 4)}
-        ${block('Actions taken to correct the problem (immediate actions)', d.actions_taken, 3)}
-        ${block('Actions to avoid recurrence / Preventive Actions', d.actions_preventive, 3)}
+        ${fldWide('Description of Non-Conformance / Issue', d.problem_description, 5)}
+        ${fld('Detected At Stage', d.detected_at_stage)}
+        ${fld('Detected By', d.detected_by)}
+        ${fld('Detection Date', dt(d.detection_date))}
       </div>
 
-      ${sectHead('C')}
+      ${sectHead(3, 'ROOT CAUSE ANALYSIS')}
       <div class="capa-print-grid">
-        ${block('Review of Corrective / Preventive Action', d.review_action, 3)}
+        ${fldWide('Root Cause (5-Why / Fishbone Analysis)', d.root_cause, 3)}
+        ${fld('Category', d.category)}
+        ${fld('Analysis Done By', d.analysis_done_by)}
+        ${fld('Analysis Date', dt(d.analysis_date))}
       </div>
 
-      <!-- Footer: Comments + Date + Prepared/Checked By -->
-      <div class="capa-print-grid" style="margin-top:6px;">
-        ${block('Comments', d.comments, 2)}
-        <div class="capa-print-cell">
-          <div class="capa-print-lbl">Date</div>
-          <div class="capa-print-val">${esc(dt(d.prepared_date))}</div>
-        </div>
-        <div class="capa-print-cell">
-          <div class="capa-print-lbl">Prepared and Checked By</div>
-          <div class="capa-print-val capa-print-lines" style="min-height:32px;">${esc(d.prepared_by || '')}</div>
-        </div>
+      ${sectHead(4, 'ACTIONS')}
+      <div class="capa-print-grid">
+        ${fldWide('Corrective Action (immediate steps to contain / correct)', d.corrective_action, 2)}
+        ${fldWide('Preventive Action (systematic changes to prevent recurrence)', d.preventive_action, 2)}
+        ${fld('Action Date', dt(d.action_date))}
+        ${fld('Category', d.action_category)}
+        ${fld('Action By', d.action_by)}
+      </div>
+
+      ${sectHead(5, 'VERIFICATION & CLOSURE')}
+      <div class="capa-print-grid">
+        ${fldWide('Effectiveness Verification', d.verification, 2)}
+        ${fld('Verified By', d.verified_by)}
+        ${fld('Verification Date', dt(d.verification_date))}
+      </div>
+
+      <!-- Signatures row + CEO section -->
+      <div class="capa-print-sigrow">
+        ${sigBox('Prepared By', d.prepared_by, d.prepared_date)}
+        ${sigBox('Reviewed By', d.reviewed_by, d.reviewed_date)}
+        ${sigBox('Approved By', d.approved_by, d.approved_date)}
+      </div>
+      <div class="capa-print-grid" style="margin-top:4px;">
+        ${fldWide('CEO Note / Review', d.ceo_note, 2)}
       </div>
 
       <div class="capa-print-footer">${esc(capa.capa_ref)} | Form Rev: 01 | This document is confidential and for internal use only.</div>
@@ -8745,12 +8770,8 @@ function renderCapaReport() {
   const body = rows.map(c => {
     const d = c.data || {};
     const snap = c.job_snapshot || {};
-    // Problem text source depends on the form layout. Job-tied CAPAs use
-    // d.problem_description (QMS section 2); General CAPAs use the Brief
-    // Description from Section B (or fall back to Section A's one-liner).
-    const probText = c.job_id
-      ? (d.problem_description || '')
-      : (d.brief_description || d.problem_nonconformity || '');
+    // Both forms now share the problem_description field, so a single read.
+    const probText = d.problem_description || '';
     const probSnippet = probText.slice(0, 70);
     const checked = capaReportSel.has(c.id) ? 'checked' : '';
     const sel = capaReportSel.has(c.id) ? 'bulk-row-selected' : '';
@@ -8889,10 +8910,7 @@ function printCapaReportSummary() {
       ({open:'Open',in_progress:'In Progress',closed:'Closed'}[c.status]) || c.status,
       d.detected_at_stage || '',
       d.detected_by || '',
-      // Use whichever problem field this CAPA's layout uses (see renderCapaReport).
-      (c.job_id
-        ? (d.problem_description || '')
-        : (d.brief_description || d.problem_nonconformity || '')).slice(0, 120),
+      (d.problem_description || '').slice(0, 120),
     ];
   });
   const headHtml = head.map(h => `<th>${esc(h)}</th>`).join('');
@@ -8952,10 +8970,10 @@ function exportCapasToXlsx(rows, baseName) {
     'Preventive Action','Preventive Responsible','Preventive Target','Preventive Actual',
     'Verification','Verified By','Verification Date',
     'Prepared By','Prepared Date','Reviewed By','Reviewed Date','Approved By','Approved Date',
-    // General CAPA fields (sections A/B/C) — populated only on standalone CAPAs.
-    'Name Concerned','Type: Product','Type: Process','Type: Customer','Problem/Non-Conformity',
-    'Brief Description','Actions Taken','Actions Preventive',
-    'Review Action','Comments',
+    // General CAPA-only fields — populated on standalone (job_id NULL) CAPAs.
+    'Company Name','Contact Person','Reference / PO No.',
+    'Action Date','Action Category','Action By',
+    'CEO Note',
     'Created At','Created By',
   ];
   const data = rows.map(c => {
@@ -8999,16 +9017,13 @@ function exportCapasToXlsx(rows, baseName) {
       d.approved_by || '',
       d.approved_date || '',
       // General CAPA columns
-      d.name_concerned || '',
-      d.noncon_product || '',
-      d.noncon_process || '',
-      d.noncon_customer || '',
-      d.problem_nonconformity || '',
-      d.brief_description || '',
-      d.actions_taken || '',
-      d.actions_preventive || '',
-      d.review_action || '',
-      d.comments || '',
+      d.company_name || '',
+      d.contact_person || '',
+      d.ref_no || '',
+      d.action_date || '',
+      d.action_category || '',
+      d.action_by || '',
+      d.ceo_note || '',
       c.created_at ? new Date(c.created_at).toLocaleString('en-GB') : '',
       c.created_by_email || '',
     ];
