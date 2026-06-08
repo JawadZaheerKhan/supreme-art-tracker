@@ -217,6 +217,33 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS audit_log_entity_idx ON audit_log(entity_type, entity_id)`;
     await sql`CREATE INDEX IF NOT EXISTS audit_log_user_idx   ON audit_log(user_id)`;
 
+    // CAPA reports: Corrective & Preventive Action reports raised against a
+    // job card. A job can have multiple CAPAs (one per non-conformance issue).
+    // Section-1 job details are auto-snapshotted at creation in job_snapshot
+    // so the CAPA stays stable even if the underlying job is edited. The rest
+    // of the form lives in `data` JSONB so we can evolve fields without
+    // migrations. Status is denormalized out of `data` for easy filtering.
+    await sql`
+      CREATE TABLE IF NOT EXISTS capa_reports (
+        id               SERIAL PRIMARY KEY,
+        job_id           INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        capa_ref         TEXT NOT NULL,
+        seq              INTEGER NOT NULL,
+        status           TEXT NOT NULL DEFAULT 'open',
+        issue_date       TEXT,
+        job_snapshot     JSONB NOT NULL DEFAULT '{}',
+        data             JSONB NOT NULL DEFAULT '{}',
+        created_at       TIMESTAMPTZ DEFAULT NOW(),
+        created_by_id    INTEGER,
+        created_by_email TEXT,
+        updated_at       TIMESTAMPTZ DEFAULT NOW(),
+        closed_at        TIMESTAMPTZ
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS capa_reports_job_idx    ON capa_reports(job_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS capa_reports_status_idx ON capa_reports(status)`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS capa_reports_job_seq_uidx ON capa_reports(job_id, seq)`;
+
     console.log('Database ready');
   } catch (err) {
     console.error('Database init error:', err.message);
@@ -1589,6 +1616,163 @@ app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── CAPA reports ─────────────────────────────────────────────
+// Corrective & Preventive Action reports raised against a job. Multiple
+// per job allowed (ref = JC-{jobcode}-{seq}). Section 1 (job details) is
+// snapshotted at creation so the CAPA stays stable if the job is edited
+// later. The rest of the form lives in a JSONB blob.
+//
+// Permissions:
+//   • Any signed-in user can read.
+//   • Admin + User + Stock can create/edit while status != 'closed'.
+//   • Once status='closed', only admin can edit/delete.
+//   • CEO is read-only everywhere (requireWriteUser blocks them).
+
+// Build a Section-1 snapshot from a job row. Frozen at CAPA creation time.
+function buildJobSnapshot(job) {
+  return {
+    job_card_no:  job.jobcode || (job.id ? `E-${job.id}` : ''),
+    job_ref_id:   job.id,
+    po_no:        job.ref || '',
+    issue_date:   job.dateissued || '',
+    machine:      job.machine || '',
+    job_name:     job.name || '',
+    company:      job.client || '',
+    po_qty:       job.qty || '',
+    delivered_qty:job.delqty || '',
+  };
+}
+
+// GET all CAPAs for a job, newest first.
+app.get('/api/jobs/:id/capa', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT * FROM capa_reports WHERE job_id=${req.params.id}
+      ORDER BY seq DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// GET one CAPA.
+app.get('/api/capa/:id', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'CAPA not found' });
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
+// the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
+app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(jobId)) return res.status(400).json({ error: 'Invalid job id' });
+
+    const jobs = await sql`SELECT * FROM jobs WHERE id=${jobId}`;
+    if (!jobs.length) return res.status(404).json({ error: 'Job not found' });
+    const job = jobs[0];
+
+    const snap = buildJobSnapshot(job);
+    const maxRows = await sql`SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports WHERE job_id=${jobId}`;
+    const seq = (maxRows[0].m || 0) + 1;
+    const capaRef = `JC-${snap.job_card_no}-${seq}`;
+    const today = new Date().toISOString().slice(0, 10); // yyyy-mm-dd
+
+    const inserted = await sql`
+      INSERT INTO capa_reports
+        (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
+      VALUES
+        (${jobId}, ${capaRef}, ${seq}, 'open', ${today}, ${JSON.stringify(snap)}, ${JSON.stringify(req.body && req.body.data || {})}, ${req.user.id}, ${req.user.email})
+      RETURNING *
+    `;
+    const capa = inserted[0];
+    await logAudit(sql, req, {
+      action: 'capa.create',
+      entityType: 'capa',
+      entityId: capa.id,
+      summary: `CAPA ${capa.capa_ref} raised on job E-${jobId}`,
+      metadata: { job_id: jobId, capa_ref: capa.capa_ref },
+    });
+    res.json(capa);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// UPDATE a CAPA. Anyone with write access can edit while open/in_progress.
+// Once closed, only admin can change it (including reopening).
+app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
+    if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
+    const current = existing[0];
+
+    // Lock closed CAPAs to admin only.
+    if (current.status === 'closed' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'This CAPA is closed. Only admin can edit it.' });
+    }
+
+    const { status, issue_date, data } = req.body || {};
+    const nextStatus = ['open', 'in_progress', 'closed'].includes(status) ? status : current.status;
+    const nextData   = data && typeof data === 'object' ? data : current.data;
+    const nextIssue  = (issue_date === undefined || issue_date === null) ? current.issue_date : issue_date;
+    const closingNow = nextStatus === 'closed' && current.status !== 'closed';
+    const reopening  = nextStatus !== 'closed' && current.status === 'closed';
+    // Compute closed_at in JS so we don't have to embed a SQL fragment into a
+    // value slot (neon's tagged template parameterizes ${...} as bind values).
+    const nextClosedAt = closingNow ? new Date() : (reopening ? null : current.closed_at);
+
+    const updated = await sql`
+      UPDATE capa_reports SET
+        status=${nextStatus},
+        issue_date=${nextIssue},
+        data=${JSON.stringify(nextData)},
+        updated_at=NOW(),
+        closed_at=${nextClosedAt}
+      WHERE id=${req.params.id}
+      RETURNING *
+    `;
+    const capa = updated[0];
+    let action = 'capa.update';
+    let summary = `CAPA ${capa.capa_ref} updated`;
+    if (closingNow) { action = 'capa.close'; summary = `CAPA ${capa.capa_ref} closed`; }
+    if (reopening)  { action = 'capa.reopen'; summary = `CAPA ${capa.capa_ref} reopened`; }
+    await logAudit(sql, req, {
+      action, entityType: 'capa', entityId: capa.id, summary,
+      metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref, status: capa.status },
+    });
+    res.json(capa);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// DELETE a CAPA (admin only). Hard delete — CAPAs aren't trashed.
+app.delete('/api/capa/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
+    if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
+    const capa = existing[0];
+    await sql`DELETE FROM capa_reports WHERE id=${req.params.id}`;
+    await logAudit(sql, req, {
+      action: 'capa.delete',
+      entityType: 'capa',
+      entityId: capa.id,
+      summary: `CAPA ${capa.capa_ref} deleted`,
+      metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref },
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 app.get('*', (req, res) => {
