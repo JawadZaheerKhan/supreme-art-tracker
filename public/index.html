@@ -413,23 +413,32 @@
   font-weight: 700; letter-spacing: 0.05em; margin: 12px 0 0;
   border-radius: 3px 3px 0 0;
 }
+/* Line-free, document-style grid. No table borders — cells are separated by
+   whitespace and inputs get clean bottom-only rules so the form reads as
+   prose rather than a spreadsheet. Sections are anchored by the heading
+   underline above. */
 .capa-grid {
   display: grid; grid-template-columns: 1fr 1fr;
-  border: 1px solid var(--border); border-top: none;
-  border-radius: 0 0 3px 3px; overflow: hidden;
+  gap: 14px 28px; padding: 12px 4px 4px;
 }
-.capa-cell { padding: 8px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.capa-cell:nth-child(2n) { border-right: none; }
-.capa-cell.capa-full { grid-column: 1 / -1; border-right: none; }
+.capa-cell { padding: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.capa-cell.capa-full { grid-column: 1 / -1; }
 .capa-lbl { font-size: 10.5px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
-.capa-cell input[type="text"], .capa-cell input[type="date"], .capa-cell textarea, .capa-cell select {
-  font-family: var(--font); font-size: 13px; padding: 4px 6px;
-  border: 1px solid transparent; border-radius: 3px; background: #fff; color: var(--text);
+.capa-cell input[type="text"], .capa-cell input[type="date"], .capa-cell select {
+  font-family: var(--font); font-size: 13px; padding: 4px 2px;
+  border: none; border-bottom: 1px solid var(--border); border-radius: 0;
+  background: transparent; color: var(--text);
   outline: none; width: 100%; box-sizing: border-box;
 }
-.capa-cell input:focus, .capa-cell textarea:focus, .capa-cell select:focus { border-color: #2563eb; }
-.capa-cell input[readonly] { background: #f1f5f9; color: var(--text2); }
-.capa-cell textarea { resize: vertical; min-height: 36px; }
+.capa-cell input:focus, .capa-cell select:focus { border-bottom-color: #2563eb; }
+.capa-cell input[readonly] { color: var(--text2); }
+.capa-cell textarea {
+  font-family: var(--font); font-size: 13px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 4px; background: #fff; color: var(--text);
+  outline: none; width: 100%; box-sizing: border-box;
+  resize: vertical; min-height: 36px;
+}
+.capa-cell textarea:focus { border-color: #2563eb; }
 
 /* ── CAPA print layout — paper-size agnostic ─────────────────
    No @page size declaration: whatever paper the user picks in the
@@ -471,21 +480,42 @@
   /* Don't orphan a section header at the bottom of a page. */
   page-break-after: avoid; break-after: avoid;
 }
+/* Document-style print layout — no table borders. Short fields get a single
+   writing line under the value; multi-line cells get a ruled background so
+   handwriting follows clean horizontal rules. */
 .capa-print-grid {
   display: grid; grid-template-columns: 1fr 1fr;
-  border: 1px solid #000; border-top: none;
+  gap: 10px 28px; padding: 8px 0 4px;
   /* Keep the entire grid together — if it doesn't fit on this page, move
      the whole thing to the next page instead of splitting mid-cell. */
   page-break-inside: avoid; break-inside: avoid;
 }
-.capa-print-cell { padding: 3px 8px; border-right: 1px solid #000; border-bottom: 1px solid #000; min-width: 0; }
-.capa-print-cell:nth-child(2n)   { border-right: none; }
-.capa-print-cell:last-child      { border-bottom: none; }
-.capa-print-cell:nth-last-child(2):nth-child(odd) { border-bottom: none; }
-.capa-print-wide                 { grid-column: 1 / -1; border-right: none; }
-.capa-print-lbl                  { font-size: 8.5pt; color: #000; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
-.capa-print-val                  { font-size: 11pt; font-weight: 600; min-height: 16px; padding-top: 1px; }
-.capa-print-lines                { font-weight: 500; white-space: pre-wrap; }
+.capa-print-cell                 { padding: 0; min-width: 0; }
+.capa-print-wide                 { grid-column: 1 / -1; }
+.capa-print-lbl                  { font-size: 8.5pt; color: #000; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; margin-bottom: 3px; }
+.capa-print-val                  {
+  font-size: 11pt; font-weight: 600; min-height: 20px;
+  padding: 0 2px 2px;
+  border-bottom: 1px solid #000;
+}
+/* Multi-line writing area: repeating horizontal rules every 22px so
+   handwriting has a guide line on every row. min-height inline-style
+   controls how many rules show through. The val border-bottom is
+   suppressed since the ruled background already shows the bottom line. */
+.capa-print-lines                {
+  font-weight: 500; white-space: pre-wrap;
+  border-bottom: none;
+  padding: 0 2px;
+  line-height: 22px;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 21px,
+    #000 21px,
+    #000 22px
+  );
+  print-color-adjust: exact; -webkit-print-color-adjust: exact;
+}
 .capa-print-sigrow {
   display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;
   margin-top: 8px; padding: 0 8px;
@@ -5755,7 +5785,9 @@ function buildFormCapaPrint(d) {
   const dt = v => v ? fmtDMY(v) : '';
   const sectHead = (n, label) => `<div class="capa-print-head">${n}. ${label}</div>`;
   const fld = (lbl, val) => `<div class="capa-print-cell"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val">${esc(val || '')}</div></div>`;
-  const fldWide = (lbl, val, lines = 2) => `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${lines*20}px;">${esc(val || '')}</div></div>`;
+  // 22px per line matches the ruled-background spacing in .capa-print-lines
+  // so each handwriting rule lines up with one row of writing.
+  const fldWide = (lbl, val, lines = 2) => `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${lines*22}px;">${esc(val || '')}</div></div>`;
   const sigBox = (lbl, name, date) => `
     <div class="capa-print-sig">
       <div class="capa-print-lbl">${lbl}</div>
