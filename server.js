@@ -254,6 +254,10 @@ async function initDb() {
         closed_at        TIMESTAMPTZ
       )
     `;
+    // Allow standalone CAPAs (not tied to a specific job). job_id stays a FK
+    // but is now nullable — the user fills Section 1 manually instead of
+    // snapshotting from a job. Idempotent migration on existing deployments.
+    await sql`ALTER TABLE capa_reports ALTER COLUMN job_id DROP NOT NULL`;
     await sql`CREATE INDEX IF NOT EXISTS capa_reports_job_idx    ON capa_reports(job_id)`;
     await sql`CREATE INDEX IF NOT EXISTS capa_reports_status_idx ON capa_reports(status)`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS capa_reports_job_seq_uidx ON capa_reports(job_id, seq)`;
@@ -1747,6 +1751,46 @@ app.get('/api/capa/:id', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// CREATE a standalone CAPA (not tied to any job). Used for shop-wide quality
+// issues that aren't a single-job event — supplier complaint, machine
+// calibration drift, safety incident, etc. capa_ref = GEN-{YYYY}-{seq}
+// where seq is monotonic across all standalone CAPAs ever raised. Section 1
+// stays empty in job_snapshot; the user types those fields themselves on
+// the edit form (capaFormHtml flips Section 1 to editable when snapshot is
+// empty).
+app.post('/api/capa', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const year = new Date().getFullYear();
+    // Count existing GEN- refs to find the next seq. Cheaper than a sequence
+    // and handles year-boundary resets cleanly.
+    const existing = await sql`
+      SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports
+      WHERE job_id IS NULL AND capa_ref LIKE ${'GEN-' + year + '-%'}
+    `;
+    const seq = (existing[0].m || 0) + 1;
+    const capaRef = `GEN-${year}-${seq}`;
+    const today = new Date().toISOString().slice(0, 10);
+    const inserted = await sql`
+      INSERT INTO capa_reports
+        (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
+      VALUES
+        (${null}, ${capaRef}, ${seq}, 'open', ${today}, ${JSON.stringify({})}, ${JSON.stringify(req.body && req.body.data || {})}, ${req.user.id}, ${req.user.email})
+      RETURNING *
+    `;
+    const capa = inserted[0];
+    await logAudit(sql, req, {
+      action: 'capa.create',
+      entityType: 'capa',
+      entityId: capa.id,
+      summary: `General CAPA ${capa.capa_ref} raised (no job)`,
+      metadata: { capa_ref: capa.capa_ref, general: true },
+    });
+    res.json(capa);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
 // the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
 app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
@@ -1800,7 +1844,7 @@ app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
       return res.status(403).json({ error: 'This CAPA is closed. Only admin can edit it.' });
     }
 
-    const { status, issue_date, data } = req.body || {};
+    const { status, issue_date, data, job_snapshot } = req.body || {};
     const nextStatus = ['open', 'in_progress', 'closed'].includes(status) ? status : current.status;
     const nextData   = data && typeof data === 'object' ? data : current.data;
     const nextIssue  = (issue_date === undefined || issue_date === null) ? current.issue_date : issue_date;
@@ -1809,12 +1853,20 @@ app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
     // Compute closed_at in JS so we don't have to embed a SQL fragment into a
     // value slot (neon's tagged template parameterizes ${...} as bind values).
     const nextClosedAt = closingNow ? new Date() : (reopening ? null : current.closed_at);
+    // Section 1 (job_snapshot) is only writable for General CAPAs (job_id IS
+    // NULL). Job-tied CAPAs keep their frozen snapshot — even if the client
+    // sends a different value, we ignore it. This preserves the audit
+    // guarantee that Section 1 reflects the job at CAPA creation.
+    const nextSnap = (current.job_id == null && job_snapshot && typeof job_snapshot === 'object')
+      ? job_snapshot
+      : current.job_snapshot;
 
     const updated = await sql`
       UPDATE capa_reports SET
         status=${nextStatus},
         issue_date=${nextIssue},
         data=${JSON.stringify(nextData)},
+        job_snapshot=${JSON.stringify(nextSnap)},
         updated_at=NOW(),
         closed_at=${nextClosedAt}
       WHERE id=${req.params.id}

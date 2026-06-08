@@ -697,6 +697,10 @@
       <span style="color:var(--text2);font-size:12px;">to</span>
       <input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;">
     </span>
+    <!-- Single CAPA entry point. Yellow highlight so it stands out among
+         the filters. Opens a launcher modal: search a job to raise a CAPA
+         against, or create a General CAPA not tied to any job. -->
+    <button class="btn btn-sm btn-capa ceo-hide" onclick="openCapaLauncher()" title="Raise a Corrective &amp; Preventive Action report">&#9888; CAPA</button>
   </div>
   <div class="jobs-list" id="jobs-list"></div>
 </div>
@@ -1520,11 +1524,6 @@ function renderJobs() {
           </div>
           ${sidePanel}
         </div>
-      </div>
-      <!-- CAPA lives in its own bottom-right strip so it's separated from the
-           main action row. Yellow highlight makes it pop as a QMS/alert action. -->
-      <div class="job-capa-bar">
-        <button class="btn btn-sm btn-capa" onclick="openCapaList(${j.id})" title="Corrective &amp; Preventive Action reports raised against this job">&#9888; CAPA</button>
       </div>
     </div>`;
   }).join('');
@@ -7975,6 +7974,71 @@ function capaStatusChip(status) {
 }
 
 // Open the list modal for a job — shows all CAPAs raised against it.
+// ── CAPA Launcher ──────────────────────────────────────────
+// Opened from the yellow CAPA button on the Jobs filter row. Two paths
+// from here:
+//   • Search a job → click → opens that job's CAPA list (existing flow).
+//   • + General CAPA → creates a standalone CAPA (no job link) and
+//     opens it for editing. Section 1 becomes manually-editable.
+function openCapaLauncher() {
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()" style="max-width:720px;">
+    <div class="capa-modal-header">
+      <img class="capa-modal-logo" src="/logo.png" alt="Supreme Art">
+      <div class="capa-modal-title-block">
+        <div class="capa-modal-title">RAISE CAPA</div>
+        <div class="capa-modal-sub">Pick a job — or create a General CAPA for a non-job issue.</div>
+      </div>
+      <div style="width:48px;"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Search for a job</label>
+      <input type="text" id="capa-launch-search" placeholder="Job name, company, or code…" oninput="renderCapaLauncherList()" autocomplete="off">
+    </div>
+    <div id="capa-launch-list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:#fff;"></div>
+    <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);font-size:12px;color:var(--text2);">
+      <b>Not tied to a job?</b> Click below to create a General CAPA. You'll fill Section 1 yourself.
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-capa" onclick="newGeneralCapa()">&#9888; + General CAPA</button>
+    </div>
+  </div>`);
+  setTimeout(() => { const s = document.getElementById('capa-launch-search'); if (s) s.focus(); }, 30);
+  renderCapaLauncherList();
+}
+
+function renderCapaLauncherList() {
+  const list = document.getElementById('capa-launch-list');
+  if (!list) return;
+  const q = (document.getElementById('capa-launch-search')||{}).value.trim().toLowerCase();
+  const matches = jobs.filter(j => {
+    if (!q) return true;
+    const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
+    return hay.includes(q);
+  }).sort((a,b) => b.id - a.id).slice(0, 30);
+  if (!matches.length) {
+    list.innerHTML = '<div style="padding:14px;color:var(--text2);font-style:italic;text-align:center;">No jobs match.</div>';
+    return;
+  }
+  list.innerHTML = matches.map(j => `
+    <div onclick="openCapaList(${j.id})" style="padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:baseline;" onmouseover="this.style.background='#fef9c3'" onmouseout="this.style.background='#fff'">
+      <div>
+        <div style="font-weight:600;font-size:13px;">${esc(j.name||'')}</div>
+        <div style="font-size:11px;color:var(--text2);">${esc(j.client||'')}${j.jobcode?' · Code '+esc(j.jobcode):''}</div>
+      </div>
+      <div style="font-size:11px;color:var(--text2);white-space:nowrap;">E-${j.id}</div>
+    </div>`).join('');
+}
+
+// Create a standalone CAPA and open it — Section 1 will be editable.
+async function newGeneralCapa() {
+  try {
+    const capa = await api('POST', '/api/capa', { data: {} });
+    notify(`CAPA ${capa.capa_ref} created`);
+    openCapaEdit(capa.id);
+  } catch (e) { notify('Error: ' + e.message); }
+}
+
 async function openCapaList(jobId) {
   const j = jobs.find(x => x.id === jobId);
   if (!j) return notify('Job not found');
@@ -8094,17 +8158,20 @@ function capaFormHtml(capa) {
       <div>Status: ${capaStatusChip(capa.status)}</div>
     </div>
 
-    <!-- Section 1 — auto from job snapshot, read-only -->
-    <div class="capa-section-head">1. JOB / SOURCE DETAILS</div>
+    <!-- Section 1 — auto from job snapshot when this CAPA is tied to a job;
+         editable when it's a General/standalone CAPA (no job_id). -->
+    <div class="capa-section-head">1. ${capa.job_id ? 'JOB / SOURCE DETAILS' : 'SOURCE DETAILS (General CAPA)'}</div>
     <div class="capa-grid">
-      ${cell('Job Card No.', 'snap_job_card_no',  snap.job_card_no,  '', 'readonly')}
-      ${cell('P.O. No.',     'snap_po_no',        snap.po_no,        '', 'readonly')}
-      ${cell('Issue Date',   'snap_issue_date',   snap.issue_date ? fmtDMY(snap.issue_date) : '', '', 'readonly')}
-      ${cell('Machine',      'snap_machine',      snap.machine,      '', 'readonly')}
-      ${cell('Job Name',     'snap_job_name',     snap.job_name,     '', 'readonly')}
-      ${cell('Company',      'snap_company',      snap.company,      '', 'readonly')}
-      ${cell('P.O. Qty',     'snap_po_qty',       snap.po_qty,       '', 'readonly')}
-      ${cell('Delivered Qty','snap_delivered_qty',snap.delivered_qty,'', 'readonly')}
+      ${cell('Job Card No.', 'snap_job_card_no',  snap.job_card_no,  '', capa.job_id ? 'readonly' : '')}
+      ${cell('P.O. No.',     'snap_po_no',        snap.po_no,        '', capa.job_id ? 'readonly' : '')}
+      ${capa.job_id
+        ? cell('Issue Date',   'snap_issue_date',   snap.issue_date ? fmtDMY(snap.issue_date) : '', '', 'readonly')
+        : dateCell('Issue Date', 'snap_issue_date', snap.issue_date)}
+      ${cell('Machine',      'snap_machine',      snap.machine,      '', capa.job_id ? 'readonly' : '')}
+      ${cell('Job Name',     'snap_job_name',     snap.job_name,     '', capa.job_id ? 'readonly' : '')}
+      ${cell('Company',      'snap_company',      snap.company,      '', capa.job_id ? 'readonly' : '')}
+      ${cell('P.O. Qty',     'snap_po_qty',       snap.po_qty,       '', capa.job_id ? 'readonly' : '')}
+      ${cell('Delivered Qty','snap_delivered_qty',snap.delivered_qty,'', capa.job_id ? 'readonly' : '')}
     </div>
 
     <!-- Section 2 — Problem Description -->
@@ -8186,7 +8253,7 @@ async function openCapaEdit(capaId) {
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()" style="max-width:1100px;">
     ${capaFormHtml(capa)}
     <div class="modal-actions">
-      <button class="btn" onclick="openCapaList(${capa.job_id})">&larr; Back</button>
+      <button class="btn" onclick="${capa.job_id ? 'openCapaList(' + capa.job_id + ')' : 'closeModal()'}">&larr; Back</button>
       <button class="btn" onclick="printCapa(${capa.id})">Print / Save as PDF</button>
       ${ro ? '' : `<button class="btn btn-primary" onclick="saveCapa(${capa.id})">Save</button>`}
       ${(!ro && capa.status !== 'closed') ? `<button class="btn btn-success" onclick="closeCapa(${capa.id})" title="Mark this CAPA as Closed. Once closed it becomes read-only — only admin can edit or reopen it.">&#10003; Close CAPA</button>` : ''}
@@ -8208,15 +8275,30 @@ function collectCapaForm() {
   ];
   const data = {};
   keys.forEach(k => { data[k] = get(`capa-${k}`).trim(); });
-  return { data, status: get('capa-status') || 'open' };
+  // Section 1 fields. For job-tied CAPAs these inputs are readonly so the
+  // collected values just round-trip the snapshot. For General CAPAs the
+  // user types them and we save back into job_snapshot.
+  const job_snapshot = {
+    job_card_no:  get('capa-snap_job_card_no').trim(),
+    po_no:        get('capa-snap_po_no').trim(),
+    issue_date:   get('capa-snap_issue_date').trim(),
+    machine:      get('capa-snap_machine').trim(),
+    job_name:     get('capa-snap_job_name').trim(),
+    company:      get('capa-snap_company').trim(),
+    po_qty:       get('capa-snap_po_qty').trim(),
+    delivered_qty:get('capa-snap_delivered_qty').trim(),
+  };
+  return { data, status: get('capa-status') || 'open', job_snapshot };
 }
 
 async function saveCapa(capaId) {
-  const { data, status } = collectCapaForm();
+  const { data, status, job_snapshot } = collectCapaForm();
   try {
-    const updated = await api('PUT', `/api/capa/${capaId}`, { data, status });
+    // Send job_snapshot too — the server only writes it back when the CAPA
+    // has no job_id (General CAPAs). Job-tied CAPAs keep their original
+    // snapshot regardless of what's sent.
+    const updated = await api('PUT', `/api/capa/${capaId}`, { data, status, job_snapshot });
     notify(`CAPA ${updated.capa_ref} saved`);
-    // Re-open so the lock/status reflects the change.
     openCapaEdit(capaId);
   } catch (e) { notify('Error: ' + e.message); }
 }
@@ -8240,9 +8322,9 @@ async function closeCapa(capaId) {
     confirmText: 'Close CAPA',
   });
   if (!ok) return;
-  const { data } = collectCapaForm();
+  const { data, job_snapshot } = collectCapaForm();
   try {
-    const updated = await api('PUT', `/api/capa/${capaId}`, { data, status: 'closed' });
+    const updated = await api('PUT', `/api/capa/${capaId}`, { data, status: 'closed', job_snapshot });
     notify(`CAPA ${updated.capa_ref} closed`);
     openCapaEdit(capaId);
   } catch (e) { notify('Error: ' + e.message); }
@@ -8474,7 +8556,7 @@ function renderCapaReport() {
         <td class="bulk-td"><input type="checkbox" class="bulk-check" ${checked} onclick="toggleCapaRow(${c.id}, this.checked)"></td>
         <td ${td}><b>${esc(c.capa_ref)}</b></td>
         <td ${tdN}>${esc(c.issue_date ? fmtDMY(c.issue_date) : '')}</td>
-        <td ${tdN}>${esc(snap.job_card_no || ('E-' + c.job_id))}</td>
+        <td ${tdN}>${esc(snap.job_card_no || (c.job_id ? 'E-' + c.job_id : 'General'))}</td>
         <td ${td}>${esc(snap.company || '')}</td>
         <td ${tdN}>${capaStatusChip(c.status)}</td>
         <td ${td}>${esc(d.detected_at_stage || '')}</td>
@@ -8599,7 +8681,7 @@ function printCapaReportSummary() {
     return [
       c.capa_ref,
       c.issue_date ? fmtDMY(c.issue_date) : '',
-      snap.job_card_no || ('E-' + c.job_id),
+      snap.job_card_no || (c.job_id ? 'E-' + c.job_id : 'General'),
       snap.company || '',
       ({open:'Open',in_progress:'In Progress',closed:'Closed'}[c.status]) || c.status,
       d.detected_at_stage || '',
