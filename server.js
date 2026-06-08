@@ -1650,6 +1650,32 @@ function buildJobSnapshot(job) {
   };
 }
 
+// GET all CAPAs across the whole shop with filters. Used by the CAPA Report
+// page under Jobs Reports — supports date range, company, and status filters,
+// and is the source for bulk export / bulk print on that page.
+app.get('/api/capa', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { from, to, client, status } = req.query;
+    // Date filter is on the CAPA's issue_date (the day it was raised). We
+    // bind it loosely as text — values are 'yyyy-mm-dd' which sort lexically.
+    const fromTxt   = from   && /^\d{4}-\d{2}-\d{2}$/.test(from)   ? from   : null;
+    const toTxt     = to     && /^\d{4}-\d{2}-\d{2}$/.test(to)     ? to     : null;
+    const clientTxt = client && String(client).trim()              ? String(client).trim() : null;
+    const statusTxt = status && ['open','in_progress','closed'].includes(status) ? status : null;
+    const rows = await sql`
+      SELECT * FROM capa_reports
+      WHERE (${fromTxt}::text IS NULL OR issue_date >= ${fromTxt})
+        AND (${toTxt}::text   IS NULL OR issue_date <= ${toTxt})
+        AND (${clientTxt}::text IS NULL OR job_snapshot->>'company' = ${clientTxt})
+        AND (${statusTxt}::text IS NULL OR status = ${statusTxt})
+      ORDER BY created_at DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // GET all CAPAs for a job, newest first.
 app.get('/api/jobs/:id/capa', requireAuth, async (req, res) => {
   try {
