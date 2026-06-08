@@ -8061,6 +8061,7 @@ async function openCapaEdit(capaId) {
       <button class="btn" onclick="openCapaList(${capa.job_id})">&larr; Back</button>
       <button class="btn" onclick="printCapa(${capa.id})">Print / Save as PDF</button>
       ${ro ? '' : `<button class="btn btn-primary" onclick="saveCapa(${capa.id})">Save</button>`}
+      ${(!ro && capa.status !== 'closed') ? `<button class="btn btn-success" onclick="closeCapa(${capa.id})" title="Mark this CAPA as Closed. Once closed it becomes read-only — only admin can edit or reopen it.">&#10003; Close CAPA</button>` : ''}
       ${isAdmin() && capa.status === 'closed' ? `<button class="btn" onclick="reopenCapa(${capa.id})">Reopen</button>` : ''}
     </div>
   </div>`);
@@ -8096,6 +8097,25 @@ async function reopenCapa(capaId) {
   try {
     await api('PUT', `/api/capa/${capaId}`, { status: 'open' });
     notify('CAPA reopened');
+    openCapaEdit(capaId);
+  } catch (e) { notify('Error: ' + e.message); }
+}
+
+// Explicit Close button. Confirms first because closing locks the CAPA for
+// everyone except admin — so it's a real workflow event, not just a save.
+// Saves any pending edits on the form in the same PUT so the user doesn't
+// lose them by clicking Close before Save.
+async function closeCapa(capaId) {
+  const ok = await confirmDialog({
+    title: 'Close this CAPA?',
+    message: 'Once closed, the CAPA becomes read-only. Only admin can edit or reopen it. Any unsaved changes on this form will be saved as part of closing.',
+    confirmText: 'Close CAPA',
+  });
+  if (!ok) return;
+  const { data } = collectCapaForm();
+  try {
+    const updated = await api('PUT', `/api/capa/${capaId}`, { data, status: 'closed' });
+    notify(`CAPA ${updated.capa_ref} closed`);
     openCapaEdit(capaId);
   } catch (e) { notify('Error: ' + e.message); }
 }
