@@ -1631,12 +1631,17 @@ app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
 //   • CEO is read-only everywhere (requireWriteUser blocks them).
 
 // Build a Section-1 snapshot from a job row. Frozen at CAPA creation time.
+// `issue_date` is the date the JOB CARD was issued — NOT the date this CAPA
+// was raised (that lives on capa.issue_date instead). Falls back to the
+// job's created_at if the user never typed a Date Issued on the job form.
 function buildJobSnapshot(job) {
+  const jobIssueDate = job.dateissued
+    || (job.created_at ? new Date(job.created_at).toISOString().slice(0, 10) : '');
   return {
     job_card_no:  job.jobcode || (job.id ? `E-${job.id}` : ''),
     job_ref_id:   job.id,
     po_no:        job.ref || '',
-    issue_date:   job.dateissued || '',
+    issue_date:   jobIssueDate,
     machine:      job.machine || '',
     job_name:     job.name || '',
     company:      job.client || '',
