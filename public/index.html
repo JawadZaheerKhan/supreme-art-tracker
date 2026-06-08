@@ -6612,8 +6612,8 @@ function calcRecalc() {
 // case branches in calcTabsHTML. Nothing else depends on it.
 
 function calcTabsHTML(active) {
-  // Two-button switcher rendered at the top of the popover. Active tab
-  // gets the dark fill; the other is outlined. Keeps both modes
+  // Three-button switcher rendered at the top of the popover. Active tab
+  // gets the dark fill; the others are outlined. Keeps every mode
   // discoverable from a glance.
   const onStyle  = 'background:#111;color:#fff;border-color:#111;';
   const offStyle = 'background:#fff;color:var(--text);';
@@ -6621,6 +6621,7 @@ function calcTabsHTML(active) {
     <div style="display:flex;gap:6px;margin-bottom:10px;">
       <button class="btn btn-sm" style="flex:1;${active==='paper'?onStyle:offStyle}" onclick="openCalculator()">Paper</button>
       <button class="btn btn-sm" style="flex:1;${active==='job'?onStyle:offStyle}" onclick="openCalculatorJobMode()">Job (PO)</button>
+      <button class="btn btn-sm" style="flex:1;${active==='history'?onStyle:offStyle}" onclick="openCalculatorHistoryMode()">History</button>
     </div>`;
 }
 
@@ -6675,6 +6676,112 @@ function jcalcReset() {
   if (paperEl) paperEl.value = '';
   const out = document.getElementById('jc-out');
   if (out) out.innerHTML = 'Enter PO Qty + Ups to see the result.';
+}
+
+// ── History lookup (Calculator → History tab) ────────────────
+// Quick recall of past jobs: "this job was last printed on what paper, what
+// size, how many ups, which coatings?". Lives in the floating calculator so
+// it's reachable from anywhere — inventory, jobs, reports, while editing a
+// form, etc. Read-only; just shows the specs of historical jobs that match
+// the search.
+function openCalculatorHistoryMode() {
+  const pop = document.getElementById('calc-popover');
+  if (!pop) return;
+  pop.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <h2 style="margin:0;font-size:16px;">&#129518; Calculator</h2>
+      <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
+    </div>
+    ${calcTabsHTML('history')}
+    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Look up how a job was made last time — paper, size, ups, coatings.</p>
+
+    <div class="form-group">
+      <label class="form-label">Search</label>
+      <input type="text" id="hlk-search" placeholder="Job name, company, or code…" oninput="hlkRender()" autocomplete="off">
+    </div>
+
+    <div id="hlk-out" style="max-height:360px;overflow-y:auto;font-size:12px;"></div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+      <button class="btn btn-sm" onclick="document.getElementById('hlk-search').value='';hlkRender();">Reset</button>
+      <button class="btn btn-sm btn-primary" onclick="closeCalculator()">Close</button>
+    </div>`;
+  pop.style.display = 'block';
+  // Auto-focus the search box so the user can start typing immediately.
+  setTimeout(() => { const s = document.getElementById('hlk-search'); if (s) s.focus(); }, 30);
+  hlkRender();
+}
+
+// Build the result list. Groups by job name (case-insensitive trim) so a
+// repeat-order job's history rolls up together. Most-recent job in each
+// group is shown first; older variants collapse under "previous runs".
+function hlkRender() {
+  const out = document.getElementById('hlk-out');
+  if (!out) return;
+  const q = (document.getElementById('hlk-search')||{}).value.trim().toLowerCase();
+  // Search across name + client + jobcode. If nothing typed, show the 25
+  // most recent jobs so the user can browse without a query.
+  const matches = jobs.filter(j => {
+    if (!q) return true;
+    const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
+    return hay.includes(q);
+  }).sort((a,b) => b.id - a.id);
+
+  if (!matches.length) {
+    out.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:10px;">No jobs match.</div>';
+    return;
+  }
+
+  // Group by normalized job name (so "Box 100ml" and "BOX 100ML " group).
+  const norm = s => String(s||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const groups = new Map();
+  matches.forEach(j => {
+    const key = norm(j.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(j);
+  });
+
+  // Render: one card per group. Latest variant on top, the rest collapsed.
+  const cards = [];
+  for (const [, list] of groups) {
+    // Limit to top 15 groups so the popover doesn't blow up.
+    if (cards.length >= 15) break;
+    const latest = list[0];
+    const older  = list.slice(1, 5); // up to 4 older variants
+    const coatings = Array.isArray(latest.coatings) ? latest.coatings.filter(Boolean) : [];
+    const dt = latest.dateissued ? fmtDMY(latest.dateissued) : (latest.created_at ? fmtDMY(latest.created_at) : '');
+    const fact = (lbl, val) => val ? `<span style="display:inline-block;margin-right:10px;"><b style="color:var(--text2);font-weight:500;">${lbl}:</b> ${esc(val)}</span>` : '';
+    cards.push(`
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;margin-bottom:4px;">
+          <div style="font-weight:600;font-size:13px;">${esc(latest.name)}</div>
+          <div style="font-size:11px;color:var(--text2);white-space:nowrap;">E-${latest.id}${dt?' · '+esc(dt):''}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">${esc(latest.client||'')}${latest.jobcode?' · Code '+esc(latest.jobcode):''}</div>
+        <div style="font-size:12px;line-height:1.6;">
+          ${fact('Paper', latest.paper)}
+          ${fact('Size/GSM', latest.size)}
+          ${fact('Ups', latest.ups)}
+          ${fact('Sheets', latest.sheets)}
+          ${fact('Machine', latest.machine)}
+          ${coatings.length ? fact('Coatings', coatings.join(', ')) : ''}
+        </div>
+        ${older.length ? `
+          <details style="margin-top:6px;">
+            <summary style="cursor:pointer;font-size:11px;color:var(--text2);">${older.length} previous run${older.length===1?'':'s'}</summary>
+            <div style="margin-top:4px;border-top:1px dashed var(--border);padding-top:6px;font-size:11px;color:var(--text2);">
+              ${older.map(j => {
+                const cts = Array.isArray(j.coatings) ? j.coatings.filter(Boolean) : [];
+                const od = j.dateissued ? fmtDMY(j.dateissued) : (j.created_at ? fmtDMY(j.created_at) : '');
+                return `<div style="margin-bottom:4px;">
+                  <b>E-${j.id}</b>${od?' · '+esc(od):''} · ${esc(j.paper||'-')} · ${esc(j.size||'-')} · Ups ${esc(j.ups||'-')}${cts.length?' · '+esc(cts.join(', ')):''}
+                </div>`;
+              }).join('')}
+            </div>
+          </details>` : ''}
+      </div>`);
+  }
+  out.innerHTML = cards.join('');
 }
 
 function jcalcRecalc() {
