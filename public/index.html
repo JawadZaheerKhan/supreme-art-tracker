@@ -760,8 +760,8 @@
       </button>
       <button class="report-card" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
         <div class="report-card-icon">&#128465;</div>
-        <div class="report-card-title">Trash</div>
-        <div class="report-card-desc">Deleted jobs and imports stay here for 30 days before being permanently removed. Anyone can view; only admin can restore or empty the bin.</div>
+        <div class="report-card-title">Archive</div>
+        <div class="report-card-desc">Deleted jobs and imports are archived here for 30 days before being permanently removed. Anyone can view; only admin can restore or empty the archive.</div>
       </button>
     </div>
   </div>
@@ -850,7 +850,7 @@
     <div class="reports-layout">
       <aside class="reports-sidebar">
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
-        <div class="rsb-section">Trash</div>
+        <div class="rsb-section">Archive</div>
         <button class="rsb-item active" data-rt="trash-jobs" onclick="setReportsTab('trash-jobs')">
           <span class="rsb-icon">&#128196;</span> Jobs
         </button>
@@ -4299,10 +4299,10 @@ async function bulkDeleteJobsReport() {
   const ids = [...jobsReportSel];
   if (!ids.length) { notify('Nothing selected.'); return; }
   const ok = await confirmDialog({
-    title: `Move ${ids.length} delivered job${ids.length===1?'':'s'} to Trash?`,
-    message: 'They\'ll stay in Trash for 30 days where an admin can restore them, then auto-purge. Their issued stock is NOT returned. After 30 days they\'re gone for good.',
+    title: `Move ${ids.length} delivered job${ids.length===1?'':'s'} to Archive?`,
+    message: 'They\'ll stay in the Archive for 30 days where an admin can restore them, then auto-purge. Their issued stock is NOT returned. After 30 days they\'re gone for good.',
     danger: true,
-    confirmText: 'Move to Trash',
+    confirmText: 'Move to Archive',
   });
   if (!ok) return;
   let good = 0, failed = 0;
@@ -4774,7 +4774,7 @@ async function loadTrashAndRender(which) {
   try {
     trashCache = await api('GET', '/api/trash');
   } catch (e) {
-    notify('Error loading trash: ' + e.message);
+    notify('Error loading archive: ' + e.message);
     trashCache = { jobs: [], imports: [], retention_days: 30 };
   }
   if (which === 'jobs')    renderTrashJobs();
@@ -4795,11 +4795,11 @@ function trashDaysLeft(deletedAt) {
 function trashPaneHeader(label, count) {
   return `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-      <h2 style="margin:0;font-size:20px;">Trash · ${label}</h2>
+      <h2 style="margin:0;font-size:20px;">Archive · ${label}</h2>
       <span style="color:var(--text2);font-size:12px;">${count} item${count===1?'':'s'} · auto-purges after ${trashCache.retention_days} days</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="refreshTrash()">&#8635; Refresh</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="emptyTrash()">&#128465; Empty Trash</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="emptyTrash()">&#128465; Empty Archive</button>
       </div>
     </div>`;
 }
@@ -4816,7 +4816,7 @@ function renderTrashJobs() {
   const rows = trashCache.jobs || [];
   if (!rows.length) {
     el.innerHTML = trashPaneHeader('Jobs', 0)
-      + `<div class="empty">Trash is empty — no deleted jobs.</div>`;
+      + `<div class="empty">Archive is empty — no deleted jobs.</div>`;
     return;
   }
   const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -4864,7 +4864,7 @@ function renderTrashImports() {
   const rows = trashCache.imports || [];
   if (!rows.length) {
     el.innerHTML = trashPaneHeader('Imports', 0)
-      + `<div class="empty">Trash is empty — no deleted imports.</div>`;
+      + `<div class="empty">Archive is empty — no deleted imports.</div>`;
     return;
   }
   const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -4959,18 +4959,18 @@ async function purgeTrash(type, id) {
 
 async function emptyTrash() {
   const total = (trashCache.jobs?.length || 0) + (trashCache.imports?.length || 0);
-  if (!total) { notify('Trash is already empty.'); return; }
+  if (!total) { notify('Archive is already empty.'); return; }
   const ok = await confirmDialog({
-    title: `Empty Trash?`,
+    title: `Empty Archive?`,
     message: `Permanently delete all ${total} item${total===1?'':'s'} (${trashCache.jobs?.length || 0} job${(trashCache.jobs?.length||0)===1?'':'s'} + ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'}). Cannot be undone.`,
     danger: true,
-    confirmText: 'Empty Trash',
+    confirmText: 'Empty Archive',
   });
   if (!ok) return;
   showSaving(true);
   try {
     const r = await api('POST', '/api/trash/empty');
-    notify(`Trash emptied · ${r.jobs} job${r.jobs===1?'':'s'} + ${r.imports} import${r.imports===1?'':'s'} deleted`);
+    notify(`Archive emptied · ${r.jobs} job${r.jobs===1?'':'s'} + ${r.imports} import${r.imports===1?'':'s'} deleted`);
     refreshTrash();
   } catch (e) { notify('Empty failed: ' + e.message); }
   showSaving(false);
@@ -6230,10 +6230,10 @@ async function bulkDeleteImports() {
   const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status !== 'received');
   if (!rows.length) { notify('Nothing deletable selected (received rows must be reversed first).'); return; }
   const ok = await confirmDialog({
-    title: `Move ${rows.length} import row${rows.length===1?'':'s'} to Trash?`,
-    message: 'They\'ll stay in Trash for 30 days where an admin can restore them, then auto-purge. (Received rows are skipped — reverse them from the inventory ledger instead.)',
+    title: `Move ${rows.length} import row${rows.length===1?'':'s'} to Archive?`,
+    message: 'They\'ll stay in the Archive for 30 days where an admin can restore them, then auto-purge. (Received rows are skipped — reverse them from the inventory ledger instead.)',
     danger: true,
-    confirmText: 'Move to Trash',
+    confirmText: 'Move to Archive',
   });
   if (!ok) return;
   let good = 0, failed = 0;
@@ -7624,10 +7624,10 @@ async function deleteJob(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   const ok = await confirmDialog({
-    title: `Move Job E-${id} to Trash?`,
-    message: `"${j.name}"\n\nIt'll stay in Trash for 30 days where you can restore it, then auto-purge. Inventory ledger entries are preserved.`,
+    title: `Move Job E-${id} to Archive?`,
+    message: `"${j.name}"\n\nIt'll stay in the Archive for 30 days where you can restore it, then auto-purge. Inventory ledger entries are preserved.`,
     danger: true,
-    confirmText: 'Move to Trash',
+    confirmText: 'Move to Archive',
   });
   if (!ok) return;
   showSaving(true);
@@ -7635,7 +7635,7 @@ async function deleteJob(id) {
     await api('DELETE', `/api/jobs/${id}`);
     jobs = jobs.filter(x => x.id !== id);
     await loadInventory();
-    notify('Job moved to Trash'); render();
+    notify('Job moved to Archive'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }

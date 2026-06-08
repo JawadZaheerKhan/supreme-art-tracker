@@ -826,7 +826,7 @@ app.delete('/api/jobs/:id', requireAdmin, async (req, res) => {
       RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Job not found' });
-    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Trash: ${updated[0].name}` });
+    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Archive: ${updated[0].name}` });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1461,13 +1461,13 @@ app.post('/api/trash/restore', requireAdmin, async (req, res) => {
     if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
     if (type === 'job') {
       const updated = await sql`UPDATE jobs SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
-      if (!updated.length) return res.status(404).json({ error: 'Job not in trash' });
+      if (!updated.length) return res.status(404).json({ error: 'Job not in archive' });
       await logAudit(sql, req, { action: 'job.restore', entityType: 'job', entityId: rowId, summary: `Restored Job E-${rowId}: ${updated[0].name}` });
       return res.json({ ok: true });
     }
     if (type === 'import') {
       const updated = await sql`UPDATE inventory_imports SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type, status`;
-      if (!updated.length) return res.status(404).json({ error: 'Import not in trash' });
+      if (!updated.length) return res.status(404).json({ error: 'Import not in archive' });
       await logAudit(sql, req, { action: 'import.restore', entityType: 'import', entityId: rowId, summary: `Restored ${updated[0].status} import #${rowId}: ${updated[0].paper_type}` });
       return res.json({ ok: true });
     }
@@ -1485,13 +1485,13 @@ app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
     if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
     if (type === 'job') {
       const deleted = await sql`DELETE FROM jobs WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
-      if (!deleted.length) return res.status(404).json({ error: 'Job not in trash' });
+      if (!deleted.length) return res.status(404).json({ error: 'Job not in archive' });
       await logAudit(sql, req, { action: 'job.purge', entityType: 'job', entityId: rowId, summary: `Permanently deleted Job E-${rowId}: ${deleted[0].name}` });
       return res.json({ ok: true });
     }
     if (type === 'import') {
       const deleted = await sql`DELETE FROM inventory_imports WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type`;
-      if (!deleted.length) return res.status(404).json({ error: 'Import not in trash' });
+      if (!deleted.length) return res.status(404).json({ error: 'Import not in archive' });
       await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
       return res.json({ ok: true });
     }
@@ -1511,7 +1511,7 @@ app.post('/api/trash/empty', requireAdmin, async (req, res) => {
       action: 'trash.empty',
       entityType: 'system',
       entityId: 0,
-      summary: `Emptied Trash: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
+      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
     });
     res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -1568,7 +1568,7 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
       action: 'import.delete',
       entityType: 'import',
       entityId: parseInt(id, 10),
-      summary: `Moved ${imp.status} import #${imp.id} to Trash: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
+      summary: `Moved ${imp.status} import #${imp.id} to Archive: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
