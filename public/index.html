@@ -761,7 +761,7 @@
       <button class="report-card" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
         <div class="report-card-icon">&#128465;</div>
         <div class="report-card-title">Trash</div>
-        <div class="report-card-desc">Deleted jobs and imports stay here for 30 days before being permanently removed. Admin can restore or empty the bin; CEO can view.</div>
+        <div class="report-card-desc">Deleted jobs and imports stay here for 30 days before being permanently removed. Anyone can view; only admin can restore or empty the bin.</div>
       </button>
     </div>
   </div>
@@ -1238,9 +1238,10 @@ function renderUserChip() {
   else { pic.style.display = 'none'; }
   // Users tab — visible to admin (full control) and CEO (read-only audit feed).
   document.getElementById('mode-users-btn').style.display = (isAdmin() || isCeo()) ? 'block' : 'none';
-  // Trash card — same: admin can act, CEO can view.
+  // Trash card — visible to everyone signed in. Admin can act (restore /
+  // empty); user/stock/ceo can browse the bin to see what's been deleted.
   const trashBtn = document.getElementById('trash-card-btn');
-  if (trashBtn) trashBtn.style.display = (isAdmin() || isCeo()) ? 'flex' : 'none';
+  if (trashBtn) trashBtn.style.display = 'flex';
   // CEOs see a read-only version of the app — flip a body class so the CSS
   // rule below hides every element tagged .ceo-hide in one go.
   document.body.classList.toggle('role-ceo', isCeo());
@@ -1297,7 +1298,11 @@ async function loadJobs() {
 
 async function loadInventory() {
   try {
+    // Fetch dropdown-hidden list in parallel — cheap and needed for the brand/
+    // supplier suggestion filtering in invDistinct(). Non-blocking failure.
+    const hiddenP = loadDropdownHidden();
     inventory = await api('GET', '/api/inventory');
+    await hiddenP;
     if (mode === 'inventory') {
       renderInventory();
       // Refresh daily stats whenever inventory reloads (after edits, deletes,
@@ -1575,12 +1580,26 @@ function getInventoryFiltered() {
   return filtered;
 }
 // Distinct, sorted values for the size and GSM filter dropdowns.
+// Set of {field}::{value} pairs hidden from dropdowns. Refreshed by
+// loadDropdownHidden() at startup + after a hide/unhide. Used by
+// invDistinct() to filter brand/supplier suggestions without touching
+// the underlying inventory items.
+let dropdownHidden = new Set();
+async function loadDropdownHidden() {
+  try {
+    const rows = await api('GET', '/api/inventory/dropdown-hidden');
+    dropdownHidden = new Set(rows.map(r => `${r.field}::${r.value}`));
+  } catch { /* non-fatal — just means hidden list empty client-side */ }
+}
 function invDistinct(field) {
-  return [...new Set(inventory.map(i => i[field]).filter(Boolean))].sort((a,b)=>{
-    const an = parseInt(a, 10), bn = parseInt(b, 10);
-    if (!isNaN(an) && !isNaN(bn) && an !== bn) return an - bn;
-    return String(a).localeCompare(String(b));
-  });
+  const filterable = field === 'brand' || field === 'supplier';
+  return [...new Set(inventory.map(i => i[field]).filter(Boolean))]
+    .filter(v => !filterable || !dropdownHidden.has(`${field}::${v}`))
+    .sort((a,b)=>{
+      const an = parseInt(a, 10), bn = parseInt(b, 10);
+      if (!isNaN(an) && !isNaN(bn) && an !== bn) return an - bn;
+      return String(a).localeCompare(String(b));
+    });
 }
 // Daily activity stats. Populated by loadDailyStats() on inventory entry
 // and after refresh. Numbers are inert until the first load completes; the
@@ -1935,7 +1954,7 @@ function invComboPick(sel, hiddenId) {
 // brand/supplier tag is cleared). Lets the user clean up typo duplicates
 // like "century" vs "Century" without one-by-one edits.
 function openManageInvField(field) {
-  if (!isAdmin()) return;
+  if (!canWrite()) return;
   const fieldLabel = field === 'brand' ? 'Brand' : 'Supplier';
   const values = invDistinct(field);
   const rows = values.map(v => {
@@ -1945,16 +1964,16 @@ function openManageInvField(field) {
       <td style="padding:6px 10px;border-bottom:1px solid var(--border);">${esc(v)}</td>
       <td style="padding:6px 10px;text-align:right;color:var(--text2);border-bottom:1px solid var(--border);">${count} item${count !== 1 ? 's' : ''}</td>
       <td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;">
-        <button class="btn btn-sm btn-danger" onclick="deleteInvFieldValue('${field}', '${esc1}')">&#128465; Delete</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteInvFieldValue('${field}', '${esc1}')">&#128465; Hide</button>
       </td>
     </tr>`;
   }).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Manage ${fieldLabel}s</h2>
     <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">
-      Delete a ${fieldLabel.toLowerCase()} to clear it from every inventory item that currently uses it.
-      The items stay in inventory — they just lose this ${fieldLabel.toLowerCase()} tag.
-      Useful for fixing typo duplicates.
+      Hide a ${fieldLabel.toLowerCase()} to stop showing it in the dropdown for new items.
+      Existing items keep their ${fieldLabel.toLowerCase()} tag and their stock history is untouched.
+      Useful for fixing typo duplicates without rewriting history.
     </p>
     <table style="width:100%;border-collapse:collapse;font-size:13px;">
       <tr style="background:#f9fafb;">
@@ -1969,23 +1988,22 @@ function openManageInvField(field) {
 }
 
 async function deleteInvFieldValue(field, value) {
-  if (!isAdmin()) return;
+  if (!canWrite()) return;
   const count = inventory.filter(i => (i[field] || '') === value).length;
   const fieldLabel = field === 'brand' ? 'brand' : 'supplier';
   const ok = await confirmDialog({
-    title: `Remove "${value}" from ${fieldLabel}s?`,
-    message: `It will be cleared from ${count} item${count !== 1 ? 's' : ''}. The items themselves stay in inventory — they just lose this ${fieldLabel} tag.\n\nThis cannot be undone.`,
-    danger: true,
-    confirmText: 'Remove',
+    title: `Hide "${value}" from the ${fieldLabel} dropdown?`,
+    message: `It will be hidden from new-item suggestions. The ${count} existing item${count !== 1 ? 's' : ''} tagged "${value}" keep that tag — their stock history is untouched. Admin can restore it from the same screen later.`,
+    confirmText: 'Hide',
   });
   if (!ok) return;
   try {
     await api('DELETE', `/api/inventory/dropdown/${encodeURIComponent(field)}/${encodeURIComponent(value)}`);
-    await loadInventory();
+    await loadDropdownHidden();
     openManageInvField(field);  // re-render with the value gone
-    notify(`"${value}" removed from ${fieldLabel} list`);
+    notify(`"${value}" hidden from ${fieldLabel} list`);
   } catch (e) {
-    notify('Failed to remove: ' + e.message);
+    notify('Failed to hide: ' + e.message);
   }
 }
 
@@ -7977,7 +7995,7 @@ async function openCapaList(jobId) {
         <div class="inv-actions" onclick="event.stopPropagation()">
           <button class="btn btn-sm" onclick="openCapaEdit(${c.id})">View/Edit</button>
           <button class="btn btn-sm" onclick="printCapa(${c.id})">Print</button>
-          ${isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="deleteCapa(${c.id}, ${jobId})">Delete</button>` : ''}
+          ${(isAdmin() || (canWrite() && c.status !== 'closed')) ? `<button class="btn btn-sm btn-danger" onclick="deleteCapa(${c.id}, ${jobId})">Delete</button>` : ''}
         </div>
       </div>`;
   }).join('') : '<div class="empty">No CAPAs raised yet.</div>';
@@ -8011,7 +8029,7 @@ async function newCapa(jobId) {
 async function deleteCapa(capaId, jobId) {
   const ok = await confirmDialog({
     title: 'Delete this CAPA?',
-    message: 'This permanently removes the CAPA. Admin-only action.',
+    message: 'This permanently removes the CAPA. Closed CAPAs can only be deleted by admin.',
     danger: true,
     confirmText: 'Delete',
   });

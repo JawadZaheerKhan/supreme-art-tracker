@@ -217,6 +217,20 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS audit_log_entity_idx ON audit_log(entity_type, entity_id)`;
     await sql`CREATE INDEX IF NOT EXISTS audit_log_user_idx   ON audit_log(user_id)`;
 
+    // Dropdown blacklist — values removed from the brand/supplier dropdown
+    // suggestions without touching existing inventory items. So "Century" can
+    // be hidden from new-item suggestions, but every item already tagged
+    // "Century" keeps its tag intact (and its stock history is preserved).
+    await sql`
+      CREATE TABLE IF NOT EXISTS dropdown_hidden (
+        field      TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        hidden_at  TIMESTAMPTZ DEFAULT NOW(),
+        hidden_by  TEXT,
+        PRIMARY KEY (field, value)
+      )
+    `;
+
     // CAPA reports: Corrective & Preventive Action reports raised against a
     // job card. A job can have multiple CAPAs (one per non-conformance issue).
     // Section-1 job details are auto-snapshotted at creation in job_snapshot
@@ -1019,7 +1033,12 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
 // duplicates (e.g. "century" vs "Century") without per-item editing. The
 // items themselves stay — just the brand/supplier column is NULLed where it
 // matched. Doesn't touch paper_type (required column, can't be NULLed).
-app.delete('/api/inventory/dropdown/:field/:value', requireAdmin, async (req, res) => {
+// Hide a dropdown value (brand or supplier) — adds it to dropdown_hidden so
+// it won't be suggested in new-item forms or the Manage UI, but DOES NOT
+// touch existing inventory items. They keep their brand/supplier text so
+// historical stock records stay intact. requireWriteUser (admin/user/stock).
+// Admin can still undo via the GET-list + unhide endpoint below.
+app.delete('/api/inventory/dropdown/:field/:value', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1028,19 +1047,48 @@ app.delete('/api/inventory/dropdown/:field/:value', requireAdmin, async (req, re
     if (!['brand', 'supplier'].includes(field)) {
       return res.status(400).json({ error: 'Field must be brand or supplier' });
     }
-    // Tagged-template SQL can't interpolate column names, so we branch.
-    const result = field === 'brand'
-      ? await sql`UPDATE inventory_items SET brand    = NULL WHERE brand    = ${value} RETURNING id`
-      : await sql`UPDATE inventory_items SET supplier = NULL WHERE supplier = ${value} RETURNING id`;
+    await sql`
+      INSERT INTO dropdown_hidden (field, value, hidden_by)
+      VALUES (${field}, ${value}, ${req.user.email})
+      ON CONFLICT (field, value) DO NOTHING
+    `;
     await logAudit(sql, req, {
-      action: 'inventory.clear-dropdown',
-      summary: `Cleared ${field}="${value}" from ${result.length} item${result.length !== 1 ? 's' : ''}`,
+      action: 'inventory.hide-dropdown',
+      summary: `Hid ${field} "${value}" from dropdown suggestions (existing items unchanged)`,
     });
-    res.json({ ok: true, cleared_from: result.length });
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// List all hidden dropdown values. Used client-side to filter the brand /
+// supplier suggestions in inventory forms and the Manage UI.
+app.get('/api/inventory/dropdown-hidden', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT field, value FROM dropdown_hidden ORDER BY field, value`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Un-hide a dropdown value — admin only, in case someone hides one by
+// mistake. Pulls it back into the suggestion list.
+app.post('/api/inventory/dropdown/:field/:value/unhide', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const field = req.params.field;
+    const value = req.params.value;
+    await sql`DELETE FROM dropdown_hidden WHERE field=${field} AND value=${value}`;
+    await logAudit(sql, req, {
+      action: 'inventory.unhide-dropdown',
+      summary: `Restored ${field} "${value}" to dropdown suggestions`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // DELETE an inventory item. Admin only. Refused if any pending-issuance
@@ -1382,10 +1430,9 @@ async function purgeExpiredTrash(sql) {
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
 // frontend can show "Auto-purges in N days" per row. Open to admin AND ceo
 // (CEO is read-only — the write endpoints below still require admin).
+// Anyone signed in can view the Trash bin (admin, user, stock, ceo). Restore
+// and Empty stay admin-only — see those endpoints below.
 app.get('/api/trash', requireAuth, async (req, res) => {
-  if (req.user?.role !== 'admin' && req.user?.role !== 'ceo') {
-    return res.status(403).json({ error: 'Admin or CEO only' });
-  }
   try {
     await dbReady;
     const sql = getDb();
@@ -1786,14 +1833,21 @@ app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE a CAPA (admin only). Hard delete — CAPAs aren't trashed.
-app.delete('/api/capa/:id', requireAdmin, async (req, res) => {
+// DELETE a CAPA. Hard delete — CAPAs aren't trashed.
+//   • Admin can delete any CAPA, in any status.
+//   • User / Stock can delete a CAPA only if it's still Open or In Progress;
+//     once Closed it's locked to admin (matches the edit-lock behavior).
+//   • CEO can't reach this — requireWriteUser blocks them.
+app.delete('/api/capa/:id', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
     if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
     const capa = existing[0];
+    if (capa.status === 'closed' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'This CAPA is closed. Only admin can delete it.' });
+    }
     await sql`DELETE FROM capa_reports WHERE id=${req.params.id}`;
     await logAudit(sql, req, {
       action: 'capa.delete',
