@@ -9533,7 +9533,55 @@ async function init() {
   renderUserChip();
   await Promise.all([loadJobs(), loadInventory()]);
   document.getElementById('loading-screen').style.display = 'none';
-  setInterval(() => { loadJobs(); loadInventory(); }, 30000);
+  startSmartPolling();
+}
+
+// ── Smart polling ────────────────────────────────────────────
+// Keeps the UI in sync across users WITHOUT keeping the Neon compute awake
+// 24/7. Rules:
+//   • Preview deploys: never auto-poll (manual Refresh only) — zero idle cost.
+//   • Production: poll every 60s, but ONLY while the tab is visible AND the
+//     user has interacted within the last 5 min. When hidden or idle, polling
+//     stops so the DB can scale to zero. Returning (focus/visibility/activity)
+//     triggers an immediate catch-up fetch.
+//   • A tick is skipped while a modal or the station update screen is open, so
+//     a background refresh never wipes something the user is typing.
+const POLL_INTERVAL_MS = 60000;
+const IDLE_LIMIT_MS    = 5 * 60 * 1000;
+let lastActivity = Date.now();
+let pollTimer = null;
+
+function isPreviewEnv() { return (window.__SA_CONFIG__ || {}).vercelEnv === 'preview'; }
+function modalOpen() {
+  const root = document.getElementById('modal-root');
+  return !!(root && root.children.length);
+}
+// Don't redraw over active input: any open modal, or the station update screen.
+// typeof guards keep this safe on branches that don't have the station feature.
+function pollWouldDisrupt() {
+  if (modalOpen()) return true;
+  if (typeof mode !== 'undefined' && mode === 'station' &&
+      typeof stationView !== 'undefined' && stationView === 'update') return true;
+  return false;
+}
+function pollTick() {
+  if (document.visibilityState !== 'visible') return;       // hidden → let it sleep
+  if (Date.now() - lastActivity > IDLE_LIMIT_MS) return;    // idle → let it sleep
+  if (pollWouldDisrupt()) return;                            // mid-edit → skip this tick
+  loadJobs();
+  loadInventory();
+}
+function startSmartPolling() {
+  if (isPreviewEnv()) return;   // preview: manual refresh only
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(pollTick, POLL_INTERVAL_MS);
+  // Mark activity on real interaction so "idle" reflects actual use.
+  ['mousedown','keydown','touchstart','scroll'].forEach(ev =>
+    document.addEventListener(ev, () => { lastActivity = Date.now(); }, { passive: true }));
+  // Coming back to the tab (or waking from idle) → refresh immediately.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { lastActivity = Date.now(); pollTick(); }
+  });
 }
 
 init();

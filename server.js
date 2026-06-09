@@ -20,7 +20,13 @@ const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 // Safe to expose — it's a public identifier, not a secret.
 app.get('/config.js', (req, res) => {
   res.type('application/javascript');
-  res.send(`window.__SA_CONFIG__ = ${JSON.stringify({ googleClientId: GOOGLE_CLIENT_ID || '' })};`);
+  // vercelEnv ('production' | 'preview' | 'development') drives client-side
+  // polling: preview deployments don't auto-poll (manual refresh only) so they
+  // never keep the Neon compute awake. Set automatically by Vercel per deploy.
+  res.send(`window.__SA_CONFIG__ = ${JSON.stringify({
+    googleClientId: GOOGLE_CLIENT_ID || '',
+    vercelEnv: process.env.VERCEL_ENV || 'development',
+  })};`);
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
