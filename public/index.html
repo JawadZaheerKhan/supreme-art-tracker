@@ -387,6 +387,17 @@
   .station-primary { background: #166534; color: #fff; border-color: #166534; font-size: 18px; font-weight: 700; padding: 18px; border-radius: 14px; margin-top: 6px; }
   .station-primary:hover { background: #14532d; }
   .station-secondary { font-size: 15px; padding: 12px; border-radius: 12px; }
+  /* Stage machine inside the Station — bigger, and always animating (no hover
+     on a touch screen) so the operator recognizes their station at a glance. */
+  .station-machine { margin-bottom: 16px; }
+  .station-machine .sm-svg { height: 130px; }
+  .station-machine .sm-label { font-size: 16px; }
+  .station-machine--sm { margin-bottom: 0; padding: 4px 8px; flex-direction: row; }
+  .station-machine--sm .sm-svg { height: 46px; width: 80px; }
+  #station-mode .stage-machine .sm { animation-play-state: running; }
+  @media (prefers-reduced-motion: reduce) {
+    #station-mode .stage-machine .sm { animation-play-state: paused !important; }
+  }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
   /* Branded dialogs (confirm / alert / prompt) — sit above the regular
      modal overlay (z-index 200) so a dialog can interrupt a form modal.
@@ -8273,6 +8284,16 @@ async function stationPinSubmit() {
   }
 }
 
+// A big animated machine vignette for the operator's stage — so a worker who
+// can't read still recognizes their station by the picture. Reuses the same
+// stageMachineSVG built for the job cards.
+function stationStageBanner(stageIndex) {
+  return `<div class="station-machine stage-machine">
+    ${stageMachineSVG(stageIndex, {})}
+    <div class="sm-label">${esc(STAGES[stageIndex] || ('Stage ' + stageIndex))}</div>
+  </div>`;
+}
+
 function stationQueueHtml() {
   const stIdx = stationOperator.stage_index;
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
@@ -8294,6 +8315,7 @@ function stationQueueHtml() {
       <div><div class="station-who">${esc(stationOperator.name)}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
+    ${stationStageBanner(stIdx)}
     <div class="station-queue">${rows}</div>`;
 }
 
@@ -8321,7 +8343,10 @@ function stationUpdateHtml() {
   const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
   return `
     <div class="station-head">
-      <div><div class="station-who">${esc(stationOperator.name)}</div><div class="station-where">${esc(stageName)}</div></div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div class="station-machine station-machine--sm stage-machine">${stageMachineSVG(stIdx, {})}</div>
+        <div><div class="station-who">${esc(stationOperator.name)}</div><div class="station-where">${esc(stageName)}</div></div>
+      </div>
       <button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>
     </div>
     <div class="station-update">
