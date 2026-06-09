@@ -1711,58 +1711,94 @@ function stageMachineSVG(stageIndex, { pending } = {}) {
         <!-- LED status -->
         <circle class="sm sm-ink-pulse" cx="96" cy="12" r="2" fill="${green}"/>
       ` + close;
-    case 1: // Offset printing — full ink path: fountain → plate → blanket → paper
+    case 1: // Offset printing — full ink train + plate + blanket + paper
       // ── Visual story (top to bottom) ─────────────────────────
-      // 1. Ink fountain at top (blue tank). Three drops drip from the
-      //    nozzle into the plate cylinder so it's obvious where the
-      //    color comes from.
-      // 2. Plate cylinder (lighter blue, small) — carries the image as
-      //    little dark marks (rotates clockwise).
-      // 3. Blanket cylinder (dark rubber, bigger) — picks up the image
-      //    from the plate. Spins the opposite direction (real offset).
-      // 4. Conveyor at the bottom: blank sheet feeds in from the LEFT,
-      //    passes under the blanket, emerges PRINTED on the RIGHT
-      //    with the same marks the plate carried.
+      // 1. INK FOUNTAIN at the top (blue tank with a black nozzle).
+      // 2. INK TRAIN — 4 small rollers spinning in place, alternating
+      //    direction, in a zigzag chain. This is how real offset presses
+      //    distribute and even out ink from the fountain down to the
+      //    plate cylinder.
+      // 3. PLATE CYLINDER — image marks visible on the surface (spins CW).
+      // 4. BLANKET CYLINDER — dark rubber, picks up the image from the
+      //    plate, transfers it to paper. Spins CCW (real offset behavior).
+      // 5. CONVEYOR — blank sheet in from the LEFT, printed sheet out
+      //    on the RIGHT with the same marks the plate carries.
+      // Inline a custom keyframe (smInkFeed) for the short drops because
+      // the global smDrop animates 9px — too far for the tighter chain.
       // ───────────────────────────────────────────────────────────
       return open + `
-        <!-- 1. Ink fountain (blue tank with a nozzle) -->
-        <rect x="40" y="2" width="40" height="6" rx="1" fill="${blue}"/>
-        <rect x="56" y="8" width="8" height="3" fill="${ink}"/>
-        <!-- Three ink drops dripping in sequence -->
-        <circle class="sm sm-drop"    cx="60" cy="13" r="1.6" fill="${blue}"/>
-        <circle class="sm sm-drop d2" cx="60" cy="13" r="1.6" fill="${blue}"/>
-        <circle class="sm sm-drop d3" cx="60" cy="13" r="1.6" fill="${blue}"/>
+        <style>
+          .sm-ink-feed    { animation: smInkFeed 1.6s cubic-bezier(0.4, 0, 0.8, 1) infinite; opacity: 0; }
+          .sm-ink-feed.d2 { animation-delay: 0.6s; }
+          @keyframes smInkFeed {
+            0%   { transform: translateY(0);   opacity: 0; }
+            15%  { opacity: 1; }
+            65%  { transform: translateY(4px); opacity: 1; }
+            75%  { opacity: 0; }
+            100% { transform: translateY(4px); opacity: 0; }
+          }
+        </style>
 
-        <!-- 2. Plate cylinder — small, top. Image is the row of marks. -->
-        <g class="sm sm-spin" style="transform-origin:60px 24px">
-          <circle cx="60" cy="24" r="8" fill="${blueLt}" stroke="${blue}" stroke-width="1.3"/>
-          <rect x="55" y="21" width="10" height="1" fill="${blue}"/>
-          <rect x="55" y="24" width="7"  height="1" fill="${blue}"/>
-          <rect x="55" y="27" width="9"  height="1" fill="${blue}"/>
-          <circle cx="60" cy="24" r="1" fill="${blue}"/>
+        <!-- 1. Ink fountain -->
+        <rect x="44" y="2" width="32" height="4" rx="1" fill="${blue}"/>
+        <rect x="58" y="6" width="4" height="2" fill="${ink}"/>
+        <!-- Two ink drops feeding the top roller -->
+        <circle class="sm sm-ink-feed"    cx="60" cy="8" r="1.2" fill="${blue}"/>
+        <circle class="sm sm-ink-feed d2" cx="60" cy="8" r="1.2" fill="${blue}"/>
+
+        <!-- 2. Ink train — 4 rollers in a zigzag chain, alternating spin
+             direction so neighbouring rollers visually 'mesh' like gears. -->
+        <!-- Fountain roller (top, centered) -->
+        <g class="sm sm-spin" style="transform-origin:60px 13px">
+          <circle cx="60" cy="13" r="2.4" fill="#cfe2f6" stroke="${blue}" stroke-width="0.7"/>
+          <line x1="58" y1="13" x2="62" y2="13" stroke="${blue}" stroke-width="0.6"/>
+          <line x1="60" y1="11" x2="60" y2="15" stroke="${blue}" stroke-width="0.6"/>
+        </g>
+        <!-- Distributor 1 (offset left) -->
+        <g class="sm sm-spin-ccw" style="transform-origin:55px 18px">
+          <circle cx="55" cy="18" r="2.6" fill="#cfe2f6" stroke="${blue}" stroke-width="0.7"/>
+          <line x1="53" y1="18" x2="57" y2="18" stroke="${blue}" stroke-width="0.6"/>
+          <line x1="55" y1="16" x2="55" y2="20" stroke="${blue}" stroke-width="0.6"/>
+        </g>
+        <!-- Distributor 2 (offset right) -->
+        <g class="sm sm-spin" style="transform-origin:65px 23px">
+          <circle cx="65" cy="23" r="2.6" fill="#cfe2f6" stroke="${blue}" stroke-width="0.7"/>
+          <line x1="63" y1="23" x2="67" y2="23" stroke="${blue}" stroke-width="0.6"/>
+          <line x1="65" y1="21" x2="65" y2="25" stroke="${blue}" stroke-width="0.6"/>
+        </g>
+        <!-- Form roller (touches the plate cylinder) -->
+        <g class="sm sm-spin-ccw" style="transform-origin:60px 28px">
+          <circle cx="60" cy="28" r="2.4" fill="${blueLt}" stroke="${blue}" stroke-width="0.7"/>
+          <line x1="58" y1="28" x2="62" y2="28" stroke="${blue}" stroke-width="0.6"/>
+          <line x1="60" y1="26" x2="60" y2="30" stroke="${blue}" stroke-width="0.6"/>
         </g>
 
-        <!-- 3. Blanket cylinder — bigger, bottom, dark rubber. The
-             image picked up from the plate shows in lighter ink. -->
-        <g class="sm sm-spin-ccw" style="transform-origin:60px 42px">
-          <circle cx="60" cy="42" r="10" fill="#3f3d36" stroke="${ink}" stroke-width="1.3"/>
-          <rect x="55" y="39" width="10" height="1" fill="${blueLt}"/>
-          <rect x="55" y="42" width="7"  height="1" fill="${blueLt}"/>
-          <rect x="55" y="45" width="9"  height="1" fill="${blueLt}"/>
-          <circle cx="60" cy="42" r="1" fill="${blueLt}"/>
+        <!-- 3. Plate cylinder — image is the row of marks. -->
+        <g class="sm sm-spin" style="transform-origin:60px 36px">
+          <circle cx="60" cy="36" r="6" fill="${blueLt}" stroke="${blue}" stroke-width="1.2"/>
+          <rect x="56" y="34"   width="8" height="0.8" fill="${blue}"/>
+          <rect x="56" y="36"   width="6" height="0.8" fill="${blue}"/>
+          <rect x="56" y="38"   width="7" height="0.8" fill="${blue}"/>
+          <circle cx="60" cy="36" r="0.8" fill="${blue}"/>
         </g>
 
-        <!-- 4. Paper path ─ conveyor + blank in, printed out -->
-        <line x1="8" y1="58" x2="112" y2="58" stroke="${edge}" stroke-width="1.5"/>
-        <!-- Blank sheet feeding from the LEFT -->
-        <rect class="sm sm-feed" x="4" y="54" width="20" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
-        <!-- Printed sheet exiting on the RIGHT — same marks as the
-             plate image so the cause-and-effect is unmistakable -->
+        <!-- 4. Blanket cylinder — picks up the image. -->
+        <g class="sm sm-spin-ccw" style="transform-origin:60px 49px">
+          <circle cx="60" cy="49" r="7" fill="#3f3d36" stroke="${ink}" stroke-width="1.2"/>
+          <rect x="56" y="47" width="8" height="0.8" fill="${blueLt}"/>
+          <rect x="56" y="49" width="6" height="0.8" fill="${blueLt}"/>
+          <rect x="56" y="51" width="7" height="0.8" fill="${blueLt}"/>
+          <circle cx="60" cy="49" r="0.8" fill="${blueLt}"/>
+        </g>
+
+        <!-- 5. Conveyor + paper -->
+        <line x1="8" y1="60" x2="112" y2="60" stroke="${edge}" stroke-width="1.5"/>
+        <rect class="sm sm-feed" x="4" y="56" width="20" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <g class="sm sm-feed-out">
-          <rect x="92" y="54" width="20" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
-          <rect x="95" y="56" width="10" height="0.8" fill="${blue}"/>
-          <rect x="95" y="58" width="7"  height="0.8" fill="${blue}"/>
-          <rect x="95" y="60" width="9"  height="0.8" fill="${blue}"/>
+          <rect x="92" y="56" width="20" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
+          <rect x="95" y="58" width="10" height="0.8" fill="${blue}"/>
+          <rect x="95" y="60" width="7"  height="0.8" fill="${blue}"/>
+          <rect x="95" y="62" width="9"  height="0.8" fill="${blue}"/>
         </g>
       ` + close;
     case 2: // Coatings — roller lays gloss; sparkle dots appear after the gloss passes
