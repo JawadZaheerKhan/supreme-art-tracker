@@ -291,9 +291,27 @@
   .tile-actions { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
 
   /* Stage machine vignette */
-  .stage-machine { background: linear-gradient(180deg, var(--bg2), var(--bg3)); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px 4px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-  .sm-svg { width: 100%; height: 78px; display: block; }
-  .sm-label { font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
+  .stage-machine {
+    background: linear-gradient(180deg, var(--bg2), var(--bg3));
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 8px 4px;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    position: relative; overflow: hidden;
+    transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  }
+  /* Soft ambient breath so cards feel alive even when nothing is hovered.
+     Very low amplitude; suppressed under reduced-motion. */
+  .stage-machine::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 110%, rgba(30,64,175,0.10), transparent 60%);
+    opacity: 0; pointer-events: none;
+    animation: smBreath 3.6s ease-in-out infinite;
+  }
+  .job-tile:hover .stage-machine { box-shadow: inset 0 0 0 1px rgba(30,64,175,0.18); border-color: rgba(30,64,175,0.35); }
+  .job-tile:hover .stage-machine::before { opacity: 1; }
+  @keyframes smBreath { 0%,100% { opacity: 0.25; } 50% { opacity: 0.65; } }
+  .sm-svg { width: 100%; height: 78px; display: block; position: relative; z-index: 1; }
+  .sm-label { font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; position: relative; z-index: 1; }
 
   /* Progress ribbon */
   .tile-ribbon { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 0 2px; }
@@ -315,41 +333,65 @@
   .job-more-menu button.danger { color: #A32D2D; }
 
   /* Stage-machine animations — paused until the tile is hovered, so a grid
-     of cards stays calm and only the one you point at comes alive. */
+     of cards stays calm and only the one you point at comes alive. Curves
+     use smooth cubic-bezier so the motion feels organic, not robotic. */
   .stage-machine .sm { animation-play-state: paused; }
   .job-tile:hover .stage-machine .sm { animation-play-state: running; }
   @media (prefers-reduced-motion: reduce) {
+    .stage-machine::before { animation: none !important; }
     .job-tile:hover .stage-machine .sm { animation-play-state: paused !important; }
   }
-  .sm-sweep   { animation: smSweep 1.6s ease-in-out infinite alternate; }
+  /* Shared smoother curve — slight overshoot for organic feel on key motions */
+  .sm-sweep   { animation: smSweep 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate; }
   @keyframes smSweep { to { transform: translateX(62px); } }
-  .sm-spin    { transform-box: fill-box; transform-origin: center; animation: smSpin 1.5s linear infinite; }
+  .sm-spin    { transform-box: fill-box; transform-origin: center; animation: smSpin 1.6s linear infinite; }
   .sm-wheel   { transform-box: fill-box; transform-origin: center; animation: smSpin 0.7s linear infinite; }
   @keyframes smSpin { to { transform: rotate(360deg); } }
-  .sm-feed    { animation: smFeed 1.9s ease-in-out infinite; }
-  @keyframes smFeed { 0% { transform: translateX(0); opacity: 1; } 70% { transform: translateX(80px); opacity: 1; } 72% { opacity: 0; } 100% { transform: translateX(80px); opacity: 0; } }
-  .sm-gloss   { transform-box: fill-box; transform-origin: left center; animation: smGloss 2.1s ease-in-out infinite; }
+  .sm-feed    { animation: smFeed 2.2s cubic-bezier(0.4, 0.2, 0.2, 1) infinite; }
+  @keyframes smFeed { 0% { transform: translateX(0); opacity: 1; } 65% { transform: translateX(72px); opacity: 1; } 70% { opacity: 0; } 100% { transform: translateX(72px); opacity: 0; } }
+  .sm-feed-out { animation: smFeedOut 2.2s cubic-bezier(0.4, 0.2, 0.2, 1) infinite; }
+  @keyframes smFeedOut { 0%,30% { transform: translateX(-22px); opacity: 0; } 32% { opacity: 1; } 100% { transform: translateX(34px); opacity: 1; } }
+  .sm-ink-pulse { transform-box: fill-box; transform-origin: center; animation: smInkPulse 1.4s ease-in-out infinite; }
+  @keyframes smInkPulse { 0%,100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.18); opacity: 1; } }
+  .sm-gloss   { transform-box: fill-box; transform-origin: left center; animation: smGloss 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
   @keyframes smGloss { 0% { transform: scaleX(0); } 55% { transform: scaleX(1); } 100% { transform: scaleX(1); } }
-  .sm-roll    { animation: smRoll 2.1s ease-in-out infinite; }
+  .sm-roll    { animation: smRoll 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
   @keyframes smRoll { 0% { transform: translateX(0); } 55% { transform: translateX(74px); } 100% { transform: translateX(74px); } }
-  .sm-stamp   { animation: smStamp 1s ease-in-out infinite; }
-  @keyframes smStamp { 0%,100% { transform: translateY(0); } 45%,55% { transform: translateY(9px); } }
-  .sm-break-l { animation: smBreakL 1.5s ease-in-out infinite alternate; }
-  @keyframes smBreakL { to { transform: translateX(-7px); } }
-  .sm-break-r { animation: smBreakR 1.5s ease-in-out infinite alternate; }
-  @keyframes smBreakR { to { transform: translateX(7px); } }
-  .sm-fold    { transform-box: fill-box; transform-origin: left center; animation: smFold 1.9s ease-in-out infinite; }
+  .sm-sparkle { transform-box: fill-box; transform-origin: center; animation: smSparkle 2.4s ease-in-out infinite; }
+  .sm-sparkle.s2 { animation-delay: 0.4s; }
+  .sm-sparkle.s3 { animation-delay: 0.8s; }
+  @keyframes smSparkle { 0%,60% { opacity: 0; transform: scale(0.3); } 70% { opacity: 1; transform: scale(1.3); } 100% { opacity: 0; transform: scale(0.6); } }
+  .sm-stamp   { animation: smStamp 1.1s cubic-bezier(0.55, 0, 0.45, 1) infinite; }
+  @keyframes smStamp { 0%,100% { transform: translateY(0); } 42%,58% { transform: translateY(9px); } }
+  .sm-flash   { animation: smFlash 1.1s ease-out infinite; }
+  @keyframes smFlash { 0%,40% { opacity: 0; } 48%,55% { opacity: 0.85; } 100% { opacity: 0; } }
+  .sm-cut-line { animation: smCutLine 1.1s ease-out infinite; stroke-dasharray: 8; stroke-dashoffset: 8; }
+  @keyframes smCutLine { 0%,50% { stroke-dashoffset: 8; } 65%,100% { stroke-dashoffset: 0; } }
+  .sm-break-l { animation: smBreakL 1.7s cubic-bezier(0.5, 0, 0.5, 1.4) infinite alternate; }
+  @keyframes smBreakL { to { transform: translateX(-8px); } }
+  .sm-break-r { animation: smBreakR 1.7s cubic-bezier(0.5, 0, 0.5, 1.4) infinite alternate; }
+  @keyframes smBreakR { to { transform: translateX(8px); } }
+  .sm-fold    { transform-box: fill-box; transform-origin: left center; animation: smFold 2.1s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
   @keyframes smFold { 0%,100% { transform: scaleX(1); } 50% { transform: scaleX(0.12); } }
-  .sm-glue    { animation: smGlue 1.9s ease-in-out infinite; }
-  @keyframes smGlue { 0%,100% { opacity: 0.2; } 50% { opacity: 1; } }
-  .sm-stack1, .sm-stack2, .sm-stack3 { animation: smStack 2.4s ease-in-out infinite; }
+  .sm-glue    { animation: smGlue 2.1s ease-in-out infinite; }
+  @keyframes smGlue { 0%,100% { opacity: 0.2; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.15); } }
+  .sm-carton  { transform-box: fill-box; transform-origin: center; animation: smCarton 2.1s cubic-bezier(0.34, 1.56, 0.64, 1) infinite; opacity: 0; }
+  @keyframes smCarton { 0%,55% { opacity: 0; transform: scale(0.6); } 70% { opacity: 1; transform: scale(1.05); } 80%,100% { opacity: 1; transform: scale(1); } }
+  .sm-stack1, .sm-stack2, .sm-stack3 { animation: smStack 2.6s cubic-bezier(0.34, 1.4, 0.64, 1) infinite; }
   .sm-stack1 { animation-delay: 0s; }
-  .sm-stack2 { animation-delay: 0.3s; }
-  .sm-stack3 { animation-delay: 0.6s; }
-  @keyframes smStack { 0% { transform: translateY(12px); opacity: 0; } 28%,100% { transform: translateY(0); opacity: 1; } }
-  .sm-drive   { animation: smDrive 1.4s ease-in-out infinite; }
-  @keyframes smDrive { 0%,100% { transform: translateX(0); } 50% { transform: translateX(6px); } }
-  .sm-clock   { transform-origin: 60px 35px; animation: smSpin 2s linear infinite; }
+  .sm-stack2 { animation-delay: 0.35s; }
+  .sm-stack3 { animation-delay: 0.7s; }
+  @keyframes smStack { 0% { transform: translateY(14px); opacity: 0; } 26%,100% { transform: translateY(0); opacity: 1; } }
+  .sm-drive   { animation: smDrive 1.5s ease-in-out infinite; }
+  @keyframes smDrive { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+  .sm-road    { animation: smRoad 0.9s linear infinite; }
+  @keyframes smRoad { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -18px; } }
+  .sm-exhaust { animation: smExhaust 1.4s ease-out infinite; }
+  .sm-exhaust.e2 { animation-delay: 0.4s; }
+  .sm-exhaust.e3 { animation-delay: 0.8s; }
+  @keyframes smExhaust { 0% { opacity: 0.7; transform: translate(0, 0) scale(0.6); } 100% { opacity: 0; transform: translate(-10px, -8px) scale(1.6); } }
+  .sm-clock   { transform-origin: 60px 35px; animation: smClockTick 6s steps(60) infinite; }
+  @keyframes smClockTick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
   /* Branded dialogs (confirm / alert / prompt) — sit above the regular
      modal overlay (z-index 200) so a dialog can interrupt a form modal.
@@ -1643,17 +1685,37 @@ function stageMachineSVG(stageIndex, { pending } = {}) {
   const paper = '#f5f4f0', edge = '#9e9c94', body = '#6b6960', ink = '#1a1a18';
   const blue = '#0C447C', blueLt = '#85B7EB', green = '#166534', amber = '#EF9F27';
   switch (stageIndex) {
-    case 0: // CTP Plate Making — exposure light sweeps across the plate
+    case 0: // CTP Plate Making — laser scans the plate, exposure dots appear behind the beam
       return open + `
         <rect x="20" y="16" width="80" height="38" rx="2" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
+        <!-- Existing exposure dots -->
         <g fill="${edge}"><circle cx="38" cy="28" r="1.6"/><circle cx="54" cy="40" r="1.6"/><circle cx="70" cy="26" r="1.6"/><circle cx="84" cy="42" r="1.6"/><circle cx="62" cy="34" r="1.6"/></g>
-        <rect class="sm sm-sweep" x="22" y="18" width="7" height="34" rx="1" fill="${amber}" opacity="0.85"/>
+        <!-- Laser beam glow + bar -->
+        <rect class="sm sm-sweep" x="22" y="16" width="3" height="38" fill="${amber}" opacity="0.95"/>
+        <rect class="sm sm-sweep" x="22" y="16" width="9" height="38" rx="1" fill="${amber}" opacity="0.25"/>
         <rect x="20" y="56" width="80" height="4" rx="2" fill="${body}"/>
+        <!-- LED status -->
+        <circle class="sm sm-ink-pulse" cx="96" cy="12" r="2" fill="${green}"/>
       ` + close;
-    case 1: // Printing — two cylinders spin, a sheet feeds through
+    case 1: // Printing — cylinders spin, sheet feeds in, printed sheet exits the other side
       return open + `
+        <!-- Ink reservoirs on top of cylinders -->
+        <rect x="36" y="14" width="14" height="4" rx="1" fill="${blue}"/>
+        <rect x="70" y="14" width="14" height="4" rx="1" fill="${ink}"/>
+        <circle class="sm sm-ink-pulse" cx="43" cy="12" r="1.8" fill="${blue}"/>
+        <circle class="sm sm-ink-pulse" cx="77" cy="12" r="1.8" fill="${ink}"/>
+        <!-- Conveyor -->
         <line x1="14" y1="54" x2="106" y2="54" stroke="${edge}" stroke-width="2"/>
+        <!-- Sheet feeding in from the left -->
         <rect class="sm sm-feed" x="6" y="46" width="22" height="9" rx="1" fill="${paper}" stroke="${edge}"/>
+        <!-- Printed sheet emerging on the right, with ink dots already on it -->
+        <g class="sm sm-feed-out">
+          <rect x="86" y="46" width="22" height="9" rx="1" fill="${paper}" stroke="${edge}"/>
+          <circle cx="92" cy="50" r="0.9" fill="${blue}"/>
+          <circle cx="98" cy="49" r="0.9" fill="${ink}"/>
+          <circle cx="104" cy="51" r="0.9" fill="${blue}"/>
+        </g>
+        <!-- Spinning cylinders -->
         <g class="sm sm-spin" style="transform-origin:43px 34px">
           <circle cx="43" cy="34" r="13" fill="${blueLt}" stroke="${blue}" stroke-width="1.5"/>
           <line x1="43" y1="22" x2="43" y2="46" stroke="${blue}" stroke-width="1.5"/>
@@ -1665,51 +1727,97 @@ function stageMachineSVG(stageIndex, { pending } = {}) {
           <line x1="65" y1="34" x2="89" y2="34" stroke="${blue}" stroke-width="1.5"/>
         </g>
       ` + close;
-    case 2: // Coatings — a roller lays gloss across the sheet
+    case 2: // Coatings — roller lays gloss; sparkle dots appear after the gloss passes
       return open + `
         <rect x="16" y="26" width="88" height="28" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <rect class="sm sm-gloss" x="16" y="26" width="88" height="28" fill="${blueLt}" opacity="0.4"/>
+        <rect class="sm sm-gloss" x="16" y="26" width="88" height="28" fill="${blueLt}" opacity="0.45"/>
+        <!-- Sparkle highlights left behind the roller -->
+        <g fill="#fff" stroke="${blue}" stroke-width="0.5">
+          <path class="sm sm-sparkle"      d="M32 36 l1.5 0 l-0.75 -1.5 l-0.75 1.5 z M32 36 l0 1.5 l1.5 -0.75 l-1.5 -0.75 z" transform="translate(2 4)"/>
+          <path class="sm sm-sparkle s2"   d="M56 32 l1.5 0 l-0.75 -1.5 l-0.75 1.5 z M56 32 l0 1.5 l1.5 -0.75 l-1.5 -0.75 z" transform="translate(0 2)"/>
+          <path class="sm sm-sparkle s3"   d="M80 44 l1.5 0 l-0.75 -1.5 l-0.75 1.5 z M80 44 l0 1.5 l1.5 -0.75 l-1.5 -0.75 z"/>
+        </g>
         <g class="sm sm-roll">
           <rect x="16" y="16" width="14" height="9" rx="2" fill="${body}"/>
           <circle cx="23" cy="27" r="6" fill="${edge}" stroke="${ink}"/>
+          <circle class="sm sm-wheel" cx="23" cy="27" r="6" fill="none" stroke="${ink}" stroke-width="1" stroke-dasharray="3 4" style="transform-origin:23px 27px"/>
         </g>
       ` + close;
-    case 3: // Die Cutting — a platen stamps down repeatedly
+    case 3: // Die Cutting — platen stamps, cut lines appear on the paper, white impact flash
       return open + `
         <rect x="18" y="48" width="84" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
+        <!-- Cut lines appearing in sync with each stamp -->
+        <g stroke="${blue}" stroke-width="1.2" stroke-linecap="round" fill="none">
+          <line class="sm sm-cut-line" x1="32" y1="52" x2="40" y2="52"/>
+          <line class="sm sm-cut-line" x1="48" y1="52" x2="56" y2="52"/>
+          <line class="sm sm-cut-line" x1="64" y1="52" x2="72" y2="52"/>
+          <line class="sm sm-cut-line" x1="80" y1="52" x2="88" y2="52"/>
+        </g>
         <g class="sm sm-stamp">
           <rect x="28" y="12" width="64" height="22" rx="2" fill="${body}"/>
           <path d="M32 34 l4 6 M44 34 l4 6 M56 34 l4 6 M68 34 l4 6 M80 34 l4 6" stroke="${ink}" stroke-width="2" stroke-linecap="round"/>
         </g>
+        <!-- Impact flash bar at the contact line -->
+        <rect class="sm sm-flash" x="18" y="46" width="84" height="3" rx="1" fill="#fff7ed"/>
       ` + close;
-    case 4: // Breaking — the sheet separates into pieces
+    case 4: // Breaking — sheet snaps into two pieces along a dashed perforation
       return open + `
+        <!-- Dotted perforation that pulses subtly -->
+        <line class="sm sm-ink-pulse" x1="60" y1="18" x2="60" y2="54" stroke="${edge}" stroke-width="1.2" stroke-dasharray="2 3" style="transform-origin:60px 36px"/>
         <rect class="sm sm-break-l" x="22" y="22" width="34" height="28" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
         <rect class="sm sm-break-r" x="64" y="22" width="34" height="28" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <line x1="60" y1="18" x2="60" y2="54" stroke="${edge}" stroke-width="1" stroke-dasharray="3 3"/>
+        <!-- Tear marks on the inner edges -->
+        <path class="sm sm-break-l" d="M54 24 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2" stroke="${edge}" stroke-width="0.8" fill="none"/>
+        <path class="sm sm-break-r" d="M66 24 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2 l-1.5 2 l1.5 2" stroke="${edge}" stroke-width="0.8" fill="none"/>
       ` + close;
-    case 5: // Pasting — a flap folds over and a glue dab pulses
+    case 5: // Pasting — flap folds; glue dab pulses; finished carton pops in on the right
       return open + `
-        <rect x="34" y="28" width="52" height="24" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <rect class="sm sm-fold" x="34" y="28" width="26" height="24" fill="#eeece7" stroke="${edge}" stroke-width="1.5" style="transform-origin:34px 40px"/>
-        <circle class="sm sm-glue" cx="60" cy="30" r="3.5" fill="${amber}"/>
+        <rect x="30" y="28" width="40" height="24" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
+        <rect class="sm sm-fold" x="30" y="28" width="20" height="24" fill="#eeece7" stroke="${edge}" stroke-width="1.5" style="transform-origin:30px 40px"/>
+        <circle class="sm sm-glue" cx="50" cy="30" r="3.5" fill="${amber}"/>
+        <!-- Finished carton shape appearing after the fold -->
+        <g class="sm sm-carton" style="transform-origin:90px 40px">
+          <rect x="78" y="28" width="24" height="24" rx="1.5" fill="#eeece7" stroke="${edge}" stroke-width="1.5"/>
+          <path d="M78 36 h24" stroke="${edge}" stroke-width="1"/>
+          <path d="M90 28 v24" stroke="${edge}" stroke-width="0.8" stroke-dasharray="2 2"/>
+        </g>
       ` + close;
-    case 6: // Storage / Ready — sheets stack up
+    case 6: // Storage / Ready — sheets stack from the bottom up with overshoot bounce
       return open + `
+        <!-- Floor shadow -->
+        <ellipse cx="60" cy="60" rx="36" ry="2" fill="${edge}" opacity="0.25"/>
         <rect x="30" y="50" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <rect class="sm sm-stack1" x="30" y="41" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <rect class="sm sm-stack2" x="30" y="32" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <rect class="sm sm-stack3" x="30" y="23" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
+        <!-- Top sheet highlight stripe so the stack reads as multiple layers -->
+        <line x1="32" y1="24.5" x2="88" y2="24.5" stroke="#fff" stroke-width="0.6"/>
       ` + close;
-    case 7: // Delivered — a truck drives off, wheels spinning
+    case 7: // Delivered — truck rolls; exhaust puffs; road dashes pass underneath
       return open + `
-        <line x1="10" y1="54" x2="110" y2="54" stroke="${edge}" stroke-width="2"/>
+        <!-- Road with moving dashes -->
+        <line x1="10" y1="56" x2="110" y2="56" stroke="${edge}" stroke-width="2"/>
+        <line class="sm sm-road" x1="10" y1="60" x2="110" y2="60" stroke="${edge}" stroke-width="1.2" stroke-dasharray="6 12"/>
+        <!-- Exhaust puffs trailing behind the truck -->
+        <g fill="${edge}" opacity="0.7">
+          <circle class="sm sm-exhaust"    cx="22" cy="36" r="2.5"/>
+          <circle class="sm sm-exhaust e2" cx="22" cy="36" r="2.5"/>
+          <circle class="sm sm-exhaust e3" cx="22" cy="36" r="2.5"/>
+        </g>
         <g class="sm sm-drive">
           <rect x="22" y="26" width="42" height="22" rx="2" fill="${blue}"/>
           <path d="M64 32 h14 l8 8 v8 h-22 z" fill="${blueLt}" stroke="${blue}"/>
           <rect x="68" y="34" width="10" height="7" rx="1" fill="#eaf2fb"/>
+          <!-- Headlight -->
+          <circle cx="86" cy="44" r="1.2" fill="${amber}"/>
           <circle class="sm sm-wheel" cx="34" cy="50" r="5.5" fill="${ink}" stroke="${edge}" style="transform-origin:34px 50px"/>
+          <circle cx="34" cy="50" r="1.8" fill="${edge}"/>
+          <line x1="34" y1="44.5" x2="34" y2="55.5" stroke="${edge}" stroke-width="0.6"/>
+          <line x1="28.5" y1="50" x2="39.5" y2="50" stroke="${edge}" stroke-width="0.6"/>
           <circle class="sm sm-wheel" cx="74" cy="50" r="5.5" fill="${ink}" stroke="${edge}" style="transform-origin:74px 50px"/>
+          <circle cx="74" cy="50" r="1.8" fill="${edge}"/>
+          <line x1="74" y1="44.5" x2="74" y2="55.5" stroke="${edge}" stroke-width="0.6"/>
+          <line x1="68.5" y1="50" x2="79.5" y2="50" stroke="${edge}" stroke-width="0.6"/>
         </g>
       ` + close;
     default:
