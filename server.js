@@ -16,6 +16,10 @@ const SESSION_COOKIE   = 'sa_session';
 const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// Production stages — must mirror STAGES in public/index.html. Used by the
+// station-update endpoint to build stage names + detect the final stage.
+const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+
 // Expose the public Google client id to the frontend so it can configure GIS.
 // Safe to expose — it's a public identifier, not a secret.
 app.get('/config.js', (req, res) => {
@@ -216,6 +220,23 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS audit_log_entity_idx ON audit_log(entity_type, entity_id)`;
     await sql`CREATE INDEX IF NOT EXISTS audit_log_user_idx   ON audit_log(user_id)`;
+
+    // Operators: shop-floor workers who update jobs from the shared station
+    // terminal via a 4-digit PIN. Separate from `users` (login accounts) —
+    // these never sign in, they just identify themselves at a machine.
+    // stage_index ties an operator to one production section (index into STAGES).
+    await sql`
+      CREATE TABLE IF NOT EXISTS operators (
+        id          SERIAL PRIMARY KEY,
+        name        TEXT NOT NULL,
+        pin         TEXT NOT NULL,
+        stage_index INTEGER NOT NULL,
+        active      BOOLEAN NOT NULL DEFAULT true,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // PIN must be unique among active operators so /verify is unambiguous.
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_idx ON operators(pin) WHERE active`;
 
     console.log('Database ready');
   } catch (err) {
@@ -477,6 +498,101 @@ app.get('/api/audit', requireAuth, async (req, res) => {
       rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
     }
     res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Operators (shop-floor roster) ────────────────────────────
+
+function validPin(pin) { return /^\d{4}$/.test(String(pin || '')); }
+
+// List operators — admin only (includes pin for management).
+app.get('/api/operators', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM operators ORDER BY stage_index, name`;
+    res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/operators', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = (req.body.name || '').trim();
+    const pin = String(req.body.pin || '').trim();
+    const stage_index = parseInt(req.body.stage_index, 10);
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+    if (!Number.isInteger(stage_index) || stage_index < 0) return res.status(400).json({ error: 'A section is required' });
+    const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
+    if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
+    const inserted = await sql`
+      INSERT INTO operators (name, pin, stage_index) VALUES (${name}, ${pin}, ${stage_index}) RETURNING *
+    `;
+    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (stage ${stage_index})` });
+    res.json(inserted[0]);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/operators/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const name = (req.body.name || '').trim();
+    const pin = String(req.body.pin || '').trim();
+    const stage_index = parseInt(req.body.stage_index, 10);
+    const active = req.body.active !== false;
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+    if (!Number.isInteger(stage_index) || stage_index < 0) return res.status(400).json({ error: 'A section is required' });
+    const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
+    if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
+    const updated = await sql`
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${stage_index}, active=${active}
+      WHERE id=${id} RETURNING *
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
+    await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `Edited operator ${name}` });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/operators/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM operators WHERE id=${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Operator not found' });
+    await logAudit(sql, req, { action: 'operator.delete', entityType: 'operator', entityId: id, summary: `Removed operator ${deleted[0].name}` });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify a PIN — used by the station PIN pad. Returns the operator's identity
+// (never the pin). requireWriteUser so the floor terminal can call it but the
+// read-only CEO account cannot.
+app.post('/api/operators/verify', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const pin = String(req.body.pin || '').trim();
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    const rows = await sql`SELECT id, name, stage_index FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
+    res.json(rows[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
@@ -1585,6 +1701,97 @@ app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
       await logAudit(sql, req, { action: 'job.stage', entityType: 'job', entityId: job.id, summary });
     }
     res.json(job);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Station update — a shop-floor operator advances a job and/or records that
+// stage's production numbers, identified by a 4-digit PIN. PIN is verified
+// server-side; the operator must be assigned to the job's current stage.
+app.post('/api/jobs/:id/station-update', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const pin = String(req.body.pin || '').trim();
+    const particularsPatch = req.body.particulars_patch && typeof req.body.particulars_patch === 'object'
+      ? req.body.particulars_patch : {};
+    const advance = req.body.advance === true;
+
+    // 1) Identify the operator by PIN (server-side — never trust the client).
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    const ops = await sql`SELECT id, name, stage_index FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+    const operator = ops[0];
+
+    // 2) Load job + guards.
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status === 'pending') {
+      return res.status(400).json({ error: 'Stock must be issued before this job can be updated.' });
+    }
+    const curStage = job.stage_index || 0;
+
+    // 3) Scope: the operator may only act on jobs at their own stage.
+    if (operator.stage_index !== curStage) {
+      return res.status(400).json({ error: "This job isn't at your station right now." });
+    }
+
+    // 4) Merge the stage's number fields into particulars. Write the value into
+    // the row's `quantity` subfield and stamp `name` with the operator.
+    const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+    for (const [key, value] of Object.entries(particularsPatch)) {
+      const prev = (particulars[key] && typeof particulars[key] === 'object') ? particulars[key] : {};
+      particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+    }
+
+    const by = `${operator.name} (${STAGES[operator.stage_index] || 'Stage ' + operator.stage_index})`;
+    const time = new Date().toLocaleString('en-GB', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }).replace(',', '');
+
+    let stage_index = curStage;
+    let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    let log = Array.isArray(job.log) ? [...job.log] : [];
+
+    if (advance) {
+      // Mirror moveToStage: mark current stage done, advance to next (or finish).
+      const target = Math.min(curStage + 1, STAGES.length - 1);
+      const finishing = curStage === STAGES.length - 1;
+      stages[curStage] = { ...(stages[curStage] || {}), status: 'done', by, time };
+      if (!finishing) {
+        const status = target === STAGES.length - 1 ? 'done' : 'active';
+        stages[target] = { status, notes: '', by, time };
+        for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
+        stage_index = target;
+        log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[curStage]} by ${operator.name}`, by, time });
+      } else {
+        log.push({ stage: STAGES[curStage], status: 'done', notes: `Completed by ${operator.name}`, by, time });
+      }
+    } else {
+      log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `Numbers recorded by ${operator.name}`, by, time });
+    }
+
+    const updated = await sql`
+      UPDATE jobs
+         SET particulars = ${JSON.stringify(particulars)},
+             stage_index = ${stage_index},
+             stages = ${JSON.stringify(stages)},
+             log = ${JSON.stringify(log)}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.station',
+      entityType: 'job',
+      entityId: id,
+      summary: advance
+        ? `Job E-${id} ${stage_index === curStage ? 'completed' : 'moved to ' + STAGES[stage_index]} by ${operator.name} at ${STAGES[curStage]}`
+        : `Job E-${id} numbers recorded by ${operator.name} at ${STAGES[curStage]}`,
+      metadata: { operator_id: operator.id, operator_name: operator.name, stage_index: curStage, advance },
+    });
+    res.json(updated[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
