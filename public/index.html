@@ -504,6 +504,38 @@
   @media (prefers-reduced-motion: reduce) {
     #station-mode .stage-machine .sm { animation-play-state: paused !important; }
   }
+  /* On-screen number pad for tablet kiosks. Native keyboards are unreliable
+     on tablets (cover half the screen, sometimes full QWERTY), so the
+     station fields are readonly and tapping one slides this pad up from
+     the bottom. Same key styling as the PIN pad, bigger hit targets. */
+  .station-field input.numpad-target { caret-color: transparent; cursor: pointer; }
+  .station-field input.numpad-active { border-color: var(--blue-text); box-shadow: 0 0 0 3px rgba(30,64,175,0.15); }
+  .station-numpad {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 300;
+    background: var(--bg); border-top: 2px solid var(--border2);
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.18);
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    animation: numpadUp 0.18s ease-out;
+  }
+  @keyframes numpadUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .numpad-head { display: flex; align-items: baseline; gap: 12px; width: 100%; max-width: 420px; justify-content: space-between; }
+  .numpad-label { font-size: 15px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
+  .numpad-value { font-size: 30px; font-weight: 800; color: var(--text); min-height: 38px; }
+  .numpad-grid { display: grid; grid-template-columns: repeat(3, minmax(86px, 124px)); gap: 10px; width: 100%; max-width: 420px; }
+  .numpad-key {
+    height: 66px; font-size: 28px; font-weight: 600;
+    border: 1px solid var(--border2); border-radius: 12px;
+    background: var(--bg); color: var(--text); cursor: pointer; font-family: var(--font);
+    transition: background 0.1s, transform 0.05s;
+  }
+  .numpad-key:active { transform: scale(0.94); background: var(--bg2); }
+  .numpad-key.numpad-fn { font-size: 24px; color: var(--text2); background: var(--bg2); }
+  .numpad-key.numpad-done { background: #166534; color: #fff; border-color: #166534; font-size: 22px; font-weight: 700; }
+  .numpad-key.numpad-done:active { background: #14532d; }
+  /* When the pad is open, pad the page bottom so the focused field can
+     scroll above the sheet instead of hiding underneath it. */
+  #station-mode.numpad-open { padding-bottom: 340px; }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
   /* Branded dialogs (confirm / alert / prompt) — sit above the regular
      modal overlay (z-index 200) so a dialog can interrupt a form modal.
@@ -10396,6 +10428,7 @@ function stationLogout(silent) {
   stationPinBuf = '';
   stationView = 'pin';
   stationJobId = null;
+  stationClosePad();
   if (stationIdleTimer) { clearTimeout(stationIdleTimer); stationIdleTimer = null; }
   if (mode === 'station') stationRender();
   if (!silent) notify('Signed out of station');
@@ -10499,10 +10532,15 @@ function stationUpdateHtml() {
   const fields = STATION_STAGE_FIELDS[stIdx] || [];
   const fieldHtml = fields.length ? fields.map(f => {
     const cur = (j.particulars && j.particulars[f.key] && j.particulars[f.key].quantity) || '';
+    // readonly + custom on-screen pad: native tablet keyboards are unreliable
+    // in kiosk mode (cover half the screen / QWERTY on iPads). Tapping the
+    // field slides up our own number pad instead.
     return `
       <div class="station-field">
         <label>${esc(f.label)}</label>
-        <input type="number" inputmode="numeric" id="sf-${f.key}" value="${esc(cur)}" placeholder="0">
+        <input type="text" inputmode="none" readonly class="numpad-target" id="sf-${f.key}"
+               value="${esc(cur)}" placeholder="0"
+               onclick="stationOpenPad('${f.key}', '${esc(f.label).replace(/'/g, "\\'")}')">
       </div>`;
   }).join('') : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
   const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
@@ -10522,7 +10560,63 @@ function stationUpdateHtml() {
       ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
     </div>`;
 }
-function stationBackToQueue() { stationView = 'queue'; stationJobId = null; stationRender(); }
+function stationBackToQueue() { stationView = 'queue'; stationJobId = null; stationClosePad(); stationRender(); }
+
+// ── On-screen number pad (tablet kiosk) ──────────────────────
+// Tapping a station field slides this pad up from the bottom of the
+// screen. Digits type into the field directly; Done dismisses. Tapping
+// a different field while the pad is open just retargets it.
+let stationPadKey = null;   // the f.key of the field currently being edited
+
+function stationOpenPad(key, label) {
+  stationPadKey = key;
+  stationResetIdle();
+  // Highlight the active field, clear highlight from the others.
+  document.querySelectorAll('.numpad-target').forEach(i => i.classList.remove('numpad-active'));
+  const input = document.getElementById('sf-' + key);
+  if (input) input.classList.add('numpad-active');
+  let pad = document.getElementById('station-numpad');
+  if (!pad) {
+    pad = document.createElement('div');
+    pad.id = 'station-numpad';
+    pad.className = 'station-numpad';
+    document.getElementById('station-mode').appendChild(pad);
+    document.getElementById('station-mode').classList.add('numpad-open');
+  }
+  const keys = ['1','2','3','4','5','6','7','8','9','back','0','done'].map(k => {
+    if (k === 'back') return `<button class="numpad-key numpad-fn" onclick="stationPadBack()">⌫</button>`;
+    if (k === 'done') return `<button class="numpad-key numpad-done" onclick="stationPadDone()">Done</button>`;
+    return `<button class="numpad-key" onclick="stationPadPress('${k}')">${k}</button>`;
+  }).join('');
+  pad.innerHTML = `
+    <div class="numpad-head">
+      <span class="numpad-label">${esc(label || '')}</span>
+      <button class="btn btn-sm" onclick="stationPadClear()">Clear</button>
+    </div>
+    <div class="numpad-grid">${keys}</div>`;
+  // Scroll the field into view above the pad.
+  if (input) setTimeout(() => input.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60);
+}
+
+function stationPadInput() { return stationPadKey ? document.getElementById('sf-' + stationPadKey) : null; }
+function stationPadPress(d) {
+  const input = stationPadInput();
+  if (!input) return;
+  if (input.value.length >= 9) return;          // sanity cap
+  input.value = input.value + d;
+  stationResetIdle();
+}
+function stationPadBack()  { const i = stationPadInput(); if (i) i.value = i.value.slice(0, -1); stationResetIdle(); }
+function stationPadClear() { const i = stationPadInput(); if (i) i.value = ''; stationResetIdle(); }
+function stationPadDone()  { stationClosePad(); }
+function stationClosePad() {
+  stationPadKey = null;
+  const pad = document.getElementById('station-numpad');
+  if (pad) pad.remove();
+  const mode = document.getElementById('station-mode');
+  if (mode) mode.classList.remove('numpad-open');
+  document.querySelectorAll('.numpad-target').forEach(i => i.classList.remove('numpad-active'));
+}
 
 async function stationSubmit(advance) {
   const j = jobs.find(x => x.id === stationJobId);
@@ -10540,7 +10634,7 @@ async function stationSubmit(advance) {
     });
     jobs = jobs.map(x => x.id === j.id ? { ...x, ...updated } : x);
     if (advance) { notify('Job advanced'); stationBackToQueue(); }
-    else { notify('Numbers saved'); stationRender(); }
+    else { notify('Numbers saved'); stationClosePad(); stationRender(); }
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
