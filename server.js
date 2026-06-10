@@ -24,7 +24,13 @@ const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking
 // Safe to expose — it's a public identifier, not a secret.
 app.get('/config.js', (req, res) => {
   res.type('application/javascript');
-  res.send(`window.__SA_CONFIG__ = ${JSON.stringify({ googleClientId: GOOGLE_CLIENT_ID || '' })};`);
+  // vercelEnv ('production' | 'preview' | 'development') drives client-side
+  // polling: preview deployments don't auto-poll (manual refresh only) so they
+  // never keep the Neon compute awake. Set automatically by Vercel per deploy.
+  res.send(`window.__SA_CONFIG__ = ${JSON.stringify({
+    googleClientId: GOOGLE_CLIENT_ID || '',
+    vercelEnv: process.env.VERCEL_ENV || 'development',
+  })};`);
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -237,6 +243,51 @@ async function initDb() {
     `;
     // PIN must be unique among active operators so /verify is unambiguous.
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_idx ON operators(pin) WHERE active`;
+
+    // Dropdown blacklist — values removed from the brand/supplier dropdown
+    // suggestions without touching existing inventory items. So "Century" can
+    // be hidden from new-item suggestions, but every item already tagged
+    // "Century" keeps its tag intact (and its stock history is preserved).
+    await sql`
+      CREATE TABLE IF NOT EXISTS dropdown_hidden (
+        field      TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        hidden_at  TIMESTAMPTZ DEFAULT NOW(),
+        hidden_by  TEXT,
+        PRIMARY KEY (field, value)
+      )
+    `;
+
+    // CAPA reports: Corrective & Preventive Action reports raised against a
+    // job card. A job can have multiple CAPAs (one per non-conformance issue).
+    // Section-1 job details are auto-snapshotted at creation in job_snapshot
+    // so the CAPA stays stable even if the underlying job is edited. The rest
+    // of the form lives in `data` JSONB so we can evolve fields without
+    // migrations. Status is denormalized out of `data` for easy filtering.
+    await sql`
+      CREATE TABLE IF NOT EXISTS capa_reports (
+        id               SERIAL PRIMARY KEY,
+        job_id           INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        capa_ref         TEXT NOT NULL,
+        seq              INTEGER NOT NULL,
+        status           TEXT NOT NULL DEFAULT 'open',
+        issue_date       TEXT,
+        job_snapshot     JSONB NOT NULL DEFAULT '{}',
+        data             JSONB NOT NULL DEFAULT '{}',
+        created_at       TIMESTAMPTZ DEFAULT NOW(),
+        created_by_id    INTEGER,
+        created_by_email TEXT,
+        updated_at       TIMESTAMPTZ DEFAULT NOW(),
+        closed_at        TIMESTAMPTZ
+      )
+    `;
+    // Allow standalone CAPAs (not tied to a specific job). job_id stays a FK
+    // but is now nullable — the user fills Section 1 manually instead of
+    // snapshotting from a job. Idempotent migration on existing deployments.
+    await sql`ALTER TABLE capa_reports ALTER COLUMN job_id DROP NOT NULL`;
+    await sql`CREATE INDEX IF NOT EXISTS capa_reports_job_idx    ON capa_reports(job_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS capa_reports_status_idx ON capa_reports(status)`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS capa_reports_job_seq_uidx ON capa_reports(job_id, seq)`;
 
     console.log('Database ready');
   } catch (err) {
@@ -901,7 +952,7 @@ app.delete('/api/jobs/:id', requireAdmin, async (req, res) => {
       RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Job not found' });
-    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Trash: ${updated[0].name}` });
+    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Archive: ${updated[0].name}` });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1108,7 +1159,12 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
 // duplicates (e.g. "century" vs "Century") without per-item editing. The
 // items themselves stay — just the brand/supplier column is NULLed where it
 // matched. Doesn't touch paper_type (required column, can't be NULLed).
-app.delete('/api/inventory/dropdown/:field/:value', requireAdmin, async (req, res) => {
+// Hide a dropdown value (brand or supplier) — adds it to dropdown_hidden so
+// it won't be suggested in new-item forms or the Manage UI, but DOES NOT
+// touch existing inventory items. They keep their brand/supplier text so
+// historical stock records stay intact. requireWriteUser (admin/user/stock).
+// Admin can still undo via the GET-list + unhide endpoint below.
+app.delete('/api/inventory/dropdown/:field/:value', requireWriteUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1117,19 +1173,48 @@ app.delete('/api/inventory/dropdown/:field/:value', requireAdmin, async (req, re
     if (!['brand', 'supplier'].includes(field)) {
       return res.status(400).json({ error: 'Field must be brand or supplier' });
     }
-    // Tagged-template SQL can't interpolate column names, so we branch.
-    const result = field === 'brand'
-      ? await sql`UPDATE inventory_items SET brand    = NULL WHERE brand    = ${value} RETURNING id`
-      : await sql`UPDATE inventory_items SET supplier = NULL WHERE supplier = ${value} RETURNING id`;
+    await sql`
+      INSERT INTO dropdown_hidden (field, value, hidden_by)
+      VALUES (${field}, ${value}, ${req.user.email})
+      ON CONFLICT (field, value) DO NOTHING
+    `;
     await logAudit(sql, req, {
-      action: 'inventory.clear-dropdown',
-      summary: `Cleared ${field}="${value}" from ${result.length} item${result.length !== 1 ? 's' : ''}`,
+      action: 'inventory.hide-dropdown',
+      summary: `Hid ${field} "${value}" from dropdown suggestions (existing items unchanged)`,
     });
-    res.json({ ok: true, cleared_from: result.length });
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// List all hidden dropdown values. Used client-side to filter the brand /
+// supplier suggestions in inventory forms and the Manage UI.
+app.get('/api/inventory/dropdown-hidden', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT field, value FROM dropdown_hidden ORDER BY field, value`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Un-hide a dropdown value — admin only, in case someone hides one by
+// mistake. Pulls it back into the suggestion list.
+app.post('/api/inventory/dropdown/:field/:value/unhide', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const field = req.params.field;
+    const value = req.params.value;
+    await sql`DELETE FROM dropdown_hidden WHERE field=${field} AND value=${value}`;
+    await logAudit(sql, req, {
+      action: 'inventory.unhide-dropdown',
+      summary: `Restored ${field} "${value}" to dropdown suggestions`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // DELETE an inventory item. Admin only. Refused if any pending-issuance
@@ -1471,10 +1556,9 @@ async function purgeExpiredTrash(sql) {
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
 // frontend can show "Auto-purges in N days" per row. Open to admin AND ceo
 // (CEO is read-only — the write endpoints below still require admin).
+// Anyone signed in can view the Trash bin (admin, user, stock, ceo). Restore
+// and Empty stay admin-only — see those endpoints below.
 app.get('/api/trash', requireAuth, async (req, res) => {
-  if (req.user?.role !== 'admin' && req.user?.role !== 'ceo') {
-    return res.status(403).json({ error: 'Admin or CEO only' });
-  }
   try {
     await dbReady;
     const sql = getDb();
@@ -1503,13 +1587,13 @@ app.post('/api/trash/restore', requireAdmin, async (req, res) => {
     if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
     if (type === 'job') {
       const updated = await sql`UPDATE jobs SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
-      if (!updated.length) return res.status(404).json({ error: 'Job not in trash' });
+      if (!updated.length) return res.status(404).json({ error: 'Job not in archive' });
       await logAudit(sql, req, { action: 'job.restore', entityType: 'job', entityId: rowId, summary: `Restored Job E-${rowId}: ${updated[0].name}` });
       return res.json({ ok: true });
     }
     if (type === 'import') {
       const updated = await sql`UPDATE inventory_imports SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type, status`;
-      if (!updated.length) return res.status(404).json({ error: 'Import not in trash' });
+      if (!updated.length) return res.status(404).json({ error: 'Import not in archive' });
       await logAudit(sql, req, { action: 'import.restore', entityType: 'import', entityId: rowId, summary: `Restored ${updated[0].status} import #${rowId}: ${updated[0].paper_type}` });
       return res.json({ ok: true });
     }
@@ -1527,13 +1611,13 @@ app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
     if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
     if (type === 'job') {
       const deleted = await sql`DELETE FROM jobs WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
-      if (!deleted.length) return res.status(404).json({ error: 'Job not in trash' });
+      if (!deleted.length) return res.status(404).json({ error: 'Job not in archive' });
       await logAudit(sql, req, { action: 'job.purge', entityType: 'job', entityId: rowId, summary: `Permanently deleted Job E-${rowId}: ${deleted[0].name}` });
       return res.json({ ok: true });
     }
     if (type === 'import') {
       const deleted = await sql`DELETE FROM inventory_imports WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type`;
-      if (!deleted.length) return res.status(404).json({ error: 'Import not in trash' });
+      if (!deleted.length) return res.status(404).json({ error: 'Import not in archive' });
       await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
       return res.json({ ok: true });
     }
@@ -1553,7 +1637,7 @@ app.post('/api/trash/empty', requireAdmin, async (req, res) => {
       action: 'trash.empty',
       entityType: 'system',
       entityId: 0,
-      summary: `Emptied Trash: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
+      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
     });
     res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -1610,7 +1694,7 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
       action: 'import.delete',
       entityType: 'import',
       entityId: parseInt(id, 10),
-      summary: `Moved ${imp.status} import #${imp.id} to Trash: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
+      summary: `Moved ${imp.status} import #${imp.id} to Archive: ${label || '(no details)'} · ${imp.packets} packets · ${imp.supplier || 'no supplier'}`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -1796,6 +1880,249 @@ app.post('/api/jobs/:id/station-update', requireWriteUser, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── CAPA reports ─────────────────────────────────────────────
+// Corrective & Preventive Action reports raised against a job. Multiple
+// per job allowed (ref = JC-{jobcode}-{seq}). Section 1 (job details) is
+// snapshotted at creation so the CAPA stays stable if the job is edited
+// later. The rest of the form lives in a JSONB blob.
+//
+// Permissions:
+//   • Any signed-in user can read.
+//   • Admin + User + Stock can create/edit while status != 'closed'.
+//   • Once status='closed', only admin can edit/delete.
+//   • CEO is read-only everywhere (requireWriteUser blocks them).
+
+// Build a Section-1 snapshot from a job row. Frozen at CAPA creation time.
+// `issue_date` is the date the JOB CARD was issued — NOT the date this CAPA
+// was raised (that lives on capa.issue_date instead). Falls back to the
+// job's created_at if the user never typed a Date Issued on the job form.
+function buildJobSnapshot(job) {
+  const jobIssueDate = job.dateissued
+    || (job.created_at ? new Date(job.created_at).toISOString().slice(0, 10) : '');
+  return {
+    job_card_no:  job.jobcode || (job.id ? `E-${job.id}` : ''),
+    job_ref_id:   job.id,
+    po_no:        job.ref || '',
+    issue_date:   jobIssueDate,
+    machine:      job.machine || '',
+    job_name:     job.name || '',
+    company:      job.client || '',
+    po_qty:       job.qty || '',
+    delivered_qty:job.delqty || '',
+  };
+}
+
+// GET all CAPAs across the whole shop with filters. Used by the CAPA Report
+// page under Jobs Reports — supports date range, company, and status filters,
+// and is the source for bulk export / bulk print on that page.
+app.get('/api/capa', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { from, to, client, status } = req.query;
+    // Date filter is on the CAPA's issue_date (the day it was raised). We
+    // bind it loosely as text — values are 'yyyy-mm-dd' which sort lexically.
+    const fromTxt   = from   && /^\d{4}-\d{2}-\d{2}$/.test(from)   ? from   : null;
+    const toTxt     = to     && /^\d{4}-\d{2}-\d{2}$/.test(to)     ? to     : null;
+    const clientTxt = client && String(client).trim()              ? String(client).trim() : null;
+    const statusTxt = status && ['open','in_progress','closed'].includes(status) ? status : null;
+    const rows = await sql`
+      SELECT * FROM capa_reports
+      WHERE (${fromTxt}::text IS NULL OR issue_date >= ${fromTxt})
+        AND (${toTxt}::text   IS NULL OR issue_date <= ${toTxt})
+        AND (${clientTxt}::text IS NULL OR job_snapshot->>'company' = ${clientTxt})
+        AND (${statusTxt}::text IS NULL OR status = ${statusTxt})
+      ORDER BY created_at DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// GET all CAPAs for a job, newest first.
+app.get('/api/jobs/:id/capa', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT * FROM capa_reports WHERE job_id=${req.params.id}
+      ORDER BY seq DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// GET one CAPA.
+app.get('/api/capa/:id', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'CAPA not found' });
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// CREATE a standalone CAPA (not tied to any job). Used for shop-wide quality
+// issues that aren't a single-job event — supplier complaint, machine
+// calibration drift, safety incident, etc. capa_ref = GEN-{YYYY}-{seq}
+// where seq is monotonic across all standalone CAPAs ever raised. Section 1
+// stays empty in job_snapshot; the user types those fields themselves on
+// the edit form (capaFormHtml flips Section 1 to editable when snapshot is
+// empty).
+app.post('/api/capa', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const year = new Date().getFullYear();
+    // Count existing GEN- refs to find the next seq. Cheaper than a sequence
+    // and handles year-boundary resets cleanly.
+    const existing = await sql`
+      SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports
+      WHERE job_id IS NULL AND capa_ref LIKE ${'GEN-' + year + '-%'}
+    `;
+    const seq = (existing[0].m || 0) + 1;
+    const capaRef = `GEN-${year}-${seq}`;
+    const today = new Date().toISOString().slice(0, 10);
+    const inserted = await sql`
+      INSERT INTO capa_reports
+        (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
+      VALUES
+        (${null}, ${capaRef}, ${seq}, 'open', ${today}, ${JSON.stringify({})}, ${JSON.stringify(req.body && req.body.data || {})}, ${req.user.id}, ${req.user.email})
+      RETURNING *
+    `;
+    const capa = inserted[0];
+    await logAudit(sql, req, {
+      action: 'capa.create',
+      entityType: 'capa',
+      entityId: capa.id,
+      summary: `General CAPA ${capa.capa_ref} raised (no job)`,
+      metadata: { capa_ref: capa.capa_ref, general: true },
+    });
+    res.json(capa);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
+// the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
+app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(jobId)) return res.status(400).json({ error: 'Invalid job id' });
+
+    const jobs = await sql`SELECT * FROM jobs WHERE id=${jobId}`;
+    if (!jobs.length) return res.status(404).json({ error: 'Job not found' });
+    const job = jobs[0];
+
+    const snap = buildJobSnapshot(job);
+    const maxRows = await sql`SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports WHERE job_id=${jobId}`;
+    const seq = (maxRows[0].m || 0) + 1;
+    const capaRef = `JC-${snap.job_card_no}-${seq}`;
+    const today = new Date().toISOString().slice(0, 10); // yyyy-mm-dd
+
+    const inserted = await sql`
+      INSERT INTO capa_reports
+        (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
+      VALUES
+        (${jobId}, ${capaRef}, ${seq}, 'open', ${today}, ${JSON.stringify(snap)}, ${JSON.stringify(req.body && req.body.data || {})}, ${req.user.id}, ${req.user.email})
+      RETURNING *
+    `;
+    const capa = inserted[0];
+    await logAudit(sql, req, {
+      action: 'capa.create',
+      entityType: 'capa',
+      entityId: capa.id,
+      summary: `CAPA ${capa.capa_ref} raised on job E-${jobId}`,
+      metadata: { job_id: jobId, capa_ref: capa.capa_ref },
+    });
+    res.json(capa);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// UPDATE a CAPA. Anyone with write access can edit while open/in_progress.
+// Once closed, only admin can change it (including reopening).
+app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
+    if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
+    const current = existing[0];
+
+    // Lock closed CAPAs to admin only.
+    if (current.status === 'closed' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'This CAPA is closed. Only admin can edit it.' });
+    }
+
+    const { status, issue_date, data, job_snapshot } = req.body || {};
+    const nextStatus = ['open', 'in_progress', 'closed'].includes(status) ? status : current.status;
+    const nextData   = data && typeof data === 'object' ? data : current.data;
+    const nextIssue  = (issue_date === undefined || issue_date === null) ? current.issue_date : issue_date;
+    const closingNow = nextStatus === 'closed' && current.status !== 'closed';
+    const reopening  = nextStatus !== 'closed' && current.status === 'closed';
+    // Compute closed_at in JS so we don't have to embed a SQL fragment into a
+    // value slot (neon's tagged template parameterizes ${...} as bind values).
+    const nextClosedAt = closingNow ? new Date() : (reopening ? null : current.closed_at);
+    // Section 1 (job_snapshot) is only writable for General CAPAs (job_id IS
+    // NULL). Job-tied CAPAs keep their frozen snapshot — even if the client
+    // sends a different value, we ignore it. This preserves the audit
+    // guarantee that Section 1 reflects the job at CAPA creation.
+    const nextSnap = (current.job_id == null && job_snapshot && typeof job_snapshot === 'object')
+      ? job_snapshot
+      : current.job_snapshot;
+
+    const updated = await sql`
+      UPDATE capa_reports SET
+        status=${nextStatus},
+        issue_date=${nextIssue},
+        data=${JSON.stringify(nextData)},
+        job_snapshot=${JSON.stringify(nextSnap)},
+        updated_at=NOW(),
+        closed_at=${nextClosedAt}
+      WHERE id=${req.params.id}
+      RETURNING *
+    `;
+    const capa = updated[0];
+    let action = 'capa.update';
+    let summary = `CAPA ${capa.capa_ref} updated`;
+    if (closingNow) { action = 'capa.close'; summary = `CAPA ${capa.capa_ref} closed`; }
+    if (reopening)  { action = 'capa.reopen'; summary = `CAPA ${capa.capa_ref} reopened`; }
+    await logAudit(sql, req, {
+      action, entityType: 'capa', entityId: capa.id, summary,
+      metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref, status: capa.status },
+    });
+    res.json(capa);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// DELETE a CAPA. Hard delete — CAPAs aren't trashed.
+//   • Admin can delete any CAPA, in any status.
+//   • User / Stock can delete a CAPA only if it's still Open or In Progress;
+//     once Closed it's locked to admin (matches the edit-lock behavior).
+//   • CEO can't reach this — requireWriteUser blocks them.
+app.delete('/api/capa/:id', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
+    if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
+    const capa = existing[0];
+    if (capa.status === 'closed' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'This CAPA is closed. Only admin can delete it.' });
+    }
+    await sql`DELETE FROM capa_reports WHERE id=${req.params.id}`;
+    await logAudit(sql, req, {
+      action: 'capa.delete',
+      entityType: 'capa',
+      entityId: capa.id,
+      summary: `CAPA ${capa.capa_ref} deleted`,
+      metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref },
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 app.get('*', (req, res) => {
