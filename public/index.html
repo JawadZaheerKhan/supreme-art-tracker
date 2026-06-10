@@ -296,9 +296,27 @@
   .tile-actions { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
 
   /* Stage machine vignette */
-  .stage-machine { background: linear-gradient(180deg, var(--bg2), var(--bg3)); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px 4px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-  .sm-svg { width: 100%; height: 78px; display: block; }
-  .sm-label { font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
+  .stage-machine {
+    background: linear-gradient(180deg, var(--bg2), var(--bg3));
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 8px 4px;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    position: relative; overflow: hidden;
+    transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  }
+  /* Soft ambient breath so cards feel alive even when nothing is hovered.
+     Very low amplitude; suppressed under reduced-motion. */
+  .stage-machine::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 110%, rgba(30,64,175,0.10), transparent 60%);
+    opacity: 0; pointer-events: none;
+    animation: smBreath 3.6s ease-in-out infinite;
+  }
+  .job-tile:hover .stage-machine { box-shadow: inset 0 0 0 1px rgba(30,64,175,0.18); border-color: rgba(30,64,175,0.35); }
+  .job-tile:hover .stage-machine::before { opacity: 1; }
+  @keyframes smBreath { 0%,100% { opacity: 0.25; } 50% { opacity: 0.65; } }
+  .sm-svg { width: 100%; height: 78px; display: block; position: relative; z-index: 1; }
+  .sm-label { font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; position: relative; z-index: 1; }
 
   /* Progress ribbon */
   .tile-ribbon { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 0 2px; }
@@ -320,41 +338,123 @@
   .job-more-menu button.danger { color: #A32D2D; }
 
   /* Stage-machine animations — paused until the tile is hovered, so a grid
-     of cards stays calm and only the one you point at comes alive. */
+     of cards stays calm and only the one you point at comes alive. Curves
+     use smooth cubic-bezier so the motion feels organic, not robotic. */
   .stage-machine .sm { animation-play-state: paused; }
   .job-tile:hover .stage-machine .sm { animation-play-state: running; }
   @media (prefers-reduced-motion: reduce) {
+    .stage-machine::before { animation: none !important; }
     .job-tile:hover .stage-machine .sm { animation-play-state: paused !important; }
   }
-  .sm-sweep   { animation: smSweep 1.6s ease-in-out infinite alternate; }
+  /* Shared smoother curve — slight overshoot for organic feel on key motions */
+  .sm-sweep   { animation: smSweep 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate; }
   @keyframes smSweep { to { transform: translateX(62px); } }
-  .sm-spin    { transform-box: fill-box; transform-origin: center; animation: smSpin 1.5s linear infinite; }
+  .sm-spin    { transform-box: fill-box; transform-origin: center; animation: smSpin 1.6s linear infinite; }
+  .sm-spin-ccw{ transform-box: fill-box; transform-origin: center; animation: smSpinCCW 1.6s linear infinite; }
   .sm-wheel   { transform-box: fill-box; transform-origin: center; animation: smSpin 0.7s linear infinite; }
   @keyframes smSpin { to { transform: rotate(360deg); } }
-  .sm-feed    { animation: smFeed 1.9s ease-in-out infinite; }
-  @keyframes smFeed { 0% { transform: translateX(0); opacity: 1; } 70% { transform: translateX(80px); opacity: 1; } 72% { opacity: 0; } 100% { transform: translateX(80px); opacity: 0; } }
-  .sm-gloss   { transform-box: fill-box; transform-origin: left center; animation: smGloss 2.1s ease-in-out infinite; }
+  @keyframes smSpinCCW { to { transform: rotate(-360deg); } }
+  /* Ink drips falling from the fountain onto the plate cylinder — shows
+     the ink supply visually so it's obvious where the color comes from. */
+  .sm-drop    { animation: smDrop 1.6s cubic-bezier(0.4, 0, 0.8, 1) infinite; opacity: 0; }
+  .sm-drop.d2 { animation-delay: 0.4s; }
+  .sm-drop.d3 { animation-delay: 0.85s; }
+  @keyframes smDrop {
+    0%   { transform: translateY(0); opacity: 0; }
+    10%  { opacity: 1; }
+    55%  { transform: translateY(9px); opacity: 1; }
+    65%  { opacity: 0; }
+    100% { transform: translateY(9px); opacity: 0; }
+  }
+  .sm-feed    { animation: smFeed 2.2s cubic-bezier(0.4, 0.2, 0.2, 1) infinite; }
+  @keyframes smFeed { 0% { transform: translateX(0); opacity: 1; } 65% { transform: translateX(72px); opacity: 1; } 70% { opacity: 0; } 100% { transform: translateX(72px); opacity: 0; } }
+  .sm-feed-out { animation: smFeedOut 2.2s cubic-bezier(0.4, 0.2, 0.2, 1) infinite; }
+  @keyframes smFeedOut { 0%,30% { transform: translateX(-22px); opacity: 0; } 32% { opacity: 1; } 100% { transform: translateX(34px); opacity: 1; } }
+  .sm-ink-pulse { transform-box: fill-box; transform-origin: center; animation: smInkPulse 1.4s ease-in-out infinite; }
+  @keyframes smInkPulse { 0%,100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.18); opacity: 1; } }
+  .sm-gloss   { transform-box: fill-box; transform-origin: left center; animation: smGloss 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
   @keyframes smGloss { 0% { transform: scaleX(0); } 55% { transform: scaleX(1); } 100% { transform: scaleX(1); } }
-  .sm-roll    { animation: smRoll 2.1s ease-in-out infinite; }
+  .sm-roll    { animation: smRoll 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
   @keyframes smRoll { 0% { transform: translateX(0); } 55% { transform: translateX(74px); } 100% { transform: translateX(74px); } }
-  .sm-stamp   { animation: smStamp 1s ease-in-out infinite; }
-  @keyframes smStamp { 0%,100% { transform: translateY(0); } 45%,55% { transform: translateY(9px); } }
-  .sm-break-l { animation: smBreakL 1.5s ease-in-out infinite alternate; }
-  @keyframes smBreakL { to { transform: translateX(-7px); } }
-  .sm-break-r { animation: smBreakR 1.5s ease-in-out infinite alternate; }
-  @keyframes smBreakR { to { transform: translateX(7px); } }
-  .sm-fold    { transform-box: fill-box; transform-origin: left center; animation: smFold 1.9s ease-in-out infinite; }
+  .sm-sparkle { transform-box: fill-box; transform-origin: center; animation: smSparkle 2.4s ease-in-out infinite; }
+  .sm-sparkle.s2 { animation-delay: 0.4s; }
+  .sm-sparkle.s3 { animation-delay: 0.8s; }
+  @keyframes smSparkle { 0%,60% { opacity: 0; transform: scale(0.3); } 70% { opacity: 1; transform: scale(1.3); } 100% { opacity: 0; transform: scale(0.6); } }
+  .sm-stamp   { animation: smStamp 1.1s cubic-bezier(0.55, 0, 0.45, 1) infinite; }
+  @keyframes smStamp { 0%,100% { transform: translateY(0); } 42%,58% { transform: translateY(9px); } }
+  /* Synced die-cutter press — 2.2s to match the paper feed cycle. Around
+     the 45-58% window (when the sheet is centred between the blocks) the
+     top block drops 4px and the bottom block rises 4px, pinching the
+     sheet. Then both ease back out. Matches the sm-feed / sm-feed-out
+     timing so the press always lands while the paper is in the jaws. */
+  .sm-press-top { animation: smPressTop 2.2s cubic-bezier(0.5, 0, 0.5, 1) infinite; }
+  @keyframes smPressTop {
+    0%, 38%   { transform: translateY(0); }
+    46%, 58%  { transform: translateY(4px); }
+    66%, 100% { transform: translateY(0); }
+  }
+  .sm-press-bot { animation: smPressBot 2.2s cubic-bezier(0.5, 0, 0.5, 1) infinite; }
+  @keyframes smPressBot {
+    0%, 38%   { transform: translateY(0); }
+    46%, 58%  { transform: translateY(-4px); }
+    66%, 100% { transform: translateY(0); }
+  }
+  .sm-flash   { animation: smFlash 1.1s ease-out infinite; }
+  @keyframes smFlash { 0%,40% { opacity: 0; } 48%,55% { opacity: 0.85; } 100% { opacity: 0; } }
+  .sm-cut-line { animation: smCutLine 1.1s ease-out infinite; stroke-dasharray: 8; stroke-dashoffset: 8; }
+  @keyframes smCutLine { 0%,50% { stroke-dashoffset: 8; } 65%,100% { stroke-dashoffset: 0; } }
+  .sm-break-l { animation: smBreakL 1.7s cubic-bezier(0.5, 0, 0.5, 1.4) infinite alternate; }
+  @keyframes smBreakL { to { transform: translateX(-8px); } }
+  .sm-break-r { animation: smBreakR 1.7s cubic-bezier(0.5, 0, 0.5, 1.4) infinite alternate; }
+  @keyframes smBreakR { to { transform: translateX(8px); } }
+  /* Breaking hammers — sync with the .sm-break-* sheets (1.7s alternate)
+     so the hammer drops AS the sheets split. Heavy ease-in feel for the
+     downstroke. */
+  .sm-hammer  { animation: smHammer 1.7s cubic-bezier(0.4, 0, 0.7, 0.5) infinite alternate; }
+  @keyframes smHammer { to { transform: translateY(6px); } }
+  /* Worker's arm-plus-hammer swing — rotates around the shoulder pivot
+     (set per-use via inline transform-origin). Raised-back at the
+     start, swung forward into the stack at the end. cubic-bezier with
+     fast end matches a real hammer strike. */
+  .sm-swing { animation: smSwing 1.7s cubic-bezier(0.45, 0, 0.65, 0.35) infinite alternate; }
+  @keyframes smSwing {
+    from { transform: rotate(30deg); }
+    to   { transform: rotate(-55deg); }
+  }
+  /* Breaking waste — small cardboard bits drift outward and fade as the
+     hammer strikes. Three staggered for variety. */
+  .sm-waste1, .sm-waste2, .sm-waste3 {
+    animation: smWaste 1.7s cubic-bezier(0.4, 0, 0.6, 1) infinite alternate;
+    transform-box: fill-box; transform-origin: center;
+  }
+  .sm-waste1 { animation-delay: 0s;   }
+  .sm-waste2 { animation-delay: 0.2s; }
+  .sm-waste3 { animation-delay: 0.4s; }
+  @keyframes smWaste {
+    0%   { transform: translate(0, 0)     rotate(0deg); opacity: 1; }
+    100% { transform: translate(7px, 4px) rotate(40deg); opacity: 0.2; }
+  }
+  .sm-fold    { transform-box: fill-box; transform-origin: left center; animation: smFold 2.1s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
   @keyframes smFold { 0%,100% { transform: scaleX(1); } 50% { transform: scaleX(0.12); } }
-  .sm-glue    { animation: smGlue 1.9s ease-in-out infinite; }
-  @keyframes smGlue { 0%,100% { opacity: 0.2; } 50% { opacity: 1; } }
-  .sm-stack1, .sm-stack2, .sm-stack3 { animation: smStack 2.4s ease-in-out infinite; }
+  .sm-glue    { animation: smGlue 2.1s ease-in-out infinite; }
+  @keyframes smGlue { 0%,100% { opacity: 0.2; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.15); } }
+  .sm-carton  { transform-box: fill-box; transform-origin: center; animation: smCarton 2.1s cubic-bezier(0.34, 1.56, 0.64, 1) infinite; opacity: 0; }
+  @keyframes smCarton { 0%,55% { opacity: 0; transform: scale(0.6); } 70% { opacity: 1; transform: scale(1.05); } 80%,100% { opacity: 1; transform: scale(1); } }
+  .sm-stack1, .sm-stack2, .sm-stack3 { animation: smStack 2.6s cubic-bezier(0.34, 1.4, 0.64, 1) infinite; }
   .sm-stack1 { animation-delay: 0s; }
-  .sm-stack2 { animation-delay: 0.3s; }
-  .sm-stack3 { animation-delay: 0.6s; }
-  @keyframes smStack { 0% { transform: translateY(12px); opacity: 0; } 28%,100% { transform: translateY(0); opacity: 1; } }
-  .sm-drive   { animation: smDrive 1.4s ease-in-out infinite; }
-  @keyframes smDrive { 0%,100% { transform: translateX(0); } 50% { transform: translateX(6px); } }
-  .sm-clock   { transform-origin: 60px 35px; animation: smSpin 2s linear infinite; }
+  .sm-stack2 { animation-delay: 0.35s; }
+  .sm-stack3 { animation-delay: 0.7s; }
+  @keyframes smStack { 0% { transform: translateY(14px); opacity: 0; } 26%,100% { transform: translateY(0); opacity: 1; } }
+  .sm-drive   { animation: smDrive 1.5s ease-in-out infinite; }
+  @keyframes smDrive { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+  .sm-road    { animation: smRoad 0.9s linear infinite; }
+  @keyframes smRoad { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -18px; } }
+  .sm-exhaust { animation: smExhaust 1.4s ease-out infinite; }
+  .sm-exhaust.e2 { animation-delay: 0.4s; }
+  .sm-exhaust.e3 { animation-delay: 0.8s; }
+  @keyframes smExhaust { 0% { opacity: 0.7; transform: translate(0, 0) scale(0.6); } 100% { opacity: 0; transform: translate(-10px, -8px) scale(1.6); } }
+  .sm-clock   { transform-origin: 60px 35px; animation: smClockTick 6s steps(60) infinite; }
+  @keyframes smClockTick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
   /* ── Station terminal (kiosk) ────────────────────────────── */
   #station-mode { max-width: 640px; }
@@ -873,11 +973,11 @@
       <span style="color:var(--text2);font-size:12px;">to</span>
       <input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;">
     </span>
-    <!-- Cards / Compact view toggle — fun animated grid vs. dense list.
+    <!-- Track / Jobs view toggle — animated grid vs. dense list.
          Choice persists in localStorage. Pushed to the far right. -->
     <div class="mode-switch" id="jobs-view-switch" style="margin-left:auto;">
-      <button class="mode-btn" data-jv="cards"   onclick="setJobsViewMode('cards')" title="Card grid with animated stage machines">&#127183; Cards</button>
-      <button class="mode-btn" data-jv="compact" onclick="setJobsViewMode('compact')" title="Dense list for fast scanning">&#9776; Compact</button>
+      <button class="mode-btn" data-jv="cards"   onclick="setJobsViewMode('cards')" title="Track view — animated stage machines for at-a-glance production status">&#127183; Track</button>
+      <button class="mode-btn" data-jv="compact" onclick="setJobsViewMode('compact')" title="Jobs view — dense list for fast scanning">&#9776; Jobs</button>
     </div>
   </div>
   <div class="jobs-list" id="jobs-list"></div>
@@ -1804,7 +1904,6 @@ function renderJobCard(j) {
   const done = isDone(j), blocked = isBlocked(j), pending = isPendingIssuance(j);
   const priNorm = normalizePriority(j.priority);
   const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
-  const coatings = Array.isArray(j.coatings) ? j.coatings : [];
 
   const badge = pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
     done ? `<span class="badge badge-done">Delivered</span>` :
@@ -1830,18 +1929,13 @@ function renderJobCard(j) {
       <div class="sm-label">${esc(stageLabel)}</div>
     </div>`;
 
+  // Tracking-only view — machine and deadline are the only facts the floor
+  // needs while a job is in flight. Everything else (PO, Size, Sheets,
+  // Coatings, cut size) lives on the printed job card and the Edit form.
   const facts = [
-    j.qty      ? `<span><b>PO</b> ${esc(j.qty)}</span>` : '',
-    j.size     ? `<span><b>Size</b> ${esc(j.size)}</span>` : '',
-    j.sheets   ? `<span><b>Sheets</b> ${esc(j.sheets)}</span>` : '',
     j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
     j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
-    coatings.length ? `<span><b>Coat</b> ${coatings.map(esc).join(', ')}</span>` : '',
   ].filter(Boolean).join('');
-
-  const cutChip = j.cut_size
-    ? `<div class="tile-cut">✂ Cut to <b>${esc(j.cut_size)}</b>${j.offcut_size?` · offcut ${esc(j.offcut_size)}`:''}</div>`
-    : '';
 
   // Primary actions stay visible; everything else folds into a ⋯ menu.
   const primary = (pending && canIssueStock()) ? cardIssueStockBtn(j) : '';
@@ -1873,7 +1967,6 @@ function renderJobCard(j) {
     ${machine}
     <div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
-    ${cutChip}
     <div class="tile-actions">
       ${primary}
       ${updateBtn}
@@ -1905,73 +1998,465 @@ function stageMachineSVG(stageIndex, { pending } = {}) {
   const paper = '#f5f4f0', edge = '#9e9c94', body = '#6b6960', ink = '#1a1a18';
   const blue = '#0C447C', blueLt = '#85B7EB', green = '#166534', amber = '#EF9F27';
   switch (stageIndex) {
-    case 0: // CTP Plate Making — exposure light sweeps across the plate
+    case 0: // CTP Plate Making — operator holds the plate, laser exposes the image
+      // ── Visual story ─────────────────────────────────────────
+      // Blue-gloved hands grip the bottom corners of a steel-framed
+      // printing plate. The plate surface is the characteristic
+      // greenish-yellow of real CTP aluminium plates, with the printed
+      // image already burned onto it (header bar, body text bars, a
+      // photo/icon block, footer bar). An amber laser beam sweeps
+      // across the surface to convey "image being exposed", and a
+      // small green LED pulses in the corner as the ready indicator.
+      // Hands at the bottom mimic the user's reference image of an
+      // operator working with a stencil/plate.
+      // ───────────────────────────────────────────────────────────
       return open + `
-        <rect x="20" y="16" width="80" height="38" rx="2" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <g fill="${edge}"><circle cx="38" cy="28" r="1.6"/><circle cx="54" cy="40" r="1.6"/><circle cx="70" cy="26" r="1.6"/><circle cx="84" cy="42" r="1.6"/><circle cx="62" cy="34" r="1.6"/></g>
-        <rect class="sm sm-sweep" x="22" y="18" width="7" height="34" rx="1" fill="${amber}" opacity="0.85"/>
-        <rect x="20" y="56" width="80" height="4" rx="2" fill="${body}"/>
-      ` + close;
-    case 1: // Printing — two cylinders spin, a sheet feeds through
-      return open + `
-        <line x1="14" y1="54" x2="106" y2="54" stroke="${edge}" stroke-width="2"/>
-        <rect class="sm sm-feed" x="6" y="46" width="22" height="9" rx="1" fill="${paper}" stroke="${edge}"/>
-        <g class="sm sm-spin" style="transform-origin:43px 34px">
-          <circle cx="43" cy="34" r="13" fill="${blueLt}" stroke="${blue}" stroke-width="1.5"/>
-          <line x1="43" y1="22" x2="43" y2="46" stroke="${blue}" stroke-width="1.5"/>
-          <line x1="31" y1="34" x2="55" y2="34" stroke="${blue}" stroke-width="1.5"/>
+        <!-- Plate carrier frame (outer) + bezel + plate surface -->
+        <rect x="10" y="9"  width="100" height="50" rx="2"  fill="#8a8a85" stroke="#3a3a36" stroke-width="0.8"/>
+        <rect x="12.5" y="11.5" width="95" height="45" rx="1.2" fill="#5a5a55"/>
+        <rect x="16" y="15" width="88" height="38" fill="#a5d8f4" stroke="#4a7ba0" stroke-width="0.4"/>
+
+        <!-- Image already burned onto the plate -->
+        <!-- Header (brand bar) -->
+        <rect x="22" y="19" width="42" height="2.6" rx="0.3" fill="${ink}"/>
+        <rect x="22" y="22.8" width="28" height="1"   fill="${ink}" opacity="0.7"/>
+        <!-- Photo/icon block on the right (image with simple checkmark).
+             Inner shapes use the same sky-blue so they read as cut-outs. -->
+        <rect x="72" y="18" width="26" height="16" rx="0.6" fill="${ink}" opacity="0.88"/>
+        <circle cx="79" cy="24" r="2.3" fill="#a5d8f4"/>
+        <path d="M76 32 L82 26 L92 32 Z" fill="#a5d8f4"/>
+        <!-- Body text bars -->
+        <g fill="${ink}" opacity="0.78">
+          <rect x="22" y="28"   width="36" height="0.9"/>
+          <rect x="22" y="30.4" width="30" height="0.9"/>
+          <rect x="22" y="32.8" width="34" height="0.9"/>
         </g>
-        <g class="sm sm-spin" style="transform-origin:77px 34px">
-          <circle cx="77" cy="34" r="13" fill="#cfe2f6" stroke="${blue}" stroke-width="1.5"/>
-          <line x1="77" y1="22" x2="77" y2="46" stroke="${blue}" stroke-width="1.5"/>
-          <line x1="65" y1="34" x2="89" y2="34" stroke="${blue}" stroke-width="1.5"/>
+        <!-- Lower text columns -->
+        <g fill="${ink}" opacity="0.72">
+          <rect x="22" y="39"   width="36" height="0.9"/>
+          <rect x="22" y="41.4" width="32" height="0.9"/>
+          <rect x="22" y="43.8" width="28" height="0.9"/>
+          <rect x="72" y="39"   width="26" height="0.9"/>
+          <rect x="72" y="41.4" width="22" height="0.9"/>
+          <rect x="72" y="43.8" width="20" height="0.9"/>
+        </g>
+        <!-- Footer (small price/brand block) -->
+        <rect x="22" y="48" width="20" height="2.4" rx="0.2" fill="${ink}"/>
+
+        <!-- Amber laser beam sweeping across (the exposure) -->
+        <rect class="sm sm-sweep" x="16" y="15" width="2.5" height="38" fill="${amber}" opacity="0.95"/>
+        <rect class="sm sm-sweep" x="16" y="15" width="8"   height="38" rx="1" fill="${amber}" opacity="0.25"/>
+
+        <!-- Ready LED, pulses -->
+        <circle class="sm sm-ink-pulse" cx="6" cy="6" r="2" fill="${green}"/>
+
+        <!-- Blue-gloved hands gripping the bottom corners of the plate -->
+        <g fill="#1e4ea5" stroke="#0a2c70" stroke-width="0.4">
+          <!-- LEFT hand -->
+          <ellipse cx="14"  cy="55"  rx="3" ry="2.6"/>
+          <path d="M0 60 Q0 54 6 52 L22 53 Q26 54 26 58 L26 67 L0 70 Z"/>
+          <!-- Cuff -->
+          <path d="M0 65 L26 64 L26 67 L0 70 Z" fill="#0a2c70"/>
+          <!-- RIGHT hand -->
+          <ellipse cx="106" cy="55"  rx="3" ry="2.6"/>
+          <path d="M120 60 Q120 54 114 52 L98 53 Q94 54 94 58 L94 67 L120 70 Z"/>
+          <path d="M120 65 L94 64 L94 67 L120 70 Z" fill="#0a2c70"/>
         </g>
       ` + close;
-    case 2: // Coatings — a roller lays gloss across the sheet
+    case 1: // CMYK 4-tower offset press — paper snakes through 4 colour stations
+      // ── Visual story ─────────────────────────────────────────
+      // 4 identical towers side-by-side, one for each CMYK ink:
+      //   Tower 1: BLACK (K)   - leftmost
+      //   Tower 2: YELLOW (Y)
+      //   Tower 3: MAGENTA (M)
+      //   Tower 4: CYAN (C)    - rightmost
+      // Each tower has a cluster of ink granules at the very top (its
+      // ink colour), a tall body, a stack of stationary rollers inside,
+      // and a plate cylinder at the bottom that contacts the paper
+      // path running underneath. The paper feeds in BLANK from the left,
+      // passes under all 4 towers, and exits on the RIGHT printed with
+      // all 4 colours. Mirrors how multi-colour offset presses really
+      // work, the same way every printing-explainer infographic shows
+      // it. Everything is static — only the paper moves.
+      // ───────────────────────────────────────────────────────────
+      const cmyk = [
+        { x: 18, ink: '#1a1a18', edge: '#000' },   // K
+        { x: 44, ink: '#f7c423', edge: '#9c7a05' },// Y
+        { x: 70, ink: '#d62593', edge: '#8c1761' },// M
+        { x: 96, ink: '#00a2e2', edge: '#006a93' },// C
+      ];
+      const tower = ({ x, ink: tInk, edge: tEdge }) => `
+        <!-- Ink granules at the top, in this tower's colour -->
+        <g fill="${tInk}" stroke="${tEdge}" stroke-width="0.25">
+          <circle cx="${x-3}" cy="3.5" r="1.1"/>
+          <circle cx="${x}"   cy="3"   r="1.1"/>
+          <circle cx="${x+3}" cy="3.5" r="1.1"/>
+          <circle cx="${x-1.5}" cy="6" r="1.1"/>
+          <circle cx="${x+1.5}" cy="6" r="1.1"/>
+        </g>
+        <!-- Tower body -->
+        <rect x="${x-7}" y="9" width="14" height="36" rx="2" fill="#5e5d56" opacity="0.55"/>
+        <!-- Stack of rollers inside, getting bigger toward the bottom -->
+        <circle cx="${x}" cy="14" r="1.8" fill="#cfe2f6" stroke="${blue}" stroke-width="0.5"/>
+        <circle cx="${x}" cy="20" r="2.2" fill="#cfe2f6" stroke="${blue}" stroke-width="0.5"/>
+        <circle cx="${x}" cy="27" r="2.6" fill="#cfe2f6" stroke="${blue}" stroke-width="0.5"/>
+        <circle cx="${x}" cy="34" r="3"   fill="#cfe2f6" stroke="${blue}" stroke-width="0.5"/>
+        <!-- Plate cylinder at the bottom, touches the paper. The colour
+             dot inside makes it obvious this tower prints THAT colour. -->
+        <circle cx="${x}" cy="44" r="3.8" fill="${blueLt}" stroke="${blue}" stroke-width="0.8"/>
+        <circle cx="${x}" cy="44" r="1.1" fill="${tInk}"/>
+      `;
       return open + `
-        <rect x="16" y="26" width="88" height="28" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <rect class="sm sm-gloss" x="16" y="26" width="88" height="28" fill="${blueLt}" opacity="0.4"/>
-        <g class="sm sm-roll">
-          <rect x="16" y="16" width="14" height="9" rx="2" fill="${body}"/>
-          <circle cx="23" cy="27" r="6" fill="${edge}" stroke="${ink}"/>
+        ${cmyk.map(tower).join('')}
+        <!-- Paper path running under all 4 towers, dashed like the reference -->
+        <line x1="0" y1="54" x2="120" y2="54" stroke="${edge}" stroke-width="1" stroke-dasharray="2.5 1.5"/>
+        <!-- Blank sheet feeding from the left -->
+        <rect class="sm sm-feed" x="-2" y="51" width="14" height="6" rx="0.6" fill="${paper}" stroke="${edge}" stroke-width="0.6"/>
+        <!-- Printed sheet exiting right, with one dot of EACH colour so the
+             multi-colour story (4 towers → 4 colours on paper) is obvious -->
+        <g class="sm sm-feed-out">
+          <rect x="100" y="51" width="14" height="6" rx="0.6" fill="${paper}" stroke="${edge}" stroke-width="0.6"/>
+          <circle cx="103" cy="54" r="0.8" fill="${cmyk[0].ink}"/>
+          <circle cx="106" cy="54" r="0.8" fill="${cmyk[1].ink}"/>
+          <circle cx="109" cy="54" r="0.8" fill="${cmyk[2].ink}"/>
+          <circle cx="112" cy="54" r="0.8" fill="${cmyk[3].ink}"/>
         </g>
       ` + close;
-    case 3: // Die Cutting — a platen stamps down repeatedly
+    case 2: // Coating — coating cylinder + impression cylinder, paper threads between
+      // ── Visual story ─────────────────────────────────────────
+      // Coating works mechanically the same way as a single-station offset
+      // press: a COATING CYLINDER at the top carries the coating (UV /
+      // varnish / lacquer), an IMPRESSION CYLINDER below presses the
+      // paper up against it. Paper feeds in DRY/MATTE from the left,
+      // comes out GLOSSY on the right with a subtle amber sheen.
+      // Coating material (amber dots = varnish) sits in a cluster above
+      // the coating cylinder, the way ink granules sit above each tower
+      // in the CMYK printing vignette — so the two stages read as
+      // "same family, different fluid".
+      // ───────────────────────────────────────────────────────────
       return open + `
-        <rect x="18" y="48" width="84" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
-        <g class="sm sm-stamp">
-          <rect x="28" y="12" width="64" height="22" rx="2" fill="${body}"/>
-          <path d="M32 34 l4 6 M44 34 l4 6 M56 34 l4 6 M68 34 l4 6 M80 34 l4 6" stroke="${ink}" stroke-width="2" stroke-linecap="round"/>
+        <!-- Coating supply (amber varnish blobs) on top of the coating cylinder -->
+        <g fill="${amber}" stroke="#9c5c0c" stroke-width="0.3">
+          <circle cx="55" cy="3"   r="1.2"/>
+          <circle cx="58" cy="2.8" r="1.2"/>
+          <circle cx="61" cy="3.2" r="1.2"/>
+          <circle cx="64" cy="3"   r="1.2"/>
+          <circle cx="57" cy="5.5" r="1.2"/>
+          <circle cx="60" cy="5.2" r="1.2"/>
+          <circle cx="63" cy="5.5" r="1.2"/>
+        </g>
+
+        <!-- Coating cylinder (dark base + amber coating on the upper hemisphere) -->
+        <g>
+          <circle cx="60" cy="20" r="11" fill="#3f3d36" stroke="${ink}" stroke-width="1.2"/>
+          <!-- Upper half painted amber = the coating that just got picked up -->
+          <path d="M 49 20 A 11 11 0 0 1 71 20 Z" fill="${amber}" opacity="0.85"/>
+          <circle cx="60" cy="20" r="1.6" fill="${amber}"/>
+        </g>
+
+        <!-- Impression cylinder (smooth grey, presses paper against coating) -->
+        <g>
+          <circle cx="60" cy="48" r="11" fill="#6b6960" stroke="${ink}" stroke-width="1.2"/>
+          <circle cx="60" cy="48" r="1.6" fill="#2a2a26"/>
+        </g>
+
+        <!-- Paper path running between the two cylinders -->
+        <line x1="0" y1="34" x2="120" y2="34" stroke="${edge}" stroke-width="0.8" stroke-dasharray="2.5 1.5"/>
+
+        <!-- Blank, matte sheet feeding in from the LEFT -->
+        <rect class="sm sm-feed" x="-2" y="31" width="14" height="6" rx="0.6" fill="${paper}" stroke="${edge}" stroke-width="0.6"/>
+
+        <!-- Glossy, coated sheet exiting on the RIGHT — amber sheen overlay
+             + three sparkle highlights so it visibly reads as "coated" -->
+        <g class="sm sm-feed-out">
+          <rect x="100" y="31" width="14" height="6" rx="0.6" fill="${paper}" stroke="${edge}" stroke-width="0.6"/>
+          <rect x="101" y="31.6" width="12" height="1.6" fill="${amber}" opacity="0.55"/>
+          <circle cx="104" cy="34"   r="0.55" fill="#fff" stroke="${amber}" stroke-width="0.3"/>
+          <circle cx="108" cy="33.6" r="0.55" fill="#fff" stroke="${amber}" stroke-width="0.3"/>
+          <circle cx="111" cy="34.2" r="0.55" fill="#fff" stroke="${amber}" stroke-width="0.3"/>
         </g>
       ` + close;
-    case 4: // Breaking — the sheet separates into pieces
+    case 3: // Die Cutting — top steel-die block + bottom board; paper passes between
+      // ── Visual story ─────────────────────────────────────────
+      // TOP BLOCK   : wooden carrier with a steel cutter shaped like a +
+      //               cross (the die). Stays put.
+      // PAPER PATH  : dashed line between the two blocks. A blank sheet
+      //               feeds in from the LEFT, exits on the RIGHT showing
+      //               the same + cut pattern that the steel die carries.
+      // BOTTOM BLOCK: green-felt-topped wooden base. The sheet rests on
+      //               this while the top block presses down to cut.
+      // Match the user's reference (the Tradeprint Knowledge diagram):
+      // two stacked blocks, paper between, cut pattern carried over.
+      // Everything static — only the paper moves.
+      // ───────────────────────────────────────────────────────────
       return open + `
-        <rect class="sm sm-break-l" x="22" y="22" width="34" height="28" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <rect class="sm sm-break-r" x="64" y="22" width="34" height="28" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <line x1="60" y1="18" x2="60" y2="54" stroke="${edge}" stroke-width="1" stroke-dasharray="3 3"/>
+        <!-- TOP BLOCK: brushed-steel carrier with the steel cutting die.
+             Drops 4px while the sheet is centred between the jaws so it
+             visibly presses the paper, then eases back up. -->
+        <g class="sm sm-press-top">
+          <rect x="30" y="14" width="60" height="14" rx="1.2" fill="#9a9a95" stroke="#3a3a36" stroke-width="0.6"/>
+          <rect x="32" y="16" width="56" height="10" rx="0.6" fill="#5a5a55"/>
+          <!-- Brushed-steel hatch on the carrier face so it reads as metal -->
+          <g stroke="#3a3a36" stroke-width="0.25" opacity="0.6">
+            <line x1="34" y1="18" x2="86" y2="18"/>
+            <line x1="34" y1="21" x2="86" y2="21"/>
+            <line x1="34" y1="24" x2="86" y2="24"/>
+          </g>
+          <!-- Steel die: horizontal blade + vertical blade = + cross -->
+          <rect x="38" y="10" width="44" height="4" rx="0.4" fill="#dcdcd6" stroke="#3a3a36" stroke-width="0.35"/>
+          <rect x="58" y="5"  width="4"  height="13" rx="0.4" fill="#dcdcd6" stroke="#3a3a36" stroke-width="0.35"/>
+          <!-- Polished highlight strip so the blades pop against the carrier -->
+          <rect x="39" y="11" width="42" height="0.6" fill="#fff" opacity="0.8"/>
+          <rect x="59" y="6"  width="2"  height="11"  fill="#fff" opacity="0.5"/>
+        </g>
+
+        <!-- PAPER PATH between the two blocks -->
+        <line x1="0" y1="35" x2="120" y2="35" stroke="${edge}" stroke-width="0.7" stroke-dasharray="2.5 1.5"/>
+
+        <!-- Blank sheet feeding in from the LEFT -->
+        <rect class="sm sm-feed" x="-2" y="32" width="14" height="6" rx="0.5" fill="${paper}" stroke="${edge}" stroke-width="0.6"/>
+
+        <!-- Cut sheet exiting on the RIGHT — shows the same + cross the
+             die carries, so the cause-and-effect reads at a glance. -->
+        <g class="sm sm-feed-out">
+          <rect x="100" y="32" width="14" height="6" rx="0.5" fill="${paper}" stroke="${edge}" stroke-width="0.6"/>
+          <line x1="107" y1="32" x2="107" y2="38" stroke="${blue}" stroke-width="0.7"/>
+          <line x1="100" y1="35" x2="114" y2="35" stroke="${blue}" stroke-width="0.7"/>
+        </g>
+
+        <!-- BOTTOM BLOCK: brushed-steel anvil where the sheet rests.
+             Rises 4px in sync with the top block to pinch the paper
+             from below. A lighter top plate marks the strike surface. -->
+        <g class="sm sm-press-bot">
+          <rect x="30" y="42" width="60" height="5"  rx="0.6" fill="#c8c8c3" stroke="#3a3a36" stroke-width="0.5"/>
+          <rect x="30" y="46" width="60" height="14" rx="1.2" fill="#9a9a95" stroke="#3a3a36" stroke-width="0.6"/>
+          <rect x="32" y="48" width="56" height="10" rx="0.6" fill="#5a5a55"/>
+          <!-- Brushed-steel hatch on the body face -->
+          <g stroke="#3a3a36" stroke-width="0.25" opacity="0.6">
+            <line x1="34" y1="50" x2="86" y2="50"/>
+            <line x1="34" y1="53" x2="86" y2="53"/>
+            <line x1="34" y1="56" x2="86" y2="56"/>
+          </g>
+        </g>
       ` + close;
-    case 5: // Pasting — a flap folds over and a glue dab pulses
+    case 4: // Breaking — worker strikes a pallet of die-cut sheets; waste flies off
+      // ── Visual story ─────────────────────────────────────────
+      // PALLET base at the bottom (wood slats). Above it, a STACK of
+      // die-cut cardboard sheets, layered as many thin strips of
+      // alternating warm tan tones. Three LOT labels with miniature
+      // barcodes sit on the front face so the stack reads as
+      // finished, labelled work — not raw paper. A HAMMER hangs
+      // above the stack and strikes down on a 1.7s alternate cycle.
+      // Three CARDBOARD WASTE BITS on the right edge of the stack
+      // drift outward and fade as the hammer strikes, conveying the
+      // 'breaking off the offcuts' moment. A WORKER silhouette in a
+      // hi-vis vest stands on the right, the way the user's reference
+      // shows an operator breaking cartons by hand.
+      // ───────────────────────────────────────────────────────────
       return open + `
-        <rect x="34" y="28" width="52" height="24" rx="1" fill="${paper}" stroke="${edge}" stroke-width="1.5"/>
-        <rect class="sm sm-fold" x="34" y="28" width="26" height="24" fill="#eeece7" stroke="${edge}" stroke-width="1.5" style="transform-origin:34px 40px"/>
-        <circle class="sm sm-glue" cx="60" cy="30" r="3.5" fill="${amber}"/>
+        <!-- Soft floor shadow under the pallet -->
+        <ellipse cx="46" cy="63" rx="44" ry="2" fill="#1a1a18" opacity="0.22"/>
+
+        <!-- STACK of die-cut cardboard sheets on the pallet -->
+        <g>
+          <rect x="8" y="22" width="78" height="3" fill="#c8946a" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="25" width="78" height="3" fill="#d9a87c" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="28" width="78" height="3" fill="#c8946a" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="31" width="78" height="3" fill="#d9a87c" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="34" width="78" height="3" fill="#c8946a" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="37" width="78" height="3" fill="#d9a87c" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="40" width="78" height="3" fill="#c8946a" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="43" width="78" height="3" fill="#d9a87c" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="46" width="78" height="3" fill="#c8946a" stroke="#7a4a1c" stroke-width="0.3"/>
+          <rect x="8" y="49" width="78" height="3" fill="#d9a87c" stroke="#7a4a1c" stroke-width="0.3"/>
+
+          <!-- Three LOT labels on the stack face, each with a small barcode -->
+          <g>
+            <rect x="14" y="38" width="14" height="9" fill="#f5f0e6" stroke="#5a3e1c" stroke-width="0.3"/>
+            <rect x="16" y="40"   width="10" height="0.7" fill="#3a2a1a"/>
+            <rect x="16" y="41.6" width="8"  height="0.5" fill="#3a2a1a" opacity="0.7"/>
+            <g fill="#3a2a1a">
+              <rect x="16"   y="43.5" width="0.4" height="2"/><rect x="16.7" y="43.5" width="0.8" height="2"/>
+              <rect x="17.9" y="43.5" width="0.4" height="2"/><rect x="18.7" y="43.5" width="1"   height="2"/>
+              <rect x="20.1" y="43.5" width="0.4" height="2"/><rect x="20.9" y="43.5" width="0.7" height="2"/>
+              <rect x="22"   y="43.5" width="0.4" height="2"/><rect x="22.8" y="43.5" width="1.1" height="2"/>
+              <rect x="24.3" y="43.5" width="0.4" height="2"/><rect x="25.1" y="43.5" width="0.8" height="2"/>
+            </g>
+          </g>
+          <g>
+            <rect x="36" y="38" width="14" height="9" fill="#f5f0e6" stroke="#5a3e1c" stroke-width="0.3"/>
+            <rect x="38" y="40"   width="10" height="0.7" fill="#3a2a1a"/>
+            <rect x="38" y="41.6" width="8"  height="0.5" fill="#3a2a1a" opacity="0.7"/>
+            <g fill="#3a2a1a">
+              <rect x="38"   y="43.5" width="0.4" height="2"/><rect x="38.7" y="43.5" width="0.8" height="2"/>
+              <rect x="39.9" y="43.5" width="0.4" height="2"/><rect x="40.7" y="43.5" width="1"   height="2"/>
+              <rect x="42.1" y="43.5" width="0.4" height="2"/><rect x="42.9" y="43.5" width="0.7" height="2"/>
+              <rect x="44"   y="43.5" width="0.4" height="2"/><rect x="44.8" y="43.5" width="1.1" height="2"/>
+              <rect x="46.3" y="43.5" width="0.4" height="2"/><rect x="47.1" y="43.5" width="0.8" height="2"/>
+            </g>
+          </g>
+          <g>
+            <rect x="58" y="38" width="14" height="9" fill="#f5f0e6" stroke="#5a3e1c" stroke-width="0.3"/>
+            <rect x="60" y="40"   width="10" height="0.7" fill="#3a2a1a"/>
+            <rect x="60" y="41.6" width="8"  height="0.5" fill="#3a2a1a" opacity="0.7"/>
+            <g fill="#3a2a1a">
+              <rect x="60"   y="43.5" width="0.4" height="2"/><rect x="60.7" y="43.5" width="0.8" height="2"/>
+              <rect x="61.9" y="43.5" width="0.4" height="2"/><rect x="62.7" y="43.5" width="1"   height="2"/>
+              <rect x="64.1" y="43.5" width="0.4" height="2"/><rect x="64.9" y="43.5" width="0.7" height="2"/>
+              <rect x="66"   y="43.5" width="0.4" height="2"/><rect x="66.8" y="43.5" width="1.1" height="2"/>
+              <rect x="68.3" y="43.5" width="0.4" height="2"/><rect x="69.1" y="43.5" width="0.8" height="2"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- CARDBOARD WASTE BITS — drift off the right edge as the hammer strikes -->
+        <g fill="#d9a87c" stroke="#7a4a1c" stroke-width="0.3">
+          <polygon class="sm sm-waste1" points="88,26 92,24 93.5,28 89,29"/>
+          <polygon class="sm sm-waste2" points="92,36 96,34 97,38 92.5,39"/>
+          <polygon class="sm sm-waste3" points="88,46 92,44 93,48 89,49"/>
+        </g>
+
+        <!-- PALLET base (wood slats) -->
+        <g>
+          <rect x="4" y="54" width="86" height="8" fill="#8b6c3e" stroke="#5a3e1c" stroke-width="0.4"/>
+          <g stroke="#5a3e1c" stroke-width="0.4">
+            <line x1="14" y1="54" x2="14" y2="62"/>
+            <line x1="28" y1="54" x2="28" y2="62"/>
+            <line x1="46" y1="54" x2="46" y2="62"/>
+            <line x1="62" y1="54" x2="62" y2="62"/>
+            <line x1="78" y1="54" x2="78" y2="62"/>
+          </g>
+        </g>
+
+        <!-- WORKER silhouette in hi-vis vest on the right -->
+        <g>
+          <!-- Body (dark) -->
+          <rect x="102" y="38" width="14" height="22" fill="#2a2a26"/>
+          <!-- Yellow safety vest -->
+          <rect x="100" y="36" width="18" height="18" fill="#f7e423" stroke="#9c8005" stroke-width="0.3"/>
+          <!-- Reflective stripes -->
+          <rect x="100" y="44" width="18" height="0.7" fill="#fff" opacity="0.7"/>
+          <rect x="100" y="46" width="18" height="0.7" fill="#fff" opacity="0.7"/>
+          <!-- Head + hair + glasses -->
+          <circle cx="108" cy="29" r="3.6" fill="#d4a574"/>
+          <path d="M104.5 29 Q104.5 24 108 24 Q111.5 24 111.5 29 Z" fill="#2a1a0a"/>
+          <rect x="105.5" y="28.5" width="5" height="1" fill="#0a0a08"/>
+
+          <!-- ARM + HAMMER — swings around the shoulder pivot (100, 38)
+               from raised-back (+30°) to struck-forward (-55°). When
+               the rotation lands at -55°, the hammer head ends up just
+               above the right edge of the stack, in sync with the
+               waste pieces flying off (both 1.7s alternate). -->
+          <g class="sm sm-swing" style="transform-origin: 100px 38px">
+            <!-- Forearm (skin colour) extending up from the shoulder -->
+            <rect x="98" y="20" width="4" height="18" rx="0.6" fill="#d4a574" stroke="#7a5c3e" stroke-width="0.3"/>
+            <!-- Wrist / hand grip -->
+            <circle cx="100" cy="19" r="2.3" fill="#d4a574" stroke="#7a5c3e" stroke-width="0.3"/>
+            <!-- Wooden hammer handle -->
+            <rect x="98.5" y="6" width="3" height="13" fill="#7a5c3e" stroke="#3a2a1a" stroke-width="0.3"/>
+            <!-- Steel hammer head -->
+            <rect x="92" y="0" width="14" height="6" rx="0.6" fill="#5a5a55" stroke="#1a1a18" stroke-width="0.5"/>
+            <!-- Polished highlight on the head -->
+            <rect x="93" y="1" width="12" height="1.2" fill="#fff" opacity="0.5"/>
+          </g>
+        </g>
       ` + close;
-    case 6: // Storage / Ready — sheets stack up
+    case 5: // Pasting — flat printed carton on the left folds into a 3D box on the right
+      // ── Visual story ─────────────────────────────────────────
+      // LEFT  : flat unfolded medicine-style carton with the main panel,
+      //         top + bottom dust flaps, and a side-glue panel. The side
+      //         panel uses sm-fold so it visibly folds inward (the gluing
+      //         step).
+      // MIDDLE: an arrow pointing right + an amber glue dab pulsing
+      //         (sm-glue) so the "paste" step is obvious.
+      // RIGHT : the same carton, now folded into a 3-face isometric box,
+      //         popping in with sm-carton's overshoot easing. The blue
+      //         curve + text bars from the flat panel wrap onto the
+      //         folded face so the SAME printed design is recognisable
+      //         in both states.
+      // ───────────────────────────────────────────────────────────
       return open + `
+        <!-- LEFT: flat unfolded carton template -->
+        <g>
+          <!-- Main panel (this becomes the front face when folded) -->
+          <rect x="14" y="22" width="20" height="24" fill="#cfe2f6" stroke="${blue}" stroke-width="0.5"/>
+          <!-- Top dust flap -->
+          <rect x="14" y="15" width="20" height="7"  fill="#e8f1fa" stroke="${blue}" stroke-width="0.5"/>
+          <!-- Bottom dust flap -->
+          <rect x="14" y="46" width="20" height="7"  fill="#e8f1fa" stroke="${blue}" stroke-width="0.5"/>
+          <!-- Side glue panel — animates folding inward (the paste step) -->
+          <rect class="sm sm-fold" x="34" y="22" width="8" height="24" fill="#e8f1fa" stroke="${blue}" stroke-width="0.5" style="transform-origin:34px 34px"/>
+          <!-- Printed design on the main panel: blue curve + text bars -->
+          <path d="M16 28 Q24 24 32 28 L32 33 Q24 30 16 33 Z" fill="${blue}" opacity="0.7"/>
+          <rect x="17" y="35"   width="14" height="1.2" fill="${blue}"/>
+          <rect x="17" y="37.6" width="10" height="0.7" fill="${blue}" opacity="0.65"/>
+          <rect x="17" y="39.6" width="12" height="0.7" fill="${blue}" opacity="0.65"/>
+          <!-- Dashed fold lines so the score creases are visible -->
+          <g stroke="${blue}" stroke-width="0.3" stroke-dasharray="1.4 1" opacity="0.55">
+            <line x1="14" y1="22" x2="34" y2="22"/>
+            <line x1="14" y1="46" x2="34" y2="46"/>
+            <line x1="34" y1="22" x2="34" y2="46"/>
+          </g>
+        </g>
+
+        <!-- MIDDLE: arrow + pulsing glue dab -->
+        <g>
+          <path d="M48 34 L64 34" stroke="#5a5a55" stroke-width="1.1" stroke-linecap="round"/>
+          <path d="M61 30 L65 34 L61 38" stroke="#5a5a55" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <circle class="sm sm-glue" cx="56" cy="44" r="2.2" fill="${amber}"/>
+        </g>
+
+        <!-- RIGHT: folded 3D box — same printed design wraps onto it -->
+        <g class="sm sm-carton" style="transform-origin:90px 38px">
+          <!-- Front face -->
+          <path d="M74 26 L96 26 L96 56 L74 56 Z" fill="#cfe2f6" stroke="${blue}" stroke-width="0.6"/>
+          <!-- Top face (perspective) -->
+          <path d="M74 26 L80 20 L102 20 L96 26 Z" fill="#e8f1fa" stroke="${blue}" stroke-width="0.6"/>
+          <!-- Right side face (perspective) -->
+          <path d="M96 26 L102 20 L102 50 L96 56 Z" fill="${blueLt}" stroke="${blue}" stroke-width="0.6"/>
+          <!-- Printed design carried onto the front face -->
+          <path d="M76 32 Q85 28 94 32 L94 37 Q85 34 76 37 Z" fill="${blue}" opacity="0.7"/>
+          <rect x="77" y="39"   width="16" height="1.2" fill="${blue}"/>
+          <rect x="77" y="41.6" width="12" height="0.7" fill="${blue}" opacity="0.65"/>
+          <rect x="77" y="43.6" width="14" height="0.7" fill="${blue}" opacity="0.65"/>
+        </g>
+      ` + close;
+    case 6: // Storage / Ready — sheets stack from the bottom up with overshoot bounce
+      return open + `
+        <!-- Floor shadow -->
+        <ellipse cx="60" cy="60" rx="36" ry="2" fill="${edge}" opacity="0.25"/>
         <rect x="30" y="50" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <rect class="sm sm-stack1" x="30" y="41" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <rect class="sm sm-stack2" x="30" y="32" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
         <rect class="sm sm-stack3" x="30" y="23" width="60" height="8" rx="1" fill="${paper}" stroke="${edge}"/>
+        <!-- Top sheet highlight stripe so the stack reads as multiple layers -->
+        <line x1="32" y1="24.5" x2="88" y2="24.5" stroke="#fff" stroke-width="0.6"/>
       ` + close;
-    case 7: // Delivered — a truck drives off, wheels spinning
+    case 7: // Delivered — truck rolls; exhaust puffs; road dashes pass underneath
       return open + `
-        <line x1="10" y1="54" x2="110" y2="54" stroke="${edge}" stroke-width="2"/>
+        <!-- Road with moving dashes -->
+        <line x1="10" y1="56" x2="110" y2="56" stroke="${edge}" stroke-width="2"/>
+        <line class="sm sm-road" x1="10" y1="60" x2="110" y2="60" stroke="${edge}" stroke-width="1.2" stroke-dasharray="6 12"/>
+        <!-- Exhaust puffs trailing behind the truck -->
+        <g fill="${edge}" opacity="0.7">
+          <circle class="sm sm-exhaust"    cx="22" cy="36" r="2.5"/>
+          <circle class="sm sm-exhaust e2" cx="22" cy="36" r="2.5"/>
+          <circle class="sm sm-exhaust e3" cx="22" cy="36" r="2.5"/>
+        </g>
         <g class="sm sm-drive">
           <rect x="22" y="26" width="42" height="22" rx="2" fill="${blue}"/>
           <path d="M64 32 h14 l8 8 v8 h-22 z" fill="${blueLt}" stroke="${blue}"/>
           <rect x="68" y="34" width="10" height="7" rx="1" fill="#eaf2fb"/>
+          <!-- Headlight -->
+          <circle cx="86" cy="44" r="1.2" fill="${amber}"/>
           <circle class="sm sm-wheel" cx="34" cy="50" r="5.5" fill="${ink}" stroke="${edge}" style="transform-origin:34px 50px"/>
+          <circle cx="34" cy="50" r="1.8" fill="${edge}"/>
+          <line x1="34" y1="44.5" x2="34" y2="55.5" stroke="${edge}" stroke-width="0.6"/>
+          <line x1="28.5" y1="50" x2="39.5" y2="50" stroke="${edge}" stroke-width="0.6"/>
           <circle class="sm sm-wheel" cx="74" cy="50" r="5.5" fill="${ink}" stroke="${edge}" style="transform-origin:74px 50px"/>
+          <circle cx="74" cy="50" r="1.8" fill="${edge}"/>
+          <line x1="74" y1="44.5" x2="74" y2="55.5" stroke="${edge}" stroke-width="0.6"/>
+          <line x1="68.5" y1="50" x2="79.5" y2="50" stroke="${edge}" stroke-width="0.6"/>
         </g>
       ` + close;
     default:
