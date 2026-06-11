@@ -10478,7 +10478,7 @@ let stationIdleTimer = null;
 let stationNotes    = [];     // incoming notes for this station's queue (prev stage → us)
 let stationRec      = null;   // active MediaRecorder while capturing a voice note
 let stationRecTimer = null;   // 60s auto-stop
-let stationRecBlob  = null;   // finished recording awaiting send { dataUrl, mime, duration }
+let stationRecBlobs = [];     // queued recordings awaiting send: [{ dataUrl, mime, duration }]
 let stationRecStart = 0;
 
 function enterStation() {
@@ -10610,7 +10610,7 @@ function stationQueueHtml() {
 function stationOpenJob(id) {
   stationJobId = id;
   stationView = 'update';
-  stationRecBlob = null;
+  stationRecBlobs = [];
   // Text notes count as read the moment they're on screen; voice notes
   // wait for an actual play (stationNoteHeard via onplay).
   stationNotes.filter(n => n.job_id === id && n.kind === 'text' && !n.heard_at)
@@ -10791,22 +10791,18 @@ async function stationRecToggle() {
       stream.getTracks().forEach(t => t.stop());
       if (stationRecTimer) { clearTimeout(stationRecTimer); stationRecTimer = null; }
       const blob = new Blob(chunks, { type: stationRec.mimeType || 'audio/webm' });
+      const startedAt = stationRecStart;
       stationRec = null;
       const reader = new FileReader();
       reader.onload = () => {
-        stationRecBlob = {
+        // Append (not replace) — every tap of Record voice stacks another
+        // clip in the queue. Send posts each as its own note.
+        stationRecBlobs.push({
           dataUrl: reader.result,
           mime: blob.type,
-          duration: Math.round((Date.now() - stationRecStart) / 1000),
-        };
-        const prev = document.getElementById('sn-preview');
-        if (prev) prev.innerHTML = `
-          <div style="display:flex;align-items:center;gap:10px;">
-            <audio controls src="${stationRecBlob.dataUrl}" style="flex:1;height:46px;"></audio>
-            <button class="btn btn-sm" onclick="stationRecDiscard()" title="Delete recording">&#128465;</button>
-          </div>`;
-        const b = document.getElementById('sn-rec-btn');
-        if (b) { b.classList.remove('recording'); b.innerHTML = micIconSvg() + ' Re-record'; }
+          duration: Math.round((Date.now() - startedAt) / 1000),
+        });
+        stationRenderRecPreview();
       };
       reader.readAsDataURL(blob);
     };
@@ -10819,12 +10815,30 @@ async function stationRecToggle() {
   }
 }
 
-function stationRecDiscard() {
-  stationRecBlob = null;
+// Render the queue of pending voice clips, with per-clip delete. Also drives
+// the Record-button label: empty queue → "Record voice", one+ in queue →
+// "Record another". Called whenever the queue changes.
+function stationRenderRecPreview() {
   const prev = document.getElementById('sn-preview');
-  if (prev) prev.innerHTML = '';
+  if (prev) {
+    prev.innerHTML = stationRecBlobs.length ? stationRecBlobs.map((clip, i) => `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <span style="font-size:13px;font-weight:700;color:var(--text2);min-width:22px;">${i + 1}.</span>
+        <audio controls src="${clip.dataUrl}" style="flex:1;height:46px;"></audio>
+        <button class="btn btn-sm" onclick="stationRecRemove(${i})" title="Delete this clip">&#128465;</button>
+      </div>`).join('') : '';
+  }
   const b = document.getElementById('sn-rec-btn');
-  if (b) { b.classList.remove('recording'); b.innerHTML = micIconSvg() + ' Record voice'; }
+  if (b) {
+    b.classList.remove('recording');
+    b.innerHTML = micIconSvg() + ' ' + (stationRecBlobs.length ? 'Record another' : 'Record voice');
+  }
+}
+
+function stationRecRemove(i) {
+  stationRecBlobs.splice(i, 1);
+  stationRenderRecPreview();
+  stationResetIdle();
 }
 
 // Abort any in-flight recording (screen change / logout) without saving.
@@ -10835,27 +10849,34 @@ function stationRecAbort() {
     try { stationRec.stop(); } catch {}
   }
   stationRec = null;
-  stationRecBlob = null;
+  stationRecBlobs = [];
 }
 
+// Send the typed text (if any) then every queued voice clip as separate
+// notes — chronological order on the receiving station. Each clip becomes
+// its own row in station_notes, with its own heard_at status.
 async function stationSendNote() {
   const j = jobs.find(x => x.id === stationJobId);
   if (!j || !stationOperator) return;
   const text = (document.getElementById('sn-text') || {}).value?.trim() || '';
-  if (!stationRecBlob && !text) { notify('Record a voice note or type something first'); return; }
+  if (!stationRecBlobs.length && !text) { notify('Record a voice note or type something first'); return; }
   const btn = document.getElementById('sn-send-btn');
   if (btn) btn.disabled = true;
   try {
-    await api('POST', `/api/jobs/${j.id}/station-notes`, {
-      pin: stationOperator.pin,
-      kind: stationRecBlob ? 'voice' : 'text',
-      body: text,
-      audio: stationRecBlob ? stationRecBlob.dataUrl : undefined,
-      mime: stationRecBlob ? stationRecBlob.mime : undefined,
-      duration_s: stationRecBlob ? stationRecBlob.duration : undefined,
-    });
-    stationRecBlob = null;
-    notify('Note sent to the next station');
+    if (text) {
+      await api('POST', `/api/jobs/${j.id}/station-notes`, {
+        pin: stationOperator.pin, kind: 'text', body: text,
+      });
+    }
+    for (const clip of stationRecBlobs) {
+      await api('POST', `/api/jobs/${j.id}/station-notes`, {
+        pin: stationOperator.pin, kind: 'voice', body: '',
+        audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration,
+      });
+    }
+    const sentCount = (text ? 1 : 0) + stationRecBlobs.length;
+    stationRecBlobs = [];
+    notify(`${sentCount} note${sentCount === 1 ? '' : 's'} sent to the next station`);
     stationRender();   // clears the form
   } catch (e) {
     notify('Error: ' + e.message);
