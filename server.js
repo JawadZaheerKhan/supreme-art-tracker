@@ -6,7 +6,9 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 
 const app = express();
-app.use(express.json());
+// 6mb limit: station voice notes arrive as base64 audio (~1MB for 60s of
+// opus). Default 100kb would 413 them. Vercel itself caps bodies at 4.5MB.
+app.use(express.json({ limit: '6mb' }));
 app.use(cookieParser());
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -288,6 +290,30 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS capa_reports_job_idx    ON capa_reports(job_id)`;
     await sql`CREATE INDEX IF NOT EXISTS capa_reports_status_idx ON capa_reports(status)`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS capa_reports_job_seq_uidx ON capa_reports(job_id, seq)`;
+
+    // Station notes — short text/voice messages an operator leaves on a job
+    // for the NEXT station ("plate 2 runs dark, watch the left edge").
+    // stage_index records where the note was written; it is shown at the
+    // station whose stage_index is one higher, while the job sits there.
+    // Voice audio is stored inline as a base64 data-URL (TEXT) — a 60s opus
+    // clip is ~1MB, fine at floor volumes; audio is purged after 30 days
+    // (lazily, on each note insert) while the text rows stay for history.
+    await sql`
+      CREATE TABLE IF NOT EXISTS station_notes (
+        id            SERIAL PRIMARY KEY,
+        job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        stage_index   INTEGER NOT NULL,
+        operator_name TEXT,
+        kind          TEXT NOT NULL DEFAULT 'text',
+        body          TEXT,
+        audio         TEXT,
+        mime          TEXT,
+        duration_s    REAL,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        heard_at      TIMESTAMPTZ
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS station_notes_job_idx ON station_notes(job_id)`;
 
     console.log('Database ready');
   } catch (err) {
@@ -1880,6 +1906,111 @@ app.post('/api/jobs/:id/station-update', requireWriteUser, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Station notes (text + voice, operator → next station) ───
+// A note written at stage S is shown to the station at stage S+1 while
+// the job sits there. Office users can read everything via the per-job
+// GET (used by the History modal).
+
+// CREATE a note. PIN-verified like station-update — never trust the client
+// for the operator identity. kind: 'text' (body required) or 'voice'
+// (audio data-URL required, ≤ ~3MB so we stay under Vercel's body cap).
+app.post('/api/jobs/:id/station-notes', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const pin = String(req.body.pin || '').trim();
+    const kind = req.body.kind === 'voice' ? 'voice' : 'text';
+    const body = String(req.body.body || '').trim();
+    const audio = typeof req.body.audio === 'string' ? req.body.audio : '';
+    const mime = String(req.body.mime || '').slice(0, 80);
+    const duration = Number.isFinite(+req.body.duration_s) ? +req.body.duration_s : null;
+
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    const ops = await sql`SELECT id, name, stage_index FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+    const operator = ops[0];
+
+    if (kind === 'text' && !body) return res.status(400).json({ error: 'Note is empty' });
+    if (kind === 'voice') {
+      if (!audio.startsWith('data:audio/')) return res.status(400).json({ error: 'No recording attached' });
+      if (audio.length > 3_000_000) return res.status(413).json({ error: 'Recording too long — keep it under a minute' });
+    }
+
+    const rows = await sql`SELECT id, stage_index, deleted_at FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    // Operator may only leave notes on jobs at their own station.
+    if ((rows[0].stage_index || 0) !== operator.stage_index) {
+      return res.status(400).json({ error: "This job isn't at your station right now." });
+    }
+
+    // Lazy purge: drop audio blobs older than 30 days (text survives).
+    await sql`UPDATE station_notes SET audio = NULL WHERE audio IS NOT NULL AND created_at < NOW() - INTERVAL '30 days'`;
+
+    const inserted = await sql`
+      INSERT INTO station_notes (job_id, stage_index, operator_name, kind, body, audio, mime, duration_s)
+      VALUES (${id}, ${operator.stage_index}, ${operator.name}, ${kind},
+              ${kind === 'text' ? body : (body || null)}, ${kind === 'voice' ? audio : null},
+              ${kind === 'voice' ? mime : null}, ${duration})
+      RETURNING id, job_id, stage_index, operator_name, kind, body, mime, duration_s, created_at
+    `;
+    await logAudit(sql, req, {
+      action: 'job.station-note',
+      entityType: 'job',
+      entityId: id,
+      summary: `${kind === 'voice' ? 'Voice note' : 'Note'} left on Job E-${id} by ${operator.name} at ${STAGES[operator.stage_index] || 'Stage ' + operator.stage_index}`,
+      metadata: { operator_name: operator.name, stage_index: operator.stage_index, kind },
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Notes for a whole station queue in one call: every note written at
+// stage (S-1) on jobs that are CURRENTLY at stage S. Powers both the
+// queue badges and the job screen at the station.
+app.get('/api/station-notes/for-stage/:stageIndex', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const stage = parseInt(req.params.stageIndex, 10);
+    if (!Number.isInteger(stage) || stage <= 0) return res.json([]); // stage 0 has no previous station
+    const rows = await sql`
+      SELECT n.id, n.job_id, n.stage_index, n.operator_name, n.kind, n.body,
+             n.audio, n.mime, n.duration_s, n.created_at, n.heard_at
+        FROM station_notes n
+        JOIN jobs j ON j.id = n.job_id
+       WHERE j.deleted_at IS NULL
+         AND (j.stage_index) = ${stage}
+         AND n.stage_index = ${stage - 1}
+       ORDER BY n.created_at ASC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// All notes for one job — the office History modal. Any signed-in user.
+app.get('/api/jobs/:id/station-notes', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT id, job_id, stage_index, operator_name, kind, body, audio, mime, duration_s, created_at, heard_at
+        FROM station_notes WHERE job_id = ${req.params.id} ORDER BY created_at ASC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Mark a note heard/read — fired when the next station plays or views it.
+app.post('/api/station-notes/:id/heard', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    await sql`UPDATE station_notes SET heard_at = COALESCE(heard_at, NOW()) WHERE id = ${req.params.id}`;
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // ── CAPA reports ─────────────────────────────────────────────

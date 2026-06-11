@@ -536,6 +536,50 @@
   /* When the pad is open, pad the page bottom so the focused field can
      scroll above the sheet instead of hiding underneath it. */
   #station-mode.numpad-open { padding-bottom: 340px; }
+  /* ── Station notes (text + voice) ───────────────────────────
+     Incoming notes from the previous station render as amber message
+     cards at the top of the job screen — unmissable. The add-note
+     block sits under the number fields. */
+  .station-notes-in { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 6px; }
+  .sn-card {
+    background: #fffbeb; border: 2px solid #f59e0b; border-radius: 12px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .sn-from { font-size: 14px; font-weight: 700; color: #92400e; }
+  .sn-body { font-size: 19px; font-weight: 600; color: var(--text); line-height: 1.4; }
+  .sn-card audio { width: 100%; height: 46px; }
+  .sj-note-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: #fef3c7; color: #92400e; border: 1px solid #f59e0b;
+    border-radius: 10px; padding: 3px 9px; font-size: 13px; font-weight: 700;
+  }
+  .station-addnote { border-top: 2px dashed var(--border); margin-top: 6px; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .station-addnote-title { font-size: 16px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
+  .station-addnote textarea {
+    font-size: 19px; padding: 14px; border: 2px solid var(--border2); border-radius: 12px;
+    background: var(--bg); color: var(--text); font-family: var(--font); resize: none;
+  }
+  .station-note-row { display: flex; gap: 10px; }
+  .station-rec-btn {
+    flex: 1; font-size: 19px; font-weight: 700; padding: 16px; border-radius: 12px;
+    background: var(--bg2); color: var(--text); border: 2px solid var(--border2);
+    cursor: pointer; font-family: var(--font);
+  }
+  .station-rec-btn.recording {
+    background: #A32D2D; color: #fff; border-color: #A32D2D;
+    animation: recPulse 1s ease-in-out infinite;
+  }
+  @keyframes recPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(163,45,45,0.5); } 50% { box-shadow: 0 0 0 10px rgba(163,45,45,0); } }
+  .station-send-note {
+    flex: 1; font-size: 19px; font-weight: 700; padding: 16px; border-radius: 12px;
+    background: #1e40af; color: #fff; border: 2px solid #1e40af; cursor: pointer; font-family: var(--font);
+  }
+  .station-send-note:disabled { opacity: 0.45; cursor: default; }
+  /* Office History modal: floor-notes section */
+  .hist-floor-note { background: #fffbeb; border: 1px solid #f59e0b; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+  .hist-floor-note .sn-from { font-size: 12px; }
+  .hist-floor-note .sn-body { font-size: 14px; font-weight: 500; }
+  .hist-floor-note audio { width: 100%; height: 36px; margin-top: 4px; }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
   /* Branded dialogs (confirm / alert / prompt) — sit above the regular
      modal overlay (z-index 200) so a dialog can interrupt a form modal.
@@ -8836,10 +8880,27 @@ async function openHistory(id) {
       </div>
       <div class="h-time">${esc(fmtStageTime(l.time))}</div>
     </div>`).join('')}
+    <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Floor Notes</div>
+    <div id="job-floor-notes" style="font-size:13px;color:var(--text2);">Loading…</div>
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Audit Log</div>
     <div id="job-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
   </div>`);
+  // Floor notes (station → station messages, incl. voice) load in parallel
+  // with the audit log — each section fills in as its request lands.
+  api('GET', `/api/jobs/${id}/station-notes`).then(notes => {
+    const el = document.getElementById('job-floor-notes');
+    if (!el) return;
+    el.innerHTML = notes.length ? notes.map(n => `
+      <div class="hist-floor-note">
+        <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} ${esc(STAGES[n.stage_index] || 'Stage ' + n.stage_index)} → ${esc(STAGES[n.stage_index + 1] || 'next')} · ${esc(n.operator_name || '')} · ${fmtDMYT(n.created_at)}${n.heard_at ? ' · ✓ heard' : ''}</div>
+      ${n.body ? `<div class="sn-body">${esc(n.body)}</div>` : ''}
+        ${n.kind === 'voice' ? (n.audio ? `<audio controls preload="metadata" src="${n.audio}"></audio>` : '<div style="font-style:italic;font-size:12px;">(voice note expired — audio kept 30 days)</div>') : ''}
+      </div>`).join('') : '<div class="empty">No notes between stations on this job.</div>';
+  }).catch(e => {
+    const el = document.getElementById('job-floor-notes');
+    if (el) el.innerHTML = 'Error: ' + e.message;
+  });
   try {
     const audit = await api('GET', `/api/audit?entity_type=job&entity_id=${id}`);
     document.getElementById('job-audit-content').innerHTML = audit.length
@@ -10410,6 +10471,11 @@ let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
 let stationJobId    = null;
 let stationIdleTimer = null;
+let stationNotes    = [];     // incoming notes for this station's queue (prev stage → us)
+let stationRec      = null;   // active MediaRecorder while capturing a voice note
+let stationRecTimer = null;   // 60s auto-stop
+let stationRecBlob  = null;   // finished recording awaiting send { dataUrl, mime, duration }
+let stationRecStart = 0;
 
 function enterStation() {
   stationLogout(true);  // always start fresh at the PIN pad
@@ -10428,7 +10494,9 @@ function stationLogout(silent) {
   stationPinBuf = '';
   stationView = 'pin';
   stationJobId = null;
+  stationNotes = [];
   stationClosePad();
+  stationRecAbort();
   if (stationIdleTimer) { clearTimeout(stationIdleTimer); stationIdleTimer = null; }
   if (mode === 'station') stationRender();
   if (!silent) notify('Signed out of station');
@@ -10473,6 +10541,7 @@ async function stationPinSubmit() {
     stationOperator = { ...op, pin };
     stationView = 'queue';
     await loadJobs();             // make sure the queue is current
+    await stationLoadNotes();     // incoming notes for the queue badges
     stationRender();
   } catch (e) {
     stationPinBuf = '';
@@ -10492,6 +10561,15 @@ function stationStageBanner(stageIndex) {
   </div>`;
 }
 
+// Pull every note aimed at this station (written at our stage - 1, for jobs
+// currently sitting with us). One request for the whole queue.
+async function stationLoadNotes() {
+  if (!stationOperator) { stationNotes = []; return; }
+  try {
+    stationNotes = await api('GET', `/api/station-notes/for-stage/${stationOperator.stage_index}`);
+  } catch { stationNotes = []; }
+}
+
 function stationQueueHtml() {
   const stIdx = stationOperator.stage_index;
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
@@ -10499,15 +10577,23 @@ function stationQueueHtml() {
   const queue = jobs.filter(j =>
     (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j) && !isPendingIssuance(j)
   ).reverse();
-  const rows = queue.length ? queue.map(j => `
+  const rows = queue.length ? queue.map(j => {
+    // Unheard notes get a loud badge so the operator opens that job first.
+    const notes = stationNotes.filter(n => n.job_id === j.id);
+    const unheard = notes.filter(n => !n.heard_at);
+    const badge = notes.length
+      ? `<span class="sj-note-badge">${notes.some(n => n.kind === 'voice') ? '&#127908;' : '&#128172;'} ${unheard.length ? unheard.length + ' new' : notes.length}</span>`
+      : '';
+    return `
     <button class="station-job" onclick="stationOpenJob(${j.id})">
       <div class="sj-id">#${j.id}</div>
       <div class="sj-main">
-        <div class="sj-name">${esc(j.name)}</div>
+        <div class="sj-name">${esc(j.name)} ${badge}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
       </div>
       <div class="sj-go">›</div>
-    </button>`).join('') : `<div class="empty">Nothing waiting at ${esc(stageName)} right now.</div>`;
+    </button>`;
+  }).join('') : `<div class="empty">Nothing waiting at ${esc(stageName)} right now.</div>`;
   return `
     <div class="station-head">
       <div><div class="station-who">${esc(stationOperator.name)}</div><div class="station-where">${esc(stageName)}</div></div>
@@ -10520,6 +10606,11 @@ function stationQueueHtml() {
 function stationOpenJob(id) {
   stationJobId = id;
   stationView = 'update';
+  stationRecBlob = null;
+  // Text notes count as read the moment they're on screen; voice notes
+  // wait for an actual play (stationNoteHeard via onplay).
+  stationNotes.filter(n => n.job_id === id && n.kind === 'text' && !n.heard_at)
+    .forEach(n => stationNoteHeard(n.id));
   stationRender();
 }
 
@@ -10544,6 +10635,36 @@ function stationUpdateHtml() {
       </div>`;
   }).join('') : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
   const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
+
+  // Incoming notes from the previous station for THIS job. Voice renders a
+  // native audio player (big enough for gloves); text renders as a card.
+  const inNotes = stationNotes.filter(n => n.job_id === j.id);
+  const prevStageName = stIdx > 0 ? (STAGES[stIdx - 1] || '') : '';
+  const notesIn = inNotes.length ? `
+    <div class="station-notes-in">
+      ${inNotes.map(n => `
+        <div class="sn-card">
+          <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} From ${esc(prevStageName)} · ${esc(n.operator_name || '')} · ${esc(fmtDMYT(n.created_at))}</div>
+          ${n.body ? `<div class="sn-body">${esc(n.body)}</div>` : ''}
+          ${n.kind === 'voice' && n.audio
+            ? `<audio controls preload="metadata" src="${n.audio}" onplay="stationNoteHeard(${n.id})"></audio>`
+            : ''}
+        </div>`).join('')}
+    </div>` : '';
+
+  // Add-note block — message for the NEXT station. Voice (tap to record,
+  // tap to stop, 60s cap) or typed text; Send posts whichever exists.
+  const addNote = nextName ? `
+    <div class="station-addnote">
+      <div class="station-addnote-title">&#128172; Message for ${esc(nextName)}</div>
+      <textarea id="sn-text" rows="2" placeholder="Type a note (optional)…" oninput="stationResetIdle()"></textarea>
+      <div id="sn-preview"></div>
+      <div class="station-note-row">
+        <button class="station-rec-btn" id="sn-rec-btn" onclick="stationRecToggle()">&#127908; Record voice</button>
+        <button class="station-send-note" id="sn-send-btn" onclick="stationSendNote()">Send note</button>
+      </div>
+    </div>` : '';
+
   return `
     <div class="station-head">
       <div style="display:flex;align-items:center;gap:12px;">
@@ -10555,12 +10676,20 @@ function stationUpdateHtml() {
     <div class="station-update">
       <div class="su-job">#${j.id} · ${esc(j.name)}</div>
       <div class="su-jobsub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
+      ${notesIn}
       ${fieldHtml}
       <button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
       ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
+      ${addNote}
     </div>`;
 }
-function stationBackToQueue() { stationView = 'queue'; stationJobId = null; stationClosePad(); stationRender(); }
+function stationBackToQueue() {
+  stationView = 'queue'; stationJobId = null;
+  stationClosePad(); stationRecAbort();
+  // Refresh badges in the background — a note may have landed meanwhile.
+  stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
+  stationRender();
+}
 
 // ── On-screen number pad (tablet kiosk) ──────────────────────
 // Tapping a station field slides this pad up from the bottom of the
@@ -10616,6 +10745,110 @@ function stationClosePad() {
   const mode = document.getElementById('station-mode');
   if (mode) mode.classList.remove('numpad-open');
   document.querySelectorAll('.numpad-target').forEach(i => i.classList.remove('numpad-active'));
+}
+
+// ── Station notes: voice recorder + send ────────────────────
+// Tap to record, tap again to stop (hold-to-record is unreliable on
+// tablets). 60s auto-stop. The finished clip previews inline so the
+// operator can listen before sending; Send posts voice if recorded,
+// otherwise the typed text.
+async function stationRecToggle() {
+  stationResetIdle();
+  const btn = document.getElementById('sn-rec-btn');
+  if (stationRec && stationRec.state === 'recording') { stationRec.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Chrome/Android records webm+opus; Safari/iPad records mp4+aac.
+    const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) ? 'audio/webm;codecs=opus'
+               : (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/mp4')) ? 'audio/mp4' : '';
+    stationRec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    stationRecStart = Date.now();
+    stationRec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    stationRec.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      if (stationRecTimer) { clearTimeout(stationRecTimer); stationRecTimer = null; }
+      const blob = new Blob(chunks, { type: stationRec.mimeType || 'audio/webm' });
+      stationRec = null;
+      const reader = new FileReader();
+      reader.onload = () => {
+        stationRecBlob = {
+          dataUrl: reader.result,
+          mime: blob.type,
+          duration: Math.round((Date.now() - stationRecStart) / 1000),
+        };
+        const prev = document.getElementById('sn-preview');
+        if (prev) prev.innerHTML = `
+          <div style="display:flex;align-items:center;gap:10px;">
+            <audio controls src="${stationRecBlob.dataUrl}" style="flex:1;height:46px;"></audio>
+            <button class="btn btn-sm" onclick="stationRecDiscard()" title="Delete recording">&#128465;</button>
+          </div>`;
+        const b = document.getElementById('sn-rec-btn');
+        if (b) { b.classList.remove('recording'); b.innerHTML = '&#127908; Re-record'; }
+      };
+      reader.readAsDataURL(blob);
+    };
+    stationRec.start();
+    if (btn) { btn.classList.add('recording'); btn.innerHTML = '&#9632; Stop recording'; }
+    // Hard cap — keeps the base64 payload comfortably under the 3MB guard.
+    stationRecTimer = setTimeout(() => { if (stationRec && stationRec.state === 'recording') stationRec.stop(); }, 60000);
+  } catch (e) {
+    notify('Microphone not available — check tablet permissions');
+  }
+}
+
+function stationRecDiscard() {
+  stationRecBlob = null;
+  const prev = document.getElementById('sn-preview');
+  if (prev) prev.innerHTML = '';
+  const b = document.getElementById('sn-rec-btn');
+  if (b) { b.classList.remove('recording'); b.innerHTML = '&#127908; Record voice'; }
+}
+
+// Abort any in-flight recording (screen change / logout) without saving.
+function stationRecAbort() {
+  if (stationRecTimer) { clearTimeout(stationRecTimer); stationRecTimer = null; }
+  if (stationRec && stationRec.state === 'recording') {
+    stationRec.onstop = () => { stationRec = null; };
+    try { stationRec.stop(); } catch {}
+  }
+  stationRec = null;
+  stationRecBlob = null;
+}
+
+async function stationSendNote() {
+  const j = jobs.find(x => x.id === stationJobId);
+  if (!j || !stationOperator) return;
+  const text = (document.getElementById('sn-text') || {}).value?.trim() || '';
+  if (!stationRecBlob && !text) { notify('Record a voice note or type something first'); return; }
+  const btn = document.getElementById('sn-send-btn');
+  if (btn) btn.disabled = true;
+  try {
+    await api('POST', `/api/jobs/${j.id}/station-notes`, {
+      pin: stationOperator.pin,
+      kind: stationRecBlob ? 'voice' : 'text',
+      body: text,
+      audio: stationRecBlob ? stationRecBlob.dataUrl : undefined,
+      mime: stationRecBlob ? stationRecBlob.mime : undefined,
+      duration_s: stationRecBlob ? stationRecBlob.duration : undefined,
+    });
+    stationRecBlob = null;
+    notify('Note sent to the next station');
+    stationRender();   // clears the form
+  } catch (e) {
+    notify('Error: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Fired by onplay of an incoming voice note (and used for text below) —
+// flips the "new" badge off for the queue list.
+function stationNoteHeard(noteId) {
+  const n = stationNotes.find(x => x.id === noteId);
+  if (n && !n.heard_at) {
+    n.heard_at = new Date().toISOString();
+    api('POST', `/api/station-notes/${noteId}/heard`).catch(() => {});
+  }
 }
 
 async function stationSubmit(advance) {
