@@ -34,6 +34,19 @@
   /* Inverse: .ceo-only elements only appear when role-ceo is active. */
   .ceo-only { display: none; }
   body.role-ceo .ceo-only { display: inline; }
+  /* Store Manager: read-only on Jobs (inventory is their write area).
+     Production Manager: read-only on Inventory (jobs is their write area).
+     Both still see the data — they just can't edit it. */
+  body.role-store-manager #jobs-mode .ceo-hide,
+  body.role-store-manager #forms-mode .ceo-hide,
+  body.role-store-manager #stickers-mode .ceo-hide { display: none !important; }
+  body.role-production-manager #inventory-mode .ceo-hide,
+  body.role-production-manager #imports-mode .ceo-hide { display: none !important; }
+  /* Operator: lock-down — only the Station view is reachable, and the
+     top-bar mode switch is hidden so they can't navigate away by mistake. */
+  body.role-operator .mode-switch { display: none !important; }
+  body.role-operator #topbar-export,
+  body.role-operator #topbar-add { display: none !important; }
   .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
   .report-card:hover { border-color: var(--blue-border); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-2px); }
   .report-card-icon { font-size: 28px; }
@@ -1031,12 +1044,12 @@
     <div class="topbar-sub">Packaging Press · Job Tracker</div>
   </div>
   <div class="mode-switch" id="mode-switch">
-    <button class="mode-btn active" data-mode="jobs" onclick="setMode('jobs')">Jobs</button>
-    <button class="mode-btn" data-mode="inventory" onclick="setMode('inventory')">Inventory</button>
-    <button class="mode-btn" data-mode="reports" onclick="setMode('reports')">Reports</button>
-    <button class="mode-btn" data-mode="stickers" onclick="setMode('stickers')">Stickers</button>
-    <button class="mode-btn" data-mode="station" onclick="setMode('station')">&#127981; Station</button>
-    <button class="mode-btn" data-mode="forms" onclick="setMode('forms')">Forms</button>
+    <button class="mode-btn active" data-mode="jobs" id="mode-jobs-btn" onclick="setMode('jobs')">Jobs</button>
+    <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
+    <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="setMode('reports')">Reports</button>
+    <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
+    <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
+    <button class="mode-btn" data-mode="forms" id="mode-forms-btn" onclick="setMode('forms')">Forms</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn" style="display:none;">Users</button>
   </div>
   <div class="topbar-right">
@@ -1630,15 +1643,41 @@ async function api(method, path, body) {
 }
 
 // ── Auth state ────────────────────────────────────────────────
+// Roles: 'admin' (full), 'production_manager' (jobs+station write),
+// 'store_manager' (inventory+imports write), 'operator' (station only),
+// 'ceo' (read-only). The server enforces the same matrix on every endpoint.
 let currentUser = null;
-function isAdmin() { return currentUser && currentUser.role === 'admin'; }
-// Anyone with write access can issue stock (admin / stock / user). CEO is
-// blocked because canWrite() is false for them. Server enforces the same.
-function canIssueStock() { return canWrite(); }
-// Read-only executive view. CEOs can browse the whole app but every write
-// button is hidden from them and the server blocks mutations anyway.
-function isCeo() { return currentUser && currentUser.role === 'ceo'; }
-function canWrite() { return currentUser && currentUser.role !== 'ceo'; }
+function isAdmin()             { return currentUser && currentUser.role === 'admin'; }
+function isCeo()               { return currentUser && currentUser.role === 'ceo'; }
+function isProductionManager() { return currentUser && currentUser.role === 'production_manager'; }
+function isStoreManager()      { return currentUser && currentUser.role === 'store_manager'; }
+function isOperator()          { return currentUser && currentUser.role === 'operator'; }
+// Per-area write capability. Used to gate UI write buttons. Server enforces
+// the same matrix server-side so the UI gates are convenience, not security.
+function canWriteJobs()      { return isAdmin() || isProductionManager(); }
+function canWriteInventory() { return isAdmin() || isStoreManager(); }
+function canRunStation()     { return isAdmin() || isProductionManager() || isOperator(); }
+// Generic legacy helper — kept so widely-used .ceo-hide elements + existing
+// call sites don't need to change. Reads as "is this user allowed to mutate
+// anything at all" (anyone except CEO + operator-outside-station).
+function canWrite() { return currentUser && currentUser.role !== 'ceo' && !isOperator(); }
+// Anyone who can write any area can issue stock (admin / production_manager /
+// store_manager). CEO + operator are blocked.
+function canIssueStock() { return isAdmin() || isProductionManager() || isStoreManager(); }
+// Pretty label for the role pill / dropdowns. Falls back to the raw value for
+// forward-compatibility.
+function roleLabel(role) {
+  return ({
+    admin: 'Admin',
+    ceo: 'CEO',
+    production_manager: 'Production Manager',
+    store_manager: 'Store Manager',
+    operator: 'Operator',
+    // Legacy role names that may still appear on un-migrated user rows.
+    user: 'Production Manager',
+    stock: 'Store Manager',
+  })[role] || role;
+}
 function isPendingIssuance(j) { return j && j.issuance_status === 'pending'; }
 
 function showLogin(errorMsg) {
@@ -1661,19 +1700,39 @@ function renderUserChip() {
   if (!currentUser) { chip.style.display = 'none'; return; }
   chip.style.display = 'flex';
   document.getElementById('user-name').textContent = currentUser.name || currentUser.email;
-  document.getElementById('user-role-pill').textContent = currentUser.role;
+  document.getElementById('user-role-pill').textContent = roleLabel(currentUser.role);
   const pic = document.getElementById('user-pic');
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
+  // Tab visibility by role. Show/hide via dataset so setMode can still
+  // route the user to the first allowed tab when an operator/manager lands.
+  const showTab = (id, ok) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = ok ? '' : 'none';
+  };
+  // Operators see ONLY the Station tab. Store Manager skips Station/Forms.
+  // Production Manager + Admin + CEO see everything (CEO is read-only).
+  const op = isOperator(), sm = isStoreManager();
+  showTab('mode-jobs-btn',      !op);
+  showTab('mode-inventory-btn', !op);
+  showTab('mode-reports-btn',   !op);
+  showTab('mode-stickers-btn',  !op && !sm);
+  showTab('mode-station-btn',   canRunStation());
+  showTab('mode-forms-btn',     !op && !sm);
   // Users tab — visible to admin (full control) and CEO (read-only audit feed).
-  document.getElementById('mode-users-btn').style.display = (isAdmin() || isCeo()) ? 'block' : 'none';
-  // Trash card — visible to everyone signed in. Admin can act (restore /
-  // empty); user/stock/ceo can browse the bin to see what's been deleted.
+  showTab('mode-users-btn',     isAdmin() || isCeo());
+  // Trash card — visible to anyone who can navigate the app (so operators
+  // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
-  if (trashBtn) trashBtn.style.display = 'flex';
+  if (trashBtn) trashBtn.style.display = op ? 'none' : 'flex';
   // CEOs see a read-only version of the app — flip a body class so the CSS
-  // rule below hides every element tagged .ceo-hide in one go.
+  // rule below hides every element tagged .ceo-hide in one go. Store Manager
+  // gets the same .ceo-hide treatment on Jobs (read-only for them too), and
+  // Production Manager gets it on Inventory.
   document.body.classList.toggle('role-ceo', isCeo());
+  document.body.classList.toggle('role-store-manager', sm);
+  document.body.classList.toggle('role-production-manager', isProductionManager());
+  document.body.classList.toggle('role-operator', op);
 }
 
 // Google Identity Services — renders the official Sign In button into our
@@ -1702,7 +1761,14 @@ async function onGoogleCredential(response) {
     currentUser = out.user;
     hideLogin();
     renderUserChip();
-    await Promise.all([loadJobs(), loadInventory()]);
+    // Operators don't have permission to read inventory; skip the call so it
+    // doesn't 403 in their console. Store Manager lands on Inventory; Operator
+    // lands on Station; everyone else stays on Jobs (default).
+    const loaders = [loadJobs()];
+    if (!isOperator()) loaders.push(loadInventory());
+    await Promise.all(loaders);
+    if (isOperator())            setMode('station');
+    else if (isStoreManager())   setMode('inventory');
     document.getElementById('loading-screen').style.display = 'none';
   } catch (e) {
     const err = document.getElementById('login-error');
@@ -1750,9 +1816,17 @@ async function loadInventory() {
 // Mode (top-level page) switching — toggles between Jobs / Inventory / Users
 // and swaps the topbar's primary action button accordingly.
 function setMode(m) {
+  // Role gates — collapse any disallowed tab to the user's home tab so
+  // disallowed views can't be reached even via a stray setMode() call.
+  // Operators are locked to Station regardless of what was requested.
+  if (isOperator())                                m = 'station';
+  // Store Manager has no business on Forms/Stickers/Station.
+  if (isStoreManager() && (m === 'forms' || m === 'stickers' || m === 'station')) m = 'inventory';
   // Block everyone except admin + ceo from the Users tab. CEO gets a
   // read-only view (every write button inside is tagged .ceo-hide).
   if (m === 'users' && !isAdmin() && !isCeo()) m = 'jobs';
+  // Station tab is gated to roles that can actually run it.
+  if (m === 'station' && !canRunStation())     m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
@@ -1766,13 +1840,13 @@ function setMode(m) {
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('topbar-refresh');
   if (m === 'jobs') {
-    addBtn.style.display = isCeo() ? 'none' : '';
+    addBtn.style.display = canWriteJobs() ? '' : 'none';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
     exportBtn.style.display = '';
     refreshBtn.style.display = '';
     render();
   } else if (m === 'inventory') {
-    addBtn.style.display = isCeo() ? 'none' : '';
+    addBtn.style.display = canWriteInventory() ? '' : 'none';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
@@ -11080,12 +11154,17 @@ function renderUsersTab() {
   const stats = {
     total: usersList.length,
     admins: usersList.filter(u => u.role === 'admin').length,
-    users: usersList.filter(u => u.role === 'user').length,
+    // 'user' legacy roles read as Production Manager until they're migrated.
+    managers:  usersList.filter(u => u.role === 'production_manager' || u.role === 'user').length,
+    store:     usersList.filter(u => u.role === 'store_manager' || u.role === 'stock').length,
+    operators: usersList.filter(u => u.role === 'operator').length,
   };
   document.getElementById('users-stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Total Users</div><div class="stat-value">${stats.total}</div></div>
     <div class="stat"><div class="stat-label">Admins</div><div class="stat-value">${stats.admins}</div></div>
-    <div class="stat"><div class="stat-label">Users</div><div class="stat-value">${stats.users}</div></div>
+    <div class="stat"><div class="stat-label">Prod. Managers</div><div class="stat-value">${stats.managers}</div></div>
+    <div class="stat"><div class="stat-label">Store Managers</div><div class="stat-value">${stats.store}</div></div>
+    <div class="stat"><div class="stat-label">Operators</div><div class="stat-value">${stats.operators}</div></div>
   `;
   document.getElementById('users-list').innerHTML = usersList.map(u => {
     const last = u.last_login_at ? fmtDMYT(u.last_login_at) : 'never';
@@ -11099,12 +11178,13 @@ function renderUsersTab() {
       </div>
       <div class="inv-balance">
         ${isCeo()
-          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(u.role)}</span>`
-          : `<select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:110px;">
-              <option value="user" ${u.role==='user'?'selected':''}>User</option>
-              <option value="stock" ${u.role==='stock'?'selected':''}>Stock</option>
-              <option value="ceo" ${u.role==='ceo'?'selected':''}>CEO (view-only)</option>
-              <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(roleLabel(u.role))}</span>`
+          : `<select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:160px;">
+              <option value="production_manager" ${(u.role==='production_manager'||u.role==='user')?'selected':''}>Production Manager</option>
+              <option value="store_manager"      ${(u.role==='store_manager'||u.role==='stock')?'selected':''}>Store Manager</option>
+              <option value="operator"           ${u.role==='operator'?'selected':''}>Operator</option>
+              <option value="ceo"                ${u.role==='ceo'?'selected':''}>CEO (view-only)</option>
+              <option value="admin"              ${u.role==='admin'?'selected':''}>Admin</option>
             </select>`}
       </div>
       <div class="inv-actions">
@@ -11133,8 +11213,9 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Role</label>
       <select id="invite-role">
-        <option value="user" selected>User</option>
-        <option value="stock">Stock</option>
+        <option value="production_manager" selected>Production Manager</option>
+        <option value="store_manager">Store Manager</option>
+        <option value="operator">Operator (Station only)</option>
         <option value="ceo">CEO (view-only)</option>
         <option value="admin">Admin</option>
       </select>

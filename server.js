@@ -199,17 +199,26 @@ async function initDb() {
         email         TEXT NOT NULL UNIQUE,
         name          TEXT,
         picture       TEXT,
-        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user','stock','ceo')),
+        role          TEXT NOT NULL DEFAULT 'production_manager' CHECK (role IN ('admin','production_manager','store_manager','operator','ceo')),
         invited_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at    TIMESTAMPTZ DEFAULT NOW(),
         last_login_at TIMESTAMPTZ
       )
     `;
-    // Migrate the role CHECK constraint on existing DBs to include the
-    // latest allowed roles ('stock' was added later, then 'ceo' for the
-    // read-only executive view). Idempotent — drop+re-add every boot.
+    // Role rename rollout: the original roles were 'admin','user','stock','ceo'.
+    // We renamed 'user' → 'production_manager' and 'stock' → 'store_manager',
+    // and added a new 'operator' role for the station-only floor staff.
+    // The migration runs every boot but is idempotent:
+    //   1. Widen the CHECK to accept both old + new names so the UPDATE doesn't
+    //      get blocked.
+    //   2. UPDATE the old role names to the new ones.
+    //   3. Re-narrow the CHECK to only the new role names.
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo'))`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator'))`;
+    await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
+    await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
+    await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','operator','ceo'))`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -359,23 +368,57 @@ function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
 }
-// Any signed-in user EXCEPT the read-only 'ceo' role. Use this on every
-// write endpoint so CEOs can browse the app freely but can't mutate state.
-// Admins/users/stock all still go through; the UI hides the write buttons
-// for CEOs as well, but this is the real enforcement.
+// ── Role helpers ─────────────────────────────────────────────
+// Roles: 'admin' (full), 'production_manager' (jobs+station write),
+// 'store_manager' (inventory+imports write), 'operator' (station only),
+// 'ceo' (read-only everywhere).
+function canWriteJobs(role)      { return role === 'admin' || role === 'production_manager'; }
+function canWriteInventory(role) { return role === 'admin' || role === 'store_manager'; }
+function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'operator'; }
+function isOperatorRole(role)    { return role === 'operator'; }
+
+// Generic "not read-only" check. Used for cross-cutting endpoints (audit
+// metadata, profile edits, etc.) where any non-CEO write is fine.
 function requireWriteUser(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (req.user.role === 'ceo') {
     return res.status(403).json({ error: 'Read-only account — changes are not allowed' });
   }
+  // Operators can only touch the station endpoints — block everything else.
+  if (req.user.role === 'operator') {
+    return res.status(403).json({ error: 'Operator accounts can only use the Station view' });
+  }
   next();
 }
-// Legacy: requireStockOrAdmin used to restrict stock issuance to admin + stock
-// roles. The 'user' role now has full write parity with 'stock' (only CEO is
-// read-only), so every endpoint that previously called this now uses
-// requireWriteUser instead. Middleware kept as a stub for any external code
-// that might still import it; new callers should always use requireWriteUser.
-const requireStockOrAdmin = requireWriteUser;
+// Jobs writes (create/edit/delete/move stages outside station) — admin or
+// production_manager.
+function requireJobsWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canWriteJobs(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — jobs write access required' });
+  }
+  next();
+}
+// Inventory + imports writes — admin or store_manager.
+function requireInventoryWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canWriteInventory(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — inventory write access required' });
+  }
+  next();
+}
+// Station endpoints — admin, production_manager, or operator. (CEO and
+// store_manager are blocked.) PIN is still verified separately per call.
+function requireStationUser(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canRunStation(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — station access required' });
+  }
+  next();
+}
+// Legacy aliases — kept so existing call sites compile until they're
+// individually migrated to the more specific middleware above.
+const requireStockOrAdmin = requireInventoryWriter;
 
 app.use(authMiddleware);
 
@@ -508,8 +551,8 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
-    // Allow 'admin', 'stock', or 'user' (default). Anything else falls back to user.
-    const role = ['admin','stock','user','ceo'].includes(req.body.role) ? req.body.role : 'user';
+    const ALLOWED_ROLES = ['admin','production_manager','store_manager','operator','ceo'];
+    const role = ALLOWED_ROLES.includes(req.body.role) ? req.body.role : 'production_manager';
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     const inserted = await sql`
       INSERT INTO users (email, role, invited_by) VALUES (${email}, ${role}, ${req.user.id})
@@ -529,7 +572,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const role = ['admin','stock','user','ceo'].includes(req.body.role) ? req.body.role : 'user';
+    const role = ['admin','production_manager','store_manager','operator','ceo'].includes(req.body.role) ? req.body.role : 'production_manager';
     // Guardrail: don't allow demoting yourself — locks you out of admin tools.
     if (parseInt(id, 10) === req.user.id && role !== 'admin') {
       return res.status(400).json({ error: "You can't change your own role away from admin." });
@@ -661,7 +704,7 @@ app.delete('/api/operators/:id', requireAdmin, async (req, res) => {
 // Verify a PIN — used by the station PIN pad. Returns the operator's identity
 // (never the pin). requireWriteUser so the floor terminal can call it but the
 // read-only CEO account cannot.
-app.post('/api/operators/verify', requireWriteUser, async (req, res) => {
+app.post('/api/operators/verify', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -756,7 +799,7 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
 }
 
 // CREATE a job
-app.post('/api/jobs', requireWriteUser, async (req, res) => {
+app.post('/api/jobs', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -782,7 +825,7 @@ app.post('/api/jobs', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE job details
-app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
+app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1030,7 +1073,7 @@ app.get('/api/inventory', requireAuth, async (req, res) => {
 
 // CREATE an inventory item. Initial balance, if provided, is recorded as an
 // "opening-balance" ledger row so the audit trail is complete from day one.
-app.post('/api/inventory', requireWriteUser, async (req, res) => {
+app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1099,7 +1142,7 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE inventory item fields (not balance — balance is ledger-driven)
-app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
+app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1190,7 +1233,7 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
 // touch existing inventory items. They keep their brand/supplier text so
 // historical stock records stay intact. requireWriteUser (admin/user/stock).
 // Admin can still undo via the GET-list + unhide endpoint below.
-app.delete('/api/inventory/dropdown/:field/:value', requireWriteUser, async (req, res) => {
+app.delete('/api/inventory/dropdown/:field/:value', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1300,7 +1343,7 @@ app.delete('/api/inventory/:id', requireAdmin, async (req, res) => {
 });
 
 // ADD/ADJUST stock — used for deliveries and manual corrections.
-app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) => {
+app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1344,7 +1387,7 @@ app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) =
 //   • The transaction is a stock-OUT (change <= 0) — only stock-in is reversible
 //   • The transaction has already been reversed (no double-reversals)
 //   • The transaction is itself a reversal (no chain reversals)
-app.post('/api/inventory/transactions/:id/reverse', requireWriteUser, async (req, res) => {
+app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1507,7 +1550,7 @@ app.get('/api/imports', async (req, res) => {
 // CREATE an import. Auto-links to a matching inventory_item if one exists
 // (same paper_type + size + gsm + brand). No match → leave the link NULL;
 // receiving the import later will create the item.
-app.post('/api/imports', requireWriteUser, async (req, res) => {
+app.post('/api/imports', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1535,7 +1578,7 @@ app.post('/api/imports', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE import fields. Status changes go through /receive or /cancel below.
-app.put('/api/imports/:id', requireWriteUser, async (req, res) => {
+app.put('/api/imports/:id', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1553,7 +1596,7 @@ app.put('/api/imports/:id', requireWriteUser, async (req, res) => {
 });
 
 // CANCEL an import (status → cancelled, no inventory change).
-app.post('/api/imports/:id/cancel', requireWriteUser, async (req, res) => {
+app.post('/api/imports/:id/cancel', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1730,7 +1773,7 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
 // import has no linked inventory_item, we create one on the fly using the
 // import's paper_type/size/gsm/brand. The body may override `packets` (e.g.,
 // when the actual delivery differs from the booked quantity).
-app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
+app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1791,7 +1834,7 @@ app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE stage/status only
-app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
+app.patch('/api/jobs/:id/stage', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1820,7 +1863,7 @@ app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
 // Station update — a shop-floor operator advances a job and/or records that
 // stage's production numbers, identified by a 4-digit PIN. PIN is verified
 // server-side; the operator must be assigned to the job's current stage.
-app.post('/api/jobs/:id/station-update', requireWriteUser, async (req, res) => {
+app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1916,7 +1959,7 @@ app.post('/api/jobs/:id/station-update', requireWriteUser, async (req, res) => {
 // CREATE a note. PIN-verified like station-update — never trust the client
 // for the operator identity. kind: 'text' (body required) or 'voice'
 // (audio data-URL required, ≤ ~3MB so we stay under Vercel's body cap).
-app.post('/api/jobs/:id/station-notes', requireWriteUser, async (req, res) => {
+app.post('/api/jobs/:id/station-notes', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1970,7 +2013,7 @@ app.post('/api/jobs/:id/station-notes', requireWriteUser, async (req, res) => {
 // Notes for a whole station queue in one call: every note written at
 // stage (S-1) on jobs that are CURRENTLY at stage S. Powers both the
 // queue badges and the job screen at the station.
-app.get('/api/station-notes/for-stage/:stageIndex', requireWriteUser, async (req, res) => {
+app.get('/api/station-notes/for-stage/:stageIndex', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2004,7 +2047,7 @@ app.get('/api/jobs/:id/station-notes', requireAuth, async (req, res) => {
 });
 
 // Mark a note heard/read — fired when the next station plays or views it.
-app.post('/api/station-notes/:id/heard', requireWriteUser, async (req, res) => {
+app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2102,7 +2145,7 @@ app.get('/api/capa/:id', requireAuth, async (req, res) => {
 // stays empty in job_snapshot; the user types those fields themselves on
 // the edit form (capaFormHtml flips Section 1 to editable when snapshot is
 // empty).
-app.post('/api/capa', requireWriteUser, async (req, res) => {
+app.post('/api/capa', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2137,7 +2180,7 @@ app.post('/api/capa', requireWriteUser, async (req, res) => {
 
 // CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
 // the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
-app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
+app.post('/api/jobs/:id/capa', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2175,7 +2218,7 @@ app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
 
 // UPDATE a CAPA. Anyone with write access can edit while open/in_progress.
 // Once closed, only admin can change it (including reopening).
-app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
+app.put('/api/capa/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2234,7 +2277,7 @@ app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
 //   • User / Stock can delete a CAPA only if it's still Open or In Progress;
 //     once Closed it's locked to admin (matches the edit-lock behavior).
 //   • CEO can't reach this — requireWriteUser blocks them.
-app.delete('/api/capa/:id', requireWriteUser, async (req, res) => {
+app.delete('/api/capa/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
