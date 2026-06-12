@@ -6,7 +6,9 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 
 const app = express();
-app.use(express.json());
+// 6mb limit: station voice notes arrive as base64 audio (~1MB for 60s of
+// opus). Default 100kb would 413 them. Vercel itself caps bodies at 4.5MB.
+app.use(express.json({ limit: '6mb' }));
 app.use(cookieParser());
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -15,6 +17,10 @@ const BOOTSTRAP_ADMIN  = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase()
 const SESSION_COOKIE   = 'sa_session';
 const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// Production stages — must mirror STAGES in public/index.html. Used by the
+// station-update endpoint to build stage names + detect the final stage.
+const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
 
 // Expose the public Google client id to the frontend so it can configure GIS.
 // Safe to expose — it's a public identifier, not a secret.
@@ -193,17 +199,26 @@ async function initDb() {
         email         TEXT NOT NULL UNIQUE,
         name          TEXT,
         picture       TEXT,
-        role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user','stock','ceo')),
+        role          TEXT NOT NULL DEFAULT 'production_manager' CHECK (role IN ('admin','production_manager','store_manager','operator','ceo')),
         invited_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at    TIMESTAMPTZ DEFAULT NOW(),
         last_login_at TIMESTAMPTZ
       )
     `;
-    // Migrate the role CHECK constraint on existing DBs to include the
-    // latest allowed roles ('stock' was added later, then 'ceo' for the
-    // read-only executive view). Idempotent — drop+re-add every boot.
+    // Role rename rollout: the original roles were 'admin','user','stock','ceo'.
+    // We renamed 'user' → 'production_manager' and 'stock' → 'store_manager',
+    // and added a new 'operator' role for the station-only floor staff.
+    // The migration runs every boot but is idempotent:
+    //   1. Widen the CHECK to accept both old + new names so the UPDATE doesn't
+    //      get blocked.
+    //   2. UPDATE the old role names to the new ones.
+    //   3. Re-narrow the CHECK to only the new role names.
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo'))`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator'))`;
+    await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
+    await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
+    await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','operator','ceo'))`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -222,6 +237,23 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS audit_log_entity_idx ON audit_log(entity_type, entity_id)`;
     await sql`CREATE INDEX IF NOT EXISTS audit_log_user_idx   ON audit_log(user_id)`;
+
+    // Operators: shop-floor workers who update jobs from the shared station
+    // terminal via a 4-digit PIN. Separate from `users` (login accounts) —
+    // these never sign in, they just identify themselves at a machine.
+    // stage_index ties an operator to one production section (index into STAGES).
+    await sql`
+      CREATE TABLE IF NOT EXISTS operators (
+        id          SERIAL PRIMARY KEY,
+        name        TEXT NOT NULL,
+        pin         TEXT NOT NULL,
+        stage_index INTEGER NOT NULL,
+        active      BOOLEAN NOT NULL DEFAULT true,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // PIN must be unique among active operators so /verify is unambiguous.
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_idx ON operators(pin) WHERE active`;
 
     // Dropdown blacklist — values removed from the brand/supplier dropdown
     // suggestions without touching existing inventory items. So "Century" can
@@ -268,6 +300,30 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS capa_reports_status_idx ON capa_reports(status)`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS capa_reports_job_seq_uidx ON capa_reports(job_id, seq)`;
 
+    // Station notes — short text/voice messages an operator leaves on a job
+    // for the NEXT station ("plate 2 runs dark, watch the left edge").
+    // stage_index records where the note was written; it is shown at the
+    // station whose stage_index is one higher, while the job sits there.
+    // Voice audio is stored inline as a base64 data-URL (TEXT) — a 60s opus
+    // clip is ~1MB, fine at floor volumes; audio is purged after 30 days
+    // (lazily, on each note insert) while the text rows stay for history.
+    await sql`
+      CREATE TABLE IF NOT EXISTS station_notes (
+        id            SERIAL PRIMARY KEY,
+        job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        stage_index   INTEGER NOT NULL,
+        operator_name TEXT,
+        kind          TEXT NOT NULL DEFAULT 'text',
+        body          TEXT,
+        audio         TEXT,
+        mime          TEXT,
+        duration_s    REAL,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        heard_at      TIMESTAMPTZ
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS station_notes_job_idx ON station_notes(job_id)`;
+
     console.log('Database ready');
   } catch (err) {
     console.error('Database init error:', err.message);
@@ -312,23 +368,57 @@ function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
 }
-// Any signed-in user EXCEPT the read-only 'ceo' role. Use this on every
-// write endpoint so CEOs can browse the app freely but can't mutate state.
-// Admins/users/stock all still go through; the UI hides the write buttons
-// for CEOs as well, but this is the real enforcement.
+// ── Role helpers ─────────────────────────────────────────────
+// Roles: 'admin' (full), 'production_manager' (jobs+station write),
+// 'store_manager' (inventory+imports write), 'operator' (station only),
+// 'ceo' (read-only everywhere).
+function canWriteJobs(role)      { return role === 'admin' || role === 'production_manager'; }
+function canWriteInventory(role) { return role === 'admin' || role === 'store_manager'; }
+function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'operator'; }
+function isOperatorRole(role)    { return role === 'operator'; }
+
+// Generic "not read-only" check. Used for cross-cutting endpoints (audit
+// metadata, profile edits, etc.) where any non-CEO write is fine.
 function requireWriteUser(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (req.user.role === 'ceo') {
     return res.status(403).json({ error: 'Read-only account — changes are not allowed' });
   }
+  // Operators can only touch the station endpoints — block everything else.
+  if (req.user.role === 'operator') {
+    return res.status(403).json({ error: 'Operator accounts can only use the Station view' });
+  }
   next();
 }
-// Legacy: requireStockOrAdmin used to restrict stock issuance to admin + stock
-// roles. The 'user' role now has full write parity with 'stock' (only CEO is
-// read-only), so every endpoint that previously called this now uses
-// requireWriteUser instead. Middleware kept as a stub for any external code
-// that might still import it; new callers should always use requireWriteUser.
-const requireStockOrAdmin = requireWriteUser;
+// Jobs writes (create/edit/delete/move stages outside station) — admin or
+// production_manager.
+function requireJobsWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canWriteJobs(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — jobs write access required' });
+  }
+  next();
+}
+// Inventory + imports writes — admin or store_manager.
+function requireInventoryWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canWriteInventory(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — inventory write access required' });
+  }
+  next();
+}
+// Station endpoints — admin, production_manager, or operator. (CEO and
+// store_manager are blocked.) PIN is still verified separately per call.
+function requireStationUser(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canRunStation(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — station access required' });
+  }
+  next();
+}
+// Legacy aliases — kept so existing call sites compile until they're
+// individually migrated to the more specific middleware above.
+const requireStockOrAdmin = requireInventoryWriter;
 
 app.use(authMiddleware);
 
@@ -461,8 +551,8 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
-    // Allow 'admin', 'stock', or 'user' (default). Anything else falls back to user.
-    const role = ['admin','stock','user','ceo'].includes(req.body.role) ? req.body.role : 'user';
+    const ALLOWED_ROLES = ['admin','production_manager','store_manager','operator','ceo'];
+    const role = ALLOWED_ROLES.includes(req.body.role) ? req.body.role : 'production_manager';
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     const inserted = await sql`
       INSERT INTO users (email, role, invited_by) VALUES (${email}, ${role}, ${req.user.id})
@@ -482,7 +572,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const role = ['admin','stock','user','ceo'].includes(req.body.role) ? req.body.role : 'user';
+    const role = ['admin','production_manager','store_manager','operator','ceo'].includes(req.body.role) ? req.body.role : 'production_manager';
     // Guardrail: don't allow demoting yourself — locks you out of admin tools.
     if (parseInt(id, 10) === req.user.id && role !== 'admin') {
       return res.status(400).json({ error: "You can't change your own role away from admin." });
@@ -528,6 +618,101 @@ app.get('/api/audit', requireAuth, async (req, res) => {
       rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
     }
     res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Operators (shop-floor roster) ────────────────────────────
+
+function validPin(pin) { return /^\d{4}$/.test(String(pin || '')); }
+
+// List operators — admin only (includes pin for management).
+app.get('/api/operators', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM operators ORDER BY stage_index, name`;
+    res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/operators', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = (req.body.name || '').trim();
+    const pin = String(req.body.pin || '').trim();
+    const stage_index = parseInt(req.body.stage_index, 10);
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+    if (!Number.isInteger(stage_index) || stage_index < 0) return res.status(400).json({ error: 'A section is required' });
+    const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
+    if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
+    const inserted = await sql`
+      INSERT INTO operators (name, pin, stage_index) VALUES (${name}, ${pin}, ${stage_index}) RETURNING *
+    `;
+    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (stage ${stage_index})` });
+    res.json(inserted[0]);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/operators/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const name = (req.body.name || '').trim();
+    const pin = String(req.body.pin || '').trim();
+    const stage_index = parseInt(req.body.stage_index, 10);
+    const active = req.body.active !== false;
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+    if (!Number.isInteger(stage_index) || stage_index < 0) return res.status(400).json({ error: 'A section is required' });
+    const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
+    if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
+    const updated = await sql`
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${stage_index}, active=${active}
+      WHERE id=${id} RETURNING *
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
+    await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `Edited operator ${name}` });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/operators/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM operators WHERE id=${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Operator not found' });
+    await logAudit(sql, req, { action: 'operator.delete', entityType: 'operator', entityId: id, summary: `Removed operator ${deleted[0].name}` });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify a PIN — used by the station PIN pad. Returns the operator's identity
+// (never the pin). requireWriteUser so the floor terminal can call it but the
+// read-only CEO account cannot.
+app.post('/api/operators/verify', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const pin = String(req.body.pin || '').trim();
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    const rows = await sql`SELECT id, name, stage_index FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
+    res.json(rows[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
@@ -614,7 +799,7 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
 }
 
 // CREATE a job
-app.post('/api/jobs', requireWriteUser, async (req, res) => {
+app.post('/api/jobs', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -640,7 +825,7 @@ app.post('/api/jobs', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE job details
-app.put('/api/jobs/:id', requireWriteUser, async (req, res) => {
+app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -888,7 +1073,7 @@ app.get('/api/inventory', requireAuth, async (req, res) => {
 
 // CREATE an inventory item. Initial balance, if provided, is recorded as an
 // "opening-balance" ledger row so the audit trail is complete from day one.
-app.post('/api/inventory', requireWriteUser, async (req, res) => {
+app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -957,7 +1142,7 @@ app.post('/api/inventory', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE inventory item fields (not balance — balance is ledger-driven)
-app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
+app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1048,7 +1233,7 @@ app.put('/api/inventory/:id', requireWriteUser, async (req, res) => {
 // touch existing inventory items. They keep their brand/supplier text so
 // historical stock records stay intact. requireWriteUser (admin/user/stock).
 // Admin can still undo via the GET-list + unhide endpoint below.
-app.delete('/api/inventory/dropdown/:field/:value', requireWriteUser, async (req, res) => {
+app.delete('/api/inventory/dropdown/:field/:value', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1158,7 +1343,7 @@ app.delete('/api/inventory/:id', requireAdmin, async (req, res) => {
 });
 
 // ADD/ADJUST stock — used for deliveries and manual corrections.
-app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) => {
+app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1202,7 +1387,7 @@ app.post('/api/inventory/:id/transactions', requireWriteUser, async (req, res) =
 //   • The transaction is a stock-OUT (change <= 0) — only stock-in is reversible
 //   • The transaction has already been reversed (no double-reversals)
 //   • The transaction is itself a reversal (no chain reversals)
-app.post('/api/inventory/transactions/:id/reverse', requireWriteUser, async (req, res) => {
+app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1365,7 +1550,7 @@ app.get('/api/imports', async (req, res) => {
 // CREATE an import. Auto-links to a matching inventory_item if one exists
 // (same paper_type + size + gsm + brand). No match → leave the link NULL;
 // receiving the import later will create the item.
-app.post('/api/imports', requireWriteUser, async (req, res) => {
+app.post('/api/imports', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1393,7 +1578,7 @@ app.post('/api/imports', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE import fields. Status changes go through /receive or /cancel below.
-app.put('/api/imports/:id', requireWriteUser, async (req, res) => {
+app.put('/api/imports/:id', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1411,7 +1596,7 @@ app.put('/api/imports/:id', requireWriteUser, async (req, res) => {
 });
 
 // CANCEL an import (status → cancelled, no inventory change).
-app.post('/api/imports/:id/cancel', requireWriteUser, async (req, res) => {
+app.post('/api/imports/:id/cancel', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1588,7 +1773,7 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
 // import has no linked inventory_item, we create one on the fly using the
 // import's paper_type/size/gsm/brand. The body may override `packets` (e.g.,
 // when the actual delivery differs from the booked quantity).
-app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
+app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1649,7 +1834,7 @@ app.post('/api/imports/:id/receive', requireWriteUser, async (req, res) => {
 });
 
 // UPDATE stage/status only
-app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
+app.patch('/api/jobs/:id/stage', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1673,6 +1858,202 @@ app.patch('/api/jobs/:id/stage', requireWriteUser, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Station update — a shop-floor operator advances a job and/or records that
+// stage's production numbers, identified by a 4-digit PIN. PIN is verified
+// server-side; the operator must be assigned to the job's current stage.
+app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const pin = String(req.body.pin || '').trim();
+    const particularsPatch = req.body.particulars_patch && typeof req.body.particulars_patch === 'object'
+      ? req.body.particulars_patch : {};
+    const advance = req.body.advance === true;
+
+    // 1) Identify the operator by PIN (server-side — never trust the client).
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    const ops = await sql`SELECT id, name, stage_index FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+    const operator = ops[0];
+
+    // 2) Load job + guards.
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status === 'pending') {
+      return res.status(400).json({ error: 'Stock must be issued before this job can be updated.' });
+    }
+    const curStage = job.stage_index || 0;
+
+    // 3) Scope: the operator may only act on jobs at their own stage.
+    if (operator.stage_index !== curStage) {
+      return res.status(400).json({ error: "This job isn't at your station right now." });
+    }
+
+    // 4) Merge the stage's number fields into particulars. Write the value into
+    // the row's `quantity` subfield and stamp `name` with the operator.
+    const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+    for (const [key, value] of Object.entries(particularsPatch)) {
+      const prev = (particulars[key] && typeof particulars[key] === 'object') ? particulars[key] : {};
+      particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+    }
+
+    const by = `${operator.name} (${STAGES[operator.stage_index] || 'Stage ' + operator.stage_index})`;
+    const time = new Date().toLocaleString('en-GB', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }).replace(',', '');
+
+    let stage_index = curStage;
+    let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    let log = Array.isArray(job.log) ? [...job.log] : [];
+
+    if (advance) {
+      // Mirror moveToStage: mark current stage done, advance to next (or finish).
+      const target = Math.min(curStage + 1, STAGES.length - 1);
+      const finishing = curStage === STAGES.length - 1;
+      stages[curStage] = { ...(stages[curStage] || {}), status: 'done', by, time };
+      if (!finishing) {
+        const status = target === STAGES.length - 1 ? 'done' : 'active';
+        stages[target] = { status, notes: '', by, time };
+        for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
+        stage_index = target;
+        log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[curStage]} by ${operator.name}`, by, time });
+      } else {
+        log.push({ stage: STAGES[curStage], status: 'done', notes: `Completed by ${operator.name}`, by, time });
+      }
+    } else {
+      log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `Numbers recorded by ${operator.name}`, by, time });
+    }
+
+    const updated = await sql`
+      UPDATE jobs
+         SET particulars = ${JSON.stringify(particulars)},
+             stage_index = ${stage_index},
+             stages = ${JSON.stringify(stages)},
+             log = ${JSON.stringify(log)}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.station',
+      entityType: 'job',
+      entityId: id,
+      summary: advance
+        ? `Job E-${id} ${stage_index === curStage ? 'completed' : 'moved to ' + STAGES[stage_index]} by ${operator.name} at ${STAGES[curStage]}`
+        : `Job E-${id} numbers recorded by ${operator.name} at ${STAGES[curStage]}`,
+      metadata: { operator_id: operator.id, operator_name: operator.name, stage_index: curStage, advance },
+    });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Station notes (text + voice, operator → next station) ───
+// A note written at stage S is shown to the station at stage S+1 while
+// the job sits there. Office users can read everything via the per-job
+// GET (used by the History modal).
+
+// CREATE a note. PIN-verified like station-update — never trust the client
+// for the operator identity. kind: 'text' (body required) or 'voice'
+// (audio data-URL required, ≤ ~3MB so we stay under Vercel's body cap).
+app.post('/api/jobs/:id/station-notes', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const pin = String(req.body.pin || '').trim();
+    const kind = req.body.kind === 'voice' ? 'voice' : 'text';
+    const body = String(req.body.body || '').trim();
+    const audio = typeof req.body.audio === 'string' ? req.body.audio : '';
+    const mime = String(req.body.mime || '').slice(0, 80);
+    const duration = Number.isFinite(+req.body.duration_s) ? +req.body.duration_s : null;
+
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    const ops = await sql`SELECT id, name, stage_index FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+    const operator = ops[0];
+
+    if (kind === 'text' && !body) return res.status(400).json({ error: 'Note is empty' });
+    if (kind === 'voice') {
+      if (!audio.startsWith('data:audio/')) return res.status(400).json({ error: 'No recording attached' });
+      if (audio.length > 3_000_000) return res.status(413).json({ error: 'Recording too long — keep it under a minute' });
+    }
+
+    const rows = await sql`SELECT id, stage_index, deleted_at FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    // Operator may only leave notes on jobs at their own station.
+    if ((rows[0].stage_index || 0) !== operator.stage_index) {
+      return res.status(400).json({ error: "This job isn't at your station right now." });
+    }
+
+    // Lazy purge: drop audio blobs older than 30 days (text survives).
+    await sql`UPDATE station_notes SET audio = NULL WHERE audio IS NOT NULL AND created_at < NOW() - INTERVAL '30 days'`;
+
+    const inserted = await sql`
+      INSERT INTO station_notes (job_id, stage_index, operator_name, kind, body, audio, mime, duration_s)
+      VALUES (${id}, ${operator.stage_index}, ${operator.name}, ${kind},
+              ${kind === 'text' ? body : (body || null)}, ${kind === 'voice' ? audio : null},
+              ${kind === 'voice' ? mime : null}, ${duration})
+      RETURNING id, job_id, stage_index, operator_name, kind, body, mime, duration_s, created_at
+    `;
+    await logAudit(sql, req, {
+      action: 'job.station-note',
+      entityType: 'job',
+      entityId: id,
+      summary: `${kind === 'voice' ? 'Voice note' : 'Note'} left on Job E-${id} by ${operator.name} at ${STAGES[operator.stage_index] || 'Stage ' + operator.stage_index}`,
+      metadata: { operator_name: operator.name, stage_index: operator.stage_index, kind },
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Notes for a whole station queue in one call: every note written at
+// stage (S-1) on jobs that are CURRENTLY at stage S. Powers both the
+// queue badges and the job screen at the station.
+app.get('/api/station-notes/for-stage/:stageIndex', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const stage = parseInt(req.params.stageIndex, 10);
+    if (!Number.isInteger(stage) || stage <= 0) return res.json([]); // stage 0 has no previous station
+    const rows = await sql`
+      SELECT n.id, n.job_id, n.stage_index, n.operator_name, n.kind, n.body,
+             n.audio, n.mime, n.duration_s, n.created_at, n.heard_at
+        FROM station_notes n
+        JOIN jobs j ON j.id = n.job_id
+       WHERE j.deleted_at IS NULL
+         AND (j.stage_index) = ${stage}
+         AND n.stage_index = ${stage - 1}
+       ORDER BY n.created_at ASC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// All notes for one job — the office History modal. Any signed-in user.
+app.get('/api/jobs/:id/station-notes', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT id, job_id, stage_index, operator_name, kind, body, audio, mime, duration_s, created_at, heard_at
+        FROM station_notes WHERE job_id = ${req.params.id} ORDER BY created_at ASC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Mark a note heard/read — fired when the next station plays or views it.
+app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    await sql`UPDATE station_notes SET heard_at = COALESCE(heard_at, NOW()) WHERE id = ${req.params.id}`;
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // ── CAPA reports ─────────────────────────────────────────────
@@ -1764,7 +2145,7 @@ app.get('/api/capa/:id', requireAuth, async (req, res) => {
 // stays empty in job_snapshot; the user types those fields themselves on
 // the edit form (capaFormHtml flips Section 1 to editable when snapshot is
 // empty).
-app.post('/api/capa', requireWriteUser, async (req, res) => {
+app.post('/api/capa', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1799,7 +2180,7 @@ app.post('/api/capa', requireWriteUser, async (req, res) => {
 
 // CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
 // the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
-app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
+app.post('/api/jobs/:id/capa', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1837,7 +2218,7 @@ app.post('/api/jobs/:id/capa', requireWriteUser, async (req, res) => {
 
 // UPDATE a CAPA. Anyone with write access can edit while open/in_progress.
 // Once closed, only admin can change it (including reopening).
-app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
+app.put('/api/capa/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1896,7 +2277,7 @@ app.put('/api/capa/:id', requireWriteUser, async (req, res) => {
 //   • User / Stock can delete a CAPA only if it's still Open or In Progress;
 //     once Closed it's locked to admin (matches the edit-lock behavior).
 //   • CEO can't reach this — requireWriteUser blocks them.
-app.delete('/api/capa/:id', requireWriteUser, async (req, res) => {
+app.delete('/api/capa/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
