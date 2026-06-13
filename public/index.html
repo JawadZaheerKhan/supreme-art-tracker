@@ -29,6 +29,21 @@
   }
   body { font-family: var(--font); background: var(--bg3); color: var(--text); min-height: 100vh; }
   .topbar { background: var(--bg); border-bottom: 1px solid var(--border); padding: 0 1.5rem; display: flex; align-items: center; gap: 1rem; height: 56px; position: sticky; top: 0; z-index: 50; }
+  /* Date stamp pinned to the top-right corner just under the topbar.
+     Two-line maroon stack — DAY on top, full date below — matches the
+     Parts Store / HR Portal corner stamp. Hidden for operator role
+     (their topbar is hidden anyway). */
+  #app-date {
+    position: fixed; top: 66px; right: 24px;
+    text-align: right; line-height: 1.05;
+    color: var(--brand);
+    font-family: var(--font); font-weight: 700;
+    z-index: 40;
+    pointer-events: none;
+  }
+  #app-date .ad-day  { font-size: 11px; letter-spacing: 0.18em; opacity: 0.85; }
+  #app-date .ad-date { font-size: 13px; letter-spacing: 0.04em; margin-top: 2px; }
+  body.role-operator #app-date { display: none; }
   .topbar-brand { font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; animation: fadeIn 0.3s ease-out; }
   .topbar-brand-logo { width: 28px; height: 28px; object-fit: contain; }
   .topbar-brand span { color: var(--brand); }
@@ -1163,6 +1178,10 @@
     </div>
   </div>
 </div>
+<!-- Date stamp anchored to the top-right corner, sits just under the
+     topbar / Logout button. Updates on render and quietly self-refreshes
+     so it tracks midnight without a page reload. -->
+<div id="app-date" aria-hidden="true"></div>
 
 <div class="main" id="jobs-mode">
   <div id="jobs-hero" class="hero-card"></div>
@@ -1831,6 +1850,7 @@ function renderUserChip() {
   document.body.classList.toggle('role-store-manager', sm);
   document.body.classList.toggle('role-production-manager', isProductionManager());
   document.body.classList.toggle('role-operator', op);
+  renderAppDate();
 }
 
 // Google Identity Services — renders the official Sign In button into our
@@ -2013,6 +2033,24 @@ function getFiltered() {
 }
 
 // ── Render ────────────────────────────────────────────────────
+// Render the corner date stamp. Hidden until a user is signed in (so it
+// doesn't clutter the login screen) and on the operator role (their
+// topbar is hidden anyway, so an absolute-positioned corner stamp would
+// float over the station UI).
+function renderAppDate() {
+  const el = document.getElementById('app-date');
+  if (!el) return;
+  if (!currentUser || isOperator()) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  const d = new Date();
+  const day = d.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase();
+  const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  el.innerHTML = `<div class="ad-day">${day}</div><div class="ad-date">${date}</div>`;
+}
+// Heartbeat: re-render every 5 minutes so the day flips at midnight
+// without a page reload. Cheap enough to leave on permanently.
+setInterval(renderAppDate, 5 * 60 * 1000);
+
 // Greeting that switches by local time. Used by the welcome hero card.
 function greetingForNow() {
   const h = new Date().getHours();
