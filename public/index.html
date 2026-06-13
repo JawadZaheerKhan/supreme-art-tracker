@@ -235,24 +235,21 @@
     pointer-events: none; z-index: 1;
   }
   .hero-mark-img {
-    height: 90px; width: auto;
-    /* logo.png has a solid white background, not a transparent one. The
-       previous brightness(0)+invert(1) trick painted that whole white
-       rectangle solid white over the maroon. Inverting the colours
-       (black calligraphy -> white, white bg -> black) and then using
-       mix-blend-mode: screen drops the now-black background to the
-       underlying maroon and keeps the white calligraphy bright. */
-    filter: invert(1);
-    mix-blend-mode: screen;
+    height: 92px; width: auto;
+    /* The image src is replaced at runtime with a JS-processed version
+       where white pixels are turned transparent and everything else is
+       turned solid white. That gives clean white calligraphy on the
+       maroon without relying on mix-blend-mode (which got blocked by
+       stacking contexts in earlier attempts). */
   }
   .hero-mark-text {
     color: #fff;
     font-family: 'Georgia', 'Times New Roman', serif;
-    font-size: 18px; font-weight: 700; letter-spacing: 0.04em;
+    font-size: 16px; font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    margin-top: 4px;
     white-space: nowrap;
-  }
-  .hero-mark-text span {
-    font-weight: 500; opacity: 0.92;
   }
   @keyframes heroIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes wave   { 0%, 60%, 100% { transform: rotate(0); } 10% { transform: rotate(14deg); } 20% { transform: rotate(-8deg); } 30% { transform: rotate(14deg); } 40% { transform: rotate(-4deg); } 50% { transform: rotate(10deg); } }
@@ -2034,6 +2031,45 @@ function greetingForNow() {
   return 'Good evening';
 }
 
+// Preprocess /logo.png into a white-on-transparent watermark. The original
+// asset has a solid white background and dark calligraphy, so neither
+// filter-only nor mix-blend-mode approaches produced clean output on the
+// maroon hero. Drawing it to a canvas, knocking out near-white pixels to
+// transparent, and recolouring everything else to solid white gives a
+// crisp watermark that doesn't depend on blend-mode stacking contexts.
+// Cached in module scope so the work happens once per page load.
+let __cachedWhiteLogoUrl = null;
+function buildWhiteLogo() {
+  if (__cachedWhiteLogoUrl) return Promise.resolve(__cachedWhiteLogoUrl);
+  return new Promise(resolve => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const id = ctx.getImageData(0, 0, c.width, c.height);
+        const d = id.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const r = d[i], g = d[i+1], b = d[i+2];
+          // Near-white pixels become transparent. Everything else (the
+          // dark calligraphy and red accents) becomes solid white so the
+          // shape reads cleanly against any dark background.
+          if (r > 235 && g > 235 && b > 235) { d[i+3] = 0; }
+          else { d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = 255; }
+        }
+        ctx.putImageData(id, 0, 0);
+        __cachedWhiteLogoUrl = c.toDataURL('image/png');
+        resolve(__cachedWhiteLogoUrl);
+      } catch (e) { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = '/logo.png';
+  });
+}
+
 // Welcome hero card at the top of the Jobs tab. Re-rendered on every
 // renderStats() (so the greeting tracks time-of-day across long sessions
 // and the name reflects the signed-in user). The Watermark uses the same
@@ -2056,10 +2092,16 @@ function renderJobsHero() {
       <div class="hero-cta">${newJobBtn}${viewAllBtn}</div>
     </div>
     <div class="hero-mark">
-      <img class="hero-mark-img" src="/logo.png" alt="Supreme Art" onerror="this.style.display='none'">
-      <div class="hero-mark-text">Supreme Art <span>(Pvt) Ltd.</span></div>
+      <img class="hero-mark-img" alt="Supreme Art" onerror="this.style.display='none'">
+      <div class="hero-mark-text">Supreme Art (Pvt) Ltd.</div>
     </div>
   `;
+  // Fill the watermark img with the JS-processed (white-on-transparent)
+  // version of /logo.png so it composites cleanly against the maroon.
+  const markImg = el.querySelector('.hero-mark-img');
+  if (markImg) {
+    buildWhiteLogo().then(url => { if (url && markImg) markImg.src = url; });
+  }
 }
 
 function renderStats() {
