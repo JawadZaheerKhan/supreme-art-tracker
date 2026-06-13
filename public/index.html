@@ -1649,8 +1649,11 @@ async function api(method, path, body) {
 let currentUser = null;
 function isAdmin()             { return currentUser && currentUser.role === 'admin'; }
 function isCeo()               { return currentUser && currentUser.role === 'ceo'; }
-function isProductionManager() { return currentUser && currentUser.role === 'production_manager'; }
-function isStoreManager()      { return currentUser && currentUser.role === 'store_manager'; }
+// Legacy fallback: rows / JWT cookies created before the role rename still
+// carry 'user' (→ production_manager) and 'stock' (→ store_manager). Treat
+// them as the new equivalents so stale cookies don't lock people out.
+function isProductionManager() { return currentUser && (currentUser.role === 'production_manager' || currentUser.role === 'user'); }
+function isStoreManager()      { return currentUser && (currentUser.role === 'store_manager'      || currentUser.role === 'stock'); }
 function isOperator()          { return currentUser && currentUser.role === 'operator'; }
 // Per-area write capability. Used to gate UI write buttons. Server enforces
 // the same matrix server-side so the UI gates are convenience, not security.
@@ -9241,10 +9244,13 @@ function buildPrintCard(j) {
       }
       /* Cut selection beside Sheets Qty — make it pop a touch more. */
       .pc-cut { font-weight: 700 !important; }
-      /* Ticked checkboxes (coatings + paper-type) print in GREEN so the
-         active ones stand out without clashing with the priority colors. */
+      /* Ticked checkboxes (coatings + paper-type) print as a SOLID green
+         box with a white tick inside. The earlier outline-only style was
+         too faint on most office printers — a filled square reads as
+         "active" from across the shop floor. */
       .pc-coat-on {
-        color: #166534 !important;
+        background: #166534 !important;
+        color: #ffffff !important;
         border-color: #166534 !important;
         font-weight: 700 !important;
         -webkit-print-color-adjust: exact !important;
