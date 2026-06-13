@@ -372,9 +372,12 @@ function requireAdmin(req, res, next) {
 // Roles: 'admin' (full), 'production_manager' (jobs+station write),
 // 'store_manager' (inventory+imports write), 'operator' (station only),
 // 'ceo' (read-only everywhere).
-function canWriteJobs(role)      { return role === 'admin' || role === 'production_manager'; }
-function canWriteInventory(role) { return role === 'admin' || role === 'store_manager'; }
-function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'operator'; }
+// Legacy fallback: JWT cookies issued before the role rename still carry
+// 'user' (→ production_manager) and 'stock' (→ store_manager). Treat them as
+// the new equivalents so stale cookies don't break access until they expire.
+function canWriteJobs(role)      { return role === 'admin' || role === 'production_manager' || role === 'user'; }
+function canWriteInventory(role) { return role === 'admin' || role === 'store_manager'      || role === 'stock'; }
+function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'user' || role === 'operator'; }
 function isOperatorRole(role)    { return role === 'operator'; }
 
 // Generic "not read-only" check. Used for cross-cutting endpoints (audit
