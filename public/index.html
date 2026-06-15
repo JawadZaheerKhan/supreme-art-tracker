@@ -1139,15 +1139,22 @@
 
 .inbox-list { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; max-height: calc(100vh - 220px); overflow-y: auto; }
 .inbox-loading { padding: 30px 18px; text-align: center; color: var(--text2); font-size: 13px; }
-.inbox-msg { padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s; }
+.inbox-msg { padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s; display: flex; gap: 10px; align-items: flex-start; }
 .inbox-msg:last-child { border-bottom: none; }
 .inbox-msg:hover { background: var(--bg2); }
 .inbox-msg.active { background: var(--brand-soft); border-left: 3px solid var(--brand); padding-left: 11px; }
+.inbox-msg.is-done .inbox-msg-from,
+.inbox-msg.is-done .inbox-msg-subject,
+.inbox-msg.is-done .inbox-msg-snippet { color: var(--text3); text-decoration: line-through; }
+.inbox-msg-done { flex: 0 0 auto; padding-top: 2px; cursor: pointer; }
+.inbox-msg-done input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--brand); }
+.inbox-msg-body { flex: 1; min-width: 0; }
 .inbox-msg-from { font-size: 13px; font-weight: 600; color: var(--text); display: flex; justify-content: space-between; gap: 8px; }
 .inbox-msg-from .inbox-msg-date { font-weight: 400; color: var(--text2); font-size: 11px; white-space: nowrap; }
 .inbox-msg-subject { font-size: 13px; color: var(--text); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-msg-snippet { font-size: 12px; color: var(--text2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-msg-att { display: inline-block; margin-left: 6px; font-size: 11px; color: var(--brand); }
+.inbox-toggle-row { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg2); text-align: center; }
 
 .inbox-detail { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; overflow-y: auto; max-height: calc(100vh - 220px); }
 .inbox-empty { color: var(--text3); font-size: 13px; padding: 40px 0; text-align: center; }
@@ -7028,6 +7035,32 @@ const INBOX_DEFAULT_QUERY = '(label:PO OR subject:PO OR subject:"purchase order"
 // Currently selected company filter — a sender's "from" email (lowercased).
 // Empty string means "all companies". Lives client-side; doesn't hit Gmail.
 let inboxFromFilter = '';
+// Set of Gmail message ids the user has ticked as done. Persisted in
+// localStorage so triage state survives page reloads. Per user so two
+// people on the same browser don't see each other's checked items.
+let inboxDoneIds = new Set();
+let inboxShowDone = false;
+function inboxDoneKey() { return 'sa_inbox_done_' + (currentUser?.email || ''); }
+function loadInboxDone() {
+  try {
+    const raw = localStorage.getItem(inboxDoneKey());
+    inboxDoneIds = new Set(raw ? JSON.parse(raw) : []);
+  } catch { inboxDoneIds = new Set(); }
+}
+function saveInboxDone() {
+  try { localStorage.setItem(inboxDoneKey(), JSON.stringify([...inboxDoneIds])); } catch {}
+}
+function toggleInboxDone(id, ev) {
+  if (ev) ev.stopPropagation();
+  if (inboxDoneIds.has(id)) inboxDoneIds.delete(id);
+  else inboxDoneIds.add(id);
+  saveInboxDone();
+  renderInboxList();
+}
+function toggleShowDone() {
+  inboxShowDone = !inboxShowDone;
+  renderInboxList();
+}
 
 function inboxStorageKey() { return 'sa_inbox_query_' + (currentUser?.email || ''); }
 
@@ -7042,6 +7075,7 @@ function initInboxTab() {
   }
   if (gmailToken && gmailTokenExp > Date.now()) {
     showInboxState('connected');
+    loadInboxDone();
     if (!inboxMessages.length) loadInboxPOs();
   } else {
     showInboxState('disconnected');
@@ -7224,25 +7258,45 @@ function renderInboxList() {
   const list = document.getElementById('inbox-list');
   if (!list) return;
   syncInboxFromFilter();
-  // Apply the active company filter (empty = show everything).
-  const visible = inboxFromFilter
+  // Two filters stack: the company dropdown narrows by sender, then the
+  // "Done" filter hides ticked items (unless the user clicked Show done).
+  const byCompany = inboxFromFilter
     ? inboxMessages.filter(m => parseFrom(getHeader(m, 'From')).email === inboxFromFilter)
     : inboxMessages;
+  const visible = inboxShowDone
+    ? byCompany
+    : byCompany.filter(m => !inboxDoneIds.has(m.id));
+  const doneInScope = byCompany.filter(m => inboxDoneIds.has(m.id)).length;
+  // Toggle row above the message list: shows a count of hidden items and
+  // lets the user reveal them when they need to untick or re-read.
+  const toggleHtml = doneInScope > 0
+    ? `<div class="inbox-toggle-row">
+         <button class="btn btn-sm" onclick="toggleShowDone()">
+           ${inboxShowDone ? 'Hide done' : `Show done (${doneInScope})`}
+         </button>
+       </div>`
+    : '';
   if (!visible.length) {
-    list.innerHTML = '<div class="inbox-loading">No emails from that company in the current results.</div>';
+    list.innerHTML = toggleHtml + '<div class="inbox-loading">No outstanding emails. Anything you ticked as done is hidden.</div>';
     return;
   }
-  list.innerHTML = visible.map(m => {
+  list.innerHTML = toggleHtml + visible.map(m => {
     const from = getHeader(m, 'From');
     const subj = getHeader(m, 'Subject') || '(no subject)';
     const date = getHeader(m, 'Date');
     const friendlyDate = date ? new Date(date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : '';
     const fromName = parseFrom(from).name || from;
     const hasAtt = (m.payload && m.payload.parts || []).some(p => p.filename);
-    return `<div class="inbox-msg ${m.id === inboxActiveId ? 'active' : ''}" onclick="openInboxMessage('${m.id}')">
-      <div class="inbox-msg-from">${esc(fromName)}<span class="inbox-msg-date">${esc(friendlyDate)}</span></div>
-      <div class="inbox-msg-subject">${esc(subj)}${hasAtt ? '<span class="inbox-msg-att">&#128206;</span>' : ''}</div>
-      <div class="inbox-msg-snippet">${esc(m.snippet || '')}</div>
+    const isDone = inboxDoneIds.has(m.id);
+    return `<div class="inbox-msg ${m.id === inboxActiveId ? 'active' : ''} ${isDone ? 'is-done' : ''}" onclick="openInboxMessage('${m.id}')">
+      <label class="inbox-msg-done" onclick="event.stopPropagation()" title="${isDone ? 'Mark as not done' : 'Mark as done'}">
+        <input type="checkbox" ${isDone ? 'checked' : ''} onchange="toggleInboxDone('${m.id}', event)">
+      </label>
+      <div class="inbox-msg-body">
+        <div class="inbox-msg-from">${esc(fromName)}<span class="inbox-msg-date">${esc(friendlyDate)}</span></div>
+        <div class="inbox-msg-subject">${esc(subj)}${hasAtt ? '<span class="inbox-msg-att">&#128206;</span>' : ''}</div>
+        <div class="inbox-msg-snippet">${esc(m.snippet || '')}</div>
+      </div>
     </div>`;
   }).join('');
 }
@@ -7319,7 +7373,6 @@ async function openInboxMessage(id) {
         <h3 class="inbox-det-subject">${esc(subj)}</h3>
         <div class="inbox-det-meta"><b>From:</b> ${esc(from)} &middot; ${esc(dateStr)}</div>
         <div class="inbox-det-actions">
-          ${canWriteJobs() ? `<button class="btn btn-sm btn-primary" onclick="createJobFromInbox('${id}')">Create Job from this PO</button>` : ''}
           <button class="btn btn-sm" onclick="openInboxOriginal('${id}')">Open in Gmail</button>
         </div>
       </div>
@@ -7398,31 +7451,6 @@ async function openInboxAttachment(msgId, idx) {
 //   - client   = sender display name (or email local-part as fallback)
 //   - ref      = first PO-like token we find in the subject or body
 //   - notes    = email date + a one-line snippet
-function createJobFromInbox(id) {
-  if (!inboxCurrentMsg || inboxCurrentMsg.id !== id) return;
-  const m = inboxCurrentMsg;
-  // Display name from From: header
-  const dispName = (m.from.match(/^([^<]+)</)?.[1] || m.from.split('@')[0]).trim();
-  // First PO/Ref token in subject or text body
-  const bodyForScan = (m.text || m.html || '').replace(/<[^>]+>/g, ' ');
-  const poMatch = (m.subject + ' ' + bodyForScan).match(/\bP\.?O\.?\s*#?\s*([A-Z0-9-]{2,20})\b/i);
-  const ref = poMatch ? poMatch[1] : '';
-  setMode('jobs');
-  // Defer to the next frame so jobs-mode is mounted before openAdd() reads
-  // its form elements.
-  setTimeout(() => {
-    if (typeof openAdd === 'function') openAdd();
-    setTimeout(() => {
-      const setVal = (sel, v) => { const el = document.querySelector(sel); if (el && v) el.value = v; };
-      setVal('#f-name',   m.subject);
-      setVal('#f-client', dispName);
-      setVal('#f-ref',    ref);
-      const notesEl = document.querySelector('#f-notes');
-      if (notesEl) notesEl.value = `Created from email · ${m.dateStr}\n${(m.text || m.html || '').replace(/<[^>]+>/g, '').slice(0, 240).trim()}`;
-    }, 50);
-  }, 30);
-}
-
 // Open the CAPA form in the Forms pane. Renders the editable 5-section
 // form into #forms-capa-pane and hides the landing. Click "Back to Forms"
 // to return without losing what's typed — see setMode('forms') which
