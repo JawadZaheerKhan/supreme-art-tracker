@@ -1545,7 +1545,10 @@
       <div class="inbox-sub">Pulls purchase orders straight from your Gmail. Tag PO emails with the <code>PO</code> label in Gmail and they'll show up here.</div>
     </div>
     <div class="inbox-head-right">
-      <input type="text" id="inbox-query" class="inbox-query" placeholder="Gmail search (e.g. label:PO has:attachment newer_than:30d)">
+      <input type="text" id="inbox-query" class="inbox-query" placeholder="Gmail search (default: PO emails, last 7 days)">
+      <select id="inbox-from-filter" class="inbox-query" onchange="onInboxFromChange()" style="min-width:180px;">
+        <option value="">All companies</option>
+      </select>
       <button class="btn btn-sm" onclick="loadInboxPOs()" id="inbox-refresh-btn">&#8635; Refresh</button>
       <button class="btn btn-sm" onclick="disconnectGmail()" id="inbox-disconnect-btn" style="display:none;">Disconnect</button>
     </div>
@@ -7018,7 +7021,13 @@ let gmailTokClient = null;     // cached google.accounts.oauth2 client
 let inboxMessages  = [];       // last fetched list
 let inboxActiveId  = null;     // currently opened message id
 const GMAIL_SCOPE  = 'https://www.googleapis.com/auth/gmail.readonly';
-const INBOX_DEFAULT_QUERY = 'label:PO OR subject:PO OR subject:"purchase order"';
+// Default: anything labelled PO or with PO/purchase order in the subject,
+// restricted to the last 7 days so the list doesn't fill with stale POs.
+// Users override this in the search box if they want a different window.
+const INBOX_DEFAULT_QUERY = '(label:PO OR subject:PO OR subject:"purchase order") newer_than:7d';
+// Currently selected company filter — a sender's "from" email (lowercased).
+// Empty string means "all companies". Lives client-side; doesn't hit Gmail.
+let inboxFromFilter = '';
 
 function inboxStorageKey() { return 'sa_inbox_query_' + (currentUser?.email || ''); }
 
@@ -7174,16 +7183,61 @@ function getHeader(msg, name) {
   return row ? row.value : '';
 }
 
+// Parse a Gmail "From" header into { name, email } where email is
+// lowercased for stable filter matching. Handles "Name <addr>", bare
+// addresses, and the no-name case.
+function parseFrom(raw) {
+  const r = (raw || '').trim();
+  const m = r.match(/^(.*?)<\s*([^>]+?)\s*>\s*$/);
+  if (m) return { name: m[1].replace(/['"]/g, '').trim(), email: m[2].toLowerCase() };
+  return { name: r, email: r.toLowerCase() };
+}
+
+// Repopulate the company dropdown with the unique senders found in the
+// current inbox results. Preserves the selected filter across refreshes
+// when the same sender is still present; otherwise resets to "All".
+function syncInboxFromFilter() {
+  const sel = document.getElementById('inbox-from-filter');
+  if (!sel) return;
+  const senders = new Map();
+  for (const m of inboxMessages) {
+    const f = parseFrom(getHeader(m, 'From'));
+    if (!f.email) continue;
+    if (!senders.has(f.email)) senders.set(f.email, f.name || f.email);
+  }
+  const sorted = [...senders.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const prev = inboxFromFilter;
+  sel.innerHTML = '<option value="">All companies</option>' +
+    sorted.map(([email, name]) =>
+      `<option value="${esc(email)}">${esc(name)}</option>`).join('');
+  if (prev && senders.has(prev)) sel.value = prev;
+  else { sel.value = ''; inboxFromFilter = ''; }
+}
+
+function onInboxFromChange() {
+  const sel = document.getElementById('inbox-from-filter');
+  inboxFromFilter = sel ? sel.value : '';
+  renderInboxList();
+}
+
 function renderInboxList() {
   const list = document.getElementById('inbox-list');
   if (!list) return;
-  list.innerHTML = inboxMessages.map(m => {
+  syncInboxFromFilter();
+  // Apply the active company filter (empty = show everything).
+  const visible = inboxFromFilter
+    ? inboxMessages.filter(m => parseFrom(getHeader(m, 'From')).email === inboxFromFilter)
+    : inboxMessages;
+  if (!visible.length) {
+    list.innerHTML = '<div class="inbox-loading">No emails from that company in the current results.</div>';
+    return;
+  }
+  list.innerHTML = visible.map(m => {
     const from = getHeader(m, 'From');
     const subj = getHeader(m, 'Subject') || '(no subject)';
     const date = getHeader(m, 'Date');
     const friendlyDate = date ? new Date(date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : '';
-    // From: "Display Name <email@…>"
-    const fromName = (from.match(/^([^<]+)</)?.[1] || from).trim() || from;
+    const fromName = parseFrom(from).name || from;
     const hasAtt = (m.payload && m.payload.parts || []).some(p => p.filename);
     return `<div class="inbox-msg ${m.id === inboxActiveId ? 'active' : ''}" onclick="openInboxMessage('${m.id}')">
       <div class="inbox-msg-from">${esc(fromName)}<span class="inbox-msg-date">${esc(friendlyDate)}</span></div>
