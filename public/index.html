@@ -3238,13 +3238,15 @@ function renderInventory() {
 // Embedded in every modal that has a size/gsm/brand input so users can pick
 // from existing values OR type a new one.
 function invDatalistsHtml() {
-  const sizes  = invDistinct('size');
-  const gsms   = invDistinct('gsm');
-  const brands = invDistinct('brand');
+  const sizes     = invDistinct('size');
+  const gsms      = invDistinct('gsm');
+  const brands    = invDistinct('brand');
+  const suppliers = invDistinct('supplier');
   return `
     <datalist id="inv-sizes">${sizes.map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
     <datalist id="inv-gsms">${gsms.map(g=>`<option value="${esc(g)}">`).join('')}</datalist>
-    <datalist id="inv-brands">${brands.map(b=>`<option value="${esc(b)}">`).join('')}</datalist>`;
+    <datalist id="inv-brands">${brands.map(b=>`<option value="${esc(b)}">`).join('')}</datalist>
+    <datalist id="inv-suppliers">${suppliers.map(s=>`<option value="${esc(s)}">`).join('')}</datalist>`;
 }
 
 // Renders a "pick from list OR add new" combobox. The effective value is
@@ -3751,9 +3753,10 @@ function bulkRowHtml(idx) {
   return `
     <tr data-row="${idx}">
       <td><select class="bulk-paper-type" onchange="bulkRowSync(${idx})">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></td>
-      <td><input type="text" class="bulk-size"  list="inv-sizes"  placeholder="e.g. 25x36"></td>
-      <td><input type="text" class="bulk-gsm"   list="inv-gsms"   placeholder="e.g. 300"></td>
-      <td><input type="text" class="bulk-brand" list="inv-brands" placeholder="e.g. Century"></td>
+      <td><input type="text" class="bulk-size"     list="inv-sizes"     placeholder="e.g. 25x36"></td>
+      <td><input type="text" class="bulk-gsm"      list="inv-gsms"      placeholder="e.g. 300"></td>
+      <td><input type="text" class="bulk-brand"    list="inv-brands"    placeholder="e.g. Century"></td>
+      <td><input type="text" class="bulk-supplier" list="inv-suppliers" placeholder="e.g. XYZ Suppliers"></td>
       <td class="col-qty"><input type="number" class="bulk-packets" placeholder="0" min="0" step="any" oninput="bulkRowSync(${idx}, 'packets')"></td>
       <td class="col-qty"><input type="number" class="bulk-qty" placeholder="0" min="1" oninput="bulkRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkRemoveRow(${idx})" title="Remove row">×</button></td>
@@ -3790,10 +3793,7 @@ function openBulkStockIn() {
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Stock In · Bulk</h2>
     ${invDatalistsHtml()}
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Supplier (optional)</label><input type="text" id="bulk-supplier" placeholder="e.g. XYZ Suppliers"></div>
-      <div class="form-group"><label class="form-label">Reference / Invoice (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. INV-2026-042"></div>
-    </div>
+    <div class="form-group"><label class="form-label">Reference / Invoice (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. INV-2026-042"></div>
     <div class="form-group"><label class="form-label">Shipment Notes</label><input type="text" id="bulk-notes" placeholder="Optional notes applied to every row"></div>
     <table class="bulk-table" id="bulk-table">
       <thead>
@@ -3802,6 +3802,7 @@ function openBulkStockIn() {
           <th>Size</th>
           <th>GSM</th>
           <th>Brand</th>
+          <th>Supplier</th>
           <th style="text-align:right;">Packets / Reams</th>
           <th style="text-align:right;">Sheets</th>
           <th></th>
@@ -3838,10 +3839,12 @@ function bulkRemoveRow(idx) {
 async function saveBulkStockIn() {
   const tbody = document.getElementById('bulk-rows');
   if (!tbody) return;
-  const supplier = document.getElementById('bulk-supplier').value.trim();
   const ref      = document.getElementById('bulk-ref').value.trim();
   const notesIn  = document.getElementById('bulk-notes').value.trim();
-  const noteSuffix = [supplier && `Supplier: ${supplier}`, ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
+  // Top-level note bits that apply to every row. Per-row supplier is
+  // appended further down so each ledger entry shows its own supplier
+  // instead of a shared one.
+  const sharedNote = [ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
 
   // Gather + validate rows. Skip empties (all fields blank). Reject zero-qty rows.
   const rows = [];
@@ -3850,12 +3853,13 @@ async function saveBulkStockIn() {
     const size       = tr.querySelector('.bulk-size').value.trim();
     const gsm        = tr.querySelector('.bulk-gsm').value.trim();
     const brand      = tr.querySelector('.bulk-brand').value.trim();
+    const supplier   = tr.querySelector('.bulk-supplier').value.trim();
     const qty        = parseInt(tr.querySelector('.bulk-qty').value, 10) || 0;
-    if (!size && !gsm && !brand && !qty) continue;  // empty row, skip
+    if (!size && !gsm && !brand && !supplier && !qty) continue;  // empty row, skip
     if (!qty || qty <= 0) {
       await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
-    rows.push({ paper_type, size, gsm, brand, qty });
+    rows.push({ paper_type, size, gsm, brand, supplier, qty });
   }
   if (!rows.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
 
@@ -3863,6 +3867,9 @@ async function saveBulkStockIn() {
   let saved = 0, errored = 0;
   for (const r of rows) {
     try {
+      // Compose the per-row note: per-row supplier first, then any shared
+      // ref / notes from the modal. Drops to null when everything is blank.
+      const rowNote = [r.supplier && `Supplier: ${r.supplier}`, sharedNote].filter(Boolean).join(' · ');
       // Try to match an existing item; treat missing fields as empty strings
       // so the lookup mirrors the DB's COALESCE-based unique index.
       const match = inventory.find(it =>
@@ -3873,14 +3880,15 @@ async function saveBulkStockIn() {
       );
       if (match) {
         await api('POST', `/api/inventory/${match.id}/transactions`, {
-          change: r.qty, reason: 'delivery', notes: noteSuffix || null,
+          change: r.qty, reason: 'delivery', notes: rowNote || null,
         });
       } else {
         await api('POST', '/api/inventory', {
           paper_type: r.paper_type,
           size: r.size, gsm: r.gsm, brand: r.brand,
+          supplier: r.supplier,
           opening_balance: r.qty,
-          opening_notes: noteSuffix || 'Bulk stock-in',
+          opening_notes: rowNote || 'Bulk stock-in',
         });
       }
       saved++;
