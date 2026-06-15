@@ -1380,9 +1380,18 @@
   <div class="stk-wrap">
     <div class="stk-form-card">
       <div class="stk-form-title">Carton Stickers</div>
-      <div class="stk-form-sub">Pick a job — Despatch To, P.O. No. and Description fill in automatically. Enter quantity per carton and total cases, then print.</div>
+      <div class="stk-form-sub" id="stk-form-sub">Pick a job — Despatch To, P.O. No. and Description fill in automatically. Enter quantity per carton and total cases, then print.</div>
 
-      <div class="stk-row">
+      <!-- Source toggle: jobs pre-fill the read-only fields below; manual
+           lets the user type any sticker without a job tied to it. -->
+      <div class="stk-row" style="margin-bottom:12px;">
+        <div class="mode-switch" style="display:inline-flex;margin:0;">
+          <button type="button" class="mode-btn active" id="stk-source-job"    onclick="setStickerMode('job')">From Job</button>
+          <button type="button" class="mode-btn"        id="stk-source-manual" onclick="setStickerMode('manual')">Manual Entry</button>
+        </div>
+      </div>
+
+      <div class="stk-row" id="stk-job-row">
         <label class="stk-label">Job</label>
         <div class="stk-combobox" id="stk-job-combo">
           <input type="hidden" id="stk-job">
@@ -1399,17 +1408,17 @@
       <div class="stk-grid2">
         <div class="stk-row">
           <label class="stk-label">Despatch To</label>
-          <input type="text" id="stk-despatch" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
+          <input type="text" id="stk-despatch" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job" oninput="renderStickerPreview()">
         </div>
         <div class="stk-row">
           <label class="stk-label">P.O. No.</label>
-          <input type="text" id="stk-po" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
+          <input type="text" id="stk-po" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job" oninput="renderStickerPreview()">
         </div>
       </div>
 
       <div class="stk-row">
         <label class="stk-label">Description</label>
-        <input type="text" id="stk-desc" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job">
+        <input type="text" id="stk-desc" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job" oninput="renderStickerPreview()">
       </div>
 
       <div class="stk-row">
@@ -7141,10 +7150,49 @@ function buildFormCapaPrint(d) {
     </div>`;
 }
 
+// Sticker form source: 'job' (default — pick a job, fields autofill +
+// lock) or 'manual' (job picker hidden, all fields freely editable so
+// the user can print a one-off sticker without a job tied to it).
+let stickerMode = 'job';
+function setStickerMode(mode) {
+  stickerMode = (mode === 'manual') ? 'manual' : 'job';
+  const jobRow   = document.getElementById('stk-job-row');
+  const sub      = document.getElementById('stk-form-sub');
+  const btnJob   = document.getElementById('stk-source-job');
+  const btnMan   = document.getElementById('stk-source-manual');
+  const fields   = ['stk-despatch', 'stk-po', 'stk-desc']
+    .map(id => document.getElementById(id))
+    .filter(Boolean);
+  if (!jobRow) return;
+  if (stickerMode === 'manual') {
+    jobRow.style.display = 'none';
+    if (sub) sub.textContent = 'Type Despatch To, P.O. No. and Description, then enter quantity per carton and total cases.';
+    btnJob.classList.remove('active'); btnMan.classList.add('active');
+    fields.forEach(el => {
+      el.readOnly = false;
+      el.classList.remove('stk-readonly');
+      el.placeholder = el.id === 'stk-desc' ? 'e.g. Carton description' :
+                       el.id === 'stk-po'   ? 'e.g. PO-1234'             :
+                                              'e.g. Client name';
+    });
+  } else {
+    jobRow.style.display = '';
+    if (sub) sub.textContent = 'Pick a job — Despatch To, P.O. No. and Description fill in automatically. Enter quantity per carton and total cases, then print.';
+    btnJob.classList.add('active'); btnMan.classList.remove('active');
+    fields.forEach(el => {
+      el.readOnly = true;
+      el.classList.add('stk-readonly');
+      el.placeholder = 'Auto-filled from job';
+    });
+  }
+}
+
 function initStickersTab() {
   // Cache the jobs sorted most-recent first so the searchable dropdown
   // shows the freshest job at the top by default.
   stickerJobList = [...jobs].sort((a, b) => (b.id || 0) - (a.id || 0));
+  // Re-apply the current source mode so toggling tabs doesn't lose state.
+  setStickerMode(stickerMode);
 
   // Default date = today (only if not already set so we keep user's tweak)
   const today = new Date();
@@ -7485,7 +7533,9 @@ function printStickers() {
   const to       = +document.getElementById('stk-to').value || total;
 
   // Validation — give the user a clear message rather than printing junk.
-  if (!despatch) return notify('Select a job first (Despatch To is empty).');
+  if (!despatch) return notify(stickerMode === 'manual'
+    ? 'Despatch To is required.'
+    : 'Select a job first (Despatch To is empty).');
   if (!total || total < 1) return notify('Enter total cases for at least one variant.');
   // Each variant must have a qty if it has cases > 0.
   for (let i = 0; i < stickerVariants.length; i++) {
