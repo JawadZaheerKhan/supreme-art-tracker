@@ -1155,6 +1155,24 @@
 .inbox-msg-snippet { font-size: 12px; color: var(--text2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-msg-att { display: inline-block; margin-left: 6px; font-size: 11px; color: var(--brand); }
 .inbox-toggle-row { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg2); text-align: center; }
+/* NEW pill for unread POs. Gmail keeps the UNREAD label on a message
+   until the user opens it in Gmail itself; we just surface that state
+   here so the freshly-arrived POs are easy to spot in the list. */
+.inbox-msg-new {
+  display: inline-block; margin-left: 8px; padding: 2px 7px;
+  background: #dc2626; color: #fff; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em; border-radius: 10px; vertical-align: 1px;
+  animation: inboxNewPulse 1.8s ease-in-out infinite;
+}
+.inbox-msg.is-new { background: linear-gradient(90deg, rgba(220,38,38,0.06), transparent 60%); }
+.inbox-msg.is-new:hover { background: linear-gradient(90deg, rgba(220,38,38,0.10), var(--bg2) 60%); }
+@keyframes inboxNewPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.55); }
+  50%      { box-shadow: 0 0 0 4px rgba(220,38,38,0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inbox-msg-new { animation: none; }
+}
 
 .inbox-detail { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; overflow-y: auto; max-height: calc(100vh - 220px); }
 .inbox-empty { color: var(--text3); font-size: 13px; padding: 40px 0; text-align: center; }
@@ -7288,12 +7306,17 @@ function renderInboxList() {
     const fromName = parseFrom(from).name || from;
     const hasAtt = (m.payload && m.payload.parts || []).some(p => p.filename);
     const isDone = inboxDoneIds.has(m.id);
-    return `<div class="inbox-msg ${m.id === inboxActiveId ? 'active' : ''} ${isDone ? 'is-done' : ''}" onclick="openInboxMessage('${m.id}')">
+    // A message is "new" if Gmail still has the UNREAD label on it. The
+    // user clears that by opening the original mail in Gmail (we only
+    // have read-only scope, so we can't strip the label ourselves).
+    const isNew  = (m.labelIds || []).includes('UNREAD') && !isDone;
+    const newBadge = isNew ? '<span class="inbox-msg-new" title="Unread in Gmail">&#128276; NEW</span>' : '';
+    return `<div class="inbox-msg ${m.id === inboxActiveId ? 'active' : ''} ${isDone ? 'is-done' : ''} ${isNew ? 'is-new' : ''}" onclick="openInboxMessage('${m.id}')">
       <label class="inbox-msg-done" onclick="event.stopPropagation()" title="${isDone ? 'Mark as not done' : 'Mark as done'}">
         <input type="checkbox" ${isDone ? 'checked' : ''} onchange="toggleInboxDone('${m.id}', event)">
       </label>
       <div class="inbox-msg-body">
-        <div class="inbox-msg-from">${esc(fromName)}<span class="inbox-msg-date">${esc(friendlyDate)}</span></div>
+        <div class="inbox-msg-from">${esc(fromName)}${newBadge}<span class="inbox-msg-date">${esc(friendlyDate)}</span></div>
         <div class="inbox-msg-subject">${esc(subj)}${hasAtt ? '<span class="inbox-msg-att">&#128206;</span>' : ''}</div>
         <div class="inbox-msg-snippet">${esc(m.snippet || '')}</div>
       </div>
