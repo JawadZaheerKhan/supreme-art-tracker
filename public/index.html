@@ -11601,33 +11601,38 @@ function stationUpdateHtml() {
   }).join('') : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
   const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
 
-  // Incoming notes from the previous station for THIS job. Voice renders a
-  // native audio player (big enough for gloves); text renders as a card.
+  // Incoming notes from ANY upstream station for THIS job. With the
+  // forward-broadcast change, a note from CTP keeps showing all the way
+  // through Delivered — so the source stage label is per-note rather than
+  // a single "previous station" string.
   const inNotes = stationNotes.filter(n => n.job_id === j.id);
-  const prevStageName = stIdx > 0 ? (STAGES[stIdx - 1] || '') : '';
   const notesIn = inNotes.length ? `
     <div class="station-notes-in">
-      ${inNotes.map(n => `
+      ${inNotes.map(n => {
+        const srcStage = STAGES[n.stage_index] || 'Earlier stage';
+        return `
         <div class="sn-card">
-          <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} From ${esc(prevStageName)} · ${esc(n.operator_name || '')} · ${esc(fmtDMYT(n.created_at))}</div>
+          <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} From ${esc(srcStage)} &middot; ${esc(n.operator_name || '')} &middot; ${esc(fmtDMYT(n.created_at))}</div>
           ${n.body ? `<div class="sn-body">${esc(n.body)}</div>` : ''}
           ${n.kind === 'voice' && n.audio
             ? `<audio controls preload="metadata" src="${n.audio}" onplay="stationNoteHeard(${n.id})"></audio>`
             : ''}
-        </div>`).join('')}
+        </div>`;
+      }).join('')}
     </div>` : '';
 
-  // Add-note block — message for the NEXT station. Voice (tap to record,
-  // tap to stop, 60s cap) or typed text; Send posts whichever exists.
+  // Add-note block — message broadcast to every downstream station up to
+  // Delivered. The standalone "Send note" button is gone; whatever the
+  // operator types / records here goes with the Done click below, so the
+  // floor only has one "I'm finished, here's the heads-up" action.
   const addNote = nextName ? `
     <div class="station-addnote">
-      <div class="station-addnote-title">&#128172; Message for ${esc(nextName)}</div>
+      <div class="station-addnote-title">&#128172; Message for the next stations <span style="font-weight:400;color:var(--text2);font-size:12px;">(sent on Done)</span></div>
       <textarea id="sn-text" rows="2" placeholder="Tap here to type a note (optional)…" readonly inputmode="none" class="qwerty-target"
-                onclick="stationOpenQwerty('sn-text', 'Message for ${esc(nextName).replace(/'/g, "\\'")}')"></textarea>
+                onclick="stationOpenQwerty('sn-text', 'Message for the next stations')"></textarea>
       <div id="sn-preview"></div>
       <div class="station-note-row">
         <button class="station-rec-btn" id="sn-rec-btn" onclick="stationRecToggle()">${micIconSvg()} Record voice</button>
-        <button class="station-send-note" id="sn-send-btn" onclick="stationSendNote()">Send note</button>
       </div>
     </div>` : '';
 
@@ -11928,38 +11933,6 @@ function stationRecAbort() {
   stationRecBlobs = [];
 }
 
-// Send the typed text (if any) then every queued voice clip as separate
-// notes — chronological order on the receiving station. Each clip becomes
-// its own row in station_notes, with its own heard_at status.
-async function stationSendNote() {
-  const j = jobs.find(x => x.id === stationJobId);
-  if (!j || !stationOperator) return;
-  const text = (document.getElementById('sn-text') || {}).value?.trim() || '';
-  if (!stationRecBlobs.length && !text) { notify('Record a voice note or type something first'); return; }
-  const btn = document.getElementById('sn-send-btn');
-  if (btn) btn.disabled = true;
-  try {
-    if (text) {
-      await api('POST', `/api/jobs/${j.id}/station-notes`, {
-        pin: stationOperator.pin, kind: 'text', body: text,
-      });
-    }
-    for (const clip of stationRecBlobs) {
-      await api('POST', `/api/jobs/${j.id}/station-notes`, {
-        pin: stationOperator.pin, kind: 'voice', body: '',
-        audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration,
-      });
-    }
-    const sentCount = (text ? 1 : 0) + stationRecBlobs.length;
-    stationRecBlobs = [];
-    notify(`${sentCount} note${sentCount === 1 ? '' : 's'} sent to the next station`);
-    stationRender();   // clears the form
-  } catch (e) {
-    notify('Error: ' + e.message);
-    if (btn) btn.disabled = false;
-  }
-}
-
 // Fired by onplay of an incoming voice note (and used for text below) —
 // flips the "new" badge off for the queue list.
 function stationNoteHeard(noteId) {
@@ -11979,14 +11952,40 @@ async function stationSubmit(advance) {
     const el = document.getElementById('sf-' + f.key);
     if (el && el.value !== '') patch[f.key] = el.value.trim();
   });
+  // On Done, flush any pending text + voice notes BEFORE advancing the job
+  // so they land at the correct (current) stage_index. Save-numbers
+  // doesn't touch notes — the operator keeps editing the textarea.
+  let pendingText = '';
+  let pendingClips = [];
+  if (advance) {
+    pendingText  = (document.getElementById('sn-text') || {}).value?.trim() || '';
+    pendingClips = stationRecBlobs.slice();
+  }
   showSaving(true);
   try {
+    if (advance) {
+      if (pendingText) {
+        await api('POST', `/api/jobs/${j.id}/station-notes`, {
+          pin: stationOperator.pin, kind: 'text', body: pendingText,
+        });
+      }
+      for (const clip of pendingClips) {
+        await api('POST', `/api/jobs/${j.id}/station-notes`, {
+          pin: stationOperator.pin, kind: 'voice', body: '',
+          audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration,
+        });
+      }
+      stationRecBlobs = [];
+    }
     const updated = await api('POST', `/api/jobs/${j.id}/station-update`, {
       pin: stationOperator.pin, particulars_patch: patch, advance,
     });
     jobs = jobs.map(x => x.id === j.id ? { ...x, ...updated } : x);
-    if (advance) { notify('Job advanced'); stationBackToQueue(); }
-    else { notify('Numbers saved'); stationClosePad(); stationRender(); }
+    if (advance) {
+      const sent = (pendingText ? 1 : 0) + pendingClips.length;
+      notify(sent ? `Job advanced · ${sent} note${sent === 1 ? '' : 's'} sent` : 'Job advanced');
+      stationBackToQueue();
+    } else { notify('Numbers saved'); stationClosePad(); stationRender(); }
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
