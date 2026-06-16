@@ -2021,7 +2021,14 @@ app.get('/api/station-notes/for-stage/:stageIndex', requireStationUser, async (r
     await dbReady;
     const sql = getDb();
     const stage = parseInt(req.params.stageIndex, 10);
-    if (!Number.isInteger(stage) || stage <= 0) return res.json([]); // stage 0 has no previous station
+    if (!Number.isInteger(stage) || stage < 0) return res.json([]);
+    // Forward-broadcast + self-echo: an operator at this stage sees notes
+    // from EVERY upstream stage AND their own stage's notes on the jobs
+    // currently at their station. CTP's message reaches Printing,
+    // Coating, Die-Cut, Break, Paste, Storage, and Delivered; and an
+    // operator who hits Save (stay here) after recording immediately
+    // sees their own broadcast in the same list so they can verify it
+    // went out.
     const rows = await sql`
       SELECT n.id, n.job_id, n.stage_index, n.operator_name, n.kind, n.body,
              n.audio, n.mime, n.duration_s, n.created_at, n.heard_at
@@ -2029,7 +2036,7 @@ app.get('/api/station-notes/for-stage/:stageIndex', requireStationUser, async (r
         JOIN jobs j ON j.id = n.job_id
        WHERE j.deleted_at IS NULL
          AND (j.stage_index) = ${stage}
-         AND n.stage_index = ${stage - 1}
+         AND n.stage_index <= ${stage}
        ORDER BY n.created_at ASC
     `;
     res.json(rows);
