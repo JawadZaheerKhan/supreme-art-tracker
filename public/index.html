@@ -11059,7 +11059,7 @@ function stationUpdateHtml() {
   // floor only has one "I'm finished, here's the heads-up" action.
   const addNote = nextName ? `
     <div class="station-addnote">
-      <div class="station-addnote-title">&#128172; Message for the next stations <span style="font-weight:400;color:var(--text2);font-size:12px;">(sent on Done)</span></div>
+      <div class="station-addnote-title">&#128172; Message for the next stations <span style="font-weight:400;color:var(--text2);font-size:12px;">(sent on Save or Done)</span></div>
       <textarea id="sn-text" rows="2" placeholder="Tap here to type a note (optional)…" readonly inputmode="none" class="qwerty-target"
                 onclick="stationOpenQwerty('sn-text', 'Message for the next stations')"></textarea>
       <div id="sn-preview"></div>
@@ -11384,40 +11384,47 @@ async function stationSubmit(advance) {
     const el = document.getElementById('sf-' + f.key);
     if (el && el.value !== '') patch[f.key] = el.value.trim();
   });
-  // On Done, flush any pending text + voice notes BEFORE advancing the job
-  // so they land at the correct (current) stage_index. Save-numbers
-  // doesn't touch notes — the operator keeps editing the textarea.
-  let pendingText = '';
-  let pendingClips = [];
-  if (advance) {
-    pendingText  = (document.getElementById('sn-text') || {}).value?.trim() || '';
-    pendingClips = stationRecBlobs.slice();
-  }
+  // Flush any pending text + voice notes BEFORE the numbers POST so they
+  // land at the current stage_index. Both Save (stay here) and Done
+  // broadcast the notes forward — Save then re-renders the form so the
+  // operator gets a clean textarea, Done moves them off the screen.
+  const pendingText  = (document.getElementById('sn-text') || {}).value?.trim() || '';
+  const pendingClips = stationRecBlobs.slice();
   showSaving(true);
   try {
-    if (advance) {
-      if (pendingText) {
-        await api('POST', `/api/jobs/${j.id}/station-notes`, {
-          pin: stationOperator.pin, kind: 'text', body: pendingText,
-        });
-      }
-      for (const clip of pendingClips) {
-        await api('POST', `/api/jobs/${j.id}/station-notes`, {
-          pin: stationOperator.pin, kind: 'voice', body: '',
-          audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration,
-        });
-      }
-      stationRecBlobs = [];
+    if (pendingText) {
+      await api('POST', `/api/jobs/${j.id}/station-notes`, {
+        pin: stationOperator.pin, kind: 'text', body: pendingText,
+      });
     }
+    for (const clip of pendingClips) {
+      await api('POST', `/api/jobs/${j.id}/station-notes`, {
+        pin: stationOperator.pin, kind: 'voice', body: '',
+        audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration,
+      });
+    }
+    stationRecBlobs = [];
     const updated = await api('POST', `/api/jobs/${j.id}/station-update`, {
       pin: stationOperator.pin, particulars_patch: patch, advance,
     });
     jobs = jobs.map(x => x.id === j.id ? { ...x, ...updated } : x);
+    const sent = (pendingText ? 1 : 0) + pendingClips.length;
+    const sentTxt = sent ? ` &middot; ${sent} note${sent === 1 ? '' : 's'} sent` : '';
     if (advance) {
-      const sent = (pendingText ? 1 : 0) + pendingClips.length;
-      notify(sent ? `Job advanced · ${sent} note${sent === 1 ? '' : 's'} sent` : 'Job advanced');
+      notify(`Job advanced${sentTxt}`);
       stationBackToQueue();
-    } else { notify('Numbers saved'); stationClosePad(); stationRender(); }
+    } else {
+      notify(`Numbers saved${sentTxt}`);
+      stationClosePad();
+      // Re-fetch incoming notes so the operator sees what they just sent
+      // and any other broadcasts. stationRender() reads from stationNotes.
+      if (stationOperator) {
+        try {
+          stationNotes = await api('GET', `/api/station-notes/for-stage/${stationOperator.stage_index}`);
+        } catch {}
+      }
+      stationRender();
+    }
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
