@@ -10872,6 +10872,9 @@ let stationRec      = null;   // active MediaRecorder while capturing a voice no
 let stationRecTimer = null;   // 60s auto-stop
 let stationRecBlobs = [];     // queued recordings awaiting send: [{ dataUrl, mime, duration }]
 let stationRecStart = 0;
+let stationRecFlushResolve = null; // promise resolver set by stationSubmit when
+                                   // it needs to wait for an in-progress
+                                   // recording's blob to land in the queue
 
 function enterStation() {
   stationLogout(true);  // always start fresh at the PIN pad
@@ -11316,6 +11319,13 @@ async function stationRecToggle() {
           duration: Math.round((Date.now() - startedAt) / 1000),
         });
         stationRenderRecPreview();
+        // If stationSubmit kicked the recorder to flush, resolve the
+        // promise it's awaiting so it can read the freshly-pushed blob.
+        if (stationRecFlushResolve) {
+          const fn = stationRecFlushResolve;
+          stationRecFlushResolve = null;
+          fn();
+        }
       };
       reader.readAsDataURL(blob);
     };
@@ -11384,6 +11394,19 @@ async function stationSubmit(advance) {
     const el = document.getElementById('sf-' + f.key);
     if (el && el.value !== '') patch[f.key] = el.value.trim();
   });
+  // If the operator hit Save / Done while still holding the recorder
+  // open, the in-progress blob hasn't been pushed into stationRecBlobs
+  // yet (MediaRecorder.onstop + FileReader chain is async). Stop it now
+  // and await the flush so the queued read below picks the clip up.
+  if (stationRec && stationRec.state === 'recording') {
+    await new Promise((resolve) => {
+      stationRecFlushResolve = resolve;
+      try { stationRec.stop(); } catch { resolve(); }
+      // Fallback in case onstop never fires (browser quirk) — don't
+      // hang the Save button forever.
+      setTimeout(() => { if (stationRecFlushResolve === resolve) { stationRecFlushResolve = null; resolve(); } }, 2500);
+    });
+  }
   // Flush any pending text + voice notes BEFORE the numbers POST so they
   // land at the current stage_index. Both Save (stay here) and Done
   // broadcast the notes forward — Save then re-renders the form so the
