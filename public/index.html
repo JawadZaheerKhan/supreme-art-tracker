@@ -12162,7 +12162,16 @@ async function init() {
   }
   hideLogin();
   renderUserChip();
-  await Promise.all([loadJobs(), loadInventory()]);
+  // Operators can't read inventory (403), so skip the call for them.
+  // Everyone else loads jobs + inventory in parallel.
+  const loaders = [loadJobs()];
+  if (!isOperator()) loaders.push(loadInventory());
+  await Promise.all(loaders);
+  // Route to the same landing tab the login flow uses so a refresh
+  // doesn't dump operators onto Jobs (which they can't even see) or
+  // store managers onto the default Jobs view.
+  if (isOperator())          setMode('station');
+  else if (isStoreManager()) setMode('inventory');
   document.getElementById('loading-screen').style.display = 'none';
   startSmartPolling();
 }
