@@ -350,6 +350,17 @@
   /* Job ID is the primary identifier — a bit larger, bolder, and tinted
      with the brand blue so it pops against the all-black labels. */
   .job-id { font-size: 15px; font-weight: 700; color: var(--blue-text); letter-spacing: -0.01em; }
+  /* Small brand-maroon dot that appears next to #id on the job card whenever
+     the job has been printed at least once. Hover for the count + last
+     printed timestamp. Driven by jobs.print_count from the server so every
+     user in the company sees the same signal. */
+  .job-printed-dot {
+    display: inline-block; width: 9px; height: 9px;
+    border-radius: 50%; background: var(--brand);
+    margin-left: 4px; vertical-align: 2px;
+    box-shadow: 0 0 0 2px rgba(163,45,45,0.18);
+    cursor: help;
+  }
   .job-name { font-size: 18px; font-weight: 700; color: var(--text); line-height: 1.3; }
   .job-sub { font-size: 13px; color: var(--text); margin-top: 3px; font-weight: 500; }
   /* Meta facts row — all text black; the "Code:", "Issued:" labels render
@@ -2225,6 +2236,7 @@ function renderJobsCompact() {
         <div class="job-meta">
           <div class="job-id-row">
             <span class="job-id">#${j.id}</span>
+            ${(j.print_count || 0) > 0 ? `<span class="job-printed-dot" title="Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}"></span>` : ''}
             ${badge}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
           </div>
@@ -2380,6 +2392,7 @@ function renderJobCard(j) {
   <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''}">
     <div class="tile-head">
       <span class="job-id">#${j.id}</span>
+      ${(j.print_count || 0) > 0 ? `<span class="job-printed-dot" title="Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}"></span>` : ''}
       ${badge}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
     </div>
@@ -9537,21 +9550,11 @@ function buildPrintCard(j) {
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
-      /* Small filled dot next to the E-id serial — signals at a glance
-         that the sheet came off the printer (vs a hand-filled / blank
-         job card). Brand maroon, prints in colour. */
-      .pc-print-dot {
-        display: inline-block; width: 9px; height: 9px;
-        border-radius: 50%; background: #A32D2D;
-        margin-left: 8px; vertical-align: 1px;
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-      }
     </style>
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-      <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}<span class="pc-print-dot" title="Printed copy"></span></div>
+      <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}</div>
       <img class="pc-logo" src="/logo.png" alt="Supreme Art">
     </div>
     <h1 class="pc-title">JOB CARD</h1>
@@ -9615,6 +9618,17 @@ function buildPrintCard(j) {
 function printJobCard(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
+  // Fire-and-forget: bump the server-side print count so the UI dot
+  // flips on for everyone. Patch the local cache too so the dot
+  // appears on this client without waiting for the next refresh.
+  api('POST', `/api/jobs/${id}/printed`).then((row) => {
+    if (!row) return;
+    const idx = jobs.findIndex(x => x.id === id);
+    if (idx >= 0) {
+      jobs[idx] = { ...jobs[idx], print_count: row.print_count, last_printed_at: row.last_printed_at };
+      if (mode === 'jobs') render();
+    }
+  }).catch(() => {});
   const area = document.getElementById('print-area');
   area.innerHTML = buildPrintCard(j);
   // Browsers print the document.title in the page header by default
