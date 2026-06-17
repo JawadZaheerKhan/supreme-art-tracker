@@ -87,6 +87,12 @@ async function initDb() {
     await sql`ALTER TABLE jobs ALTER COLUMN issuance_status SET DEFAULT 'pending'`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_at  TIMESTAMPTZ`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_by_id INTEGER`;
+    // Job card print tracking: incremented every time someone clicks Print
+    // on a job card. Drives the small "this job has been printed" dot on
+    // the job card UI so the office can tell at a glance which jobs are
+    // already on the floor as paper.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS print_count INTEGER NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_printed_at TIMESTAMPTZ`;
     // Cut workflow: a job may consume a source sheet at one size (cut_size,
     // what the job prints on) and return the leftover to stock at another
     // size (offcut_size). NULL on both = no cut, issue normally.
@@ -936,6 +942,27 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
 
 // Issue stock for a pending job. Deducts inventory and flips status to
 // 'issued'. Admin, stock, and user roles can all issue (CEO is blocked
+// Bump print_count + last_printed_at when someone clicks Print on a job
+// card in the UI. Allows any signed-in user (CEO included — they may
+// well want to print a card for an exec review). Returns the updated
+// row so the client can refresh the print-dot indicator inline.
+app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`
+      UPDATE jobs
+         SET print_count = COALESCE(print_count, 0) + 1,
+             last_printed_at = NOW()
+       WHERE id = ${id} AND deleted_at IS NULL
+       RETURNING id, print_count, last_printed_at
+    `;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // upstream by requireWriteUser). The stock-keeper-only restriction was
 // relaxed once the workflow expanded so any non-readonly role can act.
 app.post('/api/jobs/:id/issue-stock', requireWriteUser, async (req, res) => {
