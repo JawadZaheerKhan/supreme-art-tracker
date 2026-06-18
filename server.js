@@ -1036,6 +1036,76 @@ app.post('/api/jobs/:id/issue-stock', requireWriteUser, async (req, res) => {
   }
 });
 
+// Reverse a previously-issued stock issuance: refunds the consumed sheets
+// back to inventory, undoes the offcut return if there was one, and flips
+// the job back to issuance_status='pending'. Guarded to stage 0 because
+// once the operators have started working a card the sheets have probably
+// already left the storeroom — refunding inventory then would lie about
+// what's actually on the shelf.
+app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status !== 'issued') {
+      return res.status(400).json({ error: 'Stock was not issued for this job' });
+    }
+    if ((job.stage_index || 0) > 0) {
+      return res.status(400).json({ error: 'Cannot reverse — job has already moved past the first stage' });
+    }
+    // Refund the consumed sheets if the job had an inventory item linked.
+    if (job.inventory_item_id) {
+      const inv = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
+      const sourceItem = inv[0];
+      const paperType = sourceItem?.paper_type || '';
+      const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars });
+      if (sheetsUsed > 0) {
+        await applyInventoryChange(sql, {
+          itemId: job.inventory_item_id,
+          change: +sheetsUsed,
+          reason: 'job-issuance-reversed',
+          jobId: job.id,
+          notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: issuance reversed by ${req.user.email} — ${sheetsUsed} sheets returned`,
+          user: req.user,
+        });
+        // If the original issuance created an offcut return, undo it too.
+        if (job.cut_size && job.offcut_size && sourceItem) {
+          const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+          await applyInventoryChange(sql, {
+            itemId: offcutItem.id,
+            change: -sheetsUsed,
+            reason: 'job-issuance-reversed',
+            jobId: job.id,
+            notes: `Job E-${job.id}: offcut return reversed by ${req.user.email} — ${sheetsUsed} sheets pulled back from ${job.offcut_size} offcuts`,
+            user: req.user,
+          });
+        }
+      }
+    }
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status = 'pending',
+             issued_at = NULL,
+             issued_by_id = NULL
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.reverse_issuance',
+      entityType: 'job',
+      entityId: id,
+      summary: `Reversed stock issuance for Job E-${id}: ${job.name}`,
+    });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE a job — admin only. SOFT delete: flips deleted_at so the row stays
 // recoverable from the Trash page for 30 days. Inventory ledger entries are
 // unaffected (their FK is ON DELETE SET NULL and we don't actually delete).
