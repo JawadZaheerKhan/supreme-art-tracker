@@ -401,6 +401,17 @@
      style) because we need this one to read as a status badge at a glance. */
   .btn-waiting { background: #A32D2D; color: #fff; border-color: #A32D2D; font-weight: 600; }
   .btn-waiting:hover { background: #7f1d1d; border-color: #7f1d1d; }
+  /* Pending Stock toggle in the Inventory toolbar. Idle: green outline so
+     the store keeper sees a quiet "this is the queue" hint. Active: solid
+     green with the count baked into the label — it's their working view. */
+  #inv-pending-toggle { font-weight: 600; }
+  .inv-pending-idle   { background: var(--bg); color: var(--green-text); border: 1.5px solid var(--green-border); }
+  .inv-pending-idle:hover { background: var(--green-bg); }
+  .inv-pending-active { background: var(--green-text); color: #fff; border: 1.5px solid var(--green-text); }
+  .inv-pending-active:hover { background: #14532d; border-color: #14532d; }
+  /* Pending-queue rows in the inventory list view — slightly more padding
+     than a paper card, faint green left border to match the toggle. */
+  .inv-pending-row { border-left: 4px solid var(--green-border); }
   /* Yellow CAPA button — pops as a QMS/alert action distinct from the
      normal action row. Bottom-right strip on each job card. */
   .job-capa-bar { display: flex; justify-content: flex-end; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
@@ -1245,6 +1256,13 @@
 <div class="main" id="inventory-mode" style="display:none;">
   <div class="stats-row" id="inv-stats-row"></div>
   <div class="toolbar">
+    <!-- Pending Stock toggle: switches the list below from inventory items
+         to the queue of jobs waiting for stock to be issued. Highlighted
+         green and shows a live count so the store keeper sees at a glance
+         how many jobs are waiting. -->
+    <button id="inv-pending-toggle" class="btn btn-sm" onclick="toggleInvViewMode()">
+      &#9201; <span id="inv-pending-label">Pending Stock</span>
+    </button>
     <div class="search-wrap">
       <input type="text" id="inv-search-input" placeholder="Search paper type, brand..." oninput="setInvFilter(this.value)">
       <span class="search-icon">&#128269;</span>
@@ -1651,6 +1669,10 @@ let invFilterSize   = '';
 let invFilterGsm    = '';
 let invFilterStock  = '';
 let invFilterOffcut = '';   // '' = all, 'fresh' = is_offcut=false, 'offcut' = is_offcut=true
+// 'items' = normal paper-list view, 'pending' = list of jobs waiting for
+// stock to be issued. Toggled via the green "Pending Stock" button at
+// the top of the Inventory toolbar.
+let invViewMode = 'items';
 let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -2279,28 +2301,6 @@ function renderJobsCompact() {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${pending && canIssueStock() ? (() => {
-              // Stock check: live balance on the linked inventory item vs the
-              // sheets this job needs. When short, the button stays clickable
-              // but flips red so it reads at a glance as "waiting for stock".
-              // Once stock arrives (via stock-in or import receive), the next
-              // render() automatically flips it back to green.
-              const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-              const have     = invIt ? (invIt.current_balance || 0) : 0;
-              const need     = parseFloat(j.sheets) || 0;
-              const enough   = !need || (invIt && have >= need);
-              const shortBy  = enough ? 0 : (need - have);
-              const cls      = enough ? 'btn-success' : 'btn-waiting';
-              const tip      = enough
-                ? 'Issue stock and start this job'
-                : (invIt
-                    ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}). Will turn green when stock arrives.`
-                    : 'No paper picked yet — open Edit to link an inventory item.');
-              const icon     = enough ? '&#10003;' : '&#9888;';
-              const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
-              return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
-            })() : ''}
-            ${(!pending && (j.stage_index || 0) === 0 && j.issuance_status === 'issued' && canIssueStock()) ? `<button class="btn btn-sm btn-danger ceo-hide" onclick="reverseIssuance(${j.id})" title="Refund the issued sheets and flip the job back to Pending Stock">&#8634; Reverse Issuance</button>` : ''}
             <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
@@ -2388,8 +2388,10 @@ function renderJobCard(j) {
     j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
   ].filter(Boolean).join('');
 
-  // Primary actions stay visible; everything else folds into a ⋯ menu.
-  const primary = (pending && canIssueStock()) ? cardIssueStockBtn(j) : '';
+  // Issue Stock + Reverse Issuance are no longer shown on the job card —
+  // both actions live on the Inventory tab's Pending Stock filter (issue)
+  // and inside the inventory item History modal (reverse).
+  const primary = '';
   const more = `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
@@ -2399,7 +2401,6 @@ function renderJobCard(j) {
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
         <button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>
-        ${(!pending && (j.stage_index || 0) === 0 && j.issuance_status === 'issued' && canIssueStock()) ? `<button class="danger ceo-hide" onclick="closeJobMore(this); reverseIssuance(${j.id})">&#8634; Reverse Issuance</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
@@ -3261,7 +3262,94 @@ function renderInventoryList() {
 function renderInventory() {
   renderInventoryStats();
   renderInventoryFilters();
-  renderInventoryList();
+  // Refresh the Pending Stock toggle button regardless of mode so the
+  // count + active highlight track new pending jobs in real time.
+  renderInvPendingToggle();
+  if (invViewMode === 'pending') renderInvPendingList();
+  else                           renderInventoryList();
+}
+
+// Pending Stock toggle in the inventory toolbar. Active state = solid
+// green with the count baked in. Idle state = green outline so the button
+// still reads as "this is the pending queue" without yelling at you.
+function renderInvPendingToggle() {
+  const btn = document.getElementById('inv-pending-toggle');
+  if (!btn) return;
+  const count = jobs.filter(isPendingIssuance).length;
+  const label = document.getElementById('inv-pending-label');
+  if (label) label.textContent = count ? `Pending Stock (${count})` : 'Pending Stock';
+  btn.classList.toggle('inv-pending-active', invViewMode === 'pending');
+  btn.classList.toggle('inv-pending-idle',   invViewMode !== 'pending');
+}
+
+function toggleInvViewMode() {
+  invViewMode = invViewMode === 'pending' ? 'items' : 'pending';
+  renderInventory();
+}
+
+// Render the queue of pending-stock jobs as a list of compact rows
+// inside the inventory tab. Each row shows the linked paper, how many
+// packets the job needs, the live balance on that paper, and an
+// Issue Stock button that runs the same issueStock() flow the job card
+// used to have. Store-keeper-friendly: no jumping between tabs.
+function renderInvPendingList() {
+  const el = document.getElementById('inventory-list');
+  if (!el) return;
+  const pendingJobs = jobs
+    .filter(isPendingIssuance)
+    .sort((a, b) => (a.deadline || '').localeCompare(b.deadline || '') || a.id - b.id);
+  if (!pendingJobs.length) {
+    el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">
+      No jobs are waiting for stock right now. Newly created jobs will appear here for the store keeper to issue stock against.
+    </div>`;
+    return;
+  }
+  el.innerHTML = pendingJobs.map(j => {
+    const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const have     = invIt ? (invIt.current_balance || 0) : 0;
+    const need     = parseFloat(j.sheets) || 0;
+    const enough   = !need || (invIt && have >= need);
+    const shortBy  = enough ? 0 : (need - have);
+    const cls      = enough ? 'btn-success' : 'btn-waiting';
+    const icon     = enough ? '&#10003;' : '&#9888;';
+    const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
+    const tip      = enough
+      ? 'Issue stock and start this job'
+      : (invIt
+          ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}).`
+          : 'No paper picked yet — open the job’s Edit to link an inventory item.');
+    const paperLabel = invIt
+      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${invIt.brand?' · '+esc(invIt.brand):''}`
+      : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
+    const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
+    const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
+    const issueBtn = canIssueStock()
+      ? `<button class="btn btn-sm ${cls} ceo-hide" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
+      : '';
+    return `
+      <div class="inv-card inv-pending-row">
+        <div class="inv-main">
+          <div class="inv-name">
+            <b>#${j.id}</b> &middot; ${esc(j.name)}
+            ${j.priority && normalizePriority(j.priority) === 'Urgent' ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : ''}
+          </div>
+          <div class="inv-sub">
+            ${j.client ? esc(j.client) + ' &middot; ' : ''}
+            ${paperLabel}
+            ${packetsIn ? ` &middot; <b>${packetsIn} ${unit}</b> needed` : ''}
+            ${j.deadline ? ` &middot; Due ${esc(fmtDMY(j.deadline))}` : ''}
+          </div>
+        </div>
+        <div class="inv-balance">
+          ${invIt ? `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div><div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${have.toLocaleString()} sheets</div>` : ''}
+        </div>
+        <div class="inv-actions">
+          ${issueBtn}
+          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+          <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 // ── Inventory modals ─────────────────────────────────────────
@@ -4013,8 +4101,25 @@ async function renderInvHistory(id) {
         !isReversal &&
         !hasBeenReversed &&
         (isAdmin() || (canWrite() && within24));
+      // Same idea for job-consumed stock-OUT rows: surface a Reverse
+      // button that hands off to the same /api/jobs/:id/reverse-issuance
+      // endpoint the job card uses. Server enforces the stage-0 + still-
+      // issued guards, but we pre-check client-side so the button only
+      // shows when reversal will actually succeed.
+      const linkedJob = t.job_id ? jobs.find(j => j.id === t.job_id) : null;
+      const canReverseIssuance =
+        t.reason === 'job-consumed' &&
+        t.change < 0 &&
+        !isReversal &&
+        !hasBeenReversed &&
+        linkedJob &&
+        linkedJob.issuance_status === 'issued' &&
+        (linkedJob.stage_index || 0) === 0 &&
+        canIssueStock();
       const reverseBtn = canReverse
         ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="Undo this stock-in entry. Creates a -${packets} ${unit} correction.">&#8634; Reverse</button>`
+        : canReverseIssuance
+        ? `<button class="btn btn-sm" style="background:#A32D2D;color:#fff;border-color:#A32D2D;font-weight:600;" onclick="reverseIssuanceFromLedger(${linkedJob.id}, ${id})" title="Refund these sheets and flip Job E-${linkedJob.id} back to Pending Stock.">&#8634; Reverse Issuance</button>`
         : (hasBeenReversed
             ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
             : '');
@@ -9437,6 +9542,16 @@ async function reverseIssuance(id) {
     notify('Error: ' + e.message);
   }
   showSaving(false);
+}
+
+// Called from the inventory item History modal's Reverse Issuance button.
+// Same flow as reverseIssuance() but also re-renders the open ledger in
+// place so the new reversal row shows immediately.
+async function reverseIssuanceFromLedger(jobId, invItemId) {
+  await reverseIssuance(jobId);
+  // reverseIssuance() bails early on cancel/error — re-rendering the ledger
+  // either way is harmless and keeps the modal in sync with the truth.
+  await renderInvHistory(invItemId);
 }
 
 async function toggleBlock(id) {
