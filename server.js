@@ -1474,19 +1474,21 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
   }
 });
 
-// REVERSE a wrong stock-in transaction. Creates an opposite ledger row with
-// reason='correction' that nets out the original. Movement reports filter
-// out 'correction' so the day's totals stay clean.
+// REVERSE any inventory transaction — stock-in or job-driven stock-out.
+// Creates an opposite ledger row with reason='correction' that nets out
+// the original. Movement reports filter out 'correction' so the day's
+// totals stay clean.
 //
 // Permissions:
-//   • Admin can reverse any positive (stock-in) transaction, any time.
-//   • Stock keeper can only reverse stock-in entries from the last 24 hours.
+//   • Admin can reverse any reversible transaction, any time.
+//   • Stock keeper / writer can only reverse entries from the last 24 hours.
 //   • CEO can't reach this endpoint at all (requireWriteUser blocks them).
 //
 // Refused if:
-//   • The transaction is a stock-OUT (change <= 0) — only stock-in is reversible
 //   • The transaction has already been reversed (no double-reversals)
 //   • The transaction is itself a reversal (no chain reversals)
+//   • The reason isn't one of the reversible kinds (delivery, job-consumed,
+//     job-edit-apply, job-edit-revert, job-offcut, adjustment)
 app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
@@ -1498,8 +1500,16 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     if (!rows[0]) return res.status(404).json({ error: 'Transaction not found' });
     const tx = rows[0];
 
-    if (tx.change <= 0) {
-      return res.status(400).json({ error: 'Only stock-in entries can be reversed. Stock-OUT mistakes (job consumption, adjustments) must be fixed by editing the source.' });
+    // Reasons we never reverse — these are bookkeeping rows that don't
+    // represent a real, undo-able event. 'correction' is itself a reversal
+    // class; reversing one would create an infinite loop of corrections.
+    const REVERSIBLE_REASONS = new Set([
+      'delivery', 'adjustment', 'opening',
+      'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
+      'job-issuance-reversed',
+    ]);
+    if (!REVERSIBLE_REASONS.has(tx.reason)) {
+      return res.status(400).json({ error: `Cannot reverse a '${tx.reason}' entry.` });
     }
     if (tx.reverses_tx_id) {
       return res.status(400).json({ error: 'This row is itself a reversal — cannot reverse a reversal.' });
@@ -1511,8 +1521,8 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     }
 
     // 24-hour window applies to everyone except admin. Stock keepers and
-    // regular users can self-correct recent stock-in mistakes; anything
-    // older needs an admin to keep the audit trail intact.
+    // regular users can self-correct recent mistakes; anything older
+    // needs an admin to keep the audit trail intact.
     if (req.user.role !== 'admin') {
       const ageMs = Date.now() - new Date(tx.created_at).getTime();
       const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
@@ -1544,14 +1554,37 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       reversesTxId: tx.id,
     });
 
+    // If we just reversed a 'job-consumed' row and the linked job is still
+    // sitting at the first stage with issuance_status='issued', flip the
+    // job back to Pending Stock so the store-keeper queue picks it up
+    // again. If the job has already moved past CTP we leave its state
+    // alone — refunding inventory while the floor is mid-flight is a
+    // judgment call the user just made; we don't second-guess them by
+    // also rewriting the job's progress.
+    let jobReverted = false;
+    if (tx.reason === 'job-consumed' && tx.job_id) {
+      const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
+      const job = jobRows[0];
+      if (job && job.issuance_status === 'issued' && (job.stage_index || 0) === 0) {
+        await sql`
+          UPDATE jobs
+             SET issuance_status = 'pending',
+                 issued_at = NULL,
+                 issued_by_id = NULL
+           WHERE id = ${tx.job_id}
+        `;
+        jobReverted = true;
+      }
+    }
+
     await logAudit(sql, req, {
       action: 'inventory.reverse',
       entityType: 'inventory',
       entityId: tx.item_id,
-      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}`,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}`,
     });
 
-    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id });
+    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

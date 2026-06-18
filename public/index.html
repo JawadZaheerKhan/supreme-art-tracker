@@ -401,6 +401,24 @@
      style) because we need this one to read as a status badge at a glance. */
   .btn-waiting { background: #A32D2D; color: #fff; border-color: #A32D2D; font-weight: 600; }
   .btn-waiting:hover { background: #7f1d1d; border-color: #7f1d1d; }
+  /* Pending Stock toggle in the Inventory toolbar. Bigger than the filters
+     so it reads as a primary store-keeper action, sits to the right next
+     to Stock In (Bulk). Light green palette — soft enough not to compete
+     with the maroon brand but loud enough to draw the eye. */
+  #inv-pending-toggle {
+    font-weight: 600; font-size: 14px;
+    padding: 8px 16px; border-radius: 7px;
+    font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background 0.12s, border-color 0.12s, transform 0.06s;
+  }
+  .inv-pending-idle   { background: #dcfce7; color: #14532d; border: 1.5px solid #86efac; }
+  .inv-pending-idle:hover   { background: #bbf7d0; border-color: #4ade80; }
+  .inv-pending-active { background: #86efac; color: #14532d; border: 1.5px solid #4ade80; }
+  .inv-pending-active:hover { background: #4ade80; border-color: #22c55e; }
+  /* Pending-queue rows in the inventory list view — slightly more padding
+     than a paper card, faint green left border to match the toggle. */
+  .inv-pending-row { border-left: 4px solid #86efac; }
   /* Yellow CAPA button — pops as a QMS/alert action distinct from the
      normal action row. Bottom-right strip on each job card. */
   .job-capa-bar { display: flex; justify-content: flex-end; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
@@ -586,6 +604,27 @@
 
   /* ── Station terminal (kiosk) ────────────────────────────── */
   #station-mode { max-width: 820px; }
+  /* Fixed canvas: when station mode is active, lock the body so the
+     tablet can't accidentally scroll past the calc-style layout. The
+     viewport meta also disables pinch-zoom from JS in setMode(). The
+     topbar stays visible — operators can still tap other tabs (Jobs
+     is read-only for them; everything else is hidden via showTab). */
+  body.station-fixed { overflow: hidden; height: 100vh; touch-action: pan-y; overscroll-behavior: contain; }
+  body.station-fixed #station-mode {
+    height: calc(100vh - 56px);        /* 56px = topbar */
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;                   /* internal scroll only — list of jobs or update form */
+    -webkit-overflow-scrolling: touch;
+    padding: 18px 20px;
+    box-sizing: border-box;
+  }
+  /* Keep tap-targets large but stop them growing past the tablet height. */
+  body.station-fixed .station-queue { max-height: none; }
+  body.station-fixed .station-field input { font-size: 28px; padding: 14px 12px; }
+  body.station-fixed .station-primary,
+  body.station-fixed .station-secondary { font-size: 19px; padding: 16px; }
+  body.station-fixed .pin-grid { grid-template-columns: repeat(3, 76px); gap: 12px; }
+  body.station-fixed .pin-key { height: 76px; font-size: 26px; }
   .station-pin { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 28px 0; }
   .station-pin.shake { animation: stShake 0.35s; }
   @keyframes stShake { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-9px)} 40%,80%{transform:translateX(9px)} }
@@ -1344,7 +1383,16 @@
       <option value="fresh">Fresh only</option>
       <option value="offcut">Offcut only</option>
     </select>
-    <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
+    <!-- Pending Stock toggle: switches the list below from inventory items
+         to the queue of jobs waiting for stock to be issued. Highlighted
+         light green and shows a live count so the store keeper sees at a
+         glance how many jobs are waiting. Sits next to Stock In (Bulk)
+         on the right edge of the toolbar so the two store-keeper actions
+         are grouped together. -->
+    <button id="inv-pending-toggle" onclick="toggleInvViewMode()" style="margin-left:auto;">
+      &#9201; <span id="inv-pending-label">Pending Stock</span>
+    </button>
+    <button class="btn btn-primary ceo-hide" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -1764,6 +1812,10 @@ let invFilterSize   = '';
 let invFilterGsm    = '';
 let invFilterStock  = '';
 let invFilterOffcut = '';   // '' = all, 'fresh' = is_offcut=false, 'offcut' = is_offcut=true
+// 'items' = normal paper-list view, 'pending' = list of jobs waiting for
+// stock to be issued. Toggled via the green "Pending Stock" button at
+// the top of the Inventory toolbar.
+let invViewMode = 'items';
 let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -2154,6 +2206,17 @@ function setMode(m) {
     refreshBtn.style.display = 'none';
     enterStation();
   }
+  // Fixed-canvas behaviour for Station — calculator-app feel on tablets:
+  // no pinch-zoom, no body scroll, content fits the viewport. Restored on
+  // exit so the rest of the app keeps normal zoom.
+  const vp = document.querySelector('meta[name="viewport"]');
+  if (m === 'station') {
+    document.body.classList.add('station-fixed');
+    if (vp) vp.setAttribute('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover');
+  } else {
+    document.body.classList.remove('station-fixed');
+    if (vp) vp.setAttribute('content', 'width=device-width, initial-scale=1.0');
+  }
   if (m !== 'station') {
     stationClosePad?.();
     stationCloseQwerty?.();
@@ -2405,28 +2468,6 @@ function renderJobsCompact() {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${pending && canIssueStock() ? (() => {
-              // Stock check: live balance on the linked inventory item vs the
-              // sheets this job needs. When short, the button stays clickable
-              // but flips red so it reads at a glance as "waiting for stock".
-              // Once stock arrives (via stock-in or import receive), the next
-              // render() automatically flips it back to green.
-              const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-              const have     = invIt ? (invIt.current_balance || 0) : 0;
-              const need     = parseFloat(j.sheets) || 0;
-              const enough   = !need || (invIt && have >= need);
-              const shortBy  = enough ? 0 : (need - have);
-              const cls      = enough ? 'btn-success' : 'btn-waiting';
-              const tip      = enough
-                ? 'Issue stock and start this job'
-                : (invIt
-                    ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}). Will turn green when stock arrives.`
-                    : 'No paper picked yet — open Edit to link an inventory item.');
-              const icon     = enough ? '&#10003;' : '&#9888;';
-              const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
-              return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
-            })() : ''}
-            ${(!pending && (j.stage_index || 0) === 0 && j.issuance_status === 'issued' && canIssueStock()) ? `<button class="btn btn-sm btn-danger ceo-hide" onclick="reverseIssuance(${j.id})" title="Refund the issued sheets and flip the job back to Pending Stock">&#8634; Reverse Issuance</button>` : ''}
             <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
@@ -2514,8 +2555,10 @@ function renderJobCard(j) {
     j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
   ].filter(Boolean).join('');
 
-  // Primary actions stay visible; everything else folds into a ⋯ menu.
-  const primary = (pending && canIssueStock()) ? cardIssueStockBtn(j) : '';
+  // Issue Stock + Reverse Issuance are no longer shown on the job card —
+  // both actions live on the Inventory tab's Pending Stock filter (issue)
+  // and inside the inventory item History modal (reverse).
+  const primary = '';
   const more = `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
@@ -2525,7 +2568,6 @@ function renderJobCard(j) {
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
         <button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>
-        ${(!pending && (j.stage_index || 0) === 0 && j.issuance_status === 'issued' && canIssueStock()) ? `<button class="danger ceo-hide" onclick="closeJobMore(this); reverseIssuance(${j.id})">&#8634; Reverse Issuance</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
@@ -3387,7 +3429,94 @@ function renderInventoryList() {
 function renderInventory() {
   renderInventoryStats();
   renderInventoryFilters();
-  renderInventoryList();
+  // Refresh the Pending Stock toggle button regardless of mode so the
+  // count + active highlight track new pending jobs in real time.
+  renderInvPendingToggle();
+  if (invViewMode === 'pending') renderInvPendingList();
+  else                           renderInventoryList();
+}
+
+// Pending Stock toggle in the inventory toolbar. Active state = solid
+// green with the count baked in. Idle state = green outline so the button
+// still reads as "this is the pending queue" without yelling at you.
+function renderInvPendingToggle() {
+  const btn = document.getElementById('inv-pending-toggle');
+  if (!btn) return;
+  const count = jobs.filter(isPendingIssuance).length;
+  const label = document.getElementById('inv-pending-label');
+  if (label) label.textContent = count ? `Pending Stock (${count})` : 'Pending Stock';
+  btn.classList.toggle('inv-pending-active', invViewMode === 'pending');
+  btn.classList.toggle('inv-pending-idle',   invViewMode !== 'pending');
+}
+
+function toggleInvViewMode() {
+  invViewMode = invViewMode === 'pending' ? 'items' : 'pending';
+  renderInventory();
+}
+
+// Render the queue of pending-stock jobs as a list of compact rows
+// inside the inventory tab. Each row shows the linked paper, how many
+// packets the job needs, the live balance on that paper, and an
+// Issue Stock button that runs the same issueStock() flow the job card
+// used to have. Store-keeper-friendly: no jumping between tabs.
+function renderInvPendingList() {
+  const el = document.getElementById('inventory-list');
+  if (!el) return;
+  const pendingJobs = jobs
+    .filter(isPendingIssuance)
+    .sort((a, b) => (a.deadline || '').localeCompare(b.deadline || '') || a.id - b.id);
+  if (!pendingJobs.length) {
+    el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">
+      No jobs are waiting for stock right now. Newly created jobs will appear here for the store keeper to issue stock against.
+    </div>`;
+    return;
+  }
+  el.innerHTML = pendingJobs.map(j => {
+    const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const have     = invIt ? (invIt.current_balance || 0) : 0;
+    const need     = parseFloat(j.sheets) || 0;
+    const enough   = !need || (invIt && have >= need);
+    const shortBy  = enough ? 0 : (need - have);
+    const cls      = enough ? 'btn-success' : 'btn-waiting';
+    const icon     = enough ? '&#10003;' : '&#9888;';
+    const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
+    const tip      = enough
+      ? 'Issue stock and start this job'
+      : (invIt
+          ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}).`
+          : 'No paper picked yet — open the job’s Edit to link an inventory item.');
+    const paperLabel = invIt
+      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${invIt.brand?' · '+esc(invIt.brand):''}`
+      : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
+    const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
+    const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
+    const issueBtn = canIssueStock()
+      ? `<button class="btn btn-sm ${cls} ceo-hide" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
+      : '';
+    return `
+      <div class="inv-card inv-pending-row">
+        <div class="inv-main">
+          <div class="inv-name">
+            <b>#${j.id}</b> &middot; ${esc(j.name)}
+            ${j.priority && normalizePriority(j.priority) === 'Urgent' ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : ''}
+          </div>
+          <div class="inv-sub">
+            ${j.client ? esc(j.client) + ' &middot; ' : ''}
+            ${paperLabel}
+            ${packetsIn ? ` &middot; <b>${packetsIn} ${unit}</b> needed` : ''}
+            ${j.deadline ? ` &middot; Due ${esc(fmtDMY(j.deadline))}` : ''}
+          </div>
+        </div>
+        <div class="inv-balance">
+          ${invIt ? `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div><div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${have.toLocaleString()} sheets</div>` : ''}
+        </div>
+        <div class="inv-actions">
+          ${issueBtn}
+          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+          <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 // ── Inventory modals ─────────────────────────────────────────
@@ -4128,19 +4257,30 @@ async function renderInvHistory(id) {
         ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
         : esc(t.reason || '');
 
-      // Reverse button — admin can reverse anytime; everyone else (stock
+      // Reverse button — admin can reverse anytime; everyone else (store
       // keeper, regular user) can reverse within 24h. CEO never sees it
-      // (read-only). Only for stock-in (positive change). Hidden if this
-      // row IS a reversal or HAS been reversed.
+      // (read-only). Works for both stock-in and stock-OUT (job consumption,
+      // job edits, offcut returns, adjustments). Hidden if this row IS a
+      // reversal or HAS been reversed. The server enforces the same
+      // allow-list of reasons, so an unsupported row just won't expose the
+      // button client-side.
+      const REVERSIBLE = new Set([
+        'delivery', 'adjustment', 'opening',
+        'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
+        'job-issuance-reversed',
+      ]);
       const ageMs    = Date.now() - new Date(t.created_at).getTime();
       const within24 = ageMs <= TWENTY_FOUR_HRS;
       const canReverse =
-        t.change > 0 &&
+        REVERSIBLE.has(t.reason) &&
         !isReversal &&
         !hasBeenReversed &&
         (isAdmin() || (canWrite() && within24));
+      const reverseTooltip = t.change > 0
+        ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
+        : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
       const reverseBtn = canReverse
-        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="Undo this stock-in entry. Creates a -${packets} ${unit} correction.">&#8634; Reverse</button>`
+        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
         : (hasBeenReversed
             ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
             : '');
@@ -4177,17 +4317,20 @@ async function renderInvHistory(id) {
 // inventory (balance changed) and re-renders the History modal in place.
 async function reverseStockTx(txId, itemId) {
   const ok = await confirmDialog({
-    title: 'Reverse this stock-in entry?',
-    message: 'A "correction" entry will be added that cancels it out. The original row stays for the audit trail but shows as struck-through.',
+    title: 'Reverse this entry?',
+    message: 'A "correction" entry will be added that cancels it out. The original row stays for the audit trail but shows struck-through. If the row is a job-consumed stock-OUT and that job is still at CTP, the job also flips back to Pending Stock.',
     confirmText: 'Reverse',
   });
   if (!ok) return;
   showSaving(true);
   try {
-    await api('POST', `/api/inventory/transactions/${txId}/reverse`);
+    const result = await api('POST', `/api/inventory/transactions/${txId}/reverse`);
     await loadInventory();           // current_balance changed
+    // Job state might have flipped — refresh jobs so the Pending Stock
+    // queue picks it up and the badge updates.
+    if (result && result.job_reverted) await loadJobs();
     await renderInvHistory(itemId);  // re-render the open modal in place
-    notify('Entry reversed');
+    notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock' : 'Entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
   }
@@ -9965,42 +10108,6 @@ async function issueStock(id) {
     await loadInventory(); // balances changed — refresh
     render();
     notify(`Stock issued · ${sheets.toLocaleString()} sheets deducted`);
-  } catch (e) {
-    notify('Error: ' + e.message);
-  }
-  showSaving(false);
-}
-
-// Reverse a stock issuance done by mistake — refunds the consumed sheets
-// back to inventory and flips the job back to Pending Stock. Only allowed
-// while the job is still at stage 0; once the floor has started work the
-// server rejects with a clear message.
-async function reverseIssuance(id) {
-  if (!canIssueStock()) { notify('Read-only — you can\'t reverse a stock issuance.'); return; }
-  const j = jobs.find(x => x.id === id);
-  if (!j) return;
-  if (j.issuance_status !== 'issued') { notify('Stock was not issued for this job.'); return; }
-  if ((j.stage_index || 0) > 0) { notify('Job has already moved past CTP — issuance cannot be reversed.'); return; }
-  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const ps   = it ? packetSize(it.paper_type) : 100;
-  const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
-  const sheets = Math.round(packetsIn * ps);
-  const label = it ? `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}` : '(no paper linked)';
-  const ok = await confirmDialog({
-    title: `Reverse stock issuance for Job E-${id}?`,
-    message: `${packetsIn} packets (${sheets.toLocaleString()} sheets) will be returned to inventory.\nPaper: ${label}\n\nThe job goes back to Pending Stock so you can re-issue once corrected.`,
-    confirmText: 'Reverse issuance',
-    danger: true,
-  });
-  if (!ok) return;
-  showSaving(true);
-  try {
-    const updated = await api('POST', `/api/jobs/${id}/reverse-issuance`);
-    const idx = jobs.findIndex(x => x.id === id);
-    if (idx >= 0) jobs[idx] = updated;
-    await loadInventory();
-    render();
-    notify(`Issuance reversed · ${sheets.toLocaleString()} sheets returned`);
   } catch (e) {
     notify('Error: ' + e.message);
   }
