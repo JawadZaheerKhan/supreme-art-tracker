@@ -4090,36 +4090,30 @@ async function renderInvHistory(id) {
         ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
         : esc(t.reason || '');
 
-      // Reverse button — admin can reverse anytime; everyone else (stock
+      // Reverse button — admin can reverse anytime; everyone else (store
       // keeper, regular user) can reverse within 24h. CEO never sees it
-      // (read-only). Only for stock-in (positive change). Hidden if this
-      // row IS a reversal or HAS been reversed.
+      // (read-only). Works for both stock-in and stock-OUT (job consumption,
+      // job edits, offcut returns, adjustments). Hidden if this row IS a
+      // reversal or HAS been reversed. The server enforces the same
+      // allow-list of reasons, so an unsupported row just won't expose the
+      // button client-side.
+      const REVERSIBLE = new Set([
+        'delivery', 'adjustment', 'opening',
+        'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
+        'job-issuance-reversed',
+      ]);
       const ageMs    = Date.now() - new Date(t.created_at).getTime();
       const within24 = ageMs <= TWENTY_FOUR_HRS;
       const canReverse =
-        t.change > 0 &&
+        REVERSIBLE.has(t.reason) &&
         !isReversal &&
         !hasBeenReversed &&
         (isAdmin() || (canWrite() && within24));
-      // Same idea for job-consumed stock-OUT rows: surface a Reverse
-      // button that hands off to the same /api/jobs/:id/reverse-issuance
-      // endpoint the job card uses. Server enforces the stage-0 + still-
-      // issued guards, but we pre-check client-side so the button only
-      // shows when reversal will actually succeed.
-      const linkedJob = t.job_id ? jobs.find(j => j.id === t.job_id) : null;
-      const canReverseIssuance =
-        t.reason === 'job-consumed' &&
-        t.change < 0 &&
-        !isReversal &&
-        !hasBeenReversed &&
-        linkedJob &&
-        linkedJob.issuance_status === 'issued' &&
-        (linkedJob.stage_index || 0) === 0 &&
-        canIssueStock();
+      const reverseTooltip = t.change > 0
+        ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
+        : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
       const reverseBtn = canReverse
-        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="Undo this stock-in entry. Creates a -${packets} ${unit} correction.">&#8634; Reverse</button>`
-        : canReverseIssuance
-        ? `<button class="btn btn-sm" style="background:#A32D2D;color:#fff;border-color:#A32D2D;font-weight:600;" onclick="reverseIssuanceFromLedger(${linkedJob.id}, ${id})" title="Refund these sheets and flip Job E-${linkedJob.id} back to Pending Stock.">&#8634; Reverse Issuance</button>`
+        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
         : (hasBeenReversed
             ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
             : '');
@@ -4156,17 +4150,20 @@ async function renderInvHistory(id) {
 // inventory (balance changed) and re-renders the History modal in place.
 async function reverseStockTx(txId, itemId) {
   const ok = await confirmDialog({
-    title: 'Reverse this stock-in entry?',
-    message: 'A "correction" entry will be added that cancels it out. The original row stays for the audit trail but shows as struck-through.',
+    title: 'Reverse this entry?',
+    message: 'A "correction" entry will be added that cancels it out. The original row stays for the audit trail but shows struck-through. If the row is a job-consumed stock-OUT and that job is still at CTP, the job also flips back to Pending Stock.',
     confirmText: 'Reverse',
   });
   if (!ok) return;
   showSaving(true);
   try {
-    await api('POST', `/api/inventory/transactions/${txId}/reverse`);
+    const result = await api('POST', `/api/inventory/transactions/${txId}/reverse`);
     await loadInventory();           // current_balance changed
+    // Job state might have flipped — refresh jobs so the Pending Stock
+    // queue picks it up and the badge updates.
+    if (result && result.job_reverted) await loadJobs();
     await renderInvHistory(itemId);  // re-render the open modal in place
-    notify('Entry reversed');
+    notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock' : 'Entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
   }
@@ -9506,52 +9503,6 @@ async function issueStock(id) {
     notify('Error: ' + e.message);
   }
   showSaving(false);
-}
-
-// Reverse a stock issuance done by mistake — refunds the consumed sheets
-// back to inventory and flips the job back to Pending Stock. Only allowed
-// while the job is still at stage 0; once the floor has started work the
-// server rejects with a clear message.
-async function reverseIssuance(id) {
-  if (!canIssueStock()) { notify('Read-only — you can\'t reverse a stock issuance.'); return; }
-  const j = jobs.find(x => x.id === id);
-  if (!j) return;
-  if (j.issuance_status !== 'issued') { notify('Stock was not issued for this job.'); return; }
-  if ((j.stage_index || 0) > 0) { notify('Job has already moved past CTP — issuance cannot be reversed.'); return; }
-  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const ps   = it ? packetSize(it.paper_type) : 100;
-  const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
-  const sheets = Math.round(packetsIn * ps);
-  const label = it ? `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}` : '(no paper linked)';
-  const ok = await confirmDialog({
-    title: `Reverse stock issuance for Job E-${id}?`,
-    message: `${packetsIn} packets (${sheets.toLocaleString()} sheets) will be returned to inventory.\nPaper: ${label}\n\nThe job goes back to Pending Stock so you can re-issue once corrected.`,
-    confirmText: 'Reverse issuance',
-    danger: true,
-  });
-  if (!ok) return;
-  showSaving(true);
-  try {
-    const updated = await api('POST', `/api/jobs/${id}/reverse-issuance`);
-    const idx = jobs.findIndex(x => x.id === id);
-    if (idx >= 0) jobs[idx] = updated;
-    await loadInventory();
-    render();
-    notify(`Issuance reversed · ${sheets.toLocaleString()} sheets returned`);
-  } catch (e) {
-    notify('Error: ' + e.message);
-  }
-  showSaving(false);
-}
-
-// Called from the inventory item History modal's Reverse Issuance button.
-// Same flow as reverseIssuance() but also re-renders the open ledger in
-// place so the new reversal row shows immediately.
-async function reverseIssuanceFromLedger(jobId, invItemId) {
-  await reverseIssuance(jobId);
-  // reverseIssuance() bails early on cancel/error — re-rendering the ledger
-  // either way is harmless and keeps the modal in sync with the truth.
-  await renderInvHistory(invItemId);
 }
 
 async function toggleBlock(id) {
