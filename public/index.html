@@ -715,6 +715,17 @@
     background: #fef3c7; color: #92400e; border: 1px solid #f59e0b;
     border-radius: 10px; padding: 3px 9px; font-size: 13px; font-weight: 700;
   }
+  /* Pending-stock jobs surface on the CTP queue so the operator can see
+     what's coming, but the visual hint (faded card + green pill) tells
+     them stock hasn't been issued yet. Same green palette used for the
+     "Pending Stock" badge in the jobs list, for consistency. */
+  .sj-pending-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border);
+    border-radius: 10px; padding: 3px 9px; font-size: 13px; font-weight: 700;
+    margin-left: 6px;
+  }
+  .station-job.is-pending { border-left-color: var(--green-border); opacity: 0.85; }
   .station-addnote { border-top: 2px dashed var(--border); margin-top: 6px; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
   .station-addnote-title { font-size: 16px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
   .station-addnote textarea {
@@ -11003,21 +11014,26 @@ function stationQueueHtml() {
   const stIdx = stationOperator.stage_index;
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   // Jobs currently sitting at this operator's stage, ready to work.
+  // Pending-stock jobs are included so the CTP / first-stage operator
+  // knows what's coming, even though stock hasn't been issued yet —
+  // they're tagged with a 'Pending Stock' badge to make the state clear.
   const queue = jobs.filter(j =>
-    (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j) && !isPendingIssuance(j)
+    (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j)
   ).reverse();
   const rows = queue.length ? queue.map(j => {
     // Unheard notes get a loud badge so the operator opens that job first.
     const notes = stationNotes.filter(n => n.job_id === j.id);
     const unheard = notes.filter(n => !n.heard_at);
-    const badge = notes.length
+    const noteBadge = notes.length
       ? `<span class="sj-note-badge">${notes.some(n => n.kind === 'voice') ? '&#127908;' : '&#128172;'} ${unheard.length ? unheard.length + ' new' : notes.length}</span>`
       : '';
+    const pending = isPendingIssuance(j);
+    const pendingBadge = pending ? `<span class="sj-pending-badge">&#8987; Pending Stock</span>` : '';
     return `
-    <button class="station-job" onclick="stationOpenJob(${j.id})">
+    <button class="station-job${pending ? ' is-pending' : ''}" onclick="stationOpenJob(${j.id})">
       <div class="sj-id">#${j.id}</div>
       <div class="sj-main">
-        <div class="sj-name">${esc(j.name)} ${badge}</div>
+        <div class="sj-name">${esc(j.name)} ${pendingBadge}${noteBadge}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
       </div>
       <div class="sj-go">›</div>
