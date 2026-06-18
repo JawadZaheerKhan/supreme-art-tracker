@@ -68,9 +68,12 @@
   body.role-store-manager #stickers-mode .ceo-hide { display: none !important; }
   body.role-production-manager #inventory-mode .ceo-hide,
   body.role-production-manager #imports-mode .ceo-hide { display: none !important; }
-  /* Operator: lock-down — only the Station view is reachable, and the
-     top-bar mode switch is hidden so they can't navigate away by mistake. */
-  body.role-operator .mode-switch { display: none !important; }
+  /* Operator: Station is the default working view; Jobs is reachable
+     but strictly read-only (every write button tagged .ceo-hide on a
+     job card is hidden, plus the topbar action buttons). The two
+     allowed tab buttons stay visible — every other one is hidden by
+     renderUserChip via showTab(). */
+  body.role-operator #jobs-mode .ceo-hide { display: none !important; }
   body.role-operator #topbar-export,
   body.role-operator #topbar-add { display: none !important; }
   .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
@@ -1839,10 +1842,11 @@ function renderUserChip() {
     const el = document.getElementById(id);
     if (el) el.style.display = ok ? '' : 'none';
   };
-  // Operators see ONLY the Station tab. Store Manager skips Station/Forms.
+  // Operators see Station (default) + Jobs (read-only, so they can check
+  // the queue), nothing else. Store Manager skips Station/Forms.
   // Production Manager + Admin + CEO see everything (CEO is read-only).
   const op = isOperator(), sm = isStoreManager();
-  showTab('mode-jobs-btn',      !op);
+  showTab('mode-jobs-btn',      true);
   showTab('mode-inventory-btn', !op);
   showTab('mode-reports-btn',   !op);
   showTab('mode-stickers-btn',  !op && !sm);
@@ -1948,8 +1952,9 @@ async function loadInventory() {
 function setMode(m) {
   // Role gates — collapse any disallowed tab to the user's home tab so
   // disallowed views can't be reached even via a stray setMode() call.
-  // Operators are locked to Station regardless of what was requested.
-  if (isOperator())                                m = 'station';
+  // Operators get Station (default) + Jobs (read-only). Any other tab
+  // they try to land on falls back to Station.
+  if (isOperator() && m !== 'jobs' && m !== 'station') m = 'station';
   // Store Manager has no business on Forms/Stickers/Station.
   if (isStoreManager() && (m === 'forms' || m === 'stickers' || m === 'station')) m = 'inventory';
   // Block everyone except admin + ceo from the Users tab. CEO gets a
