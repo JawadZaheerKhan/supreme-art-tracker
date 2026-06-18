@@ -2300,6 +2300,7 @@ function renderJobsCompact() {
               const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
               return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
             })() : ''}
+            ${(!pending && (j.stage_index || 0) === 0 && j.issuance_status === 'issued' && canIssueStock()) ? `<button class="btn btn-sm btn-danger ceo-hide" onclick="reverseIssuance(${j.id})" title="Refund the issued sheets and flip the job back to Pending Stock">&#8634; Reverse Issuance</button>` : ''}
             <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
@@ -2398,6 +2399,7 @@ function renderJobCard(j) {
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
         <button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>
+        ${(!pending && (j.stage_index || 0) === 0 && j.issuance_status === 'issued' && canIssueStock()) ? `<button class="danger ceo-hide" onclick="closeJobMore(this); reverseIssuance(${j.id})">&#8634; Reverse Issuance</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
@@ -9395,6 +9397,42 @@ async function issueStock(id) {
     await loadInventory(); // balances changed — refresh
     render();
     notify(`Stock issued · ${sheets.toLocaleString()} sheets deducted`);
+  } catch (e) {
+    notify('Error: ' + e.message);
+  }
+  showSaving(false);
+}
+
+// Reverse a stock issuance done by mistake — refunds the consumed sheets
+// back to inventory and flips the job back to Pending Stock. Only allowed
+// while the job is still at stage 0; once the floor has started work the
+// server rejects with a clear message.
+async function reverseIssuance(id) {
+  if (!canIssueStock()) { notify('Read-only — you can\'t reverse a stock issuance.'); return; }
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  if (j.issuance_status !== 'issued') { notify('Stock was not issued for this job.'); return; }
+  if ((j.stage_index || 0) > 0) { notify('Job has already moved past CTP — issuance cannot be reversed.'); return; }
+  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const ps   = it ? packetSize(it.paper_type) : 100;
+  const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
+  const sheets = Math.round(packetsIn * ps);
+  const label = it ? `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}` : '(no paper linked)';
+  const ok = await confirmDialog({
+    title: `Reverse stock issuance for Job E-${id}?`,
+    message: `${packetsIn} packets (${sheets.toLocaleString()} sheets) will be returned to inventory.\nPaper: ${label}\n\nThe job goes back to Pending Stock so you can re-issue once corrected.`,
+    confirmText: 'Reverse issuance',
+    danger: true,
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/reverse-issuance`);
+    const idx = jobs.findIndex(x => x.id === id);
+    if (idx >= 0) jobs[idx] = updated;
+    await loadInventory();
+    render();
+    notify(`Issuance reversed · ${sheets.toLocaleString()} sheets returned`);
   } catch (e) {
     notify('Error: ' + e.message);
   }
