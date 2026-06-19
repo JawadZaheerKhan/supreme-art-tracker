@@ -260,6 +260,10 @@ async function initDb() {
     `;
     // PIN must be unique among active operators so /verify is unambiguous.
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_idx ON operators(pin) WHERE active`;
+    // Optional machine label — which specific press / coater / die-cutter
+    // this operator is at. Free-text so the floor can name machines
+    // however they refer to them ('SM-52', 'Heidelberg #2', 'Coater 1').
+    await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS machine TEXT`;
 
     // Dropdown blacklist — values removed from the brand/supplier dropdown
     // suggestions without touching existing inventory items. So "Century" can
@@ -664,15 +668,16 @@ app.post('/api/operators', requireAdmin, async (req, res) => {
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
     const stage_index = parseInt(req.body.stage_index, 10);
+    const machine = (req.body.machine || '').trim() || null;
     if (!name) return res.status(400).json({ error: 'Name is required' });
     if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
     if (!Number.isInteger(stage_index) || stage_index < 0) return res.status(400).json({ error: 'A section is required' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
     const inserted = await sql`
-      INSERT INTO operators (name, pin, stage_index) VALUES (${name}, ${pin}, ${stage_index}) RETURNING *
+      INSERT INTO operators (name, pin, stage_index, machine) VALUES (${name}, ${pin}, ${stage_index}, ${machine}) RETURNING *
     `;
-    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (stage ${stage_index})` });
+    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (stage ${stage_index}${machine ? ', machine ' + machine : ''})` });
     res.json(inserted[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -688,13 +693,14 @@ app.put('/api/operators/:id', requireAdmin, async (req, res) => {
     const pin = String(req.body.pin || '').trim();
     const stage_index = parseInt(req.body.stage_index, 10);
     const active = req.body.active !== false;
+    const machine = (req.body.machine || '').trim() || null;
     if (!name) return res.status(400).json({ error: 'Name is required' });
     if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
     if (!Number.isInteger(stage_index) || stage_index < 0) return res.status(400).json({ error: 'A section is required' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
     const updated = await sql`
-      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${stage_index}, active=${active}
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${stage_index}, active=${active}, machine=${machine}
       WHERE id=${id} RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
