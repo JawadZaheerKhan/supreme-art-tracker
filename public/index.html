@@ -7661,28 +7661,41 @@ function fmtStickerDate(iso) {
   return `${d}-${m}-${y}`;
 }
 
-// Walk every .sticker-row-value inside `root` and shrink its font-size
-// until the text fits the cell on a single line. Browsers will give us
-// scrollWidth > clientWidth whenever the inner text overflows; we step
-// the font down 0.5pt at a time until that's no longer true (or we hit
-// the floor). Cheap enough to run inline after each render — half a
-// dozen iterations on a worst-case "ferozsons pharmaceuticals..." line.
+// Walk every .sticker-row-value inside `root` and shrink the inner
+// .sticker-fit span's font-size until it fits the cell on a single
+// line. Measuring an inline <span>'s offsetWidth gives us the real
+// rendered text width even on flex containers (scrollWidth was
+// unreliable when display:flex collapsed the overflow into 0).
+//
+// Cheap — half a dozen iterations on a worst-case
+// "ferozsons pharmaceuticals" line. Force a getBoundingClientRect()
+// read first to flush any pending layout before we measure.
 function fitStickerText(root) {
   if (!root) return;
   const FLOOR_PT = 6;
   const cells = root.querySelectorAll('.sticker-row-value');
   cells.forEach(cell => {
+    const span = cell.querySelector('.sticker-fit');
+    if (!span) return;
     // Reset to the base size (set by stylesheet) before re-fitting in case
     // we're re-running on the same node (e.g. preview re-renders).
-    cell.style.fontSize = '';
+    span.style.fontSize = '';
     let pt = cell.classList.contains('big') ? 17 : 13;
-    cell.style.fontSize = pt + 'pt';
-    // scrollWidth = full content width, clientWidth = visible (padded) cell
-    // width. Loop while overflowing.
-    let guard = 40;
-    while (cell.scrollWidth > cell.clientWidth && pt > FLOOR_PT && guard-- > 0) {
+    span.style.fontSize = pt + 'pt';
+    // Available width inside the cell (clientWidth already excludes
+    // border but includes padding — subtract the padding so we compare
+    // against the actual text area).
+    const cs = getComputedStyle(cell);
+    const padL = parseFloat(cs.paddingLeft)  || 0;
+    const padR = parseFloat(cs.paddingRight) || 0;
+    const avail = Math.max(0, cell.clientWidth - padL - padR);
+    // getBoundingClientRect forces layout, so the offsetWidth we read
+    // next reflects the freshly-applied font size.
+    span.getBoundingClientRect();
+    let guard = 60;
+    while (span.offsetWidth > avail && pt > FLOOR_PT && guard-- > 0) {
       pt = Math.max(FLOOR_PT, pt - 0.5);
-      cell.style.fontSize = pt + 'pt';
+      span.style.fontSize = pt + 'pt';
     }
   });
 }
@@ -7700,23 +7713,23 @@ function buildStickerHTML(opts) {
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Despatch To</div>
-        <div class="sticker-row-value">${esc(opts.despatch || '')}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(opts.despatch || '')}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">P.O. #</div>
-        <div class="sticker-row-value big">${esc(opts.po || '')}</div>
+        <div class="sticker-row-value big"><span class="sticker-fit">${esc(opts.po || '')}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Description</div>
-        <div class="sticker-row-value">${esc(opts.desc || '')}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(opts.desc || '')}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Quantity</div>
-        <div class="sticker-row-value">${esc(String(opts.qty || ''))}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(String(opts.qty || ''))}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Case #</div>
-        <div class="sticker-row-value">${opts.caseNo} of ${opts.caseTotal}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${opts.caseNo} of ${opts.caseTotal}</span></div>
       </div>
     </div>`;
 }
