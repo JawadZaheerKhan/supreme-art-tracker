@@ -1142,7 +1142,7 @@
    dropped to 0 and font knocked to 9.5pt — still bold and readable,
    no more wrap. overflow: hidden on the row + each cell stops any
    stray glyph from spilling into the neighbour. */
-.sticker-row-label { width: 33%; padding: 4px 9px; font-size: 9.5pt; font-weight: 800; border-right: 2.5px solid #000; box-sizing: border-box; display: flex; align-items: center; text-transform: uppercase; letter-spacing: 0; white-space: nowrap; overflow: hidden; }
+.sticker-row-label { width: 28%; padding: 4px 8px; font-size: 8pt; font-weight: 500; border-right: 2.5px solid #000; box-sizing: border-box; display: flex; align-items: center; text-transform: uppercase; letter-spacing: 0.1px; white-space: nowrap; overflow: hidden; }
 /* Font sizes are the BASE — they get shrunk per-sticker by fitStickerText()
    so long values (Description, Despatch To) stay on one line instead of
    truncating with an ellipsis or overflowing the cell. */
@@ -7829,9 +7829,16 @@ function printStickers() {
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
-    // Fit every sticker AFTER layout + images settle so scrollWidth /
-    // clientWidth reflect the real printed cell width.
+    // #print-area is display:none on screen, so its children have 0 width
+    // — the auto-fit can't measure anything. Temporarily park the area
+    // off-screen as a normal block, measure + shrink each cell, then
+    // restore the inline style so the @media print rules take over.
+    const prev = area.getAttribute('style') || '';
+    area.style.cssText = 'display:block; position:absolute; left:-10000px; top:0; width:auto;';
+    // Force a synchronous layout pass before measuring.
+    void area.offsetWidth;
     fitStickerText(area);
+    area.setAttribute('style', prev);
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
