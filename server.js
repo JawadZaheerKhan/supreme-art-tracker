@@ -425,6 +425,15 @@ function requireStationUser(req, res, next) {
   }
   next();
 }
+// CAPA writes — admin, production_manager, or CEO. CAPA is governance,
+// not floor work; CEOs need to be able to file / close their own reports.
+function requireCapaWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  const r = req.user.role;
+  const ok = r === 'admin' || r === 'production_manager' || r === 'user' || r === 'ceo';
+  if (!ok) return res.status(403).json({ error: 'Not allowed — CAPA write access required' });
+  next();
+}
 // Legacy aliases — kept so existing call sites compile until they're
 // individually migrated to the more specific middleware above.
 const requireStockOrAdmin = requireInventoryWriter;
@@ -965,7 +974,7 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 
 // upstream by requireWriteUser). The stock-keeper-only restriction was
 // relaxed once the workflow expanded so any non-readonly role can act.
-app.post('/api/jobs/:id/issue-stock', requireWriteUser, async (req, res) => {
+app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2285,7 +2294,7 @@ app.get('/api/capa/:id', requireAuth, async (req, res) => {
 // stays empty in job_snapshot; the user types those fields themselves on
 // the edit form (capaFormHtml flips Section 1 to editable when snapshot is
 // empty).
-app.post('/api/capa', requireJobsWriter, async (req, res) => {
+app.post('/api/capa', requireCapaWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2320,7 +2329,7 @@ app.post('/api/capa', requireJobsWriter, async (req, res) => {
 
 // CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
 // the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
-app.post('/api/jobs/:id/capa', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/capa', requireCapaWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2358,7 +2367,7 @@ app.post('/api/jobs/:id/capa', requireJobsWriter, async (req, res) => {
 
 // UPDATE a CAPA. Anyone with write access can edit while open/in_progress.
 // Once closed, only admin can change it (including reopening).
-app.put('/api/capa/:id', requireJobsWriter, async (req, res) => {
+app.put('/api/capa/:id', requireCapaWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2366,9 +2375,9 @@ app.put('/api/capa/:id', requireJobsWriter, async (req, res) => {
     if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
     const current = existing[0];
 
-    // Lock closed CAPAs to admin only.
-    if (current.status === 'closed' && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'This CAPA is closed. Only admin can edit it.' });
+    // Lock closed CAPAs to admin + CEO — CEO has full CAPA governance.
+    if (current.status === 'closed' && req.user.role !== 'admin' && req.user.role !== 'ceo') {
+      return res.status(403).json({ error: 'This CAPA is closed. Only admin or CEO can edit it.' });
     }
 
     const { status, issue_date, data, job_snapshot } = req.body || {};
@@ -2417,15 +2426,15 @@ app.put('/api/capa/:id', requireJobsWriter, async (req, res) => {
 //   • User / Stock can delete a CAPA only if it's still Open or In Progress;
 //     once Closed it's locked to admin (matches the edit-lock behavior).
 //   • CEO can't reach this — requireWriteUser blocks them.
-app.delete('/api/capa/:id', requireJobsWriter, async (req, res) => {
+app.delete('/api/capa/:id', requireCapaWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
     if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
     const capa = existing[0];
-    if (capa.status === 'closed' && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'This CAPA is closed. Only admin can delete it.' });
+    if (capa.status === 'closed' && req.user.role !== 'admin' && req.user.role !== 'ceo') {
+      return res.status(403).json({ error: 'This CAPA is closed. Only admin or CEO can delete it.' });
     }
     await sql`DELETE FROM capa_reports WHERE id=${req.params.id}`;
     await logAudit(sql, req, {

@@ -66,6 +66,10 @@
   body.role-store-manager #jobs-mode .ceo-hide,
   body.role-store-manager #forms-mode .ceo-hide,
   body.role-store-manager #stickers-mode .ceo-hide { display: none !important; }
+  /* Store Manager: hide elements tagged .sm-hide regardless of where they
+     live. Used for the Jobs Report card in the Reports landing — SM's
+     focus is paper movement, not job-by-job production logs. */
+  body.role-store-manager .sm-hide { display: none !important; }
   body.role-production-manager #inventory-mode .ceo-hide,
   body.role-production-manager #imports-mode .ceo-hide { display: none !important; }
   /* Operator: Station is the default working view; Jobs is reachable
@@ -1108,30 +1112,39 @@
    On A4 portrait we fit 8 per page (2 columns × 4 rows) with a small gap
    between them so they're easy to cut apart. */
 .sticker {
-  border: 1.5px solid #000; box-sizing: border-box;
+  /* Outer border bumped 1.5px -> 3px so the carton sticker reads as a
+     framed label across the warehouse. */
+  border: 3px solid #000; box-sizing: border-box;
   width: 3.5in; height: 2.5in;
   font-family: Arial, sans-serif; color: #000; background: #fff;
   display: flex; flex-direction: column;
   overflow: hidden;
-}
-.sticker-header { display: flex; align-items: center; border-bottom: 1.5px solid #000; padding: 4px 8px; gap: 10px; flex: 0 0 auto; }
-.sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 4px; }
-.sticker-logo {
-  height: 50px; width: auto; flex: 0 0 auto;
-  /* Bump contrast + saturation so the (already small) printed logo
-     keeps its black/red punch instead of fading to gray. exact-color
-     stops browsers from stripping it for ink-saving. */
-  filter: contrast(1.35) saturate(1.5);
   -webkit-print-color-adjust: exact !important;
   print-color-adjust: exact !important;
 }
-.sticker-brand { font-size: 11pt; font-weight: 700; letter-spacing: 0.2px; line-height: 1.1; white-space: nowrap; }
-.sticker-date  { font-size: 10pt; font-weight: 700; white-space: nowrap; }
-.sticker-row { display: flex; border-bottom: 1.5px solid #000; flex: 1 1 0; min-height: 0; }
+.sticker-header { display: flex; align-items: center; border-bottom: 2.5px solid #000; padding: 5px 9px; gap: 10px; flex: 0 0 auto; }
+.sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 4px; }
+.sticker-logo {
+  height: 56px; width: auto; flex: 0 0 auto;
+  /* Bump contrast + saturation so the (already small) printed logo
+     keeps its black/red punch instead of fading to gray. exact-color
+     stops browsers from stripping it for ink-saving. */
+  filter: contrast(1.5) saturate(1.6);
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
+}
+.sticker-brand { font-size: 13pt; font-weight: 900; letter-spacing: 0.3px; line-height: 1.1; white-space: nowrap; }
+.sticker-date  { font-size: 11pt; font-weight: 800; white-space: nowrap; }
+.sticker-row { display: flex; border-bottom: 2.5px solid #000; flex: 1 1 0; min-height: 0; overflow: hidden; }
 .sticker-row:last-child { border-bottom: none; }
-.sticker-row-label { width: 26%; padding: 3px 8px; font-size: 9.5pt; font-weight: 500; border-right: 1.5px solid #000; box-sizing: border-box; display: flex; align-items: center; }
-.sticker-row-value { flex: 1; padding: 3px 8px; font-size: 11pt; font-weight: 700; box-sizing: border-box; display: flex; align-items: center; }
-.sticker-row-value.big { font-size: 15pt; }
+/* Label column widened to 33% so 'DESPATCH TO' and 'DESCRIPTION' fit on
+   one line without bleeding into the value column. Letter-spacing
+   dropped to 0 and font knocked to 9.5pt — still bold and readable,
+   no more wrap. overflow: hidden on the row + each cell stops any
+   stray glyph from spilling into the neighbour. */
+.sticker-row-label { width: 33%; padding: 4px 9px; font-size: 9.5pt; font-weight: 800; border-right: 2.5px solid #000; box-sizing: border-box; display: flex; align-items: center; text-transform: uppercase; letter-spacing: 0; white-space: nowrap; overflow: hidden; }
+.sticker-row-value { flex: 1; min-width: 0; padding: 4px 9px; font-size: 13pt; font-weight: 900; box-sizing: border-box; display: flex; align-items: center; letter-spacing: 0.2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sticker-row-value.big { font-size: 17pt; letter-spacing: 0.4px; }
 
 /* On-screen preview: gray backdrop helps users see the white sticker edge */
 .stk-preview .sticker { box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
@@ -1343,7 +1356,7 @@
         <div class="report-card-title">Imports</div>
         <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders and mark them received to feed Stock Summary.</div>
       </button>
-      <button class="report-card" onclick="openJobsReportPage()">
+      <button class="report-card sm-hide" onclick="openJobsReportPage()">
         <div class="report-card-icon">&#128196;</div>
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
@@ -1859,7 +1872,16 @@ function canRunStation()     { return isAdmin() || isProductionManager() || isOp
 function canWrite() { return currentUser && currentUser.role !== 'ceo' && !isOperator(); }
 // Anyone who can write any area can issue stock (admin / production_manager /
 // store_manager). CEO + operator are blocked.
-function canIssueStock() { return isAdmin() || isProductionManager() || isStoreManager(); }
+function canIssueStock() { return isAdmin() || isStoreManager(); }
+// CAPA writes — admin, production manager, store manager, and CEO all
+// participate in CAPA governance. Operators are excluded.
+function canWriteCapa() { return isAdmin() || isProductionManager() || isStoreManager() || isCeo(); }
+// Admin-level CAPA actions (edit/delete a CLOSED CAPA, reopen one).
+// CEO is admin-equivalent for CAPA governance.
+function canAdminCapa() { return isAdmin() || isCeo(); }
+// Print job card — admin / production manager / CEO. Store manager and
+// operator don't print job cards.
+function canPrintJobCard() { return isAdmin() || isProductionManager() || isCeo(); }
 // Pretty label for the role pill / dropdowns. Falls back to the raw value for
 // forward-compatibility.
 function roleLabel(role) {
@@ -1914,7 +1936,7 @@ function renderUserChip() {
   showTab('mode-inventory-btn', !op);
   showTab('mode-reports-btn',   !op);
   showTab('mode-stickers-btn',  !op && !sm);
-  showTab('mode-station-btn',   canRunStation());
+  showTab('mode-station-btn',   canRunStation() || isCeo());
   showTab('mode-forms-btn',     !op && !sm);
   // Users tab — visible to admin (full control) and CEO (read-only audit feed).
   showTab('mode-users-btn',     isAdmin() || isCeo());
@@ -2024,8 +2046,8 @@ function setMode(m) {
   // Block everyone except admin + ceo from the Users tab. CEO gets a
   // read-only view (every write button inside is tagged .ceo-hide).
   if (m === 'users' && !isAdmin() && !isCeo()) m = 'jobs';
-  // Station tab is gated to roles that can actually run it.
-  if (m === 'station' && !canRunStation())     m = 'jobs';
+  // Station tab is gated to roles that can run it OR CEO (view-only).
+  if (m === 'station' && !canRunStation() && !isCeo()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
@@ -2347,7 +2369,7 @@ function renderJobsCompact() {
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
-            <button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>
+            ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
           </div>
@@ -2442,7 +2464,7 @@ function renderJobCard(j) {
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
-        <button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>
+        ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
@@ -5742,6 +5764,7 @@ const jobsReportState = { from: '', to: '', client: '' };
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
 function openJobsReportPage() {
+  if (isStoreManager()) { notify('Jobs Report is not available for the Store Manager role.'); return; }
   openReportsGroup('jobs-group');
 }
 
@@ -9507,7 +9530,7 @@ async function deleteJob(id) {
 // it (server enforces too via requireWriteUser). CEO is read-only and gets
 // blocked by canIssueStock(). Confirms before deducting real inventory.
 async function issueStock(id) {
-  if (!canIssueStock()) { notify('Read-only — you can\'t issue stock.'); return; }
+  if (!canIssueStock()) { notify('Issuing stock is reserved for the store keeper (Admin or Store Manager).'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
@@ -9937,7 +9960,7 @@ async function openCapaList(jobId) {
         <div class="inv-actions" onclick="event.stopPropagation()">
           <button class="btn btn-sm" onclick="openCapaEdit(${c.id})">View/Edit</button>
           <button class="btn btn-sm" onclick="printCapa(${c.id})">Print</button>
-          ${(isAdmin() || (canWrite() && c.status !== 'closed')) ? `<button class="btn btn-sm btn-danger" onclick="deleteCapa(${c.id}, ${jobId})">Delete</button>` : ''}
+          ${(canAdminCapa() || (canWriteCapa() && c.status !== 'closed')) ? `<button class="btn btn-sm btn-danger" onclick="deleteCapa(${c.id}, ${jobId})">Delete</button>` : ''}
         </div>
       </div>`;
   }).join('') : '<div class="empty">No CAPAs raised yet.</div>';
@@ -9954,7 +9977,7 @@ async function openCapaList(jobId) {
     <div id="capa-list-body">${rows}</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Close</button>
-      ${canWrite() ? `<button class="btn btn-primary" onclick="newCapa(${jobId})">+ New CAPA</button>` : ''}
+      ${canWriteCapa() ? `<button class="btn btn-primary" onclick="newCapa(${jobId})">+ New CAPA</button>` : ''}
     </div>
   </div>`);
 }
@@ -10245,7 +10268,7 @@ async function openCapaEdit(capaId) {
   try { capa = await api('GET', `/api/capa/${capaId}`); }
   catch (e) { return notify('Error: ' + e.message); }
   _currentCapaId = capaId;
-  const ro = capa.status === 'closed' && !isAdmin();
+  const ro = capa.status === 'closed' && !canAdminCapa();
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()" style="max-width:1100px;">
     ${capaFormHtml(capa)}
     <div class="modal-actions">
@@ -10253,7 +10276,7 @@ async function openCapaEdit(capaId) {
       <button class="btn" onclick="printCapa(${capa.id})">Print / Save as PDF</button>
       ${ro ? '' : `<button class="btn btn-primary" onclick="saveCapa(${capa.id})">Save</button>`}
       ${(!ro && capa.status !== 'closed') ? `<button class="btn btn-success" onclick="closeCapa(${capa.id})" title="Mark this CAPA as Closed. Once closed it becomes read-only — only admin can edit or reopen it.">&#10003; Close CAPA</button>` : ''}
-      ${isAdmin() && capa.status === 'closed' ? `<button class="btn" onclick="reopenCapa(${capa.id})">Reopen</button>` : ''}
+      ${canAdminCapa() && capa.status === 'closed' ? `<button class="btn" onclick="reopenCapa(${capa.id})">Reopen</button>` : ''}
     </div>
   </div>`);
 }
