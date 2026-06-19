@@ -7828,9 +7828,16 @@ function printStickers() {
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
-    // Fit every sticker AFTER layout + images settle so scrollWidth /
-    // clientWidth reflect the real printed cell width.
+    // #print-area is display:none on screen, so its children have 0 width
+    // — the auto-fit can't measure anything. Temporarily park the area
+    // off-screen as a normal block, measure + shrink each cell, then
+    // restore the inline style so the @media print rules take over.
+    const prev = area.getAttribute('style') || '';
+    area.style.cssText = 'display:block; position:absolute; left:-10000px; top:0; width:auto;';
+    // Force a synchronous layout pass before measuring.
+    void area.offsetWidth;
     fitStickerText(area);
+    area.setAttribute('style', prev);
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
