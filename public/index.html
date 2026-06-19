@@ -1143,7 +1143,10 @@
    no more wrap. overflow: hidden on the row + each cell stops any
    stray glyph from spilling into the neighbour. */
 .sticker-row-label { width: 33%; padding: 4px 9px; font-size: 9.5pt; font-weight: 800; border-right: 2.5px solid #000; box-sizing: border-box; display: flex; align-items: center; text-transform: uppercase; letter-spacing: 0; white-space: nowrap; overflow: hidden; }
-.sticker-row-value { flex: 1; min-width: 0; padding: 4px 9px; font-size: 13pt; font-weight: 900; box-sizing: border-box; display: flex; align-items: center; letter-spacing: 0.2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* Font sizes are the BASE — they get shrunk per-sticker by fitStickerText()
+   so long values (Description, Despatch To) stay on one line instead of
+   truncating with an ellipsis or overflowing the cell. */
+.sticker-row-value { flex: 1; min-width: 0; padding: 4px 9px; font-size: 13pt; font-weight: 900; box-sizing: border-box; display: flex; align-items: center; letter-spacing: 0.2px; overflow: hidden; white-space: nowrap; }
 .sticker-row-value.big { font-size: 17pt; letter-spacing: 0.4px; }
 
 /* On-screen preview: gray backdrop helps users see the white sticker edge */
@@ -7659,6 +7662,45 @@ function fmtStickerDate(iso) {
   return `${d}-${m}-${y}`;
 }
 
+// Walk every .sticker-row-value inside `root` and shrink the inner
+// .sticker-fit span's font-size until it fits the cell on a single
+// line. Measuring an inline <span>'s offsetWidth gives us the real
+// rendered text width even on flex containers (scrollWidth was
+// unreliable when display:flex collapsed the overflow into 0).
+//
+// Cheap — half a dozen iterations on a worst-case
+// "ferozsons pharmaceuticals" line. Force a getBoundingClientRect()
+// read first to flush any pending layout before we measure.
+function fitStickerText(root) {
+  if (!root) return;
+  const FLOOR_PT = 6;
+  const cells = root.querySelectorAll('.sticker-row-value');
+  cells.forEach(cell => {
+    const span = cell.querySelector('.sticker-fit');
+    if (!span) return;
+    // Reset to the base size (set by stylesheet) before re-fitting in case
+    // we're re-running on the same node (e.g. preview re-renders).
+    span.style.fontSize = '';
+    let pt = cell.classList.contains('big') ? 17 : 13;
+    span.style.fontSize = pt + 'pt';
+    // Available width inside the cell (clientWidth already excludes
+    // border but includes padding — subtract the padding so we compare
+    // against the actual text area).
+    const cs = getComputedStyle(cell);
+    const padL = parseFloat(cs.paddingLeft)  || 0;
+    const padR = parseFloat(cs.paddingRight) || 0;
+    const avail = Math.max(0, cell.clientWidth - padL - padR);
+    // getBoundingClientRect forces layout, so the offsetWidth we read
+    // next reflects the freshly-applied font size.
+    span.getBoundingClientRect();
+    let guard = 60;
+    while (span.offsetWidth > avail && pt > FLOOR_PT && guard-- > 0) {
+      pt = Math.max(FLOOR_PT, pt - 0.5);
+      span.style.fontSize = pt + 'pt';
+    }
+  });
+}
+
 function buildStickerHTML(opts) {
   // opts: { despatch, po, desc, qty, caseNo, caseTotal, date }
   return `
@@ -7672,23 +7714,23 @@ function buildStickerHTML(opts) {
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Despatch To</div>
-        <div class="sticker-row-value">${esc(opts.despatch || '')}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(opts.despatch || '')}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">P.O. #</div>
-        <div class="sticker-row-value big">${esc(opts.po || '')}</div>
+        <div class="sticker-row-value big"><span class="sticker-fit">${esc(opts.po || '')}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Description</div>
-        <div class="sticker-row-value">${esc(opts.desc || '')}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(opts.desc || '')}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Quantity</div>
-        <div class="sticker-row-value">${esc(String(opts.qty || ''))}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(String(opts.qty || ''))}</span></div>
       </div>
       <div class="sticker-row">
         <div class="sticker-row-label">Case #</div>
-        <div class="sticker-row-value">${opts.caseNo} of ${opts.caseTotal}</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${opts.caseNo} of ${opts.caseTotal}</span></div>
       </div>
     </div>`;
 }
@@ -7727,6 +7769,7 @@ function renderStickerPreview() {
     caseNo: validFrom,
     caseTotal: total,
   });
+  fitStickerText(previewBox);
 }
 
 function printStickers() {
@@ -7786,6 +7829,9 @@ function printStickers() {
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    // Fit every sticker AFTER layout + images settle so scrollWidth /
+    // clientWidth reflect the real printed cell width.
+    fitStickerText(area);
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
