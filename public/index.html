@@ -11192,6 +11192,13 @@ function stationLogout(silent) {
   if (!silent) notify('Signed out of station');
 }
 
+// True on tablets / phones (coarse pointer), false on a laptop / desktop
+// with a mouse. Drives whether the station inputs are readonly+on-screen-
+// pad (touch) or accept native keyboard typing (laptop).
+function stationIsTouchDevice() {
+  return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+}
+
 function stationRender() {
   const root = document.getElementById('station-root');
   if (!root) return;
@@ -11199,6 +11206,26 @@ function stationRender() {
   stationResetIdle();
   if (stationView === 'update' && stationJobId != null) root.innerHTML = stationUpdateHtml();
   else root.innerHTML = stationQueueHtml();
+}
+
+// Once-on-load keydown listener so a laptop user can type the PIN on
+// their physical keyboard. Digits append, Backspace clears the last
+// dot, Enter submits. Only active when the station tab is showing AND
+// no operator is signed in yet (the PIN pad is the screen with focus).
+if (typeof window !== 'undefined' && !window._stationPinKbdInstalled) {
+  window._stationPinKbdInstalled = true;
+  document.addEventListener('keydown', (e) => {
+    if (typeof mode === 'undefined' || mode !== 'station') return;
+    if (typeof stationOperator !== 'undefined' && stationOperator) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Don't fight a focused input — let the user type freely if anything
+    // accidentally has focus.
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (/^[0-9]$/.test(e.key))  { stationPinPress(e.key); e.preventDefault(); }
+    else if (e.key === 'Backspace') { stationPinClear(); e.preventDefault(); }
+    else if (e.key === 'Enter')     { stationPinSubmit(); e.preventDefault(); }
+  });
 }
 
 function stationPinPadHtml() {
@@ -11316,17 +11343,20 @@ function stationUpdateHtml() {
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   const nextName = stIdx < STAGES.length - 1 ? STAGES[stIdx + 1] : null;
   const fields = STATION_STAGE_FIELDS[stIdx] || [];
+  // Tablet view uses an on-screen number pad (readonly + onclick that
+  // slides up the custom pad). Laptop view lets the user type natively
+  // with their physical keyboard. Detection is one-shot per render so
+  // operator could plug in a keyboard mid-shift if needed.
+  const isTouch = stationIsTouchDevice();
   const fieldHtml = fields.length ? `<div class="station-field-grid">${fields.map(f => {
     const cur = (j.particulars && j.particulars[f.key] && j.particulars[f.key].quantity) || '';
-    // readonly + custom on-screen pad: native tablet keyboards are unreliable
-    // in kiosk mode (cover half the screen / QWERTY on iPads). Tapping the
-    // field slides up our own number pad instead.
+    const tabletAttrs = `inputmode="none" readonly onclick="stationOpenPad('${f.key}', '${esc(f.label).replace(/'/g, "\\'")}')"`;
+    const laptopAttrs = `inputmode="numeric" pattern="[0-9]*"`;
     return `
       <div class="station-field">
         <label>${esc(f.label)}</label>
-        <input type="text" inputmode="none" readonly class="numpad-target" id="sf-${f.key}"
-               value="${esc(cur)}" placeholder="0"
-               onclick="stationOpenPad('${f.key}', '${esc(f.label).replace(/'/g, "\\'")}')">
+        <input type="text" ${isTouch ? tabletAttrs : laptopAttrs} class="numpad-target" id="sf-${f.key}"
+               value="${esc(cur)}" placeholder="0">
       </div>`;
   }).join('')}</div>` : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
   const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
@@ -11361,8 +11391,9 @@ function stationUpdateHtml() {
         <div class="station-addnote-title">&#128172; Message for the next stations <span style="font-weight:400;color:var(--text2);font-size:12px;">(sent on Save or Done)</span></div>
         <button class="station-rec-btn" id="sn-rec-btn" onclick="stationRecToggle()">${micIconSvg()} Record voice</button>
       </div>
-      <textarea id="sn-text" rows="2" placeholder="Tap here to type a note (optional)…" readonly inputmode="none" class="qwerty-target"
-                onclick="stationOpenQwerty('sn-text', 'Message for the next stations')"></textarea>
+      ${isTouch
+        ? `<textarea id="sn-text" rows="2" placeholder="Tap here to type a note (optional)…" readonly inputmode="none" class="qwerty-target" onclick="stationOpenQwerty('sn-text', 'Message for the next stations')"></textarea>`
+        : `<textarea id="sn-text" rows="2" placeholder="Type a note (optional)…"></textarea>`}
       <div id="sn-preview"></div>
     </div>` : '';
 
