@@ -656,6 +656,10 @@
   .su-job { font-size: 26px; font-weight: 800; color: var(--text); }
   .su-jobsub { font-size: 17px; color: var(--text2); margin-top: -8px; }
   .station-field { display: flex; flex-direction: column; gap: 6px; }
+  /* Number-entry grid: 1 field stretches full width, 2+ share a row so
+     the station view doesn't waste vertical space. auto-fit + minmax
+     wraps gracefully on smaller tablets. */
+  .station-field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
   .station-field label { font-size: 16px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
   .station-field input { font-size: 34px; font-weight: 700; padding: 20px 18px; border: 2px solid var(--border2); border-radius: 12px; background: var(--bg); color: var(--text); font-family: var(--font); text-align: center; }
   /* Three station actions sit in a single horizontal row instead of a
@@ -785,19 +789,26 @@
   }
   .station-job.is-pending { border-left-color: var(--green-border); opacity: 0.85; }
   .station-addnote { border-top: 2px dashed var(--border); margin-top: 6px; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  /* Title row holds the 'Message for...' label on the left and the
+     compact Record voice button on the right so the textarea below
+     is uncluttered. Wraps on a very narrow tablet. */
+  .station-addnote-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .station-addnote-title { font-size: 16px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
   .station-addnote textarea {
     font-size: 19px; padding: 14px; border: 2px solid var(--border2); border-radius: 12px;
     background: var(--bg); color: var(--text); font-family: var(--font); resize: none;
   }
   .station-note-row { display: flex; gap: 10px; }
+  /* Compact record button — same proportions as the Done / Save / Skip
+     row so the operator's eye treats it as another normal action. */
   .station-rec-btn {
-    flex: 1; font-size: 19px; font-weight: 700; padding: 16px; border-radius: 12px;
+    font-size: 14px; font-weight: 700; padding: 8px 14px; border-radius: 8px;
     background: #fde047; color: #422006; border: 2px solid #d97706;
     cursor: pointer; font-family: var(--font);
-    display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    white-space: nowrap;
   }
-  .station-rec-btn .rec-ico { width: 28px; height: 28px; flex: 0 0 auto; }
+  .station-rec-btn .rec-ico { width: 18px; height: 18px; flex: 0 0 auto; }
   .station-rec-btn .rec-ico path { fill: #422006; }
   .station-rec-btn.recording {
     background: #A32D2D; color: #fff; border-color: #A32D2D;
@@ -11305,7 +11316,7 @@ function stationUpdateHtml() {
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   const nextName = stIdx < STAGES.length - 1 ? STAGES[stIdx + 1] : null;
   const fields = STATION_STAGE_FIELDS[stIdx] || [];
-  const fieldHtml = fields.length ? fields.map(f => {
+  const fieldHtml = fields.length ? `<div class="station-field-grid">${fields.map(f => {
     const cur = (j.particulars && j.particulars[f.key] && j.particulars[f.key].quantity) || '';
     // readonly + custom on-screen pad: native tablet keyboards are unreliable
     // in kiosk mode (cover half the screen / QWERTY on iPads). Tapping the
@@ -11317,7 +11328,7 @@ function stationUpdateHtml() {
                value="${esc(cur)}" placeholder="0"
                onclick="stationOpenPad('${f.key}', '${esc(f.label).replace(/'/g, "\\'")}')">
       </div>`;
-  }).join('') : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
+  }).join('')}</div>` : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
   const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
 
   // Incoming notes from ANY upstream station for THIS job. With the
@@ -11346,13 +11357,13 @@ function stationUpdateHtml() {
   // floor only has one "I'm finished, here's the heads-up" action.
   const addNote = nextName ? `
     <div class="station-addnote">
-      <div class="station-addnote-title">&#128172; Message for the next stations <span style="font-weight:400;color:var(--text2);font-size:12px;">(sent on Save or Done)</span></div>
+      <div class="station-addnote-head">
+        <div class="station-addnote-title">&#128172; Message for the next stations <span style="font-weight:400;color:var(--text2);font-size:12px;">(sent on Save or Done)</span></div>
+        <button class="station-rec-btn" id="sn-rec-btn" onclick="stationRecToggle()">${micIconSvg()} Record voice</button>
+      </div>
       <textarea id="sn-text" rows="2" placeholder="Tap here to type a note (optional)…" readonly inputmode="none" class="qwerty-target"
                 onclick="stationOpenQwerty('sn-text', 'Message for the next stations')"></textarea>
       <div id="sn-preview"></div>
-      <div class="station-note-row">
-        <button class="station-rec-btn" id="sn-rec-btn" onclick="stationRecToggle()">${micIconSvg()} Record voice</button>
-      </div>
     </div>` : '';
 
   return `
