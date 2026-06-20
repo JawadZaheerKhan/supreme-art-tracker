@@ -662,6 +662,18 @@
   .station-field input { font-size: 34px; font-weight: 700; padding: 20px 18px; border: 2px solid var(--border2); border-radius: 12px; background: var(--bg); color: var(--text); font-family: var(--font); text-align: center; }
   .station-primary { background: #166534; color: #fff; border-color: #166534; font-size: 21px; font-weight: 700; padding: 20px; border-radius: 14px; margin-top: 6px; }
   .station-primary:hover { background: #14532d; }
+  /* Skip-to-stage — yellow so it reads as 'detour' rather than 'next step'.
+     Used when the job legitimately bypasses one or more stations (printing
+     and coating on the same machine, direct-to-storage, etc.). */
+  .station-skip { background: #facc15; color: #422006; border-color: #eab308; font-size: 18px; font-weight: 700; padding: 16px; border-radius: 12px; margin-top: 4px; }
+  .station-skip:hover { background: #eab308; }
+  .station-skip-grid { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
+  .station-skip-opt { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; padding: 14px 18px; text-align: left; font-family: var(--font); cursor: pointer; transition: background 0.1s, border-color 0.1s, transform 0.05s; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .station-skip-opt:hover { background: #fef3c7; border-color: #eab308; }
+  .station-skip-opt:active { transform: scale(0.99); }
+  .station-skip-opt .skip-name { font-size: 18px; font-weight: 700; color: var(--text); }
+  .station-skip-opt .skip-hint { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .station-skip-opt .skip-arrow { font-size: 22px; color: #a16207; font-weight: 700; flex: 0 0 auto; }
   .station-secondary { font-size: 17px; font-weight: 700; padding: 14px; border-radius: 12px; background: #A32D2D; color: #fff; border-color: #A32D2D; }
   .station-secondary:hover { background: #7f1d1d; border-color: #7f1d1d; }
   /* Stage machine inside the Station — bigger, and always animating (no hover
@@ -11355,6 +11367,7 @@ function stationUpdateHtml() {
       ${fieldHtml}
       <button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
       ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
+      ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}
       ${addNote}
     </div>`;
 }
@@ -11654,7 +11667,41 @@ function stationNoteHeard(noteId) {
   }
 }
 
-async function stationSubmit(advance) {
+// Open the Skip-to-stage chooser. Lists every downstream stage with a
+// hint about how many intermediate stations the job will fly past. The
+// modal closes itself before stationSubmit fires so the operator sees
+// the toast instead of the chooser.
+function stationOpenSkip() {
+  const j = jobs.find(x => x.id === stationJobId);
+  if (!j || !stationOperator) return;
+  const stIdx = stationOperator.stage_index;
+  const opts = STAGES.map((s, i) => {
+    if (i <= stIdx) return null;
+    const gap = i - stIdx - 1;
+    const hint = gap === 0
+      ? 'Next stage (same as Done)'
+      : `Skip ${gap} stage${gap > 1 ? 's' : ''}`;
+    return `<button class="station-skip-opt" onclick="stationSkipTo(${i})">
+      <div><div class="skip-name">${esc(s)}</div><div class="skip-hint">${hint}</div></div>
+      <div class="skip-arrow">&rsaquo;</div>
+    </button>`;
+  }).filter(Boolean).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
+    <h2>Skip to which stage?</h2>
+    <p style="color:var(--text2);font-size:13px;margin:0 0 8px;line-height:1.4;">Any stages between here and the one you pick are marked done in the job's history with a 'Skipped' note. Use this when one machine handles two stages (e.g. Printing + Coatings) or when the job ships direct to Storage / Delivery.</p>
+    <div class="station-skip-grid">${opts}</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+    </div>
+  </div>`);
+}
+
+async function stationSkipTo(target) {
+  closeModal();
+  await stationSubmit(true, target);
+}
+
+async function stationSubmit(advance, skipTo) {
   const j = jobs.find(x => x.id === stationJobId);
   if (!j || !stationOperator) return;
   const fields = STATION_STAGE_FIELDS[stationOperator.stage_index] || [];
@@ -11696,14 +11743,18 @@ async function stationSubmit(advance) {
       });
     }
     stationRecBlobs = [];
-    const updated = await api('POST', `/api/jobs/${j.id}/station-update`, {
-      pin: stationOperator.pin, particulars_patch: patch, advance,
-    });
+    const stationBody = { pin: stationOperator.pin, particulars_patch: patch, advance };
+    if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
+    const updated = await api('POST', `/api/jobs/${j.id}/station-update`, stationBody);
     jobs = jobs.map(x => x.id === j.id ? { ...x, ...updated } : x);
     const sent = (pendingText ? 1 : 0) + pendingClips.length;
     const sentTxt = sent ? ` &middot; ${sent} note${sent === 1 ? '' : 's'} sent` : '';
     if (advance) {
-      notify(`Job advanced${sentTxt}`);
+      // When skipping, name the target stage in the toast so the operator
+      // sees their pick actually landed (e.g. 'Sent to Die Cutting').
+      const targetName = updated && Number.isFinite(updated.stage_index) ? (STAGES[updated.stage_index] || '') : '';
+      const movedTo = Number.isInteger(skipTo) && targetName ? ` to ${targetName}` : '';
+      notify(`Job advanced${movedTo}${sentTxt}`);
       stationBackToQueue();
     } else {
       notify(`Numbers saved${sentTxt}`);

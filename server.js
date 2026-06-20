@@ -2020,6 +2020,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const particularsPatch = req.body.particulars_patch && typeof req.body.particulars_patch === 'object'
       ? req.body.particulars_patch : {};
     const advance = req.body.advance === true;
+    // Optional skip target. When the operator uses 'Skip to stage', they
+    // pick a downstream stage index; we mark every stage between current
+    // and target as done and jump straight there. Must be > curStage and
+    // within the STAGES array; anything else falls back to the regular
+    // single-step advance below.
+    const skipToRaw = req.body.skip_to;
+    const skipTo = Number.isFinite(parseInt(skipToRaw, 10)) ? parseInt(skipToRaw, 10) : null;
 
     // 1) Identify the operator by PIN (server-side — never trust the client).
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
@@ -2057,16 +2064,25 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     let log = Array.isArray(job.log) ? [...job.log] : [];
 
     if (advance) {
-      // Mirror moveToStage: mark current stage done, advance to next (or finish).
-      const target = Math.min(curStage + 1, STAGES.length - 1);
+      // Decide target. A valid skip_to wins over the default +1 step; any
+      // out-of-range value falls back to single-step advance.
+      const validSkip = Number.isInteger(skipTo) && skipTo > curStage && skipTo < STAGES.length;
+      const target = validSkip ? skipTo : Math.min(curStage + 1, STAGES.length - 1);
+      const skipped = Math.max(0, target - curStage - 1); // intermediate stages we're flying past
       const finishing = curStage === STAGES.length - 1;
       stages[curStage] = { ...(stages[curStage] || {}), status: 'done', by, time };
       if (!finishing) {
+        // Mark every skipped intermediate stage as done with an audit note
+        // so the pipeline UI shows them passed, not blank.
+        for (let i = curStage + 1; i < target; i++) {
+          stages[i] = { ...(stages[i] || {}), status: 'done', by, time, notes: `Skipped — job went from ${STAGES[curStage]} directly to ${STAGES[target]}` };
+        }
         const status = target === STAGES.length - 1 ? 'done' : 'active';
         stages[target] = { status, notes: '', by, time };
         for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
         stage_index = target;
-        log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[curStage]} by ${operator.name}`, by, time });
+        const skipNote = skipped > 0 ? ` (skipped ${skipped} stage${skipped > 1 ? 's' : ''})` : '';
+        log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[curStage]} by ${operator.name}${skipNote}`, by, time });
       } else {
         log.push({ stage: STAGES[curStage], status: 'done', notes: `Completed by ${operator.name}`, by, time });
       }
@@ -2083,14 +2099,15 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
        WHERE id = ${id}
        RETURNING *
     `;
+    const skippedCount = Math.max(0, stage_index - curStage - 1);
     await logAudit(sql, req, {
       action: 'job.station',
       entityType: 'job',
       entityId: id,
       summary: advance
-        ? `Job E-${id} ${stage_index === curStage ? 'completed' : 'moved to ' + STAGES[stage_index]} by ${operator.name} at ${STAGES[curStage]}`
+        ? `Job E-${id} ${stage_index === curStage ? 'completed' : 'moved to ' + STAGES[stage_index]} by ${operator.name} at ${STAGES[curStage]}${skippedCount > 0 ? ` (skipped ${skippedCount} stage${skippedCount > 1 ? 's' : ''})` : ''}`
         : `Job E-${id} numbers recorded by ${operator.name} at ${STAGES[curStage]}`,
-      metadata: { operator_id: operator.id, operator_name: operator.name, stage_index: curStage, advance },
+      metadata: { operator_id: operator.id, operator_name: operator.name, stage_index: curStage, advance, target_stage: stage_index, skipped: skippedCount },
     });
     res.json(updated[0]);
   } catch (err) {
