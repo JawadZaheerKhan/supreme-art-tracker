@@ -20,34 +20,60 @@ const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
-// Coatings (cat A — wet/film) and Embellishments (cat B — emboss/foil) are
-// separate sections on the floor, so they're separate stages here too.
-const STAGES = ['CTP Plate Making','Printing','Coatings','Embellishments','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
 
-// Which planned finishes belong to which section. Drives the per-job
-// queue at the Coatings / Embellishments stations and the auto-skip
-// when a job has no work for one of these sections.
-const FINISHES_BY_SECTION = {
-  2: ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup'],
-  3: ['Emboss','Color Seal','Cylinder Emboss','Hot Foiling'],
+// Operator roles — what each role lets the holder do. Multiple roles can
+// land on the same stage_index (Coatings + Embellishments both at 2): the
+// difference is which specific finishes they're qualified for. ROLES keeps
+// the named list; ROLE_FINISHES maps the coatings-stage roles to the
+// finish kinds they cover. Roles without finishes simply gate the stage.
+const ROLES = [
+  { id: 'ctp',       label: 'CTP Plate Making', stage_index: 0 },
+  { id: 'print',     label: 'Printing',         stage_index: 1 },
+  { id: 'coatings',  label: 'Coatings',         stage_index: 2 },
+  { id: 'embellish', label: 'Embellishments',   stage_index: 2 },
+  { id: 'diecut',    label: 'Die Cutting',      stage_index: 3 },
+  { id: 'break',     label: 'Breaking',         stage_index: 4 },
+  { id: 'paste',     label: 'Pasting',          stage_index: 5 },
+  { id: 'storage',   label: 'Storage / Ready',  stage_index: 6 },
+];
+const ROLE_FINISHES = {
+  coatings:  ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup'],
+  embellish: ['Emboss','Color Seal','Cylinder Emboss','Hot Foiling'],
 };
-function pendingFinishesForSection(job, stageIdx) {
-  const all = FINISHES_BY_SECTION[stageIdx] || [];
-  if (!all.length) return [];
-  const planned = (Array.isArray(job.coatings) ? job.coatings : []).filter(c => all.includes(c));
-  const doneKinds = (Array.isArray(job.coatings_done) ? job.coatings_done : []).map(d => d && d.kind).filter(Boolean);
-  return planned.filter(c => !doneKinds.includes(c));
+const ALL_FINISHES = [...ROLE_FINISHES.coatings, ...ROLE_FINISHES.embellish];
+const ROLE_IDS = new Set(ROLES.map(r => r.id));
+
+function rolesOf(operator) {
+  if (Array.isArray(operator.roles) && operator.roles.length) return operator.roles;
+  // Back-compat: derive from legacy stage_indices/stage_index — assume the
+  // wet/film 'coatings' role when stage 2 was assigned (admin can refine).
+  const idxs = (Array.isArray(operator.stage_indices) && operator.stage_indices.length)
+    ? operator.stage_indices : [operator.stage_index];
+  const out = [];
+  for (const r of ROLES) if (idxs.includes(r.stage_index) && r.id !== 'embellish') out.push(r.id);
+  return out;
 }
-// Walk forward from `fromStage + 1`, skipping any finish stage that has no
-// pending work for this job. Used both for initial routing out of Printing
-// and after a finish stage's last item is recorded.
-function nextStageSkippingEmptyFinishes(job, fromStage) {
-  let next = Math.min(fromStage + 1, STAGES.length - 1);
-  while ((next === 2 || next === 3) && pendingFinishesForSection(job, next).length === 0) {
-    if (next >= STAGES.length - 1) break;
-    next++;
+function allowedFinishesForOperator(operator) {
+  const set = new Set();
+  for (const id of rolesOf(operator)) {
+    const list = ROLE_FINISHES[id];
+    if (list) list.forEach(f => set.add(f));
   }
-  return next;
+  return set;
+}
+function stageIndicesFromRoles(roles) {
+  const set = new Set();
+  for (const r of ROLES) if (roles.includes(r.id)) set.add(r.stage_index);
+  return [...set].sort((a, b) => a - b);
+}
+// Pending coatings for a job, optionally restricted to a single role's
+// finish set (so an Embellishments operator only sees the embellishments
+// still to do, not the UV / lamination items meant for the wet section).
+function pendingCoatings(job, allowedSet) {
+  const planned = Array.isArray(job.coatings) ? job.coatings : [];
+  const doneKinds = (Array.isArray(job.coatings_done) ? job.coatings_done : []).map(d => d && d.kind).filter(Boolean);
+  return planned.filter(c => !doneKinds.includes(c) && (!allowedSet || allowedSet.has(c)));
 }
 
 // Expose the public Google client id to the frontend so it can configure GIS.
@@ -302,42 +328,72 @@ async function initDb() {
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS stage_indices INTEGER[]`;
     await sql`UPDATE operators SET stage_indices = ARRAY[stage_index]
               WHERE stage_indices IS NULL OR cardinality(stage_indices) = 0`;
+    // Named roles — Coatings and Embellishments live at the same stage_index
+    // but are different role labels so the admin can assign people to the
+    // wet/film section vs. the foil/emboss section without splitting the
+    // workflow into two stages.
+    await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS roles TEXT[]`;
 
-    // One-time migration to shift existing stage_index values to make room
-    // for the new Embellishments stage inserted at index 3. Old: Die Cutting
-    // was 3, Breaking 4, Pasting 5, Storage 6, Delivered 7. New: those become
-    // 4, 5, 6, 7, 8. Coatings (2) and earlier are untouched. Tracked by a
-    // marker row so it never runs twice.
     await sql`
       CREATE TABLE IF NOT EXISTS schema_meta (
         key   TEXT PRIMARY KEY,
         value TEXT
       )
     `;
-    const stagesV2 = await sql`SELECT value FROM schema_meta WHERE key = 'stages_v2_embellishments'`;
-    if (!stagesV2.length) {
-      await sql`UPDATE jobs SET stage_index = stage_index + 1 WHERE stage_index >= 3`;
-      // The `stages` JSONB is keyed by stage index as a string; shift those
-      // keys too so the per-stage status records line up with the new array.
-      const jobsWithStages = await sql`SELECT id, stages FROM jobs WHERE stages IS NOT NULL`;
-      for (const r of jobsWithStages) {
-        if (!r.stages || typeof r.stages !== 'object' || Array.isArray(r.stages)) continue;
-        const shifted = {};
-        for (const [k, v] of Object.entries(r.stages)) {
-          const idx = parseInt(k, 10);
-          const newIdx = Number.isFinite(idx) && idx >= 3 ? idx + 1 : idx;
-          shifted[String(newIdx)] = v;
+    // Revert the short-lived v2 migration that added an Embellishments
+    // stage at index 3. If v2 ever ran on this DB, undo the stage_index
+    // shift: any stage_index that landed at 3 (Embellishments) collapses
+    // back into 2 (Coatings); 4+ steps back down by 1. Idempotent via
+    // the v3 marker.
+    const v3 = await sql`SELECT value FROM schema_meta WHERE key = 'stages_v3_no_embellishments'`;
+    if (!v3.length) {
+      const v2 = await sql`SELECT value FROM schema_meta WHERE key = 'stages_v2_embellishments'`;
+      if (v2.length) {
+        await sql`UPDATE jobs SET stage_index = 2 WHERE stage_index = 3`;
+        await sql`UPDATE jobs SET stage_index = stage_index - 1 WHERE stage_index >= 4`;
+        const jobsWithStages = await sql`SELECT id, stages FROM jobs WHERE stages IS NOT NULL`;
+        for (const r of jobsWithStages) {
+          if (!r.stages || typeof r.stages !== 'object' || Array.isArray(r.stages)) continue;
+          const shifted = {};
+          for (const [k, v] of Object.entries(r.stages)) {
+            const idx = parseInt(k, 10);
+            let newIdx;
+            if (idx === 3) newIdx = 2;
+            else if (idx >= 4) newIdx = idx - 1;
+            else newIdx = idx;
+            // If both an old-2 (Coatings) and old-3 (Embellishments) entry
+            // existed, prefer the existing target so we don't clobber it.
+            if (shifted[String(newIdx)]) continue;
+            shifted[String(newIdx)] = v;
+          }
+          await sql`UPDATE jobs SET stages = ${JSON.stringify(shifted)} WHERE id = ${r.id}`;
         }
-        await sql`UPDATE jobs SET stages = ${JSON.stringify(shifted)} WHERE id = ${r.id}`;
+        await sql`UPDATE operators SET stage_index = 2 WHERE stage_index = 3`;
+        await sql`UPDATE operators SET stage_index = stage_index - 1 WHERE stage_index >= 4`;
+        await sql`UPDATE operators
+                  SET stage_indices = ARRAY(
+                    SELECT DISTINCT CASE WHEN x = 3 THEN 2 WHEN x >= 4 THEN x - 1 ELSE x END
+                    FROM unnest(stage_indices) AS x
+                  )
+                  WHERE stage_indices IS NOT NULL`;
       }
-      await sql`UPDATE operators SET stage_index = stage_index + 1 WHERE stage_index >= 3`;
-      await sql`UPDATE operators
-                SET stage_indices = ARRAY(
-                  SELECT CASE WHEN x >= 3 THEN x + 1 ELSE x END
-                  FROM unnest(stage_indices) AS x
-                )
-                WHERE stage_indices IS NOT NULL`;
-      await sql`INSERT INTO schema_meta (key, value) VALUES ('stages_v2_embellishments', NOW()::TEXT)`;
+      await sql`INSERT INTO schema_meta (key, value) VALUES ('stages_v3_no_embellishments', NOW()::TEXT)`;
+    }
+    // Backfill operator.roles from the legacy stage_indices for anyone who
+    // hasn't been edited since this column landed. Embellishments operators
+    // can't be auto-detected (Coatings + Embellishments share stage 2), so
+    // they default to the 'coatings' role; admin re-saves to add 'embellish'.
+    const opsNeedingRoles = await sql`SELECT id, stage_indices FROM operators WHERE roles IS NULL OR cardinality(roles) = 0`;
+    for (const op of opsNeedingRoles) {
+      const idxs = Array.isArray(op.stage_indices) ? op.stage_indices : [];
+      const ids = [];
+      for (const r of ROLES) {
+        if (r.id === 'embellish') continue;
+        if (idxs.includes(r.stage_index)) ids.push(r.id);
+      }
+      if (ids.length) {
+        await sql`UPDATE operators SET roles = ${ids} WHERE id = ${op.id}`;
+      }
     }
 
     // Dropdown blacklist — values removed from the brand/supplier dropdown
@@ -736,21 +792,28 @@ app.get('/api/operators', requireAdmin, async (req, res) => {
   }
 });
 
-// Parse the section payload — accepts either `stage_indices: [..]` (preferred)
-// or a single `stage_index` for back-compat. Returns { stageIndices, primary }
-// or null if nothing valid was supplied.
-function parseOperatorStages(body) {
-  let arr = Array.isArray(body.stage_indices) ? body.stage_indices : null;
-  if (!arr && body.stage_index !== undefined) arr = [body.stage_index];
-  if (!arr) return null;
-  const clean = [];
-  for (const v of arr) {
-    const n = parseInt(v, 10);
-    if (Number.isInteger(n) && n >= 0 && !clean.includes(n)) clean.push(n);
+// Parse the role payload — admin assigns operators by role name (Coatings,
+// Embellishments, Die Cutting, …) and stage_indices are derived from the
+// roles. Accepts legacy `stage_indices` only when no roles are sent.
+function parseOperatorRoles(body) {
+  let roleIds = Array.isArray(body.roles) ? body.roles.filter(r => ROLE_IDS.has(r)) : [];
+  if (!roleIds.length && (Array.isArray(body.stage_indices) || body.stage_index !== undefined)) {
+    // Legacy path: derive a default 'coatings' (wet) role when stage 2 is
+    // requested; map other stage indices 1:1 to their role ids.
+    const arr = Array.isArray(body.stage_indices)
+      ? body.stage_indices
+      : (body.stage_index !== undefined ? [body.stage_index] : []);
+    const idxs = arr.map(v => parseInt(v, 10)).filter(n => Number.isInteger(n) && n >= 0);
+    for (const r of ROLES) {
+      if (r.id === 'embellish') continue;
+      if (idxs.includes(r.stage_index)) roleIds.push(r.id);
+    }
   }
-  if (!clean.length) return null;
-  clean.sort((a, b) => a - b);
-  return { stageIndices: clean, primary: clean[0] };
+  roleIds = Array.from(new Set(roleIds));
+  if (!roleIds.length) return null;
+  const stageIndices = stageIndicesFromRoles(roleIds);
+  if (!stageIndices.length) return null;
+  return { roles: roleIds, stageIndices, primary: stageIndices[0] };
 }
 
 app.post('/api/operators', requireAdmin, async (req, res) => {
@@ -759,18 +822,18 @@ app.post('/api/operators', requireAdmin, async (req, res) => {
     const sql = getDb();
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
-    const stages = parseOperatorStages(req.body);
+    const parsed = parseOperatorRoles(req.body);
     const machine = (req.body.machine || '').trim() || null;
     if (!name) return res.status(400).json({ error: 'Name is required' });
     if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
-    if (!stages) return res.status(400).json({ error: 'At least one section is required' });
+    if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
     const inserted = await sql`
-      INSERT INTO operators (name, pin, stage_index, stage_indices, machine)
-      VALUES (${name}, ${pin}, ${stages.primary}, ${stages.stageIndices}, ${machine}) RETURNING *
+      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, machine)
+      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${machine}) RETURNING *
     `;
-    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (stages ${stages.stageIndices.join(',')}${machine ? ', machine ' + machine : ''})` });
+    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (roles ${parsed.roles.join(',')}${machine ? ', machine ' + machine : ''})` });
     res.json(inserted[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -784,16 +847,16 @@ app.put('/api/operators/:id', requireAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
-    const stages = parseOperatorStages(req.body);
+    const parsed = parseOperatorRoles(req.body);
     const active = req.body.active !== false;
     const machine = (req.body.machine || '').trim() || null;
     if (!name) return res.status(400).json({ error: 'Name is required' });
     if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
-    if (!stages) return res.status(400).json({ error: 'At least one section is required' });
+    if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
     const updated = await sql`
-      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${stages.primary}, stage_indices=${stages.stageIndices}, active=${active}, machine=${machine}
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, active=${active}, machine=${machine}
       WHERE id=${id} RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
@@ -827,10 +890,11 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const sql = getDb();
     const pin = String(req.body.pin || '').trim();
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
-    const rows = await sql`SELECT id, name, stage_index, stage_indices, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
+    if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
     res.json(op);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -2125,10 +2189,11 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 
     // 1) Identify the operator by PIN (server-side — never trust the client).
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
-    const ops = await sql`SELECT id, name, stage_index, stage_indices FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
     const operator = ops[0];
     const opStages = (operator.stage_indices && operator.stage_indices.length) ? operator.stage_indices : [operator.stage_index];
+    const allowedFinishes = allowedFinishesForOperator(operator);
 
     // 2) Load job + guards.
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
@@ -2160,20 +2225,22 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     let log = Array.isArray(job.log) ? [...job.log] : [];
     let coatings_done = Array.isArray(job.coatings_done) ? [...job.coatings_done] : [];
 
-    // Finish-stage flow: at Coatings (2) / Embellishments (3), the operator
-    // records which specific finish they did (UV, Hot Foiling, …) with their
-    // machine and waste-sheet count. We append to coatings_done; the job
-    // auto-advances only when no more finishes for this section remain.
-    const isFinishStage = curStage === 2 || curStage === 3;
-    const finishKind = isFinishStage && typeof req.body.finish_kind === 'string' ? req.body.finish_kind.trim() : '';
-    const finishMachine = isFinishStage ? String(req.body.finish_machine || '').trim() : '';
-    const finishWaste = isFinishStage && req.body.finish_waste_sheets != null ? String(req.body.finish_waste_sheets).trim() : '';
-    if (isFinishStage && finishKind) {
-      const allowed = FINISHES_BY_SECTION[curStage] || [];
-      if (!allowed.includes(finishKind)) return res.status(400).json({ error: 'That finish does not belong to this section.' });
+    // Coatings flow: at the Coatings stage the operator records which planned
+    // finish they did, with their machine + waste-sheet count. We append to
+    // coatings_done AND accumulate the waste into the existing
+    // uv_waste_sheets particular as a "20 | 40 | 30" string so the job card
+    // shows the running waste total. The job auto-advances only when every
+    // planned coating has been recorded.
+    const isCoatingsStage = curStage === 2;
+    const finishKind = isCoatingsStage && typeof req.body.finish_kind === 'string' ? req.body.finish_kind.trim() : '';
+    const finishMachine = isCoatingsStage ? String(req.body.finish_machine || '').trim() : '';
+    const finishWaste = isCoatingsStage && req.body.finish_waste_sheets != null ? String(req.body.finish_waste_sheets).trim() : '';
+    if (isCoatingsStage && finishKind) {
+      if (!ALL_FINISHES.includes(finishKind)) return res.status(400).json({ error: 'Unknown coating type.' });
+      if (allowedFinishes.size && !allowedFinishes.has(finishKind)) return res.status(403).json({ error: `Your role isn't allowed to do ${finishKind}.` });
       const planned = Array.isArray(job.coatings) ? job.coatings : [];
-      if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That finish was not planned for this job.' });
-      if (coatings_done.some(d => d && d.kind === finishKind)) return res.status(409).json({ error: 'That finish has already been recorded for this job.' });
+      if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That coating was not planned for this job.' });
+      if (coatings_done.some(d => d && d.kind === finishKind)) return res.status(409).json({ error: 'That coating has already been recorded for this job.' });
       coatings_done.push({
         kind: finishKind,
         operator_id: operator.id,
@@ -2182,33 +2249,38 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         waste_sheets: finishWaste || null,
         done_at: new Date().toISOString(),
       });
+      // Accumulate waste + operator name on the Coating Waste Sheets row of
+      // the paper card. Existing values get pipe-appended so the card reads
+      // "20 | 40 | 30" after three operators contribute.
+      const prevWaste = (particulars.uv_waste_sheets && typeof particulars.uv_waste_sheets === 'object') ? particulars.uv_waste_sheets : {};
+      const prevQ = String(prevWaste.quantity || '').trim();
+      const newQ = finishWaste ? (prevQ ? `${prevQ} | ${finishWaste}` : finishWaste) : prevQ;
+      const prevN = String(prevWaste.name || '').trim();
+      const newN = prevN ? (prevN.split(' | ').includes(operator.name) ? prevN : `${prevN} | ${operator.name}`) : operator.name;
+      particulars.uv_waste_sheets = { ...prevWaste, quantity: newQ, name: newN };
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `${finishKind} recorded by ${operator.name}${finishMachine ? ' on ' + finishMachine : ''}${finishWaste ? ' (waste ' + finishWaste + ')' : ''}`, by, time });
     }
 
     if (advance) {
-      // For routing: build the "looks like after we record this finish" job
-      // shape so nextStageSkippingEmptyFinishes can see the updated done list.
       const peekJob = { ...job, coatings_done };
-      // Decide target. Priority: explicit skip_to (operator chose) > finish
-      // stage auto-skip (when this section is fully done) > default +1.
+      // Decide target. Priority: explicit skip_to wins. At Coatings, stay
+      // here while any planned coating is still pending. Otherwise default
+      // to next stage, auto-skipping Coatings if no coatings were planned.
       const validSkip = Number.isInteger(skipTo) && skipTo > curStage && skipTo < STAGES.length;
       let target;
       if (validSkip) {
         target = skipTo;
-      } else if (isFinishStage) {
-        const remaining = pendingFinishesForSection(peekJob, curStage);
-        // Still more finishes for this section pending — stay here, do not
-        // advance. The job needs another operator/machine to finish the plan.
-        if (remaining.length > 0) {
-          target = curStage;
-        } else {
-          target = nextStageSkippingEmptyFinishes(peekJob, curStage);
-        }
+      } else if (isCoatingsStage) {
+        const remaining = pendingCoatings(peekJob);
+        target = remaining.length > 0 ? curStage : Math.min(curStage + 1, STAGES.length - 1);
       } else {
-        // Auto-skip empty finish stages when leaving Printing (or any earlier
-        // stage). A job with no Coatings planned jumps past Coatings; a job
-        // with neither Coatings nor Embellishments jumps to Die Cutting.
-        target = nextStageSkippingEmptyFinishes(peekJob, curStage);
+        // Auto-skip Coatings when leaving an earlier stage on a job that
+        // has no coatings planned (jumps Printing → Die Cutting directly).
+        let next = Math.min(curStage + 1, STAGES.length - 1);
+        if (next === 2 && pendingCoatings(peekJob).length === 0 && (!Array.isArray(job.coatings) || job.coatings.length === 0)) {
+          next = Math.min(next + 1, STAGES.length - 1);
+        }
+        target = next;
       }
       const skipped = Math.max(0, target - curStage - 1); // intermediate stages we're flying past
       const finishing = curStage === STAGES.length - 1;
