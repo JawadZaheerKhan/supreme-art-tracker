@@ -640,8 +640,15 @@
   .pin-key:active { transform: scale(0.94); background: var(--bg2); }
   .pin-key.pin-fn { font-size: 26px; color: var(--text2); background: var(--bg2); }
   .station-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 4px 16px; border-bottom: 2px solid var(--border); margin-bottom: 14px; }
-  .station-who { font-size: 20px; font-weight: 800; color: var(--text); }
+  .station-who { font-size: 20px; font-weight: 800; color: var(--text); display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .station-where { font-size: 14px; color: var(--blue-text); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  /* Machine pill — sits beside the operator name everywhere their name
+     appears so the floor immediately sees who's at which machine. */
+  .station-mach {
+    display: inline-flex; align-items: center;
+    background: var(--bg2); color: var(--text2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 2px 8px; font-size: 13px; font-weight: 600;
+  }
   .station-logout { font-size: 14px; padding: 8px 16px; }
   .station-queue { display: flex; flex-direction: column; gap: 10px; }
   .station-job { display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; background: var(--bg); border: 1px solid var(--border); border-left: 4px solid var(--blue-border); border-radius: 12px; padding: 16px 18px; cursor: pointer; font-family: var(--font); transition: box-shadow 0.12s, transform 0.06s; }
@@ -906,8 +913,19 @@
   .h-stage { font-weight: 600; color: var(--text); }
   .h-time { font-size: 11px; color: var(--text3); }
   .h-note { color: var(--text2); margin-top: 2px; }
-  .notif { position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--text); color: white; padding: 10px 18px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; z-index: 300; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
-  .notif.show { opacity: 1; }
+  /* Toast — theme red, big enough to actually read from across the floor.
+     Slides in from the bottom so the eye catches the motion. */
+  .notif {
+    position: fixed; bottom: 2rem; right: 2rem;
+    background: var(--red-text); color: #fff;
+    padding: 14px 22px; border-radius: 12px;
+    font-size: 17px; font-weight: 700; letter-spacing: 0.01em;
+    box-shadow: 0 12px 28px rgba(121, 31, 31, 0.35), 0 2px 6px rgba(0,0,0,0.15);
+    z-index: 300; opacity: 0; transform: translateY(12px);
+    transition: opacity 0.2s, transform 0.2s; pointer-events: none;
+    max-width: min(520px, calc(100vw - 4rem));
+  }
+  .notif.show { opacity: 1; transform: translateY(0); }
   #loading-screen { display:flex; position:fixed; inset:0; background:var(--bg3); z-index:999; align-items:center; justify-content:center; flex-direction:column; gap:12px; }
   @media (max-width: 600px) {
     .form-row { grid-template-columns: 1fr; }
@@ -1282,7 +1300,7 @@
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn" style="display:none;">Users</button>
   </div>
   <div class="topbar-right">
-    <span id="save-indicator" style="font-size:12px;color:var(--text2);opacity:0;transition:opacity 0.2s;">Saving...</span>
+    <span id="save-indicator" style="display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:700;color:var(--red-text);background:var(--red-bg);border:1px solid var(--red-border);padding:5px 12px;border-radius:8px;opacity:0;transition:opacity 0.2s;">⟳ Saving…</span>
     <!-- Calculator is now reached via the floating round 🧮 launcher in the
          bottom-right corner — see #calc-launcher. Topbar button removed. -->
     <button class="btn btn-sm" id="topbar-refresh" onclick="refreshCurrent()">&#8635; Refresh</button>
@@ -11377,7 +11395,7 @@ function stationStagePickHtml() {
     </button>`).join('');
   return `<div class="station-shell">
     <div class="station-topbar">
-      <div class="station-who">Hi, <b>${esc(stationOperator.name)}</b></div>
+      <div class="station-who">Hi, <b>${esc(stationOperator.name)}</b>${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div>
       <button class="btn btn-sm" onclick="stationLogout()">Sign out</button>
     </div>
     <div style="padding:18px;">
@@ -11455,7 +11473,7 @@ function stationQueueHtml() {
   }).join('') : `<div class="empty">Nothing waiting at ${esc(stageName)} right now.</div>`;
   return `
     <div class="station-head">
-      <div><div class="station-who">${esc(stationOperator.name)}</div><div class="station-where">${esc(stageName)}</div></div>
+      <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stationStageBanner(stIdx)}
@@ -11607,7 +11625,7 @@ function stationUpdateHtml() {
     <div class="station-head">
       <div style="display:flex;align-items:center;gap:12px;">
         <div class="station-machine station-machine--sm stage-machine">${stageMachineSVG(stIdx, {})}</div>
-        <div><div class="station-who">${esc(stationOperator.name)}</div><div class="station-where">${esc(stageName)}</div></div>
+        <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       </div>
       <button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>
     </div>

@@ -97,9 +97,22 @@ function getDb() {
   return neon(url);
 }
 
+// Bump this whenever a new migration is added to initDb. The first cold
+// start after a deploy runs the full schema setup once and writes this
+// value to schema_meta; subsequent cold starts read the marker in a single
+// query and skip the ~30 CREATE/ALTER statements entirely. This is what
+// kept the Station PIN waiting 30 s on every cold start.
+const SCHEMA_VERSION = 'v2026-06-21-roles-machine-byline';
+
 async function initDb() {
   try {
     const sql = getDb();
+    // Fast-path: schema_meta has to exist before we can read the version
+    // marker, but CREATE TABLE IF NOT EXISTS is idempotent so it's cheap
+    // on warm DBs (one roundtrip vs. the ~30 we'd otherwise run).
+    await sql`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)`;
+    const cur = await sql`SELECT value FROM schema_meta WHERE key = 'schema_version'`;
+    if (cur.length && cur[0].value === SCHEMA_VERSION) return;
     await sql`
       CREATE TABLE IF NOT EXISTS jobs (
         id          SERIAL PRIMARY KEY,
@@ -334,12 +347,7 @@ async function initDb() {
     // workflow into two stages.
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS roles TEXT[]`;
 
-    await sql`
-      CREATE TABLE IF NOT EXISTS schema_meta (
-        key   TEXT PRIMARY KEY,
-        value TEXT
-      )
-    `;
+    // (schema_meta already created at the top of initDb for the fast-path.)
     // Revert the short-lived v2 migration that added an Embellishments
     // stage at index 3. If v2 ever ran on this DB, undo the stage_index
     // shift: any stage_index that landed at 3 (Embellishments) collapses
@@ -465,7 +473,13 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS station_notes_job_idx ON station_notes(job_id)`;
 
-    console.log('Database ready');
+    // Stamp the schema version so future cold starts hit the fast-path
+    // short-circuit at the top of initDb instead of replaying every ALTER.
+    await sql`
+      INSERT INTO schema_meta (key, value) VALUES ('schema_version', ${SCHEMA_VERSION})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    `;
+    console.log('Database ready (schema ' + SCHEMA_VERSION + ')');
   } catch (err) {
     console.error('Database init error:', err.message);
   }
