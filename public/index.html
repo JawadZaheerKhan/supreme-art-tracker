@@ -11068,7 +11068,7 @@ function renderOperators() {
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
         <div class="inv-name">${esc(o.name)}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
-        <div class="inv-sub">${esc(STAGES[o.stage_index]||('Stage '+o.stage_index))}${o.machine?' · &#9881; '+esc(o.machine):''} · PIN ${esc(o.pin)}</div>
+        <div class="inv-sub">${esc(operatorStageNames(o))}${o.machine?' · &#9881; '+esc(o.machine):''} · PIN ${esc(o.pin)}</div>
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm" onclick="openOperatorModal(${o.id})">Edit</button>
@@ -11077,21 +11077,32 @@ function renderOperators() {
     </div>`).join('');
 }
 
+// Pretty-print an operator's assigned sections for the list view.
+function operatorStageNames(o) {
+  const idxs = (o.stage_indices && o.stage_indices.length) ? o.stage_indices : [o.stage_index];
+  return idxs.map(i => STAGES[i] || ('Stage ' + i)).join(', ');
+}
+
 function openOperatorModal(id) {
   const o = id ? operatorsList.find(x => x.id === id) : null;
-  // Production sections only (exclude the final 'Delivered' stage from the
-  // operator picker — it's not a machine station, but harmless if included).
-  const opts = STAGES.map((s, i) => `<option value="${i}" ${o && o.stage_index===i ? 'selected' : ''}>${esc(s)}</option>`).join('');
+  const assigned = o ? ((o.stage_indices && o.stage_indices.length) ? o.stage_indices : [o.stage_index]) : [];
+  // Multi-section checkboxes — an operator can run more than one section
+  // (e.g. Printing + Coatings on the same machine).
+  const boxes = STAGES.map((s, i) => `
+    <label class="op-stage-chk" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;cursor:pointer;">
+      <input type="checkbox" class="op-stage-cb" value="${i}" ${assigned.includes(i) ? 'checked' : ''}>
+      <span>${esc(s)}</span>
+    </label>`).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>${o ? 'Edit' : 'Add'} Operator</h2>
     <div class="form-group"><label class="form-label">Name</label>
       <input type="text" id="op-name" value="${o?esc(o.name):''}" placeholder="e.g. Bilal"></div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Section</label>
-        <select id="op-stage" class="filter" style="width:100%;">${opts}</select></div>
-      <div class="form-group"><label class="form-label">Machine Name <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
-        <input type="text" id="op-machine" value="${o?esc(o.machine||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
+    <div class="form-group">
+      <label class="form-label">Sections <span style="font-weight:400;color:var(--text2);">(tick all this operator handles)</span></label>
+      <div id="op-stages" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;">${boxes}</div>
     </div>
+    <div class="form-group"><label class="form-label">Machine Name <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+      <input type="text" id="op-machine" value="${o?esc(o.machine||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
     <div class="form-group"><label class="form-label">4-digit PIN</label>
       <input type="text" id="op-pin" inputmode="numeric" maxlength="4" value="${o?esc(o.pin):''}" placeholder="e.g. 1234" style="max-width:160px;"></div>
     ${o ? `<div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="op-active" ${o.active!==false?'checked':''}> Active</label></div>` : ''}
@@ -11104,12 +11115,13 @@ function openOperatorModal(id) {
 async function saveOperator(id) {
   const name = document.getElementById('op-name').value.trim();
   const pin = document.getElementById('op-pin').value.trim();
-  const stage_index = parseInt(document.getElementById('op-stage').value, 10);
+  const stage_indices = Array.from(document.querySelectorAll('.op-stage-cb:checked')).map(cb => parseInt(cb.value, 10));
   const machine = (document.getElementById('op-machine').value || '').trim();
   const activeEl = document.getElementById('op-active');
   if (!name) { notify('Name is required'); return; }
   if (!/^\d{4}$/.test(pin)) { notify('PIN must be exactly 4 digits'); return; }
-  const body = { name, pin, stage_index, machine };
+  if (!stage_indices.length) { notify('Select at least one section'); return; }
+  const body = { name, pin, stage_indices, machine };
   if (activeEl) body.active = activeEl.checked;
   showSaving(true);
   try {
@@ -11205,7 +11217,8 @@ function stationRender() {
   if (!root) return;
   if (!stationOperator) { root.innerHTML = stationPinPadHtml(); return; }
   stationResetIdle();
-  if (stationView === 'update' && stationJobId != null) root.innerHTML = stationUpdateHtml();
+  if (stationView === 'stage-pick') root.innerHTML = stationStagePickHtml();
+  else if (stationView === 'update' && stationJobId != null) root.innerHTML = stationUpdateHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -11256,10 +11269,19 @@ async function stationPinSubmit() {
   const pin = stationPinBuf;
   try {
     const op = await api('POST', '/api/operators/verify', { pin });
-    stationOperator = { ...op, pin };
+    const stages = (op.stage_indices && op.stage_indices.length) ? op.stage_indices : [op.stage_index];
+    // Multi-section operator: ask which station they're at right now.
+    // Single-section: skip the picker and drop straight into the queue.
+    if (stages.length > 1) {
+      stationOperator = { ...op, pin, stage_indices: stages };
+      stationView = 'stage-pick';
+      stationRender();
+      return;
+    }
+    stationOperator = { ...op, pin, stage_index: stages[0], stage_indices: stages };
     stationView = 'queue';
-    await loadJobs();             // make sure the queue is current
-    await stationLoadNotes();     // incoming notes for the queue badges
+    await loadJobs();
+    await stationLoadNotes();
     stationRender();
   } catch (e) {
     stationPinBuf = '';
@@ -11267,6 +11289,37 @@ async function stationPinSubmit() {
     if (root) { root.innerHTML = stationPinPadHtml(); root.querySelector('.station-pin')?.classList.add('shake'); }
     notify(e.message || 'PIN not recognized');
   }
+}
+
+// Multi-section operator picks which station they're working at this shift.
+// Sets stationOperator.stage_index, then continues into the queue exactly
+// like a single-section operator.
+async function stationPickStage(idx) {
+  if (!stationOperator) return;
+  stationOperator.stage_index = idx;
+  stationView = 'queue';
+  await loadJobs();
+  await stationLoadNotes();
+  stationRender();
+}
+
+function stationStagePickHtml() {
+  const stages = stationOperator.stage_indices || [stationOperator.stage_index];
+  const buttons = stages.map(i => `
+    <button class="station-job" onclick="stationPickStage(${i})" style="text-align:left;">
+      <div class="sj-id">${i + 1}</div>
+      <div class="sj-main"><div class="sj-name">${esc(STAGES[i] || ('Stage ' + i))}</div></div>
+    </button>`).join('');
+  return `<div class="station-shell">
+    <div class="station-topbar">
+      <div class="station-who">Hi, <b>${esc(stationOperator.name)}</b></div>
+      <button class="btn btn-sm" onclick="stationLogout()">Sign out</button>
+    </div>
+    <div style="padding:18px;">
+      <h2 style="margin:0 0 12px 0;">Which station are you at right now?</h2>
+      <div style="display:grid;gap:10px;">${buttons}</div>
+    </div>
+  </div>`;
 }
 
 // A big animated machine vignette for the operator's stage — so a worker who
