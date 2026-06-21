@@ -20,7 +20,35 @@ const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
-const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+// Coatings (cat A — wet/film) and Embellishments (cat B — emboss/foil) are
+// separate sections on the floor, so they're separate stages here too.
+const STAGES = ['CTP Plate Making','Printing','Coatings','Embellishments','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+
+// Which planned finishes belong to which section. Drives the per-job
+// queue at the Coatings / Embellishments stations and the auto-skip
+// when a job has no work for one of these sections.
+const FINISHES_BY_SECTION = {
+  2: ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup'],
+  3: ['Emboss','Color Seal','Cylinder Emboss','Hot Foiling'],
+};
+function pendingFinishesForSection(job, stageIdx) {
+  const all = FINISHES_BY_SECTION[stageIdx] || [];
+  if (!all.length) return [];
+  const planned = (Array.isArray(job.coatings) ? job.coatings : []).filter(c => all.includes(c));
+  const doneKinds = (Array.isArray(job.coatings_done) ? job.coatings_done : []).map(d => d && d.kind).filter(Boolean);
+  return planned.filter(c => !doneKinds.includes(c));
+}
+// Walk forward from `fromStage + 1`, skipping any finish stage that has no
+// pending work for this job. Used both for initial routing out of Printing
+// and after a finish stage's last item is recorded.
+function nextStageSkippingEmptyFinishes(job, fromStage) {
+  let next = Math.min(fromStage + 1, STAGES.length - 1);
+  while ((next === 2 || next === 3) && pendingFinishesForSection(job, next).length === 0) {
+    if (next >= STAGES.length - 1) break;
+    next++;
+  }
+  return next;
+}
 
 // Expose the public Google client id to the frontend so it can configure GIS.
 // Safe to expose — it's a public identifier, not a secret.
@@ -98,6 +126,10 @@ async function initDb() {
     // size (offcut_size). NULL on both = no cut, issue normally.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cut_size    TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offcut_size TEXT`;
+    // Per-finish completion log. Each entry: {kind, operator_id, operator_name,
+    // machine, waste_sheets, done_at}. Drives the queue/advance logic at the
+    // Coatings + Embellishments stations.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coatings_done JSONB DEFAULT '[]'::jsonb`;
 
     // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
     // delivered job, we set deleted_at instead of dropping the row, so the
@@ -270,6 +302,43 @@ async function initDb() {
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS stage_indices INTEGER[]`;
     await sql`UPDATE operators SET stage_indices = ARRAY[stage_index]
               WHERE stage_indices IS NULL OR cardinality(stage_indices) = 0`;
+
+    // One-time migration to shift existing stage_index values to make room
+    // for the new Embellishments stage inserted at index 3. Old: Die Cutting
+    // was 3, Breaking 4, Pasting 5, Storage 6, Delivered 7. New: those become
+    // 4, 5, 6, 7, 8. Coatings (2) and earlier are untouched. Tracked by a
+    // marker row so it never runs twice.
+    await sql`
+      CREATE TABLE IF NOT EXISTS schema_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT
+      )
+    `;
+    const stagesV2 = await sql`SELECT value FROM schema_meta WHERE key = 'stages_v2_embellishments'`;
+    if (!stagesV2.length) {
+      await sql`UPDATE jobs SET stage_index = stage_index + 1 WHERE stage_index >= 3`;
+      // The `stages` JSONB is keyed by stage index as a string; shift those
+      // keys too so the per-stage status records line up with the new array.
+      const jobsWithStages = await sql`SELECT id, stages FROM jobs WHERE stages IS NOT NULL`;
+      for (const r of jobsWithStages) {
+        if (!r.stages || typeof r.stages !== 'object' || Array.isArray(r.stages)) continue;
+        const shifted = {};
+        for (const [k, v] of Object.entries(r.stages)) {
+          const idx = parseInt(k, 10);
+          const newIdx = Number.isFinite(idx) && idx >= 3 ? idx + 1 : idx;
+          shifted[String(newIdx)] = v;
+        }
+        await sql`UPDATE jobs SET stages = ${JSON.stringify(shifted)} WHERE id = ${r.id}`;
+      }
+      await sql`UPDATE operators SET stage_index = stage_index + 1 WHERE stage_index >= 3`;
+      await sql`UPDATE operators
+                SET stage_indices = ARRAY(
+                  SELECT CASE WHEN x >= 3 THEN x + 1 ELSE x END
+                  FROM unnest(stage_indices) AS x
+                )
+                WHERE stage_indices IS NOT NULL`;
+      await sql`INSERT INTO schema_meta (key, value) VALUES ('stages_v2_embellishments', NOW()::TEXT)`;
+    }
 
     // Dropdown blacklist — values removed from the brand/supplier dropdown
     // suggestions without touching existing inventory items. So "Century" can
@@ -758,7 +827,7 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const sql = getDb();
     const pin = String(req.body.pin || '').trim();
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
-    const rows = await sql`SELECT id, name, stage_index, stage_indices FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const rows = await sql`SELECT id, name, stage_index, stage_indices, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
@@ -2089,16 +2158,62 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     let stage_index = curStage;
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
     let log = Array.isArray(job.log) ? [...job.log] : [];
+    let coatings_done = Array.isArray(job.coatings_done) ? [...job.coatings_done] : [];
+
+    // Finish-stage flow: at Coatings (2) / Embellishments (3), the operator
+    // records which specific finish they did (UV, Hot Foiling, …) with their
+    // machine and waste-sheet count. We append to coatings_done; the job
+    // auto-advances only when no more finishes for this section remain.
+    const isFinishStage = curStage === 2 || curStage === 3;
+    const finishKind = isFinishStage && typeof req.body.finish_kind === 'string' ? req.body.finish_kind.trim() : '';
+    const finishMachine = isFinishStage ? String(req.body.finish_machine || '').trim() : '';
+    const finishWaste = isFinishStage && req.body.finish_waste_sheets != null ? String(req.body.finish_waste_sheets).trim() : '';
+    if (isFinishStage && finishKind) {
+      const allowed = FINISHES_BY_SECTION[curStage] || [];
+      if (!allowed.includes(finishKind)) return res.status(400).json({ error: 'That finish does not belong to this section.' });
+      const planned = Array.isArray(job.coatings) ? job.coatings : [];
+      if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That finish was not planned for this job.' });
+      if (coatings_done.some(d => d && d.kind === finishKind)) return res.status(409).json({ error: 'That finish has already been recorded for this job.' });
+      coatings_done.push({
+        kind: finishKind,
+        operator_id: operator.id,
+        operator_name: operator.name,
+        machine: finishMachine || null,
+        waste_sheets: finishWaste || null,
+        done_at: new Date().toISOString(),
+      });
+      log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `${finishKind} recorded by ${operator.name}${finishMachine ? ' on ' + finishMachine : ''}${finishWaste ? ' (waste ' + finishWaste + ')' : ''}`, by, time });
+    }
 
     if (advance) {
-      // Decide target. A valid skip_to wins over the default +1 step; any
-      // out-of-range value falls back to single-step advance.
+      // For routing: build the "looks like after we record this finish" job
+      // shape so nextStageSkippingEmptyFinishes can see the updated done list.
+      const peekJob = { ...job, coatings_done };
+      // Decide target. Priority: explicit skip_to (operator chose) > finish
+      // stage auto-skip (when this section is fully done) > default +1.
       const validSkip = Number.isInteger(skipTo) && skipTo > curStage && skipTo < STAGES.length;
-      const target = validSkip ? skipTo : Math.min(curStage + 1, STAGES.length - 1);
+      let target;
+      if (validSkip) {
+        target = skipTo;
+      } else if (isFinishStage) {
+        const remaining = pendingFinishesForSection(peekJob, curStage);
+        // Still more finishes for this section pending — stay here, do not
+        // advance. The job needs another operator/machine to finish the plan.
+        if (remaining.length > 0) {
+          target = curStage;
+        } else {
+          target = nextStageSkippingEmptyFinishes(peekJob, curStage);
+        }
+      } else {
+        // Auto-skip empty finish stages when leaving Printing (or any earlier
+        // stage). A job with no Coatings planned jumps past Coatings; a job
+        // with neither Coatings nor Embellishments jumps to Die Cutting.
+        target = nextStageSkippingEmptyFinishes(peekJob, curStage);
+      }
       const skipped = Math.max(0, target - curStage - 1); // intermediate stages we're flying past
       const finishing = curStage === STAGES.length - 1;
-      stages[curStage] = { ...(stages[curStage] || {}), status: 'done', by, time };
-      if (!finishing) {
+      stages[curStage] = { ...(stages[curStage] || {}), status: target === curStage ? (stages[curStage]?.status || 'active') : 'done', by, time };
+      if (target !== curStage && !finishing) {
         // Mark every skipped intermediate stage as done with an audit note
         // so the pipeline UI shows them passed, not blank.
         for (let i = curStage + 1; i < target; i++) {
@@ -2110,19 +2225,23 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         stage_index = target;
         const skipNote = skipped > 0 ? ` (skipped ${skipped} stage${skipped > 1 ? 's' : ''})` : '';
         log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[curStage]} by ${operator.name}${skipNote}`, by, time });
-      } else {
+      } else if (finishing) {
         log.push({ stage: STAGES[curStage], status: 'done', notes: `Completed by ${operator.name}`, by, time });
       }
-    } else {
+      // target === curStage && !finishing → we already pushed the finish log
+      // entry; the job legitimately stays at this stage waiting for the
+      // remaining finishes, so nothing else to log here.
+    } else if (!finishKind) {
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `Numbers recorded by ${operator.name}`, by, time });
     }
 
     const updated = await sql`
       UPDATE jobs
-         SET particulars = ${JSON.stringify(particulars)},
-             stage_index = ${stage_index},
-             stages = ${JSON.stringify(stages)},
-             log = ${JSON.stringify(log)}
+         SET particulars   = ${JSON.stringify(particulars)},
+             stage_index   = ${stage_index},
+             stages        = ${JSON.stringify(stages)},
+             log           = ${JSON.stringify(log)},
+             coatings_done = ${JSON.stringify(coatings_done)}
        WHERE id = ${id}
        RETURNING *
     `;

@@ -788,6 +788,21 @@
     margin-left: 6px;
   }
   .station-job.is-pending { border-left-color: var(--green-border); opacity: 0.85; }
+  /* Per-finish pills shown on the Coatings / Embellishments queue, and the
+     ✓-done pills in the update view. Keeps the finishes visually distinct
+     from notes/pending-stock badges so the operator can scan at a glance. */
+  .sj-finish-badge {
+    display: inline-flex; align-items: center;
+    background: #ede9fe; color: #5b21b6; border: 1px solid #a78bfa;
+    border-radius: 8px; padding: 2px 7px; font-size: 12px; font-weight: 600;
+  }
+  .sa-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    border-radius: 8px; padding: 3px 8px; font-size: 12px; font-weight: 600;
+  }
+  .sa-pill--done { background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); }
+  .sf-radio { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 15px; }
+  .sf-radio input { transform: scale(1.2); }
   .station-addnote { border-top: 2px dashed var(--border); margin-top: 6px; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
   /* Title row holds the 'Message for...' label on the left and the
      compact Record voice button on the right so the textarea below
@@ -1661,8 +1676,24 @@ function ensureXlsx() {
   return _xlsxLoadPromise;
 }
 
-const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
-const SHORT  = ['CTP','Print','Coat','Die Cut','Break','Paste','Storage','Delivered'];
+const STAGES = ['CTP Plate Making','Printing','Coatings','Embellishments','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+const SHORT  = ['CTP','Print','Coat','Embell','Die Cut','Break','Paste','Storage','Delivered'];
+// Which planned finishes belong to which finishing section. Coatings (2) is
+// the wet/film section (UV, lamination, varnish, …); Embellishments (3) is
+// the foil/emboss section. Same lists are mirrored on the server.
+const FINISHES_BY_SECTION = {
+  2: ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup'],
+  3: ['Emboss','Color Seal','Cylinder Emboss','Hot Foiling'],
+};
+function jobFinishesForSection(j, stageIdx) {
+  const allowed = FINISHES_BY_SECTION[stageIdx] || [];
+  if (!allowed.length) return { planned: [], done: [], pending: [] };
+  const planned = (Array.isArray(j.coatings) ? j.coatings : []).filter(c => allowed.includes(c));
+  const doneEntries = (Array.isArray(j.coatings_done) ? j.coatings_done : []).filter(d => d && allowed.includes(d.kind));
+  const doneKinds = doneEntries.map(d => d.kind);
+  const pending = planned.filter(c => !doneKinds.includes(c));
+  return { planned, done: doneEntries, pending };
+}
 const PAPERS  = ['Bleach Card','Box Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
 const MACHINES = ['SORM-Z','SORM','SM-74','CD-102','GTO','SM-52'];
 const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Emboss','Color Seal','Dripup','Cylinder Emboss','Hot Foiling'];
@@ -11157,11 +11188,13 @@ async function removeOperator(id) {
 // the station writes the value into that row's `quantity` subfield.
 const STATION_STAGE_FIELDS = {
   1: [{ key: 'printed_sheets_qty', label: 'Printed Sheets Qty' }, { key: 'printed_waste_sheets', label: 'Printed Waste Sheets' }],
-  2: [{ key: 'uv_waste_sheets', label: 'Coating Waste Sheets' }],
-  3: [{ key: 'die_cutting_sheets', label: 'Die Cutting Sheets' }, { key: 'die_cutting_waste', label: 'Die Cutting Waste' }],
-  4: [{ key: 'sorted_cartons_qty', label: 'Sorted Cartons Qty' }, { key: 'sorted_cartons_waste', label: 'Sorted Cartons Waste' }],
-  5: [{ key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' }],
-  6: [{ key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' }],
+  // Stages 2 (Coatings) and 3 (Embellishments) use the custom per-finish UI
+  // built in stationUpdateHtml — operator picks which finish they did, with
+  // their own machine + waste-sheet count — so no default number fields here.
+  4: [{ key: 'die_cutting_sheets', label: 'Die Cutting Sheets' }, { key: 'die_cutting_waste', label: 'Die Cutting Waste' }],
+  5: [{ key: 'sorted_cartons_qty', label: 'Sorted Cartons Qty' }, { key: 'sorted_cartons_waste', label: 'Sorted Cartons Waste' }],
+  6: [{ key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' }],
+  7: [{ key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' }],
 };
 
 let stationOperator = null;   // { id, name, stage_index, pin } once verified
@@ -11359,12 +11392,20 @@ function stationQueueHtml() {
       : '';
     const pending = isPendingIssuance(j);
     const pendingBadge = pending ? `<span class="sj-pending-badge">&#8987; Pending Stock</span>` : '';
+    // At Coatings / Embellishments, show the pending finishes for THIS
+    // section so the operator knows what's still to do on the job.
+    let finishBadges = '';
+    if (stIdx === 2 || stIdx === 3) {
+      const info = jobFinishesForSection(j, stIdx);
+      finishBadges = info.pending.map(c => `<span class="sj-finish-badge">${esc(c)}</span>`).join(' ');
+    }
     return `
     <button class="station-job${pending ? ' is-pending' : ''}" onclick="stationOpenJob(${j.id})">
       <div class="sj-id">#${j.id}</div>
       <div class="sj-main">
         <div class="sj-name">${esc(j.name)} ${pendingBadge}${noteBadge}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
+        ${finishBadges ? `<div class="sj-finishes" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${finishBadges}</div>` : ''}
       </div>
       <div class="sj-go">›</div>
     </button>`;
@@ -11411,8 +11452,60 @@ function stationUpdateHtml() {
         <input type="text" ${isTouch ? tabletAttrs : laptopAttrs} class="numpad-target" id="sf-${f.key}"
                value="${esc(cur)}" placeholder="0">
       </div>`;
-  }).join('')}</div>` : `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>`;
-  const advanceLabel = nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`;
+  }).join('')}</div>` : '';
+
+  // Finish-stage UI: at Coatings (2) and Embellishments (3) the operator
+  // picks which planned finish for this job they just did, with their own
+  // machine + waste count. Pending list comes from job.coatings minus what's
+  // already in job.coatings_done for this section.
+  const isFinishStage = stIdx === 2 || stIdx === 3;
+  const finishInfo = isFinishStage ? jobFinishesForSection(j, stIdx) : null;
+  const finishHtml = isFinishStage ? (() => {
+    if (!finishInfo.planned.length) {
+      return `<div class="station-hint" style="margin:10px 0;">This job has no ${stageName.toLowerCase()} planned. Hit Done to move it forward.</div>`;
+    }
+    const doneBadges = finishInfo.done.map(d => `<span class="sa-pill sa-pill--done">✓ ${esc(d.kind)}${d.operator_name ? ' · ' + esc(d.operator_name) : ''}${d.machine ? ' · ⚙ ' + esc(d.machine) : ''}</span>`).join(' ');
+    const opts = finishInfo.pending.map((c, i) => `
+      <label class="sf-radio">
+        <input type="radio" name="finish-kind" value="${esc(c)}" ${i === 0 ? 'checked' : ''}>
+        <span>${esc(c)}</span>
+      </label>`).join('');
+    const myMachine = (stationOperator && stationOperator.machine) || '';
+    const machineAttrs = isTouch
+      ? `inputmode="none" readonly onclick="stationOpenQwerty('sf-finish-machine', 'Machine name')" class="qwerty-target"`
+      : ``;
+    const wasteAttrs = isTouch
+      ? `inputmode="none" readonly onclick="stationOpenPad('finish-waste', 'Waste Sheets')"`
+      : `inputmode="numeric" pattern="[0-9]*"`;
+    const remainingMsg = finishInfo.pending.length > 1
+      ? `<div class="station-hint" style="margin-top:6px;">After saving, this job stays here for the remaining ${finishInfo.pending.length - 1} finish${finishInfo.pending.length - 1 === 1 ? '' : 'es'}.</div>`
+      : `<div class="station-hint" style="margin-top:6px;">Last ${stageName.toLowerCase().includes('emb') ? 'embellishment' : 'coating'} for this job — saving will move it forward.</div>`;
+    return `
+      <div class="station-finish">
+        ${finishInfo.done.length ? `<div class="sf-done-row" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">${doneBadges}</div>` : ''}
+        <div class="sf-label" style="font-weight:600;margin-bottom:6px;">Which one did you just do?</div>
+        <div class="sf-radios" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">${opts}</div>
+        <div class="station-field-grid">
+          <div class="station-field">
+            <label>Machine</label>
+            <input type="text" id="sf-finish-machine" ${machineAttrs} value="${esc(myMachine)}" placeholder="e.g. Coater 1">
+          </div>
+          <div class="station-field">
+            <label>Waste Sheets</label>
+            <input type="text" id="sf-finish-waste" class="numpad-target" ${wasteAttrs} value="" placeholder="0">
+          </div>
+        </div>
+        ${remainingMsg}
+      </div>`;
+  })() : '';
+
+  const hasWorkFields = fields.length > 0 || (isFinishStage && finishInfo.pending.length > 0);
+  const emptyHint = !hasWorkFields && !isFinishStage ? `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>` : '';
+  const advanceLabel = isFinishStage && finishInfo && finishInfo.pending.length > 0
+    ? (finishInfo.pending.length === 1
+        ? `✓ Save — and send to ${esc(nextName || '')}`
+        : `✓ Save this finish`)
+    : (nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`);
 
   // Incoming notes from ANY upstream station for THIS job. With the
   // forward-broadcast change, a note from CTP keeps showing all the way
@@ -11463,9 +11556,11 @@ function stationUpdateHtml() {
       <div class="su-jobsub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
       ${notesIn}
       ${fieldHtml}
+      ${finishHtml}
+      ${emptyHint}
       <div class="station-actions-row">
         <button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
-        ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
+        ${fields.length && !isFinishStage ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
         ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}
       </div>
       ${addNote}
@@ -11804,12 +11899,27 @@ async function stationSkipTo(target) {
 async function stationSubmit(advance, skipTo) {
   const j = jobs.find(x => x.id === stationJobId);
   if (!j || !stationOperator) return;
-  const fields = STATION_STAGE_FIELDS[stationOperator.stage_index] || [];
+  const stIdx = stationOperator.stage_index;
+  const fields = STATION_STAGE_FIELDS[stIdx] || [];
   const patch = {};
   fields.forEach(f => {
     const el = document.getElementById('sf-' + f.key);
     if (el && el.value !== '') patch[f.key] = el.value.trim();
   });
+  // At Coatings (2) / Embellishments (3), the operator picks which planned
+  // finish they did. Validate upfront so the trip-to-server only happens
+  // when there's a real finish to record (or none is planned at all).
+  let finishKind = '', finishMachine = '', finishWaste = '';
+  if ((stIdx === 2 || stIdx === 3)) {
+    const info = jobFinishesForSection(j, stIdx);
+    if (info.pending.length > 0) {
+      const picked = document.querySelector('input[name="finish-kind"]:checked');
+      if (!picked) { notify('Pick which finish you did'); return; }
+      finishKind = picked.value;
+      finishMachine = (document.getElementById('sf-finish-machine') || {}).value?.trim() || '';
+      finishWaste = (document.getElementById('sf-finish-waste') || {}).value?.trim() || '';
+    }
+  }
   // If the operator hit Save / Done while still holding the recorder
   // open, the in-progress blob hasn't been pushed into stationRecBlobs
   // yet (MediaRecorder.onstop + FileReader chain is async). Stop it now
@@ -11845,6 +11955,11 @@ async function stationSubmit(advance, skipTo) {
     stationRecBlobs = [];
     const stationBody = { pin: stationOperator.pin, particulars_patch: patch, advance };
     if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
+    if (finishKind) {
+      stationBody.finish_kind = finishKind;
+      stationBody.finish_machine = finishMachine;
+      stationBody.finish_waste_sheets = finishWaste;
+    }
     const updated = await api('POST', `/api/jobs/${j.id}/station-update`, stationBody);
     jobs = jobs.map(x => x.id === j.id ? { ...x, ...updated } : x);
     const sent = (pendingText ? 1 : 0) + pendingClips.length;
@@ -11854,7 +11969,14 @@ async function stationSubmit(advance, skipTo) {
       // sees their pick actually landed (e.g. 'Sent to Die Cutting').
       const targetName = updated && Number.isFinite(updated.stage_index) ? (STAGES[updated.stage_index] || '') : '';
       const movedTo = Number.isInteger(skipTo) && targetName ? ` to ${targetName}` : '';
-      notify(`Job advanced${movedTo}${sentTxt}`);
+      // Finish stage that's still incomplete: server kept stage_index where
+      // it was, so toast says what's done instead of pretending it moved.
+      if (finishKind && updated && updated.stage_index === stIdx) {
+        const info = jobFinishesForSection({ ...j, ...updated }, stIdx);
+        notify(`${finishKind} recorded · ${info.pending.length} ${stIdx === 2 ? 'coating' : 'embellishment'}${info.pending.length === 1 ? '' : 's'} still pending${sentTxt}`);
+      } else {
+        notify(`Job advanced${movedTo}${sentTxt}`);
+      }
       stationBackToQueue();
     } else {
       notify(`Numbers saved${sentTxt}`);
