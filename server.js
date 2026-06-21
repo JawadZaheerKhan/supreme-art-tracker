@@ -2249,15 +2249,19 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         waste_sheets: finishWaste || null,
         done_at: new Date().toISOString(),
       });
-      // Accumulate waste + operator name on the Coating Waste Sheets row of
-      // the paper card. Existing values get pipe-appended so the card reads
-      // "20 | 40 | 30" after three operators contribute.
+      // Accumulate the coating kind, waste, and operator name on the Coating
+      // Waste Sheets row of the paper card. All three fields get pipe-joined
+      // in the order they were recorded so the card reads e.g.
+      // Details "UV | Emboss | Hot Foiling", Qty "10 | 30 | 5",
+      // Name "obaid | hamza | obaid" — same index across columns.
       const prevWaste = (particulars.uv_waste_sheets && typeof particulars.uv_waste_sheets === 'object') ? particulars.uv_waste_sheets : {};
+      const prevD = String(prevWaste.details || '').trim();
+      const newD = prevD ? `${prevD} | ${finishKind}` : finishKind;
       const prevQ = String(prevWaste.quantity || '').trim();
-      const newQ = finishWaste ? (prevQ ? `${prevQ} | ${finishWaste}` : finishWaste) : prevQ;
+      const newQ = prevQ ? `${prevQ} | ${finishWaste || '0'}` : (finishWaste || '0');
       const prevN = String(prevWaste.name || '').trim();
-      const newN = prevN ? (prevN.split(' | ').includes(operator.name) ? prevN : `${prevN} | ${operator.name}`) : operator.name;
-      particulars.uv_waste_sheets = { ...prevWaste, quantity: newQ, name: newN };
+      const newN = prevN ? `${prevN} | ${operator.name}` : operator.name;
+      particulars.uv_waste_sheets = { ...prevWaste, details: newD, quantity: newQ, name: newN };
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `${finishKind} recorded by ${operator.name}${finishMachine ? ' on ' + finishMachine : ''}${finishWaste ? ' (waste ' + finishWaste + ')' : ''}`, by, time });
     }
 
