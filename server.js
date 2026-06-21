@@ -2189,7 +2189,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 
     // 1) Identify the operator by PIN (server-side — never trust the client).
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
-    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
     const operator = ops[0];
     const opStages = (operator.stage_indices && operator.stage_indices.length) ? operator.stage_indices : [operator.stage_index];
@@ -2217,7 +2217,12 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
     }
 
-    const by = `${operator.name} (${STAGES[operator.stage_index] || 'Stage ' + operator.stage_index})`;
+    // Byline used by every log entry below. Including the operator's
+    // assigned machine here means the job history shows e.g.
+    // "Wajid · SM-52 (Printing)" — same info whether the operator was
+    // advancing the stage or just recording numbers.
+    const stageLabel = STAGES[operator.stage_index] || 'Stage ' + operator.stage_index;
+    const by = `${operator.name}${operator.machine ? ' · ' + operator.machine : ''} (${stageLabel})`;
     const time = new Date().toLocaleString('en-GB', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }).replace(',', '');
 
     let stage_index = curStage;
