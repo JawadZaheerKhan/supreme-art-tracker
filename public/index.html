@@ -11527,9 +11527,6 @@ function stationUpdateHtml() {
       ? `<div class="station-hint" style="margin-top:8px;">For the other section: ${otherPending.map(c => `<span class="sj-finish-badge sj-finish-badge--other">${esc(c)}</span>`).join(' ')}</div>`
       : '';
     const myMachine = (stationOperator && stationOperator.machine) || '';
-    const machineAttrs = isTouch
-      ? `inputmode="none" readonly onclick="stationOpenQwerty('sf-finish-machine', 'Machine name')" class="qwerty-target"`
-      : ``;
     const wasteAttrs = isTouch
       ? `inputmode="none" readonly onclick="stationOpenPad('finish-waste', 'Waste Sheets')"`
       : `inputmode="numeric" pattern="[0-9]*"`;
@@ -11537,16 +11534,19 @@ function stationUpdateHtml() {
     const remainingMsg = stillPendingAfter > 0
       ? `<div class="station-hint" style="margin-top:6px;">After saving, this job stays at Coatings for ${stillPendingAfter} more coating${stillPendingAfter === 1 ? '' : 's'}.</div>`
       : `<div class="station-hint" style="margin-top:6px;">Last coating for this job — saving will send it to ${esc(nextName || '')}.</div>`;
+    // Machine is whatever the admin set on this operator's profile — no
+    // editable field on the floor, just a small label so the operator can
+    // confirm they're at the right station.
+    const machineLine = myMachine
+      ? `<div class="station-hint" style="margin-bottom:8px;">⚙ Machine: <b>${esc(myMachine)}</b></div>`
+      : '';
     return `
       <div class="station-finish">
         ${coatState.done.length ? `<div class="sf-done-row" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">${doneBadges}</div>` : ''}
         <div class="sf-label" style="font-weight:600;margin-bottom:6px;">Which coating did you just do?</div>
         <div class="sf-radios" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">${opts}</div>
+        ${machineLine}
         <div class="station-field-grid">
-          <div class="station-field">
-            <label>Machine</label>
-            <input type="text" id="sf-finish-machine" ${machineAttrs} value="${esc(myMachine)}" placeholder="e.g. Coater 1">
-          </div>
           <div class="station-field">
             <label>Waste Sheets</label>
             <input type="text" id="sf-finish-waste" class="numpad-target" ${wasteAttrs} value="" placeholder="0">
@@ -11977,7 +11977,7 @@ async function stationSubmit(advance, skipTo) {
       const picked = document.querySelector('input[name="finish-kind"]:checked');
       if (!picked) { notify('Pick which coating you did'); return; }
       finishKind = picked.value;
-      finishMachine = (document.getElementById('sf-finish-machine') || {}).value?.trim() || '';
+      finishMachine = (stationOperator && stationOperator.machine) || '';
       finishWaste = (document.getElementById('sf-finish-waste') || {}).value?.trim() || '';
     }
   }
