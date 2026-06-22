@@ -55,7 +55,12 @@
   .mode-switch { display: flex; gap: 4px; margin-left: 1rem; background: var(--bg2); padding: 3px; border-radius: var(--radius-sm); }
   .mode-btn { padding: 6px 14px; font-size: 13px; border: none; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text2); font-family: var(--font); font-weight: 500; transition: background 0.22s ease, color 0.22s ease; }
   .mode-btn.active { background: var(--brand); color: #fff; box-shadow: 0 1px 3px rgba(163,45,45,0.28); }
-  .mode-btn:hover:not(.active) { color: var(--brand); background: var(--brand-soft); }
+  .mode-btn:hover:not(.active):not(.mode-btn-locked) { color: var(--brand); background: var(--brand-soft); }
+  /* Locked tab — visible so everyone sees the full app shape, but greyed
+     and non-clickable for users whose role doesn't grant the page. */
+  .mode-btn-locked, .mode-btn-locked:hover {
+    color: var(--text3); opacity: 0.5; cursor: not-allowed; background: transparent;
+  }
   .inventory-list { display: flex; flex-direction: column; gap: 8px; }
   /* Read-only CEO role: any element tagged with class="ceo-hide" disappears.
      Backend still enforces the lock; this is just the UI nicety. */
@@ -1308,7 +1313,7 @@
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
     <button class="mode-btn" data-mode="forms" id="mode-forms-btn" onclick="setMode('forms')">Forms</button>
-    <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn" style="display:none;">Users</button>
+    <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
   </div>
   <div class="topbar-right">
     <span id="save-indicator" style="display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:700;color:var(--red-text);background:var(--red-bg);border:1px solid var(--red-border);padding:5px 12px;border-radius:8px;opacity:0;transition:opacity 0.2s;">⟳ Saving…</span>
@@ -2038,24 +2043,29 @@ function renderUserChip() {
   const pic = document.getElementById('user-pic');
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
-  // Tab visibility by role. Show/hide via dataset so setMode can still
-  // route the user to the first allowed tab when an operator/manager lands.
-  const showTab = (id, ok) => {
+  // Tab gating by role. All tabs stay VISIBLE so everyone sees the full
+  // list — disallowed tabs are just locked (greyed + non-clickable) so
+  // people without permission can see the app's shape without entering.
+  const lockTab = (id, allowed) => {
     const el = document.getElementById(id);
-    if (el) el.style.display = ok ? '' : 'none';
+    if (!el) return;
+    el.disabled = !allowed;
+    el.classList.toggle('mode-btn-locked', !allowed);
+    if (!allowed) el.title = 'Not allowed for your role';
+    else el.removeAttribute('title');
   };
-  // Operators see Station (default) + Jobs (read-only, so they can check
-  // the queue), nothing else. Store Manager skips Station/Forms.
-  // Production Manager + Admin + CEO see everything (CEO is read-only).
+  // Operators get Station (default) + Jobs (read-only). Store Manager
+  // skips Station/Forms. Production Manager + Admin + CEO see everything
+  // (CEO is read-only via the .role-ceo body class below).
   const op = isOperator(), sm = isStoreManager();
-  showTab('mode-jobs-btn',      true);
-  showTab('mode-inventory-btn', !op);
-  showTab('mode-reports-btn',   !op);
-  showTab('mode-stickers-btn',  !op && !sm);
-  showTab('mode-station-btn',   canRunStation() || isCeo());
-  showTab('mode-forms-btn',     !op && !sm);
-  // Users tab — visible to admin (full control) and CEO (read-only audit feed).
-  showTab('mode-users-btn',     isAdmin() || isCeo());
+  lockTab('mode-jobs-btn',      true);
+  lockTab('mode-inventory-btn', !op);
+  lockTab('mode-reports-btn',   !op);
+  lockTab('mode-stickers-btn',  !op && !sm);
+  lockTab('mode-station-btn',   canRunStation() || isCeo());
+  lockTab('mode-forms-btn',     !op && !sm);
+  // Users tab — open to admin (full control) and CEO (read-only audit feed).
+  lockTab('mode-users-btn',     isAdmin() || isCeo());
   // Trash card — visible to anyone who can navigate the app (so operators
   // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
