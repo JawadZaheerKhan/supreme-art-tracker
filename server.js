@@ -38,8 +38,8 @@ const ROLES = [
   { id: 'storage',   label: 'Storage / Ready',  stage_index: 6 },
 ];
 const ROLE_FINISHES = {
-  coatings:  ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup'],
-  embellish: ['Emboss','Color Seal','Cylinder Emboss','Hot Foiling'],
+  coatings:  ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup','Color Seal'],
+  embellish: ['Emboss','Cylinder Emboss','Hot Foiling'],
 };
 const ALL_FINISHES = [...ROLE_FINISHES.coatings, ...ROLE_FINISHES.embellish];
 const ROLE_IDS = new Set(ROLES.map(r => r.id));
