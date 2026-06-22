@@ -799,7 +799,7 @@ app.get('/api/operators', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT * FROM operators ORDER BY stage_index, name`;
+    const rows = await sql`SELECT * FROM operators ORDER BY pin ASC`;
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
