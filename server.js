@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-21-roles-machine-byline';
+const SCHEMA_VERSION = 'v2026-06-22-pin3';
 
 async function initDb() {
   try {
@@ -331,6 +331,10 @@ async function initDb() {
     `;
     // PIN must be unique among active operators so /verify is unambiguous.
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_idx ON operators(pin) WHERE active`;
+    // PINs are now 3 digits. Existing 4-digit PINs that start with 0 get
+    // their leading 0 dropped (0001 → 001, 0023 → 023). PINs that don't fit
+    // that pattern are left alone so admin can re-issue them by hand.
+    await sql`UPDATE operators SET pin = SUBSTRING(pin FROM 2) WHERE pin ~ '^0\\d{3}$'`;
     // Optional machine label — which specific press / coater / die-cutter
     // this operator is at. Free-text so the floor can name machines
     // however they refer to them ('SM-52', 'Heidelberg #2', 'Coater 1').
@@ -792,14 +796,14 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 
 // ── Operators (shop-floor roster) ────────────────────────────
 
-function validPin(pin) { return /^\d{4}$/.test(String(pin || '')); }
+function validPin(pin) { return /^\d{3}$/.test(String(pin || '')); }
 
 // List operators — admin only (includes pin for management).
 app.get('/api/operators', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT * FROM operators ORDER BY stage_index, name`;
+    const rows = await sql`SELECT * FROM operators ORDER BY pin ASC`;
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -839,7 +843,7 @@ app.post('/api/operators', requireAdmin, async (req, res) => {
     const parsed = parseOperatorRoles(req.body);
     const machine = (req.body.machine || '').trim() || null;
     if (!name) return res.status(400).json({ error: 'Name is required' });
-    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
@@ -865,7 +869,7 @@ app.put('/api/operators/:id', requireAdmin, async (req, res) => {
     const active = req.body.active !== false;
     const machine = (req.body.machine || '').trim() || null;
     if (!name) return res.status(400).json({ error: 'Name is required' });
-    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 4 digits' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
@@ -903,7 +907,7 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const pin = String(req.body.pin || '').trim();
-    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
     const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
@@ -2202,7 +2206,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const skipTo = Number.isFinite(parseInt(skipToRaw, 10)) ? parseInt(skipToRaw, 10) : null;
 
     // 1) Identify the operator by PIN (server-side — never trust the client).
-    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
     const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
     const operator = ops[0];
@@ -2377,7 +2381,7 @@ app.post('/api/jobs/:id/station-notes', requireStationUser, async (req, res) => 
     const mime = String(req.body.mime || '').slice(0, 80);
     const duration = Number.isFinite(+req.body.duration_s) ? +req.body.duration_s : null;
 
-    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 4-digit PIN' });
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
     const ops = await sql`SELECT id, name, stage_index, stage_indices FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
     const operator = ops[0];
