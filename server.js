@@ -20,7 +20,7 @@ const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
-const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Breaking','Pasting','Storage / Ready','Delivered'];
+const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Storage / Ready','Delivered'];
 
 // Operator roles — what each role lets the holder do. Multiple roles can
 // land on the same stage_index (Coatings + Embellishments both at 2): the
@@ -33,7 +33,7 @@ const ROLES = [
   { id: 'coatings',  label: 'Coatings',         stage_index: 2 },
   { id: 'embellish', label: 'Embellishments',   stage_index: 2 },
   { id: 'diecut',    label: 'Die Cutting',      stage_index: 3 },
-  { id: 'break',     label: 'Breaking',         stage_index: 4 },
+  { id: 'break',     label: 'Sorting',          stage_index: 4 },
   { id: 'paste',     label: 'Pasting',          stage_index: 5 },
   { id: 'storage',   label: 'Storage / Ready',  stage_index: 6 },
 ];
