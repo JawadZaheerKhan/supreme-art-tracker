@@ -961,7 +961,13 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const jobs = await sql`SELECT * FROM jobs WHERE deleted_at IS NULL ORDER BY id ASC`;
+    // The station only needs jobs that are still moving through stages, so
+    // it passes ?active=1 to skip Delivered + soft-deleted rows. The full
+    // list (used by Reports, History, etc.) loads everything as before.
+    const deliveredIdx = STAGES.length - 1;
+    const jobs = req.query.active
+      ? await sql`SELECT * FROM jobs WHERE deleted_at IS NULL AND stage_index < ${deliveredIdx} ORDER BY id ASC`
+      : await sql`SELECT * FROM jobs WHERE deleted_at IS NULL ORDER BY id ASC`;
     res.json(jobs);
   } catch (err) {
     console.error(err);

@@ -2137,6 +2137,13 @@ async function loadJobs() {
   }
 }
 
+// Station-only loader: skips Delivered + soft-deleted jobs so the floor
+// terminal doesn't drag the full history down the wire on every PIN.
+async function loadJobsForStation() {
+  try { jobs = await api('GET', '/api/jobs?active=1'); }
+  catch(e) { notify('Error loading jobs: ' + e.message); }
+}
+
 async function loadInventory() {
   try {
     // Fetch dropdown-hidden list in parallel — cheap and needed for the brand/
@@ -11414,9 +11421,11 @@ async function stationPinSubmit() {
     if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
     stationOperator.stage_index = stages[0];
     stationView = 'queue';
-    await loadJobs();
-    await stationLoadNotes();
+    await loadJobsForStation();
     stationRender();
+    // Notes are nice-to-have for queue badges, not blocking — fetch them
+    // after the queue is on screen and re-render once they land.
+    stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
   } catch (e) {
     stationPinBuf = '';
     const root = document.getElementById('station-root');
@@ -12153,14 +12162,14 @@ async function stationSubmit(advance, skipTo) {
     } else {
       notify(`Numbers saved${sentTxt}`);
       stationClosePad();
-      // Re-fetch incoming notes so the operator sees what they just sent
-      // and any other broadcasts. stationRender() reads from stationNotes.
-      if (stationOperator) {
-        try {
-          stationNotes = await api('GET', `/api/station-notes/for-stage/${stationOperator.stage_index}`);
-        } catch {}
+      // Only refetch notes if the operator actually sent something — Save
+      // without a note doesn't change the inbound list, so we save a round-
+      // trip and re-render straight from local state.
+      if (stationOperator && sent > 0) {
+        stationLoadNotes().then(() => stationRender());
+      } else {
+        stationRender();
       }
-      stationRender();
     }
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
