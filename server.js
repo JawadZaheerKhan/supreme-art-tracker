@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-22-pin3';
+const SCHEMA_VERSION = 'v2026-06-22-pin3-urdu';
 
 async function initDb() {
   try {
@@ -350,6 +350,9 @@ async function initDb() {
     // wet/film section vs. the foil/emboss section without splitting the
     // workflow into two stages.
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS roles TEXT[]`;
+    // Urdu name — shown next to the Roman name on the station terminal so
+    // operators who can't read Roman script can still recognise themselves.
+    await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS name_ur TEXT`;
 
     // (schema_meta already created at the top of initDb for the fast-path.)
     // Revert the short-lived v2 migration that added an Embellishments
@@ -839,6 +842,7 @@ app.post('/api/operators', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const name = (req.body.name || '').trim();
+    const name_ur = (req.body.name_ur || '').trim() || null;
     const pin = String(req.body.pin || '').trim();
     const parsed = parseOperatorRoles(req.body);
     const machine = (req.body.machine || '').trim() || null;
@@ -848,8 +852,8 @@ app.post('/api/operators', requireAdmin, async (req, res) => {
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
     const inserted = await sql`
-      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, machine)
-      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${machine}) RETURNING *
+      INSERT INTO operators (name, name_ur, pin, stage_index, stage_indices, roles, machine)
+      VALUES (${name}, ${name_ur}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${machine}) RETURNING *
     `;
     await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added operator ${name} (roles ${parsed.roles.join(',')}${machine ? ', machine ' + machine : ''})` });
     res.json(inserted[0]);
@@ -864,6 +868,7 @@ app.put('/api/operators/:id', requireAdmin, async (req, res) => {
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const name = (req.body.name || '').trim();
+    const name_ur = (req.body.name_ur || '').trim() || null;
     const pin = String(req.body.pin || '').trim();
     const parsed = parseOperatorRoles(req.body);
     const active = req.body.active !== false;
@@ -874,7 +879,7 @@ app.put('/api/operators/:id', requireAdmin, async (req, res) => {
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another operator' });
     const updated = await sql`
-      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, active=${active}, machine=${machine}
+      UPDATE operators SET name=${name}, name_ur=${name_ur}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, active=${active}, machine=${machine}
       WHERE id=${id} RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
@@ -908,7 +913,7 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const sql = getDb();
     const pin = String(req.body.pin || '').trim();
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const rows = await sql`SELECT id, name, name_ur, stage_index, stage_indices, roles, machine FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];

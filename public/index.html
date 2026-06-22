@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Job Tracker Supreme Art</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@500;700&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -644,6 +647,12 @@
      signed in, on which machine, doing which role, at a glance. */
   .station-who { font-size: 30px; font-weight: 900; color: var(--text); display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; line-height: 1.1; letter-spacing: -0.01em; }
   .station-where { font-size: 22px; color: var(--red-text); font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
+  /* Urdu names — Nastaliq script needs its own font + extra line-height
+     so the descenders don't get cut off. .urdu can be applied to inputs
+     or text spans; .station-who-ur is the bigger header variant. */
+  .urdu { font-family: 'Noto Nastaliq Urdu', 'Jameel Noori Nastaleeq', 'Nafees Nastaleeq', serif; line-height: 2; }
+  .station-who-ur { font-size: 28px; font-weight: 700; color: var(--text); }
+  input.urdu, textarea.urdu { line-height: 2.2; padding-top: 6px; padding-bottom: 6px; }
   /* Machine pill — sits beside the operator name everywhere their name
      appears so the floor immediately sees who's at which machine. */
   .station-mach {
@@ -11145,7 +11154,7 @@ function renderOperators() {
   el.innerHTML = operatorsList.map(o => `
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
-        <div class="inv-name">${esc(o.name)}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
+        <div class="inv-name">${esc(o.name)}${o.name_ur ? ` <span class="urdu" dir="rtl" lang="ur" style="font-weight:600;color:var(--text2);margin-left:8px;">${esc(o.name_ur)}</span>` : ''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
         <div class="inv-sub">${esc(operatorStageNames(o))}${o.machine?' · &#9881; '+esc(o.machine):''} · PIN ${esc(o.pin)}</div>
       </div>
       <div class="inv-actions">
@@ -11178,8 +11187,12 @@ function openOperatorModal(id) {
   }).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>${o ? 'Edit' : 'Add'} Operator</h2>
-    <div class="form-group"><label class="form-label">Name</label>
-      <input type="text" id="op-name" value="${o?esc(o.name):''}" placeholder="e.g. Bilal"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Name</label>
+        <input type="text" id="op-name" value="${o?esc(o.name):''}" placeholder="e.g. Bilal"></div>
+      <div class="form-group"><label class="form-label">Name (Urdu) <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+        <input type="text" id="op-name-ur" class="urdu" dir="rtl" lang="ur" value="${o?esc(o.name_ur||''):''}" placeholder="مثلاً بلال"></div>
+    </div>
     <div class="form-group">
       <label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(tick all this operator handles)</span></label>
       <div id="op-roles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;">${boxes}</div>
@@ -11197,6 +11210,7 @@ function openOperatorModal(id) {
 }
 async function saveOperator(id) {
   const name = document.getElementById('op-name').value.trim();
+  const name_ur = (document.getElementById('op-name-ur') || {}).value?.trim() || '';
   const pin = document.getElementById('op-pin').value.trim();
   const roles = Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
   const machine = (document.getElementById('op-machine').value || '').trim();
@@ -11204,7 +11218,7 @@ async function saveOperator(id) {
   if (!name) { notify('Name is required'); return; }
   if (!/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
   if (!roles.length) { notify('Select at least one role'); return; }
-  const body = { name, pin, roles, machine };
+  const body = { name, name_ur, pin, roles, machine };
   if (activeEl) body.active = activeEl.checked;
   showSaving(true);
   try {
@@ -11397,7 +11411,7 @@ function stationStagePickHtml() {
     </button>`).join('');
   return `<div class="station-shell">
     <div class="station-topbar">
-      <div class="station-who">Hi, <b>${esc(stationOperator.name)}</b>${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div>
+      <div class="station-who">Hi, <b>${esc(stationOperator.name)}</b>${stationOperator.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationOperator.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div>
       <button class="btn btn-sm" onclick="stationLogout()">Sign out</button>
     </div>
     <div style="padding:18px;">
@@ -11475,7 +11489,7 @@ function stationQueueHtml() {
   }).join('') : `<div class="empty">Nothing waiting at ${esc(stageName)} right now.</div>`;
   return `
     <div class="station-head">
-      <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
+      <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationOperator.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stationStageBanner(stIdx)}
@@ -11627,7 +11641,7 @@ function stationUpdateHtml() {
     <div class="station-head">
       <div style="display:flex;align-items:center;gap:12px;">
         <div class="station-machine station-machine--sm stage-machine">${stageMachineSVG(stIdx, {})}</div>
-        <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
+        <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationOperator.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       </div>
       <button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>
     </div>
