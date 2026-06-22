@@ -42,4 +42,4 @@ Packaging press job tracking system.
 - No manual steps needed
 
 ## Stages
-CTP Plate Making → Printing → Coatings → Die Cutting → Breaking → Pasting → Storage / Ready → Delivered
+CTP Plate Making → Printing → Coatings → Die Cutting → Sorting → Pasting → Storage / Ready → Delivered
