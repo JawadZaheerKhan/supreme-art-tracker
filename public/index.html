@@ -2138,6 +2138,13 @@ async function loadJobs() {
   }
 }
 
+// Station-only loader: skips Delivered + soft-deleted jobs so the floor
+// terminal doesn't drag the full history down the wire on every PIN.
+async function loadJobsForStation() {
+  try { jobs = await api('GET', '/api/jobs?active=1'); }
+  catch(e) { notify('Error loading jobs: ' + e.message); }
+}
+
 async function loadInventory() {
   try {
     // Fetch dropdown-hidden list in parallel — cheap and needed for the brand/
@@ -11162,17 +11169,23 @@ function renderOperators() {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
   }
-  el.innerHTML = operatorsList.map(o => `
+  el.innerHTML = operatorsList.map(o => {
+    const persons = Array.isArray(o.persons) ? o.persons : [];
+    const peopleStr = persons.length
+      ? persons.map(p => esc(p.name || '')).join(', ')
+      : '<span style="color:var(--text3);">No operators yet</span>';
+    return `
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
-        <div class="inv-name">${esc(o.name)}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
-        <div class="inv-sub">${esc(operatorStageNames(o))}${o.machine?' · &#9881; '+esc(o.machine):''} · PIN ${esc(o.pin)}</div>
+        <div class="inv-name">&#9881; ${esc(o.name || '(unnamed machine)')}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
+        <div class="inv-sub">${esc(operatorStageNames(o))} · PIN ${esc(o.pin)} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm" onclick="openOperatorModal(${o.id})">Edit</button>
         <button class="btn btn-sm btn-danger" onclick="removeOperator(${o.id})">Remove</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 // Pretty-print an operator's assigned roles for the list view.
@@ -11184,10 +11197,6 @@ function operatorStageNames(o) {
 function openOperatorModal(id) {
   const o = id ? operatorsList.find(x => x.id === id) : null;
   const assigned = o ? rolesOfOperator(o) : [];
-  // Multi-role checkboxes. Coatings (wet/film) and Embellishments
-  // (foil/emboss) are separate roles that both belong to the Coatings
-  // stage — ticking only one limits this operator's queue to jobs that
-  // need their kind of finish.
   const boxes = ROLES.map(r => {
     const hint = r.finishes ? ` <span style="font-weight:400;color:var(--text2);font-size:12px;">(${r.finishes.join(', ')})</span>` : '';
     return `
@@ -11196,22 +11205,26 @@ function openOperatorModal(id) {
         <span>${esc(r.label)}${hint}</span>
       </label>`;
   }).join('');
+  const startingPersons = (o && Array.isArray(o.persons) && o.persons.length) ? o.persons : [{ name: '', name_ur: '' }];
   openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2>${o ? 'Edit' : 'Add'} Operator</h2>
+    <h2>${o ? 'Edit' : 'Add'} Machine</h2>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Name</label>
-        <input type="text" id="op-name" value="${o?esc(o.name):''}" placeholder="e.g. Bilal"></div>
-      <div class="form-group"><label class="form-label">Name (Urdu) <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
-        <input type="text" id="op-name-ur" class="urdu" dir="rtl" lang="ur" value="${o?esc(o.name_ur||''):''}" placeholder="مثلاً بلال"></div>
+      <div class="form-group"><label class="form-label">Machine Name</label>
+        <input type="text" id="op-name" value="${o?esc(o.name||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
+      <div class="form-group"><label class="form-label">3-digit PIN</label>
+        <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;"></div>
     </div>
     <div class="form-group">
-      <label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(tick all this operator handles)</span></label>
+      <label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(tick all this machine handles)</span></label>
       <div id="op-roles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;">${boxes}</div>
     </div>
-    <div class="form-group"><label class="form-label">Machine Name <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
-      <input type="text" id="op-machine" value="${o?esc(o.machine||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
-    <div class="form-group"><label class="form-label">3-digit PIN</label>
-      <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;"></div>
+    <div class="form-group">
+      <label class="form-label">Operators on this Machine <span style="font-weight:400;color:var(--text2);">(after PIN, the operator picks themselves from this list)</span></label>
+      <div id="op-persons" style="display:flex;flex-direction:column;gap:6px;">
+        ${startingPersons.map((p, i) => personRowHtml(p, i)).join('')}
+      </div>
+      <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addPersonRow()">+ Add operator</button>
+    </div>
     ${o ? `<div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="op-active" ${o.active!==false?'checked':''}> Active</label></div>` : ''}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -11219,17 +11232,34 @@ function openOperatorModal(id) {
     </div>
   </div>`);
 }
+
+function personRowHtml(p, i) {
+  return `
+    <div class="op-person-row" style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">
+      <input type="text" class="op-person-name" placeholder="Name (Roman, e.g. Bilal)" value="${esc((p && p.name) || '')}">
+      <input type="text" class="op-person-name-ur urdu" dir="rtl" lang="ur" placeholder="نام (اردو، اختیاری)" value="${esc((p && p.name_ur) || '')}">
+      <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.op-person-row').remove()">&times;</button>
+    </div>`;
+}
+function addPersonRow() {
+  const wrap = document.getElementById('op-persons');
+  if (!wrap) return;
+  wrap.insertAdjacentHTML('beforeend', personRowHtml({ name: '', name_ur: '' }, wrap.children.length));
+}
 async function saveOperator(id) {
   const name = document.getElementById('op-name').value.trim();
-  const name_ur = (document.getElementById('op-name-ur') || {}).value?.trim() || '';
   const pin = document.getElementById('op-pin').value.trim();
   const roles = Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
-  const machine = (document.getElementById('op-machine').value || '').trim();
+  const persons = Array.from(document.querySelectorAll('#op-persons .op-person-row')).map(row => ({
+    name: row.querySelector('.op-person-name').value.trim(),
+    name_ur: row.querySelector('.op-person-name-ur').value.trim(),
+  })).filter(p => p.name);
   const activeEl = document.getElementById('op-active');
-  if (!name) { notify('Name is required'); return; }
+  if (!name) { notify('Machine name is required'); return; }
   if (!/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
   if (!roles.length) { notify('Select at least one role'); return; }
-  const body = { name, name_ur, pin, roles, machine };
+  if (!persons.length) { notify('Add at least one operator on this machine'); return; }
+  const body = { name, pin, roles, persons };
   if (activeEl) body.active = activeEl.checked;
   showSaving(true);
   try {
@@ -11275,7 +11305,8 @@ const STATION_STAGE_FIELDS = {
   6: [{ key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' }],
 };
 
-let stationOperator = null;   // { id, name, stage_index, pin } once verified
+let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
+let stationPerson   = null;   // picked person from stationOperator.persons — { name, name_ur }
 let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
 let stationJobId    = null;
@@ -11303,6 +11334,7 @@ function stationResetIdle() {
 
 function stationLogout(silent) {
   stationOperator = null;
+  stationPerson = null;
   stationPinBuf = '';
   stationView = 'pin';
   stationJobId = null;
@@ -11327,7 +11359,8 @@ function stationRender() {
   if (!root) return;
   if (!stationOperator) { root.innerHTML = stationPinPadHtml(); return; }
   stationResetIdle();
-  if (stationView === 'stage-pick') root.innerHTML = stationStagePickHtml();
+  if (stationView === 'person-pick') root.innerHTML = stationPersonPickHtml();
+  else if (stationView === 'stage-pick') root.innerHTML = stationStagePickHtml();
   else if (stationView === 'update' && stationJobId != null) root.innerHTML = stationUpdateHtml();
   else root.innerHTML = stationQueueHtml();
 }
@@ -11378,27 +11411,66 @@ async function stationPinSubmit() {
   if (stationPinBuf.length !== 3) return;
   const pin = stationPinBuf;
   try {
-    const op = await api('POST', '/api/operators/verify', { pin });
-    const stages = (op.stage_indices && op.stage_indices.length) ? op.stage_indices : [op.stage_index];
-    // Multi-section operator: ask which station they're at right now.
-    // Single-section: skip the picker and drop straight into the queue.
-    if (stages.length > 1) {
-      stationOperator = { ...op, pin, stage_indices: stages };
-      stationView = 'stage-pick';
-      stationRender();
-      return;
-    }
-    stationOperator = { ...op, pin, stage_index: stages[0], stage_indices: stages };
+    const machine = await api('POST', '/api/operators/verify', { pin });
+    const stages = (machine.stage_indices && machine.stage_indices.length) ? machine.stage_indices : [machine.stage_index];
+    const persons = Array.isArray(machine.persons) ? machine.persons : [];
+    // Bind the machine to stationOperator (name = machine name; persons[] is
+    // the people on this machine). Person + stage get picked next.
+    stationOperator = { ...machine, pin, stage_indices: stages, machine: machine.name };
+    stationPerson = persons.length === 1 ? persons[0] : null;
+    if (!stationPerson) { stationView = 'person-pick'; stationRender(); return; }
+    if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
+    stationOperator.stage_index = stages[0];
     stationView = 'queue';
-    await loadJobs();
-    await stationLoadNotes();
+    await loadJobsForStation();
     stationRender();
+    // Notes are nice-to-have for queue badges, not blocking — fetch them
+    // after the queue is on screen and re-render once they land.
+    stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
   } catch (e) {
     stationPinBuf = '';
     const root = document.getElementById('station-root');
     if (root) { root.innerHTML = stationPinPadHtml(); root.querySelector('.station-pin')?.classList.add('shake'); }
     notify(e.message || 'PIN not recognized');
   }
+}
+
+// After PIN: pick which person on this machine is signing in. Single-person
+// machines skip this step and go straight to the stage picker (or queue).
+async function stationPickPerson(idx) {
+  if (!stationOperator) return;
+  const persons = Array.isArray(stationOperator.persons) ? stationOperator.persons : [];
+  const p = persons[idx];
+  if (!p) return;
+  stationPerson = p;
+  const stages = stationOperator.stage_indices || [stationOperator.stage_index];
+  if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
+  stationOperator.stage_index = stages[0];
+  stationView = 'queue';
+  await loadJobs();
+  await stationLoadNotes();
+  stationRender();
+}
+
+function stationPersonPickHtml() {
+  const persons = Array.isArray(stationOperator.persons) ? stationOperator.persons : [];
+  const buttons = persons.map((p, i) => `
+    <button class="station-job" onclick="stationPickPerson(${i})" style="text-align:left;">
+      <div class="sj-id">${i + 1}</div>
+      <div class="sj-main">
+        <div class="sj-name">${esc(p.name || '')}${p.name_ur ? ` <span class="urdu" dir="rtl" lang="ur" style="margin-left:8px;font-weight:600;">${esc(p.name_ur)}</span>` : ''}</div>
+      </div>
+    </button>`).join('');
+  return `<div class="station-shell">
+    <div class="station-topbar">
+      <div class="station-who"><span class="station-mach">⚙ ${esc(stationOperator.machine || stationOperator.name || '')}</span></div>
+      <button class="btn btn-sm" onclick="stationLogout()">Sign out</button>
+    </div>
+    <div style="padding:18px;">
+      <h2 style="margin:0 0 12px 0;">Who is signing in?</h2>
+      <div style="display:grid;gap:10px;">${buttons}</div>
+    </div>
+  </div>`;
 }
 
 // Multi-section operator picks which station they're working at this shift.
@@ -11422,7 +11494,7 @@ function stationStagePickHtml() {
     </button>`).join('');
   return `<div class="station-shell">
     <div class="station-topbar">
-      <div class="station-who">Hi, <b>${esc(stationOperator.name)}</b>${stationOperator.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationOperator.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div>
+      <div class="station-who">Hi, <b>${esc((stationPerson && stationPerson.name) || stationOperator.name)}</b>${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div>
       <button class="btn btn-sm" onclick="stationLogout()">Sign out</button>
     </div>
     <div style="padding:18px;">
@@ -11500,7 +11572,7 @@ function stationQueueHtml() {
   }).join('') : `<div class="empty">Nothing waiting at ${esc(stageName)} right now.</div>`;
   return `
     <div class="station-head">
-      <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationOperator.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
+      <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stationStageBanner(stIdx)}
@@ -11652,7 +11724,7 @@ function stationUpdateHtml() {
     <div class="station-head">
       <div style="display:flex;align-items:center;gap:12px;">
         <div class="station-machine station-machine--sm stage-machine">${stageMachineSVG(stIdx, {})}</div>
-        <div><div class="station-who">${esc(stationOperator.name)}${stationOperator.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationOperator.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
+        <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       </div>
       <button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>
     </div>
@@ -12048,19 +12120,21 @@ async function stationSubmit(advance, skipTo) {
   const pendingClips = stationRecBlobs.slice();
   showSaving(true);
   try {
+    const noteWho = stationPerson && stationPerson.name ? stationPerson.name : undefined;
     if (pendingText) {
       await api('POST', `/api/jobs/${j.id}/station-notes`, {
-        pin: stationOperator.pin, kind: 'text', body: pendingText,
+        pin: stationOperator.pin, kind: 'text', body: pendingText, person_name: noteWho,
       });
     }
     for (const clip of pendingClips) {
       await api('POST', `/api/jobs/${j.id}/station-notes`, {
         pin: stationOperator.pin, kind: 'voice', body: '',
-        audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration,
+        audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration, person_name: noteWho,
       });
     }
     stationRecBlobs = [];
     const stationBody = { pin: stationOperator.pin, particulars_patch: patch, advance };
+    if (stationPerson && stationPerson.name) stationBody.person_name = stationPerson.name;
     if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
     if (finishKind) {
       stationBody.finish_kind = finishKind;
@@ -12089,14 +12163,14 @@ async function stationSubmit(advance, skipTo) {
     } else {
       notify(`Numbers saved${sentTxt}`);
       stationClosePad();
-      // Re-fetch incoming notes so the operator sees what they just sent
-      // and any other broadcasts. stationRender() reads from stationNotes.
-      if (stationOperator) {
-        try {
-          stationNotes = await api('GET', `/api/station-notes/for-stage/${stationOperator.stage_index}`);
-        } catch {}
+      // Only refetch notes if the operator actually sent something — Save
+      // without a note doesn't change the inbound list, so we save a round-
+      // trip and re-render straight from local state.
+      if (stationOperator && sent > 0) {
+        stationLoadNotes().then(() => stationRender());
+      } else {
+        stationRender();
       }
-      stationRender();
     }
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
