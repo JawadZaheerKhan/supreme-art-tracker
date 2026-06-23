@@ -979,7 +979,7 @@ app.get('/api/operators/all-persons', requireStationUser, async (req, res) => {
         out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName });
       }
     }
-    out.sort((a, b) => a.name.localeCompare(b.name));
+    out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });

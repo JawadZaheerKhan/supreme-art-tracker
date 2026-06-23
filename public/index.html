@@ -11245,9 +11245,10 @@ function openOperatorModal(id) {
 
 function personRowHtml(p, i) {
   return `
-    <div class="op-person-row" style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">
+    <div class="op-person-row" style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:8px;align-items:center;">
       <input type="text" class="op-person-name" placeholder="Name (Roman, e.g. Bilal)" value="${esc((p && p.name) || '')}">
       <input type="text" class="op-person-name-ur urdu" dir="rtl" lang="ur" placeholder="نام (اردو، اختیاری)" value="${esc((p && p.name_ur) || '')}">
+      <button type="button" class="btn btn-sm" title="Suggest Urdu spelling from the Roman name" onclick="suggestUrduFromRow(this)" style="background:#fef3c7;border-color:#f59e0b;color:#92400e;">✦ Urdu</button>
       <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.op-person-row').remove()">&times;</button>
     </div>`;
 }
@@ -11255,6 +11256,140 @@ function addPersonRow() {
   const wrap = document.getElementById('op-persons');
   if (!wrap) return;
   wrap.insertAdjacentHTML('beforeend', personRowHtml({ name: '', name_ur: '' }, wrap.children.length));
+}
+
+// Best-guess Roman → Urdu transliteration. Names are messy: same Roman
+// spelling can map to multiple Urdu spellings (Mohammad/Muhammad both →
+// محمد), and a generic char map produces nonsense for many names. So we
+// keep a curated lookup of common Pakistani first names; anything not in
+// the lookup falls back to a simple letter map the admin can fix.
+const URDU_NAME_LOOKUP = {
+  'muhammad': 'محمد', 'mohammad': 'محمد', 'muhammed': 'محمد',
+  'ahmed': 'احمد', 'ahmad': 'احمد',
+  'ali': 'علی', 'aly': 'علی',
+  'hassan': 'حسن', 'hasan': 'حسن',
+  'hussain': 'حسین', 'hussein': 'حسین', 'husain': 'حسین',
+  'bilal': 'بلال',
+  'umar': 'عمر', 'omar': 'عمر',
+  'usman': 'عثمان', 'osman': 'عثمان',
+  'imran': 'عمران',
+  'haider': 'حیدر', 'hyder': 'حیدر',
+  'haidar': 'حیدر',
+  'kashif': 'کاشف',
+  'shahzad': 'شہزاد', 'shahzaad': 'شہزاد',
+  'shehryar': 'شہریار', 'sheheryar': 'شہریار', 'sheryar': 'شہریار',
+  'wajid': 'واجد',
+  'waqar': 'وقار',
+  'zulfiqar': 'ذوالفقار', 'zulfikar': 'ذوالفقار',
+  'amin': 'امین', 'ameen': 'امین',
+  'gul': 'گل',
+  'rashid': 'راشد',
+  'mumtaz': 'ممتاز',
+  'obaid': 'عبید', 'ubaid': 'عبید',
+  'hamza': 'حمزہ', 'hamzah': 'حمزہ',
+  'asif': 'آصف',
+  'arif': 'عارف',
+  'sajid': 'ساجد',
+  'shahid': 'شاہد',
+  'khalid': 'خالد', 'khaled': 'خالد',
+  'rizwan': 'رضوان',
+  'fahad': 'فہد',
+  'faisal': 'فیصل', 'faysal': 'فیصل',
+  'naveed': 'نوید',
+  'yasir': 'یاسر',
+  'tariq': 'طارق',
+  'qasim': 'قاسم',
+  'salman': 'سلمان',
+  'saleem': 'سلیم', 'salim': 'سلیم',
+  'ibrahim': 'ابراہیم',
+  'ismail': 'اسماعیل',
+  'yusuf': 'یوسف', 'yousuf': 'یوسف',
+  'abdul': 'عبد', 'abdullah': 'عبد اللہ',
+  'rahman': 'رحمان', 'rahim': 'رحیم',
+  'kareem': 'کریم', 'karim': 'کریم',
+  'jamil': 'جمیل', 'jameel': 'جمیل',
+  'noor': 'نور',
+  'aslam': 'اسلم',
+  'akram': 'اکرم',
+  'asghar': 'اصغر',
+  'akbar': 'اکبر',
+  'amjad': 'امجد',
+  'pervez': 'پرویز', 'pervaiz': 'پرویز',
+  'zubair': 'زبیر',
+  'irfan': 'عرفان',
+  'farooq': 'فاروق', 'faruq': 'فاروق',
+  'nadeem': 'ندیم',
+  'majid': 'ماجد',
+  'kamran': 'کامران',
+  'adnan': 'عدنان',
+  'iqbal': 'اقبال',
+  'aftab': 'آفتاب',
+  'akhtar': 'اختر',
+  'anwar': 'انور',
+  'azhar': 'اظہر',
+  'babar': 'بابر',
+  'bashir': 'بشیر',
+  'fawad': 'فواد',
+  'ghulam': 'غلام',
+  'idrees': 'ادریس',
+  'javed': 'جاوید', 'javid': 'جاوید',
+  'liaqat': 'لیاقت',
+  'mahmood': 'محمود', 'mehmood': 'محمود',
+  'maqsood': 'مقصود',
+  'masood': 'مسعود',
+  'nasir': 'ناصر',
+  'naseer': 'نصیر',
+  'rauf': 'رؤف',
+  'razzaq': 'رزاق',
+  'sadiq': 'صادق',
+  'siddique': 'صدیق',
+  'sultan': 'سلطان',
+  'tahir': 'طاہر',
+  'younas': 'یونس', 'younis': 'یونس', 'younus': 'یونس',
+  'zaheer': 'ظہیر',
+  'zafar': 'ظفر',
+  'zia': 'ضیا',
+};
+// Fallback char map — rough but better than blank. Used for any name not
+// in the curated lookup. Admin should glance over the suggestion.
+const URDU_CHAR_MAP = {
+  'a': 'ا', 'b': 'ب', 'p': 'پ', 't': 'ت', 'j': 'ج',
+  'h': 'ہ', 'd': 'د', 'r': 'ر', 'z': 'ز', 's': 'س',
+  'f': 'ف', 'q': 'ق', 'k': 'ک', 'g': 'گ', 'l': 'ل',
+  'm': 'م', 'n': 'ن', 'w': 'و', 'y': 'ی', 'v': 'و',
+  'e': 'ی', 'i': 'ی', 'o': 'و', 'u': 'و', 'c': 'ک', 'x': 'کس',
+};
+function transliterateUrdu(roman) {
+  const r = String(roman || '').trim();
+  if (!r) return '';
+  // Multi-word: transliterate each token, join with U+200C zero-width
+  // non-joiner so word boundaries don't fuse in Nastaliq.
+  const words = r.split(/\s+/).filter(Boolean);
+  return words.map(w => {
+    const key = w.toLowerCase().replace(/[^a-z]/g, '');
+    if (URDU_NAME_LOOKUP[key]) return URDU_NAME_LOOKUP[key];
+    // Rough char-by-char fallback. Strip digraphs that the map can't
+    // capture cleanly (sh, ch, kh, gh) into their nearest single letter.
+    const lower = key
+      .replace(/sh/g, 'ش~')
+      .replace(/ch/g, 'چ~')
+      .replace(/kh/g, 'خ~')
+      .replace(/gh/g, 'غ~');
+    return lower.split('').map(ch => {
+      if (ch === '~') return '';   // marker consumed above
+      if (/[شچخغ]/.test(ch)) return ch;
+      return URDU_CHAR_MAP[ch] || '';
+    }).join('');
+  }).join(' ');
+}
+function suggestUrduFromRow(btn) {
+  const row = btn.closest('.op-person-row');
+  if (!row) return;
+  const roman = row.querySelector('.op-person-name').value || '';
+  if (!roman.trim()) { notify('Type the Roman name first'); return; }
+  const ur = row.querySelector('.op-person-name-ur');
+  if (!ur) return;
+  ur.value = transliterateUrdu(roman);
 }
 async function saveOperator(id) {
   const name = document.getElementById('op-name').value.trim();
