@@ -956,6 +956,36 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
   }
 });
 
+// All active persons across every machine — backs the "Custom" picker on
+// the station, used when an operator works on a machine that's not their
+// usual one. Returns a flat list of { name, name_ur, machine } so the UI
+// can present the full roster without leaking PINs.
+app.get('/api/operators/all-persons', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT name, persons FROM operators WHERE active AND persons IS NOT NULL`;
+    const out = [];
+    const seen = new Set();
+    for (const r of rows) {
+      const machineName = r.name || '';
+      const list = Array.isArray(r.persons) ? r.persons : [];
+      for (const p of list) {
+        const n = p && p.name ? String(p.name).trim() : '';
+        if (!n) continue;
+        const key = `${n.toLowerCase()}@${machineName.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName });
+      }
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // GET all jobs
 app.get('/api/jobs', requireAuth, async (req, res) => {
   try {
@@ -2261,14 +2291,28 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const personsList = Array.isArray(machine.persons) ? machine.persons : [];
     const reqPersonName = String(req.body.person_name || '').trim();
     let person = null;
-    if (personsList.length === 1) person = personsList[0];
-    else if (reqPersonName) person = personsList.find(p => p && p.name === reqPersonName) || null;
+    let personIsCustom = false;
+    if (personsList.length === 1 && !reqPersonName) person = personsList[0];
+    else if (reqPersonName) {
+      person = personsList.find(p => p && p.name === reqPersonName) || null;
+      // Custom fallback — operator working on a machine that isn't their
+      // usual one. Look up any active person across all machines and accept
+      // a matching name. Audit log will note "(custom)" so it's visible.
+      if (!person) {
+        const otherRows = await sql`SELECT persons FROM operators WHERE active AND persons IS NOT NULL`;
+        for (const r of otherRows) {
+          const list = Array.isArray(r.persons) ? r.persons : [];
+          const hit = list.find(p => p && p.name === reqPersonName);
+          if (hit) { person = hit; personIsCustom = true; break; }
+        }
+      }
+    }
     if (!person) return res.status(400).json({ error: 'Pick which operator is doing this update.' });
     // Synthesize an "operator" shape so the existing log/coatings_done code
     // keeps working without rewiring everything to a separate person object.
     const operator = {
       id: machine.id,
-      name: person.name,
+      name: person.name + (personIsCustom ? ' (custom)' : ''),
       name_ur: person.name_ur || '',
       stage_index: machine.stage_index,
       stage_indices: machine.stage_indices,
@@ -2452,10 +2496,21 @@ app.post('/api/jobs/:id/station-notes', requireStationUser, async (req, res) => 
     const personsList = Array.isArray(machine.persons) ? machine.persons : [];
     const reqPersonName = String(req.body.person_name || '').trim();
     let person = null;
-    if (personsList.length === 1) person = personsList[0];
-    else if (reqPersonName) person = personsList.find(p => p && p.name === reqPersonName) || null;
+    let personIsCustom = false;
+    if (personsList.length === 1 && !reqPersonName) person = personsList[0];
+    else if (reqPersonName) {
+      person = personsList.find(p => p && p.name === reqPersonName) || null;
+      if (!person) {
+        const otherRows = await sql`SELECT persons FROM operators WHERE active AND persons IS NOT NULL`;
+        for (const r of otherRows) {
+          const list = Array.isArray(r.persons) ? r.persons : [];
+          const hit = list.find(p => p && p.name === reqPersonName);
+          if (hit) { person = hit; personIsCustom = true; break; }
+        }
+      }
+    }
     if (!person) return res.status(400).json({ error: 'Pick which operator is leaving this note.' });
-    const operator = { id: machine.id, name: person.name, stage_index: machine.stage_index, stage_indices: machine.stage_indices };
+    const operator = { id: machine.id, name: person.name + (personIsCustom ? ' (custom)' : ''), stage_index: machine.stage_index, stage_indices: machine.stage_indices };
 
     if (kind === 'text' && !body) return res.status(400).json({ error: 'Note is empty' });
     if (kind === 'voice') {

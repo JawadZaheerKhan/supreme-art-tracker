@@ -812,6 +812,17 @@
     margin-left: 6px;
   }
   .station-job.is-pending { border-left-color: var(--green-border); opacity: 0.85; }
+  /* "Custom · someone else" escape hatch on the person picker — yellow
+     highlight so it's obviously the off-path option, not a regular row. */
+  .station-custom-btn {
+    display: block; width: 100%; margin-top: 14px;
+    padding: 14px 18px; border-radius: 12px;
+    background: #fde68a; color: #92400e; border: 2px solid #f59e0b;
+    font-family: var(--font); font-size: 18px; font-weight: 800;
+    text-align: left; cursor: pointer;
+    transition: background 0.18s, transform 0.18s;
+  }
+  .station-custom-btn:hover { background: #fcd34d; transform: translateY(-1px); }
   /* Per-finish pills shown on the Coatings / Embellishments queue, and the
      ✓-done pills in the update view. Keeps the finishes visually distinct
      from notes/pending-stock badges so the operator can scan at a glance. */
@@ -11306,6 +11317,8 @@ const STATION_STAGE_FIELDS = {
 
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
 let stationPerson   = null;   // picked person from stationOperator.persons — { name, name_ur }
+let stationPersonPickView = 'own'; // 'own' = machine's own roster, 'custom' = roster from all machines
+let stationCustomPersons = null;   // lazy-loaded list for the Custom picker — [{ name, name_ur, machine }]
 let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
 let stationJobId    = null;
@@ -11334,6 +11347,8 @@ function stationResetIdle() {
 function stationLogout(silent) {
   stationOperator = null;
   stationPerson = null;
+  stationPersonPickView = 'own';
+  stationCustomPersons = null;
   stationPinBuf = '';
   stationView = 'pin';
   stationJobId = null;
@@ -11452,6 +11467,10 @@ async function stationPickPerson(idx) {
 }
 
 function stationPersonPickHtml() {
+  // 'custom' view replaces the regular machine list with every active
+  // operator across all machines, for when someone is filling in on a
+  // machine that isn't theirs.
+  if (stationPersonPickView === 'custom') return stationCustomPersonPickHtml();
   const persons = Array.isArray(stationOperator.persons) ? stationOperator.persons : [];
   const buttons = persons.map((p, i) => `
     <button class="station-job" onclick="stationPickPerson(${i})" style="text-align:left;">
@@ -11468,8 +11487,66 @@ function stationPersonPickHtml() {
     <div style="padding:18px;">
       <h2 style="margin:0 0 12px 0;">Who is signing in?</h2>
       <div style="display:grid;gap:10px;">${buttons}</div>
+      <button class="station-custom-btn" onclick="stationOpenCustomPersonPicker()">Custom · someone else</button>
     </div>
   </div>`;
+}
+
+function stationCustomPersonPickHtml() {
+  const list = stationCustomPersons || [];
+  const rows = list.length
+    ? list.map((p, i) => `
+        <button class="station-job" onclick="stationPickCustomPerson(${i})" style="text-align:left;">
+          <div class="sj-id">${i + 1}</div>
+          <div class="sj-main">
+            <div class="sj-name">${esc(p.name || '')}${p.name_ur ? ` <span class="urdu" dir="rtl" lang="ur" style="margin-left:8px;font-weight:600;">${esc(p.name_ur)}</span>` : ''}</div>
+            <div class="sj-sub">usually at ${esc(p.machine || '—')}</div>
+          </div>
+        </button>`).join('')
+    : `<div class="empty">Loading…</div>`;
+  return `<div class="station-shell">
+    <div class="station-topbar">
+      <div class="station-who"><span class="station-mach">⚙ ${esc(stationOperator.machine || stationOperator.name || '')}</span></div>
+      <button class="btn btn-sm" onclick="stationLogout()">Sign out</button>
+    </div>
+    <div style="padding:18px;">
+      <h2 style="margin:0 0 12px 0;">Pick any operator</h2>
+      <div style="display:grid;gap:10px;">${rows}</div>
+      <button class="btn btn-sm" style="margin-top:14px;" onclick="stationBackToOwnPersons()">‹ Back</button>
+    </div>
+  </div>`;
+}
+
+async function stationOpenCustomPersonPicker() {
+  stationPersonPickView = 'custom';
+  stationRender();
+  try {
+    stationCustomPersons = await api('GET', '/api/operators/all-persons');
+  } catch (e) {
+    stationCustomPersons = [];
+    notify('Could not load operators: ' + e.message);
+  }
+  if (stationView === 'person-pick' && stationPersonPickView === 'custom') stationRender();
+}
+
+function stationBackToOwnPersons() {
+  stationPersonPickView = 'own';
+  stationRender();
+}
+
+async function stationPickCustomPerson(idx) {
+  if (!stationOperator) return;
+  const p = (stationCustomPersons || [])[idx];
+  if (!p) return;
+  stationPerson = { name: p.name, name_ur: p.name_ur || '' };
+  stationPersonPickView = 'own';
+  const stages = stationOperator.stage_indices || [stationOperator.stage_index];
+  if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
+  stationOperator.stage_index = stages[0];
+  stationView = 'queue';
+  await loadJobsForStation();
+  stationRender();
+  stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
 }
 
 // Multi-section operator picks which station they're working at this shift.
