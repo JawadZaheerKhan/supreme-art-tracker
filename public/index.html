@@ -121,6 +121,42 @@
   .dp-table input.dp-cell:focus { outline: none; border-style: solid; border-color: var(--brand); background: var(--brand-soft); }
   .dp-table input.dp-cell:disabled { background: transparent; border-color: transparent; cursor: default; }
   .dp-table input.dp-remarks { min-width: 200px; }
+
+  /* Print-only Daily Production register. The on-screen #dp-print-root
+     is empty during normal use; printDailyRegister() populates it just
+     before window.print() and clears it on afterprint. Two pages:
+     page 1 holds Printing + Die, page 2 holds Coatings + Pasting. */
+  #dp-print-root { display: none; }
+  @media print {
+    /* Hide the entire app shell — only the print container is visible. */
+    body > * { display: none !important; }
+    #dp-print-root { display: block !important; }
+    @page { size: A4 portrait; margin: 12mm; }
+    .dp-print-page { font-family: var(--font); color: #000; }
+    /* Force a hard page break between the two stacks. */
+    .dp-print-break { page-break-before: always; }
+    .dp-print-hd {
+      text-align: center; font-weight: 800; font-size: 14pt;
+      letter-spacing: 0.04em; border: 1px solid #000; padding: 4px 0;
+      margin-bottom: 6mm;
+    }
+    .dp-print-sec {
+      text-align: center; font-size: 12pt; font-weight: 800;
+      letter-spacing: 0.04em; margin: 5mm 0 2mm; text-decoration: underline;
+    }
+    .dp-print-tbl {
+      width: 100%; border-collapse: collapse; font-size: 10pt;
+      table-layout: fixed; margin-bottom: 4mm;
+    }
+    .dp-print-tbl th, .dp-print-tbl td {
+      border: 1px solid #000; padding: 4px 6px; vertical-align: middle;
+      word-wrap: break-word; overflow-wrap: break-word;
+    }
+    .dp-print-tbl th { background: #f0f0f0; font-weight: 700; text-align: center; }
+    .dp-print-tbl td.n { text-align: right; font-variant-numeric: tabular-nums; }
+    .dp-print-tbl td.m { font-weight: 700; }
+    .dp-print-tbl td.empty { text-align: center; color: #666; font-style: italic; }
+  }
   @media (max-width: 800px) {
     .reports-layout { flex-direction: column; }
     .reports-sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 10px; border-right: none; border-bottom: 1px solid var(--border); }
@@ -1589,7 +1625,7 @@
               <input type="date" id="dp-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
-            <button class="btn btn-sm" onclick="window.print()">Print</button>
+            <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-printing-body"><div class="empty">Pick a date to see the day's production.</div></div>
         </div>
@@ -1601,7 +1637,7 @@
               <input type="date" id="dp-die-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
-            <button class="btn btn-sm" onclick="window.print()">Print</button>
+            <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-die-body"><div class="empty">Pick a date to see the day's die-cutting production.</div></div>
         </div>
@@ -1613,7 +1649,7 @@
               <input type="date" id="dp-coatings-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
-            <button class="btn btn-sm" onclick="window.print()">Print</button>
+            <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-coatings-body"><div class="empty">Pick a date to see the day's coatings production.</div></div>
         </div>
@@ -1625,7 +1661,7 @@
               <input type="date" id="dp-pasting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
-            <button class="btn btn-sm" onclick="window.print()">Print</button>
+            <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-pasting-body"><div class="empty">Pick a date to see the day's pasting production.</div></div>
         </div>
@@ -6886,14 +6922,15 @@ function renderDailyProductionPrinting(rows, date) {
 
 async function saveDailyProductionCell(input) {
   const section = input.dataset.section || 'printing';
-  const dateEl = document.getElementById(section === 'die' ? 'dp-die-date' : 'dp-date');
+  const dateElId = section === 'printing' ? 'dp-date' : `dp-${section}-date`;
+  const dateEl = document.getElementById(dateElId);
   if (!dateEl || !dateEl.value) return;
   const date = dateEl.value;
   const machine = input.dataset.machine;
   if (!machine) return;
   // Gather every editable cell on this row so a partial update doesn't
-  // wipe sibling fields — Printing has hours + remarks, Die also has
-  // make_ready + settings.
+  // wipe sibling fields — Printing has hours + remarks, Die adds
+  // make_ready + settings, Coatings adds blankets.
   const sels = `.dp-cell[data-machine="${CSS.escape(machine)}"][data-section="${section}"]`;
   const body = {};
   document.querySelectorAll(sels).forEach(el => { body[el.dataset.field] = el.value.trim(); });
@@ -6902,6 +6939,119 @@ async function saveDailyProductionCell(input) {
   } catch (e) {
     notify('Save failed: ' + e.message);
   }
+}
+
+// One-shot Daily Production print: fetches the four sections in
+// parallel, lays them out across two pages (Printing + Die on page 1,
+// Coatings + Pasting on page 2), opens the browser print dialog, then
+// cleans up. Everything else on the page is hidden via @media print
+// while the dp-print-root is visible.
+async function printDailyRegister() {
+  // Whichever date picker the user touched last — they're all kept in
+  // sync, so any of them is fine.
+  const date = (document.getElementById('dp-date')         || {}).value
+            || (document.getElementById('dp-die-date')     || {}).value
+            || (document.getElementById('dp-coatings-date')|| {}).value
+            || (document.getElementById('dp-pasting-date') || {}).value;
+  if (!date) { notify('Pick a date first'); return; }
+  showSaving(true);
+  let printing, die, coatings, pasting;
+  try {
+    [printing, die, coatings, pasting] = await Promise.all([
+      api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
+    ]);
+  } catch (e) {
+    notify('Could not load all sections: ' + e.message);
+    showSaving(false);
+    return;
+  }
+  showSaving(false);
+
+  const dateNice = (() => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : date;
+  })();
+
+  const cellText = v => (v === 0 || v) && String(v).length ? esc(String(v)) : '—';
+  const numCell = v => (v && v !== 0) ? esc(Number(v).toLocaleString()) : '—';
+
+  const printingRows = printing.map(r => `
+    <tr>
+      <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
+      <td>${cellText(r.colors)}</td><td class="n">${cellText(r.plates)}</td>
+      <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
+    </tr>`).join('') || '<tr><td colspan="8" class="empty">No printing activity.</td></tr>';
+
+  const dieRows = die.map(r => `
+    <tr>
+      <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
+      <td>${cellText(r.make_ready)}</td><td>${cellText(r.settings)}</td>
+      <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
+    </tr>`).join('') || '<tr><td colspan="8" class="empty">No die-cutting activity.</td></tr>';
+
+  const coatingsRows = coatings.map(r => `
+    <tr>
+      <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
+      <td>${cellText(r.blankets)}</td>
+      <td>${cellText(r.operators)}</td><td>${cellText(r.remarks || r.finishes)}</td>
+    </tr>`).join('') || '<tr><td colspan="7" class="empty">No coatings activity.</td></tr>';
+
+  const pastingRows = pasting.map(r => `
+    <tr>
+      <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.units)}</td>
+      <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
+      <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
+    </tr>`).join('') || '<tr><td colspan="6" class="empty">No pasting activity.</td></tr>';
+
+  const html = `
+    <div class="dp-print-page">
+      <div class="dp-print-hd">DATE ${esc(dateNice)}</div>
+      <h3 class="dp-print-sec">PRINTING</h3>
+      <table class="dp-print-tbl"><thead><tr>
+        <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th>
+      </tr></thead><tbody>${printingRows}</tbody></table>
+
+      <h3 class="dp-print-sec">DIE</h3>
+      <table class="dp-print-tbl"><thead><tr>
+        <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Make Ready</th><th>Settings</th><th>Operator</th><th>Remarks</th>
+      </tr></thead><tbody>${dieRows}</tbody></table>
+    </div>
+    <div class="dp-print-page dp-print-break">
+      <div class="dp-print-hd">DATE ${esc(dateNice)}</div>
+      <h3 class="dp-print-sec">U.V — SPOT U.V (COATINGS)</h3>
+      <table class="dp-print-tbl"><thead><tr>
+        <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Blankets</th><th>Operator</th><th>Remarks</th>
+      </tr></thead><tbody>${coatingsRows}</tbody></table>
+
+      <h3 class="dp-print-sec">PASTING</h3>
+      <table class="dp-print-tbl"><thead><tr>
+        <th>Machine</th><th>Units</th><th>Hours</th><th>Jobs</th>
+        <th>Operator</th><th>Remarks</th>
+      </tr></thead><tbody>${pastingRows}</tbody></table>
+    </div>`;
+
+  let root = document.getElementById('dp-print-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'dp-print-root';
+    document.body.appendChild(root);
+  }
+  root.innerHTML = html;
+  // After print dialog closes (or is cancelled) the onafterprint event
+  // fires — clear the print container so the visible app DOM isn't
+  // affected once the user is back.
+  const cleanup = () => { root.innerHTML = ''; window.removeEventListener('afterprint', cleanup); };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
 }
 
 async function loadTrashAndRender(which) {
