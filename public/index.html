@@ -106,6 +106,21 @@
   .rsb-icon { font-size: 15px; width: 18px; text-align: center; }
   .reports-content { flex: 1; padding: 18px 24px; overflow-x: auto; min-width: 0; }
   .rt-pane { max-width: 1400px; }
+  /* Daily Production register — looks like the paper sheet it replaces:
+     ruled rows, bold-headed columns, with editable Hours + Remarks cells
+     inset so they don't visually compete with the auto-aggregated data. */
+  .dp-table { font-size: 14px; }
+  .dp-table th, .dp-table td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: middle; }
+  .dp-table th { background: var(--bg2); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text2); }
+  .dp-table td.dp-num, .dp-table td.dp-machine { font-weight: 600; }
+  .dp-table td.dp-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .dp-table input.dp-cell {
+    width: 100%; padding: 4px 6px; border: 1px dashed var(--border2); border-radius: 4px;
+    background: var(--bg); font-family: var(--font); font-size: 14px; color: var(--text);
+  }
+  .dp-table input.dp-cell:focus { outline: none; border-style: solid; border-color: var(--brand); background: var(--brand-soft); }
+  .dp-table input.dp-cell:disabled { background: transparent; border-color: transparent; cursor: default; }
+  .dp-table input.dp-remarks { min-width: 200px; }
   @media (max-width: 800px) {
     .reports-layout { flex-direction: column; }
     .reports-sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 10px; border-right: none; border-bottom: 1px solid var(--border); }
@@ -1456,6 +1471,11 @@
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
       </button>
+      <button class="report-card" onclick="openReportsGroup('daily-production-group'); openDailyProduction();">
+        <div class="report-card-icon">&#127981;</div>
+        <div class="report-card-title">Daily Production</div>
+        <div class="report-card-desc">Per-machine totals for a given day &mdash; sheets, jobs, colors, plates and operators &mdash; auto-aggregated from job activity. Mirrors the paper register.</div>
+      </button>
       <button class="report-card" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
         <div class="report-card-icon">&#128465;</div>
         <div class="report-card-title">Archive</div>
@@ -1535,6 +1555,35 @@
       </aside>
       <main class="reports-content">
         <div id="rt-jobs-report" class="rt-pane"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Daily Production group — per-machine totals for a given day. Starts
+       with the Printing section; other sections (Die, U.V, Pasting…)
+       come next once Printing is settled. -->
+  <div id="daily-production-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Daily Production</div>
+        <button class="rsb-item active" data-rt="dp-printing">
+          <span class="rsb-icon">&#128424;</span> Printing
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-dp-printing" class="rt-pane">
+          <div class="rt-head" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+            <h2 style="margin:0;font-size:20px;">Printing &mdash; Daily Production</h2>
+            <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--text2);">
+              Date
+              <input type="date" id="dp-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
+            </label>
+            <button class="btn btn-sm" onclick="loadDailyProductionPrinting()">Refresh</button>
+            <button class="btn btn-sm" onclick="window.print()">Print</button>
+          </div>
+          <div id="dp-printing-body"><div class="empty">Pick a date to see the day's production.</div></div>
+        </div>
       </main>
     </div>
   </div>
@@ -6478,6 +6527,106 @@ function openTrashPage() {
   // Admin can act, CEO can view (write buttons inside are .ceo-hide).
   if (!isAdmin() && !isCeo()) { notify('Admin or CEO only.'); return; }
   openReportsGroup('trash-group');
+}
+
+// ── Daily Production register ────────────────────────────────
+// Auto-aggregates job activity per machine for a given date. Hours +
+// Remarks cells are editable overlays stored separately so admins can
+// add context the auto-totals can't capture.
+function openDailyProduction() {
+  const dateEl = document.getElementById('dp-date');
+  if (dateEl && !dateEl.value) {
+    const d = new Date();
+    dateEl.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    dateEl.onchange = loadDailyProductionPrinting;
+  }
+  loadDailyProductionPrinting();
+}
+
+async function loadDailyProductionPrinting() {
+  const dateEl = document.getElementById('dp-date');
+  const body = document.getElementById('dp-printing-body');
+  if (!dateEl || !body) return;
+  const date = dateEl.value;
+  if (!date) { body.innerHTML = '<div class="empty">Pick a date.</div>'; return; }
+  body.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try {
+    const rows = await api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`);
+    renderDailyProductionPrinting(rows, date);
+  } catch (e) {
+    body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderDailyProductionPrinting(rows, date) {
+  const body = document.getElementById('dp-printing-body');
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty">No printing machines configured. Add machines with the "Printing" role under Users &rarr; Operators.</div>';
+    return;
+  }
+  // Totals row across all machines for the day — handy at-a-glance.
+  const totals = rows.reduce((t, r) => ({
+    sheets: t.sheets + (r.sheets || 0),
+    jobs:   t.jobs   + (r.jobs   || 0),
+    plates: t.plates + (r.plates || 0),
+  }), { sheets: 0, jobs: 0, plates: 0 });
+
+  const editable = canWriteJobs() || canWriteInventory();
+  const cellAttrs = editable ? '' : 'readonly disabled';
+  const r = rows.map(row => `
+    <tr>
+      <td class="dp-machine">${esc(row.machine)}</td>
+      <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-field="hours"
+               value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td class="dp-num">${row.jobs || '—'}</td>
+      <td>${row.colors ? esc(row.colors) : '—'}</td>
+      <td class="dp-num">${row.plates || '—'}</td>
+      <td>${row.operators ? esc(row.operators) : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-remarks" data-machine="${esc(row.machine)}" data-field="remarks"
+               value="${esc(row.remarks || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+    </tr>`).join('');
+
+  body.innerHTML = `
+    <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
+      ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
+      ${totals.sheets.toLocaleString()} sheets &middot; ${totals.plates} plates
+    </div>
+    <table class="dp-table" style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr>
+          <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+          <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th>
+        </tr>
+      </thead>
+      <tbody>${r}</tbody>
+    </table>`;
+}
+
+async function saveDailyProductionCell(input) {
+  const dateEl = document.getElementById('dp-date');
+  if (!dateEl || !dateEl.value) return;
+  const date = dateEl.value;
+  const machine = input.dataset.machine;
+  const field = input.dataset.field; // 'hours' | 'remarks'
+  if (!machine || !field) return;
+  // Pull the other field from its sibling input so we send both together.
+  const other = field === 'hours' ? 'remarks' : 'hours';
+  const otherEl = document.querySelector(`.dp-cell[data-machine="${CSS.escape(machine)}"][data-field="${other}"]`);
+  const body = { [field]: input.value.trim() };
+  if (otherEl) body[other] = otherEl.value.trim();
+  try {
+    await api('PUT', `/api/reports/daily-production/printing/${encodeURIComponent(date)}/${encodeURIComponent(machine)}`, body);
+  } catch (e) {
+    notify('Save failed: ' + e.message);
+  }
 }
 
 async function loadTrashAndRender(which) {

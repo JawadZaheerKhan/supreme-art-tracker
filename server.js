@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-22-machines';
+const SCHEMA_VERSION = 'v2026-06-23-daily-production';
 
 async function initDb() {
   try {
@@ -496,6 +496,20 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS station_notes_job_idx ON station_notes(job_id)`;
 
+    // Daily Production register notes — admin-editable Hours + Remarks cells
+    // that overlay the auto-aggregated machine totals. One row per
+    // (date, section, machine), composite primary key for clean upserts.
+    await sql`
+      CREATE TABLE IF NOT EXISTS daily_production_notes (
+        date     DATE NOT NULL,
+        section  TEXT NOT NULL,
+        machine  TEXT NOT NULL,
+        hours    TEXT,
+        remarks  TEXT,
+        PRIMARY KEY (date, section, machine)
+      )
+    `;
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -818,6 +832,40 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 function validPin(pin) { return /^\d{3}$/.test(String(pin || '')); }
 
 // List operators — admin only (includes pin for management).
+// Byline parsers — job log entries store the actor as a string of the
+// form "Name · Machine (Stage)". The Daily Production report scans
+// every job's log[] looking for entries on a given date at a given
+// stage, so we lift the operator name, machine, and stage label out.
+function parseByOperator(by) {
+  const m = /^([^·(]+?)\s*(?:·|\()/.exec(String(by || ''));
+  return m ? m[1].trim() : '';
+}
+function parseByMachine(by) {
+  const m = /·\s*([^()]+?)\s*\(/.exec(String(by || ''));
+  return m ? m[1].trim() : '';
+}
+function parseByStage(by) {
+  // Stage label is in the LAST set of parentheses, so a trailing
+  // "(skipped 2 stages)" doesn't confuse us. We want the stage that's
+  // immediately tied to who acted.
+  const all = String(by || '').match(/\(([^)]+)\)/g);
+  if (!all || !all.length) return '';
+  // Try each match from the right; "(skipped N stages)" is a known
+  // suffix — pick the first one that isn't that pattern.
+  for (let i = all.length - 1; i >= 0; i--) {
+    const inner = all[i].slice(1, -1).trim();
+    if (/^skipped\b/i.test(inner)) continue;
+    return inner;
+  }
+  return '';
+}
+// time string format the station-update writes: "dd/mm/yyyy hh:mm".
+// Returns 'YYYY-MM-DD' or '' if unparseable.
+function logTimeToISODate(s) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(s || ''));
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
+}
+
 app.get('/api/operators', requireAdmin, async (req, res) => {
   try {
     await dbReady;
@@ -981,6 +1029,146 @@ app.get('/api/operators/all-persons', requireStationUser, async (req, res) => {
     }
     out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
     res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Printing section.
+// Aggregates every Printing-stage log entry on `:date` from every job,
+// groups by machine (parsed from the byline), and returns one row per
+// machine with sheets, jobs count, colors breakdown, plates and the
+// operator list. Hours + Remarks come from daily_production_notes so
+// admin can scribble what the auto-totals can't capture.
+app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+
+    // List of Printing machines = active operator (machine) rows whose
+    // roles include 'print'. Keeps the row list driven by user data, not
+    // a hard-coded constant — admins can add/rename machines and the
+    // register adjusts automatically.
+    const machineRows = await sql`SELECT name FROM operators WHERE active AND roles @> ARRAY['print']::text[] ORDER BY name`;
+    const machines = machineRows.map(r => r.name).filter(Boolean);
+
+    // All jobs with any log entry. Filter in JS so we can parse the
+    // byline + time format ("dd/mm/yyyy hh:mm") without dragging that
+    // logic into SQL.
+    const jobs = await sql`SELECT id, name, client, particulars, log, coatings FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
+
+    // Accumulator: machineName → { sheets, jobIdsSet, colorsCounts, operatorsSet, plates }
+    const acc = new Map();
+    const ensure = (m) => {
+      if (!acc.has(m)) acc.set(m, {
+        sheets: 0, jobIds: new Set(), colorsCounts: new Map(),
+        operators: new Set(), plates: 0,
+      });
+      return acc.get(m);
+    };
+
+    for (const job of jobs) {
+      const log = Array.isArray(job.log) ? job.log : [];
+      // Find every log entry whose actor was at Printing on the date.
+      // A job's particulars are a snapshot, not history — so multiple
+      // Printing-day entries on the SAME job get counted once for that
+      // machine (we already have the sheets/colors there). If two
+      // operators on two machines worked the SAME job on the same day
+      // we attribute particulars to the LAST machine seen; rare in
+      // practice and the alternative (splitting numbers) needs data
+      // we don't have.
+      const machinesThisJob = new Set();
+      const opsByMachine = new Map();
+      for (const e of log) {
+        if (!e || !e.by) continue;
+        const day = logTimeToISODate(e.time);
+        if (day !== date) continue;
+        if (parseByStage(e.by) !== 'Printing') continue;
+        const mc = parseByMachine(e.by);
+        const opName = parseByOperator(e.by);
+        if (mc) machinesThisJob.add(mc);
+        if (mc && opName) {
+          if (!opsByMachine.has(mc)) opsByMachine.set(mc, new Set());
+          opsByMachine.get(mc).add(opName);
+        }
+      }
+      if (!machinesThisJob.size) continue;
+      const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const sheets = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+      const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+      const sheetsN = Number.isFinite(sheets) ? sheets : 0;
+      const colorsN = Number.isFinite(colors) ? colors : 0;
+      // Attribute the job to each machine it touched on that day. If
+      // someone really wants to split sheets across two machines we'd
+      // need per-machine particulars, which the app doesn't model.
+      for (const mc of machinesThisJob) {
+        const row = ensure(mc);
+        row.jobIds.add(job.id);
+        row.sheets += sheetsN;
+        row.plates += colorsN;
+        if (colorsN > 0) row.colorsCounts.set(colorsN, (row.colorsCounts.get(colorsN) || 0) + 1);
+        for (const op of (opsByMachine.get(mc) || [])) row.operators.add(op);
+      }
+    }
+
+    const notesRows = await sql`SELECT machine, hours, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+
+    // Build the final response in the configured machine order so the
+    // table layout matches the paper register even when a machine had
+    // no activity that day (it still shows up as an empty row).
+    const out = machines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const colorsArr = row ? [...row.colorsCounts.entries()].sort((a, b) => a[0] - b[0]) : [];
+      const colorsStr = colorsArr.map(([clr, cnt]) => `${cnt}-${clr}clr`).join(' / ');
+      const operators = row ? [...row.operators].sort() : [];
+      return {
+        machine: m,
+        sheets: row ? row.sheets : 0,
+        jobs: row ? row.jobIds.size : 0,
+        colors: colorsStr,
+        plates: row ? row.plates : 0,
+        operators: operators.join(', '),
+        hours: note.hours || '',
+        remarks: note.remarks || '',
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Save Hours / Remarks for a single (date, section, machine) cell.
+// Upsert so blanking a cell still leaves the row in place — admins can
+// also clear by sending empty strings.
+app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    const section = String(req.params.section || '').trim().toLowerCase();
+    const machine = String(req.params.machine || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
+    // Only admin / managers can edit register cells. Read is fine for
+    // everyone with an account.
+    const r = req.user && req.user.role;
+    const okRoles = ['admin', 'production_manager', 'store_manager', 'user', 'stock'];
+    if (!okRoles.includes(r)) return res.status(403).json({ error: 'Not allowed' });
+    const hours = (req.body.hours == null) ? null : String(req.body.hours).trim();
+    const remarks = (req.body.remarks == null) ? null : String(req.body.remarks).trim();
+    await sql`
+      INSERT INTO daily_production_notes (date, section, machine, hours, remarks)
+      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks})
+      ON CONFLICT (date, section, machine) DO UPDATE
+        SET hours   = EXCLUDED.hours,
+            remarks = EXCLUDED.remarks
+    `;
+    res.json({ ok: true });
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
