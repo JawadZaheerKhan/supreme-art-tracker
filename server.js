@@ -1226,6 +1226,41 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
   }
 });
 
+// Daily Production register — Pasting section. Same byline-parsing
+// pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
+// per job per machine on the chosen date.
+app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const { machines, acc } = await aggregateDailyProduction(sql, {
+      date, sectionRole: 'paste', stageLabel: 'Pasting', sheetsKey: 'pasted_cartons_qty',
+    });
+    const notesRows = await sql`SELECT machine, hours, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const out = machines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const operators = row ? [...row.operators].sort() : [];
+      return {
+        machine: m,
+        // The helper calls it `sheets` for shared code; in the Pasting
+        // register this number IS the units (pasted cartons qty).
+        units: row ? row.sheets : 0,
+        jobs: row ? row.jobIds.size : 0,
+        operators: operators.join(', '),
+        hours: note.hours || '',
+        remarks: note.remarks || '',
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Daily Production register — Die Cutting section. Same shape as the
 // Printing endpoint but sheets come from die_cutting_sheets, the stage
 // label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
