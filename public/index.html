@@ -1629,6 +1629,7 @@
               <input type="date" id="dp-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-printing-body"><div class="empty">Pick a date to see the day's production.</div></div>
@@ -1641,6 +1642,7 @@
               <input type="date" id="dp-die-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-die-body"><div class="empty">Pick a date to see the day's die-cutting production.</div></div>
@@ -1653,6 +1655,7 @@
               <input type="date" id="dp-coatings-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-coatings-body"><div class="empty">Pick a date to see the day's coatings production.</div></div>
@@ -1665,6 +1668,7 @@
               <input type="date" id="dp-pasting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-pasting-body"><div class="empty">Pick a date to see the day's pasting production.</div></div>
@@ -7088,6 +7092,82 @@ async function printDailyRegister() {
   };
   window.addEventListener('afterprint', cleanup);
   window.print();
+}
+
+// One-shot Daily Production .xlsx export. Mirrors printDailyRegister:
+// fetches every section in parallel for the chosen date, then builds a
+// single workbook with one sheet per section + a Breaking sheet for the
+// hand-filled roster. Same xlsx lib as the other Excel exports.
+async function exportDailyRegister() {
+  const date = (document.getElementById('dp-date')         || {}).value
+            || (document.getElementById('dp-die-date')     || {}).value
+            || (document.getElementById('dp-coatings-date')|| {}).value
+            || (document.getElementById('dp-pasting-date') || {}).value;
+  if (!date) { notify('Pick a date first'); return; }
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  showSaving(true);
+  let printing, die, coatings, pasting, allPersons;
+  try {
+    [printing, die, coatings, pasting, allPersons] = await Promise.all([
+      api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
+      api('GET', '/api/operators/all-persons').catch(() => []),
+    ]);
+  } catch (e) {
+    notify('Could not load all sections: ' + e.message);
+    showSaving(false);
+    return;
+  }
+  showSaving(false);
+
+  // Sheet builder — accepts a header array and a row-of-arrays list,
+  // sizes columns to the widest cell value, and returns an XLSX sheet.
+  const sheet = (header, rows) => {
+    const aoa = [header].concat(rows);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = header.map((h, i) => ({
+      wch: Math.max(String(h).length, ...rows.map(r => String(r[i] ?? '').length)) + 2,
+    }));
+    return ws;
+  };
+
+  const printingRows = printing.map(r => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.colors || '', r.plates || '', r.operators || '', r.remarks || '']);
+  const dieRows      = die.map(r      => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.make_ready || '', r.settings || '', r.operators || '', r.remarks || '']);
+  const coatingsRows = coatings.map(r => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.blankets || '', r.operators || '', r.remarks || r.finishes || '']);
+  const pastingRows  = pasting.map(r  => [r.machine, r.units  || '', r.hours || '', r.jobs || '', r.operators || '', r.remarks || '']);
+
+  const breakingNames = (Array.isArray(allPersons) ? allPersons : [])
+    .filter(p => Array.isArray(p.roles) && p.roles.includes('break'));
+  // Operator | Sheets | Hours | Jobs | Helper | Remarks (blanks for fill-in)
+  const breakingRows = (breakingNames.length ? breakingNames : Array.from({ length: 6 }, () => ({ name: '' })))
+    .map(p => [p.name || '', '', '', '', '', '']);
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheet(
+    ['Machine', 'Sheets', 'Hours', 'Jobs', 'Colors', 'Plates', 'Operator', 'Remarks'],
+    printingRows,
+  ), 'Printing');
+  XLSX.utils.book_append_sheet(wb, sheet(
+    ['Machine', 'Sheets', 'Hours', 'Jobs', 'Make Ready', 'Settings', 'Operator', 'Remarks'],
+    dieRows,
+  ), 'Die Cutting');
+  XLSX.utils.book_append_sheet(wb, sheet(
+    ['Machine', 'Sheets', 'Hours', 'Jobs', 'Blankets', 'Operator', 'Remarks'],
+    coatingsRows,
+  ), 'Coatings');
+  XLSX.utils.book_append_sheet(wb, sheet(
+    ['Operator', 'Sheets', 'Hours', 'Jobs', 'Helper', 'Remarks'],
+    breakingRows,
+  ), 'Breaking');
+  XLSX.utils.book_append_sheet(wb, sheet(
+    ['Machine', 'Units', 'Hours', 'Jobs', 'Operator', 'Remarks'],
+    pastingRows,
+  ), 'Pasting');
+
+  XLSX.writeFile(wb, `supreme-art-daily-production-${date}.xlsx`);
+  notify('Exported!');
 }
 
 async function loadTrashAndRender(which) {
