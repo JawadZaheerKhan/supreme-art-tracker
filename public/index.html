@@ -128,9 +128,10 @@
      page 1 holds Printing + Die, page 2 holds Coatings + Pasting. */
   #dp-print-root { display: none; }
   @media print {
-    /* Hide the entire app shell — only the print container is visible. */
-    body > * { display: none !important; }
-    #dp-print-root { display: block !important; }
+    /* Hide the entire app shell — but only when printDailyRegister has
+       opted in via body.printing-register. Plain Ctrl+P prints normally. */
+    body.printing-register > * { display: none !important; }
+    body.printing-register > #dp-print-root { display: block !important; }
     @page { size: A4 portrait; margin: 12mm; }
     .dp-print-page { font-family: var(--font); color: #000; }
     /* Force a hard page break between the two stacks. */
@@ -7046,10 +7047,18 @@ async function printDailyRegister() {
     document.body.appendChild(root);
   }
   root.innerHTML = html;
+  // body.printing-register flips on the @media print rules that hide
+  // every sibling of the print container. Without this class plain
+  // Ctrl+P prints the visible app normally — exactly what you want.
+  document.body.classList.add('printing-register');
   // After print dialog closes (or is cancelled) the onafterprint event
-  // fires — clear the print container so the visible app DOM isn't
-  // affected once the user is back.
-  const cleanup = () => { root.innerHTML = ''; window.removeEventListener('afterprint', cleanup); };
+  // fires — drop the class and clear the print container so the
+  // visible app DOM isn't affected once the user is back.
+  const cleanup = () => {
+    document.body.classList.remove('printing-register');
+    root.innerHTML = '';
+    window.removeEventListener('afterprint', cleanup);
+  };
   window.addEventListener('afterprint', cleanup);
   window.print();
 }
