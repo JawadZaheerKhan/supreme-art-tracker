@@ -1573,6 +1573,9 @@
         <button class="rsb-item" data-rt="dp-die" onclick="setReportsTab('dp-die')">
           <span class="rsb-icon">&#9986;</span> Die Cutting
         </button>
+        <button class="rsb-item" data-rt="dp-coatings" onclick="setReportsTab('dp-coatings')">
+          <span class="rsb-icon">&#9728;</span> Coatings
+        </button>
       </aside>
       <main class="reports-content">
         <div id="rt-dp-printing" class="rt-pane">
@@ -1598,6 +1601,18 @@
             <button class="btn btn-sm" onclick="window.print()">Print</button>
           </div>
           <div id="dp-die-body"><div class="empty">Pick a date to see the day's die-cutting production.</div></div>
+        </div>
+        <div id="rt-dp-coatings" class="rt-pane" style="display:none;">
+          <div class="rt-head" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+            <h2 style="margin:0;font-size:20px;">Coatings &mdash; Daily Production</h2>
+            <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--text2);">
+              Date
+              <input type="date" id="dp-coatings-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
+            </label>
+            <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="window.print()">Print</button>
+          </div>
+          <div id="dp-coatings-body"><div class="empty">Pick a date to see the day's coatings production.</div></div>
         </div>
       </main>
     </div>
@@ -6550,25 +6565,34 @@ function openTrashPage() {
 // add context the auto-totals can't capture.
 function openDailyProduction() {
   const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
-  // Two date pickers — one per section pane — keep their values in sync
-  // so flipping between Printing and Die for the same day doesn't make
-  // the user re-pick. Either picker drives both loaders.
-  const printDate = document.getElementById('dp-date');
-  const dieDate   = document.getElementById('dp-die-date');
-  if (printDate && !printDate.value) printDate.value = today;
-  if (dieDate   && !dieDate.value)   dieDate.value   = printDate ? printDate.value : today;
-  if (printDate) printDate.onchange = () => { if (dieDate) dieDate.value = printDate.value; loadDailyProductionForCurrentTab(); };
-  if (dieDate)   dieDate.onchange   = () => { if (printDate) printDate.value = dieDate.value; loadDailyProductionForCurrentTab(); };
+  // One date picker per section pane, all kept in sync so flipping
+  // between Printing / Die / Coatings for the same day never makes the
+  // user re-pick. Any picker drives the loader for whichever tab is
+  // currently visible.
+  const ids = ['dp-date', 'dp-die-date', 'dp-coatings-date'];
+  const els = ids.map(id => document.getElementById(id)).filter(Boolean);
+  const seed = (els.find(e => e.value) || {}).value || today;
+  els.forEach(e => { if (!e.value) e.value = seed; });
+  els.forEach(e => {
+    e.onchange = () => {
+      els.forEach(o => { if (o !== e) o.value = e.value; });
+      loadDailyProductionForCurrentTab();
+    };
+  });
   loadDailyProductionForCurrentTab();
 }
 
 function dailyProductionActiveTab() {
-  const printVisible = (document.getElementById('rt-dp-printing') || {}).style?.display !== 'none';
-  return printVisible ? 'printing' : 'die';
+  const visible = (id) => (document.getElementById(id) || {}).style?.display !== 'none';
+  if (visible('rt-dp-coatings')) return 'coatings';
+  if (visible('rt-dp-die'))      return 'die';
+  return 'printing';
 }
 function loadDailyProductionForCurrentTab() {
-  if (dailyProductionActiveTab() === 'printing') loadDailyProductionPrinting();
-  else loadDailyProductionDie();
+  const t = dailyProductionActiveTab();
+  if (t === 'printing') loadDailyProductionPrinting();
+  else if (t === 'die') loadDailyProductionDie();
+  else                  loadDailyProductionCoatings();
 }
 
 async function loadDailyProductionPrinting() {
@@ -6599,6 +6623,75 @@ async function loadDailyProductionDie() {
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
+}
+
+async function loadDailyProductionCoatings() {
+  const dateEl = document.getElementById('dp-coatings-date');
+  const body = document.getElementById('dp-coatings-body');
+  if (!dateEl || !body) return;
+  const date = dateEl.value;
+  if (!date) { body.innerHTML = '<div class="empty">Pick a date.</div>'; return; }
+  body.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try {
+    const rows = await api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`);
+    renderDailyProductionCoatings(rows, date);
+  } catch (e) {
+    body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderDailyProductionCoatings(rows, date) {
+  const body = document.getElementById('dp-coatings-body');
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty">No coating machines configured. Add machines with the "Coatings" or "Embellishments" role under Users &rarr; Operators.</div>';
+    return;
+  }
+  const totals = rows.reduce((t, r) => ({
+    sheets: t.sheets + (r.sheets || 0),
+    jobs:   t.jobs   + (r.jobs   || 0),
+    waste:  t.waste  + (r.waste  || 0),
+  }), { sheets: 0, jobs: 0, waste: 0 });
+
+  const editable = canWriteJobs() || canWriteInventory();
+  const cellAttrs = editable ? '' : 'readonly disabled';
+  const r = rows.map(row => `
+    <tr>
+      <td class="dp-machine">${esc(row.machine)}</td>
+      <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="hours"
+               value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td class="dp-num">${row.jobs || '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="blankets"
+               value="${esc(row.blankets || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td>${row.operators ? esc(row.operators) : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-remarks" data-machine="${esc(row.machine)}" data-section="coatings" data-field="remarks"
+               value="${esc(row.remarks || '')}" placeholder="${esc(row.finishes || '—')}"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+    </tr>`).join('');
+
+  body.innerHTML = `
+    <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
+      ${esc(date)} &middot; ${totals.jobs} job-pass${totals.jobs === 1 ? '' : 'es'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
+      ${totals.sheets.toLocaleString()} sheets &middot; ${totals.waste.toLocaleString()} waste
+    </div>
+    <table class="dp-table" style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr>
+          <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+          <th>Blankets</th><th>Operator</th><th>Remarks</th>
+        </tr>
+      </thead>
+      <tbody>${r}</tbody>
+    </table>`;
 }
 
 function renderDailyProductionDie(rows, date) {
@@ -6976,7 +7069,7 @@ function exitReportsGroup() {
 // to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
-  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die'];
+  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die', 'dp-coatings'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -6990,6 +7083,7 @@ function setReportsTab(name) {
   if (name === 'trash-imports')   loadTrashAndRender('imports');
   if (name === 'dp-printing')     loadDailyProductionPrinting();
   if (name === 'dp-die')          loadDailyProductionDie();
+  if (name === 'dp-coatings')     loadDailyProductionCoatings();
 }
 
 // ── Stock In / Stock Out panes ───────────────────────────────

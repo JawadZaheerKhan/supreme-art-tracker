@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-23-daily-production-die';
+const SCHEMA_VERSION = 'v2026-06-23-daily-production-coatings';
 
 async function initDb() {
   try {
@@ -513,6 +513,7 @@ async function initDb() {
     // editable fields the same way later.
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS make_ready TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS settings   TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS blankets   TEXT`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -1129,6 +1130,102 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
   }
 });
 
+// Daily Production register — Coatings section (matches the paper
+// register's "U.V — Spot U.V" page). Unlike Printing/Die where the
+// stage moves on once finished, every individual coating is logged to
+// the job's coatings_done JSONB array with { kind, operator_name,
+// machine, waste_sheets, done_at }. We aggregate from there directly
+// — more accurate than parsing bylines, and we get the finish kinds
+// and waste totals for free.
+function isoTsToDate(ts) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
+}
+app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+
+    // Coating machines = active operator rows whose roles include
+    // either 'coatings' (wet/film) or 'embellish' (foil/emboss).
+    const machineRows = await sql`
+      SELECT name FROM operators
+      WHERE active
+        AND (roles @> ARRAY['coatings']::text[] OR roles @> ARRAY['embellish']::text[])
+      ORDER BY name
+    `;
+    const machines = machineRows.map(r => r.name).filter(Boolean);
+
+    const jobs = await sql`SELECT id, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
+
+    const acc = new Map();
+    const ensure = (m) => {
+      if (!acc.has(m)) acc.set(m, {
+        sheets: 0, jobIds: new Set(), operators: new Set(),
+        finishCounts: new Map(), waste: 0,
+      });
+      return acc.get(m);
+    };
+
+    for (const job of jobs) {
+      const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
+      if (!done.length) continue;
+      const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const sheetsN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      for (const entry of done) {
+        if (!entry) continue;
+        if (isoTsToDate(entry.done_at) !== date) continue;
+        const mc = String(entry.machine || '').trim();
+        if (!mc) continue;
+        const row = ensure(mc);
+        row.jobIds.add(job.id);
+        // Each coating pass counts as one sheet-pass — if a job got UV
+        // and Spot UV on the same machine the same day, that's two
+        // passes worth of work for the machine.
+        row.sheets += sheetsN;
+        const opName = String(entry.operator_name || '').trim();
+        if (opName) row.operators.add(opName);
+        const kind = String(entry.kind || '').trim();
+        if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
+        const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(w)) row.waste += w;
+      }
+    }
+
+    const notesRows = await sql`SELECT machine, hours, blankets, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+
+    const out = machines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const operators = row ? [...row.operators].sort() : [];
+      // Build a "UV ×3, Lamination ×2" summary so the admin sees what
+      // kinds of coatings ran on this machine that day without opening
+      // each job. Lives in remarks/details, not a separate column.
+      const finishes = row
+        ? [...row.finishCounts.entries()].sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(', ')
+        : '';
+      return {
+        machine: m,
+        sheets: row ? row.sheets : 0,
+        jobs: row ? row.jobIds.size : 0,
+        finishes,
+        waste: row ? row.waste : 0,
+        operators: operators.join(', '),
+        hours: note.hours || '',
+        blankets: note.blankets || '',
+        remarks: note.remarks || '',
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Daily Production register — Die Cutting section. Same shape as the
 // Printing endpoint but sheets come from die_cutting_sheets, the stage
 // label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
@@ -1186,14 +1283,16 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     const remarks    = (req.body.remarks    == null) ? null : String(req.body.remarks).trim();
     const makeReady  = (req.body.make_ready == null) ? null : String(req.body.make_ready).trim();
     const settings   = (req.body.settings   == null) ? null : String(req.body.settings).trim();
+    const blankets   = (req.body.blankets   == null) ? null : String(req.body.blankets).trim();
     await sql`
-      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings)
-      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings})
+      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets)
+      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets})
       ON CONFLICT (date, section, machine) DO UPDATE
         SET hours      = EXCLUDED.hours,
             remarks    = EXCLUDED.remarks,
             make_ready = EXCLUDED.make_ready,
-            settings   = EXCLUDED.settings
+            settings   = EXCLUDED.settings,
+            blankets   = EXCLUDED.blankets
     `;
     res.json({ ok: true });
   } catch (err) {
