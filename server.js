@@ -1013,23 +1013,28 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
 // the station, used when an operator works on a machine that's not their
 // usual one. Returns a flat list of { name, name_ur, machine } so the UI
 // can present the full roster without leaking PINs.
-app.get('/api/operators/all-persons', requireStationUser, async (req, res) => {
+app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT name, persons FROM operators WHERE active AND persons IS NOT NULL`;
+    const rows = await sql`SELECT name, persons, roles FROM operators WHERE active AND persons IS NOT NULL`;
     const out = [];
     const seen = new Set();
     for (const r of rows) {
       const machineName = r.name || '';
       const list = Array.isArray(r.persons) ? r.persons : [];
+      const roles = Array.isArray(r.roles) ? r.roles : [];
       for (const p of list) {
         const n = p && p.name ? String(p.name).trim() : '';
         if (!n) continue;
         const key = `${n.toLowerCase()}@${machineName.toLowerCase()}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName });
+        // `roles` lets callers filter (e.g. the Breaking section of the
+        // Daily Production print pulls everyone whose machine has the
+        // 'break' role). Additive — existing all-persons consumers are
+        // free to ignore it.
+        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName, roles });
       }
     }
     out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
