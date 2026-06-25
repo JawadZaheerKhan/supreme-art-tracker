@@ -742,7 +742,26 @@
   /* Number-entry grid: 1 field stretches full width, 2+ share a row so
      the station view doesn't waste vertical space. auto-fit + minmax
      wraps gracefully on smaller tablets. */
-  .station-field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .station-field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; position: relative; }
+  /* Multi-pass groupings — each pass holds one day's qty + waste pair
+     and gets a subtle label so the operator sees which day's numbers
+     they're looking at. The red + button anchors to the last pass's
+     corner; tapping it inserts another empty pass below. */
+  .station-pass { position: relative; margin-bottom: 14px; padding-top: 4px; }
+  .station-pass-label {
+    font-size: 13px; font-weight: 700; color: var(--text2);
+    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;
+  }
+  .station-pass-add {
+    position: absolute; top: -8px; right: -8px;
+    width: 38px; height: 38px; border-radius: 50%;
+    background: var(--red-text); color: #fff; border: 2px solid #fff;
+    font-size: 22px; font-weight: 900; line-height: 1; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(121, 31, 31, 0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2; transition: transform 0.12s ease;
+  }
+  .station-pass-add:hover, .station-pass-add:focus { transform: scale(1.08); outline: none; }
   .station-field label { font-size: 16px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
   .station-field input { font-size: 34px; font-weight: 700; padding: 20px 18px; border: 2px solid var(--border2); border-radius: 12px; background: var(--bg); color: var(--text); font-family: var(--font); text-align: center; }
   /* Three station actions sit in a single horizontal row instead of a
@@ -12152,6 +12171,12 @@ let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], 
 let stationPerson   = null;   // picked person from stationOperator.persons — { name, name_ur }
 let stationPersonPickView = 'own'; // 'own' = machine's own roster, 'custom' = roster from all machines
 let stationCustomPersons = null;   // lazy-loaded list for the Custom picker — [{ name, name_ur, machine }]
+// Multi-pass state — drives the per-day "+" button on numeric stage
+// fields. stationPassCount is how many input rows to render for the
+// current job; stationJobPassKey tracks which job that count belongs
+// to so opening a different job resets to its own existing entries.
+let stationPassCount = 1;
+let stationJobPassKey = null;
 let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
 let stationJobId    = null;
@@ -12185,6 +12210,8 @@ function stationLogout(silent) {
   stationPinBuf = '';
   stationView = 'pin';
   stationJobId = null;
+  stationPassCount = 1;
+  stationJobPassKey = null;
   stationNotes = [];
   stationClosePad();
   stationCloseQwerty();
@@ -12511,17 +12538,70 @@ function stationUpdateHtml() {
   // with their physical keyboard. Detection is one-shot per render so
   // operator could plug in a keyboard mid-shift if needed.
   const isTouch = stationIsTouchDevice();
-  const fieldHtml = fields.length ? `<div class="station-field-grid">${fields.map(f => {
-    const cur = (j.particulars && j.particulars[f.key] && j.particulars[f.key].quantity) || '';
-    const tabletAttrs = `inputmode="none" readonly onclick="stationOpenPad('${f.key}', '${esc(f.label).replace(/'/g, "\\'")}')"`;
-    const laptopAttrs = `inputmode="numeric" pattern="[0-9]*"`;
+  // Multi-pass field grid. Each "pass" is one day's slot (qty + waste
+  // together if the stage has both). Initial pass count = max length
+  // of any field's entries[], minimum 1. Operator clicks the red + at
+  // the corner to add another pass for a different day.
+  const fieldHasEntries = (key) => Array.isArray((j.particulars && j.particulars[key] && j.particulars[key].entries));
+  const existingPassCount = Math.max(0, ...fields.map(f => {
+    const ent = j.particulars && j.particulars[f.key] && j.particulars[f.key].entries;
+    return Array.isArray(ent) ? ent.length : 0;
+  }));
+  if (stationJobPassKey !== j.id) {
+    stationPassCount = Math.max(1, existingPassCount);
+    stationJobPassKey = j.id;
+  } else if (stationPassCount < Math.max(1, existingPassCount)) {
+    // After a save the entries[] may grow on the server; sync up so the
+    // next render shows every persisted pass.
+    stationPassCount = Math.max(1, existingPassCount);
+  }
+  const passValue = (f, passIdx) => {
+    const part = j.particulars && j.particulars[f.key];
+    if (!part) return '';
+    if (Array.isArray(part.entries) && part.entries[passIdx]) return part.entries[passIdx].qty || '';
+    if (passIdx === 0 && !Array.isArray(part.entries)) return part.quantity || '';
+    return '';
+  };
+  const passMeta = (passIdx) => {
+    // First field with a meta (date / operator) labels the whole pass.
+    for (const f of fields) {
+      const part = j.particulars && j.particulars[f.key];
+      if (Array.isArray(part && part.entries) && part.entries[passIdx]) {
+        const e = part.entries[passIdx];
+        if (e.date || e.operator) return e;
+      }
+    }
+    return null;
+  };
+  const fieldHtml = fields.length ? Array.from({ length: stationPassCount }, (_, passIdx) => {
+    const m = passMeta(passIdx);
+    const isNewPass = !m && passIdx >= existingPassCount;
+    const label = m && (m.date || m.operator)
+      ? `${m.date ? esc(m.date) : ''}${m.date && m.operator ? ' &middot; ' : ''}${m.operator ? esc(m.operator) : ''}`
+      : (isNewPass ? 'New entry &mdash; today' : '');
+    const isLast = passIdx === stationPassCount - 1;
+    const inputs = fields.map(f => {
+      const cur = passValue(f, passIdx);
+      const inputId = `sf-${f.key}-p${passIdx}`;
+      const tabletAttrs = `inputmode="none" readonly onclick="stationOpenPad('${inputId}', '${esc(f.label).replace(/'/g, "\\'")}')"`;
+      const laptopAttrs = `inputmode="numeric" pattern="[0-9]*"`;
+      return `
+        <div class="station-field">
+          <label>${esc(f.label)}</label>
+          <input type="text" ${isTouch ? tabletAttrs : laptopAttrs} class="numpad-target" id="${inputId}"
+                 data-key="${esc(f.key)}" data-pass="${passIdx}"
+                 value="${esc(cur)}" placeholder="0">
+        </div>`;
+    }).join('');
     return `
-      <div class="station-field">
-        <label>${esc(f.label)}</label>
-        <input type="text" ${isTouch ? tabletAttrs : laptopAttrs} class="numpad-target" id="sf-${f.key}"
-               value="${esc(cur)}" placeholder="0">
+      <div class="station-pass">
+        ${label ? `<div class="station-pass-label">${label}</div>` : ''}
+        <div class="station-field-grid">
+          ${inputs}
+          ${isLast ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
+        </div>
       </div>`;
-  }).join('')}</div>` : '';
+  }).join('') : '';
 
   // Coatings UI: at stage 2 the operator picks which planned coating for
   // this job they just did, with their own machine + waste count. Only
@@ -12654,6 +12734,7 @@ function stationUpdateHtml() {
 }
 function stationBackToQueue() {
   stationView = 'queue'; stationJobId = null;
+  stationPassCount = 1; stationJobPassKey = null;
   stationClosePad(); stationCloseQwerty(); stationRecAbort();
   // Refresh badges in the background — a note may have landed meanwhile.
   stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
@@ -12664,16 +12745,26 @@ function stationBackToQueue() {
 // Tapping a station field slides this pad up from the bottom of the
 // screen. Digits type into the field directly; Done dismisses. Tapping
 // a different field while the pad is open just retargets it.
-let stationPadKey = null;   // the f.key of the field currently being edited
+let stationPadKey = null;   // the full DOM id of the field currently being edited
 
-function stationOpenPad(key, label) {
+// Add another empty pass row at the bottom of the field grid. Triggered
+// by the red + button on the last pass. Pass count belongs to the
+// active job, so opening a different job naturally resets it.
+function stationAddPass() {
+  stationPassCount = (stationPassCount || 1) + 1;
+  stationRender();
+}
+
+function stationOpenPad(inputId, label) {
   // Dismiss the QWERTY if it was up — they share the bottom of the screen.
   stationCloseQwerty();
-  stationPadKey = key;
+  // Back-compat: callers used to pass just the field key. If the value
+  // doesn't start with 'sf-' assume it's a bare key and prefix it.
+  stationPadKey = String(inputId).startsWith('sf-') ? inputId : ('sf-' + inputId);
   stationResetIdle();
   // Highlight the active field, clear highlight from the others.
   document.querySelectorAll('.numpad-target').forEach(i => i.classList.remove('numpad-active'));
-  const input = document.getElementById('sf-' + key);
+  const input = document.getElementById(stationPadKey);
   if (input) input.classList.add('numpad-active');
   let pad = document.getElementById('station-numpad');
   if (!pad) {
@@ -12698,7 +12789,7 @@ function stationOpenPad(key, label) {
   if (input) setTimeout(() => input.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60);
 }
 
-function stationPadInput() { return stationPadKey ? document.getElementById('sf-' + stationPadKey) : null; }
+function stationPadInput() { return stationPadKey ? document.getElementById(stationPadKey) : null; }
 function stationPadPress(d) {
   const input = stationPadInput();
   if (!input) return;
@@ -12988,9 +13079,31 @@ async function stationSubmit(advance, skipTo) {
   const stIdx = stationOperator.stage_index;
   const fields = STATION_STAGE_FIELDS[stIdx] || [];
   const patch = {};
+  // Decide whether to use the legacy single-string payload or the new
+  // array-of-passes payload. If the job already has entries[] for any
+  // field OR the operator added an extra pass via the + button, send
+  // arrays so the server preserves per-day attribution.
+  const anyExisting = fields.some(f =>
+    Array.isArray(j.particulars && j.particulars[f.key] && j.particulars[f.key].entries)
+    && j.particulars[f.key].entries.length > 0);
+  const useMulti = anyExisting || (stationPassCount && stationPassCount > 1);
   fields.forEach(f => {
-    const el = document.getElementById('sf-' + f.key);
-    if (el && el.value !== '') patch[f.key] = el.value.trim();
+    if (useMulti) {
+      const passInputs = Array
+        .from(document.querySelectorAll(`input[data-key="${CSS.escape(f.key)}"]`))
+        .sort((a, b) => Number(a.dataset.pass) - Number(b.dataset.pass));
+      if (!passInputs.length) return;
+      const values = passInputs.map(el => (el.value || '').trim());
+      // Drop trailing blank passes so the operator can add a + slot,
+      // not use it, and still save without creating an empty entry.
+      while (values.length && values[values.length - 1] === '') values.pop();
+      // Skip the whole field if nothing was ever filled in.
+      if (!values.length || values.every(v => v === '')) return;
+      patch[f.key] = values;
+    } else {
+      const el = document.getElementById(`sf-${f.key}-p0`) || document.getElementById('sf-' + f.key);
+      if (el && el.value !== '') patch[f.key] = el.value.trim();
+    }
   });
   // At Coatings (2) the operator picks which planned coating they just
   // did. Only validated client-side when there are picks for THIS operator

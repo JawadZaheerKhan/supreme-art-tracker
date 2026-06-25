@@ -1079,9 +1079,23 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     }
     if (!machinesThisJob.size) continue;
     const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-    const sheets = parseInt(String((part[sheetsKey] && part[sheetsKey].quantity) || '').replace(/[^0-9-]/g, ''), 10);
+    // Multi-pass entries[] is the source of truth when present — sum
+    // only entries whose date matches the report date so a job split
+    // across days gets attributed correctly. Falls back to the legacy
+    // single-quantity number for jobs that never used multi-pass.
+    let sheetsN = 0;
+    const partKey = part[sheetsKey];
+    if (partKey && Array.isArray(partKey.entries) && partKey.entries.length) {
+      for (const e of partKey.entries) {
+        if (!e || e.date !== date) continue;
+        const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(n)) sheetsN += n;
+      }
+    } else {
+      const n = parseInt(String((partKey && partKey.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+      if (Number.isFinite(n)) sheetsN = n;
+    }
     const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
-    const sheetsN = Number.isFinite(sheets) ? sheets : 0;
     const colorsN = Number.isFinite(colors) ? colors : 0;
     for (const mc of machinesThisJob) {
       const row = ensure(mc);
@@ -2688,12 +2702,58 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       return res.status(400).json({ error: "This job isn't at your station right now." });
     }
 
-    // 4) Merge the stage's number fields into particulars. Write the value into
-    // the row's `quantity` subfield and stamp `name` with the operator.
+    // 4) Merge the stage's number fields into particulars. Two payload
+    // shapes are supported per key:
+    //   - string  → legacy single-value patch (overwrites quantity).
+    //   - string[] → multi-pass mode. Each element is one pass; we merge
+    //     index-by-index with any existing entries[] so corrections to
+    //     historical values keep their original date/operator/machine,
+    //     while brand-new pass slots get today's date stamped on them.
+    //     quantity gets recomposed as a pipe-joined display string
+    //     ("90 | 20") so the job card and downstream consumers continue
+    //     to work without knowing about entries[].
     const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+    const todayISO = new Date().toISOString().slice(0, 10);
     for (const [key, value] of Object.entries(particularsPatch)) {
       const prev = (particulars[key] && typeof particulars[key] === 'object') ? particulars[key] : {};
-      particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+      if (Array.isArray(value)) {
+        // Seed from existing entries[], or back-fill a single legacy
+        // entry from prev.quantity so a job's first multi-pass save
+        // doesn't lose its original day-1 number.
+        const seed = Array.isArray(prev.entries) && prev.entries.length
+          ? prev.entries
+          : (prev.quantity != null && String(prev.quantity).trim() !== ''
+              ? [{ qty: String(prev.quantity).trim(), date: null,
+                   operator: prev.name || null, machine: null }]
+              : []);
+        const merged = value.map((v, i) => {
+          const qty = String(v ?? '').trim();
+          const old = seed[i];
+          if (old) {
+            // Preserve whatever date the existing entry had — including
+            // null for entries that were back-filled from the legacy
+            // single-quantity field. Stamping "today" on a null date
+            // would silently misattribute the original day-1 number to
+            // the day the operator first added a second pass.
+            return {
+              qty,
+              date:     old.date     || null,
+              operator: old.operator || operator.name,
+              machine:  old.machine  || operator.machine || null,
+            };
+          }
+          return { qty, date: todayISO, operator: operator.name, machine: operator.machine || null };
+        });
+        const opsList = [...new Set(merged.map(e => e.operator).filter(Boolean))];
+        particulars[key] = {
+          ...prev,
+          entries: merged,
+          quantity: merged.map(e => e.qty).filter(q => q !== '').join(' | '),
+          name: opsList.join(' | '),
+        };
+      } else {
+        particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+      }
     }
 
     // Byline used by every log entry below. Including the operator's
@@ -2724,7 +2784,10 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       if (allowedFinishes.size && !allowedFinishes.has(finishKind)) return res.status(403).json({ error: `Your role isn't allowed to do ${finishKind}.` });
       const planned = Array.isArray(job.coatings) ? job.coatings : [];
       if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That coating was not planned for this job.' });
-      if (coatings_done.some(d => d && d.kind === finishKind)) return res.status(409).json({ error: 'That coating has already been recorded for this job.' });
+      // Multi-day support: same finish kind can be recorded more than
+      // once for a job (e.g. half the UV done today, the other half
+      // tomorrow). The Daily Production aggregator filters by done_at
+      // so each pass lands on the correct day.
       coatings_done.push({
         kind: finishKind,
         operator_id: operator.id,
