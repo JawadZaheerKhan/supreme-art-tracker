@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-23-daily-production-coatings';
+const SCHEMA_VERSION = 'v2026-06-23-daily-production-breaking';
 
 async function initDb() {
   try {
@@ -514,6 +514,13 @@ async function initDb() {
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS make_ready TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS settings   TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS blankets   TEXT`;
+    // Breaking section is manually entered (no workflow stage to derive
+    // from). Each (date, 'breaking', operator_name) row stores one
+    // operator's day. Reuses the same table — only the new columns are
+    // section-specific.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS sheets TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS jobs   TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS helper TEXT`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -1245,6 +1252,53 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
   }
 });
 
+// Daily Production register — Breaking section. Unlike the others
+// there's no workflow stage to aggregate from, so all numeric cells
+// are admin-entered. We pull the operator roster from anyone whose
+// machine has the 'break' role and serve their saved cells.
+app.get('/api/reports/daily-production/breaking/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+
+    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY['break']::text[]`;
+    // De-dupe by lowercase name so the same person appearing on two
+    // machines only shows up once in the register.
+    const seen = new Map();
+    for (const r of machRows) {
+      const list = Array.isArray(r.persons) ? r.persons : [];
+      for (const p of list) {
+        const n = String((p && p.name) || '').trim();
+        if (!n) continue;
+        const key = n.toLowerCase();
+        if (!seen.has(key)) seen.set(key, { name: n, name_ur: String((p && p.name_ur) || '').trim() });
+      }
+    }
+    const operators = [...seen.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+    const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'breaking'`;
+    const noteByOp = new Map(notesRows.map(r => [r.machine, r]));
+
+    const out = operators.map(op => {
+      const n = noteByOp.get(op.name) || {};
+      return {
+        operator: op.name,
+        operator_ur: op.name_ur || '',
+        sheets:  n.sheets  || '',
+        hours:   n.hours   || '',
+        jobs:    n.jobs    || '',
+        helper:  n.helper  || '',
+        remarks: n.remarks || '',
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Daily Production register — Pasting section. Same byline-parsing
 // pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
 // per job per machine on the chosen date.
@@ -1338,15 +1392,21 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     const makeReady  = (req.body.make_ready == null) ? null : String(req.body.make_ready).trim();
     const settings   = (req.body.settings   == null) ? null : String(req.body.settings).trim();
     const blankets   = (req.body.blankets   == null) ? null : String(req.body.blankets).trim();
+    const sheets     = (req.body.sheets     == null) ? null : String(req.body.sheets).trim();
+    const jobs       = (req.body.jobs       == null) ? null : String(req.body.jobs).trim();
+    const helper     = (req.body.helper     == null) ? null : String(req.body.helper).trim();
     await sql`
-      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets)
-      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets})
+      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets, sheets, jobs, helper)
+      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets}, ${sheets}, ${jobs}, ${helper})
       ON CONFLICT (date, section, machine) DO UPDATE
         SET hours      = EXCLUDED.hours,
             remarks    = EXCLUDED.remarks,
             make_ready = EXCLUDED.make_ready,
             settings   = EXCLUDED.settings,
-            blankets   = EXCLUDED.blankets
+            blankets   = EXCLUDED.blankets,
+            sheets     = EXCLUDED.sheets,
+            jobs       = EXCLUDED.jobs,
+            helper     = EXCLUDED.helper
     `;
     res.json({ ok: true });
   } catch (err) {

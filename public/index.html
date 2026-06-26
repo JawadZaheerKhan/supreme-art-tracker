@@ -1653,6 +1653,9 @@
         <button class="rsb-item" data-rt="dp-coatings" onclick="setReportsTab('dp-coatings')">
           <span class="rsb-icon">&#9728;</span> Coatings
         </button>
+        <button class="rsb-item" data-rt="dp-breaking" onclick="setReportsTab('dp-breaking')">
+          <span class="rsb-icon">&#9876;</span> Breaking
+        </button>
         <button class="rsb-item" data-rt="dp-pasting" onclick="setReportsTab('dp-pasting')">
           <span class="rsb-icon">&#128193;</span> Pasting
         </button>
@@ -1696,6 +1699,19 @@
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-coatings-body"><div class="empty">Pick a date to see the day's coatings production.</div></div>
+        </div>
+        <div id="rt-dp-breaking" class="rt-pane" style="display:none;">
+          <div class="rt-head" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+            <h2 style="margin:0;font-size:20px;">Breaking &mdash; Daily Production</h2>
+            <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--text2);">
+              Date
+              <input type="date" id="dp-breaking-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
+            </label>
+            <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
+            <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
+          </div>
+          <div id="dp-breaking-body"><div class="empty">Pick a date to see the day's breaking entries.</div></div>
         </div>
         <div id="rt-dp-pasting" class="rt-pane" style="display:none;">
           <div class="rt-head" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
@@ -6665,7 +6681,7 @@ function openDailyProduction() {
   // between Printing / Die / Coatings for the same day never makes the
   // user re-pick. Any picker drives the loader for whichever tab is
   // currently visible.
-  const ids = ['dp-date', 'dp-die-date', 'dp-coatings-date', 'dp-pasting-date'];
+  const ids = ['dp-date', 'dp-die-date', 'dp-coatings-date', 'dp-breaking-date', 'dp-pasting-date'];
   const els = ids.map(id => document.getElementById(id)).filter(Boolean);
   const seed = (els.find(e => e.value) || {}).value || today;
   els.forEach(e => { if (!e.value) e.value = seed; });
@@ -6681,6 +6697,7 @@ function openDailyProduction() {
 function dailyProductionActiveTab() {
   const visible = (id) => (document.getElementById(id) || {}).style?.display !== 'none';
   if (visible('rt-dp-pasting'))  return 'pasting';
+  if (visible('rt-dp-breaking')) return 'breaking';
   if (visible('rt-dp-coatings')) return 'coatings';
   if (visible('rt-dp-die'))      return 'die';
   return 'printing';
@@ -6690,6 +6707,7 @@ function loadDailyProductionForCurrentTab() {
   if (t === 'printing')      loadDailyProductionPrinting();
   else if (t === 'die')      loadDailyProductionDie();
   else if (t === 'coatings') loadDailyProductionCoatings();
+  else if (t === 'breaking') loadDailyProductionBreaking();
   else                       loadDailyProductionPasting();
 }
 
@@ -6736,6 +6754,75 @@ async function loadDailyProductionCoatings() {
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
+}
+
+async function loadDailyProductionBreaking() {
+  const dateEl = document.getElementById('dp-breaking-date');
+  const body = document.getElementById('dp-breaking-body');
+  if (!dateEl || !body) return;
+  const date = dateEl.value;
+  if (!date) { body.innerHTML = '<div class="empty">Pick a date.</div>'; return; }
+  body.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try {
+    const rows = await api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`);
+    renderDailyProductionBreaking(rows, date);
+  } catch (e) {
+    body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderDailyProductionBreaking(rows, date) {
+  const body = document.getElementById('dp-breaking-body');
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty">No breaking operators configured. Add operators on any machine with the "Sorting" role under Users &rarr; Operators.</div>';
+    return;
+  }
+  const editable = canWriteJobs() || canWriteInventory();
+  const cellAttrs = editable ? '' : 'readonly disabled';
+  const r = rows.map(row => `
+    <tr>
+      <td class="dp-machine">${esc(row.operator)}${row.operator_ur ? ` <span class="urdu" dir="rtl" lang="ur" style="margin-left:8px;font-weight:600;">${esc(row.operator_ur)}</span>` : ''}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.operator)}" data-section="breaking" data-field="sheets"
+               value="${esc(row.sheets || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.operator)}" data-section="breaking" data-field="hours"
+               value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.operator)}" data-section="breaking" data-field="jobs"
+               value="${esc(row.jobs || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.operator)}" data-section="breaking" data-field="helper"
+               value="${esc(row.helper || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-remarks" data-machine="${esc(row.operator)}" data-section="breaking" data-field="remarks"
+               value="${esc(row.remarks || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
+    </tr>`).join('');
+
+  body.innerHTML = `
+    <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
+      ${esc(date)} &middot; ${rows.length} operator${rows.length === 1 ? '' : 's'} &middot; manual entry
+    </div>
+    <table class="dp-table" style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr>
+          <th>Operator</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+          <th>Helper</th><th>Remarks</th>
+        </tr>
+      </thead>
+      <tbody>${r}</tbody>
+    </table>`;
 }
 
 async function loadDailyProductionPasting() {
@@ -7000,16 +7087,14 @@ async function printDailyRegister() {
             || (document.getElementById('dp-pasting-date') || {}).value;
   if (!date) { notify('Pick a date first'); return; }
   showSaving(true);
-  let printing, die, coatings, pasting, allPersons;
+  let printing, die, coatings, breaking, pasting;
   try {
-    [printing, die, coatings, pasting, allPersons] = await Promise.all([
+    [printing, die, coatings, breaking, pasting] = await Promise.all([
       api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
-      // For the BREAKING section: pre-fill operator names from anyone
-      // whose machine has the 'break' role. Empty cells for fill-in.
-      api('GET', '/api/operators/all-persons').catch(() => []),
     ]);
   } catch (e) {
     notify('Could not load all sections: ' + e.message);
@@ -7018,19 +7103,22 @@ async function printDailyRegister() {
   }
   showSaving(false);
 
-  // Breaking roster: persons whose machine carries the 'break' role
-  // fill the first rows; we always pad up to a minimum so there's space
-  // to write extra names by hand. Cells are empty for fill-by-hand.
+  // Breaking — saved cells come from the new endpoint. Pad up to a
+  // minimum number of rows so the printed register always has space
+  // for hand-written extras.
   const BREAKING_MIN_ROWS = 5;
-  const breakingNames = (Array.isArray(allPersons) ? allPersons : [])
-    .filter(p => Array.isArray(p.roles) && p.roles.includes('break'))
-    .map(p => ({ name: p.name || '', name_ur: p.name_ur || '' }));
-  const padCount = Math.max(0, BREAKING_MIN_ROWS - breakingNames.length);
-  const breakingList = breakingNames.concat(Array.from({ length: padCount }, () => ({ name: '', name_ur: '' })));
+  const breakingList = Array.isArray(breaking) ? breaking.slice() : [];
+  while (breakingList.length < BREAKING_MIN_ROWS) {
+    breakingList.push({ operator: '', operator_ur: '', sheets: '', hours: '', jobs: '', helper: '', remarks: '' });
+  }
   const breakingRows = breakingList.map(p => `
       <tr>
-        <td class="m">${esc(p.name)}${p.name_ur ? ` <span class="urdu" dir="rtl" lang="ur">${esc(p.name_ur)}</span>` : ''}</td>
-        <td></td><td></td><td></td><td></td><td></td>
+        <td class="m">${esc(p.operator || '')}${p.operator_ur ? ` <span class="urdu" dir="rtl" lang="ur">${esc(p.operator_ur)}</span>` : ''}</td>
+        <td class="n">${esc(p.sheets  || '')}</td>
+        <td>${esc(p.hours   || '')}</td>
+        <td class="n">${esc(p.jobs    || '')}</td>
+        <td>${esc(p.helper  || '')}</td>
+        <td>${esc(p.remarks || '')}</td>
       </tr>`).join('');
 
   const dateNice = (() => {
@@ -7143,14 +7231,14 @@ async function exportDailyRegister() {
   if (!date) { notify('Pick a date first'); return; }
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   showSaving(true);
-  let printing, die, coatings, pasting, allPersons;
+  let printing, die, coatings, breaking, pasting;
   try {
-    [printing, die, coatings, pasting, allPersons] = await Promise.all([
+    [printing, die, coatings, breaking, pasting] = await Promise.all([
       api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
-      api('GET', '/api/operators/all-persons').catch(() => []),
     ]);
   } catch (e) {
     notify('Could not load all sections: ' + e.message);
@@ -7175,11 +7263,16 @@ async function exportDailyRegister() {
   const coatingsRows = coatings.map(r => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.blankets || '', r.operators || '', r.remarks || r.finishes || '']);
   const pastingRows  = pasting.map(r  => [r.machine, r.units  || '', r.hours || '', r.jobs || '', r.operators || '', r.remarks || '']);
 
-  const breakingNames = (Array.isArray(allPersons) ? allPersons : [])
-    .filter(p => Array.isArray(p.roles) && p.roles.includes('break'));
-  // Operator | Sheets | Hours | Jobs | Helper | Remarks (blanks for fill-in)
-  const breakingRows = (breakingNames.length ? breakingNames : Array.from({ length: 6 }, () => ({ name: '' })))
-    .map(p => [p.name || '', '', '', '', '', '']);
+  // Breaking rows use the saved data — sheets, hours, jobs, helper,
+  // remarks per operator. Pad to a minimum of 5 rows so the exported
+  // file always has space for hand-written extras after print.
+  const breakingList = Array.isArray(breaking) ? breaking.slice() : [];
+  while (breakingList.length < 5) {
+    breakingList.push({ operator: '', sheets: '', hours: '', jobs: '', helper: '', remarks: '' });
+  }
+  const breakingRows = breakingList.map(p => [
+    p.operator || '', p.sheets || '', p.hours || '', p.jobs || '', p.helper || '', p.remarks || '',
+  ]);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet(
@@ -7452,7 +7545,7 @@ function exitReportsGroup() {
 // to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
-  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-pasting'];
+  const inlinePanes = ['stock-in', 'stock-out', 'summary', 'inventory-report', 'jobs-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -7467,6 +7560,7 @@ function setReportsTab(name) {
   if (name === 'dp-printing')     loadDailyProductionPrinting();
   if (name === 'dp-die')          loadDailyProductionDie();
   if (name === 'dp-coatings')     loadDailyProductionCoatings();
+  if (name === 'dp-breaking')     loadDailyProductionBreaking();
   if (name === 'dp-pasting')      loadDailyProductionPasting();
 }
 
