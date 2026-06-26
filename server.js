@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-23-daily-production-breaking';
+const SCHEMA_VERSION = 'v2026-06-24-daily-production-custom-rows';
 
 async function initDb() {
   try {
@@ -521,6 +521,12 @@ async function initDb() {
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS sheets TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS jobs   TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS helper TEXT`;
+    // Custom-row fields — used when admin adds an ad-hoc row via the +
+    // button on a Daily Production tab. For regular (role-tagged) rows
+    // these stay null and the auto-aggregated values are shown.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS colors         TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS plates         TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS operators_text TEXT`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -1131,28 +1137,29 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
     const { machines, acc } = await aggregateDailyProduction(sql, {
       date, sectionRole: 'print', stageLabel: 'Printing', sheetsKey: 'printed_sheets_qty',
     });
-    const notesRows = await sql`SELECT machine, hours, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
+    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, colors, plates, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
-    // Custom rows added via the report's + button live in the notes
-    // table but don't appear in the role-filtered machine list. Append
-    // any such names so they render alongside the configured machines.
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
     const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
       const colorsArr = row ? [...row.colorsCounts.entries()].sort((a, b) => a[0] - b[0]) : [];
       const colorsStr = colorsArr.map(([clr, cnt]) => `${cnt}-${clr}clr`).join(' / ');
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        sheets: row ? row.sheets : 0,
-        jobs: row ? row.jobIds.size : 0,
-        colors: colorsStr,
-        plates: row ? row.plates : 0,
-        operators: operators.join(', '),
+        // For custom rows, every cell falls back to the admin-entered
+        // notes value because there's no auto-aggregation behind it.
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        colors: isCustom ? (note.colors || '') : colorsStr,
+        plates: isCustom ? (note.plates || '') : (row ? row.plates : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
         remarks: note.remarks || '',
+        is_custom: isCustom,
       };
     });
     res.json(out);
@@ -1225,7 +1232,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       }
     }
 
-    const notesRows = await sql`SELECT machine, hours, blankets, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
+    const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
@@ -1233,24 +1240,23 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
       const operators = row ? [...row.operators].sort() : [];
-      // Build a "UV ×3, Lamination ×2" summary so the admin sees what
-      // kinds of coatings ran on this machine that day without opening
-      // each job. Lives in remarks/details, not a separate column.
       const finishes = row
         ? [...row.finishCounts.entries()].sort((a, b) => b[1] - a[1])
             .map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(', ')
         : '';
       return {
         machine: m,
-        sheets: row ? row.sheets : 0,
-        jobs: row ? row.jobIds.size : 0,
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
         finishes,
         waste: row ? row.waste : 0,
-        operators: operators.join(', '),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
         blankets: note.blankets || '',
         remarks: note.remarks || '',
+        is_custom: isCustom,
       };
     });
     res.json(out);
@@ -1307,6 +1313,7 @@ app.get('/api/reports/daily-production/breaking/:date', requireAuth, async (req,
         jobs:    n.jobs    || '',
         helper:  n.helper  || '',
         remarks: n.remarks || '',
+        is_custom: !existingNames.has(op.name.toLowerCase()),
       };
     });
     res.json(out);
@@ -1327,23 +1334,24 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
     const { machines, acc } = await aggregateDailyProduction(sql, {
       date, sectionRole: 'paste', stageLabel: 'Pasting', sheetsKey: 'pasted_cartons_qty',
     });
-    const notesRows = await sql`SELECT machine, hours, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
+    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
     const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        // The helper calls it `sheets` for shared code; in the Pasting
-        // register this number IS the units (pasted cartons qty).
-        units: row ? row.sheets : 0,
-        jobs: row ? row.jobIds.size : 0,
-        operators: operators.join(', '),
+        // The helper calls it `sheets`; the Pasting register labels it Units.
+        units: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
         remarks: note.remarks || '',
+        is_custom: isCustom,
       };
     });
     res.json(out);
@@ -1365,23 +1373,25 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
     const { machines, acc } = await aggregateDailyProduction(sql, {
       date, sectionRole: 'diecut', stageLabel: 'Die Cutting', sheetsKey: 'die_cutting_sheets',
     });
-    const notesRows = await sql`SELECT machine, hours, make_ready, settings, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'die'`;
+    const notesRows = await sql`SELECT machine, hours, make_ready, settings, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'die'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
     const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        sheets: row ? row.sheets : 0,
-        jobs: row ? row.jobIds.size : 0,
-        operators: operators.join(', '),
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
         make_ready: note.make_ready || '',
         settings: note.settings || '',
         remarks: note.remarks || '',
+        is_custom: isCustom,
       };
     });
     res.json(out);
@@ -1415,18 +1425,24 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     const sheets     = (req.body.sheets     == null) ? null : String(req.body.sheets).trim();
     const jobs       = (req.body.jobs       == null) ? null : String(req.body.jobs).trim();
     const helper     = (req.body.helper     == null) ? null : String(req.body.helper).trim();
+    const colors     = (req.body.colors     == null) ? null : String(req.body.colors).trim();
+    const plates     = (req.body.plates     == null) ? null : String(req.body.plates).trim();
+    const operatorsT = (req.body.operators_text == null) ? null : String(req.body.operators_text).trim();
     await sql`
-      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets, sheets, jobs, helper)
-      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets}, ${sheets}, ${jobs}, ${helper})
+      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets, sheets, jobs, helper, colors, plates, operators_text)
+      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets}, ${sheets}, ${jobs}, ${helper}, ${colors}, ${plates}, ${operatorsT})
       ON CONFLICT (date, section, machine) DO UPDATE
-        SET hours      = EXCLUDED.hours,
-            remarks    = EXCLUDED.remarks,
-            make_ready = EXCLUDED.make_ready,
-            settings   = EXCLUDED.settings,
-            blankets   = EXCLUDED.blankets,
-            sheets     = EXCLUDED.sheets,
-            jobs       = EXCLUDED.jobs,
-            helper     = EXCLUDED.helper
+        SET hours          = EXCLUDED.hours,
+            remarks        = EXCLUDED.remarks,
+            make_ready     = EXCLUDED.make_ready,
+            settings       = EXCLUDED.settings,
+            blankets       = EXCLUDED.blankets,
+            sheets         = EXCLUDED.sheets,
+            jobs           = EXCLUDED.jobs,
+            helper         = EXCLUDED.helper,
+            colors         = EXCLUDED.colors,
+            plates         = EXCLUDED.plates,
+            operators_text = EXCLUDED.operators_text
     `;
     res.json({ ok: true });
   } catch (err) {

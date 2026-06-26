@@ -121,16 +121,26 @@
   .dp-table input.dp-cell:focus { outline: none; border-style: solid; border-color: var(--brand); background: var(--brand-soft); }
   .dp-table input.dp-cell:disabled { background: transparent; border-color: transparent; cursor: default; }
   .dp-table input.dp-remarks { min-width: 200px; }
-  /* Compact red + button on each Daily Production tab header — opens a
-     prompt to add a row for a machine/operator that isn't in the
-     configured roster. Tucks in next to Refresh / Export / Print. */
-  .btn.dp-add-row {
-    background: var(--red-text); color: #fff; border-color: var(--red-text);
-    font-weight: 800; padding: 4px 12px; font-size: 16px; line-height: 1;
-    min-width: 32px; border-radius: 8px;
+  /* Floating red + button anchored to the bottom-right corner of each
+     Daily Production table. Clicking it appends a new draft row with
+     every cell editable — Machine/Operator name and all the numeric
+     fields — for ad-hoc entries with no auto data behind them. */
+  .dp-table-wrap { position: relative; }
+  .dp-add-corner {
+    position: absolute; right: -14px; bottom: -14px;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--red-text); color: #fff; border: 2px solid #fff;
+    font-size: 24px; font-weight: 900; line-height: 1; cursor: pointer;
+    box-shadow: 0 6px 16px rgba(121, 31, 31, 0.45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2; transition: transform 0.12s ease;
   }
-  .btn.dp-add-row:hover, .btn.dp-add-row:focus {
-    background: #5e1717; border-color: #5e1717; color: #fff; outline: none;
+  .dp-add-corner:hover, .dp-add-corner:focus { transform: scale(1.08); outline: none; }
+  /* The Machine/Operator input on a draft row reads as a name field
+     rather than a number — left-align and a touch heavier than the
+     numeric cells. */
+  .dp-table input.dp-cell-name {
+    text-align: left; font-weight: 700; padding-left: 8px;
   }
 
   /* Print-only Daily Production register. The on-screen #dp-print-root
@@ -1679,7 +1689,6 @@
               Date
               <input type="date" id="dp-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
-            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1693,7 +1702,6 @@
               Date
               <input type="date" id="dp-die-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
-            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1707,7 +1715,6 @@
               Date
               <input type="date" id="dp-coatings-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
-            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1721,7 +1728,6 @@
               Date
               <input type="date" id="dp-breaking-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
-            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1735,7 +1741,6 @@
               Date
               <input type="date" id="dp-pasting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
-            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -6830,15 +6835,18 @@ function renderDailyProductionBreaking(rows, date) {
     <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
       ${esc(date)} &middot; ${rows.length} operator${rows.length === 1 ? '' : 's'} &middot; manual entry
     </div>
-    <table class="dp-table" style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr>
-          <th>Operator</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
-          <th>Helper</th><th>Remarks</th>
-        </tr>
-      </thead>
-      <tbody>${r}</tbody>
-    </table>`;
+    <div class="dp-table-wrap">
+      <table class="dp-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th>Operator</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Helper</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody>${r}</tbody>
+      </table>
+      <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc operator">+</button>
+    </div>`;
 }
 
 async function loadDailyProductionPasting() {
@@ -6870,7 +6878,25 @@ function renderDailyProductionPasting(rows, date) {
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
-  const r = rows.map(row => `
+  // Pasting stores the numeric value in `sheets` server-side but the
+  // column is labelled "Units" — a custom row's Units input maps to
+  // the `sheets` field on the PUT body.
+  const editableCell = (row, field, opts) => {
+    const o = opts || {};
+    return `<input type="text" ${cellAttrs} class="dp-cell${o.cls ? ' ' + o.cls : ''}"
+            data-machine="${esc(row.machine)}" data-section="pasting" data-field="${field}"
+            value="${esc(row[field] || row[o.from] || '')}" placeholder="—" ${o.attrs || ''}
+            onblur="saveDailyProductionCell(this)">`;
+  };
+  const r = rows.map(row => row.is_custom ? `
+    <tr>
+      <td class="dp-machine">${esc(row.machine)}</td>
+      <td>${editableCell(row, 'sheets', { from: 'units' })}</td>
+      <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
+      <td>${editableCell(row, 'jobs')}</td>
+      <td>${editableCell(row, 'operators_text', { from: 'operators' })}</td>
+      <td>${editableCell(row, 'remarks', { cls: 'dp-remarks' })}</td>
+    </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.units ? row.units.toLocaleString() : '—'}</td>
@@ -6893,15 +6919,18 @@ function renderDailyProductionPasting(rows, date) {
       ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
       ${totals.units.toLocaleString()} units pasted
     </div>
-    <table class="dp-table" style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr>
-          <th>Machine</th><th>Units</th><th>Hours</th><th>Jobs</th>
-          <th>Operator</th><th>Remarks</th>
-        </tr>
-      </thead>
-      <tbody>${r}</tbody>
-    </table>`;
+    <div class="dp-table-wrap">
+      <table class="dp-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th>Machine</th><th>Units</th><th>Hours</th><th>Jobs</th>
+            <th>Operator</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody>${r}</tbody>
+      </table>
+      <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
+    </div>`;
 }
 
 function renderDailyProductionCoatings(rows, date) {
@@ -6919,7 +6948,23 @@ function renderDailyProductionCoatings(rows, date) {
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
-  const r = rows.map(row => `
+  const editableCell = (row, field, opts) => {
+    const o = opts || {};
+    return `<input type="text" ${cellAttrs} class="dp-cell${o.cls ? ' ' + o.cls : ''}"
+            data-machine="${esc(row.machine)}" data-section="coatings" data-field="${field}"
+            value="${esc(row[field] || row[o.from] || '')}" placeholder="—" ${o.attrs || ''}
+            onblur="saveDailyProductionCell(this)">`;
+  };
+  const r = rows.map(row => row.is_custom ? `
+    <tr>
+      <td class="dp-machine">${esc(row.machine)}</td>
+      <td>${editableCell(row, 'sheets')}</td>
+      <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
+      <td>${editableCell(row, 'jobs')}</td>
+      <td>${editableCell(row, 'blankets')}</td>
+      <td>${editableCell(row, 'operators_text', { from: 'operators' })}</td>
+      <td>${editableCell(row, 'remarks', { cls: 'dp-remarks' })}</td>
+    </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
@@ -6947,15 +6992,18 @@ function renderDailyProductionCoatings(rows, date) {
       ${esc(date)} &middot; ${totals.jobs} job-pass${totals.jobs === 1 ? '' : 'es'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
       ${totals.sheets.toLocaleString()} sheets &middot; ${totals.waste.toLocaleString()} waste
     </div>
-    <table class="dp-table" style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr>
-          <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
-          <th>Blankets</th><th>Operator</th><th>Remarks</th>
-        </tr>
-      </thead>
-      <tbody>${r}</tbody>
-    </table>`;
+    <div class="dp-table-wrap">
+      <table class="dp-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Blankets</th><th>Operator</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody>${r}</tbody>
+      </table>
+      <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
+    </div>`;
 }
 
 function renderDailyProductionDie(rows, date) {
@@ -6972,7 +7020,24 @@ function renderDailyProductionDie(rows, date) {
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
-  const r = rows.map(row => `
+  const editableCell = (row, field, opts) => {
+    const o = opts || {};
+    return `<input type="text" ${cellAttrs} class="dp-cell${o.cls ? ' ' + o.cls : ''}"
+            data-machine="${esc(row.machine)}" data-section="die" data-field="${field}"
+            value="${esc(row[field] || row[o.from] || '')}" placeholder="—" ${o.attrs || ''}
+            onblur="saveDailyProductionCell(this)">`;
+  };
+  const r = rows.map(row => row.is_custom ? `
+    <tr>
+      <td class="dp-machine">${esc(row.machine)}</td>
+      <td>${editableCell(row, 'sheets')}</td>
+      <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
+      <td>${editableCell(row, 'jobs')}</td>
+      <td>${editableCell(row, 'make_ready')}</td>
+      <td>${editableCell(row, 'settings')}</td>
+      <td>${editableCell(row, 'operators_text', { from: 'operators' })}</td>
+      <td>${editableCell(row, 'remarks', { cls: 'dp-remarks' })}</td>
+    </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
@@ -7005,15 +7070,18 @@ function renderDailyProductionDie(rows, date) {
       ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
       ${totals.sheets.toLocaleString()} sheets
     </div>
-    <table class="dp-table" style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr>
-          <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
-          <th>Make Ready</th><th>Settings</th><th>Operator</th><th>Remarks</th>
-        </tr>
-      </thead>
-      <tbody>${r}</tbody>
-    </table>`;
+    <div class="dp-table-wrap">
+      <table class="dp-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Make Ready</th><th>Settings</th><th>Operator</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody>${r}</tbody>
+      </table>
+      <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
+    </div>`;
 }
 
 function renderDailyProductionPrinting(rows, date) {
@@ -7032,7 +7100,27 @@ function renderDailyProductionPrinting(rows, date) {
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
-  const r = rows.map(row => `
+  // Auto rows render auto-derived cells as plain text; custom (admin-
+  // added) rows render every cell as a free input so the user can
+  // fill in everything manually.
+  const editableCell = (row, field, opts) => {
+    const o = opts || {};
+    return `<input type="text" ${cellAttrs} class="dp-cell${o.cls ? ' ' + o.cls : ''}"
+            data-machine="${esc(row.machine)}" data-section="printing" data-field="${field}"
+            value="${esc(row[field] || row[o.from] || '')}" placeholder="—" ${o.attrs || ''}
+            onblur="saveDailyProductionCell(this)">`;
+  };
+  const r = rows.map(row => row.is_custom ? `
+    <tr>
+      <td class="dp-machine">${esc(row.machine)}</td>
+      <td>${editableCell(row, 'sheets')}</td>
+      <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
+      <td>${editableCell(row, 'jobs')}</td>
+      <td>${editableCell(row, 'colors')}</td>
+      <td>${editableCell(row, 'plates')}</td>
+      <td>${editableCell(row, 'operators_text', { from: 'operators' })}</td>
+      <td>${editableCell(row, 'remarks', { cls: 'dp-remarks' })}</td>
+    </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
@@ -7057,35 +7145,104 @@ function renderDailyProductionPrinting(rows, date) {
       ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
       ${totals.sheets.toLocaleString()} sheets &middot; ${totals.plates} plates
     </div>
-    <table class="dp-table" style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr>
-          <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
-          <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th>
-        </tr>
-      </thead>
-      <tbody>${r}</tbody>
-    </table>`;
+    <div class="dp-table-wrap">
+      <table class="dp-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody>${r}</tbody>
+      </table>
+      <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
+    </div>`;
 }
 
-// Add a row for an ad-hoc machine (or operator, for Breaking) that
-// isn't in the configured roster. Creates an empty notes row in the DB
-// so the entry survives a reload; the cells become editable on next
-// render and save via the normal blur path.
-async function addCustomDailyProductionRow() {
+// Add a draft (unsaved) ad-hoc row to the current section's table.
+// The Machine / Operator cell starts empty + editable; the operator
+// types in a name + any cell values, and on blur the row saves to the
+// server with whatever's been filled in. Refresh clears unsaved drafts.
+function addCustomDailyProductionRow() {
   const section = dailyProductionActiveTab();
-  const dateElId = section === 'printing' ? 'dp-date' : `dp-${section}-date`;
-  const dateEl = document.getElementById(dateElId);
-  if (!dateEl || !dateEl.value) { notify('Pick a date first'); return; }
-  const label = section === 'breaking' ? 'Operator name' : 'Machine name';
-  const name = (prompt(label + ':') || '').trim();
-  if (!name) return;
-  try {
-    await api('PUT', `/api/reports/daily-production/${section}/${encodeURIComponent(dateEl.value)}/${encodeURIComponent(name)}`, {});
-    loadDailyProductionForCurrentTab();
-  } catch (e) {
-    notify('Could not add row: ' + e.message);
+  const body = document.getElementById(`dp-${section}-body`);
+  const tbody = body && body.querySelector('.dp-table tbody');
+  if (!tbody) { notify('Load the section first.'); return; }
+  const draftId = 'd' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+  tbody.insertAdjacentHTML('beforeend', renderDraftRowHtml(section, draftId));
+  const firstInput = tbody.querySelector(`tr[data-draft="${draftId}"] input`);
+  if (firstInput) firstInput.focus();
+}
+
+// Per-section draft row HTML. Every cell is a free input — including
+// the machine/operator name column — because there's no auto data
+// behind an ad-hoc row.
+function renderDraftRowHtml(section, draftId) {
+  const cell = (field, opts) => {
+    const o = opts || {};
+    const cls = ['dp-cell'];
+    if (o.cls) cls.push(o.cls);
+    return `<td>
+      <input type="text" class="${cls.join(' ')}"
+             data-draft="${esc(draftId)}" data-section="${esc(section)}" data-field="${esc(field)}"
+             placeholder="${esc(o.ph || '—')}" ${o.attrs || ''}
+             onblur="saveDailyProductionCell(this)">
+    </td>`;
+  };
+  if (section === 'printing') {
+    return `<tr data-draft="${esc(draftId)}">
+      ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
+      ${cell('sheets',  { ph: '0' })}
+      ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
+      ${cell('jobs',    { ph: '0' })}
+      ${cell('colors',  { ph: '—' })}
+      ${cell('plates',  { ph: '0' })}
+      ${cell('operators_text', { ph: '—' })}
+      ${cell('remarks', { ph: '—', cls: 'dp-remarks' })}
+    </tr>`;
   }
+  if (section === 'die') {
+    return `<tr data-draft="${esc(draftId)}">
+      ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
+      ${cell('sheets',  { ph: '0' })}
+      ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
+      ${cell('jobs',    { ph: '0' })}
+      ${cell('make_ready', { ph: '—' })}
+      ${cell('settings',   { ph: '—' })}
+      ${cell('operators_text', { ph: '—' })}
+      ${cell('remarks', { ph: '—', cls: 'dp-remarks' })}
+    </tr>`;
+  }
+  if (section === 'coatings') {
+    return `<tr data-draft="${esc(draftId)}">
+      ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
+      ${cell('sheets',  { ph: '0' })}
+      ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
+      ${cell('jobs',    { ph: '0' })}
+      ${cell('blankets',{ ph: '—' })}
+      ${cell('operators_text', { ph: '—' })}
+      ${cell('remarks', { ph: '—', cls: 'dp-remarks' })}
+    </tr>`;
+  }
+  if (section === 'breaking') {
+    return `<tr data-draft="${esc(draftId)}">
+      ${cell('machine', { ph: 'Operator', cls: 'dp-cell-name' })}
+      ${cell('sheets',  { ph: '0' })}
+      ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
+      ${cell('jobs',    { ph: '0' })}
+      ${cell('helper',  { ph: '—' })}
+      ${cell('remarks', { ph: '—', cls: 'dp-remarks' })}
+    </tr>`;
+  }
+  // pasting
+  return `<tr data-draft="${esc(draftId)}">
+    ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
+    ${cell('sheets',  { ph: '0' })}
+    ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
+    ${cell('jobs',    { ph: '0' })}
+    ${cell('operators_text', { ph: '—' })}
+    ${cell('remarks', { ph: '—', cls: 'dp-remarks' })}
+  </tr>`;
 }
 
 async function saveDailyProductionCell(input) {
@@ -7094,14 +7251,32 @@ async function saveDailyProductionCell(input) {
   const dateEl = document.getElementById(dateElId);
   if (!dateEl || !dateEl.value) return;
   const date = dateEl.value;
-  const machine = input.dataset.machine;
-  if (!machine) return;
+
+  // Draft rows: the machine name lives in a sibling input on the same
+  // row instead of data-machine. Skip the save until that name's been
+  // typed so we never create a daily_production_notes row keyed by ''.
+  const draftId = input.dataset.draft;
+  let machine = input.dataset.machine;
+  let scopeSel;
+  if (draftId) {
+    const row = input.closest('tr');
+    const nameEl = row && row.querySelector(`.dp-cell[data-field="machine"][data-draft="${CSS.escape(draftId)}"]`);
+    machine = nameEl ? (nameEl.value || '').trim() : '';
+    if (!machine) return;
+    scopeSel = `.dp-cell[data-draft="${CSS.escape(draftId)}"][data-section="${CSS.escape(section)}"]`;
+  } else {
+    if (!machine) return;
+    scopeSel = `.dp-cell[data-machine="${CSS.escape(machine)}"][data-section="${CSS.escape(section)}"]`;
+  }
+
   // Gather every editable cell on this row so a partial update doesn't
-  // wipe sibling fields — Printing has hours + remarks, Die adds
-  // make_ready + settings, Coatings adds blankets.
-  const sels = `.dp-cell[data-machine="${CSS.escape(machine)}"][data-section="${section}"]`;
+  // wipe sibling fields. The 'machine' input is the URL key, not a body
+  // field — skip it. Map data-field='operators_text' through unchanged.
   const body = {};
-  document.querySelectorAll(sels).forEach(el => { body[el.dataset.field] = el.value.trim(); });
+  document.querySelectorAll(scopeSel).forEach(el => {
+    if (el.dataset.field === 'machine') return;
+    body[el.dataset.field] = el.value.trim();
+  });
   try {
     await api('PUT', `/api/reports/daily-production/${section}/${encodeURIComponent(date)}/${encodeURIComponent(machine)}`, body);
   } catch (e) {
