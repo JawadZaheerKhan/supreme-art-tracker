@@ -1450,6 +1450,27 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
   }
 });
 
+// Remove a custom Daily Production row entirely (the × button next to
+// a row added via the + button). Same role gate as the PUT endpoint.
+app.delete('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    const section = String(req.params.section || '').trim().toLowerCase();
+    const machine = String(req.params.machine || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
+    const r = req.user && req.user.role;
+    const okRoles = ['admin', 'production_manager', 'store_manager', 'user', 'stock'];
+    if (!okRoles.includes(r)) return res.status(403).json({ error: 'Not allowed' });
+    await sql`DELETE FROM daily_production_notes WHERE date = ${date} AND section = ${section} AND machine = ${machine}`;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // GET all jobs
 app.get('/api/jobs', requireAuth, async (req, res) => {
   try {
