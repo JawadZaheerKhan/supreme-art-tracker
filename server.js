@@ -1133,7 +1133,12 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
     });
     const notesRows = await sql`SELECT machine, hours, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
-    const out = machines.map(m => {
+    // Custom rows added via the report's + button live in the notes
+    // table but don't appear in the role-filtered machine list. Append
+    // any such names so they render alongside the configured machines.
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+    const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
       const colorsArr = row ? [...row.colorsCounts.entries()].sort((a, b) => a[0] - b[0]) : [];
@@ -1222,8 +1227,10 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
 
     const notesRows = await sql`SELECT machine, hours, blankets, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
 
-    const out = machines.map(m => {
+    const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
       const operators = row ? [...row.operators].sort() : [];
@@ -1280,8 +1287,17 @@ app.get('/api/reports/daily-production/breaking/:date', requireAuth, async (req,
 
     const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'breaking'`;
     const noteByOp = new Map(notesRows.map(r => [r.machine, r]));
+    // Custom operators added via the + button on the report. Listed
+    // after the role-tagged roster so the regular crew stays at top.
+    const existingNames = new Set(operators.map(o => o.name.toLowerCase()));
+    const customOps = notesRows
+      .map(r => r.machine)
+      .filter(name => name && !existingNames.has(name.toLowerCase()))
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+      .map(name => ({ name, name_ur: '' }));
+    const allOperators = [...operators, ...customOps];
 
-    const out = operators.map(op => {
+    const out = allOperators.map(op => {
       const n = noteByOp.get(op.name) || {};
       return {
         operator: op.name,
@@ -1313,7 +1329,9 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
     });
     const notesRows = await sql`SELECT machine, hours, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
-    const out = machines.map(m => {
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+    const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
       const operators = row ? [...row.operators].sort() : [];
@@ -1349,7 +1367,9 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
     });
     const notesRows = await sql`SELECT machine, hours, make_ready, settings, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'die'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
-    const out = machines.map(m => {
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+    const out = allMachines.map(m => {
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
       const operators = row ? [...row.operators].sort() : [];

@@ -121,6 +121,17 @@
   .dp-table input.dp-cell:focus { outline: none; border-style: solid; border-color: var(--brand); background: var(--brand-soft); }
   .dp-table input.dp-cell:disabled { background: transparent; border-color: transparent; cursor: default; }
   .dp-table input.dp-remarks { min-width: 200px; }
+  /* Compact red + button on each Daily Production tab header — opens a
+     prompt to add a row for a machine/operator that isn't in the
+     configured roster. Tucks in next to Refresh / Export / Print. */
+  .btn.dp-add-row {
+    background: var(--red-text); color: #fff; border-color: var(--red-text);
+    font-weight: 800; padding: 4px 12px; font-size: 16px; line-height: 1;
+    min-width: 32px; border-radius: 8px;
+  }
+  .btn.dp-add-row:hover, .btn.dp-add-row:focus {
+    background: #5e1717; border-color: #5e1717; color: #fff; outline: none;
+  }
 
   /* Print-only Daily Production register. The on-screen #dp-print-root
      is empty during normal use; printDailyRegister() populates it just
@@ -1668,6 +1679,7 @@
               Date
               <input type="date" id="dp-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
+            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1681,6 +1693,7 @@
               Date
               <input type="date" id="dp-die-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
+            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1694,6 +1707,7 @@
               Date
               <input type="date" id="dp-coatings-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
+            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1707,6 +1721,7 @@
               Date
               <input type="date" id="dp-breaking-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
+            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -1720,6 +1735,7 @@
               Date
               <input type="date" id="dp-pasting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
+            <button class="btn btn-sm dp-add-row" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">&plus;</button>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
             <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
@@ -7050,6 +7066,26 @@ function renderDailyProductionPrinting(rows, date) {
       </thead>
       <tbody>${r}</tbody>
     </table>`;
+}
+
+// Add a row for an ad-hoc machine (or operator, for Breaking) that
+// isn't in the configured roster. Creates an empty notes row in the DB
+// so the entry survives a reload; the cells become editable on next
+// render and save via the normal blur path.
+async function addCustomDailyProductionRow() {
+  const section = dailyProductionActiveTab();
+  const dateElId = section === 'printing' ? 'dp-date' : `dp-${section}-date`;
+  const dateEl = document.getElementById(dateElId);
+  if (!dateEl || !dateEl.value) { notify('Pick a date first'); return; }
+  const label = section === 'breaking' ? 'Operator name' : 'Machine name';
+  const name = (prompt(label + ':') || '').trim();
+  if (!name) return;
+  try {
+    await api('PUT', `/api/reports/daily-production/${section}/${encodeURIComponent(dateEl.value)}/${encodeURIComponent(name)}`, {});
+    loadDailyProductionForCurrentTab();
+  } catch (e) {
+    notify('Could not add row: ' + e.message);
+  }
 }
 
 async function saveDailyProductionCell(input) {
