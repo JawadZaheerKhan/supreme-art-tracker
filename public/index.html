@@ -1220,9 +1220,9 @@
 .capa-print-note     { font-size: 9pt; padding: 3px 8px 5px; font-style: italic; }
 /* Section heads: bold underlined text. No fill — works on any printer. */
 .capa-print-head {
-  background: transparent; color: #000; padding: 4px 0 3px;
+  background: transparent; color: #000; padding: 3px 0 2px;
   font-size: 12pt; font-weight: 700; letter-spacing: 0.05em;
-  margin-top: 8px; border-bottom: 2px solid #000;
+  margin-top: 5px; border-bottom: 2px solid #000;
   /* Don't orphan a section header at the bottom of a page. */
   page-break-after: avoid; break-after: avoid;
 }
@@ -1231,7 +1231,7 @@
    handwriting follows clean horizontal rules. */
 .capa-print-grid {
   display: grid; grid-template-columns: 1fr 1fr;
-  gap: 10px 28px; padding: 8px 0 4px;
+  gap: 6px 24px; padding: 4px 0 2px;
   /* Keep the entire grid together — if it doesn't fit on this page, move
      the whole thing to the next page instead of splitting mid-cell. */
   page-break-inside: avoid; break-inside: avoid;
@@ -1266,12 +1266,12 @@
 }
 .capa-print-sigrow {
   display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;
-  margin-top: 8px; padding: 0 8px;
+  margin-top: 5px; padding: 0 8px;
   page-break-inside: avoid; break-inside: avoid;
 }
 .capa-print-sig { font-size: 10pt; }
-.capa-print-sig-line { border-bottom: 1px solid #000; height: 30px; padding: 0 4px; display: flex; align-items: flex-end; font-weight: 600; font-size: 11pt; }
-.capa-print-footer { text-align: center; margin-top: 6px; font-size: 8.5pt; color: #000; }
+.capa-print-sig-line { border-bottom: 1px solid #000; height: 26px; padding: 0 4px; display: flex; align-items: flex-end; font-weight: 600; font-size: 11pt; }
+.capa-print-footer { text-align: center; margin-top: 4px; font-size: 8.5pt; color: #000; }
 /* Print-only: INHERIT the global #print-area / @page rules (A4 portrait
    with 8mm/10mm padding), same as the job card — that's why the job card
    prints with safe side margins and CAPA was getting clipped. Don't
@@ -8544,7 +8544,16 @@ function buildFormCapaPrint(d) {
   const fld = (lbl, val) => `<div class="capa-print-cell"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val">${esc(val || '')}</div></div>`;
   // 22px per line matches the ruled-background spacing in .capa-print-lines
   // so each handwriting rule lines up with one row of writing.
-  const fldWide = (lbl, val, lines = 2) => `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${lines*22}px;">${esc(val || '')}</div></div>`;
+  // Wide writing space — grows with the typed content so a long
+  // description gets more handwriting rows in print, not a cramped 2-line box.
+  // Take the larger of (default lines, newline-count+1, wrapped-char-count).
+  const fldWide = (lbl, val, lines = 2) => {
+    const s = String(val || '');
+    const nlLines = s ? (s.match(/\n/g) || []).length + 1 : 0;
+    const wrapLines = Math.ceil(s.length / 70);
+    const n = Math.max(lines, nlLines, wrapLines);
+    return `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${n*22}px;">${esc(s)}</div></div>`;
+  };
   const sigBox = (lbl, name, date) => `
     <div class="capa-print-sig">
       <div class="capa-print-lbl">${lbl}</div>
@@ -11687,7 +11696,16 @@ function buildCapaPrint(capa) {
   // Multi-line text cell — 20px per line. Enough handwriting room while
   // keeping the whole form on one legal page. `lines` = number of rules
   // available for someone to hand-write into.
-  const fldWide = (lbl, val, lines = 2) => `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${lines*22}px;">${esc(val || '')}</div></div>`;
+  // Wide writing space — grows with the typed content so a long
+  // description gets more handwriting rows in print, not a cramped 2-line box.
+  // Take the larger of (default lines, newline-count+1, wrapped-char-count).
+  const fldWide = (lbl, val, lines = 2) => {
+    const s = String(val || '');
+    const nlLines = s ? (s.match(/\n/g) || []).length + 1 : 0;
+    const wrapLines = Math.ceil(s.length / 70);
+    const n = Math.max(lines, nlLines, wrapLines);
+    return `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${n*22}px;">${esc(s)}</div></div>`;
+  };
   const sigBox = (lbl, name, date) => `
     <div class="capa-print-sig">
       <div class="capa-print-lbl">${lbl}</div>
@@ -11725,41 +11743,41 @@ function buildCapaPrint(capa) {
 
       ${sectHead(2, 'PROBLEM DESCRIPTION')}
       <div class="capa-print-grid capa-print-grid3">
-        ${fldWide('Description of Non-Conformance / Issue', d.problem_description, 3)}
         ${fld('Detected At Stage', d.detected_at_stage)}
         ${fld('Detected By', d.detected_by)}
         ${fld('Detection Date', dt(d.detection_date))}
+        ${fldWide('Description of Non-Conformance / Issue', d.problem_description, 3)}
       </div>
 
       ${sectHead(3, 'ROOT CAUSE ANALYSIS')}
       <div class="capa-print-grid capa-print-grid3">
-        ${fldWide('Root Cause (5-Why / Fishbone Analysis)', d.root_cause, 3)}
         ${fld('Category', d.category)}
         ${fld('Analysis Done By', d.analysis_done_by)}
         ${fld('Analysis Date', dt(d.analysis_date))}
+        ${fldWide('Root Cause (5-Why / Fishbone Analysis)', d.root_cause, 3)}
       </div>
 
       ${sectHead(4, 'CORRECTIVE ACTION')}
       <div class="capa-print-grid capa-print-grid3">
-        ${fldWide('Immediate Corrective Action Taken', d.corrective_action, 2)}
         ${fld('Responsible Person', d.corrective_responsible)}
         ${fld('Target Completion Date', dt(d.corrective_target_date))}
         ${fld('Actual Completion Date', dt(d.corrective_actual_date))}
+        ${fldWide('Immediate Corrective Action Taken', d.corrective_action, 2)}
       </div>
 
       ${sectHead(5, 'PREVENTIVE ACTION')}
       <div class="capa-print-grid capa-print-grid3">
-        ${fldWide('Preventive Action Plan', d.preventive_action, 2)}
         ${fld('Responsible Person', d.preventive_responsible)}
         ${fld('Target Completion Date', dt(d.preventive_target_date))}
         ${fld('Actual Completion Date', dt(d.preventive_actual_date))}
+        ${fldWide('Preventive Action Plan', d.preventive_action, 2)}
       </div>
 
       ${sectHead(6, 'VERIFICATION & CLOSURE')}
       <div class="capa-print-grid">
-        ${fldWide('Effectiveness Verification', d.verification, 2)}
         ${fld('Verified By', d.verified_by)}
         ${fld('Verification Date', dt(d.verification_date))}
+        ${fldWide('Effectiveness Verification', d.verification, 2)}
       </div>
 
       ${sectHead(7, 'AUTHORISATION SIGNATURES')}
@@ -11782,7 +11800,16 @@ function buildCapaPrintGeneral(capa) {
   const dt = v => v ? fmtDMY(v) : '';
   const sectHead = (n, label) => `<div class="capa-print-head">${n}. ${label}</div>`;
   const fld = (lbl, val) => `<div class="capa-print-cell"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val">${esc(val || '')}</div></div>`;
-  const fldWide = (lbl, val, lines = 2) => `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${lines*22}px;">${esc(val || '')}</div></div>`;
+  // Wide writing space — grows with the typed content so a long
+  // description gets more handwriting rows in print, not a cramped 2-line box.
+  // Take the larger of (default lines, newline-count+1, wrapped-char-count).
+  const fldWide = (lbl, val, lines = 2) => {
+    const s = String(val || '');
+    const nlLines = s ? (s.match(/\n/g) || []).length + 1 : 0;
+    const wrapLines = Math.ceil(s.length / 70);
+    const n = Math.max(lines, nlLines, wrapLines);
+    return `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${n*22}px;">${esc(s)}</div></div>`;
+  };
   const sigBox = (lbl, name, date) => `
     <div class="capa-print-sig">
       <div class="capa-print-lbl">${lbl}</div>
@@ -11815,33 +11842,33 @@ function buildCapaPrintGeneral(capa) {
 
       ${sectHead(2, 'PROBLEM DESCRIPTION')}
       <div class="capa-print-grid capa-print-grid3">
-        ${fldWide('Description of Non-Conformance / Issue', d.problem_description, 5)}
         ${fld('Detected At Stage', d.detected_at_stage)}
         ${fld('Detected By', d.detected_by)}
         ${fld('Detection Date', dt(d.detection_date))}
+        ${fldWide('Description of Non-Conformance / Issue', d.problem_description, 3)}
       </div>
 
       ${sectHead(3, 'ROOT CAUSE ANALYSIS')}
       <div class="capa-print-grid capa-print-grid3">
-        ${fldWide('Root Cause (5-Why / Fishbone Analysis)', d.root_cause, 3)}
         ${fld('Category', d.category)}
         ${fld('Analysis Done By', d.analysis_done_by)}
         ${fld('Analysis Date', dt(d.analysis_date))}
+        ${fldWide('Root Cause (5-Why / Fishbone Analysis)', d.root_cause, 3)}
       </div>
 
       ${sectHead(4, 'ACTIONS')}
       <div class="capa-print-grid">
-        ${fldWide('Corrective Action (immediate steps to contain / correct)', d.corrective_action, 2)}
-        ${fldWide('Preventive Action (systematic changes to prevent recurrence)', d.preventive_action, 2)}
         ${fld('Action Date', dt(d.action_date))}
         ${fld('Action By', d.action_by)}
+        ${fldWide('Corrective Action (immediate steps to contain / correct)', d.corrective_action, 2)}
+        ${fldWide('Preventive Action (systematic changes to prevent recurrence)', d.preventive_action, 2)}
       </div>
 
       ${sectHead(5, 'VERIFICATION & CLOSURE')}
       <div class="capa-print-grid">
-        ${fldWide('Effectiveness Verification', d.verification, 2)}
         ${fld('Verified By', d.verified_by)}
         ${fld('Verification Date', dt(d.verification_date))}
+        ${fldWide('Effectiveness Verification', d.verification, 2)}
       </div>
 
       <!-- Signatures row + CEO section -->
