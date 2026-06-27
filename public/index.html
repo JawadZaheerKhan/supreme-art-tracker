@@ -7075,9 +7075,10 @@ function renderDailyProductionPasting(rows, date) {
     return;
   }
   const totals = rows.reduce((t, r) => ({
-    units: t.units + (r.units || 0),
-    jobs:  t.jobs  + (r.jobs  || 0),
-  }), { units: 0, jobs: 0 });
+    units: t.units + (+r.units || 0),
+    jobs:  t.jobs  + (+r.jobs  || 0),
+    waste: t.waste + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
+  }), { units: 0, jobs: 0, waste: 0 });
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
@@ -7095,6 +7096,7 @@ function renderDailyProductionPasting(rows, date) {
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td>${editableCell(row, 'sheets', { from: 'units' })}</td>
+      <td>${editableCell(row, 'waste')}</td>
       <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
       <td>${editableCell(row, 'jobs')}</td>
       <td>${editableCell(row, 'operators_text', { from: 'operators' })}</td>
@@ -7103,7 +7105,12 @@ function renderDailyProductionPasting(rows, date) {
     </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
-      <td class="dp-num">${row.units ? row.units.toLocaleString() : '—'}</td>
+      <td class="dp-num">${row.units ? Number(row.units).toLocaleString() : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-num" data-machine="${esc(row.machine)}" data-section="pasting" data-field="waste"
+               value="${esc(row.waste || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
       <td>
         <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="pasting" data-field="hours"
                value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
@@ -7122,7 +7129,7 @@ function renderDailyProductionPasting(rows, date) {
   body.innerHTML = `
     <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
       ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
-      ${totals.units.toLocaleString()} units pasted
+      ${totals.units.toLocaleString()} units pasted &middot; ${totals.waste.toLocaleString()} waste
     </div>
     <div class="dp-add-row-bar">
       <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
@@ -7131,7 +7138,7 @@ function renderDailyProductionPasting(rows, date) {
       <table class="dp-table" style="width:100%;border-collapse:collapse;">
         <thead>
           <tr>
-            <th>Machine</th><th>Units</th><th>Hours</th><th>Jobs</th>
+            <th>Machine</th><th>Units</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
             <th>Operator</th><th>Remarks</th><th class="dp-action"></th>
           </tr>
         </thead>
@@ -7148,9 +7155,9 @@ function renderDailyProductionCoatings(rows, date) {
     return;
   }
   const totals = rows.reduce((t, r) => ({
-    sheets: t.sheets + (r.sheets || 0),
-    jobs:   t.jobs   + (r.jobs   || 0),
-    waste:  t.waste  + (r.waste  || 0),
+    sheets: t.sheets + (+r.sheets || 0),
+    jobs:   t.jobs   + (+r.jobs   || 0),
+    waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, waste: 0 });
 
   const editable = canWriteJobs() || canWriteInventory();
@@ -7166,6 +7173,7 @@ function renderDailyProductionCoatings(rows, date) {
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td>${editableCell(row, 'sheets')}</td>
+      <td>${editableCell(row, 'waste')}</td>
       <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
       <td>${editableCell(row, 'jobs')}</td>
       <td>${editableCell(row, 'blankets')}</td>
@@ -7175,7 +7183,12 @@ function renderDailyProductionCoatings(rows, date) {
     </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
-      <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
+      <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-num" data-machine="${esc(row.machine)}" data-section="coatings" data-field="waste"
+               value="${esc(row.waste || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
       <td>
         <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="hours"
                value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
@@ -7208,7 +7221,7 @@ function renderDailyProductionCoatings(rows, date) {
       <table class="dp-table" style="width:100%;border-collapse:collapse;">
         <thead>
           <tr>
-            <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
             <th>Blankets</th><th>Operator</th><th>Remarks</th><th class="dp-action"></th>
           </tr>
         </thead>
@@ -7225,9 +7238,10 @@ function renderDailyProductionDie(rows, date) {
     return;
   }
   const totals = rows.reduce((t, r) => ({
-    sheets: t.sheets + (r.sheets || 0),
-    jobs:   t.jobs   + (r.jobs   || 0),
-  }), { sheets: 0, jobs: 0 });
+    sheets: t.sheets + (+r.sheets || 0),
+    jobs:   t.jobs   + (+r.jobs   || 0),
+    waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
+  }), { sheets: 0, jobs: 0, waste: 0 });
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
@@ -7242,6 +7256,7 @@ function renderDailyProductionDie(rows, date) {
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td>${editableCell(row, 'sheets')}</td>
+      <td>${editableCell(row, 'waste')}</td>
       <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
       <td>${editableCell(row, 'jobs')}</td>
       <td>${editableCell(row, 'make_ready')}</td>
@@ -7252,7 +7267,12 @@ function renderDailyProductionDie(rows, date) {
     </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
-      <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
+      <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-num" data-machine="${esc(row.machine)}" data-section="die" data-field="waste"
+               value="${esc(row.waste || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
       <td>
         <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="die" data-field="hours"
                value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
@@ -7281,7 +7301,7 @@ function renderDailyProductionDie(rows, date) {
   body.innerHTML = `
     <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
       ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
-      ${totals.sheets.toLocaleString()} sheets
+      ${totals.sheets.toLocaleString()} sheets &middot; ${totals.waste.toLocaleString()} waste
     </div>
     <div class="dp-add-row-bar">
       <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
@@ -7290,7 +7310,7 @@ function renderDailyProductionDie(rows, date) {
       <table class="dp-table" style="width:100%;border-collapse:collapse;">
         <thead>
           <tr>
-            <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
             <th>Make Ready</th><th>Settings</th><th>Operator</th><th>Remarks</th><th class="dp-action"></th>
           </tr>
         </thead>
@@ -7308,10 +7328,11 @@ function renderDailyProductionPrinting(rows, date) {
   }
   // Totals row across all machines for the day — handy at-a-glance.
   const totals = rows.reduce((t, r) => ({
-    sheets: t.sheets + (r.sheets || 0),
-    jobs:   t.jobs   + (r.jobs   || 0),
-    plates: t.plates + (r.plates || 0),
-  }), { sheets: 0, jobs: 0, plates: 0 });
+    sheets: t.sheets + (+r.sheets || 0),
+    jobs:   t.jobs   + (+r.jobs   || 0),
+    plates: t.plates + (+r.plates || 0),
+    waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
+  }), { sheets: 0, jobs: 0, plates: 0, waste: 0 });
 
   const editable = canWriteJobs() || canWriteInventory();
   const cellAttrs = editable ? '' : 'readonly disabled';
@@ -7329,6 +7350,7 @@ function renderDailyProductionPrinting(rows, date) {
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
       <td>${editableCell(row, 'sheets')}</td>
+      <td>${editableCell(row, 'waste')}</td>
       <td>${editableCell(row, 'hours', { attrs: 'maxlength="6"' })}</td>
       <td>${editableCell(row, 'jobs')}</td>
       <td>${editableCell(row, 'colors')}</td>
@@ -7339,7 +7361,12 @@ function renderDailyProductionPrinting(rows, date) {
     </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
-      <td class="dp-num">${row.sheets ? row.sheets.toLocaleString() : '—'}</td>
+      <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}</td>
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell dp-num" data-machine="${esc(row.machine)}" data-section="printing" data-field="waste"
+               value="${esc(row.waste || '')}" placeholder="—"
+               onblur="saveDailyProductionCell(this)">
+      </td>
       <td>
         <input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="printing" data-field="hours"
                value="${esc(row.hours || '')}" placeholder="—" maxlength="6"
@@ -7360,7 +7387,7 @@ function renderDailyProductionPrinting(rows, date) {
   body.innerHTML = `
     <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
       ${esc(date)} &middot; ${totals.jobs} job${totals.jobs === 1 ? '' : 's'} across ${rows.length} machine${rows.length === 1 ? '' : 's'} &middot;
-      ${totals.sheets.toLocaleString()} sheets &middot; ${totals.plates} plates
+      ${totals.sheets.toLocaleString()} sheets &middot; ${totals.waste.toLocaleString()} waste &middot; ${totals.plates} plates
     </div>
     <div class="dp-add-row-bar">
       <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a row for an ad-hoc machine or person">+</button>
@@ -7369,7 +7396,7 @@ function renderDailyProductionPrinting(rows, date) {
       <table class="dp-table" style="width:100%;border-collapse:collapse;">
         <thead>
           <tr>
-            <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
             <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th><th class="dp-action"></th>
           </tr>
         </thead>
@@ -7447,6 +7474,7 @@ function renderDraftRowHtml(section, draftId) {
     return `<tr data-draft="${esc(draftId)}">
       ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
       ${cell('sheets',  { ph: '0' })}
+      ${cell('waste',   { ph: '0' })}
       ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
       ${cell('jobs',    { ph: '0' })}
       ${cell('colors',  { ph: '—' })}
@@ -7460,6 +7488,7 @@ function renderDraftRowHtml(section, draftId) {
     return `<tr data-draft="${esc(draftId)}">
       ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
       ${cell('sheets',  { ph: '0' })}
+      ${cell('waste',   { ph: '0' })}
       ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
       ${cell('jobs',    { ph: '0' })}
       ${cell('make_ready', { ph: '—' })}
@@ -7473,6 +7502,7 @@ function renderDraftRowHtml(section, draftId) {
     return `<tr data-draft="${esc(draftId)}">
       ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
       ${cell('sheets',  { ph: '0' })}
+      ${cell('waste',   { ph: '0' })}
       ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
       ${cell('jobs',    { ph: '0' })}
       ${cell('blankets',{ ph: '—' })}
@@ -7496,6 +7526,7 @@ function renderDraftRowHtml(section, draftId) {
   return `<tr data-draft="${esc(draftId)}">
     ${cell('machine', { ph: 'Machine', cls: 'dp-cell-name' })}
     ${cell('sheets',  { ph: '0' })}
+    ${cell('waste',   { ph: '0' })}
     ${cell('hours',   { ph: '—', attrs: 'maxlength="6"' })}
     ${cell('jobs',    { ph: '0' })}
     ${cell('operators_text', { ph: '—' })}
@@ -7602,46 +7633,50 @@ async function printDailyRegister() {
   const printingRows = printing.map(r => `
     <tr>
       <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td class="n">${numCell(r.waste)}</td>
       <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
       <td>${cellText(r.colors)}</td><td class="n">${cellText(r.plates)}</td>
       <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
-    </tr>`).join('') || '<tr><td colspan="8" class="empty">No printing activity.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="9" class="empty">No printing activity.</td></tr>';
 
   const dieRows = die.map(r => `
     <tr>
       <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td class="n">${numCell(r.waste)}</td>
       <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
       <td>${cellText(r.make_ready)}</td><td>${cellText(r.settings)}</td>
       <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
-    </tr>`).join('') || '<tr><td colspan="8" class="empty">No die-cutting activity.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="9" class="empty">No die-cutting activity.</td></tr>';
 
   const coatingsRows = coatings.map(r => `
     <tr>
       <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td class="n">${numCell(r.waste)}</td>
       <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
       <td>${cellText(r.blankets)}</td>
       <td>${cellText(r.operators)}</td><td>${cellText(r.remarks || r.finishes)}</td>
-    </tr>`).join('') || '<tr><td colspan="7" class="empty">No coatings activity.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="8" class="empty">No coatings activity.</td></tr>';
 
   const pastingRows = pasting.map(r => `
     <tr>
       <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.units)}</td>
+      <td class="n">${numCell(r.waste)}</td>
       <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
       <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
-    </tr>`).join('') || '<tr><td colspan="6" class="empty">No pasting activity.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="7" class="empty">No pasting activity.</td></tr>';
 
   const html = `
     <div class="dp-print-page">
       <div class="dp-print-hd">DATE ${esc(dateNice)}</div>
       <h3 class="dp-print-sec">PRINTING</h3>
       <table class="dp-print-tbl"><thead><tr>
-        <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${printingRows}</tbody></table>
 
       <h3 class="dp-print-sec">DIE</h3>
       <table class="dp-print-tbl"><thead><tr>
-        <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Make Ready</th><th>Settings</th><th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${dieRows}</tbody></table>
     </div>
@@ -7649,7 +7684,7 @@ async function printDailyRegister() {
       <div class="dp-print-hd">DATE ${esc(dateNice)}</div>
       <h3 class="dp-print-sec">U.V — SPOT U.V (COATINGS)</h3>
       <table class="dp-print-tbl"><thead><tr>
-        <th>Machine</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Blankets</th><th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${coatingsRows}</tbody></table>
 
@@ -7661,7 +7696,7 @@ async function printDailyRegister() {
 
       <h3 class="dp-print-sec">PASTING</h3>
       <table class="dp-print-tbl"><thead><tr>
-        <th>Machine</th><th>Units</th><th>Hours</th><th>Jobs</th>
+        <th>Machine</th><th>Units</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${pastingRows}</tbody></table>
     </div>`;
@@ -7728,10 +7763,10 @@ async function exportDailyRegister() {
     return ws;
   };
 
-  const printingRows = printing.map(r => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.colors || '', r.plates || '', r.operators || '', r.remarks || '']);
-  const dieRows      = die.map(r      => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.make_ready || '', r.settings || '', r.operators || '', r.remarks || '']);
-  const coatingsRows = coatings.map(r => [r.machine, r.sheets || '', r.hours || '', r.jobs || '', r.blankets || '', r.operators || '', r.remarks || r.finishes || '']);
-  const pastingRows  = pasting.map(r  => [r.machine, r.units  || '', r.hours || '', r.jobs || '', r.operators || '', r.remarks || '']);
+  const printingRows = printing.map(r => [r.machine, r.sheets || '', r.waste || '', r.hours || '', r.jobs || '', r.colors || '', r.plates || '', r.operators || '', r.remarks || '']);
+  const dieRows      = die.map(r      => [r.machine, r.sheets || '', r.waste || '', r.hours || '', r.jobs || '', r.make_ready || '', r.settings || '', r.operators || '', r.remarks || '']);
+  const coatingsRows = coatings.map(r => [r.machine, r.sheets || '', r.waste || '', r.hours || '', r.jobs || '', r.blankets || '', r.operators || '', r.remarks || r.finishes || '']);
+  const pastingRows  = pasting.map(r  => [r.machine, r.units  || '', r.waste || '', r.hours || '', r.jobs || '', r.operators || '', r.remarks || '']);
 
   // Breaking rows use the saved data — sheets, hours, jobs, helper,
   // remarks per operator. Pad to a minimum of 5 rows so the exported
@@ -7746,15 +7781,15 @@ async function exportDailyRegister() {
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet(
-    ['Machine', 'Sheets', 'Hours', 'Jobs', 'Colors', 'Plates', 'Operator', 'Remarks'],
+    ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Colors', 'Plates', 'Operator', 'Remarks'],
     printingRows,
   ), 'Printing');
   XLSX.utils.book_append_sheet(wb, sheet(
-    ['Machine', 'Sheets', 'Hours', 'Jobs', 'Make Ready', 'Settings', 'Operator', 'Remarks'],
+    ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Make Ready', 'Settings', 'Operator', 'Remarks'],
     dieRows,
   ), 'Die Cutting');
   XLSX.utils.book_append_sheet(wb, sheet(
-    ['Machine', 'Sheets', 'Hours', 'Jobs', 'Blankets', 'Operator', 'Remarks'],
+    ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Blankets', 'Operator', 'Remarks'],
     coatingsRows,
   ), 'Coatings');
   XLSX.utils.book_append_sheet(wb, sheet(
@@ -7762,7 +7797,7 @@ async function exportDailyRegister() {
     breakingRows,
   ), 'Breaking');
   XLSX.utils.book_append_sheet(wb, sheet(
-    ['Machine', 'Units', 'Hours', 'Jobs', 'Operator', 'Remarks'],
+    ['Machine', 'Units', 'Wastage', 'Hours', 'Jobs', 'Operator', 'Remarks'],
     pastingRows,
   ), 'Pasting');
 
