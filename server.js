@@ -587,7 +587,11 @@ function requireAdmin(req, res, next) {
 // the new equivalents so stale cookies don't break access until they expire.
 function canWriteJobs(role)      { return role === 'admin' || role === 'production_manager' || role === 'user'; }
 function canWriteInventory(role) { return role === 'admin' || role === 'store_manager'      || role === 'stock'; }
-function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'user' || role === 'operator'; }
+function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'user' || role === 'operator' || role === 'ceo'; }
+// Operator roster CRUD — admin or production manager. The PM owns the
+// floor and needs to add / edit / retire operators without an admin
+// having to be involved every time.
+function canManageOperators(role){ return role === 'admin' || role === 'production_manager' || role === 'user'; }
 function isOperatorRole(role)    { return role === 'operator'; }
 
 // Generic "not read-only" check. Used for cross-cutting endpoints (audit
@@ -620,12 +624,22 @@ function requireInventoryWriter(req, res, next) {
   }
   next();
 }
-// Station endpoints — admin, production_manager, or operator. (CEO and
-// store_manager are blocked.) PIN is still verified separately per call.
+// Station endpoints — admin, production_manager, operator, or CEO.
+// (Store_manager is blocked.) PIN is still verified separately per call.
 function requireStationUser(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (!canRunStation(req.user.role)) {
     return res.status(403).json({ error: 'Not allowed — station access required' });
+  }
+  next();
+}
+// Operator roster CRUD — admin or production_manager. Used in place
+// of requireAdmin on the operator endpoints so the PM can keep the
+// floor PIN roster current on their own.
+function requireOperatorAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canManageOperators(req.user.role)) {
+    return res.status(403).json({ error: 'Not allowed — operator admin access required' });
   }
   next();
 }
@@ -884,7 +898,7 @@ function logTimeToISODate(s) {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
 }
 
-app.get('/api/operators', requireAdmin, async (req, res) => {
+app.get('/api/operators', requireOperatorAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -934,7 +948,7 @@ function parsePersons(body) {
   return out;
 }
 
-app.post('/api/operators', requireAdmin, async (req, res) => {
+app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -959,7 +973,7 @@ app.post('/api/operators', requireAdmin, async (req, res) => {
   }
 });
 
-app.put('/api/operators/:id', requireAdmin, async (req, res) => {
+app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -987,7 +1001,7 @@ app.put('/api/operators/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/operators/:id', requireAdmin, async (req, res) => {
+app.delete('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
