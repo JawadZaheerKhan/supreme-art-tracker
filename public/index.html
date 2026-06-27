@@ -80,6 +80,9 @@
   body.role-store-manager .sm-hide { display: none !important; }
   body.role-production-manager #inventory-mode .ceo-hide,
   body.role-production-manager #imports-mode .ceo-hide { display: none !important; }
+  /* Production Manager: in the Users tab they only see the Floor Operators
+     section. Authorized Users + Recent Activity are tagged .pm-hide. */
+  body.role-production-manager .pm-hide { display: none !important; }
   /* Operator: Station is the default working view; Jobs is reachable
      but strictly read-only (every write button tagged .ceo-hide on a
      job card is hidden, plus the topbar action buttons). The two
@@ -1680,13 +1683,13 @@
 </div>
 
 <div class="main" id="users-mode" style="display:none;">
-  <div class="stats-row" id="users-stats-row"></div>
-  <div class="toolbar">
+  <div class="stats-row pm-hide" id="users-stats-row"></div>
+  <div class="toolbar pm-hide">
     <div style="font-size:14px;font-weight:600;color:var(--text);">Authorized Users</div>
     <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openInviteUser()">+ Invite User</button>
   </div>
-  <div class="inventory-list" id="users-list"></div>
-  <!-- Shop-floor operators (PIN roster for the Station terminal). Admin only. -->
+  <div class="inventory-list pm-hide" id="users-list"></div>
+  <!-- Shop-floor operators (PIN roster for the Station terminal). Admin + PM can write, CEO views. -->
   <div style="margin-top:1.5rem;">
     <div class="toolbar" style="padding:0;">
       <div style="font-size:14px;font-weight:600;color:var(--text);">Floor Operators <span style="font-weight:400;color:var(--text2);">— PIN roster for the Station terminal</span></div>
@@ -1694,7 +1697,7 @@
     </div>
     <div class="inventory-list" id="operators-list" style="margin-top:0.5rem;"></div>
   </div>
-  <div style="margin-top:1.5rem;">
+  <div class="pm-hide" style="margin-top:1.5rem;">
     <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:0.5rem;">Recent Activity</div>
     <div class="inventory-list" id="audit-list"></div>
   </div>
@@ -2010,7 +2013,10 @@ function isOperator()          { return currentUser && currentUser.role === 'ope
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
 function canWriteInventory() { return isAdmin() || isStoreManager(); }
-function canRunStation()     { return isAdmin() || isProductionManager() || isOperator(); }
+function canRunStation()     { return isAdmin() || isProductionManager() || isOperator() || isCeo(); }
+// Operator roster management (Users tab → Floor Operators section).
+// Admin and production manager can add / edit / remove operators.
+function canManageOperators() { return isAdmin() || isProductionManager(); }
 // Generic legacy helper — kept so widely-used .ceo-hide elements + existing
 // call sites don't need to change. Reads as "is this user allowed to mutate
 // anything at all" (anyone except CEO + operator-outside-station).
@@ -2086,10 +2092,12 @@ function renderUserChip() {
   lockTab('mode-inventory-btn', !op);
   lockTab('mode-reports-btn',   !op);
   lockTab('mode-stickers-btn',  !op && !sm);
-  lockTab('mode-station-btn',   canRunStation() || isCeo());
+  lockTab('mode-station-btn',   canRunStation());
   lockTab('mode-forms-btn',     !op && !sm);
-  // Users tab — open to admin (full control) and CEO (read-only audit feed).
-  lockTab('mode-users-btn',     isAdmin() || isCeo());
+  // Users tab — open to admin (full control), CEO (read-only audit feed),
+  // and production_manager (Floor Operators roster only — other sections
+  // are tagged .pm-hide and hidden via the body.role-production-manager rule).
+  lockTab('mode-users-btn',     isAdmin() || isCeo() || isProductionManager());
   // Trash card — visible to anyone who can navigate the app (so operators
   // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
@@ -2200,9 +2208,12 @@ function setMode(m) {
   if (isOperator() && m !== 'jobs' && m !== 'station') m = 'station';
   // Store Manager has no business on Forms/Stickers/Station.
   if (isStoreManager() && (m === 'forms' || m === 'stickers' || m === 'station')) m = 'inventory';
-  // Block everyone except admin + ceo from the Users tab. CEO gets a
-  // read-only view (every write button inside is tagged .ceo-hide).
-  if (m === 'users' && !isAdmin() && !isCeo()) m = 'jobs';
+  // Users tab: admin (full), ceo (read-only — every write button is
+  // tagged .ceo-hide), and production_manager (operators-only — the
+  // Authorized Users + Recent Activity sections are tagged .pm-hide
+  // so PM lands on a Users tab that's effectively just the Floor
+  // Operators roster). Everyone else is bounced to Jobs.
+  if (m === 'users' && !isAdmin() && !isCeo() && !isProductionManager()) m = 'jobs';
   // Station tab is gated to roles that can run it OR CEO (view-only).
   if (m === 'station' && !canRunStation() && !isCeo()) m = 'jobs';
   mode = m;
@@ -11194,16 +11205,27 @@ let auditList = [];
 let operatorsList = [];
 async function loadUsersAndAudit() {
   try {
-    const reqs = [
-      api('GET', '/api/users'),
-      api('GET', '/api/audit?limit=50'),
-    ];
-    // Operators roster is admin-only; skip the call for the read-only CEO.
-    if (isAdmin()) reqs.push(api('GET', '/api/operators'));
-    const [u, a, ops] = await Promise.all(reqs);
-    usersList = u;
-    auditList = a;
-    operatorsList = ops || [];
+    // PM only sees the Floor Operators section — skip the Authorized
+    // Users + Recent Activity fetches entirely so the page is faster
+    // and we don't paint data nobody will see.
+    const wantsUsersAndAudit = isAdmin() || isCeo();
+    const reqs = [];
+    if (wantsUsersAndAudit) {
+      reqs.push(api('GET', '/api/users'));
+      reqs.push(api('GET', '/api/audit?limit=50'));
+    }
+    // Operators roster: admin (write), PM (write), CEO (read-only).
+    const wantsOperators = isAdmin() || isCeo() || isProductionManager();
+    if (wantsOperators) reqs.push(api('GET', '/api/operators'));
+    const results = await Promise.all(reqs);
+    let i = 0;
+    if (wantsUsersAndAudit) {
+      usersList = results[i++];
+      auditList = results[i++];
+    } else {
+      usersList = []; auditList = [];
+    }
+    operatorsList = wantsOperators ? (results[i++] || []) : [];
     renderUsersTab();
     renderOperators();
   } catch (e) {
@@ -11215,7 +11237,10 @@ async function loadUsersAndAudit() {
 function renderOperators() {
   const el = document.getElementById('operators-list');
   if (!el) return;
-  if (!isAdmin()) { el.innerHTML = ''; return; }
+  // Visible to admin, production_manager (write), and CEO (read-only).
+  // Edit / Remove buttons are tagged .ceo-hide so CEO sees the list but
+  // can't change it.
+  if (!isAdmin() && !isProductionManager() && !isCeo()) { el.innerHTML = ''; return; }
   if (!operatorsList.length) {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
@@ -11232,8 +11257,8 @@ function renderOperators() {
         <div class="inv-sub">${esc(operatorStageNames(o))} · PIN ${esc(o.pin)} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
-        <button class="btn btn-sm" onclick="openOperatorModal(${o.id})">Edit</button>
-        <button class="btn btn-sm btn-danger" onclick="removeOperator(${o.id})">Remove</button>
+        <button class="btn btn-sm ceo-hide" onclick="openOperatorModal(${o.id})">Edit</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="removeOperator(${o.id})">Remove</button>
       </div>
     </div>`;
   }).join('');
