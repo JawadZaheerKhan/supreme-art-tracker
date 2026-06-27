@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-24-daily-production-custom-rows';
+const SCHEMA_VERSION = 'v2026-06-27-daily-production-waste';
 
 async function initDb() {
   try {
@@ -527,6 +527,11 @@ async function initDb() {
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS colors         TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS plates         TEXT`;
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS operators_text TEXT`;
+    // Wastage cell — auto-aggregated from each section's per-job waste
+    // particulars (printed_waste_sheets / die_cutting_waste /
+    // pasting_waste_qty / coatings_done[].waste_sheets) and admin-
+    // editable per machine row, same as Hours / Remarks.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS waste TEXT`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -1074,7 +1079,7 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
 // Aggregate Daily Production data for one section + date. Both the
 // Printing and Die endpoints use this — the only difference is which
 // stage we filter on and which particulars-key supplies the sheet count.
-async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sheetsKey }) {
+async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sheetsKey, wasteKey }) {
   const machineRows = await sql`SELECT name FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
   const machines = machineRows.map(r => r.name).filter(Boolean);
   const jobs = await sql`SELECT id, particulars, log FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
@@ -1082,7 +1087,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
   const acc = new Map();
   const ensure = (m) => {
     if (!acc.has(m)) acc.set(m, {
-      sheets: 0, jobIds: new Set(), colorsCounts: new Map(),
+      sheets: 0, waste: 0, jobIds: new Set(), colorsCounts: new Map(),
       operators: new Set(), plates: 0,
     });
     return acc.get(m);
@@ -1124,10 +1129,27 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     }
     const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
     const colorsN = Number.isFinite(colors) ? colors : 0;
+    // Waste — same per-date attribution as sheets. Multi-pass
+    // entries[] take precedence; legacy single-quantity falls back.
+    let wasteN = 0;
+    if (wasteKey) {
+      const partW = part[wasteKey];
+      if (partW && Array.isArray(partW.entries) && partW.entries.length) {
+        for (const e of partW.entries) {
+          if (!e || e.date !== date) continue;
+          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (Number.isFinite(n)) wasteN += n;
+        }
+      } else {
+        const n = parseInt(String((partW && partW.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(n)) wasteN = n;
+      }
+    }
     for (const mc of machinesThisJob) {
       const row = ensure(mc);
       row.jobIds.add(job.id);
       row.sheets += sheetsN;
+      row.waste  += wasteN;
       row.plates += colorsN;
       if (colorsN > 0) row.colorsCounts.set(colorsN, (row.colorsCounts.get(colorsN) || 0) + 1);
       for (const op of (opsByMachine.get(mc) || [])) row.operators.add(op);
@@ -1149,9 +1171,10 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     const { machines, acc } = await aggregateDailyProduction(sql, {
-      date, sectionRole: 'print', stageLabel: 'Printing', sheetsKey: 'printed_sheets_qty',
+      date, sectionRole: 'print', stageLabel: 'Printing',
+      sheetsKey: 'printed_sheets_qty', wasteKey: 'printed_waste_sheets',
     });
-    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, colors, plates, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
+    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, colors, plates, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
@@ -1171,6 +1194,10 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
         colors: isCustom ? (note.colors || '') : colorsStr,
         plates: isCustom ? (note.plates || '') : (row ? row.plates : 0),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        // Wastage: auto-aggregated from each job's printed_waste_sheets;
+        // any admin override stored on the notes row wins so manual
+        // adjustments stick.
+        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         hours: note.hours || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
@@ -1246,7 +1273,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       }
     }
 
-    const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
+    const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
@@ -1265,7 +1292,10 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
         jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
         finishes,
-        waste: row ? row.waste : 0,
+        // Wastage: auto-aggregated from each entry's waste_sheets in
+        // coatings_done; admin note override on the daily_production_notes
+        // row wins so manual edits stick.
+        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
         blankets: note.blankets || '',
@@ -1346,9 +1376,10 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     const { machines, acc } = await aggregateDailyProduction(sql, {
-      date, sectionRole: 'paste', stageLabel: 'Pasting', sheetsKey: 'pasted_cartons_qty',
+      date, sectionRole: 'paste', stageLabel: 'Pasting',
+      sheetsKey: 'pasted_cartons_qty', wasteKey: 'pasting_waste_qty',
     });
-    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
+    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
@@ -1363,6 +1394,8 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
         units: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
         jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        // Wastage: pasting_waste_qty summed per machine per date.
+        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         hours: note.hours || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
@@ -1385,9 +1418,10 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     const { machines, acc } = await aggregateDailyProduction(sql, {
-      date, sectionRole: 'diecut', stageLabel: 'Die Cutting', sheetsKey: 'die_cutting_sheets',
+      date, sectionRole: 'diecut', stageLabel: 'Die Cutting',
+      sheetsKey: 'die_cutting_sheets', wasteKey: 'die_cutting_waste',
     });
-    const notesRows = await sql`SELECT machine, hours, make_ready, settings, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'die'`;
+    const notesRows = await sql`SELECT machine, hours, make_ready, settings, remarks, sheets, jobs, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'die'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
     const allMachines = [...machines, ...customMachines.sort()];
@@ -1401,6 +1435,8 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
         sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
         jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        // Wastage: die_cutting_waste summed per machine per date.
+        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         hours: note.hours || '',
         make_ready: note.make_ready || '',
         settings: note.settings || '',
@@ -1571,9 +1607,10 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     const colors     = (req.body.colors     == null) ? null : String(req.body.colors).trim();
     const plates     = (req.body.plates     == null) ? null : String(req.body.plates).trim();
     const operatorsT = (req.body.operators_text == null) ? null : String(req.body.operators_text).trim();
+    const waste      = (req.body.waste      == null) ? null : String(req.body.waste).trim();
     await sql`
-      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets, sheets, jobs, helper, colors, plates, operators_text)
-      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets}, ${sheets}, ${jobs}, ${helper}, ${colors}, ${plates}, ${operatorsT})
+      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets, sheets, jobs, helper, colors, plates, operators_text, waste)
+      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets}, ${sheets}, ${jobs}, ${helper}, ${colors}, ${plates}, ${operatorsT}, ${waste})
       ON CONFLICT (date, section, machine) DO UPDATE
         SET hours          = EXCLUDED.hours,
             remarks        = EXCLUDED.remarks,
@@ -1585,7 +1622,8 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
             helper         = EXCLUDED.helper,
             colors         = EXCLUDED.colors,
             plates         = EXCLUDED.plates,
-            operators_text = EXCLUDED.operators_text
+            operators_text = EXCLUDED.operators_text,
+            waste          = EXCLUDED.waste
     `;
     res.json({ ok: true });
   } catch (err) {
