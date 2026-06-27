@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-22-machines';
+const SCHEMA_VERSION = 'v2026-06-24-daily-production-custom-rows';
 
 async function initDb() {
   try {
@@ -496,6 +496,38 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS station_notes_job_idx ON station_notes(job_id)`;
 
+    // Daily Production register notes — admin-editable Hours + Remarks cells
+    // that overlay the auto-aggregated machine totals. One row per
+    // (date, section, machine), composite primary key for clean upserts.
+    await sql`
+      CREATE TABLE IF NOT EXISTS daily_production_notes (
+        date     DATE NOT NULL,
+        section  TEXT NOT NULL,
+        machine  TEXT NOT NULL,
+        hours    TEXT,
+        remarks  TEXT,
+        PRIMARY KEY (date, section, machine)
+      )
+    `;
+    // Die-section specific cells. Other sections can add their own
+    // editable fields the same way later.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS make_ready TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS settings   TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS blankets   TEXT`;
+    // Breaking section is manually entered (no workflow stage to derive
+    // from). Each (date, 'breaking', operator_name) row stores one
+    // operator's day. Reuses the same table — only the new columns are
+    // section-specific.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS sheets TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS jobs   TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS helper TEXT`;
+    // Custom-row fields — used when admin adds an ad-hoc row via the +
+    // button on a Daily Production tab. For regular (role-tagged) rows
+    // these stay null and the auto-aggregated values are shown.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS colors         TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS plates         TEXT`;
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS operators_text TEXT`;
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -832,6 +864,40 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 function validPin(pin) { return /^\d{3}$/.test(String(pin || '')); }
 
 // List operators — admin only (includes pin for management).
+// Byline parsers — job log entries store the actor as a string of the
+// form "Name · Machine (Stage)". The Daily Production report scans
+// every job's log[] looking for entries on a given date at a given
+// stage, so we lift the operator name, machine, and stage label out.
+function parseByOperator(by) {
+  const m = /^([^·(]+?)\s*(?:·|\()/.exec(String(by || ''));
+  return m ? m[1].trim() : '';
+}
+function parseByMachine(by) {
+  const m = /·\s*([^()]+?)\s*\(/.exec(String(by || ''));
+  return m ? m[1].trim() : '';
+}
+function parseByStage(by) {
+  // Stage label is in the LAST set of parentheses, so a trailing
+  // "(skipped 2 stages)" doesn't confuse us. We want the stage that's
+  // immediately tied to who acted.
+  const all = String(by || '').match(/\(([^)]+)\)/g);
+  if (!all || !all.length) return '';
+  // Try each match from the right; "(skipped N stages)" is a known
+  // suffix — pick the first one that isn't that pattern.
+  for (let i = all.length - 1; i >= 0; i--) {
+    const inner = all[i].slice(1, -1).trim();
+    if (/^skipped\b/i.test(inner)) continue;
+    return inner;
+  }
+  return '';
+}
+// time string format the station-update writes: "dd/mm/yyyy hh:mm".
+// Returns 'YYYY-MM-DD' or '' if unparseable.
+function logTimeToISODate(s) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(s || ''));
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
+}
+
 app.get('/api/operators', requireOperatorAdmin, async (req, res) => {
   try {
     await dbReady;
@@ -974,27 +1040,446 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
 // the station, used when an operator works on a machine that's not their
 // usual one. Returns a flat list of { name, name_ur, machine } so the UI
 // can present the full roster without leaking PINs.
-app.get('/api/operators/all-persons', requireStationUser, async (req, res) => {
+app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT name, persons FROM operators WHERE active AND persons IS NOT NULL`;
+    const rows = await sql`SELECT name, persons, roles FROM operators WHERE active AND persons IS NOT NULL`;
     const out = [];
     const seen = new Set();
     for (const r of rows) {
       const machineName = r.name || '';
       const list = Array.isArray(r.persons) ? r.persons : [];
+      const roles = Array.isArray(r.roles) ? r.roles : [];
       for (const p of list) {
         const n = p && p.name ? String(p.name).trim() : '';
         if (!n) continue;
         const key = `${n.toLowerCase()}@${machineName.toLowerCase()}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName });
+        // `roles` lets callers filter (e.g. the Breaking section of the
+        // Daily Production print pulls everyone whose machine has the
+        // 'break' role). Additive — existing all-persons consumers are
+        // free to ignore it.
+        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName, roles });
       }
     }
     out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
     res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Aggregate Daily Production data for one section + date. Both the
+// Printing and Die endpoints use this — the only difference is which
+// stage we filter on and which particulars-key supplies the sheet count.
+async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sheetsKey }) {
+  const machineRows = await sql`SELECT name FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
+  const machines = machineRows.map(r => r.name).filter(Boolean);
+  const jobs = await sql`SELECT id, particulars, log FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
+
+  const acc = new Map();
+  const ensure = (m) => {
+    if (!acc.has(m)) acc.set(m, {
+      sheets: 0, jobIds: new Set(), colorsCounts: new Map(),
+      operators: new Set(), plates: 0,
+    });
+    return acc.get(m);
+  };
+
+  for (const job of jobs) {
+    const log = Array.isArray(job.log) ? job.log : [];
+    const machinesThisJob = new Set();
+    const opsByMachine = new Map();
+    for (const e of log) {
+      if (!e || !e.by) continue;
+      if (logTimeToISODate(e.time) !== date) continue;
+      if (parseByStage(e.by) !== stageLabel) continue;
+      const mc = parseByMachine(e.by);
+      const opName = parseByOperator(e.by);
+      if (mc) machinesThisJob.add(mc);
+      if (mc && opName) {
+        if (!opsByMachine.has(mc)) opsByMachine.set(mc, new Set());
+        opsByMachine.get(mc).add(opName);
+      }
+    }
+    if (!machinesThisJob.size) continue;
+    const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+    // Multi-pass entries[] is the source of truth when present — sum
+    // only entries whose date matches the report date so a job split
+    // across days gets attributed correctly. Falls back to the legacy
+    // single-quantity number for jobs that never used multi-pass.
+    let sheetsN = 0;
+    const partKey = part[sheetsKey];
+    if (partKey && Array.isArray(partKey.entries) && partKey.entries.length) {
+      for (const e of partKey.entries) {
+        if (!e || e.date !== date) continue;
+        const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(n)) sheetsN += n;
+      }
+    } else {
+      const n = parseInt(String((partKey && partKey.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+      if (Number.isFinite(n)) sheetsN = n;
+    }
+    const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+    const colorsN = Number.isFinite(colors) ? colors : 0;
+    for (const mc of machinesThisJob) {
+      const row = ensure(mc);
+      row.jobIds.add(job.id);
+      row.sheets += sheetsN;
+      row.plates += colorsN;
+      if (colorsN > 0) row.colorsCounts.set(colorsN, (row.colorsCounts.get(colorsN) || 0) + 1);
+      for (const op of (opsByMachine.get(mc) || [])) row.operators.add(op);
+    }
+  }
+  return { machines, acc };
+}
+
+// Daily Production register — Printing section.
+// Aggregates every Printing-stage log entry on `:date` from every job,
+// groups by machine (parsed from the byline), and returns one row per
+// machine with sheets, jobs count, colors breakdown, plates and the
+// operator list. Hours + Remarks come from daily_production_notes so
+// admin can scribble what the auto-totals can't capture.
+app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const { machines, acc } = await aggregateDailyProduction(sql, {
+      date, sectionRole: 'print', stageLabel: 'Printing', sheetsKey: 'printed_sheets_qty',
+    });
+    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, colors, plates, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'printing'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+    const out = allMachines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
+      const colorsArr = row ? [...row.colorsCounts.entries()].sort((a, b) => a[0] - b[0]) : [];
+      const colorsStr = colorsArr.map(([clr, cnt]) => `${cnt}-${clr}clr`).join(' / ');
+      const operators = row ? [...row.operators].sort() : [];
+      return {
+        machine: m,
+        // For custom rows, every cell falls back to the admin-entered
+        // notes value because there's no auto-aggregation behind it.
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        colors: isCustom ? (note.colors || '') : colorsStr,
+        plates: isCustom ? (note.plates || '') : (row ? row.plates : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        hours: note.hours || '',
+        remarks: note.remarks || '',
+        is_custom: isCustom,
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Coatings section (matches the paper
+// register's "U.V — Spot U.V" page). Unlike Printing/Die where the
+// stage moves on once finished, every individual coating is logged to
+// the job's coatings_done JSONB array with { kind, operator_name,
+// machine, waste_sheets, done_at }. We aggregate from there directly
+// — more accurate than parsing bylines, and we get the finish kinds
+// and waste totals for free.
+function isoTsToDate(ts) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
+}
+app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+
+    // Coating machines = active operator rows whose roles include
+    // either 'coatings' (wet/film) or 'embellish' (foil/emboss).
+    const machineRows = await sql`
+      SELECT name FROM operators
+      WHERE active
+        AND (roles @> ARRAY['coatings']::text[] OR roles @> ARRAY['embellish']::text[])
+      ORDER BY name
+    `;
+    const machines = machineRows.map(r => r.name).filter(Boolean);
+
+    const jobs = await sql`SELECT id, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
+
+    const acc = new Map();
+    const ensure = (m) => {
+      if (!acc.has(m)) acc.set(m, {
+        sheets: 0, jobIds: new Set(), operators: new Set(),
+        finishCounts: new Map(), waste: 0,
+      });
+      return acc.get(m);
+    };
+
+    for (const job of jobs) {
+      const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
+      if (!done.length) continue;
+      const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const sheetsN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      for (const entry of done) {
+        if (!entry) continue;
+        if (isoTsToDate(entry.done_at) !== date) continue;
+        const mc = String(entry.machine || '').trim();
+        if (!mc) continue;
+        const row = ensure(mc);
+        row.jobIds.add(job.id);
+        // Each coating pass counts as one sheet-pass — if a job got UV
+        // and Spot UV on the same machine the same day, that's two
+        // passes worth of work for the machine.
+        row.sheets += sheetsN;
+        const opName = String(entry.operator_name || '').trim();
+        if (opName) row.operators.add(opName);
+        const kind = String(entry.kind || '').trim();
+        if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
+        const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(w)) row.waste += w;
+      }
+    }
+
+    const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+
+    const out = allMachines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
+      const operators = row ? [...row.operators].sort() : [];
+      const finishes = row
+        ? [...row.finishCounts.entries()].sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(', ')
+        : '';
+      return {
+        machine: m,
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        finishes,
+        waste: row ? row.waste : 0,
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        hours: note.hours || '',
+        blankets: note.blankets || '',
+        remarks: note.remarks || '',
+        is_custom: isCustom,
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Breaking section. Unlike the others
+// there's no workflow stage to aggregate from, so all numeric cells
+// are admin-entered. We pull the operator roster from anyone whose
+// machine has the 'break' role and serve their saved cells.
+app.get('/api/reports/daily-production/breaking/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+
+    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY['break']::text[]`;
+    // De-dupe by lowercase name so the same person appearing on two
+    // machines only shows up once in the register.
+    const seen = new Map();
+    for (const r of machRows) {
+      const list = Array.isArray(r.persons) ? r.persons : [];
+      for (const p of list) {
+        const n = String((p && p.name) || '').trim();
+        if (!n) continue;
+        const key = n.toLowerCase();
+        if (!seen.has(key)) seen.set(key, { name: n, name_ur: String((p && p.name_ur) || '').trim() });
+      }
+    }
+    const operators = [...seen.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+    const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'breaking'`;
+    const noteByOp = new Map(notesRows.map(r => [r.machine, r]));
+    // Custom operators added via the + button on the report. Listed
+    // after the role-tagged roster so the regular crew stays at top.
+    const existingNames = new Set(operators.map(o => o.name.toLowerCase()));
+    const customOps = notesRows
+      .map(r => r.machine)
+      .filter(name => name && !existingNames.has(name.toLowerCase()))
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+      .map(name => ({ name, name_ur: '' }));
+    const allOperators = [...operators, ...customOps];
+
+    const out = allOperators.map(op => {
+      const n = noteByOp.get(op.name) || {};
+      return {
+        operator: op.name,
+        operator_ur: op.name_ur || '',
+        sheets:  n.sheets  || '',
+        hours:   n.hours   || '',
+        jobs:    n.jobs    || '',
+        helper:  n.helper  || '',
+        remarks: n.remarks || '',
+        is_custom: !existingNames.has(op.name.toLowerCase()),
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Pasting section. Same byline-parsing
+// pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
+// per job per machine on the chosen date.
+app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const { machines, acc } = await aggregateDailyProduction(sql, {
+      date, sectionRole: 'paste', stageLabel: 'Pasting', sheetsKey: 'pasted_cartons_qty',
+    });
+    const notesRows = await sql`SELECT machine, hours, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'pasting'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+    const out = allMachines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
+      const operators = row ? [...row.operators].sort() : [];
+      return {
+        machine: m,
+        // The helper calls it `sheets`; the Pasting register labels it Units.
+        units: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        hours: note.hours || '',
+        remarks: note.remarks || '',
+        is_custom: isCustom,
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Die Cutting section. Same shape as the
+// Printing endpoint but sheets come from die_cutting_sheets, the stage
+// label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
+// as admin-editable cells.
+app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const { machines, acc } = await aggregateDailyProduction(sql, {
+      date, sectionRole: 'diecut', stageLabel: 'Die Cutting', sheetsKey: 'die_cutting_sheets',
+    });
+    const notesRows = await sql`SELECT machine, hours, make_ready, settings, remarks, sheets, jobs, operators_text FROM daily_production_notes WHERE date = ${date} AND section = 'die'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+    const out = allMachines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
+      const operators = row ? [...row.operators].sort() : [];
+      return {
+        machine: m,
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        hours: note.hours || '',
+        make_ready: note.make_ready || '',
+        settings: note.settings || '',
+        remarks: note.remarks || '',
+        is_custom: isCustom,
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Save Hours / Remarks for a single (date, section, machine) cell.
+// Upsert so blanking a cell still leaves the row in place — admins can
+// also clear by sending empty strings.
+app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    const section = String(req.params.section || '').trim().toLowerCase();
+    const machine = String(req.params.machine || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
+    // Only admin / managers can edit register cells. Read is fine for
+    // everyone with an account.
+    const r = req.user && req.user.role;
+    const okRoles = ['admin', 'production_manager', 'store_manager', 'user', 'stock'];
+    if (!okRoles.includes(r)) return res.status(403).json({ error: 'Not allowed' });
+    const hours      = (req.body.hours      == null) ? null : String(req.body.hours).trim();
+    const remarks    = (req.body.remarks    == null) ? null : String(req.body.remarks).trim();
+    const makeReady  = (req.body.make_ready == null) ? null : String(req.body.make_ready).trim();
+    const settings   = (req.body.settings   == null) ? null : String(req.body.settings).trim();
+    const blankets   = (req.body.blankets   == null) ? null : String(req.body.blankets).trim();
+    const sheets     = (req.body.sheets     == null) ? null : String(req.body.sheets).trim();
+    const jobs       = (req.body.jobs       == null) ? null : String(req.body.jobs).trim();
+    const helper     = (req.body.helper     == null) ? null : String(req.body.helper).trim();
+    const colors     = (req.body.colors     == null) ? null : String(req.body.colors).trim();
+    const plates     = (req.body.plates     == null) ? null : String(req.body.plates).trim();
+    const operatorsT = (req.body.operators_text == null) ? null : String(req.body.operators_text).trim();
+    await sql`
+      INSERT INTO daily_production_notes (date, section, machine, hours, remarks, make_ready, settings, blankets, sheets, jobs, helper, colors, plates, operators_text)
+      VALUES (${date}, ${section}, ${machine}, ${hours}, ${remarks}, ${makeReady}, ${settings}, ${blankets}, ${sheets}, ${jobs}, ${helper}, ${colors}, ${plates}, ${operatorsT})
+      ON CONFLICT (date, section, machine) DO UPDATE
+        SET hours          = EXCLUDED.hours,
+            remarks        = EXCLUDED.remarks,
+            make_ready     = EXCLUDED.make_ready,
+            settings       = EXCLUDED.settings,
+            blankets       = EXCLUDED.blankets,
+            sheets         = EXCLUDED.sheets,
+            jobs           = EXCLUDED.jobs,
+            helper         = EXCLUDED.helper,
+            colors         = EXCLUDED.colors,
+            plates         = EXCLUDED.plates,
+            operators_text = EXCLUDED.operators_text
+    `;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Remove a custom Daily Production row entirely (the × button next to
+// a row added via the + button). Same role gate as the PUT endpoint.
+app.delete('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    const section = String(req.params.section || '').trim().toLowerCase();
+    const machine = String(req.params.machine || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
+    const r = req.user && req.user.role;
+    const okRoles = ['admin', 'production_manager', 'store_manager', 'user', 'stock'];
+    if (!okRoles.includes(r)) return res.status(403).json({ error: 'Not allowed' });
+    await sql`DELETE FROM daily_production_notes WHERE date = ${date} AND section = ${section} AND machine = ${machine}`;
+    res.json({ ok: true });
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
@@ -2348,12 +2833,58 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       return res.status(400).json({ error: "This job isn't at your station right now." });
     }
 
-    // 4) Merge the stage's number fields into particulars. Write the value into
-    // the row's `quantity` subfield and stamp `name` with the operator.
+    // 4) Merge the stage's number fields into particulars. Two payload
+    // shapes are supported per key:
+    //   - string  → legacy single-value patch (overwrites quantity).
+    //   - string[] → multi-pass mode. Each element is one pass; we merge
+    //     index-by-index with any existing entries[] so corrections to
+    //     historical values keep their original date/operator/machine,
+    //     while brand-new pass slots get today's date stamped on them.
+    //     quantity gets recomposed as a pipe-joined display string
+    //     ("90 | 20") so the job card and downstream consumers continue
+    //     to work without knowing about entries[].
     const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+    const todayISO = new Date().toISOString().slice(0, 10);
     for (const [key, value] of Object.entries(particularsPatch)) {
       const prev = (particulars[key] && typeof particulars[key] === 'object') ? particulars[key] : {};
-      particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+      if (Array.isArray(value)) {
+        // Seed from existing entries[], or back-fill a single legacy
+        // entry from prev.quantity so a job's first multi-pass save
+        // doesn't lose its original day-1 number.
+        const seed = Array.isArray(prev.entries) && prev.entries.length
+          ? prev.entries
+          : (prev.quantity != null && String(prev.quantity).trim() !== ''
+              ? [{ qty: String(prev.quantity).trim(), date: null,
+                   operator: prev.name || null, machine: null }]
+              : []);
+        const merged = value.map((v, i) => {
+          const qty = String(v ?? '').trim();
+          const old = seed[i];
+          if (old) {
+            // Preserve whatever date the existing entry had — including
+            // null for entries that were back-filled from the legacy
+            // single-quantity field. Stamping "today" on a null date
+            // would silently misattribute the original day-1 number to
+            // the day the operator first added a second pass.
+            return {
+              qty,
+              date:     old.date     || null,
+              operator: old.operator || operator.name,
+              machine:  old.machine  || operator.machine || null,
+            };
+          }
+          return { qty, date: todayISO, operator: operator.name, machine: operator.machine || null };
+        });
+        const opsList = [...new Set(merged.map(e => e.operator).filter(Boolean))];
+        particulars[key] = {
+          ...prev,
+          entries: merged,
+          quantity: merged.map(e => e.qty).filter(q => q !== '').join(' | '),
+          name: opsList.join(' | '),
+        };
+      } else {
+        particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+      }
     }
 
     // Byline used by every log entry below. Including the operator's
@@ -2384,7 +2915,10 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       if (allowedFinishes.size && !allowedFinishes.has(finishKind)) return res.status(403).json({ error: `Your role isn't allowed to do ${finishKind}.` });
       const planned = Array.isArray(job.coatings) ? job.coatings : [];
       if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That coating was not planned for this job.' });
-      if (coatings_done.some(d => d && d.kind === finishKind)) return res.status(409).json({ error: 'That coating has already been recorded for this job.' });
+      // Multi-day support: same finish kind can be recorded more than
+      // once for a job (e.g. half the UV done today, the other half
+      // tomorrow). The Daily Production aggregator filters by done_at
+      // so each pass lands on the correct day.
       coatings_done.push({
         kind: finishKind,
         operator_id: operator.id,
