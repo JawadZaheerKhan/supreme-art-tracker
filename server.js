@@ -1414,6 +1414,135 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
   }
 });
 
+// ── Production Report (date-range, per-machine + per-operator) ───────
+// Aggregates across the full date range using the same log-byline +
+// daily-production-notes sources the per-day Daily Production tabs use.
+// Sheets / Jobs come from the auto-aggregation (job log entries within
+// the date range); Hours come from the manager-entered notes (no other
+// source records hours). Returns { byMachine: [...], byOperator: [...] }
+// each row { sheets, hours, jobs } — frontend renders two tables with a
+// summed footer.
+async function aggregateProductionRange(sql, { from, to }) {
+  const byMachine = new Map();
+  const byOperator = new Map();
+  const ensureM = (m) => {
+    if (!byMachine.has(m)) byMachine.set(m, { machine: m, sheets: 0, hours: 0, jobs: new Set() });
+    return byMachine.get(m);
+  };
+  const ensureO = (op) => {
+    if (!byOperator.has(op)) byOperator.set(op, { operator: op, sheets: 0, hours: 0, jobs: new Set() });
+    return byOperator.get(op);
+  };
+  // Stage label -> particulars key for sheet/qty extraction. Matches the
+  // per-day endpoints above. Coatings is handled separately via the
+  // coatings_done JSONB on each job.
+  const STAGE_KEYS = {
+    'Printing':    'printed_sheets_qty',
+    'Die Cutting': 'die_cutting_sheets',
+    'Pasting':     'pasted_cartons_qty',
+  };
+  const jobs = await sql`SELECT id, particulars, log, coatings_done FROM jobs WHERE deleted_at IS NULL`;
+  for (const job of jobs) {
+    const log = Array.isArray(job.log) ? job.log : [];
+    const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+    for (const e of log) {
+      if (!e || !e.by) continue;
+      const eDate = logTimeToISODate(e.time);
+      if (!eDate || eDate < from || eDate > to) continue;
+      const stageLabel = parseByStage(e.by);
+      const sheetsKey = STAGE_KEYS[stageLabel];
+      if (!sheetsKey) continue;
+      const mc = parseByMachine(e.by);
+      const op = parseByOperator(e.by);
+      // Sheet count for this date entry — prefer multi-pass entries[]
+      // (per-date qty), fall back to the single-quantity number for
+      // older jobs that never used multi-pass.
+      let sheets = 0;
+      const partKey = part[sheetsKey];
+      if (partKey && Array.isArray(partKey.entries) && partKey.entries.length) {
+        for (const en of partKey.entries) {
+          if (en && en.date === eDate) {
+            const n = parseInt(String(en.qty || '').replace(/[^0-9-]/g, ''), 10);
+            if (Number.isFinite(n)) sheets += n;
+          }
+        }
+      } else if (partKey && partKey.quantity) {
+        const n = parseInt(String(partKey.quantity).replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(n)) sheets = n;
+      }
+      if (mc) { const r = ensureM(mc); r.sheets += sheets; r.jobs.add(job.id); }
+      if (op) { const r = ensureO(op); r.sheets += sheets; r.jobs.add(job.id); }
+    }
+    // Coatings: source of truth is the coatings_done array (one entry
+    // per finish applied). No sheets number on those entries — only
+    // waste_sheets — so we count machine/operator activity (jobs)
+    // without inflating the sheets total.
+    const coatings = Array.isArray(job.coatings_done) ? job.coatings_done : [];
+    for (const c of coatings) {
+      if (!c) continue;
+      const cDate = isoTsToDate(c.done_at);
+      if (!cDate || cDate < from || cDate > to) continue;
+      if (c.machine)       ensureM(c.machine).jobs.add(job.id);
+      if (c.operator_name) ensureO(c.operator_name).jobs.add(job.id);
+    }
+  }
+  // Hours come from daily_production_notes only. Breaking's notes use
+  // the `machine` column to hold the operator name (Breaking is
+  // operator-keyed in the paper register), so that section contributes
+  // to byOperator, never byMachine.
+  const notes = await sql`SELECT machine, hours, operators_text, section FROM daily_production_notes WHERE date BETWEEN ${from} AND ${to}`;
+  for (const n of notes) {
+    const hrs = parseFloat(String(n.hours || '').replace(/[^0-9.]/g, '')) || 0;
+    if (hrs <= 0) continue;
+    if (n.section === 'breaking') {
+      if (n.machine) ensureO(n.machine).hours += hrs;
+    } else {
+      if (n.machine) ensureM(n.machine).hours += hrs;
+      // operators_text is a comma/semicolon list. Split the hours
+      // evenly so two operators on a 6-hour shift each get 3h credit.
+      if (n.operators_text) {
+        const ops = String(n.operators_text).split(/[,;]+/).map(s => s.trim()).filter(Boolean);
+        if (ops.length) {
+          const per = hrs / ops.length;
+          for (const op of ops) ensureO(op).hours += per;
+        }
+      }
+    }
+  }
+  const toRow = (r, keyName) => ({
+    [keyName]: r[keyName],
+    sheets: r.sheets,
+    hours: Math.round(r.hours * 100) / 100,
+    jobs:   r.jobs.size,
+  });
+  const byMachineArr = [...byMachine.values()]
+    .map(r => toRow(r, 'machine'))
+    .filter(r => r.sheets > 0 || r.hours > 0 || r.jobs > 0)
+    .sort((a, b) => String(a.machine).localeCompare(String(b.machine)));
+  const byOperatorArr = [...byOperator.values()]
+    .map(r => toRow(r, 'operator'))
+    .filter(r => r.sheets > 0 || r.hours > 0 || r.jobs > 0)
+    .sort((a, b) => String(a.operator).localeCompare(String(b.operator)));
+  return { byMachine: byMachineArr, byOperator: byOperatorArr };
+}
+
+app.get('/api/reports/production', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const from = String(req.query.from || '').trim();
+    const to   = String(req.query.to   || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      return res.status(400).json({ error: 'from and to must be YYYY-MM-DD' });
+    }
+    if (from > to) return res.status(400).json({ error: 'from must be on or before to' });
+    const result = await aggregateProductionRange(sql, { from, to });
+    res.json(result);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Save Hours / Remarks for a single (date, section, machine) cell.
 // Upsert so blanking a cell still leaves the row in place — admins can
 // also clear by sending empty strings.
