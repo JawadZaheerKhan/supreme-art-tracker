@@ -6365,6 +6365,17 @@ function renderJobsReport() {
   const td  = 'style="padding:8px 10px;"';
   const tdR = 'style="padding:8px 10px;text-align:right;"';
   const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
+  // Column totals for the footer — matches the inventory report's bottom
+  // summary row. Job ID column doubles as the count ("N jobs"). Wastage is
+  // null on rows where it can't be computed (no carton/delivered qty); skip
+  // those instead of treating them as 0.
+  const totals = rows.reduce((a, r) => ({
+    poQty:        a.poQty        + (+r.poQty || 0),
+    cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
+    deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
+    wastage:      a.wastage      + (r.wastage == null ? 0 : (+r.wastage || 0)),
+    packets:      a.packets      + (+r.packets || 0),
+  }), { poQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, packets: 0 });
   const tbody = rows.map(r => {
     // Wastage (carton qty − delivered qty) is just a tracking number, not a
     // good/bad indicator — the gap between PO / produced / delivered can
@@ -6421,6 +6432,19 @@ function renderJobsReport() {
         </tr>
       </thead>
       <tbody>${tbody}</tbody>
+      <tfoot>
+        <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+          <td></td>
+          <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
+          <td colspan="5" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.packets)}</td>
+          <td colspan="3"></td>
+        </tr>
+      </tfoot>
     </table>
     </div>`;
   const headChk = document.getElementById('jr-bulk-all');
