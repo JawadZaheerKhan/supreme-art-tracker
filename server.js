@@ -1459,23 +1459,47 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
 // each row { sheets, hours, jobs } — frontend renders two tables with a
 // summed footer.
 async function aggregateProductionRange(sql, { from, to }) {
-  const byMachine = new Map();
-  const byOperator = new Map();
-  const ensureM = (m) => {
-    if (!byMachine.has(m)) byMachine.set(m, { machine: m, sheets: 0, hours: 0, jobs: new Set() });
-    return byMachine.get(m);
+  // Per-(date, machine) and per-(date, operator) accumulators so the
+  // frontend can either group by entity (summary view) or filter to one
+  // entity and show its day-by-day rows in the range.
+  const byMachineDaily = new Map();   // key: 'YYYY-MM-DD|machine'
+  const byOperatorDaily = new Map();  // key: 'YYYY-MM-DD|operator'
+  const ensureMD = (date, m) => {
+    const k = date + '|' + m;
+    if (!byMachineDaily.has(k)) byMachineDaily.set(k, { date, machine: m, sheets: 0, waste: 0, hours: 0, jobs: new Set() });
+    return byMachineDaily.get(k);
   };
-  const ensureO = (op) => {
-    if (!byOperator.has(op)) byOperator.set(op, { operator: op, sheets: 0, hours: 0, jobs: new Set() });
-    return byOperator.get(op);
+  const ensureOD = (date, op) => {
+    const k = date + '|' + op;
+    if (!byOperatorDaily.has(k)) byOperatorDaily.set(k, { date, operator: op, sheets: 0, waste: 0, hours: 0, jobs: new Set() });
+    return byOperatorDaily.get(k);
   };
-  // Stage label -> particulars key for sheet/qty extraction. Matches the
-  // per-day endpoints above. Coatings is handled separately via the
-  // coatings_done JSONB on each job.
+  // Stage label -> [sheetsKey, wasteKey] for particulars extraction.
+  // Coatings handled separately via coatings_done JSONB.
   const STAGE_KEYS = {
-    'Printing':    'printed_sheets_qty',
-    'Die Cutting': 'die_cutting_sheets',
-    'Pasting':     'pasted_cartons_qty',
+    'Printing':    ['printed_sheets_qty', 'printed_waste_sheets'],
+    'Die Cutting': ['die_cutting_sheets', 'die_cutting_waste'],
+    'Pasting':     ['pasted_cartons_qty', 'pasting_waste_qty'],
+  };
+  // Per-date qty from a particulars sub-object — multi-pass entries[]
+  // (per-date qty) preferred; single-quantity fallback for older jobs.
+  const qtyForDate = (partKey, date) => {
+    if (!partKey) return 0;
+    if (Array.isArray(partKey.entries) && partKey.entries.length) {
+      let n = 0;
+      for (const e of partKey.entries) {
+        if (e && e.date === date) {
+          const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (Number.isFinite(v)) n += v;
+        }
+      }
+      return n;
+    }
+    if (partKey.quantity) {
+      const v = parseInt(String(partKey.quantity).replace(/[^0-9-]/g, ''), 10);
+      return Number.isFinite(v) ? v : 0;
+    }
+    return 0;
   };
   const jobs = await sql`SELECT id, particulars, log, coatings_done FROM jobs WHERE deleted_at IS NULL`;
   for (const job of jobs) {
@@ -1486,80 +1510,66 @@ async function aggregateProductionRange(sql, { from, to }) {
       const eDate = logTimeToISODate(e.time);
       if (!eDate || eDate < from || eDate > to) continue;
       const stageLabel = parseByStage(e.by);
-      const sheetsKey = STAGE_KEYS[stageLabel];
-      if (!sheetsKey) continue;
+      const keys = STAGE_KEYS[stageLabel];
+      if (!keys) continue;
+      const [sheetsKey, wasteKey] = keys;
       const mc = parseByMachine(e.by);
       const op = parseByOperator(e.by);
-      // Sheet count for this date entry — prefer multi-pass entries[]
-      // (per-date qty), fall back to the single-quantity number for
-      // older jobs that never used multi-pass.
-      let sheets = 0;
-      const partKey = part[sheetsKey];
-      if (partKey && Array.isArray(partKey.entries) && partKey.entries.length) {
-        for (const en of partKey.entries) {
-          if (en && en.date === eDate) {
-            const n = parseInt(String(en.qty || '').replace(/[^0-9-]/g, ''), 10);
-            if (Number.isFinite(n)) sheets += n;
-          }
-        }
-      } else if (partKey && partKey.quantity) {
-        const n = parseInt(String(partKey.quantity).replace(/[^0-9-]/g, ''), 10);
-        if (Number.isFinite(n)) sheets = n;
-      }
-      if (mc) { const r = ensureM(mc); r.sheets += sheets; r.jobs.add(job.id); }
-      if (op) { const r = ensureO(op); r.sheets += sheets; r.jobs.add(job.id); }
+      const sheets = qtyForDate(part[sheetsKey], eDate);
+      const waste  = qtyForDate(part[wasteKey],  eDate);
+      if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
+      if (op) { const r = ensureOD(eDate, op); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
     }
-    // Coatings: source of truth is the coatings_done array (one entry
-    // per finish applied). No sheets number on those entries — only
-    // waste_sheets — so we count machine/operator activity (jobs)
-    // without inflating the sheets total.
+    // Coatings: source of truth is coatings_done. No sheet count — only
+    // the waste_sheets number — so we contribute waste + jobs but not
+    // sheets, to avoid double-counting.
     const coatings = Array.isArray(job.coatings_done) ? job.coatings_done : [];
     for (const c of coatings) {
       if (!c) continue;
       const cDate = isoTsToDate(c.done_at);
       if (!cDate || cDate < from || cDate > to) continue;
-      if (c.machine)       ensureM(c.machine).jobs.add(job.id);
-      if (c.operator_name) ensureO(c.operator_name).jobs.add(job.id);
+      const w = parseInt(String(c.waste_sheets || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      if (c.machine)       { const r = ensureMD(cDate, c.machine);       r.waste += w; r.jobs.add(job.id); }
+      if (c.operator_name) { const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id); }
     }
   }
   // Hours come from daily_production_notes only. Breaking's notes use
   // the `machine` column to hold the operator name (Breaking is
   // operator-keyed in the paper register), so that section contributes
   // to byOperator, never byMachine.
-  const notes = await sql`SELECT machine, hours, operators_text, section FROM daily_production_notes WHERE date BETWEEN ${from} AND ${to}`;
+  const notes = await sql`SELECT date, machine, hours, operators_text, section FROM daily_production_notes WHERE date BETWEEN ${from} AND ${to}`;
   for (const n of notes) {
     const hrs = parseFloat(String(n.hours || '').replace(/[^0-9.]/g, '')) || 0;
     if (hrs <= 0) continue;
+    const dateStr = n.date instanceof Date
+      ? n.date.toISOString().slice(0, 10)
+      : String(n.date).slice(0, 10);
     if (n.section === 'breaking') {
-      if (n.machine) ensureO(n.machine).hours += hrs;
+      if (n.machine) ensureOD(dateStr, n.machine).hours += hrs;
     } else {
-      if (n.machine) ensureM(n.machine).hours += hrs;
+      if (n.machine) ensureMD(dateStr, n.machine).hours += hrs;
       // operators_text is a comma/semicolon list. Split the hours
       // evenly so two operators on a 6-hour shift each get 3h credit.
       if (n.operators_text) {
         const ops = String(n.operators_text).split(/[,;]+/).map(s => s.trim()).filter(Boolean);
         if (ops.length) {
           const per = hrs / ops.length;
-          for (const op of ops) ensureO(op).hours += per;
+          for (const op of ops) ensureOD(dateStr, op).hours += per;
         }
       }
     }
   }
-  const toRow = (r, keyName) => ({
-    [keyName]: r[keyName],
-    sheets: r.sheets,
-    hours: Math.round(r.hours * 100) / 100,
-    jobs:   r.jobs.size,
-  });
-  const byMachineArr = [...byMachine.values()]
-    .map(r => toRow(r, 'machine'))
-    .filter(r => r.sheets > 0 || r.hours > 0 || r.jobs > 0)
-    .sort((a, b) => String(a.machine).localeCompare(String(b.machine)));
-  const byOperatorArr = [...byOperator.values()]
-    .map(r => toRow(r, 'operator'))
-    .filter(r => r.sheets > 0 || r.hours > 0 || r.jobs > 0)
-    .sort((a, b) => String(a.operator).localeCompare(String(b.operator)));
-  return { byMachine: byMachineArr, byOperator: byOperatorArr };
+  const toMRow = r => ({ date: r.date, machine: r.machine, sheets: r.sheets, waste: r.waste, hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size });
+  const toORow = r => ({ date: r.date, operator: r.operator, sheets: r.sheets, waste: r.waste, hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size });
+  const byMachineDailyArr = [...byMachineDaily.values()]
+    .map(toMRow)
+    .filter(r => r.sheets > 0 || r.waste > 0 || r.hours > 0 || r.jobs > 0)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.machine.localeCompare(b.machine));
+  const byOperatorDailyArr = [...byOperatorDaily.values()]
+    .map(toORow)
+    .filter(r => r.sheets > 0 || r.waste > 0 || r.hours > 0 || r.jobs > 0)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.operator.localeCompare(b.operator));
+  return { byMachineDaily: byMachineDailyArr, byOperatorDaily: byOperatorDailyArr };
 }
 
 app.get('/api/reports/production', requireAuth, async (req, res) => {
