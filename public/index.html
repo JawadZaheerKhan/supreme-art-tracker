@@ -505,8 +505,12 @@
   .badge-done { background: var(--green-bg); color: var(--green-text); }
   .badge-blocked { background: var(--red-bg); color: var(--red-text); }
   .badge-new { background: var(--amber-bg); color: var(--amber-text); }
-  /* Pending stock issuance — orange to stand out from the regular flow */
+  /* Pending stock issuance — green for "stock is ready, just click Issue". */
   .badge-pending { background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); }
+  /* On-hand = 0: nothing to issue yet. Red, same visual weight as Blocked. */
+  .badge-out-of-stock { background: var(--red-bg); color: var(--red-text); border: 1px solid var(--red-border); }
+  /* On-hand > 0 but less than needed. Yellow, "almost there" warning. */
+  .badge-low-stock { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
   /* URGENT — bright yellow badge with dark cocoa text. Switched away from
      red because the new maroon brand owns red across the app; yellow
      pops against both the white cards and the maroon hero without
@@ -520,6 +524,10 @@
      style) because we need this one to read as a status badge at a glance. */
   .btn-waiting { background: #A32D2D; color: #fff; border-color: #A32D2D; font-weight: 600; }
   .btn-waiting:hover { background: #7f1d1d; border-color: #7f1d1d; }
+  /* On-hand > 0 but short: yellow "Low Stock" button. Sits between
+     green (Issue Stock) and red (Out of Stock) as a clear middle state. */
+  .btn-low-stock { background: #f59e0b; color: #422006; border-color: #d97706; font-weight: 600; }
+  .btn-low-stock:hover { background: #d97706; border-color: #b45309; }
   /* Pending Stock toggle in the Inventory toolbar. Bigger than the filters
      so it reads as a primary store-keeper action, sits to the right next
      to Stock In (Bulk). Light green palette — soft enough not to compete
@@ -2750,7 +2758,7 @@ function renderJobsCompact() {
     // Status badge: 'Pending Stock' takes priority over everything else
     // (it means the job hasn't started consuming stock yet — nothing else
     // is meaningful until that happens).
-    const badge = pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
+    const badge = pending ? jobStockBadge(j) :
       done ? `<span class="badge badge-done">Delivered</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
@@ -2813,7 +2821,7 @@ function renderJobsCompact() {
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
-            ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>` : ''}
+            ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
           </div>
@@ -2838,20 +2846,44 @@ function renderJobsCards() {
 // The green "Issue Stock" / red "Waiting for Stock" button. Shared shape with
 // the compact view's inline logic: green when the linked inventory item has
 // enough sheets, red+warning when short, neutral hint when no paper linked.
+// Stock-state badge for a pending job. Shifts colour + label based on how
+// much paper is on hand vs how much the job needs:
+//   - on-hand >= need (or no inventory linked yet): green 'Pending Stock'
+//   - on-hand = 0:                                  red   'Out of Stock'
+//   - 0 < on-hand < need:                           yellow 'Low Stock'
+function jobStockBadge(j) {
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const have  = invIt ? (invIt.current_balance || 0) : 0;
+  const need  = parseFloat(j.sheets) || 0;
+  if (!invIt || !need || have >= need) {
+    return '<span class="badge badge-pending">&#9201; Pending Stock</span>';
+  }
+  if (have <= 0) {
+    return '<span class="badge badge-out-of-stock">&#9888; Out of Stock</span>';
+  }
+  return '<span class="badge badge-low-stock">&#9888; Low Stock</span>';
+}
+
 function cardIssueStockBtn(j) {
   const invIt   = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const have    = invIt ? (invIt.current_balance || 0) : 0;
   const need    = parseFloat(j.sheets) || 0;
   const enough  = !need || (invIt && have >= need);
+  // Three states once stock isn't 'enough':
+  //   - On-hand = 0 → Out of Stock (red).
+  //   - 0 < on-hand < need → Low Stock (yellow).
+  //   - >= need → Issue Stock (green, the 'enough' branch).
+  const isOut   = !enough && have <= 0;
+  const isLow   = !enough && have > 0;
   const shortBy = enough ? 0 : (need - have);
-  const cls     = enough ? 'btn-success' : 'btn-waiting';
+  const cls     = enough ? 'btn-success' : (isOut ? 'btn-waiting' : 'btn-low-stock');
   const tip     = enough
     ? 'Issue stock and start this job'
     : (invIt
         ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}). Will turn green when stock arrives.`
         : 'No paper picked yet — open Edit to link an inventory item.');
   const icon    = enough ? '&#10003;' : '&#9888;';
-  const label   = enough ? 'Issue Stock' : 'Waiting for Stock';
+  const label   = enough ? 'Issue Stock' : (isOut ? 'Out of Stock' : 'Low Stock');
   return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
 }
 
@@ -2908,7 +2940,7 @@ function renderJobCard(j) {
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
-        ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print${(j.print_count || 0) > 0 ? '<span class="job-printed-dot"></span>' : ''}</button>` : ''}
+        ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
@@ -3818,10 +3850,11 @@ function renderInvPendingList() {
     const have     = invIt ? (invIt.current_balance || 0) : 0;
     const need     = parseFloat(j.sheets) || 0;
     const enough   = !need || (invIt && have >= need);
+    const isOut    = !enough && have <= 0;
     const shortBy  = enough ? 0 : (need - have);
-    const cls      = enough ? 'btn-success' : 'btn-waiting';
+    const cls      = enough ? 'btn-success' : (isOut ? 'btn-waiting' : 'btn-low-stock');
     const icon     = enough ? '&#10003;' : '&#9888;';
-    const label    = enough ? 'Issue Stock' : 'Waiting for Stock';
+    const label    = enough ? 'Issue Stock' : (isOut ? 'Out of Stock' : 'Low Stock');
     const tip      = enough
       ? 'Issue stock and start this job'
       : (invIt
@@ -12368,13 +12401,56 @@ function printCapa(capaId) {
   }).catch(e => notify('Error: ' + e.message));
 }
 
-// Same flow as printCapa — the difference is just the suggested filename
-// and a toast hint so the user knows to pick 'Save as PDF' as the
-// destination in the browser print dialog. The underlying browser
-// machinery is the same; this button exists for discoverability.
-function saveCapaAsPdf(capaId) {
-  notify('In the print dialog, pick "Save as PDF" as the destination.');
-  printCapa(capaId);
+// Lazy-load html2pdf.js — only fetched the first time someone clicks
+// 'Save as PDF'. Same pattern as ensureXlsx for the Excel export.
+let _html2pdfPromise = null;
+function ensureHtml2Pdf() {
+  if (window.html2pdf) return Promise.resolve();
+  if (_html2pdfPromise) return _html2pdfPromise;
+  _html2pdfPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+    s.onload = () => resolve();
+    s.onerror = () => { _html2pdfPromise = null; reject(new Error('Could not load the PDF library — check your internet connection.')); };
+    document.head.appendChild(s);
+  });
+  return _html2pdfPromise;
+}
+
+// Generate a real PDF download — no print dialog. Builds the same CAPA
+// HTML printCapa builds, renders it into an off-screen container, and
+// uses html2pdf.js to rasterize each page into a downloadable A4 PDF.
+async function saveCapaAsPdf(capaId) {
+  try {
+    notify('Generating PDF…');
+    await ensureHtml2Pdf();
+    const capa = await api('GET', `/api/capa/${capaId}`);
+    const fileBase = capa.capa_ref
+      ? `CAPA-${capa.capa_ref}`
+      : ((capa.data && capa.data.capa_no) ? `CAPA-${capa.data.capa_no}` : 'CAPA-Report');
+    // Render into a hidden, fixed-A4-width container so html2canvas
+    // captures the same layout the print path produces. Off-screen
+    // (left: -9999px) so the user never sees it flash.
+    const container = document.createElement('div');
+    container.style.cssText = 'position:absolute;left:-9999px;top:0;width:210mm;background:#fff;';
+    container.innerHTML = buildCapaPrint(capa);
+    document.body.appendChild(container);
+    try {
+      await window.html2pdf().set({
+        margin:      8,
+        filename:    `${fileBase}.pdf`,
+        image:       { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+        jsPDF:       { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak:   { mode: ['css', 'legacy'] },
+      }).from(container).save();
+      notify('PDF saved.');
+    } finally {
+      document.body.removeChild(container);
+    }
+  } catch (e) {
+    notify('Could not save PDF: ' + e.message);
+  }
 }
 
 // ── CAPA Report page (under Jobs Reports) ────────────────────
