@@ -1515,6 +1515,9 @@
     <select class="filter" id="client-filter" onchange="setClientFilter(this.value)">
       <option value="">All companies</option>
     </select>
+    <select class="filter" id="machine-filter" onchange="setMachineFilter(this.value)">
+      <option value="">All machines</option>
+    </select>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
       <option value="this-week">This week</option>
@@ -2091,6 +2094,10 @@ let jobsViewMode = localStorage.getItem('sa_jobs_view') || 'cards';
 let filterText = '';
 let filterStage = '';
 let filterClient = '';
+// Machine filter: matches a job if any of its log entries' bylines reference
+// the selected machine (parsed from "Name · Machine (Stage)"). Useful for
+// answering "what's running on / has been run on machine X."
+let filterMachine = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
@@ -2473,6 +2480,7 @@ function setMode(m) {
     exportBtn.style.display = '';
     refreshBtn.style.display = '';
     render();
+    loadDailyStats();   // fills the Daily Unit Carton Qty card
   } else if (m === 'inventory') {
     addBtn.style.display = canWriteInventory() ? '' : 'none';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
@@ -2541,6 +2549,16 @@ function getFiltered() {
     if (t && !j.name.toLowerCase().includes(t) && !j.client.toLowerCase().includes(t) && !String(j.id).includes(t)) return false;
     if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
     if (filterClient && j.client !== filterClient) return false;
+    if (filterMachine) {
+      const log = Array.isArray(j.log) ? j.log : [];
+      const seen = new Set();
+      for (const e of log) {
+        if (!e || !e.by) continue;
+        const m = /·\s*([^()]+?)\s*\(/.exec(String(e.by));
+        if (m) seen.add(m[1].trim());
+      }
+      if (!seen.has(filterMachine)) return false;
+    }
     if (!inDateRange(j)) return false;
     if (view === 'pending') return isPendingIssuance(j);
     // Pending jobs are excluded from "active" so the queue stays clean —
@@ -2666,13 +2684,14 @@ function renderStats() {
   // flags the rows that need attention.
   const stat = (label, value, valueCls = '') =>
     `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${valueCls}">${value}</div></div>`;
+  // Daily Cartons (Printing started today) reuses the same number the
+  // inventory dashboard computes — share dailyStats so we don't fetch twice.
+  const cartonsCell = dailyStats.loaded ? dailyStats.cartons.toLocaleString() : '—';
   document.getElementById('stats-row').innerHTML = [
-    stat('Total Jobs',    s.total),
-    stat('Pending Stock', s.pending, s.pending>0?'warn':''),
-    stat('In Progress',   s.active),
-    stat('Storage',       s.storage),
-    stat('Completed',     s.done),
-    stat('Blocked',       s.blocked, s.blocked>0?'warn':''),
+    stat('Pending Stock',          s.pending, s.pending>0?'warn':''),
+    stat('In Progress',            s.active),
+    stat('Storage',                s.storage),
+    stat('Daily Unit Carton Qty',  cartonsCell),
   ].join('');
 }
 
@@ -2684,6 +2703,23 @@ function renderTabs() {
   const cf = document.getElementById('client-filter');
   const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
+  // Machine options: union of every machine that appears in any job's
+  // log byline ("Name · Machine (Stage)"). Picking one filters the
+  // Jobs list to jobs that ran on (or are running on) that machine.
+  const mf = document.getElementById('machine-filter');
+  if (mf) {
+    const machines = new Set();
+    for (const j of jobs) {
+      const log = Array.isArray(j.log) ? j.log : [];
+      for (const e of log) {
+        if (!e || !e.by) continue;
+        const m = /·\s*([^()]+?)\s*\(/.exec(String(e.by));
+        if (m) machines.add(m[1].trim());
+      }
+    }
+    const sorted = [...machines].filter(Boolean).sort((a, b) => a.localeCompare(b));
+    mf.innerHTML = `<option value="">All machines</option>` + sorted.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
+  }
 }
 
 // Dispatcher — picks the card grid or the dense list, syncs the toggle UI,
@@ -3398,6 +3434,7 @@ function setJobsViewMode(m) {
 function setFilter(v) { filterText=v; renderJobs(); }
 function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
+function setMachineFilter(v) { filterMachine=v; renderJobs(); }
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
 function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
@@ -3478,16 +3515,12 @@ function renderInventoryStats() {
   // 'job-consumed'), split between packets (cards) and reams (papers) in
   // the breakdown line so the unit ambiguity is obvious to the reader.
   const fmtN = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
-  const packetsCell = !dailyStats.loaded
+  const dailyCell = (val) => !dailyStats.loaded
     ? `<div class="stat-value">—</div>`
-    : `<div class="stat-value">${fmtN(dailyStats.packets)}</div>` +
-      (dailyStats.cards || dailyStats.reams
-        ? `<div style="font-size:11px;color:var(--text2);margin-top:2px;">${fmtN(dailyStats.cards)} pkts &middot; ${fmtN(dailyStats.reams)} reams</div>`
-        : '');
+    : `<div class="stat-value">${fmtN(val)}</div>`;
   document.getElementById('inv-stats-row').innerHTML = `
-    <div class="stat"><div class="stat-label">Paper Items</div><div class="stat-value">${s.total}</div></div>
-    <div class="stat"><div class="stat-label">Daily Packets / Reams Used</div>${packetsCell}</div>
-    <div class="stat"><div class="stat-label">Daily Cartons (Printing started today)</div><div class="stat-value">${dailyStats.loaded ? dailyStats.cartons.toLocaleString() : '—'}</div></div>
+    <div class="stat"><div class="stat-label">Daily Packets</div>${dailyCell(dailyStats.cards)}</div>
+    <div class="stat"><div class="stat-label">Daily Reams</div>${dailyCell(dailyStats.reams)}</div>
     <div class="stat"><div class="stat-label">Out of Stock</div><div class="stat-value ${s.out>0?'warn':''}">${s.out}</div></div>
   `;
 }
@@ -3532,7 +3565,11 @@ async function loadDailyStats() {
   }
   dailyStats.cartons = cartons;
   dailyStats.loaded  = true;
+  // Both dashboards consume dailyStats — refresh whichever is currently
+  // visible. Inventory shows packets/reams/out-of-stock; Jobs shows the
+  // Daily Unit Carton Qty card.
   renderInventoryStats();
+  renderStats();
 }
 function renderInventoryFilters() {
   const types = invDistinct('paper_type');
@@ -6737,6 +6774,10 @@ function renderProductionReport() {
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Production Report</h2>
       <span style="color:var(--text2);font-size:12px;">Sheets, wastage, hours, jobs from the Daily Production register. Pick a machine or operator to drill into day-by-day.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportProductionReport()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printProductionReport()">&#128424; Print Report</button>
+      </div>
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
@@ -6758,6 +6799,138 @@ function renderProductionReport() {
       ${clearBtn}
     </div>
     ${s.loading ? '<div class="empty" style="padding:30px;text-align:center;color:var(--text2);">Loading…</div>' : (s.pick ? buildDailyTable() : buildSummaryTable())}`;
+}
+
+// Print the current Production Report view (summary or drill-down).
+// Reuses the #print-area / @media print rules the rest of the app uses.
+function printProductionReport() {
+  const s = prodReportState;
+  if (!s.data) { notify('Load the report first.'); return; }
+  const isMachine = s.view === 'machine';
+  const dailyRows = isMachine ? s.data.byMachineDaily : s.data.byOperatorDaily;
+  const nameKey = isMachine ? 'machine' : 'operator';
+  const nameLabel = isMachine ? 'Machine' : 'Operator';
+  const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
+  let rows, headers, title;
+  if (s.pick) {
+    rows = dailyRows.filter(r => r[nameKey] === s.pick).map(r => [fmtDate(r.date), r.sheets, r.waste, r.hours, r.jobs]);
+    headers = ['Date', 'Sheets', 'Wastage', 'Hours', 'Jobs'];
+    title = `Production — ${s.pick} (day-by-day)`;
+  } else {
+    const acc = new Map();
+    for (const r of dailyRows) {
+      const k = r[nameKey];
+      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, waste: 0, hours: 0, jobs: 0 });
+      const e = acc.get(k);
+      e.sheets += (+r.sheets || 0); e.waste += (+r.waste || 0);
+      e.hours  += (+r.hours  || 0); e.jobs  += (+r.jobs  || 0);
+    }
+    rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map(r => [r.name, r.sheets, r.waste, Math.round(r.hours * 100) / 100, r.jobs]);
+    headers = [nameLabel, 'Sheets', 'Wastage', 'Hours', 'Jobs'];
+    title = `Production Report — By ${nameLabel}`;
+  }
+  const totals = rows.reduce((t, r) => ({
+    sheets: t.sheets + (+r[1] || 0),
+    waste:  t.waste  + (+r[2] || 0),
+    hours:  t.hours  + (+r[3] || 0),
+    jobs:   t.jobs   + (+r[4] || 0),
+  }), { sheets: 0, waste: 0, hours: 0, jobs: 0 });
+  const th  = 'style="text-align:left;padding:6px 8px;border:1px solid #888;background:#f0f0f0;font-weight:700;font-size:11pt;"';
+  const thR = 'style="text-align:right;padding:6px 8px;border:1px solid #888;background:#f0f0f0;font-weight:700;font-size:11pt;"';
+  const td  = 'style="padding:5px 8px;border:1px solid #888;font-size:10.5pt;"';
+  const tdR = 'style="padding:5px 8px;border:1px solid #888;text-align:right;font-size:10.5pt;font-variant-numeric:tabular-nums;"';
+  const body = rows.map(r => `
+    <tr>
+      <td ${td}>${esc(r[0])}</td>
+      <td ${tdR}>${fmt(r[1])}</td>
+      <td ${tdR}>${fmt(r[2])}</td>
+      <td ${tdR}>${fmt(r[3])}</td>
+      <td ${tdR}>${fmt(r[4])}</td>
+    </tr>`).join('') || `<tr><td ${td} colspan="5" style="text-align:center;color:#666;font-style:italic;">No activity in window.</td></tr>`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#000;padding:6mm;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;border-bottom:2px solid #791F1F;padding-bottom:6px;">
+        <img src="/logo.png" style="height:54px;width:auto;" alt="Supreme Art">
+        <div>
+          <div style="font-size:16pt;font-weight:800;color:#791F1F;letter-spacing:0.04em;">${esc(title)}</div>
+          <div style="font-size:10pt;color:#444;margin-top:2px;">${esc(fmtDate(s.from))} &mdash; ${esc(fmtDate(s.to))}</div>
+        </div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;">
+        <thead>
+          <tr>
+            <th ${th}>${esc(headers[0])}</th>
+            <th ${thR}>${esc(headers[1])}</th>
+            <th ${thR}>${esc(headers[2])}</th>
+            <th ${thR}>${esc(headers[3])}</th>
+            <th ${thR}>${esc(headers[4])}</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+        <tfoot>
+          <tr style="background:#f7eaea;font-weight:700;">
+            <td ${td} style="padding:6px 8px;border:1px solid #888;font-weight:700;background:#f7eaea;font-size:10.5pt;">Total</td>
+            <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmt(totals.sheets)}</td>
+            <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmt(totals.waste)}</td>
+            <td ${tdR} style="font-weight:700;background:#f7eaea;">${Math.round(totals.hours * 100) / 100}</td>
+            <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmt(totals.jobs)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 50);
+}
+
+// Export the current Production Report view to .xlsx. Mirrors print —
+// summary or drill-down depending on s.pick, with a Total row.
+async function exportProductionReport() {
+  const s = prodReportState;
+  if (!s.data) { notify('Load the report first.'); return; }
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const isMachine = s.view === 'machine';
+  const dailyRows = isMachine ? s.data.byMachineDaily : s.data.byOperatorDaily;
+  const nameKey = isMachine ? 'machine' : 'operator';
+  const nameLabel = isMachine ? 'Machine' : 'Operator';
+  const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
+  let headers, rows, sheetName;
+  if (s.pick) {
+    headers = ['Date', 'Sheets', 'Wastage', 'Hours', 'Jobs'];
+    rows = dailyRows.filter(r => r[nameKey] === s.pick)
+      .map(r => [fmtDate(r.date), r.sheets, r.waste, r.hours, r.jobs]);
+    sheetName = String(s.pick).slice(0, 28);
+  } else {
+    const acc = new Map();
+    for (const r of dailyRows) {
+      const k = r[nameKey];
+      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, waste: 0, hours: 0, jobs: 0 });
+      const e = acc.get(k);
+      e.sheets += (+r.sheets || 0); e.waste += (+r.waste || 0);
+      e.hours  += (+r.hours  || 0); e.jobs  += (+r.jobs  || 0);
+    }
+    headers = [nameLabel, 'Sheets', 'Wastage', 'Hours', 'Jobs'];
+    rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map(r => [r.name, r.sheets, r.waste, Math.round(r.hours * 100) / 100, r.jobs]);
+    sheetName = `By ${nameLabel}`;
+  }
+  // Total row
+  const totals = rows.reduce((t, r) => ({
+    sheets: t.sheets + (+r[1] || 0),
+    waste:  t.waste  + (+r[2] || 0),
+    hours:  t.hours  + (+r[3] || 0),
+    jobs:   t.jobs   + (+r[4] || 0),
+  }), { sheets: 0, waste: 0, hours: 0, jobs: 0 });
+  const aoa = [headers].concat(rows).concat([['Total', totals.sheets, totals.waste, Math.round(totals.hours * 100) / 100, totals.jobs]]);
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = headers.map((h, i) => ({ wch: Math.max(String(h).length, ...aoa.map(r => String(r[i] ?? '').length)) + 2 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Production');
+  const range = `${s.from}_${s.to}`;
+  XLSX.writeFile(wb, `supreme-art-production-${range}${s.pick ? '-' + String(s.pick).replace(/[^\w-]+/g, '_') : ''}.xlsx`);
+  notify('Exported!');
 }
 
 // Open the add/edit form. If `id` is supplied, prefill from importsCache.
@@ -11563,6 +11736,7 @@ async function openCapaList(jobId) {
         <div class="inv-actions" onclick="event.stopPropagation()">
           <button class="btn btn-sm" onclick="openCapaEdit(${c.id})">View/Edit</button>
           <button class="btn btn-sm" onclick="printCapa(${c.id})">Print</button>
+          <button class="btn btn-sm" onclick="saveCapaAsPdf(${c.id})">Save as PDF</button>
           ${(canAdminCapa() || (canWriteCapa() && c.status !== 'closed')) ? `<button class="btn btn-sm btn-danger" onclick="deleteCapa(${c.id}, ${jobId})">Delete</button>` : ''}
         </div>
       </div>`;
@@ -12176,7 +12350,14 @@ function printCapa(capaId) {
     const area = document.getElementById('print-area');
     area.innerHTML = buildCapaPrint(capa);
     const prevTitle = document.title;
-    document.title = ' ';
+    // Browser print dialog uses document.title as the default PDF
+    // filename when the user picks 'Save as PDF' destination. Setting
+    // it to the CAPA reference / number gives them a meaningful file
+    // name instead of the app's tab title.
+    const fileBase = capa.capa_ref
+      ? `CAPA-${capa.capa_ref}`
+      : ((capa.data && capa.data.capa_no) ? `CAPA-${capa.data.capa_no}` : 'CAPA-Report');
+    document.title = fileBase;
     const restoreTitle = () => { document.title = prevTitle; window.removeEventListener('afterprint', restoreTitle); };
     window.addEventListener('afterprint', restoreTitle);
     setTimeout(() => {
@@ -12184,6 +12365,15 @@ function printCapa(capaId) {
       setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
     }, 50);
   }).catch(e => notify('Error: ' + e.message));
+}
+
+// Same flow as printCapa — the difference is just the suggested filename
+// and a toast hint so the user knows to pick 'Save as PDF' as the
+// destination in the browser print dialog. The underlying browser
+// machinery is the same; this button exists for discoverability.
+function saveCapaAsPdf(capaId) {
+  notify('In the print dialog, pick "Save as PDF" as the destination.');
+  printCapa(capaId);
 }
 
 // ── CAPA Report page (under Jobs Reports) ────────────────────
@@ -12308,6 +12498,7 @@ function renderCapaReport() {
         <td style="padding:8px 10px;white-space:nowrap;">
           <button class="btn btn-sm" onclick="openCapaEdit(${c.id})">Open</button>
           <button class="btn btn-sm" onclick="printCapa(${c.id})">Print</button>
+          <button class="btn btn-sm" onclick="saveCapaAsPdf(${c.id})">PDF</button>
         </td>
       </tr>`;
   }).join('');
