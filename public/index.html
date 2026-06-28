@@ -6569,11 +6569,13 @@ function printJobsReport() {
 }
 
 // ── Production Report ─────────────────────────────────────────────
-// Date-range view of per-machine and per-operator totals (sheets,
-// hours, jobs). Data source is the Daily Production register that the
-// manager fills in daily, plus the auto-aggregation from job logs the
-// per-day Daily Production tabs use. Two tables stacked + filters.
-const prodReportState = { from: '', to: '', machine: '', operator: '', data: null, loading: false };
+// Date-range view of production. Default mode = summary by machine.
+// Toggle to summary by operator. Pick a specific machine or operator
+// to drill into that entity's day-by-day rows for the range.
+// Data source: per-(date, machine) + per-(date, operator) totals from
+// the Daily Production register (sheets/waste/jobs from job logs +
+// coatings_done, hours from manager notes).
+const prodReportState = { from: '', to: '', view: 'machine', pick: '', data: null, loading: false };
 
 function openProductionReport() {
   const pane = document.getElementById('rt-prod-report');
@@ -6591,10 +6593,14 @@ function openProductionReport() {
   loadProductionReport();
 }
 
-function setPrFrom(v)     { prodReportState.from = v;     loadProductionReport(); }
-function setPrTo(v)       { prodReportState.to = v;       loadProductionReport(); }
-function setPrMachine(v)  { prodReportState.machine = v;  renderProductionReport(); }
-function setPrOperator(v) { prodReportState.operator = v; renderProductionReport(); }
+function setPrFrom(v) { prodReportState.from = v; loadProductionReport(); }
+function setPrTo(v)   { prodReportState.to = v;   loadProductionReport(); }
+// Flip between summary-by-machine and summary-by-operator. Switching
+// view clears any in-flight drill-down pick since the picker options
+// differ between the two lists.
+function setPrView(v) { prodReportState.view = v; prodReportState.pick = ''; renderProductionReport(); }
+// Pick a specific machine/operator to drill into. Empty = summary.
+function setPrPick(v) { prodReportState.pick = v; renderProductionReport(); }
 
 async function loadProductionReport() {
   const s = prodReportState;
@@ -6605,7 +6611,7 @@ async function loadProductionReport() {
     s.data = await api('GET', `/api/reports/production?from=${encodeURIComponent(s.from)}&to=${encodeURIComponent(s.to)}`);
   } catch (e) {
     notify('Could not load production report: ' + e.message);
-    s.data = { byMachine: [], byOperator: [] };
+    s.data = { byMachineDaily: [], byOperatorDaily: [] };
   }
   s.loading = false;
   renderProductionReport();
@@ -6615,39 +6621,44 @@ function renderProductionReport() {
   const pane = document.getElementById('rt-prod-report');
   if (!pane) return;
   const s = prodReportState;
-  const data = s.data || { byMachine: [], byOperator: [] };
-  // Filter inputs are populated from the union of machines + operators
-  // currently in the data so the dropdowns reflect the date range.
-  const machineOpts = ['<option value="">All machines</option>']
-    .concat(data.byMachine.map(r => `<option value="${esc(r.machine)}"${s.machine===r.machine?' selected':''}>${esc(r.machine)}</option>`)).join('');
-  const operatorOpts = ['<option value="">All operators</option>']
-    .concat(data.byOperator.map(r => `<option value="${esc(r.operator)}"${s.operator===r.operator?' selected':''}>${esc(r.operator)}</option>`)).join('');
-  // Apply machine + operator filters to each list independently.
-  const mRows = s.machine ? data.byMachine.filter(r => r.machine === s.machine) : data.byMachine;
-  const oRows = s.operator ? data.byOperator.filter(r => r.operator === s.operator) : data.byOperator;
+  const data = s.data || { byMachineDaily: [], byOperatorDaily: [] };
+  const isMachine = s.view === 'machine';
+  const dailyRows = isMachine ? data.byMachineDaily : data.byOperatorDaily;
+  const nameKey = isMachine ? 'machine' : 'operator';
+  // Picker options: distinct entities present in the current view's
+  // daily rows for the chosen date range.
+  const entityNames = [...new Set(dailyRows.map(r => r[nameKey]))].sort((a, b) => String(a).localeCompare(String(b)));
+  const pickOpts = [`<option value="">All ${isMachine ? 'machines' : 'operators'}</option>`]
+    .concat(entityNames.map(n => `<option value="${esc(n)}"${s.pick === n ? ' selected' : ''}>${esc(n)}</option>`)).join('');
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const sum = (rows, key) => rows.reduce((a, r) => a + (+r[key] || 0), 0);
-  const buildTable = (title, rows, nameKey, nameLabel) => {
-    const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
-    const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
-    const td  = 'style="padding:8px 10px;"';
-    const tdR = 'style="padding:8px 10px;text-align:right;"';
+  const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const td  = 'style="padding:8px 10px;"';
+  const tdR = 'style="padding:8px 10px;text-align:right;"';
+  // dd/mm/yyyy formatter for the day-by-day view.
+  const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
+  // Day-by-day view for one entity: one row per day, totals at bottom.
+  const buildDailyTable = () => {
+    const rows = dailyRows.filter(r => r[nameKey] === s.pick);
     const body = rows.map(r => `
       <tr style="border-bottom:1px solid var(--border);">
-        <td ${td}>${esc(r[nameKey])}</td>
+        <td ${td}>${fmtDate(r.date)}</td>
         <td ${tdR}>${fmt(r.sheets)}</td>
+        <td ${tdR}>${fmt(r.waste)}</td>
         <td ${tdR}>${fmt(r.hours)}</td>
         <td ${tdR}>${fmt(r.jobs)}</td>
-      </tr>`).join('') || `<tr><td colspan="4" style="padding:18px;text-align:center;color:var(--text2);">No activity in this window.</td></tr>`;
-    const totals = { sheets: sum(rows, 'sheets'), hours: sum(rows, 'hours'), jobs: sum(rows, 'jobs') };
+      </tr>`).join('') || `<tr><td colspan="5" style="padding:18px;text-align:center;color:var(--text2);">No activity for ${esc(s.pick)} in this window.</td></tr>`;
+    const totals = { sheets: sum(rows, 'sheets'), waste: sum(rows, 'waste'), hours: sum(rows, 'hours'), jobs: sum(rows, 'jobs') };
     return `
       <div style="margin-top:18px;">
-        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">${title} <span style="font-weight:400;color:var(--text2);">— ${rows.length} ${nameLabel}${rows.length===1?'':'s'}</span></div>
+        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">${esc(s.pick)} <span style="font-weight:400;color:var(--text2);">— day-by-day, ${rows.length} day${rows.length===1?'':'s'} with activity</span></div>
         <div style="overflow-x:auto;">
         <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="background:var(--bg2);">
-            <th ${th}>${nameLabel.charAt(0).toUpperCase() + nameLabel.slice(1)}</th>
+            <th ${th}>Date</th>
             <th ${thR}>Sheets</th>
+            <th ${thR}>Wastage</th>
             <th ${thR}>Hours</th>
             <th ${thR}>Jobs</th>
           </tr></thead>
@@ -6656,6 +6667,7 @@ function renderProductionReport() {
             <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
               <td ${td} style="color:var(--text2);">Total</td>
               <td ${tdR}>${fmt(totals.sheets)}</td>
+              <td ${tdR}>${fmt(totals.waste)}</td>
               <td ${tdR}>${fmt(totals.hours)}</td>
               <td ${tdR}>${fmt(totals.jobs)}</td>
             </tr>
@@ -6664,10 +6676,67 @@ function renderProductionReport() {
         </div>
       </div>`;
   };
+  // Summary view: group daily rows by entity, sum across the range.
+  const buildSummaryTable = () => {
+    const acc = new Map();
+    for (const r of dailyRows) {
+      const k = r[nameKey];
+      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, waste: 0, hours: 0, jobs: 0 });
+      const e = acc.get(k);
+      e.sheets += (+r.sheets || 0);
+      e.waste  += (+r.waste  || 0);
+      e.hours  += (+r.hours  || 0);
+      e.jobs   += (+r.jobs   || 0);
+    }
+    const rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    const body = rows.map(r => `
+      <tr style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="setPrPick('${esc(r.name).replace(/'/g, "\\'")}')">
+        <td ${td}>${esc(r.name)}</td>
+        <td ${tdR}>${fmt(r.sheets)}</td>
+        <td ${tdR}>${fmt(r.waste)}</td>
+        <td ${tdR}>${fmt(r.hours)}</td>
+        <td ${tdR}>${fmt(r.jobs)}</td>
+      </tr>`).join('') || `<tr><td colspan="5" style="padding:18px;text-align:center;color:var(--text2);">No activity in this window.</td></tr>`;
+    const totals = { sheets: sum(rows, 'sheets'), waste: sum(rows, 'waste'), hours: Math.round(sum(rows, 'hours') * 100) / 100, jobs: sum(rows, 'jobs') };
+    const label = isMachine ? 'machine' : 'operator';
+    return `
+      <div style="margin-top:18px;">
+        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">By ${label.charAt(0).toUpperCase() + label.slice(1)} <span style="font-weight:400;color:var(--text2);">— ${rows.length} ${label}${rows.length===1?'':'s'} &middot; click a row to see day-by-day</span></div>
+        <div style="overflow-x:auto;">
+        <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr style="background:var(--bg2);">
+            <th ${th}>${label.charAt(0).toUpperCase() + label.slice(1)}</th>
+            <th ${thR}>Sheets</th>
+            <th ${thR}>Wastage</th>
+            <th ${thR}>Hours</th>
+            <th ${thR}>Jobs</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+          ${rows.length ? `<tfoot>
+            <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+              <td ${td} style="color:var(--text2);">Total</td>
+              <td ${tdR}>${fmt(totals.sheets)}</td>
+              <td ${tdR}>${fmt(totals.waste)}</td>
+              <td ${tdR}>${fmt(totals.hours)}</td>
+              <td ${tdR}>${fmt(totals.jobs)}</td>
+            </tr>
+          </tfoot>` : ''}
+        </table>
+        </div>
+      </div>`;
+  };
+  // Toggle button styling — active pill + light pill for the other.
+  const tabBtn = (val, label) => {
+    const active = s.view === val;
+    return `<button class="btn btn-sm${active ? ' btn-primary' : ''}" onclick="setPrView('${val}')">${label}</button>`;
+  };
+  const clearBtn = s.pick
+    ? `<button class="btn btn-sm" onclick="setPrPick('')" style="margin-left:8px;">&larr; Back to summary</button>`
+    : '';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Production Report</h2>
-      <span style="color:var(--text2);font-size:12px;">Sheets, hours, jobs per machine + per operator. Date range, from the Daily Production register.</span>
+      <span style="color:var(--text2);font-size:12px;">Sheets, wastage, hours, jobs from the Daily Production register. Pick a machine or operator to drill into day-by-day.</span>
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
@@ -6679,18 +6748,16 @@ function renderProductionReport() {
         <input class="filter" type="date" id="pr-to" value="${s.to}" onchange="setPrTo(this.value)">
       </div>
       <div>
-        <div class="dash-flbl">Machine</div>
-        <select class="filter" id="pr-machine" onchange="setPrMachine(this.value)">${machineOpts}</select>
+        <div class="dash-flbl">View</div>
+        <div style="display:flex;gap:6px;">${tabBtn('machine', 'By Machine')}${tabBtn('operator', 'By Operator')}</div>
       </div>
       <div>
-        <div class="dash-flbl">Operator</div>
-        <select class="filter" id="pr-operator" onchange="setPrOperator(this.value)">${operatorOpts}</select>
+        <div class="dash-flbl">${isMachine ? 'Machine' : 'Operator'}</div>
+        <select class="filter" id="pr-pick" onchange="setPrPick(this.value)">${pickOpts}</select>
       </div>
+      ${clearBtn}
     </div>
-    ${s.loading ? '<div class="empty" style="padding:30px;text-align:center;color:var(--text2);">Loading…</div>' : `
-      ${buildTable('By Machine',  mRows, 'machine',  'machine')}
-      ${buildTable('By Operator', oRows, 'operator', 'operator')}
-    `}`;
+    ${s.loading ? '<div class="empty" style="padding:30px;text-align:center;color:var(--text2);">Loading…</div>' : (s.pick ? buildDailyTable() : buildSummaryTable())}`;
 }
 
 // Open the add/edit form. If `id` is supplied, prefill from importsCache.
