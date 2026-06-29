@@ -10741,20 +10741,11 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : new Date().toISOString().slice(0,10)))}"></td>
         <td><span class="jc-lbl">Deadline</span><input type="date" id="f-deadline" value="${v(j.deadline)}"></td>
         <td><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
-        <td>
+        <td colspan="2">
           <span class="jc-lbl">Machine Name</span>
           <select id="f-machine"><option value="">—</option>${MACHINES.map(m=>`<option ${j.machine===m?'selected':''}>${m}</option>`).join('')}</select>
         </td>
         <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
-        <td>
-          <span class="jc-lbl">Job Priority</span>
-          <select id="f-priority">
-            ${(() => {
-              const cur = normalizePriority(j.priority);
-              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
-            })()}
-          </select>
-        </td>
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
@@ -10790,7 +10781,16 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
       </tr>
       <tr>
-        <td colspan="6"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
+        <td colspan="3"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
+        <td colspan="3">
+          <span class="jc-lbl">Job Priority</span>
+          <select id="f-priority">
+            ${(() => {
+              const cur = normalizePriority(j.priority);
+              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
+            })()}
+          </select>
+        </td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -11189,24 +11189,46 @@ async function saveAdd() {
   showSaving(false);
 }
 
-// Read-only view of the job card — full-page overlay showing the exact
-// printed-card layout. Replaces the floor copy that operators used to
-// pull from the binder: anyone can pull up a job's full card on screen.
+// Read-only view of the job card — full-page overlay that auto-scales the
+// printed-card layout to fit the viewport. No scrolling, no zooming — the
+// whole card is on screen at once. We render it at native size (8.5in
+// wide) inside a fixed wrapper, measure it, then apply a single
+// transform: scale() so the rendered card fits both viewport dimensions.
 function viewJobCard(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   document.getElementById('modal-root').innerHTML = `
-    <div id="overlay" class="overlay" onclick="overlayClick(event)" style="background:#f3f4f6;padding:0;align-items:stretch;justify-content:stretch;overflow:auto;">
-      <div onclick="event.stopPropagation()" style="background:#fff;width:100%;min-height:100vh;padding:20px 20px 80px;box-sizing:border-box;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin:0 auto 16px;max-width:8.5in;">
-          <h2 style="margin:0;font-size:18px;color:#000;">Job Card #${esc(j.id)}</h2>
+    <div id="overlay" class="overlay" onclick="overlayClick(event)" style="background:#1f2937;padding:0;align-items:stretch;justify-content:stretch;overflow:hidden;">
+      <div onclick="event.stopPropagation()" style="width:100%;height:100vh;display:flex;flex-direction:column;overflow:hidden;">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 18px;background:#111827;color:#fff;flex:0 0 auto;">
+          <h2 style="margin:0;font-size:15px;color:#fff;font-weight:600;">Job Card #${esc(j.id)}</h2>
           <button class="btn btn-sm" onclick="closeModal()">Close</button>
         </div>
-        <div style="max-width:8.5in;margin:0 auto;position:relative;">
-          ${buildPrintCard(j)}
+        <div id="view-card-wrap" style="flex:1 1 auto;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:16px;">
+          <div id="view-card-scale" style="background:#fff;width:8.5in;flex:0 0 auto;transform-origin:center center;box-shadow:0 4px 30px rgba(0,0,0,0.4);">
+            ${buildPrintCard(j)}
+          </div>
         </div>
       </div>
     </div>`;
+  const fitCard = () => {
+    const wrap = document.getElementById('view-card-wrap');
+    const card = document.getElementById('view-card-scale');
+    if (!wrap || !card) return;
+    card.style.transform = '';
+    const margin = 16;
+    const wAvail = wrap.clientWidth  - margin * 2;
+    const hAvail = wrap.clientHeight - margin * 2;
+    const cw = card.offsetWidth;
+    const ch = card.offsetHeight;
+    if (!cw || !ch) return;
+    const scale = Math.min(wAvail / cw, hAvail / ch, 1);
+    card.style.transform = `scale(${scale})`;
+  };
+  setTimeout(fitCard, 30);
+  window.addEventListener('resize', fitCard);
+  const overlay = document.getElementById('overlay');
+  if (overlay) overlay.addEventListener('click', () => window.removeEventListener('resize', fitCard), { once: true });
 }
 
 function openEdit(id) {
