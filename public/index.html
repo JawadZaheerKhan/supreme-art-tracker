@@ -2156,15 +2156,27 @@ function jobYieldParts(j) {
 }
 // Days in Production = days since the job card was created. For jobs still
 // in flight this counts up every day; once the Delivered stage is reached it
-// freezes at the delivered-on day. Same-day = 0, next day = 1, etc.
+// FREEZES at the delivered-on day so the card keeps showing the total
+// turnaround forever. Same-day = 0, next day = 1, etc.
 function jobDaysInProduction(j) {
   if (!j.created_at) return '—';
   const start = new Date(j.created_at).getTime();
   if (!isFinite(start)) return '—';
+  let endTs = Date.now();
   const lastIdx = STAGES.length - 1;
   const t = j.stages && j.stages[lastIdx] && j.stages[lastIdx].time;
-  const endTs = t ? new Date(t).getTime() : Date.now();
-  if (!isFinite(endTs)) return '—';
+  if (t) {
+    // stage.time is stored by fmtDMYT as "dd/mm/yyyy HH:MM" — that format
+    // is NOT reliably parseable by `new Date()`, so we parse it manually.
+    const m = String(t).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    if (m) {
+      const ts = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+      if (isFinite(ts)) endTs = ts;
+    } else {
+      const ts = new Date(t).getTime();
+      if (isFinite(ts)) endTs = ts;
+    }
+  }
   const days = Math.max(0, Math.floor((endTs - start) / 86400000));
   return String(days);
 }
