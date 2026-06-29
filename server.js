@@ -102,7 +102,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-27-daily-production-waste';
+const SCHEMA_VERSION = 'v2026-06-29-rename-paper-types';
 
 async function initDb() {
   try {
@@ -532,6 +532,13 @@ async function initDb() {
     // pasting_waste_qty / coatings_done[].waste_sheets) and admin-
     // editable per machine row, same as Hours / Remarks.
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS waste TEXT`;
+
+    // One-time rename of legacy paper-type labels — old "Bleach Card" and
+    // "Box Board" are now "Bleach Board" and "Duplex Board" across the app.
+    await sql`UPDATE inventory_items   SET paper_type = 'Bleach Board' WHERE paper_type = 'Bleach Card'`;
+    await sql`UPDATE inventory_items   SET paper_type = 'Duplex Board' WHERE paper_type = 'Box Board'`;
+    await sql`UPDATE inventory_imports SET paper_type = 'Bleach Board' WHERE paper_type = 'Bleach Card'`;
+    await sql`UPDATE inventory_imports SET paper_type = 'Duplex Board' WHERE paper_type = 'Box Board'`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
