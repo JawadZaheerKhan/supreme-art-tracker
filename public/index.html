@@ -2636,6 +2636,41 @@ function getFiltered() {
   });
 }
 
+// Parses a stage timestamp written by fmtDMYT ("dd/mm/yyyy HH:MM") into
+// a JS epoch ms. Returns 0 when missing/unparseable so callers can sort
+// without crashing.
+function parseStageTime(t) {
+  if (!t) return 0;
+  const m = String(t).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  if (m) {
+    const ts = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+    if (isFinite(ts)) return ts;
+  }
+  const ts = new Date(t).getTime();
+  return isFinite(ts) ? ts : 0;
+}
+
+// Per-view ordering for the jobs list:
+//   - Finished / Delivered / Blocked: oldest-first by the relevant stage
+//     timestamp, so the job that has been waiting the longest sits on top.
+//   - All other views: keep the default reverse-by-id (newest first).
+function sortJobsForView(list) {
+  if (view === 'storage' || view === 'done' || view === 'blocked') {
+    const stageIdxFor = (j) => {
+      if (view === 'storage') return STAGES.indexOf('Finished');
+      if (view === 'done')    return STAGES.length - 1;
+      return j.stage_index || 0; // blocked: where it got blocked
+    };
+    return list.slice().sort((a, b) => {
+      const ta = parseStageTime(a.stages && a.stages[stageIdxFor(a)] && a.stages[stageIdxFor(a)].time);
+      const tb = parseStageTime(b.stages && b.stages[stageIdxFor(b)] && b.stages[stageIdxFor(b)].time);
+      if (ta !== tb) return ta - tb;
+      return a.id - b.id; // tiebreaker
+    });
+  }
+  return list.slice().reverse();
+}
+
 // ── Render ────────────────────────────────────────────────────
 // Render the corner date stamp. Hidden until a user is signed in (so it
 // doesn't clutter the login screen) and on the operator role (their
@@ -2801,7 +2836,7 @@ function renderJobs() {
 }
 
 function renderJobsCompact() {
-  const filtered = getFiltered().slice().reverse();
+  const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
   if (!filtered.length) {
     el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
@@ -2895,7 +2930,7 @@ function renderJobsCompact() {
 
 // ── Card grid view ───────────────────────────────────────────
 function renderJobsCards() {
-  const filtered = getFiltered().slice().reverse();
+  const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
   if (!filtered.length) {
     el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
