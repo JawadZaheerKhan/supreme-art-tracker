@@ -570,7 +570,14 @@
   .job-tile.is-pending { border-left-color: #166534; }
   .job-tile.is-blocked { border-left-color: #A32D2D; }
   .job-tile.is-done { opacity: 0.7; }
-  .tile-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .tile-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding-right: 110px; }
+  /* Right-side info column on the card — Days (top) above Yield (bottom).
+     Positioned absolutely so it doesn't reflow the rest of the tile. */
+  .tile-side-stats { position: absolute; top: 12px; right: 14px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 130px; text-align: right; }
+  .tile-side-stats .tss-block { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+  .tile-side-stats .tss-lbl { font-size: 10px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tile-side-stats .tss-val { font-size: 14px; font-weight: 700; color: var(--text); }
+  .tile-side-stats .tss-formula { font-size: 10px; font-weight: 500; color: var(--text2); }
   .tile-name { font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.25; }
   .tile-sub { font-size: 12.5px; color: var(--text); font-weight: 500; margin-top: -2px; }
   .tile-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; color: var(--text); }
@@ -2133,15 +2140,18 @@ function jobYieldPct(j) {
   if (!planned || !delivered) return '—';
   return ((delivered / planned) * 100).toFixed(1) + '%';
 }
-// Same as jobYieldPct but appends the raw figures as the formula —
-// "99.0% (47500/48000)" — for inline display on the job tile.
-function jobYieldWithFormula(j) {
+// Returns { pct, formula } for two-line display on the tile's right-side
+// stats column. Returns null when the numbers aren't ready yet so callers
+// can omit the block entirely.
+function jobYieldParts(j) {
   const planned   = parseFloat(j.qty) || 0;
   const fromParts = parseFloat(((j.particulars||{}).delivered_cartons_qty||{}).quantity) || 0;
   const delivered = fromParts || parseFloat(j.delqty) || 0;
-  if (!planned || !delivered) return '—';
-  const pct = ((delivered / planned) * 100).toFixed(1);
-  return `${pct}% (${delivered.toLocaleString()}/${planned.toLocaleString()})`;
+  if (!planned || !delivered) return null;
+  return {
+    pct: ((delivered / planned) * 100).toFixed(1) + '%',
+    formula: `${delivered.toLocaleString()} / ${planned.toLocaleString()}`,
+  };
 }
 // Days in Production = days since the job card was created. For jobs still
 // in flight this counts up every day; once the Delivered stage is reached it
@@ -2845,15 +2855,18 @@ function renderJobsCompact() {
             ${j.cartonqty?`<span><b>Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
             ${j.delqty?`<span><b>Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
             ${j.deadline?`<span><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
-            ${(()=>{ const y = jobYieldWithFormula(j); return y !== '—' ? `<span style="margin-left:auto;"><b>Yield:</b> ${esc(y)}</span>` : ''; })()}
-            ${(()=>{ const d = jobDaysInProduction(j); return d !== '—' ? `<span><b>Days:</b> ${esc(d)}</span>` : ''; })()}
           </div>
           <div class="pipeline">${pipeline}</div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
         <div class="job-right">
+          ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
+              ${d !== '—' ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Day</div><div style="font-size:15px;font-weight:700;color:var(--text);">${esc(d)}</div></div>` : ''}
+              ${y ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Yield</div><div style="font-size:15px;font-weight:700;color:var(--text);">${esc(y.pct)}</div><div style="font-size:10px;font-weight:500;color:var(--text2);">${esc(y.formula)}</div></div>` : ''}
+            </div>`; })()}
           <div class="job-actions">
-            <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})" title="View this job. Use the stage names below to advance the stage.">View</button>
+            <button class="btn btn-sm btn-primary" onclick="viewJobCard(${j.id})" title="Open the job card to view its details. Stage advances by clicking the stage pills above.">View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
@@ -2959,15 +2972,20 @@ function renderJobCard(j) {
   // Coatings, cut size) lives on the printed job card and the Edit form.
   const invItemT = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperLabelT = j.paper || (invItemT ? invItemT.paper_type : '');
-  const yieldStr = jobYieldWithFormula(j);
-  const daysStr  = jobDaysInProduction(j);
   const facts = [
     paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
     j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
     j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
-    yieldStr !== '—' ? `<span style="margin-left:auto;"><b>Yield</b> ${esc(yieldStr)}</span>` : '',
-    daysStr  !== '—' ? `<span><b>Days</b> ${esc(daysStr)}</span>` : '',
   ].filter(Boolean).join('');
+
+  // Right-side stats column on the tile: Day on top, Yield below.
+  const daysStr   = jobDaysInProduction(j);
+  const yieldP    = jobYieldParts(j);
+  const sideStats = (daysStr !== '—' || yieldP) ? `
+    <div class="tile-side-stats">
+      ${daysStr !== '—' ? `<div class="tss-block"><div class="tss-lbl">Day</div><div class="tss-val">${esc(daysStr)}</div></div>` : ''}
+      ${yieldP ? `<div class="tss-block"><div class="tss-lbl">Yield</div><div class="tss-val">${esc(yieldP.pct)}</div><div class="tss-formula">${esc(yieldP.formula)}</div></div>` : ''}
+    </div>` : '';
 
   // Issue Stock + Reverse Issuance are no longer shown on the job card —
   // both actions live on the Inventory tab's Pending Stock filter (issue)
@@ -2977,7 +2995,7 @@ function renderJobCard(j) {
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
       <div class="job-more-menu">
-        <button class="ceo-hide" onclick="closeJobMore(this); openUpdate(${j.id})">View</button>
+        <button onclick="closeJobMore(this); viewJobCard(${j.id})">View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
@@ -2987,10 +3005,11 @@ function renderJobCard(j) {
       </div>
     </details>`;
   // Update is the most-used action when not pending — surface it directly.
-  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})" title="View this job. Use the stage names above to advance the stage.">View</button>` : '';
+  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary" onclick="viewJobCard(${j.id})" title="Open the job card to view its details. Stage advances by clicking the dots above.">View</button>` : '';
 
   return `
   <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''}">
+    ${sideStats}
     <div class="tile-head">
       <span class="job-id">#${j.id}</span>
       ${badge}
@@ -11168,6 +11187,21 @@ async function saveAdd() {
     setTimeout(() => printJobCard(newJob.id), 100);
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// Read-only view of the job card — shows the same layout as the printed
+// card (via buildPrintCard) inside a modal. Used by the per-tile View
+// button so anyone can look at a job without opening the Edit form.
+function viewJobCard(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()" style="max-width:1000px !important;padding:0;">
+    <div style="padding:16px 20px 0;display:flex;justify-content:space-between;align-items:center;">
+      <h2 style="margin:0;font-size:18px;">Job Card #${j.id}</h2>
+      <button class="btn btn-sm" onclick="closeModal()">Close</button>
+    </div>
+    <div style="padding:12px 20px 20px;overflow:auto;max-height:80vh;">${buildPrintCard(j)}</div>
+  </div>`);
 }
 
 function openEdit(id) {
