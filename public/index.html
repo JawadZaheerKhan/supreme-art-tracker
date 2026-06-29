@@ -2133,19 +2133,29 @@ function jobYieldPct(j) {
   if (!planned || !delivered) return '—';
   return ((delivered / planned) * 100).toFixed(1) + '%';
 }
-// Days in Production = (delivered stage timestamp − date issued), in days.
-// For jobs still in flight, counts up to today so you can see how long a
-// running job has been open.
+// Same as jobYieldPct but appends the raw figures as the formula —
+// "99.0% (47500/48000)" — for inline display on the job tile.
+function jobYieldWithFormula(j) {
+  const planned   = parseFloat(j.qty) || 0;
+  const fromParts = parseFloat(((j.particulars||{}).delivered_cartons_qty||{}).quantity) || 0;
+  const delivered = fromParts || parseFloat(j.delqty) || 0;
+  if (!planned || !delivered) return '—';
+  const pct = ((delivered / planned) * 100).toFixed(1);
+  return `${pct}% (${delivered.toLocaleString()}/${planned.toLocaleString()})`;
+}
+// Days in Production = days since the job card was created. For jobs still
+// in flight this counts up every day; once the Delivered stage is reached it
+// freezes at the delivered-on day. Same-day = 0, next day = 1, etc.
 function jobDaysInProduction(j) {
-  if (!j.dateissued) return '—';
-  const start = new Date(j.dateissued).getTime();
+  if (!j.created_at) return '—';
+  const start = new Date(j.created_at).getTime();
   if (!isFinite(start)) return '—';
   const lastIdx = STAGES.length - 1;
   const t = j.stages && j.stages[lastIdx] && j.stages[lastIdx].time;
   const endTs = t ? new Date(t).getTime() : Date.now();
   if (!isFinite(endTs)) return '—';
-  const days = Math.max(0, Math.round((endTs - start) / 86400000));
-  return days + ' day' + (days === 1 ? '' : 's');
+  const days = Math.max(0, Math.floor((endTs - start) / 86400000));
+  return String(days);
 }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
 function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Finished'); }
@@ -2791,7 +2801,8 @@ function renderJobsCompact() {
       const st = j.stages?.[i]?.status;
       if (st==='done') cls='s-done';
       else if (i===si && !done) cls = blocked ? 's-blocked' : 's-active';
-      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="moveToStage(${j.id},${i})" style="cursor:pointer">${SHORT[i]}</span>`;
+      const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
     }).join('');
     const note = j.stages?.[si]?.notes;
     // Priority class — two-level scheme (Normal / Urgent). Anything legacy
@@ -2834,13 +2845,15 @@ function renderJobsCompact() {
             ${j.cartonqty?`<span><b>Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
             ${j.delqty?`<span><b>Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
             ${j.deadline?`<span><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
+            ${(()=>{ const y = jobYieldWithFormula(j); return y !== '—' ? `<span style="margin-left:auto;"><b>Yield:</b> ${esc(y)}</span>` : ''; })()}
+            ${(()=>{ const d = jobDaysInProduction(j); return d !== '—' ? `<span><b>Days:</b> ${esc(d)}</span>` : ''; })()}
           </div>
           <div class="pipeline">${pipeline}</div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
         <div class="job-right">
           <div class="job-actions">
-            <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
+            <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})" title="View this job. Use the stage names below to advance the stage.">View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
@@ -2929,7 +2942,8 @@ function renderJobCard(j) {
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
     else if (i === si && !done) cls = blocked ? 'rib-blocked' : 'rib-current';
-    return `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="moveToStage(${j.id},${i})"></button>`;
+    const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+    return `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
   }).join('');
 
   // The machine vignette reflects the current stage (or the pending pre-state).
@@ -2945,10 +2959,14 @@ function renderJobCard(j) {
   // Coatings, cut size) lives on the printed job card and the Edit form.
   const invItemT = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperLabelT = j.paper || (invItemT ? invItemT.paper_type : '');
+  const yieldStr = jobYieldWithFormula(j);
+  const daysStr  = jobDaysInProduction(j);
   const facts = [
     paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
     j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
     j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
+    yieldStr !== '—' ? `<span style="margin-left:auto;"><b>Yield</b> ${esc(yieldStr)}</span>` : '',
+    daysStr  !== '—' ? `<span><b>Days</b> ${esc(daysStr)}</span>` : '',
   ].filter(Boolean).join('');
 
   // Issue Stock + Reverse Issuance are no longer shown on the job card —
@@ -2959,7 +2977,7 @@ function renderJobCard(j) {
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
       <div class="job-more-menu">
-        <button class="ceo-hide" onclick="closeJobMore(this); openUpdate(${j.id})">Update</button>
+        <button class="ceo-hide" onclick="closeJobMore(this); openUpdate(${j.id})">View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
@@ -2969,7 +2987,7 @@ function renderJobCard(j) {
       </div>
     </details>`;
   // Update is the most-used action when not pending — surface it directly.
-  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>` : '';
+  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})" title="View this job. Use the stage names above to advance the stage.">View</button>` : '';
 
   return `
   <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''}">
@@ -10753,9 +10771,7 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
       </tr>
       <tr>
-        <td colspan="2"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="2"><span class="jc-lbl">Yield %</span><div id="f-yield" style="font-size:14px;color:var(--text);padding:1px 0;font-weight:600;">${jobYieldPct(j)}</div></td>
-        <td colspan="2"><span class="jc-lbl">Days in Production</span><div id="f-days" style="font-size:14px;color:var(--text);padding:1px 0;font-weight:600;">${jobDaysInProduction(j)}</div></td>
+        <td colspan="6"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -11251,6 +11267,15 @@ async function saveUpdate(id) {
     closeModal(); notify('Updated!'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// Clicking the final Delivered stage advances the job AND opens the Edit
+// card — the operator must still fill in Delivered Cartons Qty, B.No, MFG,
+// EXP etc., so opening the card automatically prevents those from being
+// forgotten.
+async function moveToDeliveredAndEdit(id) {
+  await moveToStage(id, STAGES.length - 1);
+  openEdit(id);
 }
 
 async function moveToStage(id, target) {
