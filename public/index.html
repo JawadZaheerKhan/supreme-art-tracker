@@ -2123,6 +2123,30 @@ let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
 function isDone(j) { return j.stages && j.stages[STAGES.length-1]?.status === 'done'; }
+// Yield % = delivered cartons ÷ planned PO qty × 100. Reads delivered from
+// particulars first (single source of truth) and falls back to the legacy
+// scalar j.delqty for older rows that may not have the particulars row set.
+function jobYieldPct(j) {
+  const planned   = parseFloat(j.qty) || 0;
+  const fromParts = parseFloat(((j.particulars||{}).delivered_cartons_qty||{}).quantity) || 0;
+  const delivered = fromParts || parseFloat(j.delqty) || 0;
+  if (!planned || !delivered) return '—';
+  return ((delivered / planned) * 100).toFixed(1) + '%';
+}
+// Days in Production = (delivered stage timestamp − date issued), in days.
+// For jobs still in flight, counts up to today so you can see how long a
+// running job has been open.
+function jobDaysInProduction(j) {
+  if (!j.dateissued) return '—';
+  const start = new Date(j.dateissued).getTime();
+  if (!isFinite(start)) return '—';
+  const lastIdx = STAGES.length - 1;
+  const t = j.stages && j.stages[lastIdx] && j.stages[lastIdx].time;
+  const endTs = t ? new Date(t).getTime() : Date.now();
+  if (!isFinite(endTs)) return '—';
+  const days = Math.max(0, Math.round((endTs - start) / 86400000));
+  return days + ' day' + (days === 1 ? '' : 's');
+}
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
 function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Finished'); }
 function dateRangeBounds(preset) {
@@ -10729,8 +10753,9 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="3"><span class="jc-lbl">Delivered PO Qty</span><input type="text" id="f-delqty" value="${v(j.delqty)}" placeholder="e.g. 48000"></td>
+        <td colspan="2"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
+        <td colspan="2"><span class="jc-lbl">Yield %</span><div id="f-yield" style="font-size:14px;color:var(--text);padding:1px 0;font-weight:600;">${jobYieldPct(j)}</div></td>
+        <td colspan="2"><span class="jc-lbl">Days in Production</span><div id="f-days" style="font-size:14px;color:var(--text);padding:1px 0;font-weight:600;">${jobDaysInProduction(j)}</div></td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -10770,7 +10795,7 @@ function getFormData() {
     machine: document.getElementById('f-machine').value,
     coatings: [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c=>c.value),
     priority: document.getElementById('f-priority').value,
-    delqty: document.getElementById('f-delqty').value.trim(),
+    delqty: ((document.getElementById('p-delivered_cartons_qty-quantity')||{}).value || '').trim(),
     cartonqty: document.getElementById('f-cartonqty').value.trim(),
     notes: document.getElementById('f-notes').value.trim(),
     bno: document.getElementById('f-bno').value.trim(),
