@@ -434,10 +434,11 @@
   select.filter { padding: 7px 32px 7px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); min-width: 160px; }
   #date-filter { min-width: 170px; margin-left: auto; }
   #date-custom { margin-left: 8px; }
-  .btn { padding: 7px 16px; font-size: 13px; border: 1px solid var(--border2); border-radius: var(--radius-sm); cursor: pointer; background: var(--bg); color: var(--text); font-family: var(--font); transition: all 0.12s; font-weight: 500; }
-  .btn:hover { background: var(--bg2); }
+  .btn { padding: 7px 16px; font-size: 13px; border: 1px solid rgba(121,31,31,0.45); border-radius: var(--radius-sm); cursor: pointer; background: var(--bg); color: var(--text); font-family: var(--font); transition: box-shadow 0.15s, background 0.12s, transform 0.08s; font-weight: 500; box-shadow: 0 0 0 1px rgba(163,45,45,0.10), 0 0 10px rgba(163,45,45,0.22); }
+  .btn:hover { background: var(--bg2); box-shadow: 0 0 0 1px rgba(163,45,45,0.40), 0 0 16px rgba(163,45,45,0.45); }
+  .btn:active { transform: translateY(1px); }
   .btn-primary { background: var(--text); color: white; border-color: var(--text); }
-  .btn-primary:hover { opacity: 0.85; }
+  .btn-primary:hover { opacity: 0.92; box-shadow: 0 0 0 1px rgba(163,45,45,0.45), 0 0 18px rgba(163,45,45,0.55); }
   .btn-sm { padding: 4px 11px; font-size: 12px; }
   .btn-danger { color: #A32D2D; border-color: var(--red-border); }
   .btn-danger:hover { background: var(--red-bg); }
@@ -570,7 +571,14 @@
   .job-tile.is-pending { border-left-color: #166534; }
   .job-tile.is-blocked { border-left-color: #A32D2D; }
   .job-tile.is-done { opacity: 0.7; }
-  .tile-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .tile-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding-right: 110px; }
+  /* Right-side info column on the card — Days (top) above Yield (bottom).
+     Positioned absolutely so it doesn't reflow the rest of the tile. */
+  .tile-side-stats { position: absolute; top: 12px; right: 14px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 130px; text-align: right; }
+  .tile-side-stats .tss-block { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+  .tile-side-stats .tss-lbl { font-size: 10px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tile-side-stats .tss-val { font-size: 14px; font-weight: 700; color: var(--text); }
+  .tile-side-stats .tss-formula { font-size: 10px; font-weight: 500; color: var(--text2); }
   .tile-name { font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.25; }
   .tile-sub { font-size: 12.5px; color: var(--text); font-weight: 500; margin-top: -2px; }
   .tile-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; color: var(--text); }
@@ -2124,6 +2132,43 @@ let selSection = null;
 
 // ── Helpers ───────────────────────────────────────────────────
 function isDone(j) { return j.stages && j.stages[STAGES.length-1]?.status === 'done'; }
+// Yield % = delivered cartons ÷ planned PO qty × 100. Reads delivered from
+// particulars first (single source of truth) and falls back to the legacy
+// scalar j.delqty for older rows that may not have the particulars row set.
+function jobYieldPct(j) {
+  const planned   = parseFloat(j.qty) || 0;
+  const fromParts = parseFloat(((j.particulars||{}).delivered_cartons_qty||{}).quantity) || 0;
+  const delivered = fromParts || parseFloat(j.delqty) || 0;
+  if (!planned || !delivered) return '—';
+  return ((delivered / planned) * 100).toFixed(1) + '%';
+}
+// Returns { pct, formula } for two-line display on the tile's right-side
+// stats column. Returns null when the numbers aren't ready yet so callers
+// can omit the block entirely.
+function jobYieldParts(j) {
+  const planned   = parseFloat(j.qty) || 0;
+  const fromParts = parseFloat(((j.particulars||{}).delivered_cartons_qty||{}).quantity) || 0;
+  const delivered = fromParts || parseFloat(j.delqty) || 0;
+  if (!planned || !delivered) return null;
+  return {
+    pct: ((delivered / planned) * 100).toFixed(1) + '%',
+    formula: `${delivered.toLocaleString()} / ${planned.toLocaleString()}`,
+  };
+}
+// Days in Production = days since the job card was created. For jobs still
+// in flight this counts up every day; once the Delivered stage is reached it
+// freezes at the delivered-on day. Same-day = 0, next day = 1, etc.
+function jobDaysInProduction(j) {
+  if (!j.created_at) return '—';
+  const start = new Date(j.created_at).getTime();
+  if (!isFinite(start)) return '—';
+  const lastIdx = STAGES.length - 1;
+  const t = j.stages && j.stages[lastIdx] && j.stages[lastIdx].time;
+  const endTs = t ? new Date(t).getTime() : Date.now();
+  if (!isFinite(endTs)) return '—';
+  const days = Math.max(0, Math.floor((endTs - start) / 86400000));
+  return String(days);
+}
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
 function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Finished'); }
 function dateRangeBounds(preset) {
@@ -2768,7 +2813,8 @@ function renderJobsCompact() {
       const st = j.stages?.[i]?.status;
       if (st==='done') cls='s-done';
       else if (i===si && !done) cls = blocked ? 's-blocked' : 's-active';
-      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="moveToStage(${j.id},${i})" style="cursor:pointer">${SHORT[i]}</span>`;
+      const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
     }).join('');
     const note = j.stages?.[si]?.notes;
     // Priority class — two-level scheme (Normal / Urgent). Anything legacy
@@ -2816,10 +2862,14 @@ function renderJobsCompact() {
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
         <div class="job-right">
+          ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
+              ${d !== '—' ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Day</div><div style="font-size:15px;font-weight:700;color:var(--text);">${esc(d)}</div></div>` : ''}
+              ${y ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Yield</div><div style="font-size:15px;font-weight:700;color:var(--text);">${esc(y.pct)}</div><div style="font-size:10px;font-weight:500;color:var(--text2);">${esc(y.formula)}</div></div>` : ''}
+            </div>`; })()}
           <div class="job-actions">
-            <button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>
+            <button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
-            <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
@@ -2906,7 +2956,8 @@ function renderJobCard(j) {
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
     else if (i === si && !done) cls = blocked ? 'rib-blocked' : 'rib-current';
-    return `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="moveToStage(${j.id},${i})"></button>`;
+    const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+    return `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
   }).join('');
 
   // The machine vignette reflects the current stage (or the pending pre-state).
@@ -2928,6 +2979,15 @@ function renderJobCard(j) {
     j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
   ].filter(Boolean).join('');
 
+  // Right-side stats column on the tile: Day on top, Yield below.
+  const daysStr   = jobDaysInProduction(j);
+  const yieldP    = jobYieldParts(j);
+  const sideStats = (daysStr !== '—' || yieldP) ? `
+    <div class="tile-side-stats">
+      ${daysStr !== '—' ? `<div class="tss-block"><div class="tss-lbl">Day</div><div class="tss-val">${esc(daysStr)}</div></div>` : ''}
+      ${yieldP ? `<div class="tss-block"><div class="tss-lbl">Yield</div><div class="tss-val">${esc(yieldP.pct)}</div><div class="tss-formula">${esc(yieldP.formula)}</div></div>` : ''}
+    </div>` : '';
+
   // Issue Stock + Reverse Issuance are no longer shown on the job card —
   // both actions live on the Inventory tab's Pending Stock filter (issue)
   // and inside the inventory item History modal (reverse).
@@ -2936,20 +2996,20 @@ function renderJobCard(j) {
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
       <div class="job-more-menu">
-        <button class="ceo-hide" onclick="closeJobMore(this); openUpdate(${j.id})">Update</button>
+        <button onclick="closeJobMore(this); openEdit(${j.id})">Edit / View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
-        <button class="ceo-hide" onclick="closeJobMore(this); openEdit(${j.id})">Edit</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
     </details>`;
-  // Update is the most-used action when not pending — surface it directly.
-  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openUpdate(${j.id})">Update</button>` : '';
+  // Edit / View is the most-used action when not pending — surface it directly.
+  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the dots above.">Edit / View</button>` : '';
 
   return `
   <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''}">
+    ${sideStats}
     <div class="tile-head">
       <span class="job-id">#${j.id}</span>
       ${badge}
@@ -3888,7 +3948,7 @@ function renderInvPendingList() {
         <div class="inv-actions">
           ${issueBtn}
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
-          <button class="btn btn-sm ceo-hide" onclick="openEdit(${j.id})">Edit</button>
+          <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
         </div>
       </div>`;
   }).join('');
@@ -10681,20 +10741,11 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : new Date().toISOString().slice(0,10)))}"></td>
         <td><span class="jc-lbl">Deadline</span><input type="date" id="f-deadline" value="${v(j.deadline)}"></td>
         <td><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
-        <td>
+        <td colspan="2">
           <span class="jc-lbl">Machine Name</span>
           <select id="f-machine"><option value="">—</option>${MACHINES.map(m=>`<option ${j.machine===m?'selected':''}>${m}</option>`).join('')}</select>
         </td>
         <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
-        <td>
-          <span class="jc-lbl">Job Priority</span>
-          <select id="f-priority">
-            ${(() => {
-              const cur = normalizePriority(j.priority);
-              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
-            })()}
-          </select>
-        </td>
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
@@ -10731,7 +10782,15 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="3"><span class="jc-lbl">Delivered PO Qty</span><input type="text" id="f-delqty" value="${v(j.delqty)}" placeholder="e.g. 48000"></td>
+        <td colspan="3">
+          <span class="jc-lbl">Job Priority</span>
+          <select id="f-priority">
+            ${(() => {
+              const cur = normalizePriority(j.priority);
+              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
+            })()}
+          </select>
+        </td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -10771,7 +10830,7 @@ function getFormData() {
     machine: document.getElementById('f-machine').value,
     coatings: [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c=>c.value),
     priority: document.getElementById('f-priority').value,
-    delqty: document.getElementById('f-delqty').value.trim(),
+    delqty: ((document.getElementById('p-delivered_cartons_qty-quantity')||{}).value || '').trim(),
     cartonqty: document.getElementById('f-cartonqty').value.trim(),
     notes: document.getElementById('f-notes').value.trim(),
     bno: document.getElementById('f-bno').value.trim(),
@@ -11130,6 +11189,41 @@ async function saveAdd() {
   showSaving(false);
 }
 
+// Read-only view of the job card — same modal style as Edit (lives inside
+// the app's normal modal overlay), same layout (jobForm), but disabled via
+// pointer-events:none and scaled so the whole card fits the modal height
+// with no internal scroll.
+function viewJobCard(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()" style="max-width:1200px !important;max-height:calc(100vh - 24px);display:flex;flex-direction:column;overflow:hidden;padding:12px 16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex:0 0 auto;">
+      <h2 style="margin:0;font-size:18px;">Job Card #${esc(j.id)}</h2>
+      <button class="btn btn-sm" onclick="closeModal()">Close</button>
+    </div>
+    <div id="view-card-wrap" style="flex:1 1 auto;overflow:hidden;display:flex;align-items:flex-start;justify-content:center;">
+      <div id="view-card-scale" style="pointer-events:none;transform-origin:top center;width:100%;flex:0 0 auto;">
+        ${jobForm(j)}
+      </div>
+    </div>
+  </div>`);
+  const fitCard = () => {
+    const wrap = document.getElementById('view-card-wrap');
+    const card = document.getElementById('view-card-scale');
+    if (!wrap || !card) return;
+    card.style.transform = '';
+    const wAvail = wrap.clientWidth;
+    const hAvail = wrap.clientHeight;
+    const cw = card.offsetWidth;
+    const ch = card.offsetHeight;
+    if (!cw || !ch) return;
+    const scale = Math.min(wAvail / cw, hAvail / ch);
+    card.style.transform = `scale(${scale})`;
+  };
+  setTimeout(fitCard, 30);
+  window.addEventListener('resize', fitCard);
+}
+
 function openEdit(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
@@ -11227,6 +11321,15 @@ async function saveUpdate(id) {
     closeModal(); notify('Updated!'); render();
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// Clicking the final Delivered stage advances the job AND opens the Edit
+// card — the operator must still fill in Delivered Cartons Qty, B.No, MFG,
+// EXP etc., so opening the card automatically prevents those from being
+// forgotten.
+async function moveToDeliveredAndEdit(id) {
+  await moveToStage(id, STAGES.length - 1);
+  openEdit(id);
 }
 
 async function moveToStage(id, target) {
@@ -11558,9 +11661,8 @@ function buildPrintCard(j) {
         ${dateCell('Date', j.dateissued)}
         ${dateCell('Deadline', j.deadline)}
         ${cell('P.O. Qty', j.qty)}
-        ${cell('Machine Name', j.machine)}
+        <td colspan="2"><div class="pc-label">Machine Name</div><div class="pc-value">${v(j.machine)}</div></td>
         ${cell('Ups', j.ups)}
-        ${priorityCell('Job Priority', j.priority)}
       </tr>
       <tr>
         <td colspan="3"><div class="pc-label">Job Name</div><div class="pc-value">${v(j.name)}</div></td>
@@ -11585,7 +11687,13 @@ function buildPrintCard(j) {
       <tr>
         <td colspan="2"><div class="pc-label">Code</div><div class="pc-value">${v(j.jobcode)}</div></td>
         <td colspan="2"><div class="pc-label">Brand</div><div class="pc-value">${v(paperBrand)}</div></td>
-        <td colspan="2"><div class="pc-label">Delivered PO Qty</div><div class="pc-value">${v(j.delqty)}</div></td>
+        ${(() => {
+          const norm = normalizePriority(j.priority);
+          const cls  = norm === 'Most Urgent' ? 'pc-prio-most-urgent'
+                     : norm === 'Urgent'      ? 'pc-prio-urgent'
+                     :                          'pc-prio-normal';
+          return `<td colspan="2"><div class="pc-label">Job Priority</div><div class="pc-value ${cls}">${v(norm)}</div></td>`;
+        })()}
       </tr>
     </table>
     <table class="pp-table">
