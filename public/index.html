@@ -11189,19 +11189,24 @@ async function saveAdd() {
   showSaving(false);
 }
 
-// Read-only view of the job card — shows the same layout as the printed
-// card (via buildPrintCard) inside a modal. Used by the per-tile View
-// button so anyone can look at a job without opening the Edit form.
+// Read-only view of the job card — full-page overlay showing the exact
+// printed-card layout. Replaces the floor copy that operators used to
+// pull from the binder: anyone can pull up a job's full card on screen.
 function viewJobCard(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()" style="max-width:1000px !important;padding:0;">
-    <div style="padding:16px 20px 0;display:flex;justify-content:space-between;align-items:center;">
-      <h2 style="margin:0;font-size:18px;">Job Card #${j.id}</h2>
-      <button class="btn btn-sm" onclick="closeModal()">Close</button>
-    </div>
-    <div style="padding:12px 20px 20px;overflow:auto;max-height:80vh;">${buildPrintCard(j)}</div>
-  </div>`);
+  document.getElementById('modal-root').innerHTML = `
+    <div id="overlay" class="overlay" onclick="overlayClick(event)" style="background:#f3f4f6;padding:0;align-items:stretch;justify-content:stretch;overflow:auto;">
+      <div onclick="event.stopPropagation()" style="background:#fff;width:100%;min-height:100vh;padding:20px 20px 80px;box-sizing:border-box;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:0 auto 16px;max-width:8.5in;">
+          <h2 style="margin:0;font-size:18px;color:#000;">Job Card #${esc(j.id)}</h2>
+          <button class="btn btn-sm" onclick="closeModal()">Close</button>
+        </div>
+        <div style="max-width:8.5in;margin:0 auto;position:relative;">
+          ${buildPrintCard(j)}
+        </div>
+      </div>
+    </div>`;
 }
 
 function openEdit(id) {
@@ -11641,9 +11646,8 @@ function buildPrintCard(j) {
         ${dateCell('Date', j.dateissued)}
         ${dateCell('Deadline', j.deadline)}
         ${cell('P.O. Qty', j.qty)}
-        ${cell('Machine Name', j.machine)}
+        <td colspan="2"><div class="pc-label">Machine Name</div><div class="pc-value">${v(j.machine)}</div></td>
         ${cell('Ups', j.ups)}
-        ${priorityCell('Job Priority', j.priority)}
       </tr>
       <tr>
         <td colspan="3"><div class="pc-label">Job Name</div><div class="pc-value">${v(j.name)}</div></td>
@@ -11668,7 +11672,13 @@ function buildPrintCard(j) {
       <tr>
         <td colspan="2"><div class="pc-label">Code</div><div class="pc-value">${v(j.jobcode)}</div></td>
         <td colspan="2"><div class="pc-label">Brand</div><div class="pc-value">${v(paperBrand)}</div></td>
-        <td colspan="2"><div class="pc-label">Delivered PO Qty</div><div class="pc-value">${v(j.delqty)}</div></td>
+        ${(() => {
+          const norm = normalizePriority(j.priority);
+          const cls  = norm === 'Most Urgent' ? 'pc-prio-most-urgent'
+                     : norm === 'Urgent'      ? 'pc-prio-urgent'
+                     :                          'pc-prio-normal';
+          return `<td colspan="2"><div class="pc-label">Job Priority</div><div class="pc-value ${cls}">${v(norm)}</div></td>`;
+        })()}
       </tr>
     </table>
     <table class="pp-table">
