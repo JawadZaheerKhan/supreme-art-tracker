@@ -1259,7 +1259,16 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
       if (!done.length) continue;
       const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-      const sheetsN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      // Coated sheets = printed sheets - printed waste sheets. Waste
+      // doesn't go through the coating machine, so the input to coating
+      // is whatever survived printing.
+      const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const sheetsN = Math.max(0, printedN - printedWasteN);
+      // Tracks which machines we've already credited sheets for on this
+      // job so a job that got UV and Spot UV on the SAME machine only
+      // counts the sheet pass once for that machine.
+      const sheetsCredited = new Set();
       for (const entry of done) {
         if (!entry) continue;
         if (isoTsToDate(entry.done_at) !== date) continue;
@@ -1267,10 +1276,10 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         if (!mc) continue;
         const row = ensure(mc);
         row.jobIds.add(job.id);
-        // Each coating pass counts as one sheet-pass — if a job got UV
-        // and Spot UV on the same machine the same day, that's two
-        // passes worth of work for the machine.
-        row.sheets += sheetsN;
+        if (!sheetsCredited.has(mc)) {
+          row.sheets += sheetsN;
+          sheetsCredited.add(mc);
+        }
         const opName = String(entry.operator_name || '').trim();
         if (opName) row.operators.add(opName);
         const kind = String(entry.kind || '').trim();
