@@ -1228,16 +1228,13 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        // For custom rows, every cell falls back to the admin-entered
-        // notes value because there's no auto-aggregation behind it.
-        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
-        colors: isCustom ? (note.colors || '') : colorsStr,
-        plates: isCustom ? (note.plates || '') : (row ? row.plates : 0),
-        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
-        // Wastage: auto-aggregated from each job's printed_waste_sheets;
-        // any admin override stored on the notes row wins so manual
-        // adjustments stick.
+        // Admin override on the notes row always wins so an admin can
+        // correct any auto-aggregated cell from the report itself.
+        sheets: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
+        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
+        colors: isCustom ? (note.colors || '') : (note.colors || colorsStr),
+        plates: isCustom ? (note.plates || '') : (note.plates || (row ? row.plates : 0)),
+        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
         waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         hours: note.hours || '',
         remarks: note.remarks || '',
@@ -1268,11 +1265,13 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
 
-    // Coating machines = operators whose roles include 'coatings'
-    // (wet/film). Embellishment machines now live on their own tab.
+    // Coating machines = operators with 'coatings' (wet) or 'embellish'
+    // (foil/emboss) roles. Both share this tab — embellishments machines
+    // live in the same shop as the coatings machines.
     const machineRows = await sql`
       SELECT name FROM operators
-      WHERE active AND roles @> ARRAY['coatings']::text[]
+      WHERE active
+        AND (roles @> ARRAY['coatings']::text[] OR roles @> ARRAY['embellish']::text[])
       ORDER BY name
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
@@ -1300,8 +1299,6 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         if (!entry) continue;
         if (isoTsToDate(entry.done_at) !== date) continue;
         const kind = String(entry.kind || '').trim();
-        // Filter to wet finishes only — embellishments live on their own tab.
-        if (!WET_FINISHES.has(kind)) continue;
         const mc = String(entry.machine || '').trim();
         if (!mc) continue;
         const row = ensure(mc);
@@ -1334,105 +1331,11 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         : '';
       return {
         machine: m,
-        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
-        finishes,
-        // Wastage: auto-aggregated from each entry's waste_sheets in
-        // coatings_done; admin note override on the daily_production_notes
-        // row wins so manual edits stick.
-        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
-        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
-        hours: note.hours || '',
-        blankets: note.blankets || '',
-        remarks: note.remarks || '',
-        is_custom: isCustom,
-      };
-    });
-    res.json(out);
-  } catch (err) {
-    console.error(err); res.status(500).json({ error: err.message });
-  }
-});
-
-// Daily Production register — Embellishments section. Mirrors the
-// Coatings endpoint but filters coatings_done to embellishment finishes
-// only and pulls operators with the 'embellish' role. Same shape so the
-// frontend renderer can be the coatings renderer with a different URL.
-app.get('/api/reports/daily-production/embellishments/:date', requireAuth, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const date = String(req.params.date || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
-
-    const machineRows = await sql`
-      SELECT name FROM operators
-      WHERE active AND roles @> ARRAY['embellish']::text[]
-      ORDER BY name
-    `;
-    const machines = machineRows.map(r => r.name).filter(Boolean);
-
-    const jobs = await sql`SELECT id, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
-
-    const acc = new Map();
-    const ensure = (m) => {
-      if (!acc.has(m)) acc.set(m, {
-        sheets: 0, jobIds: new Set(), operators: new Set(),
-        finishCounts: new Map(), waste: 0,
-      });
-      return acc.get(m);
-    };
-
-    for (const job of jobs) {
-      const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
-      if (!done.length) continue;
-      const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-      const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
-      const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
-      const sheetsN = Math.max(0, printedN - printedWasteN);
-      const sheetsCredited = new Set();
-      for (const entry of done) {
-        if (!entry) continue;
-        if (isoTsToDate(entry.done_at) !== date) continue;
-        const kind = String(entry.kind || '').trim();
-        if (!EMBELLISH_FINISHES.has(kind)) continue;
-        const mc = String(entry.machine || '').trim();
-        if (!mc) continue;
-        const row = ensure(mc);
-        row.jobIds.add(job.id);
-        if (!sheetsCredited.has(mc)) {
-          row.sheets += sheetsN;
-          sheetsCredited.add(mc);
-        }
-        const opName = String(entry.operator_name || '').trim();
-        if (opName) row.operators.add(opName);
-        if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
-        const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
-        if (Number.isFinite(w)) row.waste += w;
-      }
-    }
-
-    const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'embellishments'`;
-    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
-    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
-    const allMachines = [...machines, ...customMachines.sort()];
-
-    const out = allMachines.map(m => {
-      const row = acc.get(m);
-      const note = noteByMachine.get(m) || {};
-      const isCustom = !machines.includes(m);
-      const operators = row ? [...row.operators].sort() : [];
-      const finishes = row
-        ? [...row.finishCounts.entries()].sort((a, b) => b[1] - a[1])
-            .map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(', ')
-        : '';
-      return {
-        machine: m,
-        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        sheets: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
+        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
         finishes,
         waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
-        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
         hours: note.hours || '',
         blankets: note.blankets || '',
         remarks: note.remarks || '',
@@ -1527,10 +1430,9 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
       return {
         machine: m,
         // The helper calls it `sheets`; the Pasting register labels it Units.
-        units: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
-        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
-        // Wastage: pasting_waste_qty summed per machine per date.
+        units: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
+        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
+        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
         waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         hours: note.hours || '',
         remarks: note.remarks || '',
@@ -1568,10 +1470,9 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
-        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
-        // Wastage: die_cutting_waste summed per machine per date.
+        sheets: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
+        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
+        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
         waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         hours: note.hours || '',
         make_ready: note.make_ready || '',
