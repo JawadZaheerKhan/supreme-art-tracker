@@ -1131,10 +1131,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     // one — so only the most recent submission credits a machine. Stops
     // the same job from being counted on two machines.
     let latestMs = -1, latestMc = '', latestOp = '';
+    let sawStageEntry = false;
     for (const e of log) {
       if (!e || !e.by) continue;
       if (logTimeToISODate(e.time) !== date) continue;
       if (parseByStage(e.by) !== stageLabel) continue;
+      sawStageEntry = true;
       const m = String(e.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
       const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
       if (ms > latestMs) {
@@ -1148,6 +1150,26 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       if (latestOp) {
         if (!opsByMachine.has(latestMc)) opsByMachine.set(latestMc, new Set());
         opsByMachine.get(latestMc).add(latestOp);
+      }
+    } else {
+      // No station log entry attributed a machine. Two fallbacks:
+      //   1. Admin advanced the stage manually on this date (sawStageEntry
+      //      is true) — log byline has the stage name but no machine, so
+      //      we credit the job's planned machine (job.machine).
+      //   2. Stage hasn't been logged but its stages[].time matches the
+      //      report date — same situation, the admin advance just wasn't
+      //      logged for some reason.
+      const stageIdx = STAGES.indexOf(stageLabel);
+      const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
+      const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
+      if (job.machine && (sawStageEntry || stageTimeMatches)) {
+        machinesThisJob.add(job.machine);
+        const part0 = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+        const cardOp = part0[sheetsKey] && String(part0[sheetsKey].name || '').trim();
+        if (cardOp) {
+          if (!opsByMachine.has(job.machine)) opsByMachine.set(job.machine, new Set());
+          opsByMachine.get(job.machine).add(cardOp);
+        }
       }
     }
     if (!machinesThisJob.size) continue;
