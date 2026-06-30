@@ -1108,9 +1108,22 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
 // Printing and Die endpoints use this — the only difference is which
 // stage we filter on and which particulars-key supplies the sheet count.
 async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sheetsKey, wasteKey }) {
-  const machineRows = await sql`SELECT name FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
+  const machineRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
   const machines = machineRows.map(r => r.name).filter(Boolean);
-  const jobs = await sql`SELECT id, particulars, log FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
+  // Person-name → machine-name map for THIS section's operators only. Lets
+  // the fallback below credit "obaid" (typed on the Job Card's Die Cutting
+  // Sheets row) to the Die Cutting machine obaid is registered on, rather
+  // than blindly using the job's planned machine (which is the Printing
+  // machine and would be wrong for any non-Printing section).
+  const personToMachine = new Map();
+  for (const r of machineRows) {
+    const list = Array.isArray(r.persons) ? r.persons : [];
+    for (const p of list) {
+      const n = String((p && p.name) || '').trim().toLowerCase();
+      if (n && !personToMachine.has(n)) personToMachine.set(n, r.name);
+    }
+  }
+  const jobs = await sql`SELECT id, particulars, log, machine, stages FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
 
   const acc = new Map();
   const ensure = (m) => {
@@ -1152,20 +1165,35 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         opsByMachine.get(latestMc).add(latestOp);
       }
     } else {
-      // No station log entry attributed a machine. Two fallbacks:
-      //   1. Admin advanced the stage manually on this date (sawStageEntry
-      //      is true) — log byline has the stage name but no machine, so
-      //      we credit the job's planned machine (job.machine).
-      //   2. Stage hasn't been logged but its stages[].time matches the
-      //      report date — same situation, the admin advance just wasn't
-      //      logged for some reason.
+      // No station log entry attributed a machine. Look for an admin entry
+      // on the Job Card: particulars[sheetsKey].name is the operator the
+      // admin typed in (e.g. "obaid"). Cross-reference against operators
+      // registered for THIS section's role to find their machine —
+      // crediting "Die cutting 1060" instead of the printing machine the
+      // job is planned on.
+      const part0 = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const cardOp = part0[sheetsKey] && String(part0[sheetsKey].name || '').trim();
+      const cardOpMachine = cardOp ? personToMachine.get(cardOp.toLowerCase()) : '';
       const stageIdx = STAGES.indexOf(stageLabel);
       const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
       const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
-      if (job.machine && (sawStageEntry || stageTimeMatches)) {
+      // Admin entered a Job Card row with a recognised operator name?
+      // Credit the operator's machine. Date attribution: if the stage has
+      // been advanced on this date, we use that. Otherwise we fall back
+      // to today's report date — meaning admin entries appear on whichever
+      // day the user views the report. Without a per-row date stamp
+      // there is no perfect attribution; today's view is the best heuristic.
+      const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry ||
+        date === new Date().toISOString().slice(0, 10));
+      if (cardEntryFits) {
+        machinesThisJob.add(cardOpMachine);
+        if (!opsByMachine.has(cardOpMachine)) opsByMachine.set(cardOpMachine, new Set());
+        opsByMachine.get(cardOpMachine).add(cardOp);
+      } else if (job.machine && (sawStageEntry || stageTimeMatches) && machines.includes(job.machine)) {
+        // Legacy fallback: the admin-typed name doesn't match any operator
+        // registered for this section, but the job's planned machine IS a
+        // machine for this section and the stage was advanced on the date.
         machinesThisJob.add(job.machine);
-        const part0 = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-        const cardOp = part0[sheetsKey] && String(part0[sheetsKey].name || '').trim();
         if (cardOp) {
           if (!opsByMachine.has(job.machine)) opsByMachine.set(job.machine, new Set());
           opsByMachine.get(job.machine).add(cardOp);
