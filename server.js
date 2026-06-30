@@ -22,6 +22,13 @@ const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 // station-update endpoint to build stage names + detect the final stage.
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Finished','Delivered'];
 
+// Coating finish kinds split into wet (Coatings tab) and embellishment
+// (Embellishments tab) so each tab shows only the work that section does.
+// Color Seal and Colour Seal are both accepted because the print label
+// normalizes them but historical data has both spellings.
+const WET_FINISHES = new Set(['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination']);
+const EMBELLISH_FINISHES = new Set(['Emboss','Color Seal','Colour Seal','Dripup','Cylinder Emboss','Hot Foiling']);
+
 // Operator roles — what each role lets the holder do. Multiple roles can
 // land on the same stage_index (Coatings + Embellishments both at 2): the
 // difference is which specific finishes they're qualified for. ROLES keeps
@@ -72,7 +79,21 @@ function stageIndicesFromRoles(roles) {
 // still to do, not the UV / lamination items meant for the wet section).
 function pendingCoatings(job, allowedSet) {
   const planned = Array.isArray(job.coatings) ? job.coatings : [];
-  const doneKinds = (Array.isArray(job.coatings_done) ? job.coatings_done : []).map(d => d && d.kind).filter(Boolean);
+  const allDone = Array.isArray(job.coatings_done) ? job.coatings_done : [];
+  // Staleness: ignore done entries from before the Coatings stage was last
+  // re-entered. Lets an admin reverse the stage and have operators redo
+  // coatings without the queue treating them as already done.
+  const stageRec = job.stages && job.stages[2];
+  let stageMs = 0;
+  if (stageRec && stageRec.time) {
+    const m = String(stageRec.time).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    if (m) {
+      const t = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+      if (isFinite(t)) stageMs = t;
+    }
+  }
+  const liveDone = stageMs ? allDone.filter(d => d && (new Date(d.done_at).getTime() || 0) >= stageMs) : allDone;
+  const doneKinds = liveDone.map(d => d && d.kind).filter(Boolean);
   return planned.filter(c => !doneKinds.includes(c) && (!allowedSet || allowedSet.has(c)));
 }
 
@@ -1104,16 +1125,29 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     const log = Array.isArray(job.log) ? job.log : [];
     const machinesThisJob = new Set();
     const opsByMachine = new Map();
+    // Pick the LATEST log entry for this (date, stage). Earlier station
+    // submissions on the same day are treated as corrections — operator
+    // hit submit at the wrong station, then re-submitted at the right
+    // one — so only the most recent submission credits a machine. Stops
+    // the same job from being counted on two machines.
+    let latestMs = -1, latestMc = '', latestOp = '';
     for (const e of log) {
       if (!e || !e.by) continue;
       if (logTimeToISODate(e.time) !== date) continue;
       if (parseByStage(e.by) !== stageLabel) continue;
-      const mc = parseByMachine(e.by);
-      const opName = parseByOperator(e.by);
-      if (mc) machinesThisJob.add(mc);
-      if (mc && opName) {
-        if (!opsByMachine.has(mc)) opsByMachine.set(mc, new Set());
-        opsByMachine.get(mc).add(opName);
+      const m = String(e.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+      const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
+      if (ms > latestMs) {
+        latestMs = ms;
+        latestMc = parseByMachine(e.by);
+        latestOp = parseByOperator(e.by);
+      }
+    }
+    if (latestMc) {
+      machinesThisJob.add(latestMc);
+      if (latestOp) {
+        if (!opsByMachine.has(latestMc)) opsByMachine.set(latestMc, new Set());
+        opsByMachine.get(latestMc).add(latestOp);
       }
     }
     if (!machinesThisJob.size) continue;
@@ -1234,12 +1268,11 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
 
-    // Coating machines = active operator rows whose roles include
-    // either 'coatings' (wet/film) or 'embellish' (foil/emboss).
+    // Coating machines = operators whose roles include 'coatings'
+    // (wet/film). Embellishment machines now live on their own tab.
     const machineRows = await sql`
       SELECT name FROM operators
-      WHERE active
-        AND (roles @> ARRAY['coatings']::text[] OR roles @> ARRAY['embellish']::text[])
+      WHERE active AND roles @> ARRAY['coatings']::text[]
       ORDER BY name
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
@@ -1259,19 +1292,16 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
       if (!done.length) continue;
       const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-      // Coated sheets = printed sheets - printed waste sheets. Waste
-      // doesn't go through the coating machine, so the input to coating
-      // is whatever survived printing.
       const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const sheetsN = Math.max(0, printedN - printedWasteN);
-      // Tracks which machines we've already credited sheets for on this
-      // job so a job that got UV and Spot UV on the SAME machine only
-      // counts the sheet pass once for that machine.
       const sheetsCredited = new Set();
       for (const entry of done) {
         if (!entry) continue;
         if (isoTsToDate(entry.done_at) !== date) continue;
+        const kind = String(entry.kind || '').trim();
+        // Filter to wet finishes only — embellishments live on their own tab.
+        if (!WET_FINISHES.has(kind)) continue;
         const mc = String(entry.machine || '').trim();
         if (!mc) continue;
         const row = ensure(mc);
@@ -1282,7 +1312,6 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         }
         const opName = String(entry.operator_name || '').trim();
         if (opName) row.operators.add(opName);
-        const kind = String(entry.kind || '').trim();
         if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
         const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
         if (Number.isFinite(w)) row.waste += w;
@@ -1311,6 +1340,97 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         // Wastage: auto-aggregated from each entry's waste_sheets in
         // coatings_done; admin note override on the daily_production_notes
         // row wins so manual edits stick.
+        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        hours: note.hours || '',
+        blankets: note.blankets || '',
+        remarks: note.remarks || '',
+        is_custom: isCustom,
+      };
+    });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Embellishments section. Mirrors the
+// Coatings endpoint but filters coatings_done to embellishment finishes
+// only and pulls operators with the 'embellish' role. Same shape so the
+// frontend renderer can be the coatings renderer with a different URL.
+app.get('/api/reports/daily-production/embellishments/:date', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+
+    const machineRows = await sql`
+      SELECT name FROM operators
+      WHERE active AND roles @> ARRAY['embellish']::text[]
+      ORDER BY name
+    `;
+    const machines = machineRows.map(r => r.name).filter(Boolean);
+
+    const jobs = await sql`SELECT id, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
+
+    const acc = new Map();
+    const ensure = (m) => {
+      if (!acc.has(m)) acc.set(m, {
+        sheets: 0, jobIds: new Set(), operators: new Set(),
+        finishCounts: new Map(), waste: 0,
+      });
+      return acc.get(m);
+    };
+
+    for (const job of jobs) {
+      const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
+      if (!done.length) continue;
+      const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const sheetsN = Math.max(0, printedN - printedWasteN);
+      const sheetsCredited = new Set();
+      for (const entry of done) {
+        if (!entry) continue;
+        if (isoTsToDate(entry.done_at) !== date) continue;
+        const kind = String(entry.kind || '').trim();
+        if (!EMBELLISH_FINISHES.has(kind)) continue;
+        const mc = String(entry.machine || '').trim();
+        if (!mc) continue;
+        const row = ensure(mc);
+        row.jobIds.add(job.id);
+        if (!sheetsCredited.has(mc)) {
+          row.sheets += sheetsN;
+          sheetsCredited.add(mc);
+        }
+        const opName = String(entry.operator_name || '').trim();
+        if (opName) row.operators.add(opName);
+        if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
+        const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
+        if (Number.isFinite(w)) row.waste += w;
+      }
+    }
+
+    const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'embellishments'`;
+    const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort()];
+
+    const out = allMachines.map(m => {
+      const row = acc.get(m);
+      const note = noteByMachine.get(m) || {};
+      const isCustom = !machines.includes(m);
+      const operators = row ? [...row.operators].sort() : [];
+      const finishes = row
+        ? [...row.finishCounts.entries()].sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(', ')
+        : '';
+      return {
+        machine: m,
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        finishes,
         waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
