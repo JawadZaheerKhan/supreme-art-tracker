@@ -1131,10 +1131,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     // one — so only the most recent submission credits a machine. Stops
     // the same job from being counted on two machines.
     let latestMs = -1, latestMc = '', latestOp = '';
+    let sawStageEntry = false;
     for (const e of log) {
       if (!e || !e.by) continue;
       if (logTimeToISODate(e.time) !== date) continue;
       if (parseByStage(e.by) !== stageLabel) continue;
+      sawStageEntry = true;
       const m = String(e.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
       const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
       if (ms > latestMs) {
@@ -1148,6 +1150,26 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       if (latestOp) {
         if (!opsByMachine.has(latestMc)) opsByMachine.set(latestMc, new Set());
         opsByMachine.get(latestMc).add(latestOp);
+      }
+    } else {
+      // No station log entry attributed a machine. Two fallbacks:
+      //   1. Admin advanced the stage manually on this date (sawStageEntry
+      //      is true) — log byline has the stage name but no machine, so
+      //      we credit the job's planned machine (job.machine).
+      //   2. Stage hasn't been logged but its stages[].time matches the
+      //      report date — same situation, the admin advance just wasn't
+      //      logged for some reason.
+      const stageIdx = STAGES.indexOf(stageLabel);
+      const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
+      const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
+      if (job.machine && (sawStageEntry || stageTimeMatches)) {
+        machinesThisJob.add(job.machine);
+        const part0 = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+        const cardOp = part0[sheetsKey] && String(part0[sheetsKey].name || '').trim();
+        if (cardOp) {
+          if (!opsByMachine.has(job.machine)) opsByMachine.set(job.machine, new Set());
+          opsByMachine.get(job.machine).add(cardOp);
+        }
       }
     }
     if (!machinesThisJob.size) continue;
@@ -1301,12 +1323,22 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
       if (!done.length) continue;
       const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      // Sum pipe-separated values like "500 | 500" → 1000. coating_sheets_qty
+      // and uv_waste_sheets both use this format because station submissions
+      // append pass-by-pass.
+      const sumPipe = (s) => String(s || '').split('|').reduce((acc, part) => {
+        const n = parseInt(part.replace(/[^0-9-]/g, ''), 10);
+        return acc + (Number.isFinite(n) ? n : 0);
+      }, 0);
+      const coatSheetsAdmin = sumPipe(part.coating_sheets_qty && part.coating_sheets_qty.quantity);
+      // Fallback: if admin hasn't filled in Coating Sheets Qty, derive from
+      // printed − printed-waste (legacy formula).
       const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
-      const sheetsN = Math.max(0, printedN - printedWasteN);
-      // If admin cleared the Job Card's printed sheets, don't count this
-      // job toward the Coatings report.
-      if (printedN <= 0) continue;
+      const sheetsN = coatSheetsAdmin > 0 ? coatSheetsAdmin : Math.max(0, printedN - printedWasteN);
+      // Job-level waste from particulars (admin- or station-written).
+      const adminWasteN = sumPipe(part.uv_waste_sheets && part.uv_waste_sheets.quantity);
+      if (sheetsN <= 0) continue;
       const sheetsCredited = new Set();
       for (const entry of done) {
         if (!entry) continue;
@@ -3137,11 +3169,17 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const finishKind = isCoatingsStage && typeof req.body.finish_kind === 'string' ? req.body.finish_kind.trim() : '';
     const finishMachine = isCoatingsStage ? String(req.body.finish_machine || '').trim() : '';
     const finishWaste = isCoatingsStage && req.body.finish_waste_sheets != null ? String(req.body.finish_waste_sheets).trim() : '';
+    // Multi-pass support: detect whether this finish was already recorded
+    // before this submission. If so, treat as a follow-up pass and don't
+    // auto-advance the stage even when no pending coatings remain.
+    let isFollowUpPass = false;
     if (isCoatingsStage && finishKind) {
       if (!ALL_FINISHES.includes(finishKind)) return res.status(400).json({ error: 'Unknown coating type.' });
       if (allowedFinishes.size && !allowedFinishes.has(finishKind)) return res.status(403).json({ error: `Your role isn't allowed to do ${finishKind}.` });
       const planned = Array.isArray(job.coatings) ? job.coatings : [];
       if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That coating was not planned for this job.' });
+      isFollowUpPass = (Array.isArray(job.coatings_done) ? job.coatings_done : [])
+        .some(d => d && d.kind === finishKind);
       // Multi-day support: same finish kind can be recorded more than
       // once for a job (e.g. half the UV done today, the other half
       // tomorrow). The Daily Production aggregator filters by done_at
@@ -3180,8 +3218,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       if (validSkip) {
         target = skipTo;
       } else if (isCoatingsStage) {
+        // Multi-pass: a follow-up pass on an already-done finish keeps
+        // the job at Coatings even if no formally-pending finishes remain,
+        // so the operator can keep adding passes (half today, half
+        // tomorrow). Only advance when this is the FIRST submission of
+        // the finish AND nothing else is pending.
         const remaining = pendingCoatings(peekJob);
-        target = remaining.length > 0 ? curStage : Math.min(curStage + 1, STAGES.length - 1);
+        target = (remaining.length > 0 || isFollowUpPass) ? curStage : Math.min(curStage + 1, STAGES.length - 1);
       } else {
         // Auto-skip Coatings when leaving an earlier stage on a job that
         // has no coatings planned (jumps Printing → Die Cutting directly).

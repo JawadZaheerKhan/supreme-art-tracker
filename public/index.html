@@ -2109,6 +2109,9 @@ const PARTICULARS_ROWS = [
   { key: 'no_of_colors',             label: 'No. of Colors' },
   { key: 'printed_sheets_qty',       label: 'Printed Sheets Qty' },
   { key: 'printed_waste_sheets',     label: 'Printed Waste Sheets' },
+  // Coating Sheets is a direct admin/station entry — no formula. Reports
+  // read this value rather than computing printed − waste.
+  { key: 'coating_sheets_qty',       label: 'Coating Sheets Qty' },
   // Renamed from "U.V Waste Sheets" — DB key kept as uv_waste_sheets so
   // existing job rows still match. Only the display label changed.
   { key: 'uv_waste_sheets',          label: 'Coating Waste Sheets' },
@@ -13606,7 +13609,12 @@ function stationQueueHtml() {
     (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j)
   );
   if (stIdx === 2 && myFinishes && myFinishes.size) {
-    queue = queue.filter(j => jobCoatingsState(j, myFinishes).pendingForMe.length > 0);
+    // Show any job that has a planned finish this operator can do —
+    // pending OR already done (so multi-pass / corrections can happen).
+    queue = queue.filter(j => {
+      const planned = Array.isArray(j.coatings) ? j.coatings : [];
+      return planned.some(c => myFinishes.has(c));
+    });
   }
   queue = queue.reverse();
   const rows = queue.length ? queue.map(j => {
@@ -13752,19 +13760,30 @@ function stationUpdateHtml() {
       return `<div class="station-hint" style="margin:10px 0;">This job has no coatings planned. Hit Done to move it forward.</div>`;
     }
     const doneBadges = coatState.done.map(d => `<span class="sa-pill sa-pill--done">✓ ${esc(d.kind)}${d.operator_name ? ' · ' + esc(d.operator_name) : ''}${d.machine ? ' · ⚙ ' + esc(d.machine) : ''}${d.waste_sheets ? ' · ' + esc(d.waste_sheets) + ' waste' : ''}</span>`).join(' ');
-    if (!coatState.pendingForMe.length) {
+    // Multi-pass support: show EVERY planned finish the operator can do —
+    // both pending AND already-done. Already-done finishes get a
+    // "+ another pass" marker so the operator can record a second
+    // sitting (half today, half tomorrow). Server accepts the duplicate.
+    const myDoable = coatState.planned.filter(c => !myFinishes || myFinishes.size === 0 || myFinishes.has(c));
+    if (!myDoable.length) {
       const othersList = coatState.pending.map(c => `<span class="sj-finish-badge sj-finish-badge--other">${esc(c)}</span>`).join(' ');
       return `
         <div class="station-finish">
           ${coatState.done.length ? `<div class="sf-done-row" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">${doneBadges}</div>` : ''}
-          <div class="station-hint" style="margin:10px 0;">All your coatings on this job are done.${othersList ? ' Still pending for the other section: ' + othersList : ''}</div>
+          <div class="station-hint" style="margin:10px 0;">No coatings here for your role.${othersList ? ' Pending for the other section: ' + othersList : ''}</div>
         </div>`;
     }
-    const opts = coatState.pendingForMe.map((c, i) => `
-      <label class="sf-radio">
-        <input type="radio" name="finish-kind" value="${esc(c)}" ${i === 0 ? 'checked' : ''}>
-        <span>${esc(c)}</span>
-      </label>`).join('');
+    const pendingSet = new Set(coatState.pendingForMe);
+    const firstPendingIdx = myDoable.findIndex(c => pendingSet.has(c));
+    const defaultIdx = firstPendingIdx >= 0 ? firstPendingIdx : 0;
+    const opts = myDoable.map((c, i) => {
+      const isDone = !pendingSet.has(c);
+      return `
+      <label class="sf-radio${isDone ? ' sf-radio--redo' : ''}">
+        <input type="radio" name="finish-kind" value="${esc(c)}" ${i === defaultIdx ? 'checked' : ''}>
+        <span>${esc(c)}${isDone ? ' <small style="opacity:0.7;">(+ another pass)</small>' : ''}</span>
+      </label>`;
+    }).join('');
     const otherPending = coatState.pending.filter(c => !coatState.pendingForMe.includes(c));
     const othersList = otherPending.length
       ? `<div class="station-hint" style="margin-top:8px;">For the other section: ${otherPending.map(c => `<span class="sj-finish-badge sj-finish-badge--other">${esc(c)}</span>`).join(' ')}</div>`
@@ -13800,7 +13819,9 @@ function stationUpdateHtml() {
       </div>`;
   })() : '';
 
-  const coatingPickable = isCoatingsStage && coatState && coatState.pendingForMe.length > 0;
+  // Pickable if the operator has ANY planned finish they can do — whether
+  // pending or already done (multi-pass support).
+  const coatingPickable = isCoatingsStage && coatState && coatState.planned.some(c => !myFinishes || myFinishes.size === 0 || myFinishes.has(c));
   const hasWorkFields = fields.length > 0 || coatingPickable;
   const emptyHint = !hasWorkFields && !isCoatingsStage ? `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>` : '';
   const advanceLabel = coatingPickable
