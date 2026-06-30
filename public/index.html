@@ -11192,6 +11192,17 @@ function openDuplicateJob(id) {
   // that should never inherit on a repeat. JSON-roundtrip the particulars and
   // coatings so editing the new job doesn't accidentally mutate the original.
   const today = new Date().toISOString().slice(0, 10);
+  // Particulars to carry over on a duplicate — the SETUP fields that live in
+  // the top form area (PO Qty → Code). Everything else (the production rows
+  // like Printed Sheets, all the waste columns, Delivered Cartons Qty, and
+  // free-text Comments) starts blank on the new job — those are filled in
+  // afresh when the actual run happens.
+  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand'];
+  const sp = source.particulars || {};
+  const newParticulars = {};
+  for (const k of KEEP_PARTICULARS) {
+    if (sp[k] !== undefined) newParticulars[k] = JSON.parse(JSON.stringify(sp[k]));
+  }
   const template = {
     ...source,
     id:             undefined,           // new job, server assigns
@@ -11206,9 +11217,7 @@ function openDuplicateJob(id) {
     log:            [],                  // no log entries yet
     issuance_status: 'pending',          // stock needs to be issued again
     created_at:     undefined,           // server fills
-    // Deep-copy particulars + coatings so subsequent edits don't bleed back
-    // into the source job's in-memory representation.
-    particulars:    source.particulars ? JSON.parse(JSON.stringify(source.particulars)) : {},
+    particulars:    newParticulars,
     coatings:       Array.isArray(source.coatings) ? [...source.coatings] : [],
   };
 
