@@ -1116,24 +1116,8 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         opsByMachine.get(mc).add(opName);
       }
     }
+    if (!machinesThisJob.size) continue;
     const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-    // Fallback when no station submission attributed this job to any
-    // machine for this date+stage: read the planned machine off the Job
-    // Card AND require the stage to have been completed on the report
-    // date (admin advanced it that day). Operator name falls back to the
-    // particulars row's "Name" column if the manager filled it in.
-    if (!machinesThisJob.size) {
-      const stageIdx = STAGES.indexOf(stageLabel);
-      const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
-      if (!job.machine || !stageRec || !stageRec.time) continue;
-      if (logTimeToISODate(stageRec.time) !== date) continue;
-      machinesThisJob.add(job.machine);
-      const cardOp = part[sheetsKey] && String(part[sheetsKey].name || '').trim();
-      if (cardOp) {
-        if (!opsByMachine.has(job.machine)) opsByMachine.set(job.machine, new Set());
-        opsByMachine.get(job.machine).add(cardOp);
-      }
-    }
     // Multi-pass entries[] is the source of truth when present — sum
     // only entries whose date matches the report date so a job split
     // across days gets attributed correctly. Falls back to the legacy
