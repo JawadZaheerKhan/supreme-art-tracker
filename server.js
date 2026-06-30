@@ -1186,6 +1186,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         if (Number.isFinite(n)) wasteN = n;
       }
     }
+    // Skip jobs the admin emptied out on the Job Card (no sheets, no
+    // waste, no colors). Otherwise a job whose particulars row was
+    // cleared would still inflate the jobs count and surface the
+    // operator name parsed from the log byline.
+    const hasData = sheetsN > 0 || wasteN > 0 || colorsN > 0;
+    if (!hasData) continue;
     for (const mc of machinesThisJob) {
       const row = ensure(mc);
       row.jobIds.add(job.id);
@@ -1228,14 +1234,18 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        // Admin override on the notes row always wins so an admin can
-        // correct any auto-aggregated cell from the report itself.
-        sheets: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
-        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
-        colors: isCustom ? (note.colors || '') : (note.colors || colorsStr),
-        plates: isCustom ? (note.plates || '') : (note.plates || (row ? row.plates : 0)),
-        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
-        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
+        // Source-of-truth columns (sheets / waste / operator / jobs /
+        // colors / plates) are pure aggregates over the Job Card — admin
+        // edits these via the Job Card itself, never via the report, so
+        // clearing a Job Card row clears the report row too. Custom
+        // (ad-hoc) machines still read these from the notes row because
+        // there's no aggregate behind them.
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        colors: isCustom ? (note.colors || '') : colorsStr,
+        plates: isCustom ? (note.plates || '') : (row ? row.plates : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         hours: note.hours || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
@@ -1294,6 +1304,9 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const sheetsN = Math.max(0, printedN - printedWasteN);
+      // If admin cleared the Job Card's printed sheets, don't count this
+      // job toward the Coatings report.
+      if (printedN <= 0) continue;
       const sheetsCredited = new Set();
       for (const entry of done) {
         if (!entry) continue;
@@ -1331,11 +1344,11 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         : '';
       return {
         machine: m,
-        sheets: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
-        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
         finishes,
-        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
-        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
+        waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         hours: note.hours || '',
         blankets: note.blankets || '',
         remarks: note.remarks || '',
@@ -1430,10 +1443,10 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
       return {
         machine: m,
         // The helper calls it `sheets`; the Pasting register labels it Units.
-        units: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
-        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
-        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
-        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
+        units: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         hours: note.hours || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
@@ -1470,10 +1483,10 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
       const operators = row ? [...row.operators].sort() : [];
       return {
         machine: m,
-        sheets: isCustom ? (note.sheets || '') : (note.sheets || (row ? row.sheets : 0)),
-        jobs: isCustom ? (note.jobs || '') : (note.jobs || (row ? row.jobIds.size : 0)),
-        operators: isCustom ? (note.operators_text || '') : (note.operators_text || operators.join(', ')),
-        waste: isCustom ? (note.waste || '') : (note.waste || (row ? row.waste : 0)),
+        sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
+        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        operators: isCustom ? (note.operators_text || '') : operators.join(', '),
+        waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         hours: note.hours || '',
         make_ready: note.make_ready || '',
         settings: note.settings || '',
