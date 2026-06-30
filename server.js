@@ -1260,7 +1260,9 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
 
-    const jobs = await sql`SELECT id, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
+    // Need full job rows (incl. stages + machine + coatings) for the
+    // Job-Card fallback when an operator skipped the Station submit.
+    const jobs = await sql`SELECT id, machine, stages, coatings, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL`;
 
     const acc = new Map();
     const ensure = (m) => {
@@ -1273,14 +1275,23 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
 
     for (const job of jobs) {
       const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
-      if (!done.length) continue;
       const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-      const sheetsN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      // Coatings "sheets" = printed sheets MINUS printed waste — what
+      // actually passed through the coating machine, per shop-floor
+      // convention (waste doesn't get coated).
+      const printedN      = parseInt(String((part.printed_sheets_qty   && part.printed_sheets_qty.quantity)   || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const sheetsN = Math.max(0, printedN - printedWasteN);
+
+      // Walk operator-submitted coatings_done entries first (the
+      // accurate per-finish path).
+      let matchedAny = false;
       for (const entry of done) {
         if (!entry) continue;
         if (isoTsToDate(entry.done_at) !== date) continue;
         const mc = String(entry.machine || '').trim();
         if (!mc) continue;
+        matchedAny = true;
         const row = ensure(mc);
         row.jobIds.add(job.id);
         // Each coating pass counts as one sheet-pass — if a job got UV
@@ -1294,12 +1305,42 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
         if (Number.isFinite(w)) row.waste += w;
       }
+
+      // Fallback when no coatings_done entry attributed this job to a
+      // machine for the report date: pull from the Job Card the same
+      // way Printing/Die do. Triggers only if the Coatings stage was
+      // advanced on the report date AND the manager filled in a
+      // Coating Waste Sheets quantity. Machine = job.machine; operator
+      // = Coating Waste Sheets row's "Name"; finishes = the planned
+      // coatings list so the column still shows what was applied.
+      if (!matchedAny && job.machine) {
+        const stageIdx = STAGES.indexOf('Coatings');
+        const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
+        const wasteN = parseInt(String((part.uv_waste_sheets && part.uv_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+        if (stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date && Number.isFinite(wasteN)) {
+          const row = ensure(job.machine);
+          row.jobIds.add(job.id);
+          row.sheets += sheetsN;
+          row.waste  += wasteN;
+          const cardOp = part.uv_waste_sheets && String(part.uv_waste_sheets.name || '').trim();
+          if (cardOp) row.operators.add(cardOp);
+          const planned = Array.isArray(job.coatings) ? job.coatings : [];
+          for (const k of planned) {
+            const kind = String(k || '').trim();
+            if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
+          }
+        }
+      }
     }
 
     const notesRows = await sql`SELECT machine, hours, blankets, remarks, sheets, jobs, operators_text, waste FROM daily_production_notes WHERE date = ${date} AND section = 'coatings'`;
     const noteByMachine = new Map(notesRows.map(r => [r.machine, r]));
+    // Surface fallback-attributed machines that aren't in the operators
+    // roster AND don't have an admin note saved yet — otherwise they get
+    // silently dropped when allMachines is built.
     const customMachines = notesRows.map(r => r.machine).filter(m => m && !machines.includes(m));
-    const allMachines = [...machines, ...customMachines.sort()];
+    const fallbackMachines = [...acc.keys()].filter(m => m && !machines.includes(m) && !customMachines.includes(m));
+    const allMachines = [...machines, ...customMachines.sort(), ...fallbackMachines.sort()];
 
     const out = allMachines.map(m => {
       const row = acc.get(m);
