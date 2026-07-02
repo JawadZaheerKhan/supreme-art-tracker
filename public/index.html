@@ -2282,6 +2282,18 @@ function fmtDMY(d, forDash) {
   return `${dd}/${mm}/${dt.getFullYear()}`;
 }
 
+// YYYY-MM-DD of a Date in the user's LOCAL timezone. Never use
+// toISOString().slice(0,10) for calendar dates — toISOString is UTC, so in
+// Pakistan (UTC+5) every evening after 19:00 it returns YESTERDAY's date
+// (job Date Issued defaulted to the wrong day, "today" filters missed
+// today's rows, date-range pickers were shifted a day, etc.).
+function localDateISO(d = new Date()) {
+  const dt = d instanceof Date ? d : new Date(d);
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  return `${dt.getFullYear()}-${mm}-${dd}`;
+}
+
 // Same as fmtDMY but appends hh:mm (24-hour). For transaction timestamps,
 // audit log entries, etc. where the time-of-day matters.
 function fmtDMYT(d) {
@@ -3721,7 +3733,7 @@ function renderInventoryStats() {
 // Fetch today's stock-out transactions + scan jobs for today's CTP→Printing
 // transitions. Cheap enough to run on each Inventory-tab entry and refresh.
 async function loadDailyStats() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateISO();
   // 1) Packets/Reams used: sum |change|/packetSize across job-consumed today.
   let cards = 0, reams = 0;
   try {
@@ -4887,7 +4899,7 @@ let stockReportState = { direction: 'all', period: 'month', from: '', to: '', pa
 // whatever the user typed in the from/to date inputs.
 function stockReportDateRange(period) {
   const now = new Date();
-  const iso = d => d.toISOString().slice(0, 10);
+  const iso = localDateISO;
   if (period === 'today') {
     const t = iso(now);
     return { from: t, to: t };
@@ -5432,7 +5444,7 @@ async function exportInventoryReport() {
   }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDateISO();
   const suffix = groupBy === 'consolidated' ? 'consolidated' : `by-${groupBy}`;
   XLSX.writeFile(wb, `supreme-art-inventory-${suffix}-${stamp}.xlsx`);
   notify('Exported!');
@@ -5512,7 +5524,7 @@ function openStockSummary() {
   if (!stockSummaryState.from) {
     const today = new Date();
     const start = new Date(today.getFullYear(), today.getMonth() - 4, 1);
-    const iso = d => d.toISOString().slice(0, 10);
+    const iso = localDateISO;
     stockSummaryState.from = iso(start);
     stockSummaryState.to   = iso(today);
     if (!stockSummaryState.paperType) stockSummaryState.paperType = PAPERS[0];
@@ -6023,7 +6035,7 @@ async function exportStockSummary() {
   }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Summary');
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDateISO();
   const typeTag = paperType.replace(/\s+/g, '-').toLowerCase();
   XLSX.writeFile(wb, `supreme-art-summary-${typeTag}-${stamp}.xlsx`);
   notify('Exported!');
@@ -6335,7 +6347,7 @@ async function exportImports() {
   }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Imports');
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDateISO();
   XLSX.writeFile(wb, `supreme-art-imports-${filterLabel}-${stamp}.xlsx`);
   notify('Exported!');
 }
@@ -6423,7 +6435,7 @@ function openJobsReport() {
   if (!jobsReportState.from) {
     const today = new Date();
     const start = new Date(today); start.setDate(today.getDate() - 29);
-    const iso = d => d.toISOString().slice(0, 10);
+    const iso = localDateISO;
     jobsReportState.from = iso(start);
     jobsReportState.to   = iso(today);
   }
@@ -6734,7 +6746,7 @@ async function exportJobsReport() {
   }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Jobs Report');
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDateISO();
   const tag = jobsReportState.client ? `-${jobsReportState.client.replace(/\s+/g,'-').toLowerCase()}` : '';
   XLSX.writeFile(wb, `supreme-art-jobs${tag}-${stamp}.xlsx`);
   notify('Exported!');
@@ -6825,7 +6837,7 @@ function openProductionReport() {
   if (!prodReportState.from) {
     const today = new Date();
     const start = new Date(today); start.setDate(today.getDate() - 29);
-    const iso = d => d.toISOString().slice(0, 10);
+    const iso = localDateISO;
     prodReportState.from = iso(start);
     prodReportState.to   = iso(today);
   }
@@ -7164,7 +7176,7 @@ function openImportAdd(id) {
       <div><label class="form-label">Supplier</label>
         <input type="text" id="imp-supplier" placeholder="optional" value="${esc(editing?.supplier || '')}"></div>
       <div><label class="form-label">Booked Date</label>
-        <input type="date" id="imp-booked" value="${esc(editing?.booked_date || new Date().toISOString().slice(0,10))}"></div>
+        <input type="date" id="imp-booked" value="${esc(editing?.booked_date || localDateISO())}"></div>
       <div><label class="form-label">Expected Arrival</label>
         <input type="date" id="imp-expected" value="${esc(editing?.expected_arrival || '')}"></div>
       <div style="grid-column:1/-1;"><label class="form-label">Notes</label>
@@ -7297,7 +7309,7 @@ function openDashboard() {
   // first-load isn't blank.
   const today = new Date();
   const start = new Date(today); start.setDate(today.getDate() - 29);
-  const iso = d => d.toISOString().slice(0, 10);
+  const iso = localDateISO;
   dashboardState = { from: iso(start), to: iso(today), paperType: '', size: '', gsm: '', search: '', txs: [], allInv: [] };
   const view = document.getElementById('rt-dashboard');
   view.innerHTML = `
@@ -8572,7 +8584,7 @@ async function bulkDeleteStockMovement(dir) {
 // wants to share.
 function periodToDateRange(period, customFrom, customTo) {
   const now = new Date();
-  const iso = d => d.toISOString().slice(0, 10);
+  const iso = localDateISO;
   if (period === 'today') { const t = iso(now); return { from: t, to: t }; }
   if (period === 'week') {
     const day = now.getDay() === 0 ? 6 : now.getDay() - 1;
@@ -8956,7 +8968,7 @@ async function exportStockMovement(direction) {
   const wb = XLSX.utils.book_new();
   const sheetName = direction === 'in' ? 'Stock In' : 'Stock Out';
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDateISO();
   const filterTag = state.paperType ? `-${state.paperType.replace(/\s+/g,'-').toLowerCase()}` : '';
   XLSX.writeFile(wb, `supreme-art-stock-${direction}${filterTag}-${stamp}.xlsx`);
   notify('Exported!');
@@ -10810,7 +10822,7 @@ function jobForm(j={}) {
     <div class="jc-title">JOB CARD</div>
     <table class="jc-form">
       <tr>
-        <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : new Date().toISOString().slice(0,10)))}"></td>
+        <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : localDateISO()))}"></td>
         <td><span class="jc-lbl">Deadline</span><input type="date" id="f-deadline" value="${v(j.deadline)}"></td>
         <td><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
         <td colspan="2">
@@ -11213,7 +11225,7 @@ function openDuplicateJob(id) {
   // Build the template by SHALLOW-cloning the source and clearing the fields
   // that should never inherit on a repeat. JSON-roundtrip the particulars and
   // coatings so editing the new job doesn't accidentally mutate the original.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateISO();
   // Particulars to carry over on a duplicate — the SETUP fields that live in
   // the top form area (PO Qty → Code). Everything else (the production rows
   // like Printed Sheets, all the waste columns, Delivered Cartons Qty, and
@@ -12665,7 +12677,7 @@ async function openCapaReport() {
   if (!capaReportState.from) {
     const today = new Date();
     const start = new Date(today); start.setDate(today.getDate() - 89);
-    const iso = d => d.toISOString().slice(0, 10);
+    const iso = localDateISO;
     capaReportState.from = iso(start);
     capaReportState.to   = iso(today);
   }
@@ -13010,7 +13022,7 @@ function exportCapasToXlsx(rows, baseName) {
   ws['!cols'] = header.map((h, i) => ({ wch: Math.max(h.length, ...data.map(r => String(r[i] || '').length)) + 2 }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'CAPA');
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDateISO();
   XLSX.writeFile(wb, `supreme-art-${baseName}-${stamp}.xlsx`);
   notify('Exported!');
 }
@@ -13026,7 +13038,7 @@ async function exportCSV() {
   ws['!cols'] = header.map((h,i) => ({ wch: Math.max(h.length, ...rows.map(r => String(r[i]||'').length)) + 2 }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Jobs');
-  const stamp = new Date().toISOString().slice(0,10);
+  const stamp = localDateISO();
   XLSX.writeFile(wb, `supreme-art-jobs-${stamp}.xlsx`);
   notify('Exported!');
 }
