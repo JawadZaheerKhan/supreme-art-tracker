@@ -13772,15 +13772,17 @@ function stationUpdateHtml() {
   const coatState = isCoatingsStage ? jobCoatingsState(j, myFinishes) : null;
   const myDoable = coatState ? coatState.planned.filter(c => !myFinishes || myFinishes.size === 0 || myFinishes.has(c)) : [];
   const coatingPickable = isCoatingsStage && myDoable.length > 0;
-  const wasteAttrs = isTouch
-    ? `inputmode="none" readonly onclick="stationOpenPad('finish-waste', 'Waste Sheets')"`
-    : `inputmode="numeric" pattern="[0-9]*"`;
-  // Rendered inline inside fieldHtml's last-pass row when pickable, so it
-  // sits next to Coating Sheets Qty on the same line.
-  const wasteFieldDiv = coatingPickable ? `
+  // Rendered inline inside every pass row of fieldHtml (same rule as
+  // Printing, where every pass shows both its fields together) — only the
+  // LAST pass's value is actually submitted as the finish's waste count,
+  // since one Save records one coating pass. Each row gets its own id so
+  // they don't collide.
+  const wasteFieldDiv = (passIdx) => coatingPickable ? `
         <div class="station-field">
           <label>Waste Sheets</label>
-          <input type="text" id="sf-finish-waste" class="numpad-target" ${wasteAttrs} value="" placeholder="0">
+          <input type="text" id="sf-finish-waste-p${passIdx}" class="numpad-target"
+                 ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('sf-finish-waste-p${passIdx}', 'Waste Sheets')"` : `inputmode="numeric" pattern="[0-9]*"`}
+                 value="" placeholder="0">
         </div>` : '';
   const fieldHtml = fields.length ? Array.from({ length: stationPassCount }, (_, passIdx) => {
     const m = passMeta(passIdx);
@@ -13816,7 +13818,7 @@ function stationUpdateHtml() {
                  data-key="${esc(f.key)}" data-pass="${passIdx}"
                  value="${esc(cur)}" placeholder="0">
         </div>`;
-    }).join('') + (isLast ? wasteFieldDiv : '');
+    }).join('') + wasteFieldDiv(passIdx);
     // CTP stage is one-shot (checkbox + colors + plates) — no multi-day
     // passes make sense there, so we skip the "+" / "−" buttons.
     const allowMultiPass = stIdx !== 0;
@@ -14366,7 +14368,12 @@ async function stationSubmit(advance, skipTo) {
       if (!picked) { notify('Pick which coating you did'); return; }
       finishKind = picked.value;
       finishMachine = (stationOperator && stationOperator.machine) || '';
-      finishWaste = (document.getElementById('sf-finish-waste') || {}).value?.trim() || '';
+      // Waste Sheets is rendered once per pass row (same layout as
+      // Printing), but only ONE coating pass is actually being recorded
+      // per Save — the last row is the live one, so its value is what
+      // gets submitted.
+      const wasteEl = document.getElementById(`sf-finish-waste-p${Math.max(0, (stationPassCount || 1) - 1)}`);
+      finishWaste = (wasteEl && wasteEl.value || '').trim();
     }
   }
   // If the operator hit Save / Done while still holding the recorder
