@@ -2062,7 +2062,11 @@ function jobCoatingsState(j, allowedSet) {
   return { planned, done: doneEntries, pending, pendingForMe };
 }
 const PAPERS  = ['Bleach Board','Duplex Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
+// Fallback list — used only until printingMachines loads from the server.
+// The Job Card Machine dropdown normally pulls from Users → Operators
+// (any active operator with the 'printing' role).
 const MACHINES = ['SORM-Z','SORM','SM-74','CD-102','GTO','SM-52'];
+let printingMachines = null; // cached list of active printing-role machines
 const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Emboss','Color Seal','Dripup','Cylinder Emboss','Hot Foiling'];
 // Coatings printed on the physical job card, in paper-card order (two rows)
 const PRINT_COATINGS_ROW1 = ['UV','Spot UV','Varnish','Lacquer','Lamination'];
@@ -2506,6 +2510,18 @@ async function loadJobs() {
     render();
   } catch(e) {
     notify('Error loading jobs: ' + e.message);
+  }
+}
+
+// Machine dropdown source for the Job Card. Falls back to the hardcoded
+// MACHINES const if the API is unreachable (auth error, transient 500)
+// so the form is never blank.
+async function loadPrintingMachines() {
+  try {
+    const list = await api('GET', '/api/operators/machines?role=printing');
+    printingMachines = Array.isArray(list) ? list : [];
+  } catch {
+    printingMachines = null;
   }
 }
 
@@ -10791,7 +10807,7 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
         <td colspan="2">
           <span class="jc-lbl">Machine Name</span>
-          <select id="f-machine"><option value="">—</option>${MACHINES.map(m=>`<option ${j.machine===m?'selected':''}>${m}</option>`).join('')}</select>
+          <select id="f-machine"><option value="">—</option>${(printingMachines && printingMachines.length ? printingMachines : MACHINES).map(m=>`<option ${j.machine===m?'selected':''}>${esc(m)}</option>`).join('')}${j.machine && !((printingMachines && printingMachines.length ? printingMachines : MACHINES).includes(j.machine))?`<option selected>${esc(j.machine)}</option>`:''}</select>
         </td>
         <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
       </tr>
@@ -13285,6 +13301,9 @@ async function saveOperator(id) {
     else await api('POST', '/api/operators', body);
     const ops = await api('GET', '/api/operators');
     operatorsList = ops;
+    // Refresh the Job Card's Machine dropdown source — adding a new
+    // printing-role machine should surface it there immediately.
+    loadPrintingMachines();
     renderOperators();
     closeModal(); notify('Operator saved');
   } catch (e) { notify('Error: ' + e.message); }
@@ -13313,10 +13332,19 @@ async function removeOperator(id) {
 // Which production numbers each stage records. Keys match PARTICULARS_ROWS;
 // the station writes the value into that row's `quantity` subfield.
 const STATION_STAGE_FIELDS = {
+  // CTP Plate Making: operator confirms shade card was made (checkbox),
+  // and records the number of colors + plates. Job Card reads these
+  // straight from particulars, same as any other stage.
+  0: [
+    { key: 'shade_card',   label: 'Shade Card', type: 'checkbox' },
+    { key: 'no_of_colors', label: 'No. of Colors' },
+    { key: 'plates',       label: 'Plates' },
+  ],
   1: [{ key: 'printed_sheets_qty', label: 'Printed Sheets Qty' }, { key: 'printed_waste_sheets', label: 'Printed Waste Sheets' }],
-  // Stage 2 (Coatings) uses the per-coating UI built in stationUpdateHtml:
-  // operator picks which coating they did with their own machine + waste
-  // count, so no default number fields here.
+  // Stage 2 (Coatings) also uses the per-coating picker built below.
+  // The numeric field records total coating sheets for the day; the "+"
+  // multi-pass support is inherited from the shared field grid.
+  2: [{ key: 'coating_sheets_qty', label: 'Coating Sheets Qty' }],
   3: [{ key: 'die_cutting_sheets', label: 'Die Cutting Sheets' }, { key: 'die_cutting_waste', label: 'Die Cutting Waste' }],
   4: [{ key: 'sorted_cartons_qty', label: 'Sorted Cartons Qty' }, { key: 'sorted_cartons_waste', label: 'Sorted Cartons Waste' }],
   5: [{ key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' }],
@@ -13744,6 +13772,21 @@ function stationUpdateHtml() {
     const inputs = fields.map(f => {
       const cur = passValue(f, passIdx);
       const inputId = `sf-${f.key}-p${passIdx}`;
+      // Checkbox fields (e.g. Shade Card at CTP): render a big touchable
+      // checkbox instead of the numeric input. Stored as 'Yes' / '' in
+      // the same quantity slot so downstream code and the Job Card can
+      // read it without a special case.
+      if (f.type === 'checkbox') {
+        if (passIdx > 0) return '';
+        const checked = String(cur || '').trim().toLowerCase() === 'yes' ? 'checked' : '';
+        return `
+        <div class="station-field station-field--check">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;">
+            <input type="checkbox" id="${inputId}" data-key="${esc(f.key)}" data-pass="${passIdx}" data-check="1" ${checked} style="width:22px;height:22px;">
+            <span>${esc(f.label)}</span>
+          </label>
+        </div>`;
+      }
       const tabletAttrs = `inputmode="none" readonly onclick="stationOpenPad('${inputId}', '${esc(f.label).replace(/'/g, "\\'")}')"`;
       const laptopAttrs = `inputmode="numeric" pattern="[0-9]*"`;
       return `
@@ -13754,13 +13797,16 @@ function stationUpdateHtml() {
                  value="${esc(cur)}" placeholder="0">
         </div>`;
     }).join('');
+    // CTP stage is one-shot (checkbox + colors + plates) — no multi-day
+    // passes make sense there, so we skip the "+" / "−" buttons.
+    const allowMultiPass = stIdx !== 0;
     return `
       <div class="station-pass">
         ${label ? `<div class="station-pass-label">${label}</div>` : ''}
         <div class="station-field-grid">
           ${inputs}
-          ${isLast ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
-          ${isLast && stationPassCount > 1 ? `<button type="button" class="station-pass-remove" onclick="stationRemovePass()" title="Remove this pass">&minus;</button>` : ''}
+          ${isLast && allowMultiPass ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
+          ${isLast && allowMultiPass && stationPassCount > 1 ? `<button type="button" class="station-pass-remove" onclick="stationRemovePass()" title="Remove this pass">&minus;</button>` : ''}
         </div>
       </div>`;
   }).join('') : '';
@@ -14272,6 +14318,13 @@ async function stationSubmit(advance, skipTo) {
     && j.particulars[f.key].entries.length > 0);
   const useMulti = anyExisting || (stationPassCount && stationPassCount > 1);
   fields.forEach(f => {
+    if (f.type === 'checkbox') {
+      // Checkbox is single-pass, single-value. 'Yes' when checked so it
+      // shows up on the Job Card exactly like a manual entry would.
+      const el = document.getElementById(`sf-${f.key}-p0`);
+      patch[f.key] = el && el.checked ? 'Yes' : '';
+      return;
+    }
     if (useMulti) {
       const passInputs = Array
         .from(document.querySelectorAll(`input[data-key="${CSS.escape(f.key)}"]`))
@@ -14526,7 +14579,7 @@ async function init() {
   renderUserChip();
   // Operators can't read inventory (403), so skip the call for them.
   // Everyone else loads jobs + inventory in parallel.
-  const loaders = [loadJobs()];
+  const loaders = [loadJobs(), loadPrintingMachines()];
   if (!isOperator()) loaders.push(loadInventory());
   await Promise.all(loaders);
   // Route to the same landing tab the login flow uses so a refresh

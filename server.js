@@ -1073,6 +1073,24 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
 // the station, used when an operator works on a machine that's not their
 // usual one. Returns a flat list of { name, name_ur, machine } so the UI
 // can present the full roster without leaking PINs.
+// Lightweight machines-by-role list — any signed-in user can read it.
+// Used by the Job Card form to populate the Machine dropdown with the
+// current printing machines (or any role passed in). Add a new printing
+// machine under Users → Operators and it shows up here automatically.
+app.get('/api/operators/machines', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const role = String(req.query.role || '').trim();
+    const rows = role
+      ? await sql`SELECT name FROM operators WHERE active AND roles @> ARRAY[${role}]::text[] ORDER BY name`
+      : await sql`SELECT name FROM operators WHERE active ORDER BY name`;
+    res.json(rows.map(r => r.name).filter(Boolean));
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
   try {
     await dbReady;
