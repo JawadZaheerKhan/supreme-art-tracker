@@ -18,6 +18,28 @@ const SESSION_COOKIE   = 'sa_session';
 const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// Business timezone. The server runs on Vercel in UTC, but the press
+// (and everyone reading the reports) is in Pakistan (UTC+5). Without
+// pinning this, work logged after 19:00 PKT rolls back to the previous
+// UTC calendar day, so the Daily Production report shows it on the wrong
+// date. Every server-generated "today" / stamp / date-of-instant goes
+// through these two helpers so the whole app agrees on the local day.
+const BUSINESS_TZ = process.env.BUSINESS_TZ || 'Asia/Karachi';
+// YYYY-MM-DD for the given instant in business-local time.
+function businessDateISO(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d);
+}
+// "dd/mm/yyyy hh:mm" (24h) for the given instant in business-local time —
+// the byline stamp format every station/stage log entry uses.
+function businessStamp(d = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: BUSINESS_TZ, day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(d).replace(',', '');
+}
+
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Finished','Delivered'];
@@ -1331,7 +1353,14 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
 // machine, waste_sheets, done_at }. We aggregate from there directly
 // — more accurate than parsing bylines, and we get the finish kinds
 // and waste totals for free.
+// Date (YYYY-MM-DD) of an ISO timestamp instant, in business-local time.
+// done_at values are stored as UTC instants (new Date().toISOString()), so
+// a coating recorded at 00:30 PKT must report on that PKT day, not the
+// UTC day (19:30 the day before). Falls back to a bare string-slice if the
+// value isn't a parseable instant.
 function isoTsToDate(ts) {
+  const d = new Date(ts);
+  if (!isNaN(d)) return businessDateISO(d);
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
   return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
 }
@@ -3164,7 +3193,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     //     ("90 | 20") so the job card and downstream consumers continue
     //     to work without knowing about entries[].
     const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
-    const todayISO = new Date().toISOString().slice(0, 10);
+    const todayISO = businessDateISO();
     for (const [key, value] of Object.entries(particularsPatch)) {
       const prev = (particulars[key] && typeof particulars[key] === 'object') ? particulars[key] : {};
       if (Array.isArray(value)) {
@@ -3213,7 +3242,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // advancing the stage or just recording numbers.
     const stageLabel = STAGES[operator.stage_index] || 'Stage ' + operator.stage_index;
     const by = `${operator.name}${operator.machine ? ' · ' + operator.machine : ''} (${stageLabel})`;
-    const time = new Date().toLocaleString('en-GB', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }).replace(',', '');
+    const time = businessStamp();
 
     let stage_index = curStage;
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
@@ -3495,7 +3524,7 @@ app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) =>
 // job's created_at if the user never typed a Date Issued on the job form.
 function buildJobSnapshot(job) {
   const jobIssueDate = job.dateissued
-    || (job.created_at ? new Date(job.created_at).toISOString().slice(0, 10) : '');
+    || (job.created_at ? businessDateISO(new Date(job.created_at)) : '');
   return {
     job_card_no:  job.jobcode || (job.id ? `E-${job.id}` : ''),
     job_ref_id:   job.id,
@@ -3579,7 +3608,7 @@ app.post('/api/capa', requireCapaWriter, async (req, res) => {
     `;
     const seq = (existing[0].m || 0) + 1;
     const capaRef = `GEN-${year}-${seq}`;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = businessDateISO();
     const inserted = await sql`
       INSERT INTO capa_reports
         (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
@@ -3616,7 +3645,7 @@ app.post('/api/jobs/:id/capa', requireCapaWriter, async (req, res) => {
     const maxRows = await sql`SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports WHERE job_id=${jobId}`;
     const seq = (maxRows[0].m || 0) + 1;
     const capaRef = `JC-${snap.job_card_no}-${seq}`;
-    const today = new Date().toISOString().slice(0, 10); // yyyy-mm-dd
+    const today = businessDateISO(); // yyyy-mm-dd, business-local
 
     const inserted = await sql`
       INSERT INTO capa_reports
