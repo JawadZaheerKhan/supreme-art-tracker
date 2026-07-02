@@ -1933,9 +1933,13 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     `;
     const job = result[0];
 
-    // Only adjust inventory if the job was already issued — pending jobs
-    // haven't taken any stock yet, so there's nothing to revert.
-    if (wasIssued) {
+    // Only adjust inventory if the job was already issued AND the linked
+    // paper/board (inventory_item_id) actually changed. Per user rule:
+    // editing a job card belongs to the job's own audit trail — the paper
+    // ledger should stay untouched unless the paper item itself was swapped.
+    // Changes to packets/qty/particulars alone do NOT trigger ledger writes.
+    const paperItemChanged = (oldItemId !== newItemId);
+    if (wasIssued && paperItemChanged) {
       if (oldItemId && oldSheets > 0) {
         await applyInventoryChange(sql, {
           itemId: oldItemId,
@@ -2575,10 +2579,15 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     // regular users can self-correct recent mistakes; anything older
     // needs an admin to keep the audit trail intact.
     if (req.user.role !== 'admin') {
-      const ageMs = Date.now() - new Date(tx.created_at).getTime();
-      const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
-      if (ageMs > TWENTY_FOUR_HRS) {
-        return res.status(403).json({ error: 'You can only reverse entries from the last 24 hours. Ask an admin to reverse older entries.' });
+      // Calendar-day rule: reversible only if created on today's date
+      // (00:00–23:59 of the same day), not rolling 24 hours.
+      const t = new Date(tx.created_at);
+      const n = new Date();
+      const sameDay = t.getFullYear() === n.getFullYear() &&
+                      t.getMonth()    === n.getMonth() &&
+                      t.getDate()     === n.getDate();
+      if (!sameDay) {
+        return res.status(403).json({ error: 'You can only reverse entries created today. Ask an admin to reverse older entries.' });
       }
     }
 
@@ -2672,7 +2681,7 @@ app.get('/api/inventory/transactions', async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
         AND (${to}::timestamptz   IS NULL OR t.created_at <  (${to}::timestamptz + INTERVAL '1 day'))
-        AND t.reason != 'correction'
+        AND t.reason NOT IN ('correction', 'job-edit-revert', 'job-edit-apply')
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
