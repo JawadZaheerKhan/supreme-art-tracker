@@ -1178,13 +1178,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
       const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
       // Admin entered a Job Card row with a recognised operator name?
-      // Credit the operator's machine. Date attribution: if the stage has
-      // been advanced on this date, we use that. Otherwise we fall back
-      // to today's report date — meaning admin entries appear on whichever
-      // day the user views the report. Without a per-row date stamp
-      // there is no perfect attribution; today's view is the best heuristic.
-      const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry ||
-        date === new Date().toISOString().slice(0, 10));
+      // Credit the operator's machine ONLY when the stage was actually
+      // advanced on this date (stageTimeMatches) or a station log entry
+      // for this stage was recorded on this date (sawStageEntry). We do
+      // NOT default admin-only entries to "today" — that caused old jobs
+      // to reappear on every calendar day the report was viewed.
+      const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry);
       if (cardEntryFits) {
         machinesThisJob.add(cardOpMachine);
         if (!opsByMachine.has(cardOpMachine)) opsByMachine.set(cardOpMachine, new Set());
