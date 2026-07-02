@@ -1758,15 +1758,33 @@ async function aggregateProductionRange(sql, { from, to }) {
       if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
       if (op) { const r = ensureOD(eDate, op); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
     }
-    // Coatings: source of truth is coatings_done. No sheet count — only
-    // the waste_sheets number — so we contribute waste + jobs but not
-    // sheets, to avoid double-counting.
+    // Coatings: waste comes from the date+machine-stamped uv_waste_sheets
+    // entries — same per-day source the Daily Coatings report uses — so the
+    // two reports always agree. Badge waste_sheets carries a RUNNING total
+    // per finish, so summing badges both double-counted (two finishes on
+    // one machine) and dumped everything on the badge date. Badges still
+    // count jobs/operators; their waste applies only to legacy jobs that
+    // have no entries. No sheet count here — coating sheets are excluded
+    // from the range report by design.
+    const wfPart = part.uv_waste_sheets;
+    const wasteEntries = wfPart && Array.isArray(wfPart.entries) && wfPart.entries.length ? wfPart.entries : null;
+    if (wasteEntries) {
+      for (const e of wasteEntries) {
+        if (!e || !e.date || e.date < from || e.date > to) continue;
+        const mc = String(e.machine || '').trim();
+        const op = String(e.operator || '').trim();
+        const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+        if (!Number.isFinite(v) || v === 0) continue;
+        if (mc) { const r = ensureMD(e.date, mc); r.waste += v; r.jobs.add(job.id); }
+        if (op) { const r = ensureOD(e.date, op); r.waste += v; r.jobs.add(job.id); }
+      }
+    }
     const coatings = Array.isArray(job.coatings_done) ? job.coatings_done : [];
     for (const c of coatings) {
       if (!c) continue;
       const cDate = isoTsToDate(c.done_at);
       if (!cDate || cDate < from || cDate > to) continue;
-      const w = parseInt(String(c.waste_sheets || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      const w = wasteEntries ? 0 : (parseInt(String(c.waste_sheets || '').replace(/[^0-9-]/g, ''), 10) || 0);
       if (c.machine)       { const r = ensureMD(cDate, c.machine);       r.waste += w; r.jobs.add(job.id); }
       if (c.operator_name) { const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id); }
     }
@@ -2792,8 +2810,20 @@ app.get('/api/inventory/transactions', async (req, res) => {
     const dir = req.query.direction === 'in' ? 'in'
               : req.query.direction === 'out' ? 'out'
               : 'all';
-    // Inclusive end-of-day on `to` so a date like 2026-05-31 matches transactions
-    // recorded at 2026-05-31 18:00:00. Without this, same-day queries miss data.
+    // Day boundaries in BUSINESS time. Passing the bare date string to
+    // Postgres made it parse as UTC midnight = 05:00 PKT, so stock moved
+    // between midnight and 5am showed under the previous day's filter.
+    // Convert each date to the UTC instant of ITS local midnight instead;
+    // `to` is exclusive at the NEXT local midnight (inclusive end-of-day).
+    const dayStartIso = (d) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d));
+      return m ? new Date(businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0)).toISOString() : null;
+    };
+    const fromTs   = from ? dayStartIso(from) : null;
+    const toEndIso = to   ? (() => {
+      const s = dayStartIso(to);
+      return s ? new Date(new Date(s).getTime() + 86400000).toISOString() : null;
+    })() : null;
     // reason='correction' is an admin-only balance edit (data fix). It
     // shows in the per-item History modal but is intentionally excluded
     // from movement reports so Stock In / Stock Out / Dashboard totals
@@ -2805,8 +2835,8 @@ app.get('/api/inventory/transactions', async (req, res) => {
       FROM inventory_transactions t
       LEFT JOIN jobs j ON j.id = t.job_id
       LEFT JOIN inventory_items i ON i.id = t.item_id
-      WHERE (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
-        AND (${to}::timestamptz   IS NULL OR t.created_at <  (${to}::timestamptz + INTERVAL '1 day'))
+      WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
+        AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
         AND t.reason NOT IN ('correction', 'job-edit-revert', 'job-edit-apply')
         -- Hide reversal rows and the original tx they undo. A mistake that
         -- was reversed shouldn't inflate Stock In/Out totals — the pair
