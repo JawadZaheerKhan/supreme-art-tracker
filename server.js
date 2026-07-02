@@ -3230,17 +3230,11 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const finishKind = isCoatingsStage && typeof req.body.finish_kind === 'string' ? req.body.finish_kind.trim() : '';
     const finishMachine = isCoatingsStage ? String(req.body.finish_machine || '').trim() : '';
     const finishWaste = isCoatingsStage && req.body.finish_waste_sheets != null ? String(req.body.finish_waste_sheets).trim() : '';
-    // Multi-pass support: detect whether this finish was already recorded
-    // before this submission. If so, treat as a follow-up pass and don't
-    // auto-advance the stage even when no pending coatings remain.
-    let isFollowUpPass = false;
     if (isCoatingsStage && finishKind) {
       if (!ALL_FINISHES.includes(finishKind)) return res.status(400).json({ error: 'Unknown coating type.' });
       if (allowedFinishes.size && !allowedFinishes.has(finishKind)) return res.status(403).json({ error: `Your role isn't allowed to do ${finishKind}.` });
       const planned = Array.isArray(job.coatings) ? job.coatings : [];
       if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That coating was not planned for this job.' });
-      isFollowUpPass = (Array.isArray(job.coatings_done) ? job.coatings_done : [])
-        .some(d => d && d.kind === finishKind);
       // Multi-day support: same finish kind can be recorded more than
       // once for a job (e.g. half the UV done today, the other half
       // tomorrow). The Daily Production aggregator filters by done_at
@@ -3279,13 +3273,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       if (validSkip) {
         target = skipTo;
       } else if (isCoatingsStage) {
-        // Multi-pass: a follow-up pass on an already-done finish keeps
-        // the job at Coatings even if no formally-pending finishes remain,
-        // so the operator can keep adding passes (half today, half
-        // tomorrow). Only advance when this is the FIRST submission of
-        // the finish AND nothing else is pending.
+        // Stay at Coatings only while a planned finish is still pending.
+        // A follow-up pass no longer blocks an EXPLICIT advance — the
+        // operator clicked "send to next stage" and nothing is owed, so
+        // holding the job here just strands it (multi-day passes that
+        // should stay use "Save numbers (stay here)" / advance=false).
         const remaining = pendingCoatings(peekJob);
-        target = (remaining.length > 0 || isFollowUpPass) ? curStage : Math.min(curStage + 1, STAGES.length - 1);
+        target = remaining.length > 0 ? curStage : Math.min(curStage + 1, STAGES.length - 1);
       } else {
         // Auto-skip Coatings when leaving an earlier stage on a job that
         // has no coatings planned (jumps Printing → Die Cutting directly).
