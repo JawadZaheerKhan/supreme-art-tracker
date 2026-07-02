@@ -39,6 +39,25 @@ function businessStamp(d = new Date()) {
     hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(d).replace(',', '');
 }
+// Epoch (ms) for a business-local wall-clock date/time. The server runs in
+// UTC, so `new Date(y, mo-1, d, h, mi)` would interpret the numbers as UTC
+// and be hours off. This finds BUSINESS_TZ's offset at that instant and
+// corrects for it, so a byline like "03/07/2026 00:45" (PKT) maps to the
+// same epoch the coating's UTC done_at has. Used only for legacy stage
+// rows written before we stamped an explicit `at` instant.
+function businessWallClockToMs(y, mo, d, h, mi) {
+  const utcGuess = Date.UTC(y, mo - 1, d, h, mi);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: BUSINESS_TZ, hour12: false, year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(utcGuess));
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  let hh = map.hour; if (hh === '24') hh = '00';
+  const asUTC = Date.UTC(+map.year, +map.month - 1, +map.day, +hh, +map.minute, +map.second);
+  const offset = asUTC - utcGuess;          // BUSINESS_TZ offset at that instant
+  return utcGuess - offset;                 // corrected epoch for the wall clock
+}
 
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
@@ -117,7 +136,10 @@ function pendingCoatings(job, allowedSet) {
   } else if (stageRec && stageRec.time) {
     const m = String(stageRec.time).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
     if (m) {
-      const t = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+      // Legacy row: the byline is a business-local wall clock, so parse it
+      // in the business timezone (NOT the server's UTC) to line up with
+      // the coating's UTC done_at instant.
+      const t = businessWallClockToMs(+m[3], +m[2], +m[1], +(m[4]||0), +(m[5]||0));
       if (isFinite(t)) stageMs = t;
     }
   }
