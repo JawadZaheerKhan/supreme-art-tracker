@@ -2200,7 +2200,13 @@ function jobDaysInProduction(j) {
       if (isFinite(ts)) endTs = ts;
     }
   }
-  const days = Math.max(0, Math.floor((endTs - start) / 86400000));
+  // Calendar-day diff (not rolling 24h). Same calendar date = 0, next
+  // calendar day = 1 regardless of time-of-day. Uses local midnight
+  // anchors so DST shifts don't skew the count.
+  const s = new Date(start), e = new Date(endTs);
+  const sMid = new Date(s.getFullYear(), s.getMonth(), s.getDate()).getTime();
+  const eMid = new Date(e.getFullYear(), e.getMonth(), e.getDate()).getTime();
+  const days = Math.max(0, Math.round((eMid - sMid) / 86400000));
   return String(days);
 }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
@@ -3806,7 +3812,7 @@ function renderInvCardHtml(it) {
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
-        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected in the last 24h. Open History to see the entry.') : ''}</button>
+        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
@@ -3850,7 +3856,7 @@ function renderInvBrandRow(it) {
       </div>
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
-        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected in the last 24h. Open History to see the entry.') : ''}</button>
+        <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
@@ -4774,8 +4780,13 @@ async function renderInvHistory(id) {
         'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
         'job-issuance-reversed',
       ]);
-      const ageMs    = Date.now() - new Date(t.created_at).getTime();
-      const within24 = ageMs <= TWENTY_FOUR_HRS;
+      // Calendar-day window: reversible if the tx was created today
+      // (00:00–23:59 of the same calendar day), not rolling 24 hours.
+      const _tx = new Date(t.created_at);
+      const _now = new Date();
+      const within24 = _tx.getFullYear() === _now.getFullYear() &&
+                       _tx.getMonth()    === _now.getMonth() &&
+                       _tx.getDate()     === _now.getDate();
       const canReverse =
         REVERSIBLE.has(t.reason) &&
         !isReversal &&
@@ -5753,8 +5764,12 @@ function fmtKg(n) {
 // not a permanent stain on the row.
 function hasRecentCorrection(it) {
   if (!it || !it.latest_correction_at) return false;
-  const age = Date.now() - new Date(it.latest_correction_at).getTime();
-  return age >= 0 && age <= 24 * 60 * 60 * 1000;
+  // Calendar-day: dot shows only if the correction happened today.
+  const t = new Date(it.latest_correction_at);
+  const n = new Date();
+  return t.getFullYear() === n.getFullYear() &&
+         t.getMonth()    === n.getMonth() &&
+         t.getDate()     === n.getDate();
 }
 
 // Small red dot. Used in two places:
@@ -8184,8 +8199,12 @@ async function loadTrashAndRender(which) {
 // so "Auto-purges in N days" reads cleanly.
 function trashDaysLeft(deletedAt) {
   const dt = new Date(deletedAt);
-  const ms = Date.now() - dt.getTime();
-  const daysGone = Math.floor(ms / (24 * 60 * 60 * 1000));
+  const now = new Date();
+  // Calendar-day diff (not rolling 24h). Deleted today = 0 days gone,
+  // deleted yesterday = 1, etc.
+  const dMid = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
+  const nMid = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const daysGone = Math.max(0, Math.round((nMid - dMid) / 86400000));
   return Math.max(0, trashCache.retention_days - daysGone);
 }
 
