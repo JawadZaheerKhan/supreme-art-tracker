@@ -2681,6 +2681,13 @@ app.get('/api/inventory/transactions', async (req, res) => {
       WHERE (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
         AND (${to}::timestamptz   IS NULL OR t.created_at <  (${to}::timestamptz + INTERVAL '1 day'))
         AND t.reason NOT IN ('correction', 'job-edit-revert', 'job-edit-apply')
+        -- Hide reversal rows and the original tx they undo. A mistake that
+        -- was reversed shouldn't inflate Stock In/Out totals — the pair
+        -- nets to zero, so both sides drop out of the movement report.
+        AND t.reverses_tx_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
+        )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
