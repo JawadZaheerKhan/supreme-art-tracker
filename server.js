@@ -1439,6 +1439,27 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
       const sheetsN = coatSheetsAdmin > 0 ? coatSheetsAdmin : Math.max(0, printedN - printedWasteN);
+      // Per-MACHINE sheets — same criteria as Printing. Station passes are
+      // machine-stamped in coating_sheets_qty.entries, so each machine only
+      // gets ITS OWN entries (unstamped legacy entries stay visible to all).
+      // Without this, "1000 | 800" (UV machine + Emboss machine) credited
+      // the full 1800 to BOTH machines. Falls back to the job-level total
+      // only when there are no stamped entries (legacy/admin-typed rows).
+      const qtyEntries = part.coating_sheets_qty && Array.isArray(part.coating_sheets_qty.entries)
+        ? part.coating_sheets_qty.entries : null;
+      const sheetsForMachine = (mc) => {
+        if (qtyEntries && qtyEntries.length) {
+          let n = 0;
+          for (const e of qtyEntries) {
+            if (!e) continue;
+            if (e.machine && e.machine !== mc) continue; // another machine's pass
+            const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+            if (Number.isFinite(v)) n += v;
+          }
+          return n;
+        }
+        return sheetsN;
+      };
       // Job-level waste from particulars (admin- or station-written).
       const adminWasteN = sumPipe(part.uv_waste_sheets && part.uv_waste_sheets.quantity);
       if (sheetsN <= 0) continue;
@@ -1452,7 +1473,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         const row = ensure(mc);
         row.jobIds.add(job.id);
         if (!sheetsCredited.has(mc)) {
-          row.sheets += sheetsN;
+          row.sheets += sheetsForMachine(mc);
           sheetsCredited.add(mc);
         }
         const opName = String(entry.operator_name || '').trim();
