@@ -3220,24 +3220,42 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     let log = Array.isArray(job.log) ? [...job.log] : [];
     let coatings_done = Array.isArray(job.coatings_done) ? [...job.coatings_done] : [];
 
-    // Coatings flow: at the Coatings stage the operator records which planned
-    // finish they did, with their machine + waste-sheet count. We append to
-    // coatings_done AND accumulate the waste into the existing
-    // uv_waste_sheets particular as a "20 | 40 | 30" string so the job card
-    // shows the running waste total. The job auto-advances only when every
-    // planned coating has been recorded.
+    // Coatings flow: the operator records which planned finish they did.
+    // The sheets + waste NUMBERS ride in on particularsPatch just like any
+    // other stage (coating_sheets_qty + uv_waste_sheets, both merged above
+    // into entries[] so they round-trip and show on the job card). Here we
+    // only stamp the coatings_done badge (kind + operator + machine +
+    // waste) so the pipeline knows the finish is complete. The waste for
+    // the badge is read back from the just-merged uv_waste_sheets entry
+    // for THIS machine — no separate finish_waste field needed.
     const isCoatingsStage = curStage === 2;
     const finishKind = isCoatingsStage && typeof req.body.finish_kind === 'string' ? req.body.finish_kind.trim() : '';
     const finishMachine = isCoatingsStage ? String(req.body.finish_machine || '').trim() : '';
-    const finishWaste = isCoatingsStage && req.body.finish_waste_sheets != null ? String(req.body.finish_waste_sheets).trim() : '';
     if (isCoatingsStage && finishKind) {
       if (!ALL_FINISHES.includes(finishKind)) return res.status(400).json({ error: 'Unknown coating type.' });
       if (allowedFinishes.size && !allowedFinishes.has(finishKind)) return res.status(403).json({ error: `Your role isn't allowed to do ${finishKind}.` });
       const planned = Array.isArray(job.coatings) ? job.coatings : [];
       if (!planned.includes(finishKind)) return res.status(400).json({ error: 'That coating was not planned for this job.' });
+      // Total waste for this machine, read back off the merged
+      // uv_waste_sheets field. Summed across this machine's passes so a
+      // multi-day coating (half today, half tomorrow) reports the full
+      // waste on the badge and in the Daily Production coatings report,
+      // which reads coatings_done[].waste_sheets.
+      let finishWaste = '';
+      const wf = particulars.uv_waste_sheets;
+      if (wf && Array.isArray(wf.entries) && wf.entries.length) {
+        const mine = wf.entries.filter(e => e && (!e.machine || e.machine === (operator.machine || '')));
+        const src = mine.length ? mine : wf.entries;
+        const sum = src.reduce((a, e) => {
+          const n = parseInt(String((e && e.qty) || '').replace(/[^0-9-]/g, ''), 10);
+          return a + (Number.isFinite(n) ? n : 0);
+        }, 0);
+        if (sum > 0) finishWaste = String(sum);
+      } else if (wf && wf.quantity != null) {
+        finishWaste = String(wf.quantity).trim();
+      }
       // Multi-day support: same finish kind can be recorded more than
-      // once for a job (e.g. half the UV done today, the other half
-      // tomorrow). The Daily Production aggregator filters by done_at
+      // once for a job. The Daily Production aggregator filters by done_at
       // so each pass lands on the correct day.
       coatings_done.push({
         kind: finishKind,
@@ -3247,19 +3265,6 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         waste_sheets: finishWaste || null,
         done_at: new Date().toISOString(),
       });
-      // Accumulate the coating kind, waste, and operator name on the Coating
-      // Waste Sheets row of the paper card. All three fields get pipe-joined
-      // in the order they were recorded so the card reads e.g.
-      // Details "UV | Emboss | Hot Foiling", Qty "10 | 30 | 5",
-      // Name "obaid | hamza | obaid" — same index across columns.
-      const prevWaste = (particulars.uv_waste_sheets && typeof particulars.uv_waste_sheets === 'object') ? particulars.uv_waste_sheets : {};
-      const prevD = String(prevWaste.details || '').trim();
-      const newD = prevD ? `${prevD} | ${finishKind}` : finishKind;
-      const prevQ = String(prevWaste.quantity || '').trim();
-      const newQ = prevQ ? `${prevQ} | ${finishWaste || '0'}` : (finishWaste || '0');
-      const prevN = String(prevWaste.name || '').trim();
-      const newN = prevN ? `${prevN} | ${operator.name}` : operator.name;
-      particulars.uv_waste_sheets = { ...prevWaste, details: newD, quantity: newQ, name: newN };
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `${finishKind} recorded by ${operator.name}${finishMachine ? ' on ' + finishMachine : ''}${finishWaste ? ' (waste ' + finishWaste + ')' : ''}`, by, time });
     }
 
