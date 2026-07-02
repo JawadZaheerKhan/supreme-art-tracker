@@ -13362,6 +13362,12 @@ let stationCustomPersons = null;   // lazy-loaded list for the Custom picker —
 // to so opening a different job resets to its own existing entries.
 let stationPassCount = 1;
 let stationJobPassKey = null;
+// Unsaved keystrokes in station-field inputs (keyed by DOM id). Clicking
+// "+ add pass" / "- remove pass" re-renders the whole panel from scratch,
+// which would otherwise wipe anything the operator typed but hasn't saved
+// yet (fields like Waste Sheets have no server-backed value to restore
+// from). Snapshot before re-render, replay into the new markup after.
+let stationDraftValues = {};
 let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
 let stationJobId    = null;
@@ -13709,6 +13715,7 @@ function stationOpenJob(id) {
   stationJobId = id;
   stationView = 'update';
   stationRecBlobs = [];
+  stationDraftValues = {};
   // Text notes count as read the moment they're on screen; voice notes
   // wait for an actual play (stationNoteHeard via onplay).
   stationNotes.filter(n => n.job_id === id && n.kind === 'text' && !n.heard_at)
@@ -13781,7 +13788,7 @@ function stationUpdateHtml() {
           <label>Waste Sheets</label>
           <input type="text" id="sf-finish-waste-p${passIdx}" class="numpad-target"
                  ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('sf-finish-waste-p${passIdx}', 'Waste Sheets')"` : `inputmode="numeric" pattern="[0-9]*"`}
-                 value="" placeholder="0">
+                 value="${esc(stationDraftValues[`sf-finish-waste-p${passIdx}`] || '')}" placeholder="0">
         </div>` : '';
   const fieldHtml = fields.length ? Array.from({ length: stationPassCount }, (_, passIdx) => {
     const m = passMeta(passIdx);
@@ -13799,7 +13806,8 @@ function stationUpdateHtml() {
       // read it without a special case.
       if (f.type === 'checkbox') {
         if (passIdx > 0) return '';
-        const checked = String(cur || '').trim().toLowerCase() === 'yes' ? 'checked' : '';
+        const draftChecked = stationDraftValues[inputId];
+        const checked = (draftChecked !== undefined ? draftChecked : String(cur || '').trim().toLowerCase() === 'yes') ? 'checked' : '';
         return `
         <div class="station-field station-field--check">
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;">
@@ -13810,12 +13818,14 @@ function stationUpdateHtml() {
       }
       const tabletAttrs = `inputmode="none" readonly onclick="stationOpenPad('${inputId}', '${esc(f.label).replace(/'/g, "\\'")}')"`;
       const laptopAttrs = `inputmode="numeric" pattern="[0-9]*"`;
+      const draftVal = stationDraftValues[inputId];
+      const shownVal = draftVal !== undefined ? draftVal : cur;
       return `
         <div class="station-field">
           <label>${esc(f.label)}</label>
           <input type="text" ${isTouch ? tabletAttrs : laptopAttrs} class="numpad-target" id="${inputId}"
                  data-key="${esc(f.key)}" data-pass="${passIdx}"
-                 value="${esc(cur)}" placeholder="0">
+                 value="${esc(shownVal)}" placeholder="0">
         </div>`;
     }).join('') + wasteFieldDiv(passIdx);
     // CTP stage is one-shot (checkbox + colors + plates) — no multi-day
@@ -13966,7 +13976,7 @@ function stationUpdateHtml() {
 }
 function stationBackToQueue() {
   stationView = 'queue'; stationJobId = null;
-  stationPassCount = 1; stationJobPassKey = null;
+  stationPassCount = 1; stationJobPassKey = null; stationDraftValues = {};
   stationClosePad(); stationCloseQwerty(); stationRecAbort();
   // Refresh badges in the background — a note may have landed meanwhile.
   stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
@@ -13979,10 +13989,21 @@ function stationBackToQueue() {
 // a different field while the pad is open just retargets it.
 let stationPadKey = null;   // the full DOM id of the field currently being edited
 
+// Save whatever's currently typed into station-field inputs (id starts
+// "sf-") so a re-render (from add/remove pass) doesn't wipe it. Skips
+// nothing — every field id is unique per pass, so this naturally handles
+// Coating Sheets Qty, Waste Sheets, and the CTP checkbox alike.
+function stationSnapshotDraft() {
+  document.querySelectorAll('.station-update [id^="sf-"]').forEach(el => {
+    stationDraftValues[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+}
+
 // Add another empty pass row at the bottom of the field grid. Triggered
 // by the red + button on the last pass. Pass count belongs to the
 // active job, so opening a different job naturally resets it.
 function stationAddPass() {
+  stationSnapshotDraft();
   stationPassCount = (stationPassCount || 1) + 1;
   stationRender();
 }
@@ -13992,6 +14013,7 @@ function stationAddPass() {
 // saved on the server come back on the next render because the count
 // is re-derived from existing entries[] in stationUpdateHtml.
 function stationRemovePass() {
+  stationSnapshotDraft();
   if (stationPassCount > 1) stationPassCount--;
   stationRender();
 }
