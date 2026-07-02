@@ -107,7 +107,14 @@ function pendingCoatings(job, allowedSet) {
   // coatings without the queue treating them as already done.
   const stageRec = job.stages && job.stages[2];
   let stageMs = 0;
-  if (stageRec && stageRec.time) {
+  // Prefer the unambiguous UTC instant (`at`); fall back to parsing the
+  // wall-clock byline for legacy rows written before `at` existed. The
+  // byline parse is timezone-dependent, so only use it when there's no
+  // instant available.
+  if (stageRec && stageRec.at) {
+    const t = new Date(stageRec.at).getTime();
+    if (isFinite(t)) stageMs = t;
+  } else if (stageRec && stageRec.time) {
     const m = String(stageRec.time).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
     if (m) {
       const t = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
@@ -3243,6 +3250,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const stageLabel = STAGES[operator.stage_index] || 'Stage ' + operator.stage_index;
     const by = `${operator.name}${operator.machine ? ' · ' + operator.machine : ''} (${stageLabel})`;
     const time = businessStamp();
+    // Machine-comparable instant for the SAME moment as `time`. `time` is a
+    // business-local wall-clock string ("dd/mm/yyyy hh:mm") that different
+    // clients parse in different timezones; `at` is an unambiguous UTC
+    // instant used for staleness math (see pendingCoatings) so a coating's
+    // done_at instant compares correctly against the stage-entry instant
+    // regardless of where the code runs (Vercel UTC vs browser PKT).
+    const nowIso = new Date().toISOString();
 
     let stage_index = curStage;
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
@@ -3325,15 +3339,15 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       }
       const skipped = Math.max(0, target - curStage - 1); // intermediate stages we're flying past
       const finishing = curStage === STAGES.length - 1;
-      stages[curStage] = { ...(stages[curStage] || {}), status: target === curStage ? (stages[curStage]?.status || 'active') : 'done', by, time };
+      stages[curStage] = { ...(stages[curStage] || {}), status: target === curStage ? (stages[curStage]?.status || 'active') : 'done', by, time, at: nowIso };
       if (target !== curStage && !finishing) {
         // Mark every skipped intermediate stage as done with an audit note
         // so the pipeline UI shows them passed, not blank.
         for (let i = curStage + 1; i < target; i++) {
-          stages[i] = { ...(stages[i] || {}), status: 'done', by, time, notes: `Skipped — job went from ${STAGES[curStage]} directly to ${STAGES[target]}` };
+          stages[i] = { ...(stages[i] || {}), status: 'done', by, time, at: nowIso, notes: `Skipped — job went from ${STAGES[curStage]} directly to ${STAGES[target]}` };
         }
         const status = target === STAGES.length - 1 ? 'done' : 'active';
-        stages[target] = { status, notes: '', by, time };
+        stages[target] = { status, notes: '', by, time, at: nowIso };
         for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
         stage_index = target;
         const skipNote = skipped > 0 ? ` (skipped ${skipped} stage${skipped > 1 ? 's' : ''})` : '';
