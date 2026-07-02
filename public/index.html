@@ -13740,10 +13740,27 @@ function stationUpdateHtml() {
   // together if the stage has both). Initial pass count = max length
   // of any field's entries[], minimum 1. Operator clicks the red + at
   // the corner to add another pass for a different day.
-  const fieldHasEntries = (key) => Array.isArray((j.particulars && j.particulars[key] && j.particulars[key].entries));
-  const existingPassCount = Math.max(0, ...fields.map(f => {
+  // At Coatings, TWO sections (Coatings + Embellishments) share stage 2
+  // and the same coating_sheets_qty particulars row. Each machine must
+  // only see (and edit) its OWN pass rows — otherwise the UV operator's
+  // 1000 sheets shows up on the Emboss operator's screen. Entries with
+  // no machine stamp (legacy / admin-typed) stay visible to everyone.
+  const entryVisible = (e) => stIdx !== 2 || !e || !e.machine || e.machine === (stationOperator.machine || '');
+  const entriesOf = (f) => {
     const ent = j.particulars && j.particulars[f.key] && j.particulars[f.key].entries;
-    return Array.isArray(ent) ? ent.length : 0;
+    return Array.isArray(ent) ? ent : null;
+  };
+  // Maps visible pass position → real index in the full entries[] array.
+  const visibleIdxsOf = (f) => {
+    const ent = entriesOf(f);
+    if (!ent) return null;
+    const out = [];
+    ent.forEach((e, i) => { if (entryVisible(e)) out.push(i); });
+    return out;
+  };
+  const existingPassCount = Math.max(0, ...fields.map(f => {
+    const vis = visibleIdxsOf(f);
+    return vis ? vis.length : 0;
   }));
   if (stationJobPassKey !== j.id) {
     stationPassCount = Math.max(1, existingPassCount);
@@ -13756,16 +13773,24 @@ function stationUpdateHtml() {
   const passValue = (f, passIdx) => {
     const part = j.particulars && j.particulars[f.key];
     if (!part) return '';
-    if (Array.isArray(part.entries) && part.entries[passIdx]) return part.entries[passIdx].qty || '';
-    if (passIdx === 0 && !Array.isArray(part.entries)) return part.quantity || '';
+    const ent = entriesOf(f);
+    if (ent) {
+      const vis = visibleIdxsOf(f);
+      const realIdx = vis[passIdx];
+      return realIdx !== undefined ? (ent[realIdx].qty || '') : '';
+    }
+    if (passIdx === 0) return part.quantity || '';
     return '';
   };
   const passMeta = (passIdx) => {
     // First field with a meta (date / operator) labels the whole pass.
     for (const f of fields) {
-      const part = j.particulars && j.particulars[f.key];
-      if (Array.isArray(part && part.entries) && part.entries[passIdx]) {
-        const e = part.entries[passIdx];
+      const ent = entriesOf(f);
+      if (!ent) continue;
+      const vis = visibleIdxsOf(f);
+      const realIdx = vis[passIdx];
+      if (realIdx !== undefined && ent[realIdx]) {
+        const e = ent[realIdx];
         if (e.date || e.operator) return e;
       }
     }
@@ -13895,12 +13920,20 @@ function stationUpdateHtml() {
         ${machineLine}
       </div>`;
   })() : '';
+  // The default-selected radio is the first PENDING finish (or the first
+  // doable one when everything's already recorded — a follow-up pass).
+  // Only a pending pick reduces the pending count; a follow-up pass
+  // leaves it untouched, so neither the hint nor the button may claim
+  // "last coating" while e.g. Emboss is still owed by the other section.
+  const defaultPick = coatingPickable ? (coatState.pendingForMe[0] || myDoable[0]) : null;
+  const stillPendingAfter = coatingPickable
+    ? coatState.pending.length - (coatState.pending.includes(defaultPick) ? 1 : 0)
+    : 0;
   const finishTailHtml = coatingPickable ? (() => {
     const otherPending = coatState.pending.filter(c => !coatState.pendingForMe.includes(c));
     const othersList = otherPending.length
       ? `<div class="station-hint" style="margin-top:8px;">For the other section: ${otherPending.map(c => `<span class="sj-finish-badge sj-finish-badge--other">${esc(c)}</span>`).join(' ')}</div>`
       : '';
-    const stillPendingAfter = coatState.pending.length - 1;
     const remainingMsg = stillPendingAfter > 0
       ? `<div class="station-hint" style="margin-top:6px;">After saving, this job stays at Coatings for ${stillPendingAfter} more coating${stillPendingAfter === 1 ? '' : 's'}.</div>`
       : `<div class="station-hint" style="margin-top:6px;">Last coating for this job — saving will send it to ${esc(nextName || '')}.</div>`;
@@ -13910,9 +13943,9 @@ function stationUpdateHtml() {
   const hasWorkFields = fields.length > 0 || coatingPickable;
   const emptyHint = !hasWorkFields && !isCoatingsStage ? `<div class="station-hint" style="margin:10px 0;">No numbers to record at this stage — just confirm it's done.</div>` : '';
   const advanceLabel = coatingPickable
-    ? (coatState.pending.length === 1
-        ? `✓ Save — and send to ${esc(nextName || '')}`
-        : `✓ Save this coating`)
+    ? (stillPendingAfter > 0
+        ? `✓ Save this coating`
+        : `✓ Save — and send to ${esc(nextName || '')}`)
     : (nextName ? `✓ Done — send to ${esc(nextName)}` : `✓ Mark Delivered`);
 
   // Incoming notes from ANY upstream station for THIS job. With the
@@ -14351,6 +14384,10 @@ async function stationSubmit(advance, skipTo) {
     Array.isArray(j.particulars && j.particulars[f.key] && j.particulars[f.key].entries)
     && j.particulars[f.key].entries.length > 0);
   const useMulti = anyExisting || (stationPassCount && stationPassCount > 1);
+  // Set while building the coatings qty patch below: true when the
+  // operator filled in a brand-new pass slot this save. Used to decide
+  // whether a follow-up coating pass should be recorded in coatings_done.
+  let coatingsQtyNewPass = false;
   fields.forEach(f => {
     if (f.type === 'checkbox') {
       // Checkbox is single-pass, single-value. 'Yes' when checked so it
@@ -14365,6 +14402,28 @@ async function stationSubmit(advance, skipTo) {
         .sort((a, b) => Number(a.dataset.pass) - Number(b.dataset.pass));
       if (!passInputs.length) return;
       const values = passInputs.map(el => (el.value || '').trim());
+      const ent = j.particulars && j.particulars[f.key] && j.particulars[f.key].entries;
+      if (stIdx === 2 && Array.isArray(ent) && ent.length) {
+        // Coatings: the on-screen pass rows are only THIS machine's
+        // entries — the other section's rows are hidden. Rebuild the
+        // FULL array: keep hidden entries' values at their real
+        // indexes, replace visible ones with the inputs, append any
+        // brand-new passes at the end. Sending just the visible values
+        // would overwrite the Emboss operator's numbers with ours.
+        const myMachine = (stationOperator && stationOperator.machine) || '';
+        const visIdxs = [];
+        ent.forEach((e, i) => { if (!e || !e.machine || e.machine === myMachine) visIdxs.push(i); });
+        const full = ent.map(e => String((e && e.qty) || ''));
+        values.forEach((v, k) => {
+          if (k < visIdxs.length) full[visIdxs[k]] = v;
+          else { full.push(v); if (v !== '') coatingsQtyNewPass = true; }
+        });
+        // Trim trailing blanks (unused "+" slots) — safe because
+        // appended slots are always at the end of the array.
+        while (full.length > ent.length && full[full.length - 1] === '') full.pop();
+        patch[f.key] = full;
+        return;
+      }
       // Drop trailing blank passes so the operator can add a + slot,
       // not use it, and still save without creating an empty entry.
       while (values.length && values[values.length - 1] === '') values.pop();
@@ -14385,17 +14444,30 @@ async function stationSubmit(advance, skipTo) {
   if (stIdx === 2) {
     const myFinishes = allowedFinishesForOperator(stationOperator);
     const info = jobCoatingsState(j, myFinishes);
-    if (info.pendingForMe.length > 0) {
+    // The radio list shows every planned finish the operator can do —
+    // pending AND already-done ("+ another pass"). Gate on myDoable, not
+    // pendingForMe: the old pendingForMe check silently DROPPED the
+    // waste + coating pass whenever the pick was a follow-up.
+    const myDoable = info.planned.filter(c => !myFinishes || myFinishes.size === 0 || myFinishes.has(c));
+    if (myDoable.length > 0) {
       const picked = document.querySelector('input[name="finish-kind"]:checked');
       if (!picked) { notify('Pick which coating you did'); return; }
-      finishKind = picked.value;
-      finishMachine = (stationOperator && stationOperator.machine) || '';
       // Waste Sheets is rendered once per pass row (same layout as
       // Printing), but only ONE coating pass is actually being recorded
       // per Save — the last row is the live one, so its value is what
       // gets submitted.
       const wasteEl = document.getElementById(`sf-finish-waste-p${Math.max(0, (stationPassCount || 1) - 1)}`);
-      finishWaste = (wasteEl && wasteEl.value || '').trim();
+      const wasteVal = ((wasteEl && wasteEl.value) || '').trim();
+      const isFollowUp = !info.pendingForMe.includes(picked.value);
+      // First submission of a finish: always record it. Follow-up pass:
+      // record only when the operator actually entered something new
+      // (waste, or a fresh qty pass) — otherwise a bare "Done" click
+      // after all coatings are recorded would duplicate the last pass.
+      if (!isFollowUp || wasteVal !== '' || coatingsQtyNewPass) {
+        finishKind = picked.value;
+        finishMachine = (stationOperator && stationOperator.machine) || '';
+        finishWaste = wasteVal;
+      }
     }
   }
   // If the operator hit Save / Done while still holding the recorder
