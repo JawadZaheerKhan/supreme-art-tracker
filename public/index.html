@@ -2046,7 +2046,14 @@ function jobCoatingsState(j, allowedSet) {
   // the stage and trying to redo coatings shows "nothing waiting".
   const stageRec = j.stages && j.stages[2];
   let stageMs = 0;
-  if (stageRec && stageRec.time) {
+  // Prefer the unambiguous UTC instant (`at`) the server now stamps —
+  // parsing the wall-clock byline is timezone-dependent and diverges
+  // between the browser (PKT) and the server (UTC), which used to leave a
+  // job stuck at Coatings. Fall back to the byline only for legacy rows.
+  if (stageRec && stageRec.at) {
+    const t = new Date(stageRec.at).getTime();
+    if (isFinite(t)) stageMs = t;
+  } else if (stageRec && stageRec.time) {
     const m = String(stageRec.time).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
     if (m) {
       const t = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
@@ -11374,16 +11381,17 @@ async function saveUpdate(id) {
   if (target < 0) { await alertDialog({ title: 'Please pick a stage.', kind: 'warn' }); return; }
   const by = STAGES[target];
   const time = fmtDMYT(new Date());
+  const at = new Date().toISOString(); // unambiguous instant for staleness math
   const prevSi = j.stage_index || 0;
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
   for (let i = 0; i < target; i++) {
     if (!stages[i] || stages[i].status !== 'done') {
-      stages[i] = { ...(stages[i]||{}), status: 'done', by, time };
+      stages[i] = { ...(stages[i]||{}), status: 'done', by, time, at };
     }
   }
   const status = target === STAGES.length - 1 ? 'done' : 'active';
-  stages[target] = { status, notes, by, time };
+  stages[target] = { status, notes, by, time, at };
   for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
   const logNote = notes || (target !== prevSi ? `Moved from ${STAGES[prevSi]}` : 'Stage updated');
   log.push({ stage: STAGES[target], status, notes: logNote, by, time });
@@ -11418,16 +11426,17 @@ async function moveToStage(id, target) {
   const prevSi = j.stage_index || 0;
   if (target === prevSi) return;
   const time = fmtDMYT(new Date());
+  const at = new Date().toISOString(); // unambiguous instant for staleness math
   const by = STAGES[target];
   const stages = { ...(j.stages||{}) };
   const log = [...(j.log||[])];
   for (let i = 0; i < target; i++) {
     if (!stages[i] || stages[i].status !== 'done') {
-      stages[i] = { ...(stages[i]||{}), status: 'done', by, time };
+      stages[i] = { ...(stages[i]||{}), status: 'done', by, time, at };
     }
   }
   const status = target === STAGES.length - 1 ? 'done' : 'active';
-  stages[target] = { status, notes: '', by, time };
+  stages[target] = { status, notes: '', by, time, at };
   for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
   log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[prevSi]}`, by, time });
   showSaving(true);
