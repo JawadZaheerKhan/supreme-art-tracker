@@ -981,6 +981,15 @@ function logTimeToISODate(s) {
   const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(s || ''));
   return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
 }
+// Sum a possibly pipe-joined quantity string: "26000 | 500" → 26500.
+// NEVER digit-strip these with a bare parseInt — that reads the same
+// string as 26000500. Single plain numbers pass through unchanged.
+function sumPipeInts(s) {
+  return String(s || '').split('|').reduce((acc, piece) => {
+    const n = parseInt(piece.replace(/[^0-9-]/g, ''), 10);
+    return acc + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
 
 app.get('/api/operators', requireOperatorAdmin, async (req, res) => {
   try {
@@ -1283,8 +1292,8 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         if (Number.isFinite(n)) sheetsN += n;
       }
     } else {
-      const n = parseInt(String((partKey && partKey.quantity) || '').replace(/[^0-9-]/g, ''), 10);
-      if (Number.isFinite(n)) sheetsN = n;
+      // Legacy single-quantity fallback — pipe-aware (see sumPipeInts).
+      sheetsN = sumPipeInts(partKey && partKey.quantity);
     }
     const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
     const colorsN = Number.isFinite(colors) ? colors : 0;
@@ -1300,8 +1309,8 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
           if (Number.isFinite(n)) wasteN += n;
         }
       } else {
-        const n = parseInt(String((partW && partW.quantity) || '').replace(/[^0-9-]/g, ''), 10);
-        if (Number.isFinite(n)) wasteN = n;
+        // Legacy single-quantity fallback — pipe-aware (see sumPipeInts).
+        wasteN = sumPipeInts(partW && partW.quantity);
       }
     }
     // Skip jobs the admin emptied out on the Job Card (no sheets, no
@@ -1435,34 +1444,43 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       }, 0);
       const coatSheetsAdmin = sumPipe(part.coating_sheets_qty && part.coating_sheets_qty.quantity);
       // Fallback: if admin hasn't filled in Coating Sheets Qty, derive from
-      // printed − printed-waste (legacy formula).
-      const printedN = parseInt(String((part.printed_sheets_qty && part.printed_sheets_qty.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
-      const printedWasteN = parseInt(String((part.printed_waste_sheets && part.printed_waste_sheets.quantity) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+      // printed − printed-waste (legacy formula). sumPipe — NOT parseInt —
+      // because multi-pass quantities are pipe-joined ("26000 | 500") and a
+      // bare digit-strip would read that as 26000500.
+      const printedN = sumPipe(part.printed_sheets_qty && part.printed_sheets_qty.quantity);
+      const printedWasteN = sumPipe(part.printed_waste_sheets && part.printed_waste_sheets.quantity);
       const sheetsN = coatSheetsAdmin > 0 ? coatSheetsAdmin : Math.max(0, printedN - printedWasteN);
-      // Per-MACHINE sheets — same criteria as Printing. Station passes are
-      // machine-stamped in coating_sheets_qty.entries, so each machine only
-      // gets ITS OWN entries (unstamped legacy entries stay visible to all).
-      // Without this, "1000 | 800" (UV machine + Emboss machine) credited
-      // the full 1800 to BOTH machines. Falls back to the job-level total
-      // only when there are no stamped entries (legacy/admin-typed rows).
-      const qtyEntries = part.coating_sheets_qty && Array.isArray(part.coating_sheets_qty.entries)
+      // Per-day, per-machine credit — SAME criteria as Printing. Station
+      // passes are date- and machine-stamped in entries[], so sheets/waste
+      // land on the day the work was entered (a 500/500 split across two
+      // days shows 500 on each day), and each machine only gets ITS OWN
+      // entries (UV 1000 + Emboss 800 no longer shows 1800 on both rows).
+      const qtyEntries = part.coating_sheets_qty && Array.isArray(part.coating_sheets_qty.entries) && part.coating_sheets_qty.entries.length
         ? part.coating_sheets_qty.entries : null;
-      const sheetsForMachine = (mc) => {
-        if (qtyEntries && qtyEntries.length) {
-          let n = 0;
-          for (const e of qtyEntries) {
-            if (!e) continue;
-            if (e.machine && e.machine !== mc) continue; // another machine's pass
-            const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-            if (Number.isFinite(v)) n += v;
-          }
-          return n;
+      const wasteEntries = part.uv_waste_sheets && Array.isArray(part.uv_waste_sheets.entries) && part.uv_waste_sheets.entries.length
+        ? part.uv_waste_sheets.entries : null;
+      const creditEntries = (entries, field) => {
+        for (const e of entries) {
+          if (!e || e.date !== date) continue;
+          const mc = String(e.machine || '').trim();
+          if (!mc) continue;
+          const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (!Number.isFinite(v) || v === 0) continue;
+          const row = ensure(mc);
+          row[field] += v;
+          row.jobIds.add(job.id);
+          const op = String(e.operator || '').trim();
+          if (op) row.operators.add(op);
         }
-        return sheetsN;
       };
-      // Job-level waste from particulars (admin- or station-written).
-      const adminWasteN = sumPipe(part.uv_waste_sheets && part.uv_waste_sheets.quantity);
-      if (sheetsN <= 0) continue;
+      if (qtyEntries) creditEntries(qtyEntries, 'sheets');
+      if (wasteEntries) creditEntries(wasteEntries, 'waste');
+      // Legacy jobs (no entries at all) keep the old badge-day behavior.
+      if (!qtyEntries && !wasteEntries && sheetsN <= 0) continue;
+      // ✓ badges still drive the finishes column, operator list, and job
+      // count for the day the finish was recorded. Sheets/waste from the
+      // badges only apply when the job has NO entries (legacy) — otherwise
+      // the per-day entries above are the source of truth.
       const sheetsCredited = new Set();
       for (const entry of done) {
         if (!entry) continue;
@@ -1472,15 +1490,17 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         if (!mc) continue;
         const row = ensure(mc);
         row.jobIds.add(job.id);
-        if (!sheetsCredited.has(mc)) {
-          row.sheets += sheetsForMachine(mc);
+        if (!qtyEntries && !sheetsCredited.has(mc)) {
+          row.sheets += sheetsN;
           sheetsCredited.add(mc);
         }
         const opName = String(entry.operator_name || '').trim();
         if (opName) row.operators.add(opName);
         if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
-        const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
-        if (Number.isFinite(w)) row.waste += w;
+        if (!wasteEntries) {
+          const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
+          if (Number.isFinite(w)) row.waste += w;
+        }
       }
     }
 
@@ -1702,8 +1722,8 @@ async function aggregateProductionRange(sql, { from, to }) {
       return n;
     }
     if (partKey.quantity) {
-      const v = parseInt(String(partKey.quantity).replace(/[^0-9-]/g, ''), 10);
-      return Number.isFinite(v) ? v : 0;
+      // Legacy single-quantity fallback — pipe-aware (see sumPipeInts).
+      return sumPipeInts(partKey.quantity);
     }
     return 0;
   };
