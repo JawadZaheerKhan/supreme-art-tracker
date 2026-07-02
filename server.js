@@ -2655,12 +2655,11 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     // needs an admin to keep the audit trail intact.
     if (req.user.role !== 'admin') {
       // Calendar-day rule: reversible only if created on today's date
-      // (00:00–23:59 of the same day), not rolling 24 hours.
-      const t = new Date(tx.created_at);
-      const n = new Date();
-      const sameDay = t.getFullYear() === n.getFullYear() &&
-                      t.getMonth()    === n.getMonth() &&
-                      t.getDate()     === n.getDate();
+      // (00:00–23:59 of the same day), not rolling 24 hours. Compared in
+      // the BUSINESS timezone — the server runs in UTC, so getDate() here
+      // would flip to "yesterday"/"tomorrow" at 05:00 PKT, wrongly
+      // blocking (or allowing) reversals around the UTC midnight.
+      const sameDay = businessDateISO(new Date(tx.created_at)) === businessDateISO();
       if (!sameDay) {
         return res.status(403).json({ error: 'You can only reverse entries created today. Ask an admin to reverse older entries.' });
       }
@@ -2672,11 +2671,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     const origNote = tx.notes ? ` (orig note: "${tx.notes}")` : '';
     const origBy   = tx.user_email ? ` entered by ${tx.user_email}` : '';
     // Format the original timestamp as dd/mm/yyyy hh:mm for the audit note —
-    // matches the app-wide dd/mm/yyyy display convention.
+    // matches the app-wide dd/mm/yyyy display convention, in business-local
+    // time (the server's own clock is UTC).
     const _d        = new Date(tx.created_at);
-    const _pad      = (n) => String(n).padStart(2, '0');
-    const _stamp    = isNaN(_d) ? String(tx.created_at) :
-      `${_pad(_d.getDate())}/${_pad(_d.getMonth()+1)}/${_d.getFullYear()} ${_pad(_d.getHours())}:${_pad(_d.getMinutes())}`;
+    const _stamp    = isNaN(_d) ? String(tx.created_at) : businessStamp(_d);
     const note     = `Reversal of TX #${tx.id}${origBy} on ${_stamp}${origNote}`;
 
     const newTxId = await applyInventoryChange(sql, {
@@ -3635,7 +3633,7 @@ app.post('/api/capa', requireCapaWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const year = new Date().getFullYear();
+    const year = businessDateISO().slice(0, 4); // business-local year (server clock is UTC)
     // Count existing GEN- refs to find the next seq. Cheaper than a sequence
     // and handles year-boundary resets cleanly.
     const existing = await sql`
