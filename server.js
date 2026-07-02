@@ -1690,16 +1690,28 @@ async function aggregateProductionRange(sql, { from, to }) {
   for (const job of jobs) {
     const log = Array.isArray(job.log) ? job.log : [];
     const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+    // Same dedupe rule as aggregateDailyProduction: a job can log several
+    // entries for the same (date, stage) — "Save numbers" + "Done", or a
+    // wrong-station submit followed by the right one. Pick the LATEST
+    // entry per (date, stage) and credit its machine/operator exactly
+    // once. Counting every entry doubled the sheets (26,000 → 52,000).
+    const latestByDateStage = new Map(); // 'date|stage' -> { ms, date, stageLabel, mc, op }
     for (const e of log) {
       if (!e || !e.by) continue;
       const eDate = logTimeToISODate(e.time);
       if (!eDate || eDate < from || eDate > to) continue;
       const stageLabel = parseByStage(e.by);
-      const keys = STAGE_KEYS[stageLabel];
-      if (!keys) continue;
-      const [sheetsKey, wasteKey] = keys;
-      const mc = parseByMachine(e.by);
-      const op = parseByOperator(e.by);
+      if (!STAGE_KEYS[stageLabel]) continue;
+      const m = String(e.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+      const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
+      const k = eDate + '|' + stageLabel;
+      const cur = latestByDateStage.get(k);
+      if (!cur || ms >= cur.ms) {
+        latestByDateStage.set(k, { ms, date: eDate, stageLabel, mc: parseByMachine(e.by), op: parseByOperator(e.by) });
+      }
+    }
+    for (const { date: eDate, stageLabel, mc, op } of latestByDateStage.values()) {
+      const [sheetsKey, wasteKey] = STAGE_KEYS[stageLabel];
       const sheets = qtyForDate(part[sheetsKey], eDate);
       const waste  = qtyForDate(part[wasteKey],  eDate);
       if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
