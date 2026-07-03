@@ -4858,14 +4858,20 @@ async function renderInvHistory(id) {
         <td>${reverseBtn}</td>
       </tr>`;
     }).join('');
-    document.getElementById('ledger-content').innerHTML = txs.length
+    // Modal may have been torn down by a full re-render while we awaited
+    // the fetch (e.g. reversing a job-consumed row triggers loadJobs()) —
+    // silently skip the repaint instead of crashing on a null container.
+    const box = document.getElementById('ledger-content');
+    if (!box) return;
+    box.innerHTML = txs.length
       ? `<table class="ledger-table">
            <tr><th>When</th><th>Change (${unit})</th><th>Balance After</th><th>Reason</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
   } catch(e) {
-    document.getElementById('ledger-content').innerHTML = 'Error: ' + e.message;
+    const box = document.getElementById('ledger-content');
+    if (box) box.innerHTML = 'Error: ' + e.message;
   }
 }
 
@@ -4881,11 +4887,21 @@ async function reverseStockTx(txId, itemId) {
   showSaving(true);
   try {
     const result = await api('POST', `/api/inventory/transactions/${txId}/reverse`);
-    await loadInventory();           // current_balance changed
-    // Job state might have flipped — refresh jobs so the Pending Stock
-    // queue picks it up and the badge updates.
-    if (result && result.job_reverted) await loadJobs();
-    await renderInvHistory(itemId);  // re-render the open modal in place
+    // Server-side reversal succeeded — everything below is UI refresh.
+    // Wrap it separately so a display hiccup can't masquerade as a failed
+    // reversal ("Reverse failed: Cannot set properties of null" used to
+    // appear when loadJobs()'s re-render tore down the open History modal
+    // before we tried to repaint it).
+    try {
+      await loadInventory();           // current_balance changed
+      // Job state might have flipped — refresh jobs so the Pending Stock
+      // queue picks it up and the badge updates.
+      if (result && result.job_reverted) await loadJobs();
+      // Re-render the History modal only if it survived the re-render.
+      if (document.getElementById('ledger-content')) await renderInvHistory(itemId);
+    } catch (uiErr) {
+      console.error('Post-reverse UI refresh failed (reversal itself succeeded):', uiErr);
+    }
     notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock' : 'Entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
