@@ -2096,39 +2096,89 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // editing a job card belongs to the job's own audit trail — the paper
     // ledger should stay untouched unless the paper item itself was swapped.
     // Changes to packets/qty/particulars alone do NOT trigger ledger writes.
+    //
+    // Swap mechanics: behave like a manual reverse-and-reissue so the
+    // Stock Out report always names the paper the job ACTUALLY consumed.
+    //   1. Find the original un-reversed 'job-consumed' row on the old
+    //      item and reverse it WITH the reverses_tx_id link — the linked
+    //      pair drops out of Stock In/Out automatically.
+    //   2. Write a fresh, VISIBLE 'job-consumed' row on the new item.
+    // Legacy fallback: if no original row exists (very old jobs), fall
+    // back to the hidden compensating 'job-edit-revert' entry.
     const paperItemChanged = (oldItemId !== newItemId);
     if (wasIssued && paperItemChanged) {
       if (oldItemId && oldSheets > 0) {
-        await applyInventoryChange(sql, {
-          itemId: oldItemId,
-          change: +oldSheets,
-          reason: 'job-edit-revert',
-          jobId: job.id,
-          notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
-          user: req.user,
-        });
-        // Revert the offcut +N too — compensating transaction keeps the
-        // ledger append-only. We re-apply the new offcut below if the new
-        // state also has a cut.
-        if (oldSourceItem && oldOffcutSize) {
-          const oldOffcutItem = await findOrCreateOffcutItem(sql, oldSourceItem, oldOffcutSize);
+        const orig = await sql`
+          SELECT t.id, t.change FROM inventory_transactions t
+          WHERE t.job_id = ${job.id} AND t.item_id = ${oldItemId}
+            AND t.reason = 'job-consumed' AND t.reverses_tx_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+          ORDER BY t.id DESC LIMIT 1
+        `;
+        if (orig[0]) {
           await applyInventoryChange(sql, {
-            itemId: oldOffcutItem.id,
-            change: -oldSheets,
+            itemId: oldItemId,
+            change: -orig[0].change,   // exact opposite of the original deduction
+            reason: 'correction',      // hidden from Stock In/Out (linked pair)
+            jobId: job.id,
+            notes: `Paper changed on Job E-${job.id}: reversal of TX #${orig[0].id}`,
+            user: req.user,
+            reversesTxId: orig[0].id,
+          });
+        } else {
+          await applyInventoryChange(sql, {
+            itemId: oldItemId,
+            change: +oldSheets,
             reason: 'job-edit-revert',
             jobId: job.id,
-            notes: `Edit on Job E-${job.id}: removed previous ${oldSheets} sheets of ${oldOffcutSize} offcut`,
+            notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
             user: req.user,
           });
         }
+        // Undo the offcut +N too — reverse the original job-offcut row when
+        // one exists so the pair hides; legacy fallback otherwise.
+        if (oldSourceItem && oldOffcutSize) {
+          const oldOffcutItem = await findOrCreateOffcutItem(sql, oldSourceItem, oldOffcutSize);
+          const origOff = await sql`
+            SELECT t.id, t.change FROM inventory_transactions t
+            WHERE t.job_id = ${job.id} AND t.item_id = ${oldOffcutItem.id}
+              AND t.reason = 'job-offcut' AND t.reverses_tx_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+            ORDER BY t.id DESC LIMIT 1
+          `;
+          if (origOff[0]) {
+            await applyInventoryChange(sql, {
+              itemId: oldOffcutItem.id,
+              change: -origOff[0].change,
+              reason: 'correction',
+              jobId: job.id,
+              notes: `Paper changed on Job E-${job.id}: reversal of offcut TX #${origOff[0].id}`,
+              user: req.user,
+              reversesTxId: origOff[0].id,
+            });
+          } else {
+            await applyInventoryChange(sql, {
+              itemId: oldOffcutItem.id,
+              change: -oldSheets,
+              reason: 'job-edit-revert',
+              jobId: job.id,
+              notes: `Edit on Job E-${job.id}: removed previous ${oldSheets} sheets of ${oldOffcutSize} offcut`,
+              user: req.user,
+            });
+          }
+        }
       }
       if (newItemId && newSheets > 0) {
+        // Fresh, report-visible consumption on the new paper — same shape
+        // as the issue-stock flow so Stock Out reads naturally.
+        const psNew   = packetSize(newPaperType);
+        const unitNew = REAM_PAPERS.has(newPaperType) ? 'reams' : 'packets';
         await applyInventoryChange(sql, {
           itemId: newItemId,
           change: -newSheets,
-          reason: 'job-edit-apply',
+          reason: 'job-consumed',
           jobId: job.id,
-          notes: `Edit on Job E-${job.id}: consumed ${newSheets} sheets`,
+          notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${newSheets / psNew} ${unitNew} (${newSheets} sheets) issued on paper change by ${req.user.email}`,
           user: req.user,
         });
         // Re-apply the offcut yield for the new state, if cut spec is set.
@@ -2137,9 +2187,9 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
           await applyInventoryChange(sql, {
             itemId: newOffcutItem.id,
             change: +newSheets,
-            reason: 'job-edit-apply',
+            reason: 'job-offcut',
             jobId: job.id,
-            notes: `Edit on Job E-${job.id}: added ${newSheets} sheets of ${newOffcutSize} offcut`,
+            notes: `Job E-${job.id}: ${newSheets} sheets of ${newOffcutSize} offcut returned to stock (paper change)`,
             user: req.user,
           });
         }
@@ -2276,6 +2326,16 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
       const paperType = sourceItem?.paper_type || '';
       const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars });
       if (sheetsUsed > 0) {
+        // Link the refund to the original 'job-consumed' row so the report's
+        // pair-hiding drops BOTH sides. Without the link the stale stock-out
+        // stayed in Stock Out and the refund inflated Stock In.
+        const orig = await sql`
+          SELECT t.id FROM inventory_transactions t
+          WHERE t.job_id = ${job.id} AND t.item_id = ${job.inventory_item_id}
+            AND t.reason = 'job-consumed' AND t.reverses_tx_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+          ORDER BY t.id DESC LIMIT 1
+        `;
         await applyInventoryChange(sql, {
           itemId: job.inventory_item_id,
           change: +sheetsUsed,
@@ -2283,10 +2343,19 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
           jobId: job.id,
           notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: issuance reversed by ${req.user.email} — ${sheetsUsed} sheets returned`,
           user: req.user,
+          reversesTxId: orig[0] ? orig[0].id : null,
         });
-        // If the original issuance created an offcut return, undo it too.
+        // If the original issuance created an offcut return, undo it too —
+        // linked the same way so the offcut pair vanishes from the reports.
         if (job.cut_size && job.offcut_size && sourceItem) {
           const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+          const origOff = await sql`
+            SELECT t.id FROM inventory_transactions t
+            WHERE t.job_id = ${job.id} AND t.item_id = ${offcutItem.id}
+              AND t.reason = 'job-offcut' AND t.reverses_tx_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+            ORDER BY t.id DESC LIMIT 1
+          `;
           await applyInventoryChange(sql, {
             itemId: offcutItem.id,
             change: -sheetsUsed,
@@ -2294,6 +2363,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
             jobId: job.id,
             notes: `Job E-${job.id}: offcut return reversed by ${req.user.email} — ${sheetsUsed} sheets pulled back from ${job.offcut_size} offcuts`,
             user: req.user,
+            reversesTxId: origOff[0] ? origOff[0].id : null,
           });
         }
       }
