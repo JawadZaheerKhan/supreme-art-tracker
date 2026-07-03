@@ -2479,7 +2479,7 @@ function renderUserChip() {
   // Users tab — open to admin (full control), CEO (read-only audit feed),
   // and production_manager (Floor Operators roster only — other sections
   // are tagged .pm-hide and hidden via the body.role-production-manager rule).
-  lockTab('mode-users-btn',     isAdmin() || isCeo() || isProductionManager());
+  lockTab('mode-users-btn',     isAdmin() || hasRole('ceo') || isProductionManager());
   // Trash card — visible to anyone who can navigate the app (so operators
   // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
@@ -2608,9 +2608,9 @@ function setMode(m) {
   // Authorized Users + Recent Activity sections are tagged .pm-hide
   // so PM lands on a Users tab that's effectively just the Floor
   // Operators roster). Everyone else is bounced to Jobs.
-  if (m === 'users' && !isAdmin() && !isCeo() && !isProductionManager()) m = 'jobs';
+  if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
   // Station tab is gated to roles that can run it OR CEO (view-only).
-  if (m === 'station' && !canRunStation() && !isCeo()) m = 'jobs';
+  if (m === 'station' && !canRunStation() && !hasRole('ceo')) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
@@ -7425,7 +7425,7 @@ let trashCache = { jobs: [], imports: [], retention_days: 30 };
 
 function openTrashPage() {
   // Admin can act, CEO can view (write buttons inside are .ceo-hide).
-  if (!isAdmin() && !isCeo()) { notify('Admin or CEO only.'); return; }
+  if (!isAdmin() && !hasRole('ceo')) { notify('Admin or CEO only.'); return; }
   openReportsGroup('trash-group');
 }
 
@@ -13135,14 +13135,14 @@ async function loadUsersAndAudit() {
     // PM only sees the Floor Operators section — skip the Authorized
     // Users + Recent Activity fetches entirely so the page is faster
     // and we don't paint data nobody will see.
-    const wantsUsersAndAudit = isAdmin() || isCeo();
+    const wantsUsersAndAudit = isAdmin() || hasRole('ceo');
     const reqs = [];
     if (wantsUsersAndAudit) {
       reqs.push(api('GET', '/api/users'));
       reqs.push(api('GET', '/api/audit?limit=50'));
     }
     // Operators roster: admin (write), PM (write), CEO (read-only).
-    const wantsOperators = isAdmin() || isCeo() || isProductionManager();
+    const wantsOperators = isAdmin() || hasRole('ceo') || isProductionManager();
     if (wantsOperators) reqs.push(api('GET', '/api/operators'));
     const results = await Promise.all(reqs);
     let i = 0;
@@ -13167,7 +13167,7 @@ function renderOperators() {
   // Visible to admin, production_manager (write), and CEO (read-only).
   // Edit / Remove buttons are tagged .ceo-hide so CEO sees the list but
   // can't change it.
-  if (!isAdmin() && !isProductionManager() && !isCeo()) { el.innerHTML = ''; return; }
+  if (!isAdmin() && !isProductionManager() && !hasRole('ceo')) { el.innerHTML = ''; return; }
   if (!operatorsList.length) {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
