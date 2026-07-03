@@ -1763,27 +1763,34 @@ async function aggregateProductionRange(sql, { from, to }) {
       if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
       if (op) { const r = ensureOD(eDate, op); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
     }
-    // Coatings: waste comes from the date+machine-stamped uv_waste_sheets
-    // entries — same per-day source the Daily Coatings report uses — so the
-    // two reports always agree. Badge waste_sheets carries a RUNNING total
-    // per finish, so summing badges both double-counted (two finishes on
-    // one machine) and dumped everything on the badge date. Badges still
-    // count jobs/operators; their waste applies only to legacy jobs that
-    // have no entries. No sheet count here — coating sheets are excluded
-    // from the range report by design.
-    const wfPart = part.uv_waste_sheets;
-    const wasteEntries = wfPart && Array.isArray(wfPart.entries) && wfPart.entries.length ? wfPart.entries : null;
-    if (wasteEntries) {
-      for (const e of wasteEntries) {
+    // Coatings: sheets AND waste come from the date+machine-stamped
+    // entries (coating_sheets_qty / uv_waste_sheets) — same per-day source
+    // the Daily Coatings report uses — so the two reports always agree.
+    // Sheets used to be excluded here from the days they were derived by
+    // formula from Printing's number (counting the copy would have
+    // double-counted); now the coating operator types their own count, so
+    // it's first-hand machine workload and belongs in the report. Badge
+    // waste_sheets carries a RUNNING total per finish, so summing badges
+    // both double-counted and dumped everything on the badge date —
+    // badges only count jobs/operators, plus waste for legacy jobs
+    // without entries.
+    const creditCoatingEntries = (entries, field) => {
+      for (const e of entries) {
         if (!e || !e.date || e.date < from || e.date > to) continue;
         const mc = String(e.machine || '').trim();
         const op = String(e.operator || '').trim();
         const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
         if (!Number.isFinite(v) || v === 0) continue;
-        if (mc) { const r = ensureMD(e.date, mc); r.waste += v; r.jobs.add(job.id); }
-        if (op) { const r = ensureOD(e.date, op); r.waste += v; r.jobs.add(job.id); }
+        if (mc) { const r = ensureMD(e.date, mc); r[field] += v; r.jobs.add(job.id); }
+        if (op) { const r = ensureOD(e.date, op); r[field] += v; r.jobs.add(job.id); }
       }
-    }
+    };
+    const csPart = part.coating_sheets_qty;
+    const coatSheetEntries = csPart && Array.isArray(csPart.entries) && csPart.entries.length ? csPart.entries : null;
+    if (coatSheetEntries) creditCoatingEntries(coatSheetEntries, 'sheets');
+    const wfPart = part.uv_waste_sheets;
+    const wasteEntries = wfPart && Array.isArray(wfPart.entries) && wfPart.entries.length ? wfPart.entries : null;
+    if (wasteEntries) creditCoatingEntries(wasteEntries, 'waste');
     const coatings = Array.isArray(job.coatings_done) ? job.coatings_done : [];
     for (const c of coatings) {
       if (!c) continue;
