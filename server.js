@@ -1297,6 +1297,11 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     }
     const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
     const colorsN = Number.isFinite(colors) ? colors : 0;
+    // Plates: read the job card's actual Plates row (CTP station writes
+    // it). Falls back to the colors count for older jobs where Plates was
+    // never filled in — the historical report faked plates from colors.
+    const platesTyped = parseInt(String((part.plates && part.plates.quantity) || '').replace(/[^0-9-]/g, ''), 10);
+    const platesN = Number.isFinite(platesTyped) && platesTyped > 0 ? platesTyped : colorsN;
     // Waste — same per-date attribution as sheets. Multi-pass
     // entries[] take precedence; legacy single-quantity falls back.
     let wasteN = 0;
@@ -1317,14 +1322,14 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     // waste, no colors). Otherwise a job whose particulars row was
     // cleared would still inflate the jobs count and surface the
     // operator name parsed from the log byline.
-    const hasData = sheetsN > 0 || wasteN > 0 || colorsN > 0;
+    const hasData = sheetsN > 0 || wasteN > 0 || colorsN > 0 || platesN > 0;
     if (!hasData) continue;
     for (const mc of machinesThisJob) {
       const row = ensure(mc);
       row.jobIds.add(job.id);
       row.sheets += sheetsN;
       row.waste  += wasteN;
-      row.plates += colorsN;
+      row.plates += platesN;
       if (colorsN > 0) row.colorsCounts.set(colorsN, (row.colorsCounts.get(colorsN) || 0) + 1);
       for (const op of (opsByMachine.get(mc) || [])) row.operators.add(op);
     }
