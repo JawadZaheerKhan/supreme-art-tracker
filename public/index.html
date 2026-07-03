@@ -2368,38 +2368,54 @@ async function api(method, path, body) {
 // 'store_manager' (inventory+imports write), 'operator' (station only),
 // 'ceo' (read-only). The server enforces the same matrix on every endpoint.
 let currentUser = null;
-function isAdmin()             { return currentUser && currentUser.role === 'admin'; }
-function isCeo()               { return currentUser && currentUser.role === 'ceo'; }
-// Legacy fallback: rows / JWT cookies created before the role rename still
-// carry 'user' (→ production_manager) and 'stock' (→ store_manager). Treat
-// them as the new equivalents so stale cookies don't lock people out.
-function isProductionManager() { return currentUser && (currentUser.role === 'production_manager' || currentUser.role === 'user'); }
-function isStoreManager()      { return currentUser && (currentUser.role === 'store_manager'      || currentUser.role === 'stock'); }
-function isOperator()          { return currentUser && currentUser.role === 'operator'; }
+// Multi-role: a user can hold SEVERAL roles at once (e.g. CEO + Admin).
+// hasRole() checks raw membership; capability helpers (can*) grant access
+// when ANY held role allows it — highest privilege wins. The persona
+// helpers (isCeo / isOperator / isStoreManager) answer "should the UI
+// treat this person as X?" and are only true when no higher role is held,
+// so a CEO+Admin sees the full admin UI, not the read-only CEO view.
+function myRoles() {
+  if (!currentUser) return [];
+  const raw = Array.isArray(currentUser.roles) && currentUser.roles.length
+    ? currentUser.roles : [currentUser.role];
+  const alias = { user: 'production_manager', stock: 'store_manager' };
+  return raw.map(r => alias[r] || r);
+}
+function hasRole(r) { return myRoles().includes(r); }
+function isAdmin()             { return hasRole('admin'); }
+function isProductionManager() { return hasRole('production_manager'); }
+// Persona: store manager WITHOUT a higher jobs-side role — drives the
+// landing tab and the "not for store manager" blocks.
+function isStoreManager()      { return hasRole('store_manager') && !isAdmin() && !isProductionManager(); }
+// Persona: pure read-only CEO (no write role). Drives all the .ceo-hide
+// gating — a CEO who is ALSO admin/manager gets the full UI.
+function isCeo()               { return hasRole('ceo') && !isAdmin() && !isProductionManager() && !hasRole('store_manager'); }
+// Persona: operator-only account — locked to the Station view.
+function isOperator()          { return hasRole('operator') && !isAdmin() && !isProductionManager() && !hasRole('store_manager') && !hasRole('ceo'); }
 // Per-area write capability. Used to gate UI write buttons. Server enforces
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
-function canWriteInventory() { return isAdmin() || isStoreManager(); }
-function canRunStation()     { return isAdmin() || isProductionManager() || isOperator() || isCeo(); }
+function canWriteInventory() { return isAdmin() || hasRole('store_manager'); }
+function canRunStation()     { return isAdmin() || isProductionManager() || hasRole('operator') || hasRole('ceo'); }
 // Operator roster management (Users tab → Floor Operators section).
 // Admin and production manager can add / edit / remove operators.
 function canManageOperators() { return isAdmin() || isProductionManager(); }
 // Generic legacy helper — kept so widely-used .ceo-hide elements + existing
 // call sites don't need to change. Reads as "is this user allowed to mutate
-// anything at all" (anyone except CEO + operator-outside-station).
-function canWrite() { return currentUser && currentUser.role !== 'ceo' && !isOperator(); }
-// Anyone who can write any area can issue stock (admin / production_manager /
-// store_manager). CEO + operator are blocked.
-function canIssueStock() { return isAdmin() || isStoreManager(); }
+// anything at all" (anyone holding at least one write-capable role).
+function canWrite() { return isAdmin() || isProductionManager() || hasRole('store_manager'); }
+// Anyone who can write inventory can issue stock. CEO + operator are blocked
+// unless they also hold a write role.
+function canIssueStock() { return isAdmin() || hasRole('store_manager'); }
 // CAPA writes — admin, production manager, store manager, and CEO all
 // participate in CAPA governance. Operators are excluded.
-function canWriteCapa() { return isAdmin() || isProductionManager() || isStoreManager() || isCeo(); }
+function canWriteCapa() { return isAdmin() || isProductionManager() || hasRole('store_manager') || hasRole('ceo'); }
 // Admin-level CAPA actions (edit/delete a CLOSED CAPA, reopen one).
 // CEO is admin-equivalent for CAPA governance.
-function canAdminCapa() { return isAdmin() || isCeo(); }
+function canAdminCapa() { return isAdmin() || hasRole('ceo'); }
 // Print job card — admin / production manager / CEO. Store manager and
 // operator don't print job cards.
-function canPrintJobCard() { return isAdmin() || isProductionManager() || isCeo(); }
+function canPrintJobCard() { return isAdmin() || isProductionManager() || hasRole('ceo'); }
 // Pretty label for the role pill / dropdowns. Falls back to the raw value for
 // forward-compatibility.
 function roleLabel(role) {
@@ -2436,7 +2452,7 @@ function renderUserChip() {
   if (!currentUser) { chip.style.display = 'none'; return; }
   chip.style.display = 'flex';
   document.getElementById('user-name').textContent = currentUser.name || currentUser.email;
-  document.getElementById('user-role-pill').textContent = roleLabel(currentUser.role);
+  document.getElementById('user-role-pill').textContent = myRoles().map(roleLabel).join(' + ');
   const pic = document.getElementById('user-pic');
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
@@ -14599,14 +14615,19 @@ async function stationSubmit(advance, skipTo) {
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
+// Roles held by a listed user — multi-role aware with legacy fallbacks.
+function userRolesOf(u) {
+  const raw = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role];
+  const alias = { user: 'production_manager', stock: 'store_manager' };
+  return raw.map(r => alias[r] || r);
+}
 function renderUsersTab() {
   const stats = {
     total: usersList.length,
-    admins: usersList.filter(u => u.role === 'admin').length,
-    // 'user' legacy roles read as Production Manager until they're migrated.
-    managers:  usersList.filter(u => u.role === 'production_manager' || u.role === 'user').length,
-    store:     usersList.filter(u => u.role === 'store_manager' || u.role === 'stock').length,
-    operators: usersList.filter(u => u.role === 'operator').length,
+    admins: usersList.filter(u => userRolesOf(u).includes('admin')).length,
+    managers:  usersList.filter(u => userRolesOf(u).includes('production_manager')).length,
+    store:     usersList.filter(u => userRolesOf(u).includes('store_manager')).length,
+    operators: usersList.filter(u => userRolesOf(u).includes('operator')).length,
   };
   document.getElementById('users-stats-row').innerHTML = `
     <div class="stat"><div class="stat-label">Total Users</div><div class="stat-value">${stats.total}</div></div>
@@ -14626,15 +14647,16 @@ function renderUsersTab() {
         <div class="inv-sub">${esc(u.email)} · Last login: ${last}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
       </div>
       <div class="inv-balance">
-        ${isCeo()
-          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(roleLabel(u.role))}</span>`
-          : `<select onchange="changeUserRole(${u.id}, this.value)" ${isMe?'disabled':''} class="filter" style="min-width:160px;">
-              <option value="production_manager" ${(u.role==='production_manager'||u.role==='user')?'selected':''}>Production Manager</option>
-              <option value="store_manager"      ${(u.role==='store_manager'||u.role==='stock')?'selected':''}>Store Manager</option>
-              <option value="operator"           ${u.role==='operator'?'selected':''}>Operator</option>
-              <option value="ceo"                ${u.role==='ceo'?'selected':''}>CEO (view-only)</option>
-              <option value="admin"              ${u.role==='admin'?'selected':''}>Admin</option>
-            </select>`}
+        ${isCeo() || !isAdmin()
+          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(userRolesOf(u).map(roleLabel).join(' + '))}</span>`
+          : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-wrap:wrap;gap:4px 10px;max-width:280px;">
+              ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['ceo','CEO'],['operator','Operator']].map(([r,lbl]) => `
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
+                  <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
+                         ${isMe && r==='admin' ? 'disabled' : ''}
+                         onchange="changeUserRoles(${u.id})"> ${lbl}
+                </label>`).join('')}
+            </div>`}
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>
@@ -14660,14 +14682,13 @@ function openInviteUser() {
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>Invite User</h2>
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
-    <div class="form-group"><label class="form-label">Role</label>
-      <select id="invite-role">
-        <option value="production_manager" selected>Production Manager</option>
-        <option value="store_manager">Store Manager</option>
-        <option value="operator">Operator (Station only)</option>
-        <option value="ceo">CEO (view-only)</option>
-        <option value="admin">Admin</option>
-      </select>
+    <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
+      <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
+        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false]].map(([r,lbl,def]) => `
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+            <input type="checkbox" value="${r}" ${def?'checked':''}> ${lbl}
+          </label>`).join('')}
+      </div>
     </div>
     <div style="font-size:12px;color:var(--text2);">They'll be able to sign in with this exact email via Google. If their Google account uses a different address, invite that one instead.</div>
     <div class="modal-actions">
@@ -14678,22 +14699,33 @@ function openInviteUser() {
 }
 async function saveInvite() {
   const email = document.getElementById('invite-email').value.trim();
-  const role  = document.getElementById('invite-role').value;
+  const roles = [...document.querySelectorAll('#invite-roles input[type="checkbox"]:checked')].map(cb => cb.value);
   if (!email) { await alertDialog({ title: 'Email is required', kind: 'warn' }); return; }
+  if (!roles.length) { await alertDialog({ title: 'Pick at least one role', kind: 'warn' }); return; }
   showSaving(true);
   try {
-    await api('POST', '/api/users', { email, role });
+    await api('POST', '/api/users', { email, roles });
     await loadUsersAndAudit();
     closeModal(); notify('User invited');
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
-async function changeUserRole(id, role) {
+async function changeUserRoles(id) {
+  // Collect every checked role box on this user's card. At least one role
+  // must stay selected — an empty set would strand the account.
+  const wrap = document.querySelector(`.user-role-checks[data-uid="${id}"]`);
+  if (!wrap) return;
+  const roles = [...wrap.querySelectorAll('input[type="checkbox"]:checked')].map(cb => cb.value);
+  if (!roles.length) {
+    notify('A user needs at least one role.');
+    await loadUsersAndAudit();
+    return;
+  }
   showSaving(true);
   try {
-    await api('PUT', `/api/users/${id}`, { role });
+    await api('PUT', `/api/users/${id}`, { roles });
     await loadUsersAndAudit();
-    notify('Role updated');
+    notify('Roles updated');
   } catch(e) { notify('Error: ' + e.message); await loadUsersAndAudit(); }
   showSaving(false);
 }

@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-06-29-rename-paper-types';
+const SCHEMA_VERSION = 'v2026-07-03-multi-roles';
 
 async function initDb() {
   try {
@@ -368,6 +368,12 @@ async function initDb() {
     await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
     await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','operator','ceo'))`;
+    // Multi-role support: a user can hold several roles at once (e.g. CEO +
+    // Admin). `roles` is the source of truth; the legacy `role` column keeps
+    // the highest-priority role for back-compat with old JWT cookies and any
+    // code that still reads the single value. Backfill from `role`.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[]`;
+    await sql`UPDATE users SET roles = ARRAY[role] WHERE roles IS NULL OR array_length(roles, 1) IS NULL`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -639,14 +645,20 @@ const dbReady = initDb();
 // is never set on Vercel, so production remains fully protected.
 function authMiddleware(req, res, next) {
   if (process.env.DEV_BYPASS_AUTH === '1') {
-    req.user = { id: 0, email: 'dev@local', role: 'admin', name: 'Local Dev', picture: '' };
+    req.user = { id: 0, email: 'dev@local', role: 'admin', roles: ['admin'], name: 'Local Dev', picture: '' };
     return next();
   }
   const token = req.cookies && req.cookies[SESSION_COOKIE];
   if (token) {
     try {
       const payload = jwt.verify(token, JWT_SECRET);
-      req.user = { id: payload.id, email: payload.email, role: payload.role, name: payload.name, picture: payload.picture };
+      req.user = {
+        id: payload.id, email: payload.email, name: payload.name, picture: payload.picture,
+        role: payload.role,
+        // Multi-role: newer tokens carry the full list; tokens issued before
+        // the feature only have the single role — wrap it.
+        roles: Array.isArray(payload.roles) && payload.roles.length ? payload.roles : [payload.role],
+      };
     } catch (e) {
       // Invalid/expired token — leave req.user undefined.
     }
@@ -657,45 +669,59 @@ function requireAuth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   next();
 }
-function requireAdmin(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  next();
-}
 // ── Role helpers ─────────────────────────────────────────────
 // Roles: 'admin' (full), 'production_manager' (jobs+station write),
 // 'store_manager' (inventory+imports write), 'operator' (station only),
 // 'ceo' (read-only everywhere).
-// Legacy fallback: JWT cookies issued before the role rename still carry
-// 'user' (→ production_manager) and 'stock' (→ store_manager). Treat them as
-// the new equivalents so stale cookies don't break access until they expire.
-function canWriteJobs(role)      { return role === 'admin' || role === 'production_manager' || role === 'user'; }
-function canWriteInventory(role) { return role === 'admin' || role === 'store_manager'      || role === 'stock'; }
-function canRunStation(role)     { return role === 'admin' || role === 'production_manager' || role === 'user' || role === 'operator' || role === 'ceo'; }
+// A user may hold SEVERAL roles at once (e.g. CEO + Admin) — access is
+// granted when ANY of their roles allows the action (highest privilege
+// wins). Legacy fallback: rows/JWTs from before the role rename still
+// carry 'user' (→ production_manager) and 'stock' (→ store_manager).
+const ROLE_ALIASES = { user: 'production_manager', stock: 'store_manager' };
+function normalizeUserRoles(src) {
+  const raw = Array.isArray(src) ? src : (src ? [src] : []);
+  const out = [];
+  for (const r0 of raw) {
+    const r = ROLE_ALIASES[r0] || r0;
+    if (r && !out.includes(r)) out.push(r);
+  }
+  return out;
+}
+function userHasRole(user, ...want) {
+  if (!user) return false;
+  const rs = normalizeUserRoles(Array.isArray(user.roles) && user.roles.length ? user.roles : user.role);
+  return want.some(w => rs.includes(w));
+}
+function requireAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasRole(req.user, 'admin')) return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
+function canWriteInventory(user) { return userHasRole(user, 'admin', 'store_manager'); }
+function canRunStation(user)     { return userHasRole(user, 'admin', 'production_manager', 'operator', 'ceo'); }
 // Operator roster CRUD — admin or production manager. The PM owns the
 // floor and needs to add / edit / retire operators without an admin
 // having to be involved every time.
-function canManageOperators(role){ return role === 'admin' || role === 'production_manager' || role === 'user'; }
-function isOperatorRole(role)    { return role === 'operator'; }
+function canManageOperators(user){ return userHasRole(user, 'admin', 'production_manager'); }
 
 // Generic "not read-only" check. Used for cross-cutting endpoints (audit
-// metadata, profile edits, etc.) where any non-CEO write is fine.
+// metadata, profile edits, etc.) where any write-capable role is fine.
+// Positive logic (allow if ANY role grants writes) so a CEO+Admin combo
+// isn't blocked by the read-only CEO role.
 function requireWriteUser(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (req.user.role === 'ceo') {
-    return res.status(403).json({ error: 'Read-only account — changes are not allowed' });
-  }
-  // Operators can only touch the station endpoints — block everything else.
-  if (req.user.role === 'operator') {
+  if (userHasRole(req.user, 'admin', 'production_manager', 'store_manager')) return next();
+  if (userHasRole(req.user, 'operator')) {
     return res.status(403).json({ error: 'Operator accounts can only use the Station view' });
   }
-  next();
+  return res.status(403).json({ error: 'Read-only account — changes are not allowed' });
 }
 // Jobs writes (create/edit/delete/move stages outside station) — admin or
 // production_manager.
 function requireJobsWriter(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (!canWriteJobs(req.user.role)) {
+  if (!canWriteJobs(req.user)) {
     return res.status(403).json({ error: 'Not allowed — jobs write access required' });
   }
   next();
@@ -703,7 +729,7 @@ function requireJobsWriter(req, res, next) {
 // Inventory + imports writes — admin or store_manager.
 function requireInventoryWriter(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (!canWriteInventory(req.user.role)) {
+  if (!canWriteInventory(req.user)) {
     return res.status(403).json({ error: 'Not allowed — inventory write access required' });
   }
   next();
@@ -712,7 +738,7 @@ function requireInventoryWriter(req, res, next) {
 // (Store_manager is blocked.) PIN is still verified separately per call.
 function requireStationUser(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (!canRunStation(req.user.role)) {
+  if (!canRunStation(req.user)) {
     return res.status(403).json({ error: 'Not allowed — station access required' });
   }
   next();
@@ -722,7 +748,7 @@ function requireStationUser(req, res, next) {
 // floor PIN roster current on their own.
 function requireOperatorAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (!canManageOperators(req.user.role)) {
+  if (!canManageOperators(req.user)) {
     return res.status(403).json({ error: 'Not allowed — operator admin access required' });
   }
   next();
@@ -731,9 +757,9 @@ function requireOperatorAdmin(req, res, next) {
 // not floor work; CEOs need to be able to file / close their own reports.
 function requireCapaWriter(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  const r = req.user.role;
-  const ok = r === 'admin' || r === 'production_manager' || r === 'user' || r === 'ceo';
-  if (!ok) return res.status(403).json({ error: 'Not allowed — CAPA write access required' });
+  if (!userHasRole(req.user, 'admin', 'production_manager', 'ceo')) {
+    return res.status(403).json({ error: 'Not allowed — CAPA write access required' });
+  }
   next();
 }
 // Legacy aliases — kept so existing call sites compile until they're
@@ -809,7 +835,11 @@ app.post('/api/auth/google', async (req, res) => {
     user = updated[0];
 
     const sessionToken = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name, picture: user.picture },
+      {
+        id: user.id, email: user.email, name: user.name, picture: user.picture,
+        role: user.role,
+        roles: normalizeUserRoles(Array.isArray(user.roles) && user.roles.length ? user.roles : user.role),
+      },
       JWT_SECRET,
       { expiresIn: '30d' }
     );
@@ -840,7 +870,25 @@ app.get('/api/auth/me', (req, res) => {
 });
 
 function publicUser(u) {
-  return { id: u.id, email: u.email, name: u.name, picture: u.picture, role: u.role, created_at: u.created_at, last_login_at: u.last_login_at, invited_by: u.invited_by };
+  return {
+    id: u.id, email: u.email, name: u.name, picture: u.picture,
+    role: u.role,
+    roles: normalizeUserRoles(Array.isArray(u.roles) && u.roles.length ? u.roles : u.role),
+    created_at: u.created_at, last_login_at: u.last_login_at, invited_by: u.invited_by,
+  };
+}
+
+// Multi-role input parsing shared by invite + role-change. Returns the
+// cleaned roles array plus the single highest-priority role kept in the
+// legacy `role` column (admin outranks manager roles outranks ceo/operator).
+const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'ceo', 'operator'];
+function parseRolesInput(body) {
+  const ALLOWED = new Set(ROLE_PRIORITY);
+  let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
+    .filter(r => ALLOWED.has(r));
+  if (!roles.length) roles = ['production_manager'];
+  const primary = ROLE_PRIORITY.find(r => roles.includes(r)) || 'production_manager';
+  return { roles, primary };
 }
 
 // ── User management (admin only) ─────────────────────────────
@@ -848,7 +896,7 @@ function publicUser(u) {
 // GET users — admin + ceo (CEO is read-only; mutation endpoints below stay
 // requireAdmin so role change / invite / remove are still locked down).
 app.get('/api/users', requireAuth, async (req, res) => {
-  if (req.user?.role !== 'admin' && req.user?.role !== 'ceo') {
+  if (!userHasRole(req.user, 'admin', 'ceo')) {
     return res.status(403).json({ error: 'Admin or CEO only' });
   }
   try {
@@ -871,16 +919,15 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
-    const ALLOWED_ROLES = ['admin','production_manager','store_manager','operator','ceo'];
-    const role = ALLOWED_ROLES.includes(req.body.role) ? req.body.role : 'production_manager';
+    const { roles, primary } = parseRolesInput(req.body);
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     const inserted = await sql`
-      INSERT INTO users (email, role, invited_by) VALUES (${email}, ${role}, ${req.user.id})
+      INSERT INTO users (email, role, roles, invited_by) VALUES (${email}, ${primary}, ${roles}, ${req.user.id})
       ON CONFLICT (email) DO NOTHING
       RETURNING *
     `;
     if (!inserted.length) return res.status(409).json({ error: 'A user with this email already exists' });
-    await logAudit(sql, req, { action: 'user.invite', entityType: 'user', entityId: inserted[0].id, summary: `Invited ${email} as ${role}` });
+    await logAudit(sql, req, { action: 'user.invite', entityType: 'user', entityId: inserted[0].id, summary: `Invited ${email} as ${roles.join(' + ')}` });
     res.json(publicUser(inserted[0]));
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -892,14 +939,15 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const role = ['admin','production_manager','store_manager','operator','ceo'].includes(req.body.role) ? req.body.role : 'production_manager';
-    // Guardrail: don't allow demoting yourself — locks you out of admin tools.
-    if (parseInt(id, 10) === req.user.id && role !== 'admin') {
-      return res.status(400).json({ error: "You can't change your own role away from admin." });
+    const { roles, primary } = parseRolesInput(req.body);
+    // Guardrail: don't allow removing admin from yourself — locks you out
+    // of the admin tools. Adding EXTRA roles to yourself is fine.
+    if (parseInt(id, 10) === req.user.id && !roles.includes('admin')) {
+      return res.status(400).json({ error: "You can't remove the Admin role from your own account." });
     }
-    const updated = await sql`UPDATE users SET role = ${role} WHERE id = ${id} RETURNING *`;
+    const updated = await sql`UPDATE users SET role = ${primary}, roles = ${roles} WHERE id = ${id} RETURNING *`;
     if (!updated.length) return res.status(404).json({ error: 'User not found' });
-    await logAudit(sql, req, { action: 'user.role-change', entityType: 'user', entityId: updated[0].id, summary: `Set ${updated[0].email} to ${role}` });
+    await logAudit(sql, req, { action: 'user.role-change', entityType: 'user', entityId: updated[0].id, summary: `Set ${updated[0].email} to ${roles.join(' + ')}` });
     res.json(publicUser(updated[0]));
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -1871,9 +1919,7 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
     // Only admin / managers can edit register cells. Read is fine for
     // everyone with an account.
-    const r = req.user && req.user.role;
-    const okRoles = ['admin', 'production_manager', 'store_manager', 'user', 'stock'];
-    if (!okRoles.includes(r)) return res.status(403).json({ error: 'Not allowed' });
+    if (!userHasRole(req.user, 'admin', 'production_manager', 'store_manager')) return res.status(403).json({ error: 'Not allowed' });
     const hours      = (req.body.hours      == null) ? null : String(req.body.hours).trim();
     const remarks    = (req.body.remarks    == null) ? null : String(req.body.remarks).trim();
     const makeReady  = (req.body.make_ready == null) ? null : String(req.body.make_ready).trim();
@@ -1920,9 +1966,7 @@ app.delete('/api/reports/daily-production/:section/:date/:machine', requireAuth,
     const machine = String(req.params.machine || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
-    const r = req.user && req.user.role;
-    const okRoles = ['admin', 'production_manager', 'store_manager', 'user', 'stock'];
-    if (!okRoles.includes(r)) return res.status(403).json({ error: 'Not allowed' });
+    if (!userHasRole(req.user, 'admin', 'production_manager', 'store_manager')) return res.status(403).json({ error: 'Not allowed' });
     await sql`DELETE FROM daily_production_notes WHERE date = ${date} AND section = ${section} AND machine = ${machine}`;
     res.json({ ok: true });
   } catch (err) {
@@ -2806,7 +2850,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     // 24-hour window applies to everyone except admin. Stock keepers and
     // regular users can self-correct recent mistakes; anything older
     // needs an admin to keep the audit trail intact.
-    if (req.user.role !== 'admin') {
+    if (!userHasRole(req.user, 'admin')) {
       // Calendar-day rule: reversible only if created on today's date
       // (00:00–23:59 of the same day), not rolling 24 hours. Compared in
       // the BUSINESS timezone — the server runs in UTC, so getDate() here
@@ -3876,7 +3920,7 @@ app.put('/api/capa/:id', requireCapaWriter, async (req, res) => {
     const current = existing[0];
 
     // Lock closed CAPAs to admin + CEO — CEO has full CAPA governance.
-    if (current.status === 'closed' && req.user.role !== 'admin' && req.user.role !== 'ceo') {
+    if (current.status === 'closed' && !userHasRole(req.user, 'admin', 'ceo')) {
       return res.status(403).json({ error: 'This CAPA is closed. Only admin or CEO can edit it.' });
     }
 
@@ -3933,7 +3977,7 @@ app.delete('/api/capa/:id', requireCapaWriter, async (req, res) => {
     const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
     if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
     const capa = existing[0];
-    if (capa.status === 'closed' && req.user.role !== 'admin' && req.user.role !== 'ceo') {
+    if (capa.status === 'closed' && !userHasRole(req.user, 'admin', 'ceo')) {
       return res.status(403).json({ error: 'This CAPA is closed. Only admin or CEO can delete it.' });
     }
     await sql`DELETE FROM capa_reports WHERE id=${req.params.id}`;
