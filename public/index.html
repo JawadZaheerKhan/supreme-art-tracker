@@ -1383,10 +1383,13 @@
   -webkit-print-color-adjust: exact !important;
   print-color-adjust: exact !important;
 }
-.sticker-header { display: flex; align-items: center; border-bottom: 2.5px solid #000; padding: 5px 9px; gap: 10px; flex: 0 0 auto; }
+.sticker-header { display: flex; align-items: center; border-bottom: 2.5px solid #000; padding: 3px 9px; gap: 8px; flex: 0 0 auto; }
 .sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 4px; }
 .sticker-logo {
-  height: 56px; width: 56px; flex: 0 0 auto;
+  /* Bumped 56px -> 74px: the logo art has built-in whitespace, so at 56px
+     it read small next to the brand text. Header padding trimmed to keep
+     the overall header height (and the 8-per-A4 layout) unchanged. */
+  height: 74px; width: 74px; flex: 0 0 auto;
   /* Logo painted via background-image so 80+ stickers share ONE asset
      instead of each rendering a fresh <img>. Cuts per-sticker DOM cost
      and removes the load-wait barrier for large print runs. */
@@ -6419,7 +6422,9 @@ function printImports() {
 // the last 30 days, filterable by company and date range. Shows the columns
 // needed to audit deliveries at a glance — what was made, for whom, how much
 // paper consumed, on which press, with what finishing.
-const jobsReportState = { from: '', to: '', client: '' };
+// from/to filter the CREATED date; dfrom/dto filter the DELIVERED date;
+// q matches job number ("59" / "E-59") or job name.
+const jobsReportState = { from: '', to: '', client: '', dfrom: '', dto: '', q: '' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -6455,12 +6460,24 @@ function openJobsReport() {
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
-        <div class="dash-flbl">From</div>
+        <div class="dash-flbl">Search (Job No. / Name)</div>
+        <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
+      </div>
+      <div>
+        <div class="dash-flbl">Created from</div>
         <input class="filter" type="date" id="jr-from" value="${jobsReportState.from}" onchange="setJrFrom(this.value)">
       </div>
       <div>
-        <div class="dash-flbl">To</div>
+        <div class="dash-flbl">Created to</div>
         <input class="filter" type="date" id="jr-to" value="${jobsReportState.to}" onchange="setJrTo(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">Delivered from</div>
+        <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">Delivered to</div>
+        <input class="filter" type="date" id="jr-dto" value="${jobsReportState.dto}" onchange="setJrDTo(this.value)">
       </div>
       <div>
         <div class="dash-flbl">Company</div>
@@ -6476,6 +6493,9 @@ function openJobsReport() {
 }
 function setJrFrom(v)   { jobsReportState.from = v;   jobsReportSel.clear(); renderJobsReport(); }
 function setJrTo(v)     { jobsReportState.to = v;     jobsReportSel.clear(); renderJobsReport(); }
+function setJrDFrom(v)  { jobsReportState.dfrom = v;  jobsReportSel.clear(); renderJobsReport(); }
+function setJrDTo(v)    { jobsReportState.dto = v;    jobsReportSel.clear(); renderJobsReport(); }
+function setJrQ(v)      { jobsReportState.q = v;      jobsReportSel.clear(); renderJobsReport(); }
 function setJrClient(v) { jobsReportState.client = v; jobsReportSel.clear(); renderJobsReport(); }
 
 // ── Bulk selection (Jobs Report) ─────────────────────────────
@@ -6547,14 +6567,24 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { from, to, client } = jobsReportState;
+  const { from, to, client, dfrom, dto, q } = jobsReportState;
   const lastStageIdx = STAGES.length - 1;       // Delivered
   const fromDate = from ? new Date(from + 'T00:00:00') : null;
   const toDate   = to   ? new Date(to   + 'T23:59:59') : null;
+  // Search: "59" or "e-59" matches the job number; anything else matches
+  // the job name (case-insensitive substring).
+  const qNorm  = String(q || '').trim().toLowerCase();
+  const qId    = qNorm.replace(/^e-?/, '');
+  const qIsNum = /^\d+$/.test(qId);
   const out = [];
   for (const j of jobs) {
     if ((j.stage_index || 0) !== lastStageIdx) continue;   // Delivered only
     if (client && j.client !== client) continue;
+    if (qNorm) {
+      const idHit   = qIsNum && String(j.id) === qId;
+      const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
+      if (!idHit && !nameHit) continue;
+    }
     const createdAt = j.created_at ? new Date(j.created_at) : null;
     if (fromDate && (!createdAt || createdAt < fromDate)) continue;
     if (toDate   && (!createdAt || createdAt > toDate))   continue;
@@ -6562,9 +6592,21 @@ function buildJobsReportRows() {
     // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
     // both into the app-wide dd/mm/yyyy HH:MM so the report column is
     // consistent regardless of when the job was delivered.
-    const deliveryTime = j.stages && j.stages[lastStageIdx] && j.stages[lastStageIdx].time
-      ? fmtStageTime(j.stages[lastStageIdx].time)
-      : '';
+    const stageRec = j.stages && j.stages[lastStageIdx];
+    const deliveryTime = stageRec && stageRec.time ? fmtStageTime(stageRec.time) : '';
+    // Delivered-date range filter. Prefer the unambiguous `at` instant new
+    // stage moves carry; fall back to parsing the dd/mm/yyyy byline.
+    if (dfrom || dto) {
+      let delMs = NaN;
+      if (stageRec && stageRec.at) delMs = new Date(stageRec.at).getTime();
+      if (!isFinite(delMs) && stageRec && stageRec.time) {
+        const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+        if (m) delMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+      }
+      if (!isFinite(delMs)) continue;                       // no delivery date → can't match a delivered filter
+      if (dfrom && delMs < new Date(dfrom + 'T00:00:00').getTime()) continue;
+      if (dto   && delMs > new Date(dto   + 'T23:59:59').getTime()) continue;
+    }
     // Packets consumed — prefer the explicit Quantity of Packets entered on
     // the job; fall back to sheets / packetSize so older jobs without that
     // field still show something meaningful.
@@ -6584,9 +6626,17 @@ function buildJobsReportRows() {
     const wastage = (Number.isFinite(cartonQtyNum) && Number.isFinite(delQtyNum))
       ? (cartonQtyNum - delQtyNum)
       : null;
+    // Paper — modern jobs store the paper via the linked inventory item
+    // (inventory_item_id), not the legacy free-text j.paper. Fall back to
+    // the particulars paper_types checkboxes, then the legacy field.
+    const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
+    const paper = invItem
+      ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
+      : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
     out.push({
       id: j.id,
-      jobcode: j.jobcode || '',
+      name: j.name || '',
       createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
       deliveredAt: deliveryTime,
@@ -6597,7 +6647,7 @@ function buildJobsReportRows() {
       deliveredQty: j.delqty || '',
       wastage,
       packets,
-      paper: j.paper || '',
+      paper,
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
     });
@@ -6652,7 +6702,7 @@ function renderJobsReport() {
     return `<tr data-jr-row="${r.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>E-${r.id}</td>
-      <td ${td}>${esc(r.jobcode)}</td>
+      <td ${td}>${esc(r.name)}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
       <td ${tdN}>${esc(r.deliveredAt)}</td>
       <td ${td}>${esc(r.client)}</td>
@@ -6680,7 +6730,7 @@ function renderJobsReport() {
         <tr style="background:var(--bg2);">
           <th class="bulk-th"><input type="checkbox" id="jr-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleJobsReportAll(this.checked)" title="Select all visible"></th>
           <th ${th}>Job ID</th>
-          <th ${th}>Code</th>
+          <th ${th}>Job Name</th>
           <th ${th}>Created</th>
           <th ${th}>Delivered</th>
           <th ${th}>Company</th>
@@ -6721,12 +6771,12 @@ async function exportJobsReport() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Job ID', 'Code', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
     aoa.push([
       'E-' + r.id,
-      r.jobcode,
+      r.name,
       r.createdAt,
       r.deliveredAt,
       r.client,
@@ -6762,7 +6812,7 @@ function printJobsReport() {
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const tableRows = rows.map(r => `<tr>
     <td ${tdL}>E-${r.id}</td>
-    <td ${tdL}>${esc(r.jobcode)}</td>
+    <td ${tdL}>${esc(r.name)}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
     <td ${tdL}>${esc(r.deliveredAt)}</td>
     <td ${tdL}>${esc(r.client)}</td>
@@ -6794,7 +6844,7 @@ function printJobsReport() {
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#eee;">
           <th ${tdL}>Job ID</th>
-          <th ${tdL}>Code</th>
+          <th ${tdL}>Job Name</th>
           <th ${tdL}>Created</th>
           <th ${tdL}>Delivered</th>
           <th ${tdL}>Company</th>
