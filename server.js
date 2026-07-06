@@ -864,8 +864,42 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // Who am I — used by the frontend on load to decide whether to show the login screen.
-app.get('/api/auth/me', (req, res) => {
+// Re-reads the user's CURRENT roles from the DB and, if they differ from the
+// (up to 30-day-old) session token, re-issues the cookie on the spot. So an
+// admin ticking a second role box takes effect on the user's next page
+// load/refresh — no logout-login dance required.
+app.get('/api/auth/me', async (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  try {
+    if (req.user.id) {           // skip DEV bypass (id 0) — no DB row to check
+      await dbReady;
+      const sql = getDb();
+      const rows = await sql`SELECT * FROM users WHERE id = ${req.user.id}`;
+      const dbUser = rows[0];
+      if (!dbUser) {
+        // Account was removed — kill the session instead of serving a ghost.
+        res.clearCookie(SESSION_COOKIE, { path: '/' });
+        return res.status(401).json({ error: 'Account no longer exists' });
+      }
+      const freshRoles = normalizeUserRoles(Array.isArray(dbUser.roles) && dbUser.roles.length ? dbUser.roles : dbUser.role);
+      const tokenRoles = normalizeUserRoles(req.user.roles && req.user.roles.length ? req.user.roles : req.user.role);
+      if (freshRoles.join(',') !== tokenRoles.join(',')) {
+        req.user = { ...req.user, role: dbUser.role, roles: freshRoles };
+        const sessionToken = jwt.sign(
+          { id: dbUser.id, email: dbUser.email, name: req.user.name, picture: req.user.picture, role: dbUser.role, roles: freshRoles },
+          JWT_SECRET,
+          { expiresIn: '30d' }
+        );
+        res.cookie(SESSION_COOKIE, sessionToken, {
+          httpOnly: true, secure: true, sameSite: 'lax', maxAge: SESSION_MAX_AGE, path: '/',
+        });
+      }
+    }
+  } catch (e) {
+    // DB hiccup — fall through and serve the token's view rather than
+    // logging the user out over a transient error.
+    console.error('auth/me role refresh failed:', e.message);
+  }
   res.json({ user: req.user });
 });
 
