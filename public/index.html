@@ -71,15 +71,19 @@
   /* Store Manager: read-only on Jobs (inventory is their write area).
      Production Manager: read-only on Inventory (jobs is their write area).
      Both still see the data — they just can't edit it. */
-  body.role-store-manager #jobs-mode .ceo-hide,
-  body.role-store-manager #forms-mode .ceo-hide,
-  body.role-store-manager #stickers-mode .ceo-hide { display: none !important; }
+  /* These read-only locks are driven by CAPABILITY, not persona, so a user
+     who holds BOTH roles (e.g. Production Manager + Store Manager) keeps the
+     write buttons of both areas. role-lock-jobs = can see Jobs but can't
+     write them; role-lock-inventory = can see Inventory but can't write it. */
+  body.role-lock-jobs #jobs-mode .ceo-hide,
+  body.role-lock-jobs #forms-mode .ceo-hide,
+  body.role-lock-jobs #stickers-mode .ceo-hide { display: none !important; }
   /* Store Manager: hide elements tagged .sm-hide regardless of where they
      live. Used for the Jobs Report card in the Reports landing — SM's
      focus is paper movement, not job-by-job production logs. */
   body.role-store-manager .sm-hide { display: none !important; }
-  body.role-production-manager #inventory-mode .ceo-hide,
-  body.role-production-manager #imports-mode .ceo-hide { display: none !important; }
+  body.role-lock-inventory #inventory-mode .ceo-hide,
+  body.role-lock-inventory #imports-mode .ceo-hide { display: none !important; }
   /* Production Manager: in the Users tab they only see the Floor Operators
      section. Authorized Users + Recent Activity are tagged .pm-hide. */
   body.role-production-manager .pm-hide { display: none !important; }
@@ -2492,6 +2496,14 @@ function renderUserChip() {
   document.body.classList.toggle('role-store-manager', sm);
   document.body.classList.toggle('role-production-manager', isProductionManager());
   document.body.classList.toggle('role-operator', op);
+  // Capability-driven read-only locks — a user who holds BOTH a jobs-side
+  // and inventory-side role keeps write access to both. Lock Jobs writes
+  // only when the user can VIEW jobs but not write them; likewise Inventory.
+  // (CEO/operator read-only is handled by their own body classes above.)
+  const lockJobs = !isCeo() && !op && !canWriteJobs();
+  const lockInventory = !isCeo() && !op && !canWriteInventory();
+  document.body.classList.toggle('role-lock-jobs', lockJobs);
+  document.body.classList.toggle('role-lock-inventory', lockInventory);
   renderAppDate();
 }
 
