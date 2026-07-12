@@ -2435,6 +2435,24 @@ function roleLabel(role) {
 }
 function isPendingIssuance(j) { return j && j.issuance_status === 'pending'; }
 
+// Packets top-up helpers. An issued job may have extra packets requested
+// after issuance; each entry lives in particulars.packets_topups with a
+// status of pending/approved/rejected. Original packets stay in
+// particulars.quantity_of_packets — approved top-ups add to it visually.
+function packetTopups(j)          { const arr = (j && j.particulars && j.particulars.packets_topups) || []; return Array.isArray(arr) ? arr : []; }
+function packetTopupsPending(j)   { return packetTopups(j).filter(t => t.status === 'pending'); }
+function packetTopupsApproved(j)  { return packetTopups(j).filter(t => t.status === 'approved'); }
+function hasPendingPacketTopup(j) { return packetTopupsPending(j).length > 0; }
+// Pipe-joined packets display for UI: original | approved1 | approved2 ...
+// Returns just the original if no approved top-ups. Non-numeric parts are
+// tolerated (returned verbatim) so hand-typed values like "10+5" don't crash.
+function packetsDisplay(j) {
+  const base = (j && j.particulars && j.particulars.quantity_of_packets) || '';
+  const parts = [String(base).trim()].filter(Boolean);
+  packetTopupsApproved(j).forEach(t => parts.push(String(t.qty)));
+  return parts.length ? parts.join(' | ') : '';
+}
+
 function showLogin(errorMsg) {
   document.getElementById('login-screen').style.display = 'flex';
   document.querySelector('.topbar').style.display = 'none';
@@ -4019,7 +4037,9 @@ function renderInventory() {
 function renderInvPendingToggle() {
   const btn = document.getElementById('inv-pending-toggle');
   if (!btn) return;
-  const count = jobs.filter(isPendingIssuance).length;
+  const pendCount   = jobs.filter(isPendingIssuance).length;
+  const topupCount  = jobs.reduce((n, j) => n + packetTopupsPending(j).length, 0);
+  const count = pendCount + topupCount;
   const label = document.getElementById('inv-pending-label');
   if (label) label.textContent = count ? `Pending Stock (${count})` : 'Pending Stock';
   btn.classList.toggle('inv-pending-active', invViewMode === 'pending');
@@ -4042,12 +4062,57 @@ function renderInvPendingList() {
   const pendingJobs = jobs
     .filter(isPendingIssuance)
     .sort((a, b) => (a.deadline || '').localeCompare(b.deadline || '') || a.id - b.id);
-  if (!pendingJobs.length) {
+  // Extra-packets top-up requests: one row per pending request, grouped
+  // after the fresh-issuance rows. Approve/Reject buttons let the store
+  // keeper act without leaving this tab.
+  const topupRows = [];
+  jobs.forEach(j => {
+    packetTopupsPending(j).forEach(t => topupRows.push({ job: j, topup: t }));
+  });
+  topupRows.sort((a, b) => (a.topup.requested_at || '').localeCompare(b.topup.requested_at || ''));
+  if (!pendingJobs.length && !topupRows.length) {
     el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">
       No jobs are waiting for stock right now. Newly created jobs will appear here for the store keeper to issue stock against.
     </div>`;
     return;
   }
+  const topupHtml = topupRows.map(({ job: j, topup: t }) => {
+    const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const have  = invIt ? (invIt.current_balance || 0) : 0;
+    const ps    = invIt ? packetSize(invIt.paper_type) : 100;
+    const unit  = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
+    const need  = Math.round(parseFloat(t.qty) * ps);
+    const enough = invIt && have >= need;
+    const paperLabel = invIt
+      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${invIt.brand?' · '+esc(invIt.brand):''}`
+      : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
+    const approveBtn = canIssueStock()
+      ? `<button class="btn btn-sm ${enough ? 'btn-success' : 'btn-low-stock'} ceo-hide" onclick="approvePacketsTopup(${j.id}, '${esc(t.id)}')" title="Approve and deduct ${need.toLocaleString()} sheets">&#10003; Approve</button>` : '';
+    const rejectBtn = canIssueStock()
+      ? `<button class="btn btn-sm btn-danger ceo-hide" onclick="rejectPacketsTopup(${j.id}, '${esc(t.id)}')" title="Reject this top-up request">&#10005; Reject</button>` : '';
+    return `
+      <div class="inv-card inv-pending-row" style="border-left:3px solid #F59E0B;">
+        <div class="inv-main">
+          <div class="inv-name">
+            <b>#${j.id}</b> &middot; ${esc(j.name)}
+            <span class="badge" style="background:#FEF3C7;color:#92400E;margin-left:8px;">TOP-UP · +${esc(String(t.qty))} ${esc(unit)}</span>
+          </div>
+          <div class="inv-sub">
+            ${j.client ? esc(j.client) + ' &middot; ' : ''}
+            ${paperLabel}
+            &middot; requested by ${esc(t.requested_by_email || 'unknown')}
+          </div>
+        </div>
+        <div class="inv-balance">
+          ${invIt ? `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div><div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${have.toLocaleString()} sheets</div>` : ''}
+        </div>
+        <div class="inv-actions">
+          ${approveBtn}
+          ${rejectBtn}
+          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+        </div>
+      </div>`;
+  }).join('');
   el.innerHTML = pendingJobs.map(j => {
     const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
     const have     = invIt ? (invIt.current_balance || 0) : 0;
@@ -4067,6 +4132,7 @@ function renderInvPendingList() {
       ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${invIt.brand?' · '+esc(invIt.brand):''}`
       : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
     const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
+    const pktStr = packetsDisplay(j) || (packetsIn ? String(packetsIn) : '');
     const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
     const issueBtn = canIssueStock()
       ? `<button class="btn btn-sm ${cls} ceo-hide" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
@@ -4081,7 +4147,7 @@ function renderInvPendingList() {
           <div class="inv-sub">
             ${j.client ? esc(j.client) + ' &middot; ' : ''}
             ${paperLabel}
-            ${packetsIn ? ` &middot; <b>${packetsIn} ${unit}</b> needed` : ''}
+            ${pktStr ? ` &middot; <b>${esc(pktStr)} ${unit}</b> needed` : ''}
             ${j.deadline ? ` &middot; Due ${esc(fmtDMY(j.deadline))}` : ''}
           </div>
         </div>
@@ -4094,7 +4160,7 @@ function renderInvPendingList() {
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
         </div>
       </div>`;
-  }).join('');
+  }).join('') + topupHtml;
 }
 
 // ── Inventory modals ─────────────────────────────────────────
@@ -10909,6 +10975,7 @@ function jobForm(j={}) {
   const v = x => esc(x||'');
   return `
     <img class="jc-watermark-screen" src="/logo.png" alt="">
+    <input type="hidden" id="f-editing-id" value="${j.id ? esc(j.id) : ''}">
     <div class="jc-header">
       <div class="jc-serial">${j.id ? 'E-'+j.id : ''}</div>
       <img src="/logo.png" alt="Supreme Art">
@@ -10948,7 +11015,14 @@ function jobForm(j={}) {
                 return `<option value="${c}"${sel}>${c}</option>`;
               }).join('')}
             </select>
+            ${j.id && j.issuance_status === 'issued' && canWriteJobs()
+              ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id})" title="Request extra packets for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;">+</button>`
+              : ''}
           </div>
+          ${packetTopupsApproved(j).length
+            ? `<div style="font-size:11px;color:var(--text2);margin-top:4px;">+ Top-ups: ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' | ')}</div>` : ''}
+          ${hasPendingPacketTopup(j)
+            ? `<div style="font-size:11px;color:#B45309;margin-top:2px;">&#9201; Pending approval: +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</div>` : ''}
         </td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
@@ -11034,6 +11108,16 @@ function collectParticulars() {
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
+  // Preserve the packets top-up ledger through save. Top-ups aren't editable
+  // from the form; they're managed via the Pending Stock queue. Losing them
+  // here would silently wipe pending/approved history on every job edit.
+  const editingIdEl = document.getElementById('f-editing-id');
+  const editingId = editingIdEl ? parseInt(editingIdEl.value, 10) : null;
+  if (editingId) {
+    const prior = jobs.find(x => x.id === editingId);
+    const topups = prior && prior.particulars && prior.particulars.packets_topups;
+    if (Array.isArray(topups) && topups.length) out.packets_topups = topups;
+  }
   return out;
 }
 
@@ -11672,6 +11756,84 @@ async function issueStock(id) {
   showSaving(false);
 }
 
+// Request extra packets for an already-issued job. The job stays in its
+// current stage; a pending entry appears in Inventory → Pending Stock for
+// the store keeper to Approve (extra deduction) or Reject (no change).
+async function openPacketsTopup(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  if (j.issuance_status !== 'issued') { notify('Top-ups are only for jobs whose stock is already issued.'); return; }
+  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+  const qtyStr = await promptDialog({
+    title: `Request extra packets · Job E-${id}`,
+    message: `How many EXTRA ${unit} do you need for this running job?\nThe store keeper will approve or reject it from Inventory → Pending Stock.`,
+    placeholder: 'e.g. 5',
+    confirmText: 'Send request',
+  });
+  if (qtyStr === null) return;
+  const qty = parseFloat(qtyStr);
+  if (!Number.isFinite(qty) || qty <= 0) { notify('Enter a positive number.'); return; }
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/packets-topup`, { qty });
+    const idx = jobs.findIndex(x => x.id === id); if (idx >= 0) jobs[idx] = updated;
+    closeModal();
+    render();
+    notify(`Request sent · +${qty} ${unit} pending store-keeper approval`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function approvePacketsTopup(jobId, topupId) {
+  if (!canIssueStock()) { notify('Only the store keeper can approve top-ups.'); return; }
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  const t = packetTopups(j).find(x => String(x.id) === String(topupId));
+  if (!t) return;
+  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+  const ps = it ? packetSize(it.paper_type) : 100;
+  const sheets = Math.round(parseFloat(t.qty) * ps);
+  const ok = await confirmDialog({
+    title: `Approve +${t.qty} ${unit} for Job E-${jobId}?`,
+    message: `This will deduct ${sheets.toLocaleString()} sheets from inventory as a top-up.`,
+    confirmText: 'Approve & deduct',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/packets-topup/${encodeURIComponent(topupId)}/approve`);
+    const idx = jobs.findIndex(x => x.id === jobId); if (idx >= 0) jobs[idx] = updated;
+    await loadInventory();
+    render();
+    notify(`Approved · ${sheets.toLocaleString()} sheets deducted`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function rejectPacketsTopup(jobId, topupId) {
+  if (!canIssueStock()) { notify('Only the store keeper can reject top-ups.'); return; }
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  const t = packetTopups(j).find(x => String(x.id) === String(topupId));
+  if (!t) return;
+  const ok = await confirmDialog({
+    title: `Reject +${t.qty} packets request for Job E-${jobId}?`,
+    message: 'No inventory will be deducted. The request will be marked rejected.',
+    confirmText: 'Reject',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/packets-topup/${encodeURIComponent(topupId)}/reject`);
+    const idx = jobs.findIndex(x => x.id === jobId); if (idx >= 0) jobs[idx] = updated;
+    render();
+    notify('Request rejected');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
 async function toggleBlock(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
@@ -11860,7 +12022,7 @@ function buildPrintCard(j) {
       </tr>
       <tr>
         <td colspan="3"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
-        <td colspan="3"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${v(p.quantity_of_packets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
+        <td colspan="3"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${v(packetsDisplay(j) || p.quantity_of_packets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
