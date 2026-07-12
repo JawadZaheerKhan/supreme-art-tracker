@@ -4822,51 +4822,145 @@ async function saveInvRemoveStock(id) {
 }
 
 // ── Bulk Stock In (search-based) ─────────────────────────────
-// Each row picks an existing inventory item from a single grouped
-// dropdown (search-friendly via native typeahead) and enters a qty. No
-// per-row paper_type / size / gsm / brand columns — the item already
-// carries all of that. To add a genuinely new paper, use "+ Add Paper"
-// from the inventory tab first; bulk-in is intentionally match-only so
-// nobody accidentally spawns duplicate items via typos.
+// Each row picks an existing inventory item via a typeable search
+// combo (same UX as the job card's paper picker). No per-row
+// paper_type / size / gsm / brand columns — the item carries all of
+// that. To add a genuinely new paper, use "+ Add Paper" from the
+// inventory tab first; bulk-in is intentionally match-only so nobody
+// accidentally spawns duplicate items via typos.
 let bulkRowSeq = 0;
-function bulkItemSelectHtml(className, onlyPositiveBalance) {
-  // Group existing inventory by (paper_type + size + gsm) so brands
-  // cluster together. Each option's value is the item.id — no fragile
-  // label-parsing on save. Items with zero balance can be hidden for
-  // stock-out (nothing to remove), shown for stock-in (empty items can
-  // still receive deliveries).
-  const items = (inventory || [])
-    .filter(it => onlyPositiveBalance ? (it.current_balance || 0) > 0 : true)
-    .slice()
-    .sort((a, b) =>
-      (a.paper_type||'').localeCompare(b.paper_type||'') ||
-      (a.size||'').localeCompare(b.size||'') ||
-      (a.gsm||'').localeCompare(b.gsm||'') ||
-      (a.brand||'').localeCompare(b.brand||''));
-  const groups = new Map();
-  const order = [];
-  for (const it of items) {
-    const g = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
-    if (!groups.has(g)) { groups.set(g, []); order.push(g); }
-    groups.get(g).push(it);
-  }
-  const opts = ['<option value="">— Search / select paper —</option>'];
-  for (const g of order) {
-    opts.push(`<optgroup label="${esc(g)}">`);
-    for (const it of groups.get(g)) {
-      const brand = it.brand || 'no brand';
-      const supp  = it.supplier ? ' · ' + it.supplier : '';
-      const bal   = (it.current_balance || 0).toLocaleString();
-      opts.push(`<option value="${it.id}">${esc(brand)}${esc(supp)} · ${bal} sheets</option>`);
-    }
-    opts.push(`</optgroup>`);
-  }
-  return `<select class="${className}" style="min-width:280px;">${opts.join('')}</select>`;
+// Renders a per-row typeable combo. prefix is 'bulk' (stock-in) or
+// 'bulkout' (stock-out); idx is the row's monotonic counter. The
+// hidden input keeps class="{prefix}-item" so saveBulkStockIn/Out
+// keep working with tr.querySelector('.{prefix}-item'). positiveOnly
+// hides zero-balance items (for stock-out).
+function bulkComboRowHtml(prefix, idx, positiveOnly) {
+  return `<div class="combo" style="min-width:280px;">
+    <input type="text" class="${prefix}-search combo-input"
+           id="${prefix}-search-${idx}"
+           placeholder="Search paper, size, gsm, brand…"
+           autocomplete="off"
+           onfocus="bulkComboOpen('${prefix}', ${idx}, ${positiveOnly})"
+           oninput="bulkComboFilter('${prefix}', ${idx}, ${positiveOnly})"
+           onkeydown="bulkComboKey('${prefix}', ${idx}, event)"
+           style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+    <input type="hidden" class="${prefix}-item" id="${prefix}-item-${idx}">
+    <div class="combo-list" id="${prefix}-list-${idx}" style="display:none;"></div>
+  </div>`;
 }
+function bulkComboOpen(prefix, idx, positiveOnly) {
+  const list = document.getElementById(`${prefix}-list-${idx}`);
+  if (!list) return;
+  list.style.display = 'block';
+  bulkComboFilter(prefix, idx, positiveOnly);
+}
+function bulkComboClose(prefix, idx) {
+  const list = document.getElementById(`${prefix}-list-${idx}`);
+  if (list) list.style.display = 'none';
+}
+function bulkComboFilter(prefix, idx, positiveOnly) {
+  const input = document.getElementById(`${prefix}-search-${idx}`);
+  const list  = document.getElementById(`${prefix}-list-${idx}`);
+  if (!input || !list) return;
+  const q = (input.value || '').toLowerCase().trim();
+  const items = (inventory || []).filter(it => {
+    if (positiveOnly && (it.current_balance || 0) <= 0) return false;
+    if (!q) return true;
+    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
+    return hay.includes(q);
+  });
+  if (!items.length) {
+    list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
+    return;
+  }
+  // Same grouping as the job-card combo: (paper_type + size + gsm)
+  // clusters brand variants together. Singletons render as a single
+  // clickable row; multi-brand groups get a non-clickable header and
+  // an indented row per brand.
+  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || ''].join('||');
+  const order = [];
+  const groups = new Map();
+  for (const it of items) {
+    const k = keyOf(it);
+    if (!groups.has(k)) { groups.set(k, []); order.push(k); }
+    groups.get(k).push(it);
+  }
+  list.innerHTML = order.map(k => {
+    const arr = groups.get(k);
+    const rep = arr[0];
+    if (arr.length === 1) {
+      const bal = (rep.current_balance || 0).toLocaleString();
+      const cls = (rep.current_balance || 0) <= 0 ? 'combo-item out' : 'combo-item';
+      const label = `${rep.paper_type}${rep.size?' · '+rep.size:''}${rep.gsm?' · '+rep.gsm+'gsm':''}${rep.brand?' · '+rep.brand:''}${rep.supplier?' · '+rep.supplier:''}`;
+      return `<div class="${cls}" onclick="bulkComboPick('${prefix}', ${idx}, ${rep.id})">
+        <span>${esc(label)}</span>
+        <span class="combo-bal">${bal} sheets</span>
+      </div>`;
+    }
+    const totalSheets = arr.reduce((a, it) => a + (it.current_balance || 0), 0);
+    const headerLabel = [rep.paper_type, rep.size, rep.gsm && (rep.gsm + 'gsm')].filter(Boolean).map(esc).join(' · ');
+    const sorted = [...arr].sort((a, b) => (a.brand || '').localeCompare(b.brand || ''));
+    const brandRows = sorted.map(it => {
+      const bal = (it.current_balance || 0).toLocaleString();
+      const cls = (it.current_balance || 0) <= 0 ? 'combo-item combo-brand-row out' : 'combo-item combo-brand-row';
+      const brandText = it.brand
+        ? `<b style="text-transform:uppercase;letter-spacing:0.03em;">${esc(it.brand)}</b>`
+        : '<span style="font-style:italic;color:var(--text2);">no brand</span>';
+      const supplierText = it.supplier ? `<span style="color:var(--text2);"> · ${esc(it.supplier)}</span>` : '';
+      return `<div class="${cls}" onclick="bulkComboPick('${prefix}', ${idx}, ${it.id})">
+        <span style="padding-left:16px;">${brandText}${supplierText}</span>
+        <span class="combo-bal">${bal} sheets</span>
+      </div>`;
+    }).join('');
+    return `
+      <div class="combo-group-head">
+        <span>${headerLabel}<span class="combo-group-tag">${arr.length} brands</span></span>
+        <span class="combo-bal" style="font-weight:600;">${totalSheets.toLocaleString()} sheets total</span>
+      </div>
+      ${brandRows}`;
+  }).join('');
+}
+function bulkComboPick(prefix, idx, itemId) {
+  const it = inventory.find(x => x.id === itemId);
+  if (!it) return;
+  const search = document.getElementById(`${prefix}-search-${idx}`);
+  const hidden = document.getElementById(`${prefix}-item-${idx}`);
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  if (search) search.value = label;
+  if (hidden) hidden.value = String(itemId);
+  bulkComboClose(prefix, idx);
+  // Re-sync packets↔sheets against the picked item's paper type so
+  // the numbers match whatever the user has already typed.
+  const syncFn = prefix === 'bulk' ? bulkRowSync : bulkOutRowSync;
+  if (typeof syncFn === 'function') syncFn(idx, 'packets');
+}
+function bulkComboKey(prefix, idx, e) {
+  if (e.key === 'Escape') { bulkComboClose(prefix, idx); return; }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const first = document.querySelector(`#${prefix}-list-${idx} .combo-item`);
+    if (first) first.click();
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const first = document.querySelector(`#${prefix}-list-${idx} .combo-item`);
+    if (first) first.classList.add('highlight');
+  }
+}
+// Outside-click closer — attached once at startup, closes any open
+// bulk / bulkout combo whose containing .combo doesn't include the
+// click target. Same pattern as the paper-combo closer up top.
+document.addEventListener('mousedown', (e) => {
+  document.querySelectorAll('#bulk-rows .combo-list, #bulkout-rows .combo-list').forEach(list => {
+    if (list.style.display === 'none') return;
+    const combo = list.parentElement;
+    if (combo && !combo.contains(e.target)) list.style.display = 'none';
+  });
+});
 function bulkRowHtml(idx) {
   return `
     <tr data-row="${idx}">
-      <td>${bulkItemSelectHtml('bulk-item', false)}</td>
+      <td>${bulkComboRowHtml('bulk', idx, false)}</td>
       <td class="col-qty"><input type="number" class="bulk-packets" placeholder="0" min="0" step="any" oninput="bulkRowSync(${idx}, 'packets')"></td>
       <td class="col-qty"><input type="number" class="bulk-qty" placeholder="0" min="1" oninput="bulkRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkRemoveRow(${idx})" title="Remove row">×</button></td>
@@ -4931,7 +5025,6 @@ function bulkRemoveRow(idx) {
   if (!row) return;
   if (tbody.children.length <= 1) {
     row.querySelectorAll('input').forEach(i => i.value = '');
-    row.querySelectorAll('select').forEach(s => s.value = '');
     return;
   }
   row.remove();
@@ -4994,7 +5087,7 @@ let bulkOutRowSeq = 0;
 function bulkOutRowHtml(idx) {
   return `
     <tr data-row="${idx}">
-      <td>${bulkItemSelectHtml('bulkout-item', true)}</td>
+      <td>${bulkComboRowHtml('bulkout', idx, true)}</td>
       <td>
         <select class="bulkout-reason">
           <option value="sold">Sold</option>
