@@ -4479,6 +4479,16 @@ async function openInvEdit(id) {
            <input type="number" id="inv-balance" value="${curBalPktsStr}" min="0" step="0.01" data-original-pkts="${curBalPktsStr}" data-pack-size="${ps}" style="flex:1;">
            <span style="color:var(--text2);font-size:13px;white-space:nowrap;">${packUnit.toLowerCase()}</span>
          </div>
+         <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
+           <span style="font-size:11px;color:var(--text2);white-space:nowrap;">Adjust by:</span>
+           <input type="number" id="inv-balance-adjust" min="0" step="0.01" placeholder="e.g. 5" style="flex:1;padding:6px 8px;">
+           <button type="button" class="btn btn-sm" title="Add this many ${packUnitL} to current balance"
+                   onclick="invBalanceAdjust(1)"
+                   style="padding:4px 12px;font-weight:700;background:#DCFCE7;border-color:#86EFAC;color:#166534;">+</button>
+           <button type="button" class="btn btn-sm" title="Subtract this many ${packUnitL} from current balance"
+                   onclick="invBalanceAdjust(-1)"
+                   style="padding:4px 12px;font-weight:700;background:#FEE2E2;border-color:#FCA5A5;color:#991B1B;">&minus;</button>
+         </div>
          <div style="font-size:11px;color:var(--text2);margin-top:4px;">Was: <b>${curBalPktsStr}</b> ${packUnitL} (${curBalSheets.toLocaleString()} ${sheetsUnit}). Changing this writes a "correction" entry to the item's History — leave it as-is for a normal edit.</div>
          <label class="form-label" style="margin-top:8px;font-size:11px;">Reason for correction <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
          <input type="text" id="inv-correction-notes" placeholder="e.g. physical count off by 2 ${packUnitL}">
@@ -4511,6 +4521,22 @@ async function openInvEdit(id) {
     </div>
   </div>`);
 }
+// Quick +/- adjustment for Current Balance. sign: +1 to add, -1 to subtract.
+// Reads the "Adjust by" field, applies to inv-balance, clears the adjust field.
+// User still clicks Save Changes to commit; this just does the arithmetic.
+function invBalanceAdjust(sign) {
+  const bal = document.getElementById('inv-balance');
+  const adj = document.getElementById('inv-balance-adjust');
+  if (!bal || !adj) return;
+  const amt = parseFloat(adj.value);
+  if (!Number.isFinite(amt) || amt <= 0) { adj.focus(); return; }
+  const cur = parseFloat(bal.value) || 0;
+  const next = cur + sign * amt;
+  bal.value = next < 0 ? 0 : (Number.isInteger(next) ? String(next) : (+next.toFixed(2)).toString());
+  adj.value = '';
+  adj.focus();
+}
+
 async function saveInvEdit(id) {
   const data = {
     paper_type: (document.getElementById('inv-paper-type').value || '').trim(),
@@ -11020,9 +11046,9 @@ function jobForm(j={}) {
               : ''}
           </div>
           ${packetTopupsApproved(j).length
-            ? `<div style="font-size:11px;color:var(--text2);margin-top:4px;">+ Top-ups: ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' | ')}</div>` : ''}
+            ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
           ${hasPendingPacketTopup(j)
-            ? `<div style="font-size:11px;color:#B45309;margin-top:2px;">&#9201; Pending approval: +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</div>` : ''}
+            ? `<div style="margin-top:4px;"><span style="display:inline-block;background:#F59E0B;color:#78350F;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
         </td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
