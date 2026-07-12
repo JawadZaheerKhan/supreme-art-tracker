@@ -2397,53 +2397,46 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     if ((job.stage_index || 0) > 0) {
       return res.status(400).json({ error: 'Cannot reverse — job has already moved past the first stage' });
     }
-    // Refund the consumed sheets if the job had an inventory item linked.
+    // Refund every un-reversed job-consumed row for this job (original
+    // issuance + any approved packets top-ups). Each refund links back to
+    // its source via reverses_tx_id so the report's pair-hiding drops both
+    // sides cleanly. Do the same for any un-reversed job-offcut rows.
     if (job.inventory_item_id) {
-      const inv = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
-      const sourceItem = inv[0];
-      const paperType = sourceItem?.paper_type || '';
-      const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars });
-      if (sheetsUsed > 0) {
-        // Link the refund to the original 'job-consumed' row so the report's
-        // pair-hiding drops BOTH sides. Without the link the stale stock-out
-        // stayed in Stock Out and the refund inflated Stock In.
-        const orig = await sql`
-          SELECT t.id FROM inventory_transactions t
-          WHERE t.job_id = ${job.id} AND t.item_id = ${job.inventory_item_id}
-            AND t.reason = 'job-consumed' AND t.reverses_tx_id IS NULL
-            AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-          ORDER BY t.id DESC LIMIT 1
-        `;
+      const consumedRows = await sql`
+        SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+        WHERE t.job_id = ${job.id} AND t.reason = 'job-consumed'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+        ORDER BY t.id ASC
+      `;
+      for (const row of consumedRows) {
         await applyInventoryChange(sql, {
-          itemId: job.inventory_item_id,
-          change: +sheetsUsed,
+          itemId: row.item_id,
+          change: -row.change, // change is negative on a consume, so this refunds +N
           reason: 'job-issuance-reversed',
           jobId: job.id,
-          notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: issuance reversed by ${req.user.email} — ${sheetsUsed} sheets returned`,
+          notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: issuance reversed by ${req.user.email} — ${Math.abs(row.change)} sheets returned (TX #${row.id})`,
           user: req.user,
-          reversesTxId: orig[0] ? orig[0].id : null,
+          reversesTxId: row.id,
         });
-        // If the original issuance created an offcut return, undo it too —
-        // linked the same way so the offcut pair vanishes from the reports.
-        if (job.cut_size && job.offcut_size && sourceItem) {
-          const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
-          const origOff = await sql`
-            SELECT t.id FROM inventory_transactions t
-            WHERE t.job_id = ${job.id} AND t.item_id = ${offcutItem.id}
-              AND t.reason = 'job-offcut' AND t.reverses_tx_id IS NULL
-              AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-            ORDER BY t.id DESC LIMIT 1
-          `;
-          await applyInventoryChange(sql, {
-            itemId: offcutItem.id,
-            change: -sheetsUsed,
-            reason: 'job-issuance-reversed',
-            jobId: job.id,
-            notes: `Job E-${job.id}: offcut return reversed by ${req.user.email} — ${sheetsUsed} sheets pulled back from ${job.offcut_size} offcuts`,
-            user: req.user,
-            reversesTxId: origOff[0] ? origOff[0].id : null,
-          });
-        }
+      }
+      const offcutRows = await sql`
+        SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+        WHERE t.job_id = ${job.id} AND t.reason = 'job-offcut'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+        ORDER BY t.id ASC
+      `;
+      for (const row of offcutRows) {
+        await applyInventoryChange(sql, {
+          itemId: row.item_id,
+          change: -row.change,
+          reason: 'job-issuance-reversed',
+          jobId: job.id,
+          notes: `Job E-${job.id}: offcut return reversed by ${req.user.email} — ${Math.abs(row.change)} sheets pulled back (TX #${row.id})`,
+          user: req.user,
+          reversesTxId: row.id,
+        });
       }
     }
     const updated = await sql`
@@ -2465,6 +2458,127 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Packets top-up: request extra packets on an already-issued job. The job
+// stays 'issued' — this only appends a pending entry in particulars.packets_topups
+// so the store-keeper sees it in the Pending Stock queue and can Approve
+// (deducts extra) or Reject (no ledger change).
+app.post('/api/jobs/:id/packets-topup', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const qty = parseFloat(req.body?.qty);
+    if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ error: 'qty must be a positive number' });
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status !== 'issued') return res.status(400).json({ error: 'Job must be already issued before requesting extra packets' });
+    const p = job.particulars || {};
+    const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
+    const entry = {
+      id: `t${Date.now()}${Math.floor(Math.random()*1000)}`,
+      qty,
+      status: 'pending',
+      requested_at: new Date().toISOString(),
+      requested_by_id: req.user?.id || null,
+      requested_by_email: req.user?.email || null,
+    };
+    topups.push(entry);
+    p.packets_topups = topups;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'job.packets_topup.request',
+      entityType: 'job',
+      entityId: id,
+      summary: `Requested +${qty} extra packets for Job E-${id}: ${job.name} — pending store-keeper approval`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/jobs/:id/packets-topup/:topupId/approve', requireInventoryWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const topupId = req.params.topupId;
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const p = job.particulars || {};
+    const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
+    const idx = topups.findIndex(t => String(t.id) === String(topupId));
+    if (idx < 0) return res.status(404).json({ error: 'Top-up request not found' });
+    const t = topups[idx];
+    if (t.status !== 'pending') return res.status(400).json({ error: `Top-up already ${t.status}` });
+    if (!job.inventory_item_id) return res.status(400).json({ error: 'Job has no paper linked — cannot approve' });
+    const inv = await sql`SELECT * FROM inventory_items WHERE id=${job.inventory_item_id}`;
+    const sourceItem = inv[0];
+    const paperType = sourceItem?.paper_type || '';
+    const ps = packetSize(paperType);
+    const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+    const sheets = Math.round(parseFloat(t.qty) * ps);
+    if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
+    await applyInventoryChange(sql, {
+      itemId: job.inventory_item_id,
+      change: -sheets,
+      reason: 'job-consumed',
+      jobId: job.id,
+      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${t.qty} ${unit} (${sheets} sheets) top-up issued by ${req.user.email}`,
+      user: req.user,
+    });
+    if (job.cut_size && job.offcut_size && sourceItem) {
+      const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+      await applyInventoryChange(sql, {
+        itemId: offcutItem.id,
+        change: +sheets,
+        reason: 'job-offcut',
+        jobId: job.id,
+        notes: `Job E-${job.id}: ${sheets} sheets of ${job.offcut_size} offcut returned to stock (top-up)`,
+        user: req.user,
+      });
+    }
+    topups[idx] = { ...t, status: 'approved', approved_at: new Date().toISOString(), approved_by_id: req.user?.id || null, approved_by_email: req.user?.email || null };
+    p.packets_topups = topups;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'job.packets_topup.approve',
+      entityType: 'job',
+      entityId: id,
+      summary: `Approved +${t.qty} extra packets for Job E-${id}: ${sheets} sheets deducted`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const topupId = req.params.topupId;
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const p = job.particulars || {};
+    const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
+    const idx = topups.findIndex(t => String(t.id) === String(topupId));
+    if (idx < 0) return res.status(404).json({ error: 'Top-up request not found' });
+    const t = topups[idx];
+    if (t.status !== 'pending') return res.status(400).json({ error: `Top-up already ${t.status}` });
+    topups[idx] = { ...t, status: 'rejected', rejected_at: new Date().toISOString(), rejected_by_email: req.user?.email || null };
+    p.packets_topups = topups;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'job.packets_topup.reject',
+      entityType: 'job',
+      entityId: id,
+      summary: `Rejected +${t.qty} extra packets request for Job E-${id}`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // DELETE a job — admin only. SOFT delete: flips deleted_at so the row stays
