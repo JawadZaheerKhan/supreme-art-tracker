@@ -1608,6 +1608,7 @@
       &#9201; <span id="inv-pending-label">Pending Stock</span>
     </button>
     <button class="btn btn-primary ceo-hide" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
+    <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -2434,7 +2435,16 @@ function roleLabel(role) {
     stock: 'Store Manager',
   })[role] || role;
 }
-function isPendingIssuance(j) { return j && j.issuance_status === 'pending'; }
+function partialPendingSheets(j) {
+  const n = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
+// A job is "in the Pending Stock queue" if it either was never issued OR
+// only some of its needed sheets have been issued so far. Partial jobs
+// stay visible in the queue so the store keeper knows to keep topping up,
+// even though the shop floor can already start processing them.
+function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j)); }
 
 // Packets top-up helpers. An issued job may have extra packets requested
 // after issuance; each entry lives in particulars.packets_topups with a
@@ -3898,6 +3908,7 @@ function renderInvCardHtml(it) {
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
@@ -3942,6 +3953,7 @@ function renderInvBrandRow(it) {
       </div>
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
@@ -4135,15 +4147,30 @@ function renderInvPendingList() {
     const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
     const pktStr = packetsDisplay(j) || (packetsIn ? String(packetsIn) : '');
     const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
-    const issueBtn = canIssueStock()
+    // Partial issuance callout. When a store keeper has manually issued
+    // some but not all of the required sheets, show a badge + a "Top up"
+    // action pre-filled with the exact shortfall so the next click
+    // finishes the job.
+    const partial = partialPendingSheets(j);
+    const invPs = invIt ? packetSize(invIt.paper_type) : 100;
+    const partialPkts = partial ? (partial / invPs) : 0;
+    const partialPktsStr = partialPkts ? (Number.isInteger(partialPkts) ? String(partialPkts) : (+partialPkts.toFixed(2)).toString()) : '';
+    const partialBadge = partial
+      ? `<span class="badge" style="background:#FEF3C7;color:#92400E;margin-left:8px;">PARTIAL &middot; ${partialPktsStr} ${unit} still needed</span>`
+      : '';
+    const topupBtn = (partial && canIssueStock())
+      ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partial.toLocaleString()} sheets to finish this job">&#8593; Top up ${partial.toLocaleString()} sheets</button>`
+      : '';
+    const issueBtn = (!partial && canIssueStock())
       ? `<button class="btn btn-sm ${cls} ceo-hide" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
       : '';
     return `
-      <div class="inv-card inv-pending-row">
+      <div class="inv-card inv-pending-row"${partial ? ' style="border-left:3px solid #F59E0B;"' : ''}>
         <div class="inv-main">
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
             ${j.priority && normalizePriority(j.priority) === 'Urgent' ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : ''}
+            ${partialBadge}
           </div>
           <div class="inv-sub">
             ${j.client ? esc(j.client) + ' &middot; ' : ''}
@@ -4156,6 +4183,7 @@ function renderInvPendingList() {
           ${invIt ? `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div><div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${have.toLocaleString()} sheets</div>` : ''}
         </div>
         <div class="inv-actions">
+          ${topupBtn}
           ${issueBtn}
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
@@ -4700,33 +4728,255 @@ async function saveInvAddStock(id) {
   showSaving(false);
 }
 
-// ── Bulk Stock In ────────────────────────────────────────────
-// Lets the user log a shipment with several papers at once. Each row is
-// matched against existing inventory by (paper_type, size, gsm, brand); a
-// match becomes an "add stock" transaction, a non-match auto-creates the
-// item with the entered quantity as its opening balance.
+// Manual stock-OUT. Mirrors openInvAddStock but writes a negative change
+// and offers stock-out-flavored reasons. Job Card No. is optional; if it
+// matches a real job, the ledger row links to it (Stock Out report shows
+// the E-<id> automatically) and a currently-pending job flips out of the
+// Pending Stock queue since the store keeper has manually issued the paper.
+function openInvRemoveStock(id, opts) {
+  opts = opts || {};
+  const it = inventory.find(x => x.id === id); if (!it) return;
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  const ps    = packetSize(it.paper_type);
+  const unit  = packetUnitLabel(it.paper_type);
+  const have  = it.current_balance || 0;
+  const haveP = have / ps;
+  const havePktsStr = (Number.isInteger(haveP) ? haveP : +haveP.toFixed(2)).toLocaleString();
+  const preSheets = parseInt(opts.preqty, 10);
+  const preSheetsVal = Number.isFinite(preSheets) && preSheets > 0 ? preSheets : '';
+  const prePkts     = preSheetsVal ? (+(preSheetsVal / ps).toFixed(2)) : '';
+  const preJobCard  = opts.jobCard ? String(opts.jobCard) : '';
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2 style="color:#991B1B;">Remove Stock</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text)">${esc(label)}</b><br>On hand: <b style="color:#166534;">${havePktsStr} ${unit.toLowerCase()}</b> (${have.toLocaleString()} sheets) &middot; 1 ${unit.slice(0,-1).toLowerCase()} = ${ps} sheets</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Quantity — ${unit}</label>
+        <input type="number" id="stockout-packets" value="${prePkts}" placeholder="0" min="0" step="any" oninput="stockOutQtySync('packets', ${ps})">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Quantity — Sheets *</label>
+        <input type="number" id="stockout-qty" value="${preSheetsVal}" placeholder="0" min="1" oninput="stockOutQtySync('sheets', ${ps})">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Reason</label>
+        <select id="stockout-reason">
+          ${['sold','damaged','sample','adjustment','job-card'].map(r => {
+            const labels = {sold:'Sold / Delivered to customer',damaged:'Damaged',sample:'Sample',adjustment:'Manual adjustment','job-card':'Job Card (manual issue)'};
+            const sel = (preJobCard && r === 'job-card') || (!preJobCard && r === 'sold') ? ' selected' : '';
+            return `<option value="${r}"${sel}>${labels[r]}</option>`;
+          }).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Job Card No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-jobcard" value="${esc(preJobCard)}" placeholder="e.g. E-85 or 85"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stockout-notes" placeholder="Optional details"></div>
+    <div style="font-size:11px;color:var(--text2);margin-top:6px;">Linking a Job Card No. that's currently in Pending Stock will mark that job as issued and remove it from the pending queue.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
+    </div>
+  </div>`);
+}
+function stockOutQtySync(source, ps) {
+  const packetsEl = document.getElementById('stockout-packets');
+  const sheetsEl  = document.getElementById('stockout-qty');
+  if (!packetsEl || !sheetsEl) return;
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
+  } else {
+    const s = parseFloat(sheetsEl.value);
+    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  }
+}
+async function saveInvRemoveStock(id) {
+  const it = inventory.find(x => x.id === id);
+  const qty = parseInt(document.getElementById('stockout-qty').value, 10);
+  if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
+  const have = it ? (it.current_balance || 0) : 0;
+  if (qty > have) { await alertDialog({ title: 'Not enough stock', message: `On hand is ${have.toLocaleString()} sheets. Requested ${qty.toLocaleString()}. Reconcile the count first (Edit → Adjust by).`, kind: 'warn' }); return; }
+  const data = {
+    change: -qty,
+    reason: document.getElementById('stockout-reason').value,
+    notes:  document.getElementById('stockout-notes').value.trim(),
+    job_card: document.getElementById('stockout-jobcard').value.trim() || null,
+  };
+  showSaving(true);
+  try {
+    const result = await api('POST', `/api/inventory/${id}/transactions`, data);
+    await loadInventory();
+    // Any change that touched a job's state — full flip, partial issuance,
+    // or just a jobId link — needs jobs reloaded so Pending Stock updates.
+    if (result && (result.job_flipped || result.job_fully_issued || result.job_partial_remaining || result.linked_job_id)) {
+      await loadJobs();
+    }
+    closeModal();
+    render();
+    let tail = '';
+    if (result && result.job_fully_issued && result.linked_job_id) tail = ` · Job E-${result.linked_job_id} fully issued (out of Pending Stock)`;
+    else if (result && result.job_partial_remaining) tail = ` · Job E-${result.linked_job_id} partial — ${result.job_partial_remaining.toLocaleString()} sheets still needed`;
+    notify(`−${qty.toLocaleString()} sheets removed${tail}`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Bulk Stock In (search-based) ─────────────────────────────
+// Each row picks an existing inventory item via a typeable search
+// combo (same UX as the job card's paper picker). No per-row
+// paper_type / size / gsm / brand columns — the item carries all of
+// that. To add a genuinely new paper, use "+ Add Paper" from the
+// inventory tab first; bulk-in is intentionally match-only so nobody
+// accidentally spawns duplicate items via typos.
 let bulkRowSeq = 0;
+// Renders a per-row typeable combo. prefix is 'bulk' (stock-in) or
+// 'bulkout' (stock-out); idx is the row's monotonic counter. The
+// hidden input keeps class="{prefix}-item" so saveBulkStockIn/Out
+// keep working with tr.querySelector('.{prefix}-item'). positiveOnly
+// hides zero-balance items (for stock-out).
+function bulkComboRowHtml(prefix, idx, positiveOnly) {
+  return `<div class="combo" style="min-width:280px;">
+    <input type="text" class="${prefix}-search combo-input"
+           id="${prefix}-search-${idx}"
+           placeholder="Search paper, size, gsm, brand…"
+           autocomplete="off"
+           onfocus="bulkComboOpen('${prefix}', ${idx}, ${positiveOnly})"
+           oninput="bulkComboFilter('${prefix}', ${idx}, ${positiveOnly})"
+           onkeydown="bulkComboKey('${prefix}', ${idx}, event)"
+           style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+    <input type="hidden" class="${prefix}-item" id="${prefix}-item-${idx}">
+    <div class="combo-list" id="${prefix}-list-${idx}" style="display:none;"></div>
+  </div>`;
+}
+function bulkComboOpen(prefix, idx, positiveOnly) {
+  const list = document.getElementById(`${prefix}-list-${idx}`);
+  if (!list) return;
+  list.style.display = 'block';
+  bulkComboFilter(prefix, idx, positiveOnly);
+}
+function bulkComboClose(prefix, idx) {
+  const list = document.getElementById(`${prefix}-list-${idx}`);
+  if (list) list.style.display = 'none';
+}
+function bulkComboFilter(prefix, idx, positiveOnly) {
+  const input = document.getElementById(`${prefix}-search-${idx}`);
+  const list  = document.getElementById(`${prefix}-list-${idx}`);
+  if (!input || !list) return;
+  const q = (input.value || '').toLowerCase().trim();
+  const items = (inventory || []).filter(it => {
+    if (positiveOnly && (it.current_balance || 0) <= 0) return false;
+    if (!q) return true;
+    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
+    return hay.includes(q);
+  });
+  if (!items.length) {
+    list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
+    return;
+  }
+  // Same grouping as the job-card combo: (paper_type + size + gsm)
+  // clusters brand variants together. Singletons render as a single
+  // clickable row; multi-brand groups get a non-clickable header and
+  // an indented row per brand.
+  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || ''].join('||');
+  const order = [];
+  const groups = new Map();
+  for (const it of items) {
+    const k = keyOf(it);
+    if (!groups.has(k)) { groups.set(k, []); order.push(k); }
+    groups.get(k).push(it);
+  }
+  list.innerHTML = order.map(k => {
+    const arr = groups.get(k);
+    const rep = arr[0];
+    if (arr.length === 1) {
+      const bal = (rep.current_balance || 0).toLocaleString();
+      const cls = (rep.current_balance || 0) <= 0 ? 'combo-item out' : 'combo-item';
+      const label = `${rep.paper_type}${rep.size?' · '+rep.size:''}${rep.gsm?' · '+rep.gsm+'gsm':''}${rep.brand?' · '+rep.brand:''}${rep.supplier?' · '+rep.supplier:''}`;
+      return `<div class="${cls}" onclick="bulkComboPick('${prefix}', ${idx}, ${rep.id})">
+        <span>${esc(label)}</span>
+        <span class="combo-bal">${bal} sheets</span>
+      </div>`;
+    }
+    const totalSheets = arr.reduce((a, it) => a + (it.current_balance || 0), 0);
+    const headerLabel = [rep.paper_type, rep.size, rep.gsm && (rep.gsm + 'gsm')].filter(Boolean).map(esc).join(' · ');
+    const sorted = [...arr].sort((a, b) => (a.brand || '').localeCompare(b.brand || ''));
+    const brandRows = sorted.map(it => {
+      const bal = (it.current_balance || 0).toLocaleString();
+      const cls = (it.current_balance || 0) <= 0 ? 'combo-item combo-brand-row out' : 'combo-item combo-brand-row';
+      const brandText = it.brand
+        ? `<b style="text-transform:uppercase;letter-spacing:0.03em;">${esc(it.brand)}</b>`
+        : '<span style="font-style:italic;color:var(--text2);">no brand</span>';
+      const supplierText = it.supplier ? `<span style="color:var(--text2);"> · ${esc(it.supplier)}</span>` : '';
+      return `<div class="${cls}" onclick="bulkComboPick('${prefix}', ${idx}, ${it.id})">
+        <span style="padding-left:16px;">${brandText}${supplierText}</span>
+        <span class="combo-bal">${bal} sheets</span>
+      </div>`;
+    }).join('');
+    return `
+      <div class="combo-group-head">
+        <span>${headerLabel}<span class="combo-group-tag">${arr.length} brands</span></span>
+        <span class="combo-bal" style="font-weight:600;">${totalSheets.toLocaleString()} sheets total</span>
+      </div>
+      ${brandRows}`;
+  }).join('');
+}
+function bulkComboPick(prefix, idx, itemId) {
+  const it = inventory.find(x => x.id === itemId);
+  if (!it) return;
+  const search = document.getElementById(`${prefix}-search-${idx}`);
+  const hidden = document.getElementById(`${prefix}-item-${idx}`);
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  if (search) search.value = label;
+  if (hidden) hidden.value = String(itemId);
+  bulkComboClose(prefix, idx);
+  // Re-sync packets↔sheets against the picked item's paper type so
+  // the numbers match whatever the user has already typed.
+  const syncFn = prefix === 'bulk' ? bulkRowSync : bulkOutRowSync;
+  if (typeof syncFn === 'function') syncFn(idx, 'packets');
+}
+function bulkComboKey(prefix, idx, e) {
+  if (e.key === 'Escape') { bulkComboClose(prefix, idx); return; }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const first = document.querySelector(`#${prefix}-list-${idx} .combo-item`);
+    if (first) first.click();
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const first = document.querySelector(`#${prefix}-list-${idx} .combo-item`);
+    if (first) first.classList.add('highlight');
+  }
+}
+// Outside-click closer — attached once at startup, closes any open
+// bulk / bulkout combo whose containing .combo doesn't include the
+// click target. Same pattern as the paper-combo closer up top.
+document.addEventListener('mousedown', (e) => {
+  document.querySelectorAll('#bulk-rows .combo-list, #bulkout-rows .combo-list').forEach(list => {
+    if (list.style.display === 'none') return;
+    const combo = list.parentElement;
+    if (combo && !combo.contains(e.target)) list.style.display = 'none';
+  });
+});
 function bulkRowHtml(idx) {
   return `
     <tr data-row="${idx}">
-      <td><select class="bulk-paper-type" onchange="bulkRowSync(${idx})">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></td>
-      <td><input type="text" class="bulk-size"     list="inv-sizes"     placeholder="e.g. 25x36"></td>
-      <td><input type="text" class="bulk-gsm"      list="inv-gsms"      placeholder="e.g. 300"></td>
-      <td><input type="text" class="bulk-brand"    list="inv-brands"    placeholder="e.g. Century"></td>
-      <td><input type="text" class="bulk-supplier" list="inv-suppliers" placeholder="e.g. XYZ Suppliers"></td>
+      <td>${bulkComboRowHtml('bulk', idx, false)}</td>
       <td class="col-qty"><input type="number" class="bulk-packets" placeholder="0" min="0" step="any" oninput="bulkRowSync(${idx}, 'packets')"></td>
       <td class="col-qty"><input type="number" class="bulk-qty" placeholder="0" min="1" oninput="bulkRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkRemoveRow(${idx})" title="Remove row">×</button></td>
     </tr>`;
 }
-// Sync Packets ↔ Sheets within a single bulk row. With no source argument,
-// the paper type changed — recompute sheets from packets (preferred) or
-// packets from sheets if only sheets was filled.
+// Sync Packets ↔ Sheets within a single bulk row using the selected
+// item's paper type (which determines packet size — 100 for cards, 500
+// for reams).
 function bulkRowSync(idx, source) {
   const tr = document.querySelector(`#bulk-rows tr[data-row="${idx}"]`);
   if (!tr) return;
-  const ptype = tr.querySelector('.bulk-paper-type').value;
-  const ps = packetSize(ptype);
+  const sel = tr.querySelector('.bulk-item');
+  const itemId = sel && parseInt(sel.value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const ps = it ? packetSize(it.paper_type) : 100;
   const packetsEl = tr.querySelector('.bulk-packets');
   const sheetsEl  = tr.querySelector('.bulk-qty');
   if (source === 'packets') {
@@ -4735,13 +4985,6 @@ function bulkRowSync(idx, source) {
   } else if (source === 'sheets') {
     const s = parseFloat(sheetsEl.value);
     packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
-  } else {
-    const p = parseFloat(packetsEl.value);
-    if (!isNaN(p)) sheetsEl.value = Math.round(p * ps);
-    else {
-      const s = parseFloat(sheetsEl.value);
-      if (!isNaN(s)) packetsEl.value = +(s / ps).toFixed(2);
-    }
   }
 }
 function openBulkStockIn() {
@@ -4749,17 +4992,12 @@ function openBulkStockIn() {
   const rows = [0, 1, 2].map(() => bulkRowHtml(bulkRowSeq++)).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Stock In · Bulk</h2>
-    ${invDatalistsHtml()}
     <div class="form-group"><label class="form-label">Reference / Invoice (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. INV-2026-042"></div>
     <div class="form-group"><label class="form-label">Shipment Notes</label><input type="text" id="bulk-notes" placeholder="Optional notes applied to every row"></div>
     <table class="bulk-table" id="bulk-table">
       <thead>
         <tr>
-          <th>Paper Type</th>
-          <th>Size</th>
-          <th>GSM</th>
-          <th>Brand</th>
-          <th>Supplier</th>
+          <th>Paper (search)</th>
           <th style="text-align:right;">Packets / Reams</th>
           <th style="text-align:right;">Sheets</th>
           <th></th>
@@ -4770,7 +5008,7 @@ function openBulkStockIn() {
     <div style="margin-top:8px;">
       <button class="btn btn-sm" onclick="bulkAddRow()">+ Add Row</button>
     </div>
-    <div class="bulk-summary">Cards: 1 Packet = 100 sheets (Bleach Board, Duplex Board, Art Card) · Papers: 1 Ream = 500 sheets (Art Paper, Off-White, Offset Paper). Type packets/reams and sheets auto-fills (or vice-versa). Rows match existing items by paper type + size + GSM + brand; new combinations are auto-created.</div>
+    <div class="bulk-summary">Pick an existing item and type the delivered quantity — packets/reams and sheets auto-sync. To add a paper the system doesn't know yet, use <b>+ Add Paper</b> on the Inventory tab first, then top it up here.</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveBulkStockIn()">Save All</button>
@@ -4786,7 +5024,6 @@ function bulkRemoveRow(idx) {
   const tbody = document.getElementById('bulk-rows');
   const row = tbody && tbody.querySelector(`tr[data-row="${idx}"]`);
   if (!row) return;
-  // Keep at least one row visible so the user has something to type into.
   if (tbody.children.length <= 1) {
     row.querySelectorAll('input').forEach(i => i.value = '');
     return;
@@ -4798,25 +5035,20 @@ async function saveBulkStockIn() {
   if (!tbody) return;
   const ref      = document.getElementById('bulk-ref').value.trim();
   const notesIn  = document.getElementById('bulk-notes').value.trim();
-  // Top-level note bits that apply to every row. Per-row supplier is
-  // appended further down so each ledger entry shows its own supplier
-  // instead of a shared one.
   const sharedNote = [ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
 
-  // Gather + validate rows. Skip empties (all fields blank). Reject zero-qty rows.
   const rows = [];
   for (const tr of tbody.querySelectorAll('tr')) {
-    const paper_type = tr.querySelector('.bulk-paper-type').value;
-    const size       = tr.querySelector('.bulk-size').value.trim();
-    const gsm        = tr.querySelector('.bulk-gsm').value.trim();
-    const brand      = tr.querySelector('.bulk-brand').value.trim();
-    const supplier   = tr.querySelector('.bulk-supplier').value.trim();
-    const qty        = parseInt(tr.querySelector('.bulk-qty').value, 10) || 0;
-    if (!size && !gsm && !brand && !supplier && !qty) continue;  // empty row, skip
+    const itemId = parseInt(tr.querySelector('.bulk-item').value, 10);
+    const qty    = parseInt(tr.querySelector('.bulk-qty').value, 10) || 0;
+    if (!itemId && !qty) continue;
+    if (!itemId) {
+      await alertDialog({ title: 'Paper required', message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
+    }
     if (!qty || qty <= 0) {
       await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
-    rows.push({ paper_type, size, gsm, brand, supplier, qty });
+    rows.push({ itemId, qty });
   }
   if (!rows.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
 
@@ -4824,30 +5056,9 @@ async function saveBulkStockIn() {
   let saved = 0, errored = 0;
   for (const r of rows) {
     try {
-      // Compose the per-row note: per-row supplier first, then any shared
-      // ref / notes from the modal. Drops to null when everything is blank.
-      const rowNote = [r.supplier && `Supplier: ${r.supplier}`, sharedNote].filter(Boolean).join(' · ');
-      // Try to match an existing item; treat missing fields as empty strings
-      // so the lookup mirrors the DB's COALESCE-based unique index.
-      const match = inventory.find(it =>
-        it.paper_type === r.paper_type &&
-        (it.size||'')  === r.size &&
-        (it.gsm||'')   === r.gsm &&
-        (it.brand||'') === r.brand
-      );
-      if (match) {
-        await api('POST', `/api/inventory/${match.id}/transactions`, {
-          change: r.qty, reason: 'delivery', notes: rowNote || null,
-        });
-      } else {
-        await api('POST', '/api/inventory', {
-          paper_type: r.paper_type,
-          size: r.size, gsm: r.gsm, brand: r.brand,
-          supplier: r.supplier,
-          opening_balance: r.qty,
-          opening_notes: rowNote || 'Bulk stock-in',
-        });
-      }
+      await api('POST', `/api/inventory/${r.itemId}/transactions`, {
+        change: r.qty, reason: 'delivery', notes: sharedNote || null,
+      });
       saved++;
     } catch (e) {
       console.error('Row failed:', r, e);
@@ -4864,6 +5075,160 @@ async function saveBulkStockIn() {
   closeModal();
   showSaving(false);
   if (errored === 0) notify(`Stock in saved · ${saved} row${saved===1?'':'s'}`);
+  else notify(`${saved} saved · ${errored} failed (see console)`);
+}
+
+// ── Bulk Stock Out ───────────────────────────────────────────
+// Same shape as Bulk Stock In but every row MUST match an existing
+// inventory item (paper_type + size + gsm + brand) — you can't stock out
+// something the app doesn't know exists. Extras vs Stock In: per-row
+// Reason dropdown and an optional Job Card No. that auto-links + flips
+// pending jobs, matching the single-item flow.
+let bulkOutRowSeq = 0;
+function bulkOutRowHtml(idx) {
+  return `
+    <tr data-row="${idx}">
+      <td>${bulkComboRowHtml('bulkout', idx, true)}</td>
+      <td>
+        <select class="bulkout-reason">
+          <option value="sold">Sold</option>
+          <option value="damaged">Damaged</option>
+          <option value="sample">Sample</option>
+          <option value="adjustment">Adjustment</option>
+          <option value="job-card">Job Card</option>
+        </select>
+      </td>
+      <td><input type="text" class="bulkout-jobcard" placeholder="E-85 (optional)"></td>
+      <td class="col-qty"><input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')"></td>
+      <td class="col-qty"><input type="number" class="bulkout-qty" placeholder="0" min="1" oninput="bulkOutRowSync(${idx}, 'sheets')"></td>
+      <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkOutRemoveRow(${idx})" title="Remove row">×</button></td>
+    </tr>`;
+}
+function bulkOutRowSync(idx, source) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const sel = tr.querySelector('.bulkout-item');
+  const itemId = sel && parseInt(sel.value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const ps = it ? packetSize(it.paper_type) : 100;
+  const packetsEl = tr.querySelector('.bulkout-packets');
+  const sheetsEl  = tr.querySelector('.bulkout-qty');
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
+  } else if (source === 'sheets') {
+    const s = parseFloat(sheetsEl.value);
+    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  }
+}
+function openBulkStockOut() {
+  bulkOutRowSeq = 0;
+  const rows = [0, 1, 2].map(() => bulkOutRowHtml(bulkOutRowSeq++)).join('');
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2 style="color:#991B1B;">Stock Out · Bulk</h2>
+    <div class="form-group"><label class="form-label">Reference (optional)</label><input type="text" id="bulkout-ref" placeholder="e.g. DC-2026-042"></div>
+    <div class="form-group"><label class="form-label">Notes (applied to every row)</label><input type="text" id="bulkout-notes" placeholder="Optional shared notes"></div>
+    <table class="bulk-table" id="bulkout-table">
+      <thead>
+        <tr>
+          <th>Paper (search)</th>
+          <th>Reason</th>
+          <th>Job Card No.</th>
+          <th style="text-align:right;">Packets / Reams</th>
+          <th style="text-align:right;">Sheets</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="bulkout-rows">${rows}</tbody>
+    </table>
+    <div style="margin-top:8px;">
+      <button class="btn btn-sm" onclick="bulkOutAddRow()">+ Add Row</button>
+    </div>
+    <div class="bulk-summary">Pick an existing item, enter qty. Rows that would drive on-hand negative are rejected. Reason "Job Card" + a valid Job Card No. issues to that job (partial ok — job stays in Pending Stock until fully issued).</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveBulkStockOut()" style="background:#DC2626;border-color:#DC2626;">Remove All</button>
+    </div>
+  </div>`);
+}
+function bulkOutAddRow() {
+  const tbody = document.getElementById('bulkout-rows');
+  if (!tbody) return;
+  tbody.insertAdjacentHTML('beforeend', bulkOutRowHtml(bulkOutRowSeq++));
+}
+function bulkOutRemoveRow(idx) {
+  const tbody = document.getElementById('bulkout-rows');
+  const row = tbody && tbody.querySelector(`tr[data-row="${idx}"]`);
+  if (!row) return;
+  if (tbody.children.length <= 1) {
+    row.querySelectorAll('input').forEach(i => i.value = '');
+    row.querySelectorAll('select').forEach(s => { s.selectedIndex = 0; });
+    return;
+  }
+  row.remove();
+}
+async function saveBulkStockOut() {
+  const tbody = document.getElementById('bulkout-rows');
+  if (!tbody) return;
+  const ref     = document.getElementById('bulkout-ref').value.trim();
+  const notesIn = document.getElementById('bulkout-notes').value.trim();
+  const sharedNote = [ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
+
+  const plan = [];
+  for (const tr of tbody.querySelectorAll('tr')) {
+    const itemId  = parseInt(tr.querySelector('.bulkout-item').value, 10);
+    const reason  = tr.querySelector('.bulkout-reason').value;
+    const jobCard = tr.querySelector('.bulkout-jobcard').value.trim();
+    const qty     = parseInt(tr.querySelector('.bulkout-qty').value, 10) || 0;
+    if (!itemId && !qty && !jobCard) continue;
+    if (!itemId) {
+      await alertDialog({ title: 'Paper required', message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
+    }
+    if (!qty || qty <= 0) {
+      await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
+    }
+    const match = inventory.find(it => it.id === itemId);
+    const have = match ? (match.current_balance || 0) : 0;
+    if (qty > have) {
+      const label = match ? `${match.paper_type}${match.size?' · '+match.size:''}${match.gsm?' · '+match.gsm+'gsm':''}${match.brand?' · '+match.brand:''}` : `item ${itemId}`;
+      await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
+    }
+    plan.push({ match, reason, jobCard, qty });
+  }
+  if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
+
+  showSaving(true);
+  let saved = 0, errored = 0, flipped = 0, partials = 0;
+  for (const p of plan) {
+    try {
+      const result = await api('POST', `/api/inventory/${p.match.id}/transactions`, {
+        change: -p.qty,
+        reason: p.reason,
+        notes:  sharedNote || null,
+        job_card: p.jobCard || null,
+      });
+      saved++;
+      if (result && result.job_fully_issued) flipped++;
+      if (result && result.job_partial_remaining) partials++;
+    } catch (e) {
+      console.error('Bulk stock-out row failed:', p, e);
+      errored++;
+    }
+  }
+  await loadInventory();
+  if (flipped || partials) await loadJobs();
+  const stockOutPane = document.getElementById('rt-stock-out');
+  if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
+    loadStockMovement('out');
+  }
+  closeModal();
+  render();
+  showSaving(false);
+  const tailBits = [];
+  if (flipped)  tailBits.push(`${flipped} job(s) fully issued`);
+  if (partials) tailBits.push(`${partials} partial job(s) still pending top-up`);
+  const tail = tailBits.length ? ' · ' + tailBits.join(' · ') : '';
+  if (errored === 0) notify(`Stock out saved · ${saved} row${saved===1?'':'s'}${tail}`);
   else notify(`${saved} saved · ${errored} failed (see console)`);
 }
 
@@ -4939,6 +5304,8 @@ async function renderInvHistory(id) {
         'delivery', 'adjustment', 'opening',
         'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
         'job-issuance-reversed',
+        // Manual stock-out reasons.
+        'sold', 'damaged', 'sample',
       ]);
       // Calendar-day window: reversible if the tx was created today
       // (00:00–23:59 of the same calendar day), not rolling 24 hours.
@@ -11142,8 +11509,11 @@ function collectParticulars() {
   const editingId = editingIdEl ? parseInt(editingIdEl.value, 10) : null;
   if (editingId) {
     const prior = jobs.find(x => x.id === editingId);
-    const topups = prior && prior.particulars && prior.particulars.packets_topups;
-    if (Array.isArray(topups) && topups.length) out.packets_topups = topups;
+    const priorP = (prior && prior.particulars) || {};
+    if (Array.isArray(priorP.packets_topups) && priorP.packets_topups.length) out.packets_topups = priorP.packets_topups;
+    // Partial-issuance marker lives outside the form fields — preserve it
+    // so an unrelated Edit doesn't wipe the store keeper's partial issue.
+    if (priorP.partial_pending_sheets) out.partial_pending_sheets = priorP.partial_pending_sheets;
   }
   return out;
 }
@@ -11561,7 +11931,9 @@ function openUpdate(id) {
   if (!j) return;
   // Block stage advancement while stock issuance is still pending — the
   // job hasn't actually started yet, so updating a stage would be meaningless.
-  if (isPendingIssuance(j)) {
+  // Partial issuances CAN advance stages — the shop floor has real
+  // paper to work with, only the topping-up is still pending.
+  if (j.issuance_status === 'pending') {
     notify('Stock must be issued before updating stages on this job.');
     return;
   }
@@ -11636,7 +12008,7 @@ async function moveToStage(id, target) {
   if (!j) return;
   // Same guard as openUpdate — clicking a pipeline pill shouldn't bypass
   // the issuance step.
-  if (isPendingIssuance(j)) {
+  if (j.issuance_status === 'pending') {
     notify('Stock must be issued before moving this job to a stage.');
     return;
   }

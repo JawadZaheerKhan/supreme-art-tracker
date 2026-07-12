@@ -2185,25 +2185,34 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // back to the hidden compensating 'job-edit-revert' entry.
     const paperItemChanged = (oldItemId !== newItemId);
     if (wasIssued && paperItemChanged) {
-      if (oldItemId && oldSheets > 0) {
-        const orig = await sql`
+      // Reverse EVERY un-reversed job-consumed row on the old paper.
+      // A single job may have accumulated several rows over time —
+      // original issuance, approved top-ups, and manual partials all
+      // land here — so reversing only the latest would leak the older
+      // ones. Each reversal is linked via reverses_tx_id so the pair
+      // drops out of Stock In/Out reports cleanly.
+      if (oldItemId) {
+        const origRows = await sql`
           SELECT t.id, t.change FROM inventory_transactions t
           WHERE t.job_id = ${job.id} AND t.item_id = ${oldItemId}
             AND t.reason = 'job-consumed' AND t.reverses_tx_id IS NULL
             AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-          ORDER BY t.id DESC LIMIT 1
+          ORDER BY t.id ASC
         `;
-        if (orig[0]) {
-          await applyInventoryChange(sql, {
-            itemId: oldItemId,
-            change: -orig[0].change,   // exact opposite of the original deduction
-            reason: 'correction',      // hidden from Stock In/Out (linked pair)
-            jobId: job.id,
-            notes: `Paper changed on Job E-${job.id}: reversal of TX #${orig[0].id}`,
-            user: req.user,
-            reversesTxId: orig[0].id,
-          });
-        } else {
+        if (origRows.length) {
+          for (const row of origRows) {
+            await applyInventoryChange(sql, {
+              itemId: oldItemId,
+              change: -row.change,
+              reason: 'correction',
+              jobId: job.id,
+              notes: `Paper changed on Job E-${job.id}: reversal of TX #${row.id}`,
+              user: req.user,
+              reversesTxId: row.id,
+            });
+          }
+        } else if (oldSheets > 0) {
+          // Legacy fallback for very old jobs with no linked row.
           await applyInventoryChange(sql, {
             itemId: oldItemId,
             change: +oldSheets,
@@ -2213,28 +2222,29 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
             user: req.user,
           });
         }
-        // Undo the offcut +N too — reverse the original job-offcut row when
-        // one exists so the pair hides; legacy fallback otherwise.
+        // Same idea for offcut returns — reverse ALL un-reversed offcut rows.
         if (oldSourceItem && oldOffcutSize) {
           const oldOffcutItem = await findOrCreateOffcutItem(sql, oldSourceItem, oldOffcutSize);
-          const origOff = await sql`
+          const origOffRows = await sql`
             SELECT t.id, t.change FROM inventory_transactions t
             WHERE t.job_id = ${job.id} AND t.item_id = ${oldOffcutItem.id}
               AND t.reason = 'job-offcut' AND t.reverses_tx_id IS NULL
               AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-            ORDER BY t.id DESC LIMIT 1
+            ORDER BY t.id ASC
           `;
-          if (origOff[0]) {
-            await applyInventoryChange(sql, {
-              itemId: oldOffcutItem.id,
-              change: -origOff[0].change,
-              reason: 'correction',
-              jobId: job.id,
-              notes: `Paper changed on Job E-${job.id}: reversal of offcut TX #${origOff[0].id}`,
-              user: req.user,
-              reversesTxId: origOff[0].id,
-            });
-          } else {
+          if (origOffRows.length) {
+            for (const row of origOffRows) {
+              await applyInventoryChange(sql, {
+                itemId: oldOffcutItem.id,
+                change: -row.change,
+                reason: 'correction',
+                jobId: job.id,
+                notes: `Paper changed on Job E-${job.id}: reversal of offcut TX #${row.id}`,
+                user: req.user,
+                reversesTxId: row.id,
+              });
+            }
+          } else if (oldSheets > 0) {
             await applyInventoryChange(sql, {
               itemId: oldOffcutItem.id,
               change: -oldSheets,
@@ -2247,8 +2257,8 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         }
       }
       if (newItemId && newSheets > 0) {
-        // Fresh, report-visible consumption on the new paper — same shape
-        // as the issue-stock flow so Stock Out reads naturally.
+        // Fresh, report-visible consumption on the new paper — full need,
+        // same shape as the issue-stock flow so Stock Out reads naturally.
         const psNew   = packetSize(newPaperType);
         const unitNew = REAM_PAPERS.has(newPaperType) ? 'reams' : 'packets';
         await applyInventoryChange(sql, {
@@ -2259,7 +2269,6 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
           notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${newSheets / psNew} ${unitNew} (${newSheets} sheets) issued on paper change by ${req.user.email}`,
           user: req.user,
         });
-        // Re-apply the offcut yield for the new state, if cut spec is set.
         if (newSourceItem && newOffcutSize) {
           const newOffcutItem = await findOrCreateOffcutItem(sql, newSourceItem, newOffcutSize);
           await applyInventoryChange(sql, {
@@ -2271,6 +2280,16 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
             user: req.user,
           });
         }
+      }
+      // Paper swap always re-issues the full need on the new paper, so
+      // any partial marker from the old paper is stale and must be
+      // cleared — otherwise the pending list would still flag this
+      // job as partially issued.
+      if (job.particulars && job.particulars.partial_pending_sheets) {
+        const cleanP = { ...job.particulars };
+        delete cleanP.partial_pending_sheets;
+        await sql`UPDATE jobs SET particulars=${JSON.stringify(cleanP)} WHERE id=${job.id}`;
+        job.particulars = cleanP;
       }
     }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
@@ -2439,11 +2458,16 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
         });
       }
     }
+    // Clear any partial-issuance marker so the job returns to a clean
+    // 'nothing issued' state.
+    const cleanParticulars = { ...(job.particulars || {}) };
+    delete cleanParticulars.partial_pending_sheets;
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'pending',
              issued_at = NULL,
-             issued_by_id = NULL
+             issued_by_id = NULL,
+             particulars = ${JSON.stringify(cleanParticulars)}
        WHERE id = ${id}
        RETURNING *
     `;
@@ -2923,26 +2947,127 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { change, reason, notes } = req.body;
+    const { change, reason, notes, job_card } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
     const itemId = parseInt(id, 10);
+
+    // Optional Job Card No. resolution: accepts "E-85" or "85".
+    let jobId = null;
+    let jobRow = null;
+    if (job_card) {
+      const m = String(job_card).match(/(\d+)/);
+      if (m) {
+        const candidate = parseInt(m[1], 10);
+        const rows = await sql`SELECT * FROM jobs WHERE id = ${candidate} AND deleted_at IS NULL`;
+        if (rows[0]) { jobId = candidate; jobRow = rows[0]; }
+      }
+    }
+
+    // Overdraw guard for stock-outs. Balance may not go negative.
+    if (delta < 0) {
+      const bal = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
+      const have = bal[0] ? (bal[0].current_balance || 0) : 0;
+      if (have + delta < 0) {
+        return res.status(400).json({ error: `Not enough stock — on hand ${have.toLocaleString()} sheets, requested ${Math.abs(delta).toLocaleString()} sheets.` });
+      }
+    }
+
+    // Job-card-linked issuance flow. When the user explicitly picks the
+    // "Job Card" reason and provides a valid job number, this row is a
+    // manual issuance and must obey the same accounting rules as the
+    // regular Issue Stock button: paper must match the job, no
+    // over-issuance, partial issuances keep the job in Pending Stock
+    // until the full needed sheets have been issued.
+    const isJobIssuance = !!(jobRow && delta < 0 && reason === 'job-card');
+    let finalReason = reason || (delta > 0 ? 'delivery' : 'adjustment');
+    let jobFullyIssued = false;
+    let partialRemaining = 0;
+
+    if (isJobIssuance) {
+      if (jobRow.inventory_item_id !== itemId) {
+        return res.status(400).json({ error: `Job E-${jobRow.id} needs a different paper — cannot manually issue from this item.` });
+      }
+      const needed = jobDeductionSheets({ paperType: (await sql`SELECT paper_type FROM inventory_items WHERE id=${itemId}`)[0]?.paper_type || '', particulars: jobRow.particulars });
+      if (needed <= 0) {
+        return res.status(400).json({ error: `Job E-${jobRow.id} has no Quantity of Packets set — cannot compute needed sheets.` });
+      }
+      const consumedRows = await sql`
+        SELECT COALESCE(SUM(-t.change),0) AS issued FROM inventory_transactions t
+        WHERE t.job_id = ${jobRow.id} AND t.reason = 'job-consumed'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+      `;
+      const alreadyIssued = parseInt(consumedRows[0]?.issued || 0, 10);
+      const remaining = needed - alreadyIssued;
+      if (remaining <= 0) {
+        return res.status(400).json({ error: `Job E-${jobRow.id} is already fully issued (${needed.toLocaleString()} sheets).` });
+      }
+      if (Math.abs(delta) > remaining) {
+        return res.status(400).json({ error: `Would exceed job requirement by ${(Math.abs(delta) - remaining).toLocaleString()} sheets. Remaining need: ${remaining.toLocaleString()} sheets.` });
+      }
+      finalReason = 'job-consumed';   // report semantics
+      jobFullyIssued = Math.abs(delta) === remaining;
+      partialRemaining = jobFullyIssued ? 0 : (remaining - Math.abs(delta));
+    }
+
+    // Notes: preserve unresolved job_card strings; tag manual issuance
+    // rows with the user-picked reason label so it isn't lost.
+    let finalNotes = notes || null;
+    if (job_card && !jobId) {
+      finalNotes = [finalNotes, `Job Card: ${String(job_card).trim()}`].filter(Boolean).join(' · ');
+    }
+
     await applyInventoryChange(sql, {
       itemId,
       change: delta,
-      reason: reason || (delta > 0 ? 'delivery' : 'adjustment'),
-      jobId: null,
-      notes: notes || null,
+      reason: finalReason,
+      jobId,
+      notes: finalNotes,
       user: req.user,
     });
+
+    // Job state after a manual issuance:
+    //   fully issued  → status='issued', clear partial marker
+    //   partial       → status='issued' (so stages can progress), record
+    //                   the shortfall in particulars.partial_pending_sheets
+    //                   so Pending Stock still surfaces it.
+    let jobFlipped = false;
+    if (isJobIssuance) {
+      const nextParticulars = { ...(jobRow.particulars || {}) };
+      if (jobFullyIssued) delete nextParticulars.partial_pending_sheets;
+      else                nextParticulars.partial_pending_sheets = partialRemaining;
+      const wasPending = jobRow.issuance_status === 'pending';
+      await sql`
+        UPDATE jobs
+           SET issuance_status='issued',
+               issued_at = COALESCE(issued_at, NOW()),
+               issued_by_id = COALESCE(issued_by_id, ${req.user?.id || null}),
+               particulars = ${JSON.stringify(nextParticulars)}
+         WHERE id=${jobRow.id}
+      `;
+      jobFlipped = wasPending && jobFullyIssued;
+    }
+
     const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
     const it = refreshed[0];
     if (it) {
       const label = `${it.paper_type}${it.size?' '+it.size:''}${it.gsm?' '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
       const sign = delta > 0 ? '+' : '';
-      await logAudit(sql, req, { action: 'inventory.stock', entityType: 'inventory', entityId: it.id, summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${reason || (delta>0?'delivery':'adjustment')})` });
+      await logAudit(sql, req, {
+        action: 'inventory.stock',
+        entityType: 'inventory',
+        entityId: it.id,
+        summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${finalReason})${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${partialRemaining} sheets still needed)`) : ''}`,
+      });
     }
-    res.json(it);
+    res.json({
+      ...(it || {}),
+      job_flipped: jobFlipped,
+      linked_job_id: jobId,
+      job_partial_remaining: isJobIssuance && !jobFullyIssued ? partialRemaining : 0,
+      job_fully_issued: isJobIssuance && jobFullyIssued,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -2982,6 +3107,9 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       'delivery', 'adjustment', 'opening',
       'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
       'job-issuance-reversed',
+      // Manual stock-out reasons — added so the store keeper can undo
+      // a wrong Sold/Damaged/Sample entry from the item History.
+      'sold', 'damaged', 'sample',
     ]);
     if (!REVERSIBLE_REASONS.has(tx.reason)) {
       return res.status(400).json({ error: `Cannot reverse a '${tx.reason}' entry.` });
@@ -3044,11 +3172,14 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
       if (job && job.issuance_status === 'issued' && (job.stage_index || 0) === 0) {
+        const cleanParticulars = { ...(job.particulars || {}) };
+        delete cleanParticulars.partial_pending_sheets;
         await sql`
           UPDATE jobs
              SET issuance_status = 'pending',
                  issued_at = NULL,
-                 issued_by_id = NULL
+                 issued_by_id = NULL,
+                 particulars = ${JSON.stringify(cleanParticulars)}
            WHERE id = ${tx.job_id}
         `;
         jobReverted = true;
