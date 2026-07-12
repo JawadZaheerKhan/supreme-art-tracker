@@ -1607,6 +1607,7 @@
       &#9201; <span id="inv-pending-label">Pending Stock</span>
     </button>
     <button class="btn btn-primary ceo-hide" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
+    <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -3897,6 +3898,7 @@ function renderInvCardHtml(it) {
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
@@ -3941,6 +3943,7 @@ function renderInvBrandRow(it) {
       </div>
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
+        <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
@@ -4699,6 +4702,90 @@ async function saveInvAddStock(id) {
   showSaving(false);
 }
 
+// Manual stock-OUT. Mirrors openInvAddStock but writes a negative change
+// and offers stock-out-flavored reasons. Job Card No. is optional; if it
+// matches a real job, the ledger row links to it (Stock Out report shows
+// the E-<id> automatically) and a currently-pending job flips out of the
+// Pending Stock queue since the store keeper has manually issued the paper.
+function openInvRemoveStock(id) {
+  const it = inventory.find(x => x.id === id); if (!it) return;
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  const ps    = packetSize(it.paper_type);
+  const unit  = packetUnitLabel(it.paper_type);
+  const have  = it.current_balance || 0;
+  const haveP = have / ps;
+  const havePktsStr = (Number.isInteger(haveP) ? haveP : +haveP.toFixed(2)).toLocaleString();
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2 style="color:#991B1B;">Remove Stock</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text)">${esc(label)}</b><br>On hand: <b style="color:#166534;">${havePktsStr} ${unit.toLowerCase()}</b> (${have.toLocaleString()} sheets) &middot; 1 ${unit.slice(0,-1).toLowerCase()} = ${ps} sheets</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Quantity — ${unit}</label>
+        <input type="number" id="stockout-packets" placeholder="0" min="0" step="any" oninput="stockOutQtySync('packets', ${ps})">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Quantity — Sheets *</label>
+        <input type="number" id="stockout-qty" placeholder="0" min="1" oninput="stockOutQtySync('sheets', ${ps})">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Reason</label>
+        <select id="stockout-reason">
+          <option value="sold">Sold / Delivered to customer</option>
+          <option value="damaged">Damaged</option>
+          <option value="sample">Sample</option>
+          <option value="adjustment">Manual adjustment</option>
+          <option value="job-card">Job Card (manual issue)</option>
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Job Card No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-jobcard" placeholder="e.g. E-85 or 85"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stockout-notes" placeholder="Optional details"></div>
+    <div style="font-size:11px;color:var(--text2);margin-top:6px;">Linking a Job Card No. that's currently in Pending Stock will mark that job as issued and remove it from the pending queue.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
+    </div>
+  </div>`);
+}
+function stockOutQtySync(source, ps) {
+  const packetsEl = document.getElementById('stockout-packets');
+  const sheetsEl  = document.getElementById('stockout-qty');
+  if (!packetsEl || !sheetsEl) return;
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
+  } else {
+    const s = parseFloat(sheetsEl.value);
+    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  }
+}
+async function saveInvRemoveStock(id) {
+  const it = inventory.find(x => x.id === id);
+  const qty = parseInt(document.getElementById('stockout-qty').value, 10);
+  if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
+  const have = it ? (it.current_balance || 0) : 0;
+  if (qty > have) { await alertDialog({ title: 'Not enough stock', message: `On hand is ${have.toLocaleString()} sheets. Requested ${qty.toLocaleString()}. Reconcile the count first (Edit → Adjust by).`, kind: 'warn' }); return; }
+  const data = {
+    change: -qty,
+    reason: document.getElementById('stockout-reason').value,
+    notes:  document.getElementById('stockout-notes').value.trim(),
+    job_card: document.getElementById('stockout-jobcard').value.trim() || null,
+  };
+  showSaving(true);
+  try {
+    const result = await api('POST', `/api/inventory/${id}/transactions`, data);
+    await loadInventory();
+    // A manual stock-out may have flipped a pending job to issued — refresh
+    // jobs so the Pending Stock badge and the pending list update in place.
+    if (result && result.job_flipped) await loadJobs();
+    closeModal();
+    render();
+    notify(`−${qty.toLocaleString()} sheets removed${result && result.job_flipped ? ' · Job E-' + result.linked_job_id + ' flipped out of Pending Stock' : ''}`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
 // ── Bulk Stock In ────────────────────────────────────────────
 // Lets the user log a shipment with several papers at once. Each row is
 // matched against existing inventory by (paper_type, size, gsm, brand); a
@@ -4863,6 +4950,176 @@ async function saveBulkStockIn() {
   closeModal();
   showSaving(false);
   if (errored === 0) notify(`Stock in saved · ${saved} row${saved===1?'':'s'}`);
+  else notify(`${saved} saved · ${errored} failed (see console)`);
+}
+
+// ── Bulk Stock Out ───────────────────────────────────────────
+// Same shape as Bulk Stock In but every row MUST match an existing
+// inventory item (paper_type + size + gsm + brand) — you can't stock out
+// something the app doesn't know exists. Extras vs Stock In: per-row
+// Reason dropdown and an optional Job Card No. that auto-links + flips
+// pending jobs, matching the single-item flow.
+let bulkOutRowSeq = 0;
+function bulkOutRowHtml(idx) {
+  return `
+    <tr data-row="${idx}">
+      <td><select class="bulkout-paper-type" onchange="bulkOutRowSync(${idx})">${PAPER_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></td>
+      <td><input type="text" class="bulkout-size"  list="inv-sizes"  placeholder="e.g. 25x36"></td>
+      <td><input type="text" class="bulkout-gsm"   list="inv-gsms"   placeholder="e.g. 300"></td>
+      <td><input type="text" class="bulkout-brand" list="inv-brands" placeholder="e.g. Century"></td>
+      <td>
+        <select class="bulkout-reason">
+          <option value="sold">Sold</option>
+          <option value="damaged">Damaged</option>
+          <option value="sample">Sample</option>
+          <option value="adjustment">Adjustment</option>
+          <option value="job-card">Job Card</option>
+        </select>
+      </td>
+      <td><input type="text" class="bulkout-jobcard" placeholder="E-85 (optional)"></td>
+      <td class="col-qty"><input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')"></td>
+      <td class="col-qty"><input type="number" class="bulkout-qty" placeholder="0" min="1" oninput="bulkOutRowSync(${idx}, 'sheets')"></td>
+      <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkOutRemoveRow(${idx})" title="Remove row">×</button></td>
+    </tr>`;
+}
+function bulkOutRowSync(idx, source) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const ptype = tr.querySelector('.bulkout-paper-type').value;
+  const ps = packetSize(ptype);
+  const packetsEl = tr.querySelector('.bulkout-packets');
+  const sheetsEl  = tr.querySelector('.bulkout-qty');
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
+  } else if (source === 'sheets') {
+    const s = parseFloat(sheetsEl.value);
+    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  } else {
+    const p = parseFloat(packetsEl.value);
+    if (!isNaN(p)) sheetsEl.value = Math.round(p * ps);
+    else {
+      const s = parseFloat(sheetsEl.value);
+      if (!isNaN(s)) packetsEl.value = +(s / ps).toFixed(2);
+    }
+  }
+}
+function openBulkStockOut() {
+  bulkOutRowSeq = 0;
+  const rows = [0, 1, 2].map(() => bulkOutRowHtml(bulkOutRowSeq++)).join('');
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2 style="color:#991B1B;">Stock Out · Bulk</h2>
+    ${invDatalistsHtml()}
+    <div class="form-group"><label class="form-label">Reference (optional)</label><input type="text" id="bulkout-ref" placeholder="e.g. DC-2026-042"></div>
+    <div class="form-group"><label class="form-label">Notes (applied to every row)</label><input type="text" id="bulkout-notes" placeholder="Optional shared notes"></div>
+    <table class="bulk-table" id="bulkout-table">
+      <thead>
+        <tr>
+          <th>Paper Type</th>
+          <th>Size</th>
+          <th>GSM</th>
+          <th>Brand</th>
+          <th>Reason</th>
+          <th>Job Card No.</th>
+          <th style="text-align:right;">Packets / Reams</th>
+          <th style="text-align:right;">Sheets</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="bulkout-rows">${rows}</tbody>
+    </table>
+    <div style="margin-top:8px;">
+      <button class="btn btn-sm" onclick="bulkOutAddRow()">+ Add Row</button>
+    </div>
+    <div class="bulk-summary">Each row must match an existing inventory item by Paper Type + Size + GSM + Brand — unknown combinations are rejected (use Bulk Stock In first to create them). If a row's on-hand is less than the requested Sheets, the row is rejected. Job Card No. is optional; a valid pending-stock job will be marked issued when the stock-out row matches its paper.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveBulkStockOut()" style="background:#DC2626;border-color:#DC2626;">Remove All</button>
+    </div>
+  </div>`);
+}
+function bulkOutAddRow() {
+  const tbody = document.getElementById('bulkout-rows');
+  if (!tbody) return;
+  tbody.insertAdjacentHTML('beforeend', bulkOutRowHtml(bulkOutRowSeq++));
+}
+function bulkOutRemoveRow(idx) {
+  const tbody = document.getElementById('bulkout-rows');
+  const row = tbody && tbody.querySelector(`tr[data-row="${idx}"]`);
+  if (!row) return;
+  if (tbody.children.length <= 1) {
+    row.querySelectorAll('input').forEach(i => i.value = '');
+    return;
+  }
+  row.remove();
+}
+async function saveBulkStockOut() {
+  const tbody = document.getElementById('bulkout-rows');
+  if (!tbody) return;
+  const ref     = document.getElementById('bulkout-ref').value.trim();
+  const notesIn = document.getElementById('bulkout-notes').value.trim();
+  const sharedNote = [ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
+
+  // Pass 1: gather + validate. We match every row against inventory and
+  // check the on-hand balance BEFORE writing anything, so no partial
+  // deductions if a later row is bad.
+  const plan = [];
+  for (const tr of tbody.querySelectorAll('tr')) {
+    const paper_type = tr.querySelector('.bulkout-paper-type').value;
+    const size       = tr.querySelector('.bulkout-size').value.trim();
+    const gsm        = tr.querySelector('.bulkout-gsm').value.trim();
+    const brand      = tr.querySelector('.bulkout-brand').value.trim();
+    const reason     = tr.querySelector('.bulkout-reason').value;
+    const jobCard    = tr.querySelector('.bulkout-jobcard').value.trim();
+    const qty        = parseInt(tr.querySelector('.bulkout-qty').value, 10) || 0;
+    if (!size && !gsm && !brand && !jobCard && !qty) continue; // empty row
+    if (!qty || qty <= 0) {
+      await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
+    }
+    const match = inventory.find(it =>
+      it.paper_type === paper_type &&
+      (it.size||'')  === size &&
+      (it.gsm||'')   === gsm &&
+      (it.brand||'') === brand
+    );
+    if (!match) {
+      await alertDialog({ title: 'Unknown item', message: `No inventory item matches ${paper_type} · ${size||'—'} · ${gsm||'—'} · ${brand||'—'}. Bulk Stock Out can't create new items. Fix the row or add stock first via Bulk Stock In.`, kind: 'warn' }); return;
+    }
+    const have = match.current_balance || 0;
+    if (qty > have) {
+      await alertDialog({ title: 'Not enough stock', message: `${paper_type} · ${size||'—'} · ${gsm||'—'} · ${brand||'—'}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
+    }
+    plan.push({ match, reason, jobCard, qty });
+  }
+  if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
+
+  showSaving(true);
+  let saved = 0, errored = 0, flipped = 0;
+  for (const p of plan) {
+    try {
+      const result = await api('POST', `/api/inventory/${p.match.id}/transactions`, {
+        change: -p.qty,
+        reason: p.reason,
+        notes:  sharedNote || null,
+        job_card: p.jobCard || null,
+      });
+      saved++;
+      if (result && result.job_flipped) flipped++;
+    } catch (e) {
+      console.error('Bulk stock-out row failed:', p, e);
+      errored++;
+    }
+  }
+  await loadInventory();
+  if (flipped) await loadJobs();
+  const stockOutPane = document.getElementById('rt-stock-out');
+  if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
+    loadStockMovement('out');
+  }
+  closeModal();
+  render();
+  showSaving(false);
+  if (errored === 0) notify(`Stock out saved · ${saved} row${saved===1?'':'s'}${flipped ? ' · ' + flipped + ' pending job(s) flipped to issued' : ''}`);
   else notify(`${saved} saved · ${errored} failed (see console)`);
 }
 

@@ -2923,26 +2923,80 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { change, reason, notes } = req.body;
+    const { change, reason, notes, job_card } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
     const itemId = parseInt(id, 10);
+
+    // Optional Job Card No. resolution: accepts "E-85" or "85". If the job
+    // exists (not soft-deleted) the ledger row gets job_id set so the Stock
+    // Out report's Job column populates naturally. Bad input silently falls
+    // through with jobId=null and the raw string preserved in notes.
+    let jobId = null;
+    let jobRow = null;
+    if (job_card) {
+      const m = String(job_card).match(/(\d+)/);
+      if (m) {
+        const candidate = parseInt(m[1], 10);
+        const rows = await sql`SELECT id, issuance_status, inventory_item_id FROM jobs WHERE id = ${candidate} AND deleted_at IS NULL`;
+        if (rows[0]) { jobId = candidate; jobRow = rows[0]; }
+      }
+    }
+
+    // Overdraw guard for stock-outs. Balance may not go negative — if the
+    // shelf doesn't have it, the store keeper needs to reconcile the count
+    // (via a balance correction) before issuing.
+    if (delta < 0) {
+      const bal = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
+      const have = bal[0] ? (bal[0].current_balance || 0) : 0;
+      if (have + delta < 0) {
+        return res.status(400).json({ error: `Not enough stock — on hand ${have.toLocaleString()} sheets, requested ${Math.abs(delta).toLocaleString()} sheets.` });
+      }
+    }
+
+    // Compose notes: if the raw job_card string didn't resolve to a job,
+    // preserve it as a plain-text tag so the record still shows what the
+    // user typed.
+    let finalNotes = notes || null;
+    if (job_card && !jobId) {
+      finalNotes = [finalNotes, `Job Card: ${String(job_card).trim()}`].filter(Boolean).join(' · ');
+    }
+    const finalReason = reason || (delta > 0 ? 'delivery' : 'adjustment');
+
     await applyInventoryChange(sql, {
       itemId,
       change: delta,
-      reason: reason || (delta > 0 ? 'delivery' : 'adjustment'),
-      jobId: null,
-      notes: notes || null,
+      reason: finalReason,
+      jobId,
+      notes: finalNotes,
       user: req.user,
     });
+
+    // If this manual stock-out fulfils a currently-pending job, flip it to
+    // 'issued' so it disappears from Pending Stock. The store keeper has
+    // effectively bypassed the Issue Stock button; the outcome must match.
+    let jobFlipped = false;
+    if (delta < 0 && jobRow && jobRow.issuance_status === 'pending') {
+      await sql`
+        UPDATE jobs SET issuance_status='issued', issued_at=NOW(), issued_by_id=${req.user?.id || null}
+        WHERE id=${jobRow.id}
+      `;
+      jobFlipped = true;
+    }
+
     const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
     const it = refreshed[0];
     if (it) {
       const label = `${it.paper_type}${it.size?' '+it.size:''}${it.gsm?' '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
       const sign = delta > 0 ? '+' : '';
-      await logAudit(sql, req, { action: 'inventory.stock', entityType: 'inventory', entityId: it.id, summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${reason || (delta>0?'delivery':'adjustment')})` });
+      await logAudit(sql, req, {
+        action: 'inventory.stock',
+        entityType: 'inventory',
+        entityId: it.id,
+        summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${finalReason})${jobId ? ` · Job E-${jobId}` : ''}${jobFlipped ? ' · Job flipped out of Pending Stock' : ''}`,
+      });
     }
-    res.json(it);
+    res.json({ ...(it || {}), job_flipped: jobFlipped, linked_job_id: jobId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
