@@ -1091,6 +1091,10 @@
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   input[type=text], input[type=date], input[type=number], select.form-select, textarea.form-ta { width: 100%; padding: 8px 11px; font-size: 13px; border: 1px solid var(--border2); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
   textarea.form-ta { min-height: 65px; resize: vertical; }
+  /* Force lowercase display on fields tagged .lc-input. Paired with the
+     input handler that lowercases .value on every keystroke and the
+     server-side toLowerCase() on save. */
+  .lc-input { text-transform: lowercase; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
   .section-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 7px; margin: 8px 0; }
   .sec-btn { padding: 10px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--bg); text-align: center; font-size: 12px; font-weight: 500; color: var(--text2); transition: all 0.12s; font-family: var(--font); }
@@ -2077,7 +2081,7 @@ function jobCoatingsState(j, allowedSet) {
   const pendingForMe = allowedSet ? pending.filter(c => allowedSet.has(c)) : pending;
   return { planned, done: doneEntries, pending, pendingForMe };
 }
-const PAPERS  = ['Bleach Board','Duplex Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
+const PAPERS  = ['bleach board','duplex board','art card','art paper','offset paper','half white paper'];
 // Fallback list — used only until printingMachines loads from the server.
 // The Job Card Machine dropdown normally pulls from Users → Operators
 // (any active operator with the 'printing' role).
@@ -2087,15 +2091,18 @@ const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Laminatio
 // Coatings printed on the physical job card, in paper-card order (two rows)
 const PRINT_COATINGS_ROW1 = ['UV','Spot UV','Varnish','Lacquer','Lamination'];
 const PRINT_COATINGS_ROW2 = ['Emboss','Color Seal','Dripup','Cylinder Emboss','Hot Foiling'];
-const PAPER_TYPES = ['Bleach Board','Duplex Board','Art Card','Art Paper','Offset Paper','Off-White'];
+const PAPER_TYPES = ['bleach board','duplex board','art card','art paper','offset paper','off-white'];
 
 // Packet conventions:
 //   Cards  → 1 Packet = 100 sheets (Bleach Board, Duplex Board, Art Card)
 //   Papers → 1 Ream   = 500 sheets (Art Paper, Off-White, Offset Paper)
 // The DB always stores sheets — packets/reams are just a friendlier input
 // unit at the form layer.
-const PAPER_TYPES_REAM = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
-function isReamPaper(paperType) { return PAPER_TYPES_REAM.has(paperType); }
+const PAPER_TYPES_REAM = new Set(['art paper', 'off-white', 'offset paper']);
+// Case-insensitive lookup so legacy jobs whose paper_type was saved in
+// mixed case still resolve to the right packet size after the v2026-07-13
+// lowercase migration.
+function isReamPaper(paperType) { return PAPER_TYPES_REAM.has(String(paperType || '').toLowerCase()); }
 function packetSize(paperType)  { return isReamPaper(paperType) ? 500 : 100; }
 function packetUnitLabel(paperType) { return isReamPaper(paperType) ? 'Reams' : 'Packets'; }
 
@@ -4235,9 +4242,9 @@ function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+
       <option value="__add_new__">${addLabel}</option>
       ${manageOption}
     </select>
-    <input type="text" id="${id}__new"
+    <input type="text" id="${id}__new" class="lc-input"
            placeholder="${esc(placeholder)}"
-           oninput="document.getElementById('${id}').value=this.value${onChangeCall}"
+           oninput="document.getElementById('${id}').value=this.value.toLowerCase()${onChangeCall}"
            style="display:none;margin-top:6px;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;">
   `;
 }
@@ -4347,7 +4354,7 @@ function openInvAdd() {
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" class="lc-input" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
     </div>
     <div class="form-group">
@@ -4536,7 +4543,7 @@ async function openInvEdit(id) {
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" value="${esc(it.size||'')}"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" class="lc-input" list="inv-sizes" value="${esc(it.size||'')}"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
     <div class="form-group">
@@ -5681,7 +5688,7 @@ function printStockReport() {
 // for opening balance, then IN/OUT/balance buckets across the chosen range
 // (monthly OR weekly), then totals (consumption, current stock, weight) and
 // projections (stock required next period, total imports).
-let stockSummaryState = { paperType: 'Bleach Board', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+let stockSummaryState = { paperType: 'bleach board', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
 
 // Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
 // {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
@@ -6927,7 +6934,7 @@ function printImports() {
 // paper consumed, on which press, with what finishing.
 // from/to filter the CREATED date; dfrom/dto filter the DELIVERED date;
 // q matches job number ("59" / "E-59") or job name.
-const jobsReportState = { from: '', to: '', client: '', dfrom: '', dto: '', q: '' };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -6940,13 +6947,13 @@ function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
   // Default window: last 30 days through today. Only initialize on first open
-  // (from === '') so the user's filters persist across navigations.
-  if (!jobsReportState.from) {
+  // (dfrom === '') so the user's filters persist across navigations.
+  if (!jobsReportState.dfrom) {
     const today = new Date();
     const start = new Date(today); start.setDate(today.getDate() - 29);
     const iso = localDateISO;
-    jobsReportState.from = iso(start);
-    jobsReportState.to   = iso(today);
+    jobsReportState.dfrom = iso(start);
+    jobsReportState.dto   = iso(today);
   }
   // Distinct client list for the company filter — only from jobs that ARE
   // delivered, since this report only shows delivered jobs.
@@ -6965,14 +6972,6 @@ function openJobsReport() {
       <div>
         <div class="dash-flbl">Search (Job No. / Name)</div>
         <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
-      </div>
-      <div>
-        <div class="dash-flbl">Created from</div>
-        <input class="filter" type="date" id="jr-from" value="${jobsReportState.from}" onchange="setJrFrom(this.value)">
-      </div>
-      <div>
-        <div class="dash-flbl">Created to</div>
-        <input class="filter" type="date" id="jr-to" value="${jobsReportState.to}" onchange="setJrTo(this.value)">
       </div>
       <div>
         <div class="dash-flbl">Delivered from</div>
@@ -6994,8 +6993,6 @@ function openJobsReport() {
   `;
   renderJobsReport();
 }
-function setJrFrom(v)   { jobsReportState.from = v;   jobsReportSel.clear(); renderJobsReport(); }
-function setJrTo(v)     { jobsReportState.to = v;     jobsReportSel.clear(); renderJobsReport(); }
 function setJrDFrom(v)  { jobsReportState.dfrom = v;  jobsReportSel.clear(); renderJobsReport(); }
 function setJrDTo(v)    { jobsReportState.dto = v;    jobsReportSel.clear(); renderJobsReport(); }
 function setJrQ(v)      { jobsReportState.q = v;      jobsReportSel.clear(); renderJobsReport(); }
@@ -7070,10 +7067,8 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { from, to, client, dfrom, dto, q } = jobsReportState;
+  const { client, dfrom, dto, q } = jobsReportState;
   const lastStageIdx = STAGES.length - 1;       // Delivered
-  const fromDate = from ? new Date(from + 'T00:00:00') : null;
-  const toDate   = to   ? new Date(to   + 'T23:59:59') : null;
   // Search: "59" or "e-59" matches the job number; anything else matches
   // the job name (case-insensitive substring).
   const qNorm  = String(q || '').trim().toLowerCase();
@@ -7088,9 +7083,6 @@ function buildJobsReportRows() {
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
       if (!idHit && !nameHit) continue;
     }
-    const createdAt = j.created_at ? new Date(j.created_at) : null;
-    if (fromDate && (!createdAt || createdAt < fromDate)) continue;
-    if (toDate   && (!createdAt || createdAt > toDate))   continue;
     // Delivery date — old jobs have stage.time in en-PK locale ("d/m/yyyy,
     // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
     // both into the app-wide dd/mm/yyyy HH:MM so the report column is
@@ -7339,7 +7331,7 @@ function printJobsReport() {
           <div style="font-size:10pt;">Jobs Report — Delivered</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.from))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.to))}</div>
+          <div><b>Delivered from:</b> ${esc(fmtDMY(jobsReportState.dfrom))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto))}</div>
           <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
@@ -11387,9 +11379,9 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
+        <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g"></td>
         <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
-        <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" value="${v(j.client)}" placeholder="National Foods"></td>
+        <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
@@ -11720,6 +11712,21 @@ document.addEventListener('mousedown', (e) => {
   document.querySelectorAll('details.job-more[open]').forEach(d => {
     if (!d.contains(e.target)) d.open = false;
   });
+});
+
+// Force-lowercase every input tagged `.lc-input` as the user types. The
+// server also lowercases on save (belt + braces) so an old browser or
+// programmatic value-set can't sneak a capital in. Cursor is preserved so
+// mid-word edits don't jump to the end.
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (!el || !el.classList || !el.classList.contains('lc-input')) return;
+  const v = el.value || '';
+  const low = v.toLowerCase();
+  if (v === low) return;
+  const pos = el.selectionStart;
+  el.value = low;
+  try { el.setSelectionRange(pos, pos); } catch {}
 });
 
 // Pre-save stock check — fires before POST/PUT. Returns true if okay to proceed,
