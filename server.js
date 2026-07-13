@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-03-multi-roles';
+const SCHEMA_VERSION = 'v2026-07-13-all-lowercase';
 
 async function initDb() {
   try {
@@ -617,6 +617,23 @@ async function initDb() {
     await sql`UPDATE inventory_items   SET paper_type = 'Duplex Board' WHERE paper_type = 'Box Board'`;
     await sql`UPDATE inventory_imports SET paper_type = 'Bleach Board' WHERE paper_type = 'Bleach Card'`;
     await sql`UPDATE inventory_imports SET paper_type = 'Duplex Board' WHERE paper_type = 'Box Board'`;
+
+    // Case-normalization pass (v2026-07-13): every human-typed identifier
+    // — paper_type, brand, size, supplier on inventory rows; name, client
+    // on jobs — is stored as lowercase from here on. This one-time
+    // UPDATE collapses the historical duplicates ("NINGBO"/"Ningbo"/
+    // "ningbo" all becoming "ningbo") so the dropdowns and reports stop
+    // showing the same entity as three different things.
+    await sql`UPDATE inventory_items SET paper_type = LOWER(TRIM(paper_type)) WHERE paper_type IS NOT NULL AND paper_type <> LOWER(TRIM(paper_type))`;
+    await sql`UPDATE inventory_items SET brand      = LOWER(TRIM(brand))      WHERE brand      IS NOT NULL AND brand      <> LOWER(TRIM(brand))`;
+    await sql`UPDATE inventory_items SET size       = LOWER(TRIM(size))       WHERE size       IS NOT NULL AND size       <> LOWER(TRIM(size))`;
+    await sql`UPDATE inventory_items SET supplier   = LOWER(TRIM(supplier))   WHERE supplier   IS NOT NULL AND supplier   <> LOWER(TRIM(supplier))`;
+    await sql`UPDATE inventory_imports SET paper_type = LOWER(TRIM(paper_type)) WHERE paper_type IS NOT NULL AND paper_type <> LOWER(TRIM(paper_type))`;
+    await sql`UPDATE inventory_imports SET brand      = LOWER(TRIM(brand))      WHERE brand      IS NOT NULL AND brand      <> LOWER(TRIM(brand))`;
+    await sql`UPDATE inventory_imports SET size       = LOWER(TRIM(size))       WHERE size       IS NOT NULL AND size       <> LOWER(TRIM(size))`;
+    await sql`UPDATE inventory_imports SET supplier   = LOWER(TRIM(supplier))   WHERE supplier   IS NOT NULL AND supplier   <> LOWER(TRIM(supplier))`;
+    await sql`UPDATE jobs SET name   = LOWER(TRIM(name))   WHERE name   IS NOT NULL AND name   <> LOWER(TRIM(name))`;
+    await sql`UPDATE jobs SET client = LOWER(TRIM(client)) WHERE client IS NOT NULL AND client <> LOWER(TRIM(client))`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -2039,7 +2056,7 @@ function parseSheets(v) {
 // 1/2 cut). Inventory tracks RAW sheets, so we must deduct in raw units —
 // and Quantity of Packets is the only field that maps cleanly to raw stock.
 // Returns 0 if packets is missing/zero; caller must surface a clear error.
-const REAM_PAPERS = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
+const REAM_PAPERS = new Set(['art paper', 'off-white', 'offset paper']);
 function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
 function jobDeductionSheets({ paperType, particulars }) {
   const ps      = packetSize(paperType || '');
@@ -2099,7 +2116,12 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
+    // Case rule (v2026-07-13): name and client are stored lowercase so
+    // "Fenbro" / "FENBRO" / "fenbro" all collapse to one canonical value
+    // in searches, dropdowns, and reports.
+    if (name)   name   = String(name).trim().toLowerCase();
+    if (client) client = String(client).trim().toLowerCase();
     // New jobs are created with issuance_status='pending'. Stock is NOT
     // deducted at creation time — a stock-role user (or admin) must call
     // POST /api/jobs/:id/issue-stock to deduct inventory and flip status.
@@ -2126,7 +2148,9 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
+    if (name)   name   = String(name).trim().toLowerCase();
+    if (client) client = String(client).trim().toLowerCase();
 
     // Read prior values for inventory adjustment AND issuance status — if the
     // job is still 'pending' (stock never issued), edits don't touch inventory
@@ -2682,7 +2706,12 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
     // all save as NINGBO. The case-insensitive duplicate check below still
     // catches dupes against the existing data even if old rows aren't
     // yet uppercase.
-    if (brand) brand = String(brand).trim().toUpperCase();
+    // Case rule (v2026-07-13): every human-typed identifier is stored
+    // lowercase so the same value can't appear as "ningbo" and "NINGBO".
+    if (brand)      brand      = String(brand).trim().toLowerCase();
+    if (size)       size       = String(size).trim().toLowerCase();
+    if (paper_type) paper_type = String(paper_type).trim().toLowerCase();
+    if (supplier)   supplier   = String(supplier).trim().toLowerCase();
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
 
@@ -2749,7 +2778,12 @@ app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
     let { paper_type, size, gsm, brand, reorder_threshold, current_balance, correction_notes, supplier, expected_balance_sheets } = req.body;
     // Same uppercase normalization as POST — keeps brand storage consistent
     // (Ningbo / ningbo / NINGBO all save as NINGBO).
-    if (brand) brand = String(brand).trim().toUpperCase();
+    // Case rule (v2026-07-13): every human-typed identifier is stored
+    // lowercase so the same value can't appear as "ningbo" and "NINGBO".
+    if (brand)      brand      = String(brand).trim().toLowerCase();
+    if (size)       size       = String(size).trim().toLowerCase();
+    if (paper_type) paper_type = String(paper_type).trim().toLowerCase();
+    if (supplier)   supplier   = String(supplier).trim().toLowerCase();
 
     // Snapshot the pre-edit balance — needed so an admin-only balance
     // correction below can compute the delta.
@@ -3571,7 +3605,7 @@ app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) =>
 
     // Packets → sheets using the paper-type convention (Cards=100, Papers=500).
     // Mirrors packetSize() in the frontend.
-    const reamSet = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
+    const reamSet = new Set(['art paper', 'off-white', 'offset paper']);
     const perPack = reamSet.has(imp.paper_type) ? 500 : 100;
     const pkts = Number.isFinite(overridePackets) && overridePackets > 0 ? overridePackets : parseFloat(imp.packets);
     const sheets = Math.round(pkts * perPack);

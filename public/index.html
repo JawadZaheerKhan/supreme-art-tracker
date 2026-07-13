@@ -1091,6 +1091,10 @@
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   input[type=text], input[type=date], input[type=number], select.form-select, textarea.form-ta { width: 100%; padding: 8px 11px; font-size: 13px; border: 1px solid var(--border2); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
   textarea.form-ta { min-height: 65px; resize: vertical; }
+  /* Force lowercase display on fields tagged .lc-input. Paired with the
+     input handler that lowercases .value on every keystroke and the
+     server-side toLowerCase() on save. */
+  .lc-input { text-transform: lowercase; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
   .section-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 7px; margin: 8px 0; }
   .sec-btn { padding: 10px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--bg); text-align: center; font-size: 12px; font-weight: 500; color: var(--text2); transition: all 0.12s; font-family: var(--font); }
@@ -2076,7 +2080,7 @@ function jobCoatingsState(j, allowedSet) {
   const pendingForMe = allowedSet ? pending.filter(c => allowedSet.has(c)) : pending;
   return { planned, done: doneEntries, pending, pendingForMe };
 }
-const PAPERS  = ['Bleach Board','Duplex Board','Art Card','Art Paper','Offset Paper','Half White Paper'];
+const PAPERS  = ['bleach board','duplex board','art card','art paper','offset paper','half white paper'];
 // Fallback list — used only until printingMachines loads from the server.
 // The Job Card Machine dropdown normally pulls from Users → Operators
 // (any active operator with the 'printing' role).
@@ -2086,15 +2090,18 @@ const COATING_OPTS = ['UV','Spot UV','Varnish','Lacquer','Water Base','Laminatio
 // Coatings printed on the physical job card, in paper-card order (two rows)
 const PRINT_COATINGS_ROW1 = ['UV','Spot UV','Varnish','Lacquer','Lamination'];
 const PRINT_COATINGS_ROW2 = ['Emboss','Color Seal','Dripup','Cylinder Emboss','Hot Foiling'];
-const PAPER_TYPES = ['Bleach Board','Duplex Board','Art Card','Art Paper','Offset Paper','Off-White'];
+const PAPER_TYPES = ['bleach board','duplex board','art card','art paper','offset paper','off-white'];
 
 // Packet conventions:
 //   Cards  → 1 Packet = 100 sheets (Bleach Board, Duplex Board, Art Card)
 //   Papers → 1 Ream   = 500 sheets (Art Paper, Off-White, Offset Paper)
 // The DB always stores sheets — packets/reams are just a friendlier input
 // unit at the form layer.
-const PAPER_TYPES_REAM = new Set(['Art Paper', 'Off-White', 'Offset Paper']);
-function isReamPaper(paperType) { return PAPER_TYPES_REAM.has(paperType); }
+const PAPER_TYPES_REAM = new Set(['art paper', 'off-white', 'offset paper']);
+// Case-insensitive lookup so legacy jobs whose paper_type was saved in
+// mixed case still resolve to the right packet size after the v2026-07-13
+// lowercase migration.
+function isReamPaper(paperType) { return PAPER_TYPES_REAM.has(String(paperType || '').toLowerCase()); }
 function packetSize(paperType)  { return isReamPaper(paperType) ? 500 : 100; }
 function packetUnitLabel(paperType) { return isReamPaper(paperType) ? 'Reams' : 'Packets'; }
 
@@ -4234,9 +4241,9 @@ function invComboHtml({ id, options, value = '', placeholder = '', addLabel = '+
       <option value="__add_new__">${addLabel}</option>
       ${manageOption}
     </select>
-    <input type="text" id="${id}__new"
+    <input type="text" id="${id}__new" class="lc-input"
            placeholder="${esc(placeholder)}"
-           oninput="document.getElementById('${id}').value=this.value${onChangeCall}"
+           oninput="document.getElementById('${id}').value=this.value.toLowerCase()${onChangeCall}"
            style="display:none;margin-top:6px;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;">
   `;
 }
@@ -4346,7 +4353,7 @@ function openInvAdd() {
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" class="lc-input" list="inv-sizes" placeholder="e.g. 25x36" oninput="checkInvDuplicate()"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300" oninput="checkInvDuplicate()"></div>
     </div>
     <div class="form-group">
@@ -4535,7 +4542,7 @@ async function openInvEdit(id) {
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" list="inv-sizes" value="${esc(it.size||'')}"></div>
+      <div class="form-group"><label class="form-label">Size</label><input type="text" id="inv-size" class="lc-input" list="inv-sizes" value="${esc(it.size||'')}"></div>
       <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" value="${esc(it.gsm||'')}"></div>
     </div>
     <div class="form-group">
@@ -5680,7 +5687,7 @@ function printStockReport() {
 // for opening balance, then IN/OUT/balance buckets across the chosen range
 // (monthly OR weekly), then totals (consumption, current stock, weight) and
 // projections (stock required next period, total imports).
-let stockSummaryState = { paperType: 'Bleach Board', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+let stockSummaryState = { paperType: 'bleach board', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
 
 // Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
 // {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
@@ -11371,9 +11378,9 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" value="${v(j.name)}" placeholder="e.g. Biscuit Box 200g"></td>
+        <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g"></td>
         <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
-        <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" value="${v(j.client)}" placeholder="National Foods"></td>
+        <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
@@ -11704,6 +11711,21 @@ document.addEventListener('mousedown', (e) => {
   document.querySelectorAll('details.job-more[open]').forEach(d => {
     if (!d.contains(e.target)) d.open = false;
   });
+});
+
+// Force-lowercase every input tagged `.lc-input` as the user types. The
+// server also lowercases on save (belt + braces) so an old browser or
+// programmatic value-set can't sneak a capital in. Cursor is preserved so
+// mid-word edits don't jump to the end.
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (!el || !el.classList || !el.classList.contains('lc-input')) return;
+  const v = el.value || '';
+  const low = v.toLowerCase();
+  if (v === low) return;
+  const pos = el.selectionStart;
+  el.value = low;
+  try { el.setSelectionRange(pos, pos); } catch {}
 });
 
 // Pre-save stock check — fires before POST/PUT. Returns true if okay to proceed,
