@@ -5313,18 +5313,10 @@ async function renderInvHistory(id) {
       const within24 = _tx.getFullYear() === _now.getFullYear() &&
                        _tx.getMonth()    === _now.getMonth() &&
                        _tx.getDate()     === _now.getDate();
-      // Paper-post-printing freeze: once the linked job has reached
-      // Printing (stage >= 1), its job-consumed rows can't be sent back
-      // to the store. Any leftover must go through "Send to Offcut" on
-      // the job card. Server enforces the same rule.
-      const linkedJob = t.job_id ? jobs.find(j => j.id === t.job_id) : null;
-      const linkedJobPrinted = linkedJob && (linkedJob.stage_index || 0) >= 1;
-      const paperCommitted = t.reason === 'job-consumed' && linkedJobPrinted;
       const canReverse =
         REVERSIBLE.has(t.reason) &&
         !isReversal &&
         !hasBeenReversed &&
-        !paperCommitted &&
         (isAdmin() || (canWrite() && within24));
       const reverseTooltip = t.change > 0
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
@@ -5333,9 +5325,7 @@ async function renderInvHistory(id) {
         ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
         : (hasBeenReversed
             ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
-            : (paperCommitted
-                ? `<span style="font-size:10px;color:#78350F;font-weight:700;" title="Job E-${t.job_id} has reached Printing — paper is committed. Use Send to Offcut on the job card for leftovers.">COMMITTED</span>`
-                : ''));
+            : '');
 
       const by = t.user_email ? esc(t.user_email) : '—';
       // Faded look for the original row that has been undone, so the eye
@@ -11904,93 +11894,16 @@ function viewJobCard(id) {
 function openEdit(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
-  // Send to Offcut is only offered once printing has started (stage >= 1)
-  // and only to Production Manager / Admin — matches the server gate.
-  const canOffcut = (j.stage_index || 0) >= 1 && canWriteJobs();
-  const offcutBtn = canOffcut
-    ? `<button class="btn ceo-hide" style="background:#F59E0B;border-color:#F59E0B;color:#78350F;font-weight:700;" onclick="openSendToOffcut(${j.id})">&#8618; Send to Offcut</button>`
-    : '';
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
     ${jobForm(j)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      ${offcutBtn}
       <button class="btn btn-primary" onclick="saveEdit(${j.id})">Save Changes</button>
     </div>
   </div>`);
   updateStockHint();
   renderCutPreview();
-  // Paper is committed once Printing starts — freeze the picker so nobody
-  // can accidentally swap it (the server refuses too).
-  if ((j.stage_index || 0) >= 1) {
-    const search = document.getElementById('paper-search');
-    if (search) {
-      search.readOnly = true;
-      search.title = 'Paper is committed once Printing starts';
-      search.style.background = '#F3F4F6';
-      search.style.cursor = 'not-allowed';
-    }
-  }
-}
-
-// Send leftover paper to Offcut inventory. Only reachable when the job
-// has reached Printing (stage >= 1). Server caps at total issued minus
-// prior offcuts, so multiple declarations for one job stay honest.
-async function openSendToOffcut(id) {
-  const j = jobs.find(x => x.id === id); if (!j) return;
-  if ((j.stage_index || 0) < 1) { notify('Send to Offcut only works after Printing has started.'); return; }
-  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  if (!it) { notify('No source paper linked to this job.'); return; }
-  const ps   = packetSize(it.paper_type);
-  const unit = packetUnitLabel(it.paper_type);
-  const defaultOffcutSize = j.offcut_size || '';
-  openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2 style="color:#78350F;">&#8618; Send Leftover to Offcut · Job E-${id}</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Source: <b>${esc(it.paper_type)}${it.size?' · '+esc(it.size):''}${it.gsm?' · '+esc(it.gsm)+'gsm':''}${it.brand?' · '+esc(it.brand):''}</b><br>1 ${unit.slice(0,-1).toLowerCase()} = ${ps} sheets. Leftover paper goes to an offcut inventory row at the size you enter below; it does NOT return to the source item.</div>
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Quantity — ${unit}</label>
-        <input type="number" id="offcut-packets" placeholder="0" min="0" step="any" oninput="offcutQtySync('packets', ${ps})">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Quantity — Sheets *</label>
-        <input type="number" id="offcut-qty" placeholder="0" min="1" oninput="offcutQtySync('sheets', ${ps})">
-      </div>
-    </div>
-    <div class="form-group"><label class="form-label">Offcut Size *</label><input type="text" id="offcut-size" value="${esc(defaultOffcutSize)}" placeholder="e.g. 20x10"></div>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveSendToOffcut(${id})" style="background:#F59E0B;border-color:#F59E0B;color:#78350F;">Send to Offcut</button>
-    </div>
-  </div>`);
-}
-function offcutQtySync(source, ps) {
-  const packetsEl = document.getElementById('offcut-packets');
-  const sheetsEl  = document.getElementById('offcut-qty');
-  if (!packetsEl || !sheetsEl) return;
-  if (source === 'packets') {
-    const p = parseFloat(packetsEl.value);
-    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
-  } else {
-    const s = parseFloat(sheetsEl.value);
-    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
-  }
-}
-async function saveSendToOffcut(id) {
-  const qty  = parseInt(document.getElementById('offcut-qty').value, 10);
-  const size = (document.getElementById('offcut-size').value || '').trim();
-  if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
-  if (!size) { await alertDialog({ title: 'Offcut size is required', kind: 'warn' }); return; }
-  showSaving(true);
-  try {
-    const result = await api('POST', `/api/jobs/${id}/offcut`, { qty_sheets: qty, offcut_size: size });
-    await loadInventory();
-    closeModal();
-    render();
-    notify(`${qty.toLocaleString()} sheets sent to ${size} offcut · Remaining budget: ${(result.remaining_budget || 0).toLocaleString()} sheets`);
-  } catch (e) { notify('Error: ' + e.message); }
-  showSaving(false);
 }
 
 async function saveEdit(id) {
