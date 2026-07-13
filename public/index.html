@@ -6926,7 +6926,7 @@ function printImports() {
 // paper consumed, on which press, with what finishing.
 // from/to filter the CREATED date; dfrom/dto filter the DELIVERED date;
 // q matches job number ("59" / "E-59") or job name.
-const jobsReportState = { from: '', to: '', client: '', dfrom: '', dto: '', q: '' };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -6939,13 +6939,13 @@ function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
   // Default window: last 30 days through today. Only initialize on first open
-  // (from === '') so the user's filters persist across navigations.
-  if (!jobsReportState.from) {
+  // (dfrom === '') so the user's filters persist across navigations.
+  if (!jobsReportState.dfrom) {
     const today = new Date();
     const start = new Date(today); start.setDate(today.getDate() - 29);
     const iso = localDateISO;
-    jobsReportState.from = iso(start);
-    jobsReportState.to   = iso(today);
+    jobsReportState.dfrom = iso(start);
+    jobsReportState.dto   = iso(today);
   }
   // Distinct client list for the company filter — only from jobs that ARE
   // delivered, since this report only shows delivered jobs.
@@ -6964,14 +6964,6 @@ function openJobsReport() {
       <div>
         <div class="dash-flbl">Search (Job No. / Name)</div>
         <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
-      </div>
-      <div>
-        <div class="dash-flbl">Created from</div>
-        <input class="filter" type="date" id="jr-from" value="${jobsReportState.from}" onchange="setJrFrom(this.value)">
-      </div>
-      <div>
-        <div class="dash-flbl">Created to</div>
-        <input class="filter" type="date" id="jr-to" value="${jobsReportState.to}" onchange="setJrTo(this.value)">
       </div>
       <div>
         <div class="dash-flbl">Delivered from</div>
@@ -6993,8 +6985,6 @@ function openJobsReport() {
   `;
   renderJobsReport();
 }
-function setJrFrom(v)   { jobsReportState.from = v;   jobsReportSel.clear(); renderJobsReport(); }
-function setJrTo(v)     { jobsReportState.to = v;     jobsReportSel.clear(); renderJobsReport(); }
 function setJrDFrom(v)  { jobsReportState.dfrom = v;  jobsReportSel.clear(); renderJobsReport(); }
 function setJrDTo(v)    { jobsReportState.dto = v;    jobsReportSel.clear(); renderJobsReport(); }
 function setJrQ(v)      { jobsReportState.q = v;      jobsReportSel.clear(); renderJobsReport(); }
@@ -7069,10 +7059,8 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { from, to, client, dfrom, dto, q } = jobsReportState;
+  const { client, dfrom, dto, q } = jobsReportState;
   const lastStageIdx = STAGES.length - 1;       // Delivered
-  const fromDate = from ? new Date(from + 'T00:00:00') : null;
-  const toDate   = to   ? new Date(to   + 'T23:59:59') : null;
   // Search: "59" or "e-59" matches the job number; anything else matches
   // the job name (case-insensitive substring).
   const qNorm  = String(q || '').trim().toLowerCase();
@@ -7087,9 +7075,6 @@ function buildJobsReportRows() {
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
       if (!idHit && !nameHit) continue;
     }
-    const createdAt = j.created_at ? new Date(j.created_at) : null;
-    if (fromDate && (!createdAt || createdAt < fromDate)) continue;
-    if (toDate   && (!createdAt || createdAt > toDate))   continue;
     // Delivery date — old jobs have stage.time in en-PK locale ("d/m/yyyy,
     // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
     // both into the app-wide dd/mm/yyyy HH:MM so the report column is
@@ -7338,7 +7323,7 @@ function printJobsReport() {
           <div style="font-size:10pt;">Jobs Report — Delivered</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.from))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.to))}</div>
+          <div><b>Delivered from:</b> ${esc(fmtDMY(jobsReportState.dfrom))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto))}</div>
           <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
