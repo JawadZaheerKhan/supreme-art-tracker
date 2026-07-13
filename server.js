@@ -2132,10 +2132,19 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // job is still 'pending' (stock never issued), edits don't touch inventory
     // at all. Once 'issued', edits auto-adjust the ledger using the same
     // packet-first formula as initial issuance.
-    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size, stage_index FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const newItemId  = inventory_item_id || null;
+    const priorStage = prior[0]?.stage_index || 0;
+
+    // Paper is committed once Printing starts. Refuse a paper swap if the
+    // job has already reached stage >= 1 — any leftover has to be handled
+    // via the Send to Offcut flow, not by rewriting which paper the job
+    // used. Applies to admin too (physical constraint).
+    if (priorStage >= 1 && oldItemId !== newItemId) {
+      return res.status(400).json({ error: `Job E-${id} has already reached Printing — the paper is committed and cannot be changed. Any leftover should be declared via "Send to Offcut" on the job card.` });
+    }
     const oldOffcutSize = prior[0]?.offcut_size || null;
     const newOffcutSize = offcut_size || null;
     // Look up paper types so the packet-multiplier matches what was actually
@@ -2602,6 +2611,75 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, 
       summary: `Rejected +${t.qty} extra packets request for Job E-${id}`,
     });
     res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Send leftover paper to Offcut. Called by the Production Manager (or
+// admin) once printing has started and there's unused paper to route
+// into offcut stock instead of back to the source item. Body:
+//   { qty_sheets: N, offcut_size: "20x10" }
+// Refuses if the job hasn't reached Printing (stage >= 1) or if the
+// cumulative offcut would exceed what was ever issued to the job.
+app.post('/api/jobs/:id/offcut', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const qtySheets  = parseInt(req.body?.qty_sheets, 10);
+    const offcutSize = String(req.body?.offcut_size || '').trim();
+    if (!Number.isFinite(qtySheets) || qtySheets <= 0) return res.status(400).json({ error: 'qty_sheets must be a positive number' });
+    if (!offcutSize) return res.status(400).json({ error: 'offcut_size is required' });
+
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if ((job.stage_index || 0) < 1) {
+      return res.status(400).json({ error: 'Send to Offcut is only available once the job has reached Printing.' });
+    }
+    if (!job.inventory_item_id) {
+      return res.status(400).json({ error: 'Job has no source paper linked — cannot create an offcut.' });
+    }
+    const srcRows = await sql`SELECT * FROM inventory_items WHERE id=${job.inventory_item_id}`;
+    const sourceItem = srcRows[0];
+    if (!sourceItem) return res.status(400).json({ error: 'Source paper item missing.' });
+
+    // Cap: total un-reversed job-consumed sheets minus what we've already
+    // routed to offcuts for this job. Prevents typos from inflating stock.
+    const consumed = await sql`
+      SELECT COALESCE(SUM(-t.change),0) AS issued FROM inventory_transactions t
+      WHERE t.job_id = ${id} AND t.reason = 'job-consumed'
+        AND t.reverses_tx_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+    `;
+    const totalIssued = parseInt(consumed[0]?.issued || 0, 10);
+    const priorOffcut = await sql`
+      SELECT COALESCE(SUM(t.change),0) AS out FROM inventory_transactions t
+      WHERE t.job_id = ${id} AND t.reason = 'job-offcut'
+        AND t.reverses_tx_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+    `;
+    const alreadyOffcut = parseInt(priorOffcut[0]?.out || 0, 10);
+    const remaining = totalIssued - alreadyOffcut;
+    if (qtySheets > remaining) {
+      return res.status(400).json({ error: `Would exceed total issued paper by ${(qtySheets - remaining).toLocaleString()} sheets. Remaining offcut budget for this job: ${remaining.toLocaleString()} sheets (issued ${totalIssued.toLocaleString()}, already routed ${alreadyOffcut.toLocaleString()}).` });
+    }
+
+    const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, offcutSize);
+    await applyInventoryChange(sql, {
+      itemId: offcutItem.id,
+      change: +qtySheets,
+      reason: 'job-offcut',
+      jobId: job.id,
+      notes: `Job E-${job.id}: ${qtySheets} sheets of ${offcutSize} offcut declared by ${req.user.email} at Printing`,
+      user: req.user,
+    });
+    await logAudit(sql, req, {
+      action: 'job.offcut',
+      entityType: 'job',
+      entityId: job.id,
+      summary: `Sent ${qtySheets.toLocaleString()} sheets to ${offcutSize} offcut for Job E-${job.id}`,
+    });
+    res.json({ ok: true, offcut_item_id: offcutItem.id, qty_sheets: qtySheets, remaining_budget: remaining - qtySheets });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -3121,6 +3199,19 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     const existingReversal = await sql`SELECT id FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`;
     if (existingReversal[0]) {
       return res.status(409).json({ error: 'This entry has already been reversed.' });
+    }
+
+    // Paper-post-printing rule: once a job reaches Printing (stage >= 1),
+    // the paper it consumed is physically committed and cannot be refunded
+    // to the store. Any leftover has to be declared via "Send to Offcut"
+    // on the job card instead. Applies to admin too — this is a physical
+    // constraint, not a permission gate.
+    if (tx.reason === 'job-consumed' && tx.job_id) {
+      const jrows = await sql`SELECT stage_index FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
+      const stage = jrows[0] ? (jrows[0].stage_index || 0) : 0;
+      if (stage >= 1) {
+        return res.status(400).json({ error: `Job E-${tx.job_id} has already reached Printing — paper cannot be returned to the store. Use "Send to Offcut" on the job card instead.` });
+      }
     }
 
     // 24-hour window applies to everyone except admin. Stock keepers and
