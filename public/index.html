@@ -1722,7 +1722,7 @@
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
         <div class="rsb-section">Jobs</div>
         <button class="rsb-item active" data-rt="jobs-report" onclick="setReportsTab('jobs-report')">
-          <span class="rsb-icon">&#128196;</span> Delivered Jobs
+          <span class="rsb-icon">&#128196;</span> Jobs
         </button>
         <button class="rsb-item" data-rt="prod-report" onclick="setReportsTab('prod-report')">
           <span class="rsb-icon">&#128202;</span> Production Report
@@ -5747,7 +5747,11 @@ function buildSummaryBuckets(from, to, granularity) {
 // from the Inventory tab's card list: this is dense, sortable, exportable,
 // and aggregates quantities across whatever you tell it to ignore (e.g.
 // "show me 25x36 200gsm Bleach Board across all brands, summed").
-let invReportState = { groupBy: 'consolidated', paperType: '', includeOffcuts: true };
+// from/to narrow the list to items that had at least one ledger movement
+// in the window. Empty means no filter — every item is shown. Balances
+// remain the CURRENT on-hand figure regardless of the range; the range
+// just tells you "which items were active in this period".
+let invReportState = { groupBy: 'consolidated', paperType: '', includeOffcuts: true, from: '', to: '' };
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
@@ -5777,6 +5781,14 @@ function openInventoryReport() {
           ${PAPER_TYPES.map(t => `<option value="${esc(t)}"${invReportState.paperType===t?' selected':''}>${esc(t)}</option>`).join('')}
         </select>
       </div>
+      <div>
+        <div class="dash-flbl">From</div>
+        <input class="filter" type="date" id="ir-from" value="${invReportState.from||''}" onchange="setIRFrom(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">To</div>
+        <input class="filter" type="date" id="ir-to" value="${invReportState.to||''}" onchange="setIRTo(this.value)">
+      </div>
       <label style="font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:6px;padding-bottom:8px;">
         <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
         Include offcuts
@@ -5789,14 +5801,36 @@ function openInventoryReport() {
 function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
 function setIRPaperType(v)       { invReportState.paperType = v;      renderInventoryReport(); }
 function setIRIncludeOffcuts(v)  { invReportState.includeOffcuts = !!v; renderInventoryReport(); }
+async function setIRFrom(v)      { invReportState.from = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
+async function setIRTo(v)        { invReportState.to   = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
+// When a date range is set, fetch transactions in that window once and
+// cache the set of item ids that had any movement in the period.
+// Report rendering then narrows the inventory to that set. Cleared when
+// both fields are empty so the report defaults back to showing every item.
+async function refreshIRActiveItemIds() {
+  const { from, to } = invReportState;
+  if (!from && !to) { invReportState._activeItemIds = null; return; }
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to)   params.set('to',   to);
+  try {
+    const txs = await api('GET', '/api/inventory/transactions?' + params.toString());
+    invReportState._activeItemIds = new Set((txs || []).map(t => t.item_id));
+  } catch (e) {
+    console.error('Inventory Report range fetch failed:', e);
+    invReportState._activeItemIds = new Set();
+  }
+}
 
 // Build report rows from the cached `inventory` list. Groups by the key
 // implied by groupBy. is_offcut is always part of the key — fresh and
 // offcut of the same dimensions stay separate so users can see them apart.
 function buildInventoryReportRows() {
-  const { groupBy, paperType, includeOffcuts } = invReportState;
+  const { groupBy, paperType, includeOffcuts, _activeItemIds } = invReportState;
   let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
   if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
+  // Date range narrows to items with at least one movement in [from, to].
+  if (_activeItemIds instanceof Set) items = items.filter(i => _activeItemIds.has(i.id));
   const keyOf = (i) => {
     const parts = [i.paper_type, i.size || '', i.gsm || '', i.is_offcut ? 'offcut' : 'fresh'];
     if (groupBy === 'brand')    parts.push(i.brand || '');
@@ -6947,15 +6981,8 @@ function openJobsReportPage() {
 function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
-  // Default window: last 30 days through today. Only initialize on first open
-  // (dfrom === '') so the user's filters persist across navigations.
-  if (!jobsReportState.dfrom) {
-    const today = new Date();
-    const start = new Date(today); start.setDate(today.getDate() - 29);
-    const iso = localDateISO;
-    jobsReportState.dfrom = iso(start);
-    jobsReportState.dto   = iso(today);
-  }
+  // No default date range — show every job until the user explicitly
+  // narrows the window with the From / To pickers.
   // Company filter sources from whichever set is currently shown. When
   // browsing Created jobs the dropdown includes companies whose only job
   // is still in-progress (not yet delivered) — otherwise those companies
@@ -6990,11 +7017,11 @@ function openJobsReport() {
         <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
       </div>
       <div>
-        <div class="dash-flbl">${modeLabel} from</div>
+        <div class="dash-flbl">From</div>
         <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
       </div>
       <div>
-        <div class="dash-flbl">${modeLabel} to</div>
+        <div class="dash-flbl">To</div>
         <input class="filter" type="date" id="jr-dto" value="${jobsReportState.dto}" onchange="setJrDTo(this.value)">
       </div>
       <div>
@@ -7361,7 +7388,7 @@ function printJobsReport() {
           <div style="font-size:10pt;">Jobs Report — ${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'}</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'} from:</b> ${esc(fmtDMY(jobsReportState.dfrom))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto))}</div>
+          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.dfrom) || '(any)')} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto) || '(any)')}</div>
           <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
