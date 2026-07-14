@@ -11003,7 +11003,7 @@ function calcTabsHTML(active) {
     <div style="display:flex;gap:6px;margin-bottom:10px;">
       <button class="btn btn-sm" style="flex:1;${active==='paper'?onStyle:offStyle}" onclick="openCalculator()">Paper</button>
       <button class="btn btn-sm" style="flex:1;${active==='job'?onStyle:offStyle}" onclick="openCalculatorJobMode()">Job (PO)</button>
-      <button class="btn btn-sm" style="flex:1;${active==='history'?onStyle:offStyle}" onclick="openCalculatorHistoryMode()">History</button>
+      <button class="btn btn-sm" style="flex:1;${active==='history'?onStyle:offStyle}" onclick="openCalculatorHistoryMode()">Job Data</button>
     </div>`;
 }
 
@@ -11060,38 +11060,215 @@ function jcalcReset() {
   if (out) out.innerHTML = 'Enter PO Qty + Ups to see the result.';
 }
 
-// ── History lookup (Calculator → History tab) ────────────────
-// Quick recall of past jobs: "this job was last printed on what paper, what
-// size, how many ups, which coatings?". Lives in the floating calculator so
-// it's reachable from anywhere — inventory, jobs, reports, while editing a
-// form, etc. Read-only; just shows the specs of historical jobs that match
-// the search.
+// ── Job Data (Calculator → Job Data tab) ─────────────────────
+// Was "History lookup". Now: browse every real job by company, and
+// stash the specs of an UPCOMING job as a lightweight pending record
+// so it's ready to be re-used as a template later. Same jobs table
+// under the hood — a saved-data entry is just a normal pending job
+// with no packets/deadline set yet. When it moves through printing
+// later, its record persists (no duplicate data). Reachable from any
+// screen via the floating calculator popover.
+let _jobDataClientFilter = '';
 function openCalculatorHistoryMode() {
   const pop = document.getElementById('calc-popover');
   if (!pop) return;
+  // Distinct companies from every non-deleted job — this list drives
+  // the top-of-popover filter dropdown.
+  const clients = [...new Set(jobs.map(j => j.client).filter(Boolean))].sort((a,b) => String(a).localeCompare(String(b)));
   pop.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <h2 style="margin:0;font-size:16px;">&#129518; Calculator</h2>
       <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
     </div>
     ${calcTabsHTML('history')}
-    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Look up how a job was made last time — paper, size, ups, coatings.</p>
+    <p style="font-size:11px;color:var(--text2);margin:0 0 10px;">Browse job specs by company, save specs for an upcoming print, or use any entry as the template for a new job.</p>
 
-    <div class="form-group">
-      <label class="form-label">Search</label>
-      <input type="text" id="hlk-search" placeholder="Job name, company, or code…" oninput="hlkRender()" autocomplete="off">
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <div style="flex:1;">
+        <label class="form-label" style="margin-bottom:3px;">Company</label>
+        <select id="jd-client" onchange="_jobDataClientFilter=this.value; jdRender()" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+          <option value="">All companies</option>
+          ${clients.map(c => `<option value="${esc(c)}"${_jobDataClientFilter===c?' selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="flex:1;">
+        <label class="form-label" style="margin-bottom:3px;">Search</label>
+        <input type="text" id="jd-search" class="lc-input" placeholder="Name or code…" oninput="jdRender()" autocomplete="off">
+      </div>
     </div>
 
-    <div id="hlk-out" style="max-height:360px;overflow-y:auto;font-size:12px;"></div>
+    ${canWriteJobs() ? `<button class="btn btn-sm btn-primary" onclick="openSaveJobData()" style="width:100%;margin-bottom:8px;">&#43; Save New Job Data</button>` : ''}
 
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
-      <button class="btn btn-sm" onclick="document.getElementById('hlk-search').value='';hlkRender();">Reset</button>
+    <div id="jd-out" style="max-height:340px;overflow-y:auto;font-size:12px;"></div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+      <button class="btn btn-sm" onclick="_jobDataClientFilter='';document.getElementById('jd-search').value='';document.getElementById('jd-client').value='';jdRender();">Reset</button>
       <button class="btn btn-sm btn-primary" onclick="closeCalculator()">Close</button>
     </div>`;
   pop.style.display = 'block';
-  // Auto-focus the search box so the user can start typing immediately.
-  setTimeout(() => { const s = document.getElementById('hlk-search'); if (s) s.focus(); }, 30);
-  hlkRender();
+  setTimeout(() => { const s = document.getElementById('jd-search'); if (s) s.focus(); }, 30);
+  jdRender();
+}
+
+// Backward-compat alias so any older bookmark / caller still works.
+function hlkRender() { return jdRender(); }
+
+function jdRender() {
+  const out = document.getElementById('jd-out');
+  if (!out) return;
+  const q = (document.getElementById('jd-search')||{}).value.trim().toLowerCase();
+  const client = _jobDataClientFilter;
+  const matches = jobs.filter(j => {
+    if (client && j.client !== client) return false;
+    if (!q) return true;
+    const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
+    return hay.includes(q);
+  }).sort((a,b) => b.id - a.id);
+
+  if (!matches.length) {
+    out.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:10px;">No jobs match.</div>';
+    return;
+  }
+
+  // Group by normalized job name so a repeat-order rolls up.
+  const norm = s => String(s||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const groups = new Map();
+  matches.forEach(j => {
+    const key = norm(j.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(j);
+  });
+
+  const cards = [];
+  for (const [, list] of groups) {
+    if (cards.length >= 20) break;
+    const latest = list[0];
+    const older  = list.slice(1, 5);
+    const coatings = Array.isArray(latest.coatings) ? latest.coatings.filter(Boolean) : [];
+    const p = latest.particulars || {};
+    const colors = p.no_of_colors && p.no_of_colors.quantity ? p.no_of_colors.quantity : '';
+    const spots  = p.spot_colors || '';
+    const dt = latest.dateissued ? fmtDMY(latest.dateissued) : (latest.created_at ? fmtDMY(latest.created_at) : '');
+    const fact = (lbl, val) => val ? `<span style="display:inline-block;margin-right:10px;"><b style="color:var(--text2);font-weight:500;">${lbl}:</b> ${esc(val)}</span>` : '';
+    const canUse = canWriteJobs();
+    cards.push(`
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;margin-bottom:4px;">
+          <div style="font-weight:600;font-size:13px;">${esc(latest.name)}</div>
+          <div style="font-size:11px;color:var(--text2);white-space:nowrap;">E-${latest.id}${dt?' · '+esc(dt):''}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">${esc(latest.client||'')}${latest.jobcode?' · Code '+esc(latest.jobcode):''}</div>
+        <div style="font-size:12px;line-height:1.6;">
+          ${fact('Paper', latest.paper)}
+          ${fact('Size/GSM', latest.size)}
+          ${fact('Ups', latest.ups)}
+          ${fact('Machine', latest.machine)}
+          ${fact('Colors', colors)}
+          ${fact('Spot Colors', spots)}
+          ${coatings.length ? fact('Coatings', coatings.join(', ')) : ''}
+        </div>
+        ${canUse ? `<div style="margin-top:6px;text-align:right;"><button class="btn btn-sm btn-primary" onclick="useJobDataAsTemplate(${latest.id})" style="padding:2px 10px;font-size:11px;">Use for New Job &rarr;</button></div>` : ''}
+        ${older.length ? `
+          <details style="margin-top:6px;">
+            <summary style="cursor:pointer;font-size:11px;color:var(--text2);">${older.length} previous run${older.length===1?'':'s'}</summary>
+            <div style="margin-top:4px;border-top:1px dashed var(--border);padding-top:6px;font-size:11px;color:var(--text2);">
+              ${older.map(j => {
+                const cts = Array.isArray(j.coatings) ? j.coatings.filter(Boolean) : [];
+                const od = j.dateissued ? fmtDMY(j.dateissued) : (j.created_at ? fmtDMY(j.created_at) : '');
+                return `<div style="margin-bottom:4px;">
+                  <b>E-${j.id}</b>${od?' · '+esc(od):''} · ${esc(j.paper||'-')} · ${esc(j.size||'-')} · Ups ${esc(j.ups||'-')}${cts.length?' · '+esc(cts.join(', ')):''}
+                </div>`;
+              }).join('')}
+            </div>
+          </details>` : ''}
+      </div>`);
+  }
+  out.innerHTML = cards.join('');
+}
+
+// Save a lightweight Job Data record — creates a real pending job with
+// just the specs the user knows so far (name, client, paper, size, ups,
+// coatings, no_of_colors, spot_colors). Packets, deadline, PO stay
+// blank and get filled in when the job is ready to actually print.
+function openSaveJobData() {
+  const clientsList = [...new Set(jobs.map(j => j.client).filter(Boolean))].sort();
+  const suggestedClient = _jobDataClientFilter || '';
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
+    <h2>&#43; Save New Job Data</h2>
+    <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">Records the specs so a future print of this job is one click away. Saved as a pending job — no stock is issued.</p>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Job Name *</label><input type="text" id="sjd-name" class="lc-input" placeholder="e.g. biscuit box 200g"></div>
+      <div class="form-group"><label class="form-label">Company *</label><input type="text" id="sjd-client" class="lc-input" list="sjd-client-list" value="${esc(suggestedClient)}" placeholder="e.g. national foods"><datalist id="sjd-client-list">${clientsList.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Paper</label>
+        <select id="sjd-paper"><option value="">—</option>${PAPER_TYPES.map(p => `<option>${esc(p)}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label class="form-label">Size / GSM</label><input type="text" id="sjd-size" class="lc-input" placeholder="e.g. 25x36 / 300gsm"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Ups</label><input type="text" id="sjd-ups" placeholder="e.g. 4"></div>
+      <div class="form-group"><label class="form-label">No. of Colors</label><input type="text" id="sjd-colors" placeholder="e.g. 4"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Spot Colors</label><input type="text" id="sjd-spot" class="lc-input" placeholder="e.g. pms 185c, pms 300c, gold"></div>
+    <div class="form-group"><label class="form-label">Coatings</label>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:12px;">
+        ${COATING_OPTS.map(c => `<label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" name="sjd-coat" value="${esc(c)}"> ${esc(c==='Color Seal'?'Colour Seal':c)}</label>`).join('')}
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="sjd-notes" placeholder="Optional"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveJobData()">Save Job Data</button>
+    </div>
+  </div>`);
+}
+
+async function saveJobData() {
+  const name   = (document.getElementById('sjd-name').value  || '').trim();
+  const client = (document.getElementById('sjd-client').value|| '').trim();
+  if (!name || !client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
+  const paper  = document.getElementById('sjd-paper').value;
+  const size   = (document.getElementById('sjd-size').value  || '').trim();
+  const ups    = (document.getElementById('sjd-ups').value   || '').trim();
+  const colors = (document.getElementById('sjd-colors').value|| '').trim();
+  const spots  = (document.getElementById('sjd-spot').value  || '').trim();
+  const notes  = (document.getElementById('sjd-notes').value || '').trim();
+  const coatings = [...document.querySelectorAll('input[name="sjd-coat"]:checked')].map(c => c.value);
+  const particulars = {};
+  if (colors) particulars.no_of_colors = { quantity: colors };
+  if (spots)  particulars.spot_colors = spots;
+  const payload = {
+    name, client,
+    paper: paper || null, size: size || null,
+    ups: ups || null,
+    coatings, notes,
+    particulars,
+    dateissued: localDateISO(),
+  };
+  showSaving(true);
+  try {
+    const newJob = await api('POST', '/api/jobs', payload);
+    jobs.push(newJob);
+    closeModal();
+    notify(`Saved · Job E-${newJob.id}`);
+    jdRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Take an existing job's specs and open the New Job Card modal
+// prefilled — same shape as the duplicate flow but the source can be
+// any job (delivered, in-progress, or a saved Job Data record).
+function useJobDataAsTemplate(sourceId) {
+  const src = jobs.find(j => j.id === sourceId);
+  if (!src) return;
+  closeCalculator();
+  // Reuse the duplicate flow that already knows how to prefill a
+  // clean New Job form from an existing job — it strips per-run
+  // fields (deadline, PO, dateissued, delqty, stages, log) and keeps
+  // the shared setup fields (paper, size, ups, coatings, particulars).
+  openDuplicateJob(sourceId);
 }
 
 // Build the result list. Groups by job name (case-insensitive trim) so a
@@ -11383,8 +11560,11 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
+        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="3"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
+      </tr>
+      <tr>
+        <td colspan="6"><span class="jc-lbl">Spot Colors</span><input type="text" id="f-spot-colors" class="lc-input" value="${esc((j.particulars||{}).spot_colors||'')}" placeholder="e.g. pms 185c, pms 300c, gold, silver"></td>
       </tr>
       <tr>
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
@@ -11492,6 +11672,7 @@ function collectParticulars() {
   out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
+  out.spot_colors = (document.getElementById('f-spot-colors')||{}).value?.trim() || '';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
   // Preserve the packets top-up ledger through save. Top-ups aren't editable
   // from the form; they're managed via the Pending Stock queue. Losing them
@@ -11812,7 +11993,7 @@ function openDuplicateJob(id) {
   // like Printed Sheets, all the waste columns, Delivered Cartons Qty, and
   // free-text Comments) starts blank on the new job — those are filled in
   // afresh when the actual run happens.
-  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand'];
+  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand', 'no_of_colors', 'spot_colors', 'shade_card'];
   const sp = source.particulars || {};
   const newParticulars = {};
   for (const k of KEEP_PARTICULARS) {
