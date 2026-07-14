@@ -1723,7 +1723,7 @@
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
         <div class="rsb-section">Jobs</div>
         <button class="rsb-item active" data-rt="jobs-report" onclick="setReportsTab('jobs-report')">
-          <span class="rsb-icon">&#128196;</span> Delivered Jobs
+          <span class="rsb-icon">&#128196;</span> Jobs
         </button>
         <button class="rsb-item" data-rt="prod-report" onclick="setReportsTab('prod-report')">
           <span class="rsb-icon">&#128202;</span> Production Report
@@ -5748,7 +5748,11 @@ function buildSummaryBuckets(from, to, granularity) {
 // from the Inventory tab's card list: this is dense, sortable, exportable,
 // and aggregates quantities across whatever you tell it to ignore (e.g.
 // "show me 25x36 200gsm Bleach Board across all brands, summed").
-let invReportState = { groupBy: 'consolidated', paperType: '', includeOffcuts: true };
+// from/to narrow the list to items that had at least one ledger movement
+// in the window. Empty means no filter — every item is shown. Balances
+// remain the CURRENT on-hand figure regardless of the range; the range
+// just tells you "which items were active in this period".
+let invReportState = { groupBy: 'consolidated', paperType: '', includeOffcuts: true, from: '', to: '' };
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
@@ -5778,6 +5782,14 @@ function openInventoryReport() {
           ${PAPER_TYPES.map(t => `<option value="${esc(t)}"${invReportState.paperType===t?' selected':''}>${esc(t)}</option>`).join('')}
         </select>
       </div>
+      <div>
+        <div class="dash-flbl">From</div>
+        <input class="filter" type="date" id="ir-from" value="${invReportState.from||''}" onchange="setIRFrom(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">To</div>
+        <input class="filter" type="date" id="ir-to" value="${invReportState.to||''}" onchange="setIRTo(this.value)">
+      </div>
       <label style="font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:6px;padding-bottom:8px;">
         <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
         Include offcuts
@@ -5790,14 +5802,36 @@ function openInventoryReport() {
 function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
 function setIRPaperType(v)       { invReportState.paperType = v;      renderInventoryReport(); }
 function setIRIncludeOffcuts(v)  { invReportState.includeOffcuts = !!v; renderInventoryReport(); }
+async function setIRFrom(v)      { invReportState.from = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
+async function setIRTo(v)        { invReportState.to   = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
+// When a date range is set, fetch transactions in that window once and
+// cache the set of item ids that had any movement in the period.
+// Report rendering then narrows the inventory to that set. Cleared when
+// both fields are empty so the report defaults back to showing every item.
+async function refreshIRActiveItemIds() {
+  const { from, to } = invReportState;
+  if (!from && !to) { invReportState._activeItemIds = null; return; }
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to)   params.set('to',   to);
+  try {
+    const txs = await api('GET', '/api/inventory/transactions?' + params.toString());
+    invReportState._activeItemIds = new Set((txs || []).map(t => t.item_id));
+  } catch (e) {
+    console.error('Inventory Report range fetch failed:', e);
+    invReportState._activeItemIds = new Set();
+  }
+}
 
 // Build report rows from the cached `inventory` list. Groups by the key
 // implied by groupBy. is_offcut is always part of the key — fresh and
 // offcut of the same dimensions stay separate so users can see them apart.
 function buildInventoryReportRows() {
-  const { groupBy, paperType, includeOffcuts } = invReportState;
+  const { groupBy, paperType, includeOffcuts, _activeItemIds } = invReportState;
   let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
   if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
+  // Date range narrows to items with at least one movement in [from, to].
+  if (_activeItemIds instanceof Set) items = items.filter(i => _activeItemIds.has(i.id));
   const keyOf = (i) => {
     const parts = [i.paper_type, i.size || '', i.gsm || '', i.is_offcut ? 'offcut' : 'fresh'];
     if (groupBy === 'brand')    parts.push(i.brand || '');
@@ -6934,7 +6968,9 @@ function printImports() {
 // paper consumed, on which press, with what finishing.
 // from/to filter the CREATED date; dfrom/dto filter the DELIVERED date;
 // q matches job number ("59" / "E-59") or job name.
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '' };
+// mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
+//     | 'created'   (every non-deleted job, dfrom/dto = created_at)
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', mode: 'delivered' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -6946,23 +6982,24 @@ function openJobsReportPage() {
 function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
-  // Default window: last 30 days through today. Only initialize on first open
-  // (dfrom === '') so the user's filters persist across navigations.
-  if (!jobsReportState.dfrom) {
-    const today = new Date();
-    const start = new Date(today); start.setDate(today.getDate() - 29);
-    const iso = localDateISO;
-    jobsReportState.dfrom = iso(start);
-    jobsReportState.dto   = iso(today);
-  }
-  // Distinct client list for the company filter — only from jobs that ARE
-  // delivered, since this report only shows delivered jobs.
-  const deliveredJobs = jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1);
-  const clients = [...new Set(deliveredJobs.map(j => j.client).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  // No default date range — show every job until the user explicitly
+  // narrows the window with the From / To pickers.
+  // Company filter sources from whichever set is currently shown. When
+  // browsing Created jobs the dropdown includes companies whose only job
+  // is still in-progress (not yet delivered) — otherwise those companies
+  // would be missing from the picker in Created mode.
+  const mode = jobsReportState.mode || 'delivered';
+  const scopeJobs = mode === 'delivered'
+    ? jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1)
+    : jobs;
+  const clients = [...new Set(scopeJobs.map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+  const modeLabel = mode === 'delivered' ? 'Delivered' : 'Created';
+  const activeStyle = 'background:#111;color:#fff;border-color:#111;';
+  const idleStyle   = 'background:#fff;color:var(--text);';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Jobs Report</h2>
-      <span style="color:var(--text2);font-size:12px;">Delivered jobs only — date, company, PO, quantities, paper, machine, coatings.</span>
+      <span style="color:var(--text2);font-size:12px;">${modeLabel} jobs — date, company, PO, quantities, paper, machine, coatings.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportJobsReport()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printJobsReport()">&#128424; Print Report</button>
@@ -6970,15 +7007,22 @@ function openJobsReport() {
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
+        <div class="dash-flbl">Show</div>
+        <div style="display:flex;gap:0;">
+          <button class="btn btn-sm" style="border-top-right-radius:0;border-bottom-right-radius:0;${mode==='delivered'?activeStyle:idleStyle}" onclick="setJrMode('delivered')">Delivered</button>
+          <button class="btn btn-sm" style="border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;${mode==='created'?activeStyle:idleStyle}" onclick="setJrMode('created')">Created</button>
+        </div>
+      </div>
+      <div>
         <div class="dash-flbl">Search (Job No. / Name)</div>
         <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
       </div>
       <div>
-        <div class="dash-flbl">Delivered from</div>
+        <div class="dash-flbl">From</div>
         <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
       </div>
       <div>
-        <div class="dash-flbl">Delivered to</div>
+        <div class="dash-flbl">To</div>
         <input class="filter" type="date" id="jr-dto" value="${jobsReportState.dto}" onchange="setJrDTo(this.value)">
       </div>
       <div>
@@ -6997,6 +7041,14 @@ function setJrDFrom(v)  { jobsReportState.dfrom = v;  jobsReportSel.clear(); ren
 function setJrDTo(v)    { jobsReportState.dto = v;    jobsReportSel.clear(); renderJobsReport(); }
 function setJrQ(v)      { jobsReportState.q = v;      jobsReportSel.clear(); renderJobsReport(); }
 function setJrClient(v) { jobsReportState.client = v; jobsReportSel.clear(); renderJobsReport(); }
+// Flip between Delivered-only and every Created job. Re-renders the whole
+// pane so the header/labels/company dropdown all reflect the new mode.
+function setJrMode(m) {
+  if (jobsReportState.mode === m) return;
+  jobsReportState.mode = m;
+  jobsReportSel.clear();
+  openJobsReport();
+}
 
 // ── Bulk selection (Jobs Report) ─────────────────────────────
 // Admin-only Delete from History — for clearing out delivered jobs after
@@ -7067,7 +7119,8 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { client, dfrom, dto, q } = jobsReportState;
+  const { client, dfrom, dto, q, mode } = jobsReportState;
+  const isCreatedMode = mode === 'created';
   const lastStageIdx = STAGES.length - 1;       // Delivered
   // Search: "59" or "e-59" matches the job number; anything else matches
   // the job name (case-insensitive substring).
@@ -7076,7 +7129,7 @@ function buildJobsReportRows() {
   const qIsNum = /^\d+$/.test(qId);
   const out = [];
   for (const j of jobs) {
-    if ((j.stage_index || 0) !== lastStageIdx) continue;   // Delivered only
+    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx) continue;  // Delivered-only in delivered mode
     if (client && j.client !== client) continue;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
@@ -7089,18 +7142,23 @@ function buildJobsReportRows() {
     // consistent regardless of when the job was delivered.
     const stageRec = j.stages && j.stages[lastStageIdx];
     const deliveryTime = stageRec && stageRec.time ? fmtStageTime(stageRec.time) : '';
-    // Delivered-date range filter. Prefer the unambiguous `at` instant new
-    // stage moves carry; fall back to parsing the dd/mm/yyyy byline.
+    // Date-range filter. In delivered mode the range applies to the
+    // Delivered stage timestamp; in created mode it applies to the job's
+    // created_at.
     if (dfrom || dto) {
-      let delMs = NaN;
-      if (stageRec && stageRec.at) delMs = new Date(stageRec.at).getTime();
-      if (!isFinite(delMs) && stageRec && stageRec.time) {
-        const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
-        if (m) delMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+      let refMs = NaN;
+      if (isCreatedMode) {
+        if (j.created_at) refMs = new Date(j.created_at).getTime();
+      } else {
+        if (stageRec && stageRec.at) refMs = new Date(stageRec.at).getTime();
+        if (!isFinite(refMs) && stageRec && stageRec.time) {
+          const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+          if (m) refMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+        }
       }
-      if (!isFinite(delMs)) continue;                       // no delivery date → can't match a delivered filter
-      if (dfrom && delMs < new Date(dfrom + 'T00:00:00').getTime()) continue;
-      if (dto   && delMs > new Date(dto   + 'T23:59:59').getTime()) continue;
+      if (!isFinite(refMs)) continue;
+      if (dfrom && refMs < new Date(dfrom + 'T00:00:00').getTime()) continue;
+      if (dto   && refMs > new Date(dto   + 'T23:59:59').getTime()) continue;
     }
     // Packets consumed — prefer the explicit Quantity of Packets entered on
     // the job; fall back to sheets / packetSize so older jobs without that
@@ -7328,10 +7386,10 @@ function printJobsReport() {
         <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
         <div>
           <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Jobs Report — Delivered</div>
+          <div style="font-size:10pt;">Jobs Report — ${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'}</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>Delivered from:</b> ${esc(fmtDMY(jobsReportState.dfrom))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto))}</div>
+          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.dfrom) || '(any)')} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto) || '(any)')}</div>
           <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
@@ -11004,7 +11062,7 @@ function calcTabsHTML(active) {
     <div style="display:flex;gap:6px;margin-bottom:10px;">
       <button class="btn btn-sm" style="flex:1;${active==='paper'?onStyle:offStyle}" onclick="openCalculator()">Paper</button>
       <button class="btn btn-sm" style="flex:1;${active==='job'?onStyle:offStyle}" onclick="openCalculatorJobMode()">Job (PO)</button>
-      <button class="btn btn-sm" style="flex:1;${active==='history'?onStyle:offStyle}" onclick="openCalculatorHistoryMode()">History</button>
+      <button class="btn btn-sm" style="flex:1;${active==='history'?onStyle:offStyle}" onclick="openCalculatorHistoryMode()">Job Data</button>
     </div>`;
 }
 
@@ -11061,38 +11119,140 @@ function jcalcReset() {
   if (out) out.innerHTML = 'Enter PO Qty + Ups to see the result.';
 }
 
-// ── History lookup (Calculator → History tab) ────────────────
-// Quick recall of past jobs: "this job was last printed on what paper, what
-// size, how many ups, which coatings?". Lives in the floating calculator so
-// it's reachable from anywhere — inventory, jobs, reports, while editing a
-// form, etc. Read-only; just shows the specs of historical jobs that match
-// the search.
+// ── Job Data (Calculator → Job Data tab) ─────────────────────
+// Was "History lookup". Now: browse every real job by company, and
+// stash the specs of an UPCOMING job as a lightweight pending record
+// so it's ready to be re-used as a template later. Same jobs table
+// under the hood — a saved-data entry is just a normal pending job
+// with no packets/deadline set yet. When it moves through printing
+// later, its record persists (no duplicate data). Reachable from any
+// screen via the floating calculator popover.
+let _jobDataClientFilter = '';
 function openCalculatorHistoryMode() {
   const pop = document.getElementById('calc-popover');
   if (!pop) return;
+  // Distinct companies from every non-deleted job — this list drives
+  // the top-of-popover filter dropdown.
+  const clients = [...new Set(jobs.map(j => j.client).filter(Boolean))].sort((a,b) => String(a).localeCompare(String(b)));
   pop.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <h2 style="margin:0;font-size:16px;">&#129518; Calculator</h2>
       <button class="btn btn-sm" onclick="closeCalculator()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
     </div>
     ${calcTabsHTML('history')}
-    <p style="font-size:11px;color:var(--text2);margin:0 0 12px;">Look up how a job was made last time — paper, size, ups, coatings.</p>
+    <p style="font-size:11px;color:var(--text2);margin:0 0 10px;">Browse job specs by company, save specs for an upcoming print, or use any entry as the template for a new job.</p>
 
-    <div class="form-group">
-      <label class="form-label">Search</label>
-      <input type="text" id="hlk-search" placeholder="Job name, company, or code…" oninput="hlkRender()" autocomplete="off">
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <div style="flex:1;">
+        <label class="form-label" style="margin-bottom:3px;">Company</label>
+        <select id="jd-client" onchange="_jobDataClientFilter=this.value; jdRender()" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+          <option value="">All companies</option>
+          ${clients.map(c => `<option value="${esc(c)}"${_jobDataClientFilter===c?' selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="flex:1;">
+        <label class="form-label" style="margin-bottom:3px;">Search</label>
+        <input type="text" id="jd-search" class="lc-input" placeholder="Name or code…" oninput="jdRender()" autocomplete="off">
+      </div>
     </div>
 
-    <div id="hlk-out" style="max-height:360px;overflow-y:auto;font-size:12px;"></div>
+    <div id="jd-out" style="max-height:340px;overflow-y:auto;font-size:12px;"></div>
 
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
-      <button class="btn btn-sm" onclick="document.getElementById('hlk-search').value='';hlkRender();">Reset</button>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+      <button class="btn btn-sm" onclick="_jobDataClientFilter='';document.getElementById('jd-search').value='';document.getElementById('jd-client').value='';jdRender();">Reset</button>
       <button class="btn btn-sm btn-primary" onclick="closeCalculator()">Close</button>
     </div>`;
   pop.style.display = 'block';
-  // Auto-focus the search box so the user can start typing immediately.
-  setTimeout(() => { const s = document.getElementById('hlk-search'); if (s) s.focus(); }, 30);
-  hlkRender();
+  setTimeout(() => { const s = document.getElementById('jd-search'); if (s) s.focus(); }, 30);
+  jdRender();
+}
+
+// Backward-compat alias so any older bookmark / caller still works.
+function hlkRender() { return jdRender(); }
+
+function jdRender() {
+  const out = document.getElementById('jd-out');
+  if (!out) return;
+  const q = (document.getElementById('jd-search')||{}).value.trim().toLowerCase();
+  const client = _jobDataClientFilter;
+  const matches = jobs.filter(j => {
+    if (client && j.client !== client) return false;
+    if (!q) return true;
+    const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
+    return hay.includes(q);
+  }).sort((a,b) => b.id - a.id);
+
+  if (!matches.length) {
+    out.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:10px;">No jobs match.</div>';
+    return;
+  }
+
+  // Group by normalized job name so a repeat-order rolls up.
+  const norm = s => String(s||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const groups = new Map();
+  matches.forEach(j => {
+    const key = norm(j.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(j);
+  });
+
+  const cards = [];
+  for (const [, list] of groups) {
+    if (cards.length >= 20) break;
+    const latest = list[0];
+    const older  = list.slice(1, 5);
+    const coatings = Array.isArray(latest.coatings) ? latest.coatings.filter(Boolean) : [];
+    const p = latest.particulars || {};
+    const cuttingSize = p.cutting_size_gsm || '';
+    const dt = latest.dateissued ? fmtDMY(latest.dateissued) : (latest.created_at ? fmtDMY(latest.created_at) : '');
+    const fact = (lbl, val) => val ? `<span style="display:inline-block;margin-right:10px;"><b style="color:var(--text2);font-weight:500;">${lbl}:</b> ${esc(val)}</span>` : '';
+    const canUse = canWriteJobs();
+    cards.push(`
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;margin-bottom:4px;">
+          <div style="font-weight:600;font-size:13px;">${esc(latest.name)}</div>
+          <div style="font-size:11px;color:var(--text2);white-space:nowrap;">E-${latest.id}${dt?' · '+esc(dt):''}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">${esc(latest.client||'')}${latest.jobcode?' · Code '+esc(latest.jobcode):''}</div>
+        <div style="font-size:12px;line-height:1.6;">
+          ${fact('Paper', latest.paper)}
+          ${fact('Size/GSM', latest.size)}
+          ${fact('Cutting Size', cuttingSize)}
+          ${fact('Ups', latest.ups)}
+          ${fact('MRP', latest.mrp)}
+          ${coatings.length ? fact('Coatings', coatings.join(', ')) : ''}
+        </div>
+        ${canUse ? `<div style="margin-top:6px;text-align:right;"><button class="btn btn-sm btn-primary" onclick="useJobDataAsTemplate(${latest.id})" style="padding:2px 10px;font-size:11px;">Use for New Job &rarr;</button></div>` : ''}
+        ${older.length ? `
+          <details style="margin-top:6px;">
+            <summary style="cursor:pointer;font-size:11px;color:var(--text2);">${older.length} previous run${older.length===1?'':'s'}</summary>
+            <div style="margin-top:4px;border-top:1px dashed var(--border);padding-top:6px;font-size:11px;color:var(--text2);">
+              ${older.map(j => {
+                const cts = Array.isArray(j.coatings) ? j.coatings.filter(Boolean) : [];
+                const od = j.dateissued ? fmtDMY(j.dateissued) : (j.created_at ? fmtDMY(j.created_at) : '');
+                return `<div style="margin-bottom:4px;">
+                  <b>E-${j.id}</b>${od?' · '+esc(od):''} · ${esc(j.paper||'-')} · ${esc(j.size||'-')} · Ups ${esc(j.ups||'-')}${cts.length?' · '+esc(cts.join(', ')):''}
+                </div>`;
+              }).join('')}
+            </div>
+          </details>` : ''}
+      </div>`);
+  }
+  out.innerHTML = cards.join('');
+}
+
+// Take an existing job's specs and open the New Job Card modal
+// prefilled — same shape as the duplicate flow but the source can be
+// any job (delivered, in-progress, or a saved Job Data record).
+function useJobDataAsTemplate(sourceId) {
+  const src = jobs.find(j => j.id === sourceId);
+  if (!src) return;
+  closeCalculator();
+  // Reuse the duplicate flow that already knows how to prefill a
+  // clean New Job form from an existing job — it strips per-run
+  // fields (deadline, PO, dateissued, delqty, stages, log) and keeps
+  // the shared setup fields (paper, size, ups, coatings, particulars).
+  openDuplicateJob(sourceId);
 }
 
 // Build the result list. Groups by job name (case-insensitive trim) so a
@@ -11384,7 +11544,7 @@ function jobForm(j={}) {
         <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
-        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
+        <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="3"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
       </tr>
       <tr>
