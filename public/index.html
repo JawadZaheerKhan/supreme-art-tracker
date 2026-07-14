@@ -6933,7 +6933,9 @@ function printImports() {
 // paper consumed, on which press, with what finishing.
 // from/to filter the CREATED date; dfrom/dto filter the DELIVERED date;
 // q matches job number ("59" / "E-59") or job name.
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '' };
+// mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
+//     | 'created'   (every non-deleted job, dfrom/dto = created_at)
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', mode: 'delivered' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -6954,14 +6956,22 @@ function openJobsReport() {
     jobsReportState.dfrom = iso(start);
     jobsReportState.dto   = iso(today);
   }
-  // Distinct client list for the company filter — only from jobs that ARE
-  // delivered, since this report only shows delivered jobs.
-  const deliveredJobs = jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1);
-  const clients = [...new Set(deliveredJobs.map(j => j.client).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  // Company filter sources from whichever set is currently shown. When
+  // browsing Created jobs the dropdown includes companies whose only job
+  // is still in-progress (not yet delivered) — otherwise those companies
+  // would be missing from the picker in Created mode.
+  const mode = jobsReportState.mode || 'delivered';
+  const scopeJobs = mode === 'delivered'
+    ? jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1)
+    : jobs;
+  const clients = [...new Set(scopeJobs.map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+  const modeLabel = mode === 'delivered' ? 'Delivered' : 'Created';
+  const activeStyle = 'background:#111;color:#fff;border-color:#111;';
+  const idleStyle   = 'background:#fff;color:var(--text);';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Jobs Report</h2>
-      <span style="color:var(--text2);font-size:12px;">Delivered jobs only — date, company, PO, quantities, paper, machine, coatings.</span>
+      <span style="color:var(--text2);font-size:12px;">${modeLabel} jobs — date, company, PO, quantities, paper, machine, coatings.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportJobsReport()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printJobsReport()">&#128424; Print Report</button>
@@ -6969,15 +6979,22 @@ function openJobsReport() {
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
+        <div class="dash-flbl">Show</div>
+        <div style="display:flex;gap:0;">
+          <button class="btn btn-sm" style="border-top-right-radius:0;border-bottom-right-radius:0;${mode==='delivered'?activeStyle:idleStyle}" onclick="setJrMode('delivered')">Delivered</button>
+          <button class="btn btn-sm" style="border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;${mode==='created'?activeStyle:idleStyle}" onclick="setJrMode('created')">Created</button>
+        </div>
+      </div>
+      <div>
         <div class="dash-flbl">Search (Job No. / Name)</div>
         <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
       </div>
       <div>
-        <div class="dash-flbl">Delivered from</div>
+        <div class="dash-flbl">${modeLabel} from</div>
         <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
       </div>
       <div>
-        <div class="dash-flbl">Delivered to</div>
+        <div class="dash-flbl">${modeLabel} to</div>
         <input class="filter" type="date" id="jr-dto" value="${jobsReportState.dto}" onchange="setJrDTo(this.value)">
       </div>
       <div>
@@ -6996,6 +7013,14 @@ function setJrDFrom(v)  { jobsReportState.dfrom = v;  jobsReportSel.clear(); ren
 function setJrDTo(v)    { jobsReportState.dto = v;    jobsReportSel.clear(); renderJobsReport(); }
 function setJrQ(v)      { jobsReportState.q = v;      jobsReportSel.clear(); renderJobsReport(); }
 function setJrClient(v) { jobsReportState.client = v; jobsReportSel.clear(); renderJobsReport(); }
+// Flip between Delivered-only and every Created job. Re-renders the whole
+// pane so the header/labels/company dropdown all reflect the new mode.
+function setJrMode(m) {
+  if (jobsReportState.mode === m) return;
+  jobsReportState.mode = m;
+  jobsReportSel.clear();
+  openJobsReport();
+}
 
 // ── Bulk selection (Jobs Report) ─────────────────────────────
 // Admin-only Delete from History — for clearing out delivered jobs after
@@ -7066,7 +7091,8 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { client, dfrom, dto, q } = jobsReportState;
+  const { client, dfrom, dto, q, mode } = jobsReportState;
+  const isCreatedMode = mode === 'created';
   const lastStageIdx = STAGES.length - 1;       // Delivered
   // Search: "59" or "e-59" matches the job number; anything else matches
   // the job name (case-insensitive substring).
@@ -7075,7 +7101,7 @@ function buildJobsReportRows() {
   const qIsNum = /^\d+$/.test(qId);
   const out = [];
   for (const j of jobs) {
-    if ((j.stage_index || 0) !== lastStageIdx) continue;   // Delivered only
+    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx) continue;  // Delivered-only in delivered mode
     if (client && j.client !== client) continue;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
@@ -7088,18 +7114,23 @@ function buildJobsReportRows() {
     // consistent regardless of when the job was delivered.
     const stageRec = j.stages && j.stages[lastStageIdx];
     const deliveryTime = stageRec && stageRec.time ? fmtStageTime(stageRec.time) : '';
-    // Delivered-date range filter. Prefer the unambiguous `at` instant new
-    // stage moves carry; fall back to parsing the dd/mm/yyyy byline.
+    // Date-range filter. In delivered mode the range applies to the
+    // Delivered stage timestamp; in created mode it applies to the job's
+    // created_at.
     if (dfrom || dto) {
-      let delMs = NaN;
-      if (stageRec && stageRec.at) delMs = new Date(stageRec.at).getTime();
-      if (!isFinite(delMs) && stageRec && stageRec.time) {
-        const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
-        if (m) delMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+      let refMs = NaN;
+      if (isCreatedMode) {
+        if (j.created_at) refMs = new Date(j.created_at).getTime();
+      } else {
+        if (stageRec && stageRec.at) refMs = new Date(stageRec.at).getTime();
+        if (!isFinite(refMs) && stageRec && stageRec.time) {
+          const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+          if (m) refMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+        }
       }
-      if (!isFinite(delMs)) continue;                       // no delivery date → can't match a delivered filter
-      if (dfrom && delMs < new Date(dfrom + 'T00:00:00').getTime()) continue;
-      if (dto   && delMs > new Date(dto   + 'T23:59:59').getTime()) continue;
+      if (!isFinite(refMs)) continue;
+      if (dfrom && refMs < new Date(dfrom + 'T00:00:00').getTime()) continue;
+      if (dto   && refMs > new Date(dto   + 'T23:59:59').getTime()) continue;
     }
     // Packets consumed — prefer the explicit Quantity of Packets entered on
     // the job; fall back to sheets / packetSize so older jobs without that
@@ -7327,10 +7358,10 @@ function printJobsReport() {
         <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
         <div>
           <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Jobs Report — Delivered</div>
+          <div style="font-size:10pt;">Jobs Report — ${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'}</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>Delivered from:</b> ${esc(fmtDMY(jobsReportState.dfrom))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto))}</div>
+          <div><b>${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'} from:</b> ${esc(fmtDMY(jobsReportState.dfrom))} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto))}</div>
           <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
