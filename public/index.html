@@ -11573,8 +11573,8 @@ function jobForm(j={}) {
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g"></td>
-        <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
-        <td><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
+        <td colspan="1"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
+        <td colspan="2"><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
         <td colspan="3"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
@@ -12730,6 +12730,51 @@ function buildPrintCard(j) {
   `;
 }
 
+// Auto-shrink helper for the print card. Walks every .pc-value cell
+// in #print-area and, whenever the text overflows its cell width,
+// drops font-size step-by-step (0.5px at a time) until it fits or
+// hits a floor. Prevents long Job Names / Company names / Brands
+// from wrapping to a second line — the wrap is what shoves the
+// bottom rows off the 12.5in sheet.
+//
+// #print-area is display:none in normal view, so we can't just read
+// scrollWidth off the page. Temporarily reveal it off-screen at the
+// exact print width (8.5in) so measurements match what the printer
+// will actually see, then restore.
+function fitPrintCardText() {
+  const area = document.getElementById('print-area');
+  if (!area) return;
+  const prevStyle = area.getAttribute('style') || '';
+  area.style.cssText = 'display:block !important;position:absolute;left:-99999px;top:0;width:8.5in;padding:0.22in 0.4in;box-sizing:border-box;font-family:Arial,sans-serif;visibility:hidden;';
+  const vals = area.querySelectorAll('.pc-value');
+  vals.forEach(el => {
+    // Baseline: whatever the stylesheet resolves to (accounts for the
+    // !important rules on .pc-jobname / .pp-data-row etc.).
+    const cs = window.getComputedStyle(el);
+    const startPx = parseFloat(cs.fontSize);
+    if (!isFinite(startPx) || startPx <= 0) return;
+    let size = startPx;
+    const floor = Math.max(7, startPx * 0.55); // never below 55% or 7px
+    const prevWhite = el.style.whiteSpace;
+    el.style.whiteSpace = 'nowrap';
+    // Print CSS uses !important on some pc-value rules, so we have
+    // to force our shrunk size with !important too or it's ignored.
+    for (let i = 0; i < 40 && el.scrollWidth > el.clientWidth + 0.5 && size > floor; i++) {
+      size -= 0.5;
+      el.style.setProperty('font-size', size + 'px', 'important');
+    }
+    // If we hit the floor and it STILL overflows, allow it to wrap
+    // so nothing is clipped — better a two-line company than a
+    // missing row at the bottom.
+    if (el.scrollWidth > el.clientWidth + 0.5) {
+      el.style.whiteSpace = prevWhite || '';
+    }
+  });
+  // Restore the print-area's original (empty) inline style so the
+  // print CSS block-rules apply cleanly for the actual print pass.
+  area.setAttribute('style', prevStyle);
+}
+
 // Direct print — opens Chrome's print dialog with the card laid out
 // for 8.5in × 12.5in paper. User should pick that same paper size in
 // the print dialog for the cleanest result.
@@ -12764,6 +12809,14 @@ function printJobCard(id) {
     document.head.appendChild(jcPageStyle);
   }
   jcPageStyle.textContent = '@media print { @page { size: 8.5in 12.5in; margin: 0; } }';
+
+  // Auto-shrink any .pc-value whose content overflows its cell so
+  // long job names / companies stay on a single line instead of
+  // wrapping and pushing rows off the bottom. Runs on the on-screen
+  // rendered print-area before window.print(); scrollWidth /
+  // clientWidth reads are only valid once the browser has laid the
+  // element out, hence the small setTimeout below covers that too.
+  fitPrintCardText();
 
   // Browsers print the document.title in the page header by default
   // ("Job Tracker Supreme Art"). Blank the title for the duration of
