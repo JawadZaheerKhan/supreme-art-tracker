@@ -2995,10 +2995,12 @@ function renderJobsCompact() {
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
     const pending = isPendingIssuance(j);
-    // Status badge: 'Pending Stock' takes priority over everything else
-    // (it means the job hasn't started consuming stock yet — nothing else
-    // is meaningful until that happens).
-    const badge = pending ? jobStockBadge(j) :
+    const isNew = isNewJob(j);
+    // Status badge: 'New Job' takes priority (the job isn't in the
+    // production queue yet), then 'Pending Stock' (queued but no paper
+    // issued), then production stage.
+    const badge = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+      pending ? jobStockBadge(j) :
       done ? `<span class="badge badge-done">Delivered</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
@@ -3058,7 +3060,8 @@ function renderJobsCompact() {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            <button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
+            ${isNew && canWriteJobs() ? `<button class="btn btn-sm btn-primary" onclick="processJobToCtp(${j.id})" title="Move this job into the production queue. Once processed, it appears in Pending Stock so the store keeper can issue paper.">&rarr; Process to CTP</button>` : ''}
+            <button class="btn btn-sm ${isNew ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
@@ -12087,11 +12090,17 @@ function viewJobCard(id) {
 function openEdit(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // Process to CTP is also available from inside the Edit modal so the
+  // PM can flip a New Job straight after finalising its specs.
+  const processBtn = (isNewJob(j) && canWriteJobs())
+    ? `<button class="btn ceo-hide" style="background:#0C447C;border-color:#0C447C;color:#fff;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
+    : '';
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
     ${jobForm(j)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
+      ${processBtn}
       <button class="btn btn-primary" onclick="saveEdit(${j.id})">Save Changes</button>
     </div>
   </div>`);
@@ -12325,6 +12334,10 @@ async function processJobToCtp(id) {
     const updated = await api('POST', `/api/jobs/${id}/process-to-ctp`);
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
+    // If the button was clicked from inside the Edit modal, close it
+    // so the user lands back on the jobs list where the job now sits
+    // in Pending Stock. No-op when the modal wasn't open.
+    closeModal();
     render();
     notify(`Job E-${id} moved to Pending Stock`);
   } catch (e) { notify('Error: ' + e.message); }
