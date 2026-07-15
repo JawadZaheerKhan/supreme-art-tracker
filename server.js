@@ -3376,8 +3376,15 @@ app.post('/api/imports', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes } = req.body;
+    let { paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
+    // Same lowercase rule as /api/inventory so imports don't spawn a
+    // duplicate row keyed on a mixed-case value that won't match the
+    // existing inventory item on receive.
+    if (paper_type) paper_type = String(paper_type).trim().toLowerCase();
+    if (size)       size       = String(size).trim().toLowerCase();
+    if (brand)      brand      = String(brand).trim().toLowerCase();
+    if (supplier)   supplier   = String(supplier).trim().toLowerCase();
     const matchRows = await sql`
       SELECT id FROM inventory_items
       WHERE paper_type = ${paper_type}
@@ -3405,7 +3412,11 @@ app.put('/api/imports/:id', requireInventoryWriter, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes } = req.body;
+    let { paper_type, size, gsm, brand, packets, weight_kg, supplier, booked_date, expected_arrival, notes } = req.body;
+    if (paper_type) paper_type = String(paper_type).trim().toLowerCase();
+    if (size)       size       = String(size).trim().toLowerCase();
+    if (brand)      brand      = String(brand).trim().toLowerCase();
+    if (supplier)   supplier   = String(supplier).trim().toLowerCase();
     const rows = await sql`
       UPDATE inventory_imports SET
         paper_type=${paper_type}, size=${size||null}, gsm=${gsm||null}, brand=${brand||null},
