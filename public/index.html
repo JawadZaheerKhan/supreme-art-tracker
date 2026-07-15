@@ -11556,7 +11556,18 @@ function jobForm(j={}) {
     <img class="jc-watermark-screen" src="/logo.png" alt="">
     <input type="hidden" id="f-editing-id" value="${j.id ? esc(j.id) : ''}">
     <div class="jc-header">
-      <div class="jc-serial">${j.id ? 'E-'+j.id : ''}</div>
+      <div style="display:flex;flex-direction:column;gap:2px;">
+        <div class="jc-serial">${j.id ? 'E-'+j.id : ''}</div>
+        <div style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.3px;">
+          <span style="font-weight:600;">Priority:</span>
+          <select id="f-priority" style="padding:1px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:#fff;text-transform:none;letter-spacing:0;">
+            ${(() => {
+              const cur = normalizePriority(j.priority);
+              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
+            })()}
+          </select>
+        </div>
+      </div>
       <img src="/logo.png" alt="Supreme Art">
     </div>
     <div class="jc-title">JOB CARD</div>
@@ -11576,12 +11587,9 @@ function jobForm(j={}) {
         <td colspan="2"><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
-        <td colspan="2"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="e.g. 25x36 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
-        <td colspan="2"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
-      </tr>
-      <tr>
-        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
+        <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
+        <td colspan="1"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
         <td colspan="2">
           <span class="jc-lbl">Quantity of Packets</span>
           <div style="display:flex;gap:6px;align-items:center;">
@@ -11603,6 +11611,10 @@ function jobForm(j={}) {
           ${hasPendingPacketTopup(j)
             ? `<div style="margin-top:4px;"><span style="display:inline-block;background:#F59E0B;color:#78350F;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
         </td>
+      </tr>
+      <tr>
+        <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
+        <td colspan="2"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
@@ -11610,18 +11622,6 @@ function jobForm(j={}) {
         <td colspan="2"><span class="jc-lbl">Mfg Date</span><input type="date" id="f-mfgdate" value="${v(j.mfgdate)}"></td>
         <td colspan="2"><span class="jc-lbl">Exp Date</span><input type="date" id="f-expdate" value="${v(j.expdate)}"></td>
         <td><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
-      </tr>
-      <tr>
-        <td colspan="3"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="3">
-          <span class="jc-lbl">Job Priority</span>
-          <select id="f-priority">
-            ${(() => {
-              const cur = normalizePriority(j.priority);
-              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
-            })()}
-          </select>
-        </td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -12667,7 +12667,19 @@ function buildPrintCard(j) {
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-      <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}</div>
+      <div style="display:flex;flex-direction:column;gap:2px;">
+        <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}</div>
+        ${(() => {
+          const norm = normalizePriority(j.priority);
+          const cls  = norm === 'Most Urgent' ? 'pc-prio-most-urgent'
+                     : norm === 'Urgent'      ? 'pc-prio-urgent'
+                     :                          'pc-prio-normal';
+          return `<div class="pc-priority" style="font-size:10pt;line-height:1.2;">
+            <span style="text-transform:uppercase;letter-spacing:0.3px;color:#000;font-weight:600;font-size:8.5pt;">Priority:</span>
+            <span class="pc-value ${cls}" style="margin-left:4px;">${v(norm)}</span>
+          </div>`;
+        })()}
+      </div>
       <img class="pc-logo" src="/logo.png" alt="Supreme Art">
     </div>
     <h1 class="pc-title">JOB CARD</h1>
@@ -12684,13 +12696,14 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Company</div><div class="pc-value pc-company">${v(j.client)}</div></td>
       </tr>
       <tr>
-        <td colspan="2"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
         <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
+        <td colspan="1"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
+        <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
         <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${v(packetsDisplay(j) || p.quantity_of_packets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
-        <td colspan="2"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
+        <td colspan="2"><div class="pc-label">Code</div><div class="pc-value">${v(j.jobcode)}</div></td>
         <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
       </tr>
       <tr>
@@ -12700,15 +12713,9 @@ function buildPrintCard(j) {
         ${cell('MRP', j.mrp)}
       </tr>
       <tr>
-        <td colspan="2"><div class="pc-label">Code</div><div class="pc-value">${v(j.jobcode)}</div></td>
+        <td colspan="2">&nbsp;</td>
         <td colspan="2"><div class="pc-label">Brand</div><div class="pc-value pc-brand">${v(paperBrand)}</div></td>
-        ${(() => {
-          const norm = normalizePriority(j.priority);
-          const cls  = norm === 'Most Urgent' ? 'pc-prio-most-urgent'
-                     : norm === 'Urgent'      ? 'pc-prio-urgent'
-                     :                          'pc-prio-normal';
-          return `<td colspan="2"><div class="pc-label">Job Priority</div><div class="pc-value ${cls}">${v(norm)}</div></td>`;
-        })()}
+        <td colspan="2">&nbsp;</td>
       </tr>
     </table>
     <table class="pp-table">
