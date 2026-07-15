@@ -2122,24 +2122,51 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
     // in searches, dropdowns, and reports.
     if (name)   name   = String(name).trim().toLowerCase();
     if (client) client = String(client).trim().toLowerCase();
-    // New jobs are created with issuance_status='pending'. Stock is NOT
-    // deducted at creation time — a stock-role user (or admin) must call
-    // POST /api/jobs/:id/issue-stock to deduct inventory and flip status.
-    // cut_size/offcut_size describe an optional cut performed at issuance:
-    // the source sheet is cut, the job uses cut_size, the leftover at
-    // offcut_size is returned to inventory as a +N transaction.
+    // Newly-created jobs land in issuance_status='new' — they show up
+    // in the "New Jobs" tab for the Production Manager (or Admin) to
+    // review, and are NOT visible to the store keeper yet. Clicking
+    // "Process to CTP" on the card flips them to 'pending' so the
+    // store keeper's Pending Stock queue picks them up. Stock is only
+    // deducted after that, via POST /api/jobs/:id/issue-stock.
     const result = await sql`
       INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, 'pending')
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, 'new')
       RETURNING *
     `;
     const job = result[0];
-    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — pending stock issuance` });
+    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — new job (awaiting Process to CTP)` });
     res.json(job);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Flip a job from New Jobs into the production queue. Only meaningful
+// for status='new'; anything else is idempotent-refused. After this
+// runs the job shows up in Pending Stock for the store keeper.
+app.post('/api/jobs/:id/process-to-ctp', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT id, name, issuance_status FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status !== 'new') {
+      return res.status(400).json({ error: `Job E-${id} is already in the production queue (status: ${job.issuance_status}).` });
+    }
+    const updated = await sql`
+      UPDATE jobs SET issuance_status='pending' WHERE id=${id} RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.process_to_ctp',
+      entityType: 'job',
+      entityId: id,
+      summary: `Processed Job E-${id}: ${job.name} to CTP — now in Pending Stock`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // UPDATE job details

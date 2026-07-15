@@ -1549,6 +1549,7 @@
     <select class="filter" id="machine-filter" onchange="setMachineFilter(this.value)">
       <option value="">All machines</option>
     </select>
+    <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilter(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
       <option value="this-week">This week</option>
@@ -2163,6 +2164,7 @@ let filterClient = '';
 // the selected machine (parsed from "Name · Machine (Stage)"). Useful for
 // answering "what's running on / has been run on machine X."
 let filterMachine = '';
+let filterPO = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
@@ -2441,6 +2443,12 @@ function roleLabel(role) {
     stock: 'Store Manager',
   })[role] || role;
 }
+// Freshly-created jobs land in status 'new' — they only surface in the
+// dedicated New Jobs tab. Production Manager (or Admin) clicks Process
+// to CTP on the card, which flips the status to 'pending' so the store
+// keeper's Pending Stock queue picks it up.
+function isNewJob(j) { return j && j.issuance_status === 'new'; }
+
 function partialPendingSheets(j) {
   const n = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -2745,6 +2753,10 @@ function getFiltered() {
     if (t && !j.name.toLowerCase().includes(t) && !j.client.toLowerCase().includes(t) && !String(j.id).includes(t)) return false;
     if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
     if (filterClient && j.client !== filterClient) return false;
+    if (filterPO) {
+      const po = String(j.ref || '').toLowerCase();
+      if (!po.includes(String(filterPO).toLowerCase())) return false;
+    }
     if (filterMachine) {
       const log = Array.isArray(j.log) ? j.log : [];
       const seen = new Set();
@@ -2756,14 +2768,17 @@ function getFiltered() {
       if (!seen.has(filterMachine)) return false;
     }
     if (!inDateRange(j)) return false;
+    if (view === 'new')     return isNewJob(j);
     if (view === 'pending') return isPendingIssuance(j);
-    // Pending jobs are excluded from "active" so the queue stays clean —
-    // they show up explicitly under Pending Stock instead.
-    if (view === 'active')  return !isPendingIssuance(j) && !isDone(j) && !isStorage(j) && !isBlocked(j);
+    // Pending / new jobs are excluded from "active" so the queue stays
+    // clean — they show up explicitly in their own tabs.
+    if (view === 'active')  return !isNewJob(j) && !isPendingIssuance(j) && !isDone(j) && !isStorage(j) && !isBlocked(j);
     if (view === 'storage') return isStorage(j);
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
-    return true;
+    // Default 'all' view — hide new-jobs so they don't clutter the main
+    // list; they have their own tab.
+    return !isNewJob(j);
   });
 }
 
@@ -2905,8 +2920,9 @@ function renderStats() {
   renderJobsHero();
   const s = {
     total: jobs.length,
+    newJobs: jobs.filter(isNewJob).length,
     pending: jobs.filter(isPendingIssuance).length,
-    active: jobs.filter(j=>!isPendingIssuance(j)&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
+    active: jobs.filter(j=>!isNewJob(j)&&!isPendingIssuance(j)&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
     storage: jobs.filter(isStorage).length,
     done: jobs.filter(isDone).length,
     blocked: jobs.filter(isBlocked).length
@@ -2928,7 +2944,7 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['pending','Pending Stock'],['active','In Progress'],['storage','Finished'],['blocked','Blocked'],['done','Delivered']];
+  const views = [['all','All'],['new','New Jobs'],['pending','Pending Stock'],['active','In Progress'],['storage','Finished'],['blocked','Blocked'],['done','Delivered']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -3118,10 +3134,12 @@ function cardIssueStockBtn(j) {
 function renderJobCard(j) {
   const si = j.stage_index || 0;
   const done = isDone(j), blocked = isBlocked(j), pending = isPendingIssuance(j);
+  const isNew = isNewJob(j);
   const priNorm = normalizePriority(j.priority);
   const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
 
-  const badge = pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
+  const badge = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+    pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
     done ? `<span class="badge badge-done">Delivered</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
@@ -3166,10 +3184,12 @@ function renderJobCard(j) {
       ${yieldP ? `<div class="tss-block"><div class="tss-lbl">Yield</div><div class="tss-val">${esc(yieldP.pct)}</div><div class="tss-formula">${esc(yieldP.formula)}</div></div>` : ''}
     </div>` : '';
 
-  // Issue Stock + Reverse Issuance are no longer shown on the job card —
-  // both actions live on the Inventory tab's Pending Stock filter (issue)
-  // and inside the inventory item History modal (reverse).
-  const primary = '';
+  // Primary action: for a New Job, the only relevant next step is
+  // "Process to CTP" — surface it directly on the card so the PM
+  // doesn't have to dig into the menu.
+  const primary = isNew && canWriteJobs()
+    ? `<button class="btn btn-sm btn-primary" onclick="processJobToCtp(${j.id})" title="Move this job into the production queue. Once processed, it appears in Pending Stock so the store keeper can issue paper.">&rarr; Process to CTP</button>`
+    : '';
   const more = `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
@@ -3706,6 +3726,7 @@ function setFilter(v) { filterText=v; renderJobs(); }
 function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
 function setMachineFilter(v) { filterMachine=v; renderJobs(); }
+function setPOFilter(v)      { filterPO = v; renderJobs(); }
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
 function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
@@ -12284,6 +12305,31 @@ async function deleteJob(id) {
 // Issue stock for a pending job — admin, stock, and user roles can all do
 // it (server enforces too via requireWriteUser). CEO is read-only and gets
 // blocked by canIssueStock(). Confirms before deducting real inventory.
+// Flip a new-job into the production queue. Confirms first so the PM
+// doesn't do it by accident (once processed, the store keeper sees it
+// and can start issuing paper). Refreshes locally so the tab counts
+// update in place.
+async function processJobToCtp(id) {
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
+  const j = jobs.find(x => x.id === id);
+  if (!j || !isNewJob(j)) return;
+  const ok = await confirmDialog({
+    title: `Process Job E-${id} to CTP?`,
+    message: `"${j.name}" will move into the production queue. It'll appear in Pending Stock so the store keeper can issue paper for it.`,
+    confirmText: 'Process to CTP',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/process-to-ctp`);
+    const idx = jobs.findIndex(x => x.id === id);
+    if (idx >= 0) jobs[idx] = updated;
+    render();
+    notify(`Job E-${id} moved to Pending Stock`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
 async function issueStock(id) {
   if (!canIssueStock()) { notify('Issuing stock is reserved for the store keeper (Admin or Store Manager).'); return; }
   const j = jobs.find(x => x.id === id);
