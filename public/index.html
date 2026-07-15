@@ -12525,17 +12525,27 @@ function buildPrintCard(j) {
   // job is actually using (e.g. "Sticker" added through the inventory
   // dropdown manager). Keeps the printed card consistent for normal jobs
   // while still showing custom additions when they're relevant.
+  // Case-insensitive dedupe. After the lowercase migration old jobs
+  // may still hold "Bleach Board" in particulars.paper_types while
+  // PAPER_TYPES is "bleach board" — a plain .includes would append
+  // the same paper as an EXTRA checkbox, wrap the row, and shove the
+  // last data row off the sheet.
+  const knownLower = new Set(PAPER_TYPES.map(t => String(t).toLowerCase()));
   const printPaperTypes = [
     ...PAPER_TYPES,
-    ...paperTypes.filter(t => t && !PAPER_TYPES.includes(t)),
+    ...paperTypes.filter(t => t && !knownLower.has(String(t).toLowerCase())),
   ];
   // Brand moved to its own cell next to Deadline / Delivered PO Qty so the
   // whole row can be devoted to paper-type checkboxes. Helps fit custom
   // additions like "Sticker" without crowding the brand label.
+  // Case-insensitive "is this paper type checked?" so a job whose
+  // paper_type was migrated to lowercase still shows a tick against
+  // the mixed-case PAPER_TYPES entry (and vice versa on legacy jobs).
+  const paperTypesLower = new Set(paperTypes.map(t => String(t).toLowerCase()));
   const papersRow = `
     <tr><td colspan="5" class="pp-spec">
       ${printPaperTypes.map(t => {
-        const on = paperTypes.includes(t);
+        const on = paperTypesLower.has(String(t).toLowerCase());
         return `<span style="margin-right:14px;"><span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${t}</span></span>`;
       }).join('')}
     </td></tr>`;
@@ -12565,21 +12575,26 @@ function buildPrintCard(j) {
     <style>
       @media print {
         @page { size: 8.5in 12.5in; margin: 0; }
-        #print-area { width: 8.5in !important; padding: 0.14in 0.4in 0.1in !important; }
+        #print-area { width: 8.5in !important; padding: 0.22in 0.4in !important; }
+        /* Allow tables AND rows to break across pages so nothing
+           silently disappears. Previously `tr` had `break-inside:
+           avoid`, which pushed any row that couldn't fully fit onto
+           a "page 2" — and since the sheet is a single 8.5x12.5
+           sheet, page 2 never printed. Result: Delivered Cartons
+           Qty, Comments and Signature were rendered in the DOM
+           but never made it to paper. Auto lets the row clip
+           visibly at the paper edge, and lets remaining rows fall
+           to the next physical sheet if the printer keeps going. */
         #print-area table { page-break-inside: auto !important; break-inside: auto !important; }
-        #print-area tr    { page-break-inside: avoid !important; break-inside: avoid !important; }
+        #print-area tr    { page-break-inside: auto !important; break-inside: auto !important; }
       }
-      /* Row heights tightened so all 15 particulars rows + comments +
-         signature fit inside the 8.5×12.5 sheet. Was 36 / 75 which
-         overflowed and cut off Delivered Cartons Qty, Notes and the
-         Signature line at the bottom. 28 / 52 still gives enough
-         hand-writing space and keeps everything on one page. */
-      .pc-logo   { height: 68px !important; }
-      .pc-serial { font-size: 16pt !important; }
-      .pc-title  { margin: 0 0 2px !important; font-size: 15pt !important; }
-      .pp-table .pp-data-row td     { height: 28px !important; padding: 3px 10px !important; font-size: 11pt; }
-      .pp-table .pp-comments-row td { height: 52px !important; padding: 4px 10px !important; font-size: 11pt; }
-      .pc-sig { margin-top: 2px !important; font-size: 10pt !important; }
+      /* Original pre-10am layout — bigger header, comfortable row heights. */
+      .pc-logo   { height: 80px !important; }
+      .pc-serial { font-size: 18pt !important; }
+      .pc-title  { margin: 0 0 2px !important; }
+      .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pc-sig { margin-top: 4px !important; }
 
       /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
          Force exact-color so browsers don't strip ink-saving colors. */
@@ -12704,6 +12719,22 @@ function printJobCard(id) {
   }).catch(() => {});
   const area = document.getElementById('print-area');
   area.innerHTML = buildPrintCard(j);
+  // Chrome sometimes ignores an @page rule that lives inside a
+  // body-injected <style> tag — the print engine parses the head's
+  // @page (A4 portrait) and never sees the 8.5×12.5 override. That's
+  // what makes the bottom row(s) fall off the paper: content sized
+  // for 12.5in overflows the 11.69in A4 sheet. Injecting the @page
+  // directive into <head> BEFORE calling print() guarantees it's the
+  // one the engine picks. Removed on afterprint so other flows keep
+  // their own paper size.
+  let jcPageStyle = document.getElementById('__jc-print-page');
+  if (!jcPageStyle) {
+    jcPageStyle = document.createElement('style');
+    jcPageStyle.id = '__jc-print-page';
+    document.head.appendChild(jcPageStyle);
+  }
+  jcPageStyle.textContent = '@media print { @page { size: 8.5in 12.5in; margin: 0; } }';
+
   // Browsers print the document.title in the page header by default
   // ("Job Tracker Supreme Art"). Blank the title for the duration of
   // the print so the header is empty. Date + URL + page number can
@@ -12713,7 +12744,11 @@ function printJobCard(id) {
   // step per browser.
   const prevTitle = document.title;
   document.title = ' ';
-  const restoreTitle = () => { document.title = prevTitle; window.removeEventListener('afterprint', restoreTitle); };
+  const restoreTitle = () => {
+    document.title = prevTitle;
+    if (jcPageStyle && jcPageStyle.parentNode) jcPageStyle.parentNode.removeChild(jcPageStyle);
+    window.removeEventListener('afterprint', restoreTitle);
+  };
   window.addEventListener('afterprint', restoreTitle);
   setTimeout(() => {
     window.print();
