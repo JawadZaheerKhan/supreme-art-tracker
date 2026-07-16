@@ -1153,6 +1153,24 @@
 .jc-part .jc-spec-row label { display: inline-flex; align-items: center; gap: 4px; margin: 2px 10px 2px 0; font-size: 12px; cursor: pointer; }
 .jc-part .jc-spec-row .jc-brand { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; }
 .jc-part .jc-spec-row .jc-brand input { width: 120px; border-bottom: 1px solid #888; }
+/* Special-colors editor inside the Edit/New Job modal. Rendered as a row
+   in the specs table so it sits next to coatings, matching the paper
+   card's own Rows 8–12 arrangement. */
+.jc-specials-editor td { background: #fdfcf7; padding: 8px 10px !important; }
+.f-specials-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.f-specials-title { font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; color: #555; }
+.f-specials-hint { font-size: 11px; color: var(--text2); flex: 1; }
+#f-specials-wrap { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.f-special { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; background: #fff; display: flex; flex-direction: column; gap: 4px; }
+.f-special-head { display: flex; gap: 4px; align-items: center; }
+.f-special-head input { flex: 1; border: none; border-bottom: 1px solid #999; padding: 3px 4px; font-size: 13px; font-weight: 600; background: transparent; font-family: inherit; }
+.f-special-head input:focus { outline: none; background: #fff7d6; }
+.f-special-mixes { display: flex; flex-direction: column; gap: 3px; }
+.f-mix { display: flex; gap: 4px; align-items: center; }
+.f-mix input { border: none; border-bottom: 1px dashed #999; padding: 2px 4px; font-size: 12px; background: transparent; font-family: inherit; flex: 1; min-width: 0; }
+.f-mix input:focus { outline: none; background: #fff7d6; }
+.btn-x { padding: 0 6px !important; font-size: 14px !important; line-height: 1 !important; color: var(--text2); }
+.btn-x:hover { color: #a32d2d; }
 .jc-title { text-align: center; font-size: 18px; font-weight: 700; letter-spacing: 3px; margin: 4px 0 0; color: var(--text); }
 .jc-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; position: relative; z-index: 1; }
 .jc-header .jc-serial { font-family: 'Courier New', monospace; font-size: 15px; font-weight: 700; color: var(--text); padding-top: 8px; letter-spacing: 1px; }
@@ -1479,6 +1497,26 @@
 .pp-table th { background: #eee; font-weight: 600; text-align: center; font-size: 9.5pt; text-transform: uppercase; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .pp-table .pp-row-label { font-weight: 600; width: 28%; font-size: 11pt; }
 .pp-table .pp-spec { font-size: 10.5pt; padding: 7px 8px; }
+
+/* Row 6 — the compact coatings strip on the printed job card. Left-aligned,
+   inline items, keeps the row a single line of ticked coatings. Tighter
+   vertical padding than a normal data row so it doesn't grow the card. */
+.pc-table .pc-coat-row td { text-align: left !important; padding: 4px 8px !important; }
+.pc-table .pc-ctp-row td { padding: 4px 8px !important; }
+/* Row 8–12 — Special Colors block. One <td> in this row wraps a CSS grid
+   of N side-by-side blocks (max 5). Each block is a title + 4 mix rows.
+   Total row height budget is tuned so the whole card still fits on the
+   8.5x12.5 sheet after we added Row 6 (coatings) and Row 7 (CTP setup). */
+.pc-specials-row td { padding: 0 !important; }
+.pc-sc-grid { display: grid; width: 100%; min-height: 120px; }
+.pc-sc-block { display: flex; flex-direction: column; border-right: 1px solid #000; }
+.pc-sc-block:last-child { border-right: none; }
+.pc-sc-head { text-align: center; font-weight: 700; font-size: 11pt; padding: 2px 6px; border-bottom: 1px solid #000; text-transform: uppercase; letter-spacing: 0.05em; background: #eee; line-height: 1.2; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.pc-sc-mixes { display: flex; flex-direction: column; flex: 1; }
+.pc-sc-mix { display: grid; grid-template-columns: 1fr 52px; flex: 1; border-bottom: 1px solid #000; align-items: center; min-height: 20px; }
+.pc-sc-mix:last-child { border-bottom: none; }
+.pc-sc-mix .pc-sc-name { padding: 1px 6px; text-transform: uppercase; letter-spacing: 0.02em; line-height: 1.15; }
+.pc-sc-mix .pc-sc-pct  { padding: 1px 6px; text-align: right; border-left: 1px solid #000; font-weight: 700; line-height: 1.15; }
 
 </style>
 </head>
@@ -11460,13 +11498,111 @@ function specsSection(p, coatings, j) {
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
       ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
     </td></tr>`;
+  // Special-colors editor — up to 5 named specials, each with its own mix
+  // list (color name + %). Cap enforced in addSpecialColor(). The block is
+  // rendered live from a data-carrying wrapper (data-specials JSON) so the
+  // add/remove buttons don't have to touch the surrounding table markup.
+  const initialSpecials = Array.isArray((j?.particulars||{}).special_colors)
+    ? (j.particulars.special_colors)
+    : [];
+  const specialsRow = `
+    <tr class="jc-spec-row jc-specials-editor"><td colspan="5">
+      <div class="f-specials-head">
+        <span class="f-specials-title">Special Colors</span>
+        <span class="f-specials-hint">Up to 5. Each can have up to 4 mixes.</span>
+        <button type="button" class="btn btn-sm" onclick="addSpecialColor()" id="f-add-special">+ Add Special Color</button>
+      </div>
+      <div id="f-specials-wrap" data-specials="${esc(JSON.stringify(initialSpecials))}"></div>
+    </td></tr>`;
   return `
     <table class="jc-part jc-specs">
       ${papersRow}
       ${cutRow}
       ${coatRow(PRINT_COATINGS_ROW1)}
       ${coatRow(PRINT_COATINGS_ROW2)}
+      ${specialsRow}
     </table>`;
+}
+
+// Special-colors editor state lives directly in the DOM (input .value +
+// data-idx attributes). renderSpecials() rebuilds the whole editor from an
+// in-memory array so add/remove operations don't have to splice HTML.
+const MAX_SPECIALS = 5;
+const MAX_SPECIAL_MIXES = 4;
+
+function readSpecialsFromDOM() {
+  const wrap = document.getElementById('f-specials-wrap');
+  if (!wrap) return [];
+  return [...wrap.querySelectorAll('.f-special')].map(el => {
+    const name = (el.querySelector('input[data-role="name"]')?.value || '').trim();
+    const mix = [...el.querySelectorAll('.f-mix')].map(mr => ({
+      color: (mr.querySelector('input[data-role="color"]')?.value || '').trim(),
+      pct:   (mr.querySelector('input[data-role="pct"]')?.value   || '').trim(),
+    })).filter(m => m.color || m.pct);
+    return { name, mix };
+  });
+}
+
+function renderSpecials(specials) {
+  const wrap = document.getElementById('f-specials-wrap');
+  if (!wrap) return;
+  const list = (specials || []).slice(0, MAX_SPECIALS);
+  wrap.innerHTML = list.map((s, si) => {
+    const mixes = Array.isArray(s.mix) && s.mix.length ? s.mix.slice(0, MAX_SPECIAL_MIXES) : [{ color: '', pct: '' }];
+    const mixesHtml = mixes.map((m, mi) => `
+      <div class="f-mix" data-idx="${mi}">
+        <input type="text" class="lc-input" data-role="color" placeholder="Mix color" value="${esc(m.color||'')}">
+        <input type="text" data-role="pct" placeholder="%" value="${esc(m.pct||'')}" style="width:60px;">
+        <button type="button" class="btn btn-sm btn-x" title="Remove mix" onclick="removeSpecialMix(${si}, ${mi})">×</button>
+      </div>`).join('');
+    return `
+      <div class="f-special" data-idx="${si}">
+        <div class="f-special-head">
+          <input type="text" class="lc-input" data-role="name" placeholder="Special color name (e.g. red)" value="${esc(s.name||'')}">
+          <button type="button" class="btn btn-sm btn-x" title="Remove this special color" onclick="removeSpecialColor(${si})">×</button>
+        </div>
+        <div class="f-special-mixes">${mixesHtml}</div>
+        <button type="button" class="btn btn-sm" onclick="addSpecialMix(${si})" ${mixes.length >= MAX_SPECIAL_MIXES ? 'disabled' : ''}>+ Add mix</button>
+      </div>`;
+  }).join('');
+  // Toggle the "+ Add Special Color" button when the cap is hit.
+  const addBtn = document.getElementById('f-add-special');
+  if (addBtn) addBtn.disabled = list.length >= MAX_SPECIALS;
+}
+
+function initSpecialsEditor() {
+  const wrap = document.getElementById('f-specials-wrap');
+  if (!wrap) return;
+  let initial = [];
+  try { initial = JSON.parse(wrap.dataset.specials || '[]'); } catch {}
+  renderSpecials(initial);
+}
+
+function addSpecialColor() {
+  const cur = readSpecialsFromDOM();
+  if (cur.length >= MAX_SPECIALS) return;
+  cur.push({ name: '', mix: [{ color: '', pct: '' }] });
+  renderSpecials(cur);
+}
+function removeSpecialColor(idx) {
+  const cur = readSpecialsFromDOM();
+  cur.splice(idx, 1);
+  renderSpecials(cur);
+}
+function addSpecialMix(idx) {
+  const cur = readSpecialsFromDOM();
+  if (!cur[idx]) return;
+  cur[idx].mix = cur[idx].mix || [];
+  if (cur[idx].mix.length >= MAX_SPECIAL_MIXES) return;
+  cur[idx].mix.push({ color: '', pct: '' });
+  renderSpecials(cur);
+}
+function removeSpecialMix(idx, mIdx) {
+  const cur = readSpecialsFromDOM();
+  if (!cur[idx] || !cur[idx].mix) return;
+  cur[idx].mix.splice(mIdx, 1);
+  if (!cur[idx].mix.length) cur[idx].mix = [{ color: '', pct: '' }];
+  renderSpecials(cur);
 }
 
 // Strip any "/ NNNgsm" suffix from a size string so the dimensions stand
@@ -11694,6 +11830,20 @@ function collectParticulars() {
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
+  // Special-colors block — read from the DOM editor rendered by
+  // renderSpecials(). Drop entirely-empty entries so a job never carries
+  // a `[{name:"", mix:[]}]` ghost. Capped at MAX_SPECIALS to defend
+  // against future UI changes; renderSpecials also enforces the cap.
+  const specials = (typeof readSpecialsFromDOM === 'function' ? readSpecialsFromDOM() : [])
+    .map(s => ({
+      name: (s.name || '').toLowerCase(),
+      mix:  (s.mix || [])
+        .map(m => ({ color: (m.color||'').toLowerCase(), pct: (m.pct||'').trim() }))
+        .filter(m => m.color || m.pct),
+    }))
+    .filter(s => s.name || s.mix.length)
+    .slice(0, 5);
+  if (specials.length) out.special_colors = specials;
   // Preserve the packets top-up ledger through save. Top-ups aren't editable
   // from the form; they're managed via the Pending Stock queue. Losing them
   // here would silently wipe pending/approved history on every job edit.
@@ -11958,6 +12108,7 @@ function openAdd() {
   </div>`);
   updateStockHint();
   renderCutPreview();
+  initSpecialsEditor();
 }
 
 // Given a source job code like "SA-2026-001" or "10400", figure out the next
@@ -12118,6 +12269,7 @@ function openEdit(id) {
   </div>`);
   updateStockHint();
   renderCutPreview();
+  initSpecialsEditor();
 }
 
 async function saveEdit(id) {
@@ -12514,16 +12666,23 @@ function buildPrintCard(j) {
   const fmt = d => d ? fmtDMY(d) : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const p = j.particulars || {};
-  // Paper checkmark sources: prefer the live inventory item the job points to;
-  // fall back to the old free-text paper_types array for jobs created before
-  // the inventory feature existed.
+  // Paper source: prefer the live inventory item; fall back to the legacy
+  // particulars fields for pre-inventory jobs.
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const paperTypes = invItem ? [invItem.paper_type] : (Array.isArray(p.paper_types) ? p.paper_types : []);
-  const paperBrand = invItem ? (invItem.brand || '') : (p.brand || '');
+  const paperType  = invItem ? (invItem.paper_type || '') : ((Array.isArray(p.paper_types) && p.paper_types[0]) || '');
+  const paperBrand = invItem ? (invItem.brand || '')      : (p.brand || '');
+  // Combined "PAPER - BRAND" cell (Row 5). Both pieces stay in their own
+  // storage columns; this is display-only concatenation. Renders just the
+  // paper if brand is empty and vice versa; blank if neither is set.
+  const paperBrandCombined = (() => {
+    const a = String(paperType || '').trim();
+    const b = String(paperBrand || '').trim();
+    if (a && b) return `${a} - ${b}`;
+    return a || b || '';
+  })();
   const coatLabel = name => {
-    const on = coatings.includes(name);
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
-    return `<span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${label}</span>`;
+    return `<span class="pc-coat-box pc-coat-on">✓</span><span class="pc-coat-label-on">${label}</span>`;
   };
   const cell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${v(val)}</div></td>`;
   const dateCell = (label, val) => `<td><div class="pc-label">${label}</div><div class="pc-value">${fmt(val)}</div></td>`;
@@ -12547,45 +12706,106 @@ function buildPrintCard(j) {
       <td>${v(p[r.key]?.name)}</td>
       <td>${v(p[r.key]?.signature)}</td>
     </tr>`;
-  // Show the standard 6 paper types always, plus any custom paper type this
-  // job is actually using (e.g. "Sticker" added through the inventory
-  // dropdown manager). Keeps the printed card consistent for normal jobs
-  // while still showing custom additions when they're relevant.
-  // Case-insensitive dedupe. After the lowercase migration old jobs
-  // may still hold "Bleach Board" in particulars.paper_types while
-  // PAPER_TYPES is "bleach board" — a plain .includes would append
-  // the same paper as an EXTRA checkbox, wrap the row, and shove the
-  // last data row off the sheet.
-  const knownLower = new Set(PAPER_TYPES.map(t => String(t).toLowerCase()));
-  const printPaperTypes = [
-    ...PAPER_TYPES,
-    ...paperTypes.filter(t => t && !knownLower.has(String(t).toLowerCase())),
-  ];
-  // Brand moved to its own cell next to Deadline / Delivered PO Qty so the
-  // whole row can be devoted to paper-type checkboxes. Helps fit custom
-  // additions like "Sticker" without crowding the brand label.
-  // Case-insensitive "is this paper type checked?" so a job whose
-  // paper_type was migrated to lowercase still shows a tick against
-  // the mixed-case PAPER_TYPES entry (and vice versa on legacy jobs).
-  const paperTypesLower = new Set(paperTypes.map(t => String(t).toLowerCase()));
-  const papersRow = `
-    <tr><td colspan="5" class="pp-spec">
-      ${printPaperTypes.map(t => {
-        const on = paperTypesLower.has(String(t).toLowerCase());
-        return `<span style="margin-right:14px;"><span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span><span class="${on ? 'pc-coat-label-on' : ''}">${t}</span></span>`;
-      }).join('')}
-    </td></tr>`;
-  const coatRow = list => `
-    <tr><td colspan="5" class="pp-spec" style="text-align:center;">
-      ${list.map(c => `<span style="margin:0 12px;">${coatLabel(c)}</span>`).join('')}
-    </td></tr>`;
-  const specsRows = papersRow + coatRow(PRINT_COATINGS_ROW1) + coatRow(PRINT_COATINGS_ROW2);
+  // Row 6 (coatings) now lives inline in the pc-table showing ONLY the
+  // coatings the user actually ticked. Row 5's last cell already holds
+  // the combined "PAPER - BRAND" text, so the papers checkbox strip and
+  // the two full coating rows in the old pp-table specs section are gone.
+  // Row 7 (CTP setup) also lives in the pc-table so we skip these keys
+  // from the particulars pp-table to avoid duplicate rows.
+  const PRINT_SKIP_PARTICULARS = new Set([
+    'artworks_matter_approval', 'shade_card', 'plates', 'no_of_colors',
+  ]);
   const commentsRow = `
     <tr class="pp-comments-row">
       <td class="pp-row-label" style="vertical-align:top;">Comments</td>
       <td colspan="4" style="vertical-align:top;">${v(p.comments)}</td>
     </tr>`;
-  const partRows = PARTICULARS_ROWS.map(dataRow).join('') + commentsRow;
+  const partRows = PARTICULARS_ROWS
+    .filter(r => !PRINT_SKIP_PARTICULARS.has(r.key))
+    .map(dataRow).join('') + commentsRow;
+
+  // Row 6 — only the coatings that were actually ticked, one line. Falls
+  // back to a placeholder so the row height doesn't collapse when no
+  // coating is chosen (keeps the whole card layout on one printed page).
+  const coatingRow = (() => {
+    if (!coatings.length) {
+      return `
+        <tr class="pc-coat-row">
+          <td colspan="7"><div class="pc-label">Coatings</div><div class="pc-value" style="color:#666;font-weight:400;">—</div></td>
+        </tr>`;
+    }
+    return `
+      <tr class="pc-coat-row">
+        <td colspan="7">
+          <div class="pc-label">Coatings</div>
+          <div class="pc-value" style="text-align:left;">
+            ${coatings.map(c => `<span style="margin-right:18px;white-space:nowrap;">${coatLabel(c)}</span>`).join('')}
+          </div>
+        </td>
+      </tr>`;
+  })();
+
+  // Row 7 — quick CTP-setup line. Values come from the same particulars
+  // entries that used to have their own particulars rows; those rows are
+  // filtered out of the pp-table below to avoid duplication. Shade Card
+  // shows the standard green ✓ box (always drawn — a shade card is
+  // always required before plates go on press).
+  const p_amma  = p.artworks_matter_approval || {};
+  const ammaVal = [p_amma.details, p_amma.quantity, p_amma.name].filter(Boolean).join(' · ');
+  const platesVal = (p.plates && (p.plates.quantity || p.plates.details)) || '';
+  const colorsVal = (p.no_of_colors && (p.no_of_colors.quantity || p.no_of_colors.details)) || '';
+  const ctpRow = `
+    <tr class="pc-ctp-row">
+      <td colspan="3"><div class="pc-label">Artworks &amp; Matter Approval</div><div class="pc-value">${v(ammaVal)}</div></td>
+      <td colspan="1"><div class="pc-label">Shade Card</div><div class="pc-value" style="text-align:center;"><span class="pc-coat-box pc-coat-on">✓</span></div></td>
+      <td colspan="1"><div class="pc-label">Plates</div><div class="pc-value">${v(platesVal)}</div></td>
+      <td colspan="1"><div class="pc-label">No. of Colors</div><div class="pc-value">${v(colorsVal)}</div></td>
+      <td colspan="1"><div class="pc-label">Name</div><div class="pc-value">&nbsp;</div></td>
+    </tr>`;
+
+  // Rows 8–12 — Special Colors block. Each special color is one column of
+  // a nested grid; the block is 5 rows tall (1 header + 4 mix slots).
+  // Cap at 5 specials to keep the columns wide enough to read. Font size
+  // scales with the number of filled mix rows: fewer entries = larger
+  // text (so a 1-mix special reads big; a 4-mix one packs closer).
+  const rawSpecials = Array.isArray(p.special_colors) ? p.special_colors : [];
+  const specials = rawSpecials
+    .filter(s => s && (s.name || (Array.isArray(s.mix) && s.mix.some(m => m && (m.color || m.pct)))))
+    .slice(0, 5);
+  const specialsBlock = (() => {
+    if (!specials.length) return '';
+    const cols = specials.length;
+    const blockHtml = specials.map(s => {
+      const mixes = Array.isArray(s.mix) ? s.mix.filter(m => m && (m.color || m.pct)) : [];
+      const filled = mixes.length;
+      // Font size scales roughly with height per row (block height ÷ rows).
+      const fs = filled <= 1 ? 20 : filled <= 2 ? 16 : filled <= 3 ? 13 : 11;
+      const rowsHtml = Array.from({ length: 4 }, (_, i) => {
+        const m = mixes[i] || {};
+        const color = m.color ? v(m.color) : '&nbsp;';
+        const pctRaw = m.pct ? String(m.pct).trim() : '';
+        const pct = pctRaw ? (pctRaw.endsWith('%') ? v(pctRaw) : v(pctRaw + '%')) : '&nbsp;';
+        return `
+          <div class="pc-sc-mix" style="font-size:${fs}pt;">
+            <div class="pc-sc-name">${color}</div>
+            <div class="pc-sc-pct">${pct}</div>
+          </div>`;
+      }).join('');
+      return `
+        <div class="pc-sc-block">
+          <div class="pc-sc-head">${v(s.name)}</div>
+          <div class="pc-sc-mixes">${rowsHtml}</div>
+        </div>`;
+    }).join('');
+    return `
+      <tr class="pc-specials-row">
+        <td colspan="7" style="padding:0;">
+          <div class="pc-sc-grid" style="grid-template-columns:repeat(${cols},1fr);">
+            ${blockHtml}
+          </div>
+        </td>
+      </tr>`;
+  })();
 
   return `
     <!-- Job-card-specific print styles. The shop's job-card paper is 8.5"×12.5"
@@ -12615,12 +12835,16 @@ function buildPrintCard(j) {
         #print-area table { page-break-inside: auto !important; break-inside: auto !important; }
         #print-area tr    { page-break-inside: auto !important; break-inside: auto !important; }
       }
-      /* Original pre-10am layout — bigger header, comfortable row heights. */
+      /* Original pre-10am layout — bigger header, comfortable row heights.
+         Data rows are a touch tighter now (was 36px) because the pc-table
+         picked up 3 extra rows (coatings, CTP setup, Special Colors block)
+         that had to earn their space without pushing the last particulars
+         line off the 12.5in sheet. */
       .pc-logo   { height: 80px !important; }
       .pc-serial { font-size: 18pt !important; }
       .pc-title  { margin: 0 0 2px !important; }
-      .pp-table .pp-data-row td     { height: 36px !important; padding: 5px 10px !important; font-size: 11pt; }
-      .pp-table .pp-comments-row td { height: 75px !important; padding: 5px 10px !important; font-size: 11pt; }
+      .pp-table .pp-data-row td     { height: 30px !important; padding: 3px 10px !important; font-size: 11pt; }
+      .pp-table .pp-comments-row td { height: 60px !important; padding: 4px 10px !important; font-size: 11pt; }
       .pc-sig { margin-top: 4px !important; }
 
       /* Typed/user data prints in blue; LABELS and HEADINGS stay black.
@@ -12673,6 +12897,20 @@ function buildPrintCard(j) {
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
+      /* Special-colors block prints its filled cells in the same blue as
+         the other typed values, but the header stripe stays black-on-grey
+         so the color name reads as a label. */
+      .pc-sc-mix .pc-sc-name, .pc-sc-mix .pc-sc-pct {
+        color: #1e40af !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      .pc-sc-head {
+        color: #000 !important;
+        background: #eee !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
     </style>
     <img class="pc-watermark" src="/logo.png" alt="">
     <div class="pc-content">
@@ -12722,14 +12960,11 @@ function buildPrintCard(j) {
         <td colspan="1"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
         <td colspan="1"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
         <td colspan="2"><div class="pc-label">MRP</div><div class="pc-value">${v(j.mrp)}</div></td>
-        <td colspan="3"><div class="pc-label">Brand</div><div class="pc-value pc-brand">${v(paperBrand)}</div></td>
+        <td colspan="3"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${v(paperBrandCombined)}</div></td>
       </tr>
-      <tr>
-        <td colspan="7">&nbsp;</td>
-      </tr>
-    </table>
-    <table class="pp-table">
-      ${specsRows}
+      ${coatingRow}
+      ${ctpRow}
+      ${specialsBlock}
     </table>
     <table class="pp-table">
       <tr>
