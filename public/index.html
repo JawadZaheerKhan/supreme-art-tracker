@@ -1512,6 +1512,14 @@
   print-color-adjust: exact; -webkit-print-color-adjust: exact;
 }
 .pc-content { position: relative; z-index: 1; }
+/* Give the print root — and each batch-print page wrapper — an
+   explicit positioning context so the absolute .pc-watermark centers
+   on its OWN card instead of falling back to the viewport. Without
+   this, batch-printed cards stack every watermark in the same spot
+   (only page 1 ends up looking right). Each .jc-batch-page is sized
+   to a full printed sheet so the watermark lands mid-page. */
+#print-area { position: relative; }
+.jc-batch-page { position: relative; width: 8.5in; min-height: 12.5in; box-sizing: border-box; }
 .pc-table { width: 100%; border-collapse: collapse; font-size: 12pt; table-layout: fixed; }
 .pc-table td { border: 1px solid #000; padding: 6px 8px 8px; vertical-align: top; }
 .pc-label { font-size: 9pt; color: #000; text-transform: uppercase; letter-spacing: 0.3px; line-height: 1.2; }
@@ -1557,6 +1565,12 @@
 .pc-sc-mix .pc-sc-pct  { padding: 1px 6px; text-align: right; border-left: 1px solid #000; font-weight: 700; line-height: 1.15; }
 
 </style>
+<!-- Warm the browser cache with the print-card logo/watermark image on
+     page load. #print-area is display:none, so its <img src="/logo.png">
+     doesn't kick off a fetch until we call window.print() — which is
+     exactly the moment we CAN'T afford a network round trip. Preload
+     here so the very first Print click has the asset already in cache. -->
+<link rel="preload" as="image" href="/logo.png">
 </head>
 <body>
 
@@ -13347,10 +13361,34 @@ function printJobCard(id) {
     window.removeEventListener('afterprint', restoreTitle);
   };
   window.addEventListener('afterprint', restoreTitle);
-  setTimeout(() => {
+  waitForPrintImages(area).then(() => {
     window.print();
     setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
-  }, 50);
+  });
+}
+
+// Resolve once every <img> inside `root` has finished loading (or errored
+// out) — never rejects, and never waits longer than 1200ms. window.print()
+// races image decoding: if the browser hasn't finished fetching /logo.png
+// by the time we call it, the printed sheet ships without the logo /
+// watermark. This is the reason logos would randomly go missing on cold
+// prints. Chrome's own print pipeline usually handles this for visible
+// pages, but #print-area is display:none until we call print(), which
+// suppresses eager image loads.
+function waitForPrintImages(root, timeoutMs = 1200) {
+  const imgs = [...(root ? root.querySelectorAll('img') : [])];
+  if (!imgs.length) return Promise.resolve();
+  const perImg = img => (img.complete && img.naturalWidth > 0)
+    ? Promise.resolve()
+    : new Promise(res => {
+        const done = () => { img.removeEventListener('load', done); img.removeEventListener('error', done); res(); };
+        img.addEventListener('load', done);
+        img.addEventListener('error', done);
+      });
+  const all = Promise.all(imgs.map(perImg));
+  const timeout = new Promise(res => setTimeout(res, timeoutMs));
+  // Whichever resolves first — capped so a stuck fetch doesn't block print.
+  return Promise.race([all, timeout]);
 }
 
 // Batch print — renders every ticked New Job into #print-area separated by
@@ -13399,7 +13437,7 @@ function printSelectedJobs() {
     window.removeEventListener('afterprint', restore);
   };
   window.addEventListener('afterprint', restore);
-  setTimeout(() => {
+  waitForPrintImages(area).then(() => {
     window.print();
     setTimeout(() => {
       area.innerHTML = '';
@@ -13409,7 +13447,7 @@ function printSelectedJobs() {
       selectedNewJobIds.clear();
       if (mode === 'jobs') render();
     }, 500);
-  }, 50);
+  });
 }
 
 // ── CAPA (Corrective & Preventive Action reports) ────────────
