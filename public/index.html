@@ -447,6 +447,18 @@
   .btn-danger { color: #A32D2D; border-color: var(--red-border); }
   .btn-danger:hover { background: var(--red-bg); }
   .jobs-list { display: flex; flex-direction: column; gap: 8px; }
+  /* Batch-print action bar for the New Jobs tab. Sits directly above the
+     list; sticky so the "Print Selected" button stays reachable while
+     scrolling a long queue. */
+  .new-jobs-bulk { position: sticky; top: 0; z-index: 5; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 8px; }
+  .new-jobs-bulk .njb-inner { display: flex; align-items: center; gap: 10px; }
+  .new-jobs-bulk .njb-count { font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; margin-right: auto; }
+  /* Per-card selection checkbox — small, subtle, only rendered on New
+     Jobs. is-selected on the card adds a green accent stripe so the
+     picked jobs are obvious at a glance. */
+  .job-select { display: inline-flex; align-items: center; margin-right: 6px; cursor: pointer; }
+  .job-select input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: #166534; cursor: pointer; }
+  .job-card.is-selected, .job-tile.is-selected { box-shadow: 0 0 0 2px #166534 inset; }
   .job-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; border-left: 4px solid var(--border); transition: box-shadow 0.12s; }
   .job-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.07); }
   /* Priority left-border accents on job cards. New names map to:
@@ -1645,6 +1657,10 @@
       <button class="mode-btn" data-jv="compact" onclick="setJobsViewMode('compact')" title="Jobs view — dense list for fast scanning">&#9776; Jobs</button>
     </div>
   </div>
+  <!-- Batch-print action bar — only visible on the New Jobs tab. Populated
+       by renderNewJobsBulkBar(). Placed above the list so the counter and
+       Print Selected button stay near the jobs the user is ticking. -->
+  <div class="new-jobs-bulk" id="new-jobs-bulk" style="display:none;"></div>
   <div class="jobs-list" id="jobs-list"></div>
 </div>
 
@@ -2228,6 +2244,9 @@ let view = 'active';
 // Jobs view layout: 'cards' (animated grid, default) or 'compact' (dense list).
 // Persisted so each user keeps their preferred density across sessions.
 let jobsViewMode = localStorage.getItem('sa_jobs_view') || 'cards';
+// Batch print — job IDs the user has ticked on the New Jobs tab. Only
+// active while view === 'new'; auto-cleared when the tab changes.
+const selectedNewJobIds = new Set();
 let filterText = '';
 let filterStage = '';
 let filterClient = '';
@@ -3050,8 +3069,60 @@ function renderJobs() {
   el.classList.toggle('jobs-list--compact', jobsViewMode !== 'cards');
   document.querySelectorAll('#jobs-view-switch .mode-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.jv === jobsViewMode));
+  renderNewJobsBulkBar();
   if (jobsViewMode === 'cards') renderJobsCards();
   else renderJobsCompact();
+}
+
+// Batch-print action bar for the New Jobs tab. Populates a container that
+// sits directly above the jobs list. Shows "Select All" / "Clear" plus a
+// primary "Print Selected (N)" button. Hidden entirely on any other tab or
+// when the user can't print. Kept lightweight — buttons re-read state each
+// render, no separate DOM subscription.
+function renderNewJobsBulkBar() {
+  const bar = document.getElementById('new-jobs-bulk');
+  if (!bar) return;
+  if (view !== 'new' || !canPrintJobCard()) {
+    bar.style.display = 'none';
+    bar.innerHTML = '';
+    return;
+  }
+  const filtered = sortJobsForView(getFiltered()).filter(isNewJob);
+  const visibleIds = new Set(filtered.map(j => j.id));
+  // Prune any selections that are no longer visible after a filter change.
+  for (const id of [...selectedNewJobIds]) if (!visibleIds.has(id)) selectedNewJobIds.delete(id);
+  const n = selectedNewJobIds.size;
+  const total = filtered.length;
+  const allSelected = total > 0 && n === total;
+  bar.style.display = '';
+  bar.innerHTML = `
+    <div class="njb-inner">
+      <span class="njb-count">${n} selected${total ? ` of ${total}` : ''}</span>
+      <button class="btn btn-sm" onclick="${allSelected ? 'clearNewJobSelection()' : 'selectAllNewJobs()'}" ${total ? '' : 'disabled'}>${allSelected ? 'Clear' : 'Select All'}</button>
+      <button class="btn btn-sm btn-primary" onclick="printSelectedJobs()" ${n ? '' : 'disabled'} title="Print every ticked job card in one dialog">&#128424; Print Selected${n ? ' ('+n+')' : ''}</button>
+    </div>`;
+}
+
+function toggleJobSelect(id, on) {
+  if (on) selectedNewJobIds.add(id); else selectedNewJobIds.delete(id);
+  // Cheap update — just refresh the bar count + the affected card's
+  // highlight class. Avoid a full render so the row scroll position stays.
+  renderNewJobsBulkBar();
+  document.querySelectorAll(`.job-card, .job-tile`).forEach(el => {
+    const idAttr = el.querySelector(`input[type="checkbox"][onchange*="toggleJobSelect(${id},"]`);
+    if (idAttr) el.classList.toggle('is-selected', on);
+  });
+}
+
+function selectAllNewJobs() {
+  const filtered = sortJobsForView(getFiltered()).filter(isNewJob);
+  for (const j of filtered) selectedNewJobIds.add(j.id);
+  render();
+}
+
+function clearNewJobSelection() {
+  selectedNewJobIds.clear();
+  render();
 }
 
 function renderJobsCompact() {
@@ -3102,11 +3173,18 @@ function renderJobsCompact() {
     const sidePanel = j.cut_size
       ? `<div class="job-side"><div><div class="lbl">Cut to</div><div class="val">${esc(j.cut_size)}${j.offcut_size?` <span style="font-weight:500;">(offcut ${esc(j.offcut_size)})</span>`:''}</div></div></div>`
       : '';
+    // Selection checkbox — only shown on the New Jobs tab (view === 'new')
+    // and only for users who can print. Lets the PM pick several new jobs
+    // and batch-print them in one dialog. See printSelectedJobs().
+    const selBox = (isNew && view === 'new' && canPrintJobCard())
+      ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
+      : '';
     return `
-    <div class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''}">
+    <div class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}">
       <div class="job-top">
         <div class="job-meta">
           <div class="job-id-row">
+            ${selBox}
             <span class="job-id">#${j.id}</span>
             ${badge}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -3284,10 +3362,16 @@ function renderJobCard(j) {
   // Edit / View is the most-used action when not pending — surface it directly.
   const updateBtn = !pending ? `<button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the dots above.">Edit / View</button>` : '';
 
+  // Batch-print select box — same logic as the compact view. Renders on
+  // the New Jobs tab only, and only for users who can print job cards.
+  const selBox = (isNew && view === 'new' && canPrintJobCard())
+    ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
+    : '';
   return `
-  <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''}">
+  <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}">
     ${sideStats}
     <div class="tile-head">
+      ${selBox}
       <span class="job-id">#${j.id}</span>
       ${badge}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -3795,7 +3879,13 @@ function stageMachineSVG(stageIndex, { pending } = {}) {
 }
 
 function render() { renderStats(); renderTabs(); renderJobs(); }
-function setView(v) { view=v; render(); }
+function setView(v) {
+  // Batch-print selection is a New Jobs feature — drop any ticks when the
+  // user leaves that tab so an accidental Print Selected can't send stale
+  // ids that are no longer on screen.
+  if (v !== 'new' && selectedNewJobIds.size) selectedNewJobIds.clear();
+  view=v; render();
+}
 function setJobsViewMode(m) {
   jobsViewMode = m;
   localStorage.setItem('sa_jobs_view', m);
@@ -13260,6 +13350,65 @@ function printJobCard(id) {
   setTimeout(() => {
     window.print();
     setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
+  }, 50);
+}
+
+// Batch print — renders every ticked New Job into #print-area separated by
+// forced page breaks and opens the print dialog once. Same @page override
+// and title-blank trick as printJobCard() so headers/paper size behave.
+// Fire-and-forget bumps print_count for each so the "printed" dot lights up.
+function printSelectedJobs() {
+  const ids = Array.from(selectedNewJobIds);
+  const list = ids.map(id => jobs.find(x => x.id === id)).filter(Boolean);
+  if (!list.length) return;
+  // Bump each job's print count in parallel. Server just increments and
+  // stamps last_printed_at — safe to fire concurrently. Local cache is
+  // patched as each response lands so the dot flips on for this client.
+  for (const j of list) {
+    api('POST', `/api/jobs/${j.id}/printed`).then((row) => {
+      if (!row) return;
+      const idx = jobs.findIndex(x => x.id === j.id);
+      if (idx >= 0) jobs[idx] = { ...jobs[idx], print_count: row.print_count, last_printed_at: row.last_printed_at };
+    }).catch(() => {});
+  }
+  const area = document.getElementById('print-area');
+  // Wrap each card in a div that forces a page break BEFORE (except the
+  // first). page-break-before is more reliable than -after when the
+  // trailing card has no content after it. Cards are self-contained: each
+  // buildPrintCard() call emits its own <style> block plus the card html,
+  // so styles apply globally and stacking multiple is safe.
+  area.innerHTML = list.map((j, i) => `
+    <div class="jc-batch-page" style="${i > 0 ? 'page-break-before: always; break-before: page;' : ''}">
+      ${buildPrintCard(j)}
+    </div>`).join('');
+  // Same @page override printJobCard uses — Chrome sometimes ignores the
+  // @page rule in a body-injected <style>, so plant it in <head> too.
+  let jcPageStyle = document.getElementById('__jc-print-page');
+  if (!jcPageStyle) {
+    jcPageStyle = document.createElement('style');
+    jcPageStyle.id = '__jc-print-page';
+    document.head.appendChild(jcPageStyle);
+  }
+  jcPageStyle.textContent = '@media print { @page { size: 8.5in 12.5in; margin: 0; } }';
+  fitPrintCardText();
+  const prevTitle = document.title;
+  document.title = ' ';
+  const restore = () => {
+    document.title = prevTitle;
+    if (jcPageStyle && jcPageStyle.parentNode) jcPageStyle.parentNode.removeChild(jcPageStyle);
+    window.removeEventListener('afterprint', restore);
+  };
+  window.addEventListener('afterprint', restore);
+  setTimeout(() => {
+    window.print();
+    setTimeout(() => {
+      area.innerHTML = '';
+      document.title = prevTitle;
+      // Clear the selection after a successful print so the operator
+      // doesn't accidentally re-print the same batch on the next click.
+      selectedNewJobIds.clear();
+      if (mode === 'jobs') render();
+    }, 500);
   }, 50);
 }
 
