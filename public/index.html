@@ -1171,6 +1171,17 @@
 .f-mix input:focus { outline: none; background: #fff7d6; }
 .btn-x { padding: 0 6px !important; font-size: 14px !important; line-height: 1 !important; color: var(--text2); }
 .btn-x:hover { color: #a32d2d; }
+/* CTP-setup row in the modal — mirrors Row 7 on the printed job card
+   (2/1/1/2/1 colspans). Green ✓ pre-printed next to Artworks & Matter
+   Approval and Shade Card since both are always required. */
+.jc-ctp-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: -1px; }
+.jc-ctp-table td { border: 1px solid #c5c2b6; background: #fdfcf7; padding: 6px 8px; vertical-align: top; }
+.jc-ctp-lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: #555; margin-bottom: 4px; display: flex; align-items: center; }
+.jc-ctp-check { display: inline-block; width: 15px; height: 15px; border: 2px solid #166534; background: #166534; color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 12px; margin-right: 5px; vertical-align: middle; }
+.jc-ctp-check-only { text-align: center; padding: 4px 0; }
+.jc-ctp-check-only .jc-ctp-check { margin-right: 0; }
+.jc-ctp-input { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; color: var(--text); padding: 1px 0; }
+.jc-ctp-input:focus { background: #fff7d6; }
 .jc-title { text-align: center; font-size: 18px; font-weight: 700; letter-spacing: 3px; margin: 4px 0 0; color: var(--text); }
 .jc-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; position: relative; z-index: 1; }
 .jc-header .jc-serial { font-family: 'Courier New', monospace; font-size: 15px; font-weight: 700; color: var(--text); padding-top: 8px; letter-spacing: 1px; }
@@ -11664,9 +11675,61 @@ function renderCutPreview() {
   el.innerHTML = `Cut to: <b>${esc(cutSize)}</b> &middot; Offcut size: <b>${esc(offcut)}</b> <span style="color:var(--text3);">(auto-computed from source ${esc(source.size)})</span>`;
 }
 
+// Which particulars keys are captured by the CTP-setup row (mirroring the
+// printed Row 7). We skip them from the main particulars table below so the
+// modal has ONE input per field, matching the print card layout exactly.
+const CTP_PARTICULARS_KEYS = new Set([
+  'artworks_matter_approval', 'shade_card', 'plates', 'no_of_colors',
+]);
+
+// Modal Row 7 mirror — same 2/1/1/2/1 colspan grid as the printed card, so
+// entering data in the modal looks like the printed job card. Shade Card is
+// a pre-set green ✓ (no input, always required). Artworks & Matter Approval
+// carries a matching green ✓ and a text field for the approver note. Name
+// is CTP-at-press but editable here if known in advance.
+function ctpSetupRow(p) {
+  const amma      = p.artworks_matter_approval || {};
+  const plates    = p.plates       || {};
+  const noColors  = p.no_of_colors || {};
+  const ammaText  = esc(amma.details || '');
+  const nameText  = esc(amma.name    || '');
+  const platesQty = esc(plates.quantity   || '');
+  const colorsQty = esc(noColors.quantity || '');
+  return `
+    <table class="jc-part jc-ctp-table">
+      <colgroup>
+        <col style="width:28.57%"><col style="width:14.29%"><col style="width:14.29%"><col style="width:28.57%"><col style="width:14.29%">
+      </colgroup>
+      <tr class="jc-ctp-row-tr">
+        <td>
+          <div class="jc-ctp-lbl"><span class="jc-ctp-check">✓</span>Artworks &amp; Matter Approval</div>
+          <input type="text" id="p-ctp-amma" class="jc-ctp-input" placeholder="approval note / version" value="${ammaText}">
+        </td>
+        <td>
+          <div class="jc-ctp-lbl">Shade Card</div>
+          <div class="jc-ctp-check-only"><span class="jc-ctp-check">✓</span></div>
+        </td>
+        <td>
+          <div class="jc-ctp-lbl">Plates</div>
+          <input type="text" id="p-ctp-plates" class="jc-ctp-input" placeholder="count" value="${platesQty}">
+        </td>
+        <td>
+          <div class="jc-ctp-lbl">No. of Colors</div>
+          <input type="text" id="p-ctp-colors" class="jc-ctp-input" placeholder="count" value="${colorsQty}">
+        </td>
+        <td>
+          <div class="jc-ctp-lbl">Name</div>
+          <input type="text" id="p-ctp-name" class="jc-ctp-input lc-input" placeholder="filled by CTP" value="${nameText}">
+        </td>
+      </tr>
+    </table>`;
+}
+
 function particularsTable(p) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
-  const rows = PARTICULARS_ROWS.map(r => `
+  const rows = PARTICULARS_ROWS
+    .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
+    .map(r => `
     <tr>
       <td class="jc-row-label">${r.label}</td>
       <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details')}"></td>
@@ -11768,6 +11831,7 @@ function jobForm(j={}) {
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
+    ${ctpSetupRow(j.particulars||{})}
     ${particularsTable(j.particulars||{})}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
@@ -11822,10 +11886,24 @@ function collectParticulars() {
   const out = {};
   PARTICULARS_ROWS.forEach(r => {
     if (r.type) return;
+    // CTP-setup fields (artworks_matter_approval / shade_card / plates /
+    // no_of_colors) don't have p-<key>-details inputs anymore — they live
+    // in the compact Row-7 mirror above and are collected below.
+    if (CTP_PARTICULARS_KEYS.has(r.key)) return;
     const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
     const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
     if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
   });
+  // Row-7 (CTP setup) — one input per printed cell. Mapped back onto the
+  // original particulars keys so downstream reports and the print card
+  // stay compatible with legacy data. Only stores non-empty fields.
+  const ammaText  = (document.getElementById('p-ctp-amma')  ||{}).value?.trim() || '';
+  const platesQty = (document.getElementById('p-ctp-plates')||{}).value?.trim() || '';
+  const colorsQty = (document.getElementById('p-ctp-colors')||{}).value?.trim() || '';
+  const ctpName   = (document.getElementById('p-ctp-name')  ||{}).value?.trim() || '';
+  if (ammaText || ctpName) out.artworks_matter_approval = { details: ammaText, quantity: '', name: ctpName, signature: '' };
+  if (platesQty) out.plates       = { details: '', quantity: platesQty, name: '', signature: '' };
+  if (colorsQty) out.no_of_colors = { details: '', quantity: colorsQty, name: '', signature: '' };
   out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
@@ -12747,20 +12825,23 @@ function buildPrintCard(j) {
 
   // Row 7 — quick CTP-setup line. Values come from the same particulars
   // entries that used to have their own particulars rows; those rows are
-  // filtered out of the pp-table below to avoid duplication. Shade Card
-  // shows the standard green ✓ box (always drawn — a shade card is
-  // always required before plates go on press).
-  const p_amma  = p.artworks_matter_approval || {};
-  const ammaVal = [p_amma.details, p_amma.quantity, p_amma.name].filter(Boolean).join(' · ');
-  const platesVal = (p.plates && (p.plates.quantity || p.plates.details)) || '';
+  // filtered out of the pp-table below to avoid duplication. Both
+  // Artworks & Matter Approval and Shade Card carry the standard green
+  // ✓ box (always drawn — both are required before plates go on press).
+  // Colspan layout: 2 | 1 | 1 | 2 | 1 = 7 cells so "No. of Colors"
+  // doesn't wrap onto a second line.
+  const p_amma   = p.artworks_matter_approval || {};
+  const ammaVal  = [p_amma.details, p_amma.quantity].filter(Boolean).join(' · ');
+  const platesVal = (p.plates       && (p.plates.quantity       || p.plates.details))       || '';
   const colorsVal = (p.no_of_colors && (p.no_of_colors.quantity || p.no_of_colors.details)) || '';
+  const ctpName   = (p_amma.name || '').trim();
   const ctpRow = `
     <tr class="pc-ctp-row">
-      <td colspan="3"><div class="pc-label">Artworks &amp; Matter Approval</div><div class="pc-value">${v(ammaVal)}</div></td>
+      <td colspan="2"><div class="pc-label"><span class="pc-coat-box pc-coat-on" style="margin-right:6px;">✓</span>Artworks &amp; Matter Approval</div><div class="pc-value">${v(ammaVal)}</div></td>
       <td colspan="1"><div class="pc-label">Shade Card</div><div class="pc-value" style="text-align:center;"><span class="pc-coat-box pc-coat-on">✓</span></div></td>
       <td colspan="1"><div class="pc-label">Plates</div><div class="pc-value">${v(platesVal)}</div></td>
-      <td colspan="1"><div class="pc-label">No. of Colors</div><div class="pc-value">${v(colorsVal)}</div></td>
-      <td colspan="1"><div class="pc-label">Name</div><div class="pc-value">&nbsp;</div></td>
+      <td colspan="2"><div class="pc-label">No. of Colors</div><div class="pc-value">${v(colorsVal)}</div></td>
+      <td colspan="1"><div class="pc-label">Name</div><div class="pc-value">${v(ctpName) || '&nbsp;'}</div></td>
     </tr>`;
 
   // Rows 8–12 — Special Colors block. Each special color is one column of
