@@ -1177,11 +1177,21 @@
 .jc-ctp-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: -1px; }
 .jc-ctp-table td { border: 1px solid #c5c2b6; background: #fdfcf7; padding: 6px 8px; vertical-align: top; }
 .jc-ctp-lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: #555; margin-bottom: 4px; display: flex; align-items: center; }
-.jc-ctp-check { display: inline-block; width: 15px; height: 15px; border: 2px solid #166534; background: #166534; color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 12px; margin-right: 5px; vertical-align: middle; }
-.jc-ctp-check-only { text-align: center; padding: 4px 0; }
-.jc-ctp-check-only .jc-ctp-check { margin-right: 0; }
+/* Approval checkboxes — real toggleable inputs like coatings. Sized big
+   enough to tap comfortably on the shop-floor tablet. */
+.jc-ctp-checklbl { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 0; }
+.jc-ctp-checklbl input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: #166534; cursor: pointer; flex-shrink: 0; }
+.jc-ctp-lbl-txt { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: #555; line-height: 1.2; }
+.jc-ctp-check-only { display: flex; justify-content: center; align-items: center; padding: 4px 0; cursor: pointer; }
+.jc-ctp-check-only input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: #166534; cursor: pointer; }
 .jc-ctp-input { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; color: var(--text); padding: 1px 0; }
 .jc-ctp-input:focus { background: #fff7d6; }
+/* Name is read-only — populated by Station when the CTP operator saves.
+   Show it as static text so the modal makes clear who WILL appear on the
+   printed card rather than inviting a manual edit that Station would
+   overwrite. Muted placeholder text when nothing's stamped yet. */
+.jc-ctp-name-display { font-size: 12px; padding: 1px 0; color: var(--text); text-transform: uppercase; letter-spacing: 0.02em; }
+.jc-ctp-name-display.jc-ctp-name-empty { color: var(--text3); font-style: italic; text-transform: none; letter-spacing: 0; font-size: 11px; }
 .jc-title { text-align: center; font-size: 18px; font-weight: 700; letter-spacing: 3px; margin: 4px 0 0; color: var(--text); }
 .jc-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; position: relative; z-index: 1; }
 .jc-header .jc-serial { font-family: 'Courier New', monospace; font-size: 15px; font-weight: 700; color: var(--text); padding-top: 8px; letter-spacing: 1px; }
@@ -11683,18 +11693,29 @@ const CTP_PARTICULARS_KEYS = new Set([
 ]);
 
 // Modal Row 7 mirror — same 2/1/1/2/1 colspan grid as the printed card, so
-// entering data in the modal looks like the printed job card. Shade Card is
-// a pre-set green ✓ (no input, always required). Artworks & Matter Approval
-// carries a matching green ✓ and a text field for the approver note. Name
-// is CTP-at-press but editable here if known in advance.
+// entering data in the modal looks like the printed job card. Artworks &
+// Matter Approval and Shade Card render as real toggleable checkboxes
+// (stored as particulars.<key>.quantity = 'Yes' / ''), exactly like the
+// coatings list — an unchecked box prints as an empty ☐ for the CTP
+// operator to tick by hand, checked prints green ✓.
+//
+// Name is auto-populated from Station stage 0 (the CTP operator's name
+// gets stamped on plates / no_of_colors / shade_card when they save at
+// the terminal), so the modal just displays it read-only rather than
+// letting a data-entry mistake override it.
 function ctpSetupRow(p) {
   const amma      = p.artworks_matter_approval || {};
+  const shade     = p.shade_card               || {};
   const plates    = p.plates       || {};
   const noColors  = p.no_of_colors || {};
-  const ammaText  = esc(amma.details || '');
-  const nameText  = esc(amma.name    || '');
+  const ammaOn   = String(amma.quantity  || '').trim().toLowerCase() === 'yes';
+  const scOn     = String(shade.quantity || '').trim().toLowerCase() === 'yes';
   const platesQty = esc(plates.quantity   || '');
   const colorsQty = esc(noColors.quantity || '');
+  const ctpName   = (plates.name || noColors.name || shade.name || amma.name || '').trim();
+  const nameCell  = ctpName
+    ? `<div class="jc-ctp-name-display">${esc(ctpName)}</div>`
+    : `<div class="jc-ctp-name-display jc-ctp-name-empty">auto from CTP</div>`;
   return `
     <table class="jc-part jc-ctp-table">
       <colgroup>
@@ -11702,12 +11723,16 @@ function ctpSetupRow(p) {
       </colgroup>
       <tr class="jc-ctp-row-tr">
         <td>
-          <div class="jc-ctp-lbl"><span class="jc-ctp-check">✓</span>Artworks &amp; Matter Approval</div>
-          <input type="text" id="p-ctp-amma" class="jc-ctp-input" placeholder="approval note / version" value="${ammaText}">
+          <label class="jc-ctp-checklbl" for="p-ctp-amma">
+            <input type="checkbox" id="p-ctp-amma" ${ammaOn ? 'checked' : ''}>
+            <span class="jc-ctp-lbl-txt">Artworks &amp; Matter Approval</span>
+          </label>
         </td>
         <td>
           <div class="jc-ctp-lbl">Shade Card</div>
-          <div class="jc-ctp-check-only"><span class="jc-ctp-check">✓</span></div>
+          <label class="jc-ctp-check-only" for="p-ctp-shade">
+            <input type="checkbox" id="p-ctp-shade" ${scOn ? 'checked' : ''}>
+          </label>
         </td>
         <td>
           <div class="jc-ctp-lbl">Plates</div>
@@ -11719,7 +11744,7 @@ function ctpSetupRow(p) {
         </td>
         <td>
           <div class="jc-ctp-lbl">Name</div>
-          <input type="text" id="p-ctp-name" class="jc-ctp-input lc-input" placeholder="filled by CTP" value="${nameText}">
+          ${nameCell}
         </td>
       </tr>
     </table>`;
@@ -11894,16 +11919,32 @@ function collectParticulars() {
     const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
     if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
   });
-  // Row-7 (CTP setup) — one input per printed cell. Mapped back onto the
-  // original particulars keys so downstream reports and the print card
-  // stay compatible with legacy data. Only stores non-empty fields.
-  const ammaText  = (document.getElementById('p-ctp-amma')  ||{}).value?.trim() || '';
+  // Row-7 (CTP setup) — writes back onto the same particulars keys so
+  // reports + the print card stay compatible with legacy data. Prior
+  // state is merged so the Station-stamped .name (and any entries[]) is
+  // never wiped by a modal save; only the fields we own change.
+  //   Artworks / Shade Card → .quantity = 'Yes' | ''   (checkbox)
+  //   Plates / No. of Colors → .quantity = "<n>"       (text)
+  //   Name                   → never written from modal — set by Station
+  const editingIdEl0 = document.getElementById('f-editing-id');
+  const editingId0   = editingIdEl0 ? parseInt(editingIdEl0.value, 10) : null;
+  const priorParticulars = editingId0 ? ((jobs.find(x => x.id === editingId0) || {}).particulars || {}) : {};
+  const mergeField = (key, patch) => {
+    const prev = (priorParticulars[key] && typeof priorParticulars[key] === 'object') ? priorParticulars[key] : {};
+    return { ...prev, ...patch };
+  };
+  const ammaOn    = !!(document.getElementById('p-ctp-amma')  ||{}).checked;
+  const scOn      = !!(document.getElementById('p-ctp-shade') ||{}).checked;
   const platesQty = (document.getElementById('p-ctp-plates')||{}).value?.trim() || '';
   const colorsQty = (document.getElementById('p-ctp-colors')||{}).value?.trim() || '';
-  const ctpName   = (document.getElementById('p-ctp-name')  ||{}).value?.trim() || '';
-  if (ammaText || ctpName) out.artworks_matter_approval = { details: ammaText, quantity: '', name: ctpName, signature: '' };
-  if (platesQty) out.plates       = { details: '', quantity: platesQty, name: '', signature: '' };
-  if (colorsQty) out.no_of_colors = { details: '', quantity: colorsQty, name: '', signature: '' };
+  const ammaMerged   = mergeField('artworks_matter_approval', { quantity: ammaOn ? 'Yes' : '' });
+  const shadeMerged  = mergeField('shade_card',               { quantity: scOn   ? 'Yes' : '' });
+  const platesMerged = mergeField('plates',                   { quantity: platesQty });
+  const colorsMerged = mergeField('no_of_colors',             { quantity: colorsQty });
+  if (Object.values(ammaMerged  ).some(v => v !== '' && v != null)) out.artworks_matter_approval = ammaMerged;
+  if (Object.values(shadeMerged ).some(v => v !== '' && v != null)) out.shade_card               = shadeMerged;
+  if (Object.values(platesMerged).some(v => v !== '' && v != null)) out.plates                   = platesMerged;
+  if (Object.values(colorsMerged).some(v => v !== '' && v != null)) out.no_of_colors             = colorsMerged;
   out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
@@ -12825,20 +12866,34 @@ function buildPrintCard(j) {
 
   // Row 7 — quick CTP-setup line. Values come from the same particulars
   // entries that used to have their own particulars rows; those rows are
-  // filtered out of the pp-table below to avoid duplication. Both
-  // Artworks & Matter Approval and Shade Card carry the standard green
-  // ✓ box (always drawn — both are required before plates go on press).
+  // filtered out of the pp-table below to avoid duplication.
   // Colspan layout: 2 | 1 | 1 | 2 | 1 = 7 cells so "No. of Colors"
   // doesn't wrap onto a second line.
-  const p_amma   = p.artworks_matter_approval || {};
-  const ammaVal  = [p_amma.details, p_amma.quantity].filter(Boolean).join(' · ');
-  const platesVal = (p.plates       && (p.plates.quantity       || p.plates.details))       || '';
-  const colorsVal = (p.no_of_colors && (p.no_of_colors.quantity || p.no_of_colors.details)) || '';
-  const ctpName   = (p_amma.name || '').trim();
+  //
+  // Artworks & Matter Approval + Shade Card render as tick-boxes exactly
+  // like coatings: FILLED green ✓ when the modal (or the Station stage 0
+  // for shade card) has recorded 'Yes' in particulars.<key>.quantity;
+  // otherwise an empty box for the CTP operator to tick by hand.
+  //
+  // Name is auto-populated from whichever CTP-stage field the Station
+  // touched — Plates / No. of Colors / Shade Card all get stamped with
+  // the operator's name by the server, so any one of them is the source.
+  const p_amma  = p.artworks_matter_approval || {};
+  const p_sc    = p.shade_card               || {};
+  const p_plt   = p.plates                   || {};
+  const p_col   = p.no_of_colors             || {};
+  const ammaOn  = String(p_amma.quantity || '').trim().toLowerCase() === 'yes';
+  const scOn    = String(p_sc.quantity   || '').trim().toLowerCase() === 'yes';
+  const platesVal = p_plt.quantity || p_plt.details || '';
+  const colorsVal = p_col.quantity || p_col.details || '';
+  // Prefer the station-stamped name from any of the CTP fields; artworks
+  // is a fallback for the pre-station "typed at desk" case.
+  const ctpName = (p_plt.name || p_col.name || p_sc.name || p_amma.name || '').trim();
+  const tickBox = on => `<span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span>`;
   const ctpRow = `
     <tr class="pc-ctp-row">
-      <td colspan="2"><div class="pc-label"><span class="pc-coat-box pc-coat-on" style="margin-right:6px;">✓</span>Artworks &amp; Matter Approval</div><div class="pc-value">${v(ammaVal)}</div></td>
-      <td colspan="1"><div class="pc-label">Shade Card</div><div class="pc-value" style="text-align:center;"><span class="pc-coat-box pc-coat-on">✓</span></div></td>
+      <td colspan="2"><div class="pc-label"><span style="display:inline-flex;align-items:center;gap:6px;">${tickBox(ammaOn)}Artworks &amp; Matter Approval</span></div></td>
+      <td colspan="1"><div class="pc-label">Shade Card</div><div class="pc-value" style="text-align:center;">${tickBox(scOn)}</div></td>
       <td colspan="1"><div class="pc-label">Plates</div><div class="pc-value">${v(platesVal)}</div></td>
       <td colspan="2"><div class="pc-label">No. of Colors</div><div class="pc-value">${v(colorsVal)}</div></td>
       <td colspan="1"><div class="pc-label">Name</div><div class="pc-value">${v(ctpName) || '&nbsp;'}</div></td>
