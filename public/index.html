@@ -522,6 +522,11 @@
   .badge-done { background: var(--green-bg); color: var(--green-text); }
   .badge-blocked { background: var(--red-bg); color: var(--red-text); }
   .badge-new { background: var(--amber-bg); color: var(--amber-text); }
+  /* CTP queue — job is out of New Jobs but plates aren't done yet. Purple
+     so it's visually distinct from New (amber), Pending (green), and
+     In Progress (blue). Sits between New Jobs and Pending Stock in the
+     tab flow. */
+  .badge-ctp { background: #ede9fe; color: #5b21b6; border: 1px solid #c4b5fd; }
   /* Pending stock issuance — green for "stock is ready, just click Issue". */
   .badge-pending { background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); }
   /* On-hand = 0: nothing to issue yet. Red, same visual weight as Blocked. */
@@ -2557,6 +2562,11 @@ function roleLabel(role) {
 // to CTP on the card, which flips the status to 'pending' so the store
 // keeper's Pending Stock queue picks it up.
 function isNewJob(j) { return j && j.issuance_status === 'new'; }
+// CTP queue — job has been processed out of New Jobs but not yet through
+// plate-making. Sits between New Jobs and Pending Stock. Only the CTP
+// station operator (or a PM using the Process to Printing button on the
+// CTP tab card) advances it to 'pending'.
+function isCtpQueue(j) { return j && j.issuance_status === 'ctp'; }
 
 function partialPendingSheets(j) {
   const n = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
@@ -2878,16 +2888,17 @@ function getFiltered() {
     }
     if (!inDateRange(j)) return false;
     if (view === 'new')     return isNewJob(j);
+    if (view === 'ctp')     return isCtpQueue(j);
     if (view === 'pending') return isPendingIssuance(j);
-    // Pending / new jobs are excluded from "active" so the queue stays
-    // clean — they show up explicitly in their own tabs.
-    if (view === 'active')  return !isNewJob(j) && !isPendingIssuance(j) && !isDone(j) && !isStorage(j) && !isBlocked(j);
+    // Pending / new / ctp jobs are excluded from "active" so the queue
+    // stays clean — they each show up in their own dedicated tab.
+    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && !isPendingIssuance(j) && !isDone(j) && !isStorage(j) && !isBlocked(j);
     if (view === 'storage') return isStorage(j);
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
-    // Default 'all' view — hide new-jobs so they don't clutter the main
-    // list; they have their own tab.
-    return !isNewJob(j);
+    // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
+    // the main list; both have their own tab.
+    return !isNewJob(j) && !isCtpQueue(j);
   });
 }
 
@@ -3030,8 +3041,9 @@ function renderStats() {
   const s = {
     total: jobs.length,
     newJobs: jobs.filter(isNewJob).length,
+    ctp: jobs.filter(isCtpQueue).length,
     pending: jobs.filter(isPendingIssuance).length,
-    active: jobs.filter(j=>!isNewJob(j)&&!isPendingIssuance(j)&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
+    active: jobs.filter(j=>!isNewJob(j)&&!isCtpQueue(j)&&!isPendingIssuance(j)&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
     storage: jobs.filter(isStorage).length,
     done: jobs.filter(isDone).length,
     blocked: jobs.filter(isBlocked).length
@@ -3053,7 +3065,7 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['new','New Jobs'],['pending','Pending Stock'],['active','In Progress'],['storage','Finished'],['blocked','Blocked'],['done','Delivered']];
+  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Finished'],['blocked','Blocked'],['done','Delivered']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -3156,19 +3168,21 @@ function renderJobsCompact() {
     const done = isDone(j), blocked = isBlocked(j);
     const pending = isPendingIssuance(j);
     const isNew = isNewJob(j);
+    const isCtp = isCtpQueue(j);
     // Status badge: 'New Job' takes priority (the job isn't in the
-    // production queue yet), then 'Pending Stock' (queued but no paper
-    // issued), then production stage.
+    // production queue yet), then CTP (plates being made, pre-paper),
+    // then 'Pending Stock' (queued but no paper issued), then stage.
     const badge = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+      isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
       pending ? jobStockBadge(j) :
       done ? `<span class="badge badge-done">Delivered</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
-    // Stage pipeline is meaningless for a New Job — it hasn't entered
-    // the production queue yet, so showing all the stage pills invites
-    // clicking one and confusing the workflow. Hide until Process to CTP.
-    const pipeline = isNew ? '' : STAGES.map((s,i) => {
+    // Stage pipeline is meaningless for a New Job / CTP-queue job —
+    // it hasn't entered production yet, so showing all the stage pills
+    // invites clicking one and confusing the workflow. Hide until stock.
+    const pipeline = (isNew || isCtp) ? '' : STAGES.map((s,i) => {
       let cls = 's-pending';
       const st = j.stages?.[i]?.status;
       if (st==='done') cls='s-done';
@@ -3230,8 +3244,9 @@ function renderJobsCompact() {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${isNew && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the production queue. Once processed, it appears in Pending Stock so the store keeper can issue paper.">&rarr; Process to CTP</button>` : ''}
-            <button class="btn btn-sm ${isNew ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
+            ${isNew && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
+            ${isCtp && canWriteJobs() ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
+            <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
@@ -3309,10 +3324,12 @@ function renderJobCard(j) {
   const si = j.stage_index || 0;
   const done = isDone(j), blocked = isBlocked(j), pending = isPendingIssuance(j);
   const isNew = isNewJob(j);
+  const isCtp = isCtpQueue(j);
   const priNorm = normalizePriority(j.priority);
   const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
 
   const badge = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+    isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
     pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
     done ? `<span class="badge badge-done">Delivered</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
@@ -3321,9 +3338,9 @@ function renderJobCard(j) {
 
   // Progress ribbon — 8 clickable dots, same moveToStage behavior as the
   // compact pills. done = filled, current = pulsing ring, future = muted.
-  // Hide the stage ribbon for New Jobs — the job hasn't entered the
-  // production queue yet, so clicking a stage would be confusing.
-  const ribbon = isNew ? '' : STAGES.map((s, i) => {
+  // Hide for New Jobs AND CTP-queue jobs — neither has entered the paper
+  // pipeline yet, so clicking a stage would be confusing.
+  const ribbon = (isNew || isCtp) ? '' : STAGES.map((s, i) => {
     let cls = 'rib-future';
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
@@ -3360,12 +3377,15 @@ function renderJobCard(j) {
       ${yieldP ? `<div class="tss-block"><div class="tss-lbl">Yield</div><div class="tss-val">${esc(yieldP.pct)}</div><div class="tss-formula">${esc(yieldP.formula)}</div></div>` : ''}
     </div>` : '';
 
-  // Primary action: for a New Job, the only relevant next step is
-  // "Process to CTP" — surface it directly on the card so the PM
-  // doesn't have to dig into the menu.
-  const primary = isNew && canWriteJobs()
-    ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the production queue. Once processed, it appears in Pending Stock so the store keeper can issue paper.">&rarr; Process to CTP</button>`
-    : '';
+  // Primary action: for a New Job, surface "Process to CTP"; for a
+  // CTP-queue job, surface "Process to Printing" so PM can bump plates
+  // through when they're done. Both live on the tile so the PM doesn't
+  // have to dig into the ⋯ menu.
+  const primary = (isNew && canWriteJobs())
+    ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>`
+    : (isCtp && canWriteJobs())
+      ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
+      : '';
   const more = `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
@@ -12486,11 +12506,14 @@ function viewJobCard(id) {
 function openEdit(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
-  // Process to CTP is also available from inside the Edit modal so the
-  // PM can flip a New Job straight after finalising its specs.
+  // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
+  // both offered from inside the Edit modal so the PM can flip status
+  // right after tweaking specs, without closing back to the list.
   const processBtn = (isNewJob(j) && canWriteJobs())
     ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
-    : '';
+    : (isCtpQueue(j) && canWriteJobs())
+      ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
+      : '';
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
     ${jobForm(j)}
@@ -12722,7 +12745,7 @@ async function processJobToCtp(id) {
   if (!j || !isNewJob(j)) return;
   const ok = await confirmDialog({
     title: `Process Job E-${id} to CTP?`,
-    message: `"${j.name}" will move into the production queue. It'll appear in Pending Stock so the store keeper can issue paper for it.`,
+    message: `"${j.name}" will move into the CTP queue. The CTP operator can then pick it up and start making plates.`,
     confirmText: 'Process to CTP',
   });
   if (!ok) return;
@@ -12731,12 +12754,37 @@ async function processJobToCtp(id) {
     const updated = await api('POST', `/api/jobs/${id}/process-to-ctp`);
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
-    // If the button was clicked from inside the Edit modal, close it
-    // so the user lands back on the jobs list where the job now sits
-    // in Pending Stock. No-op when the modal wasn't open.
+    // If the button was clicked from inside the Edit modal, close it so
+    // the user lands back on the jobs list where the job now sits in
+    // the CTP tab. No-op when the modal wasn't open.
     closeModal();
     render();
-    notify(`Job E-${id} moved to Pending Stock`);
+    notify(`Job E-${id} moved to CTP queue`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// CTP -> Printing / Pending Stock. Called from the "Process to Printing"
+// button on the CTP tab card. Advances the job past plate-making so the
+// store keeper can issue paper and the Printing operator can start.
+async function processJobFromCtp(id) {
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can process jobs out of CTP.'); return; }
+  const j = jobs.find(x => x.id === id);
+  if (!j || !isCtpQueue(j)) return;
+  const ok = await confirmDialog({
+    title: `Process Job E-${id} to Printing?`,
+    message: `Plates for "${j.name}" are done. The job will move to Pending Stock (waiting for paper) and be ready at the Printing stage once stock is issued.`,
+    confirmText: 'Process to Printing',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/process-from-ctp`);
+    const idx = jobs.findIndex(x => x.id === id);
+    if (idx >= 0) jobs[idx] = updated;
+    closeModal();
+    render();
+    notify(`Job E-${id} moved to Pending Stock / Printing`);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }

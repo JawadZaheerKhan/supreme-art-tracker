@@ -2145,6 +2145,10 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
 // Flip a job from New Jobs into the production queue. Only meaningful
 // for status='new'; anything else is idempotent-refused. After this
 // runs the job shows up in Pending Stock for the store keeper.
+// New Job -> CTP queue. The job stays at stage 0 (CTP Plate Making) but
+// now sits in its OWN tab so the CTP operator can pick it up and start
+// making plates BEFORE paper is ordered/issued. Only advances to Pending
+// Stock once CTP is done (see process-from-ctp / station-update below).
 app.post('/api/jobs/:id/process-to-ctp', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
@@ -2157,13 +2161,62 @@ app.post('/api/jobs/:id/process-to-ctp', requireJobsWriter, async (req, res) => 
       return res.status(400).json({ error: `Job E-${id} is already in the production queue (status: ${job.issuance_status}).` });
     }
     const updated = await sql`
-      UPDATE jobs SET issuance_status='pending' WHERE id=${id} RETURNING *
+      UPDATE jobs SET issuance_status='ctp' WHERE id=${id} RETURNING *
     `;
     await logAudit(sql, req, {
       action: 'job.process_to_ctp',
       entityType: 'job',
       entityId: id,
-      summary: `Processed Job E-${id}: ${job.name} to CTP — now in Pending Stock`,
+      summary: `Processed Job E-${id}: ${job.name} to CTP — now in CTP queue`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// CTP -> Printing / Pending Stock. Marks CTP (stage 0) as done, advances
+// stage_index to 1 (Printing), and flips issuance_status to 'pending' so
+// the store keeper sees the job in Pending Stock (waiting for paper). Two
+// callers exercise this transition:
+//   * PM clicks "Process to Printing" on the CTP-tab job card (this endpoint)
+//   * CTP operator at Station clicks Save & Done on the plate-making
+//     screen — that path lives inside /api/jobs/:id/station-update and
+//     applies the same status/stage flip when the source status is 'ctp'.
+app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status !== 'ctp') {
+      return res.status(400).json({ error: `Job E-${id} is not in the CTP queue (status: ${job.issuance_status}).` });
+    }
+    const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    const time = businessStamp();
+    const nowIso = new Date().toISOString();
+    const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
+    stages[0] = { ...(stages[0] || {}), status: 'done', by, time, at: nowIso, notes: 'CTP plates finished (marked by manager)' };
+    // Advance to stage 1 (Printing) but leave that stage in a fresh
+    // "pending stock" state — the Printing operator can only start once
+    // the store keeper issues paper, same rule as before.
+    stages[1] = { ...(stages[1] || {}), status: 'active', by, time, at: nowIso };
+    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to Pending Stock / Printing`, by, time });
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status='pending',
+             stage_index=1,
+             stages=${JSON.stringify(stages)},
+             log=${JSON.stringify(log)}
+       WHERE id=${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.process_from_ctp',
+      entityType: 'job',
+      entityId: id,
+      summary: `CTP done for Job E-${id}: ${job.name} — moved to Pending Stock / Printing`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -3763,6 +3816,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       return res.status(400).json({ error: 'Stock must be issued before this job can be updated.' });
     }
     const curStage = job.stage_index || 0;
+    // CTP-queue jobs are the exception to the "must be issued" rule above:
+    // CTP work happens BEFORE paper is ordered. The CTP operator (stage 0)
+    // is the only station allowed to act on them; every other stage still
+    // needs stock to be issued before anything can be recorded.
+    if (job.issuance_status === 'ctp' && curStage !== 0) {
+      return res.status(400).json({ error: 'This job is still in the CTP queue — plates must be finished first.' });
+    }
 
     // 3) Scope: the operator may only act on jobs at one of their assigned stages.
     if (!opStages.includes(curStage)) {
@@ -3942,13 +4002,21 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `Numbers recorded by ${operator.name}`, by, time });
     }
 
+    // When the CTP operator (stage 0) finishes plates and advances the job
+    // off stage 0, flip issuance_status from 'ctp' to 'pending' so the job
+    // pops into Pending Stock for the store keeper to issue paper. Every
+    // other transition leaves issuance_status alone.
+    const nextStatus = (job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0)
+      ? 'pending'
+      : job.issuance_status;
     const updated = await sql`
       UPDATE jobs
-         SET particulars   = ${JSON.stringify(particulars)},
-             stage_index   = ${stage_index},
-             stages        = ${JSON.stringify(stages)},
-             log           = ${JSON.stringify(log)},
-             coatings_done = ${JSON.stringify(coatings_done)}
+         SET particulars     = ${JSON.stringify(particulars)},
+             stage_index     = ${stage_index},
+             stages          = ${JSON.stringify(stages)},
+             log             = ${JSON.stringify(log)},
+             coatings_done   = ${JSON.stringify(coatings_done)},
+             issuance_status = ${nextStatus}
        WHERE id = ${id}
        RETURNING *
     `;
