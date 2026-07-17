@@ -565,6 +565,20 @@
   .inv-pending-idle:hover   { background: #bbf7d0; border-color: #4ade80; }
   .inv-pending-active { background: #86efac; color: #14532d; border: 1.5px solid #4ade80; }
   .inv-pending-active:hover { background: #4ade80; border-color: #22c55e; }
+  /* Shade Cards toggle in the Jobs toolbar. Same shape as the Pending
+     Stock toggle but purple, matching the .badge-ctp / shade-card
+     accent used elsewhere on the card. */
+  #shade-card-toggle {
+    font-weight: 600; font-size: 14px;
+    padding: 8px 16px; border-radius: 7px;
+    font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .sc-toggle-idle   { background: #ede9fe; color: #5b21b6; border: 1.5px solid #c4b5fd; }
+  .sc-toggle-idle:hover   { background: #ddd6fe; border-color: #a78bfa; }
+  .sc-toggle-active { background: #c4b5fd; color: #4c1d95; border: 1.5px solid #a78bfa; }
+  .sc-toggle-active:hover { background: #a78bfa; border-color: #8b5cf6; }
   /* Pending-queue rows in the inventory list view — slightly more padding
      than a paper card, faint green left border to match the toggle. */
   .inv-pending-row { border-left: 4px solid #86efac; }
@@ -1657,13 +1671,12 @@
       <option value="">All machines</option>
     </select>
     <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilter(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
-    <!-- Shade-card filter: 3-way toggle so PM can pull up all in-flight
-         shade cards (or exclude them from a production-only view). -->
-    <select class="filter" id="shade-card-filter" onchange="setShadeCardFilter(this.value)" title="Filter by whether a job is being printed as a shade card">
-      <option value="">All jobs</option>
-      <option value="only">Shade Cards only</option>
-      <option value="hide">Hide Shade Cards</option>
-    </select>
+    <!-- Shade Cards toggle: same visual pattern as the Pending Stock
+         button in inventory. Click once to see only shade-card jobs;
+         click again to clear. -->
+    <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
+      &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
+    </button>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
       <option value="this-week">This week</option>
@@ -3112,8 +3125,22 @@ function renderJobs() {
   document.querySelectorAll('#jobs-view-switch .mode-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.jv === jobsViewMode));
   renderNewJobsBulkBar();
+  renderShadeCardToggle();
   if (jobsViewMode === 'cards') renderJobsCards();
   else renderJobsCompact();
+}
+
+// Shade Cards toggle button in the Jobs toolbar. Idle = purple outline;
+// active = filled. Label picks up the count so PM sees at a glance how
+// many shade-card jobs are in the system. Mirrors renderInvPendingToggle.
+function renderShadeCardToggle() {
+  const btn = document.getElementById('shade-card-toggle');
+  if (!btn) return;
+  const count = jobs.filter(j => j && j.is_shade_card).length;
+  const label = document.getElementById('shade-card-toggle-label');
+  if (label) label.textContent = count ? `Shade Cards (${count})` : 'Shade Cards';
+  btn.classList.toggle('sc-toggle-active', filterShadeCard === 'only');
+  btn.classList.toggle('sc-toggle-idle',   filterShadeCard !== 'only');
 }
 
 // Batch-print action bar for the New Jobs tab. Populates a container that
@@ -3946,7 +3973,13 @@ function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
 function setMachineFilter(v) { filterMachine=v; renderJobs(); }
 function setPOFilter(v)      { filterPO = v; renderJobs(); }
-function setShadeCardFilter(v) { filterShadeCard = v; renderJobs(); }
+// Shade Cards toggle: '' = show everything, 'only' = show shade-card jobs.
+// The dedicated toggle button in the toolbar drives this — one click ON,
+// second click OFF, mirroring the Pending Stock button in inventory.
+function toggleShadeCardFilter() {
+  filterShadeCard = filterShadeCard === 'only' ? '' : 'only';
+  renderJobs();
+}
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
 function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
