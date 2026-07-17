@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-13-all-lowercase';
+const SCHEMA_VERSION = 'v2026-07-17-shade-card-flag';
 
 async function initDb() {
   try {
