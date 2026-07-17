@@ -1657,6 +1657,13 @@
       <option value="">All machines</option>
     </select>
     <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilter(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
+    <!-- Shade-card filter: 3-way toggle so PM can pull up all in-flight
+         shade cards (or exclude them from a production-only view). -->
+    <select class="filter" id="shade-card-filter" onchange="setShadeCardFilter(this.value)" title="Filter by whether a job is being printed as a shade card">
+      <option value="">All jobs</option>
+      <option value="only">Shade Cards only</option>
+      <option value="hide">Hide Shade Cards</option>
+    </select>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
       <option value="this-week">This week</option>
@@ -2279,6 +2286,8 @@ let filterClient = '';
 // answering "what's running on / has been run on machine X."
 let filterMachine = '';
 let filterPO = '';
+// Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
+let filterShadeCard = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
@@ -2876,6 +2885,8 @@ function getFiltered() {
       const po = String(j.ref || '').toLowerCase();
       if (!po.includes(String(filterPO).toLowerCase())) return false;
     }
+    if (filterShadeCard === 'only' && !j.is_shade_card) return false;
+    if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
     if (filterMachine) {
       const log = Array.isArray(j.log) ? j.log : [];
       const seen = new Set();
@@ -3935,6 +3946,7 @@ function setStageFilter(v) { filterStage=v; renderJobs(); }
 function setClientFilter(v) { filterClient=v; renderJobs(); }
 function setMachineFilter(v) { filterMachine=v; renderJobs(); }
 function setPOFilter(v)      { filterPO = v; renderJobs(); }
+function setShadeCardFilter(v) { filterShadeCard = v; renderJobs(); }
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
 function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
@@ -11922,14 +11934,24 @@ function jobForm(j={}) {
     <div class="jc-header">
       <div style="display:flex;flex-direction:column;gap:2px;">
         <div class="jc-serial">${j.id ? 'E-'+j.id : ''}</div>
-        <div style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.3px;">
-          <span style="font-weight:600;">Priority:</span>
-          <select id="f-priority" style="padding:1px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:#fff;text-transform:none;letter-spacing:0;">
-            ${(() => {
-              const cur = normalizePriority(j.priority);
-              return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
-            })()}
-          </select>
+        <div style="display:inline-flex;align-items:center;gap:14px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.3px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;">
+            <span style="font-weight:600;">Priority:</span>
+            <select id="f-priority" style="padding:1px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:#fff;text-transform:none;letter-spacing:0;">
+              ${(() => {
+                const cur = normalizePriority(j.priority);
+                return PRIORITY_LEVELS.map(p => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('');
+              })()}
+            </select>
+          </span>
+          <!-- Shade-card flag: mirrors the URGENT slot on the printed card.
+               When ticked, the print card shows a big green SHADE CARD banner
+               under the E-number so the floor knows this run is a proof, not
+               production. Distinct from Row 7's shade_card approval box. -->
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+            <input type="checkbox" id="f-is-shade-card" ${j.is_shade_card ? 'checked' : ''} style="width:14px;height:14px;margin:0;accent-color:#166534;cursor:pointer;">
+            <span style="font-weight:600;">Shade Card</span>
+          </label>
         </div>
       </div>
       <img src="/logo.png" alt="Supreme Art">
@@ -12038,6 +12060,7 @@ function getFormData() {
     inventory_item_id,
     cut_size:    sendCut ? cutSizeRaw     : null,
     offcut_size: sendCut ? computedOffcut : null,
+    is_shade_card: !!(document.getElementById('f-is-shade-card') || {}).checked,
   };
 }
 
@@ -13242,6 +13265,15 @@ function buildPrintCard(j) {
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
+      /* SHADE CARD banner — same slot / size / weight as URGENT, always
+         green so the floor immediately reads "this run is a proof, not
+         production". Overrides the generic .pc-value blue rule. */
+      .pc-value.pc-shade-card-tag {
+        color: #166534 !important;
+        font-weight: 800 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
       /* Special-colors block prints its filled cells in the same blue as
          the other typed values, but the header stripe stays black-on-grey
          so the color name reads as a label. */
@@ -13273,6 +13305,7 @@ function buildPrintCard(j) {
           const cls = norm === 'Most Urgent' ? 'pc-prio-most-urgent' : 'pc-prio-urgent';
           return `<div class="pc-priority-tag pc-value ${cls}" style="font-size:16pt;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;line-height:1.1;margin-top:2px;">${v(norm)}</div>`;
         })()}
+        ${j.is_shade_card ? `<div class="pc-shade-card-tag pc-value" style="font-size:16pt;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;line-height:1.1;margin-top:2px;color:#166534 !important;">SHADE CARD</div>` : ''}
       </div>
       <img class="pc-logo" src="/logo.png" alt="Supreme Art">
     </div>

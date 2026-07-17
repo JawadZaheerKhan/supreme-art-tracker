@@ -242,6 +242,14 @@ async function initDb() {
     // Coatings + Embellishments stations.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coatings_done JSONB DEFAULT '[]'::jsonb`;
 
+    // Shade-card flag: this job is being PRINTED as a shade card (proof/
+    // sample), not a normal production run. Distinct from
+    // particulars.shade_card.quantity which tracks whether the shade card
+    // DOCUMENT for a normal job is approved. Drives a big green SHADE CARD
+    // badge on the printed job card (same slot as URGENT) and a filter in
+    // the jobs list so PM can see all in-flight shade-card jobs.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_shade_card BOOLEAN NOT NULL DEFAULT false`;
+
     // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
     // delivered job, we set deleted_at instead of dropping the row, so the
     // admin has 30 days to recover it from the Trash page. Auto-purged later.
@@ -2116,7 +2124,7 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card } = req.body;
     // Case rule (v2026-07-13): name and client are stored lowercase so
     // "Fenbro" / "FENBRO" / "fenbro" all collapse to one canonical value
     // in searches, dropdowns, and reports.
@@ -2129,8 +2137,8 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
     // store keeper's Pending Stock queue picks them up. Stock is only
     // deducted after that, via POST /api/jobs/:id/issue-stock.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, 'new')
+      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, issuance_status)
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, 'new')
       RETURNING *
     `;
     const job = result[0];
@@ -2274,7 +2282,7 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card } = req.body;
     if (name)   name   = String(name).trim().toLowerCase();
     if (client) client = String(client).trim().toLowerCase();
 
@@ -2314,7 +2322,8 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
         bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
         particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId},
-        cut_size=${cut_size||null}, offcut_size=${newOffcutSize}
+        cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
+        is_shade_card=${!!is_shade_card}
       WHERE id=${id} RETURNING *
     `;
     const job = result[0];
