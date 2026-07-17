@@ -12627,6 +12627,28 @@ async function moveToFinishedAndEdit(id) {
 async function moveToStage(id, target) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // Special-case: from Pending Stock, allow moving BACK to CTP (undo an
+  // accidental Process to Printing). Runs its own endpoint that flips
+  // issuance_status back to 'ctp' AND clears the stale Printing stage
+  // entry, so the job pops back into the CTP tab cleanly.
+  if (target === 0 && j.issuance_status === 'pending' && (j.stage_index || 0) <= 1) {
+    if (!canWriteJobs()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
+    const ok = await confirmDialog({
+      title: `Move Job E-${id} back to CTP?`,
+      message: `"${j.name}" will leave Pending Stock and return to the CTP queue for more plate work.`,
+      confirmText: 'Move back to CTP',
+    });
+    if (!ok) return;
+    showSaving(true);
+    try {
+      const updated = await api('POST', `/api/jobs/${id}/move-back-to-ctp`);
+      jobs = jobs.map(x => x.id===id ? {...x,...updated} : x);
+      notify(`Job E-${id} moved back to CTP`);
+      render();
+    } catch (e) { notify('Error: ' + e.message); }
+    showSaving(false);
+    return;
+  }
   // Same guard as openUpdate — clicking a pipeline pill shouldn't bypass
   // the issuance step.
   if (j.issuance_status === 'pending') {

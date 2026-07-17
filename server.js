@@ -2173,6 +2173,52 @@ app.post('/api/jobs/:id/process-to-ctp', requireJobsWriter, async (req, res) => 
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Pending Stock -> CTP (undo). Puts a job that was just processed out of
+// CTP back into the CTP queue. Only allowed while the job hasn't actually
+// entered production yet — status must be 'pending' (stock not issued) AND
+// stage_index must be 1 (Printing, the stage process-from-ctp leaves it
+// at). Once paper is issued or the Printing operator has recorded anything
+// we refuse — reverting then would silently discard downstream state.
+app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status !== 'pending' || (job.stage_index || 0) > 1) {
+      return res.status(400).json({ error: `Job E-${id} can only be moved back to CTP from Pending Stock (before paper is issued).` });
+    }
+    const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    const time = businessStamp();
+    const nowIso = new Date().toISOString();
+    const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
+    // Undo the process-from-ctp side-effects: clear the fresh Printing
+    // stage entry, mark CTP active again, log the reversal.
+    delete stages[1];
+    stages[0] = { ...(stages[0] || {}), status: 'active', by, time, at: nowIso, notes: 'Reopened for CTP work' };
+    log.push({ stage: STAGES[0], status: 'active', notes: `Moved back to CTP by ${by}`, by, time });
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status='ctp',
+             stage_index=0,
+             stages=${JSON.stringify(stages)},
+             log=${JSON.stringify(log)}
+       WHERE id=${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.move_back_to_ctp',
+      entityType: 'job',
+      entityId: id,
+      summary: `Moved Job E-${id}: ${job.name} back to CTP from Pending Stock`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // CTP -> Printing / Pending Stock. Marks CTP (stage 0) as done, advances
 // stage_index to 1 (Printing), and flips issuance_status to 'pending' so
 // the store keeper sees the job in Pending Stock (waiting for paper). Two
