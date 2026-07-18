@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-17-shade-card-flag';
+const SCHEMA_VERSION = 'v2026-07-18-split-issuance';
 
 async function initDb() {
   try {
@@ -249,6 +249,17 @@ async function initDb() {
     // badge on the printed job card (same slot as URGENT) and a filter in
     // the jobs list so PM can see all in-flight shade-card jobs.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_shade_card BOOLEAN NOT NULL DEFAULT false`;
+
+    // Split issuance record: PM now picks a brand-agnostic paper GROUP
+    // (paper_type + size + gsm + is_offcut), and the store keeper chooses
+    // brand(s) at issue time — possibly across multiple brands in the
+    // group. issued_items stores what actually left the storeroom:
+    //   [{ item_id, brand, sheets }, ...]
+    // Empty until anything is issued, so old rows land at [] cleanly.
+    // The app shows this list (comma-joined brands) once populated; the
+    // printed job card leaves brand blank for the cutting group to
+    // handwrite regardless.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_items JSONB NOT NULL DEFAULT '[]'::jsonb`;
 
     // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
     // delivered job, we set deleted_at instead of dropping the row, so the
@@ -2484,6 +2495,24 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 
 // upstream by requireWriteUser). The stock-keeper-only restriction was
 // relaxed once the workflow expanded so any non-readonly role can act.
+// Issue stock — brand-agnostic paper groups.
+//
+// PM picks a paper GROUP on the job (paper_type + size + gsm + is_offcut).
+// Store keeper decides which brand(s) to actually pull from at issue time.
+//
+// Payload: { splits: [{ item_id, sheets }, ...] }
+//   - Each split must live in the SAME paper group as the job's
+//     representative inventory_item_id.
+//   - Total sheets across splits must not exceed the job's need.
+//   - If total < need, the job is flagged partially issued
+//     (particulars.partial_pending_sheets) — same marker manual
+//     inventory issuance already uses, so Pending Stock still surfaces
+//     the shortfall.
+//   - If splits is omitted (empty body), fall back to full issuance
+//     from job.inventory_item_id (backwards-compat with existing UIs).
+//
+// A per-split offcut is created when the job has a cut configured — the
+// offcut brand matches the source brand for that split.
 app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
@@ -2498,55 +2527,111 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     if (!job.inventory_item_id) {
       return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
     }
-    const inv = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
-    const sourceItem = inv[0];
-    const paperType = sourceItem?.paper_type || '';
-    const sheetsUsed = jobDeductionSheets({ paperType, particulars: job.particulars });
-    if (sheetsUsed <= 0) {
+    // Resolve the paper GROUP from the job's representative item. The
+    // group is (paper_type, size, gsm, is_offcut). Every accepted split
+    // must live in this group.
+    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
+    const anchor = anchorRows[0];
+    if (!anchor) return res.status(400).json({ error: 'Assigned paper item no longer exists.' });
+    const paperType = anchor.paper_type || '';
+    const needSheets = jobDeductionSheets({ paperType, particulars: job.particulars });
+    if (needSheets <= 0) {
       return res.status(400).json({ error: 'Job has no Quantity of Packets — set the packets count on the job, then try again. (Inventory is deducted in raw packets/reams.)' });
+    }
+    // Parse & validate splits (or synthesize the single-brand fallback).
+    const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : null;
+    let splits;
+    if (rawSplits && rawSplits.length) {
+      splits = rawSplits
+        .map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10) }))
+        .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0);
+      if (!splits.length) return res.status(400).json({ error: 'No valid split rows in payload.' });
+    } else {
+      // Empty payload → old-style full issuance from the representative.
+      splits = [{ item_id: job.inventory_item_id, sheets: needSheets }];
+    }
+    // Load every source item at once; validate they're all in the same
+    // paper group (paper_type + size + gsm + is_offcut) as the anchor.
+    const itemIds = [...new Set(splits.map(s => s.item_id))];
+    const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
+    const itemsById = new Map(itemRows.map(r => [r.id, r]));
+    for (const s of splits) {
+      const it = itemsById.get(s.item_id);
+      if (!it) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
+      const sameGroup =
+        (it.paper_type || '') === (anchor.paper_type || '') &&
+        (it.size || '') === (anchor.size || '') &&
+        String(it.gsm || '') === String(anchor.gsm || '') &&
+        !!it.is_offcut === !!anchor.is_offcut;
+      if (!sameGroup) {
+        return res.status(400).json({ error: `Split item "${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}" is not in this job's paper group.` });
+      }
+    }
+    const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
+    if (totalIssued > needSheets) {
+      return res.status(400).json({ error: `Would over-issue by ${(totalIssued - needSheets).toLocaleString()} sheets. Job needs ${needSheets.toLocaleString()} total.` });
     }
     const ps   = packetSize(paperType);
     const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
-    const packs = sheetsUsed / ps;
-    // Deduct inventory using the same helper edits use, so the ledger entry
-    // looks identical to the original auto-deduct flow.
-    await applyInventoryChange(sql, {
-      itemId: job.inventory_item_id,
-      change: -sheetsUsed,
-      reason: 'job-consumed',
-      jobId: job.id,
-      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${sheetsUsed} sheets) issued by ${req.user.email}`,
-      user: req.user,
-    });
-    // Cut workflow: if the job specifies an offcut size, find-or-create the
-    // matching offcut item and return the leftover to stock. Per source
-    // sheet, exactly one offcut is produced.
-    let cutSummary = '';
-    if (job.cut_size && job.offcut_size && sourceItem) {
-      const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+
+    // Deduct each split; create per-split offcut if the job has a cut.
+    // Record the ledger row's brand into issued_items so the app can
+    // show all sourced brands at a glance (comma-joined) later.
+    const issuedItems = [];
+    for (const s of splits) {
+      const it = itemsById.get(s.item_id);
+      const packs = s.sheets / ps;
       await applyInventoryChange(sql, {
-        itemId: offcutItem.id,
-        change: +sheetsUsed,
-        reason: 'job-offcut',
+        itemId: s.item_id,
+        change: -s.sheets,
+        reason: 'job-consumed',
         jobId: job.id,
-        notes: `Job E-${job.id}: ${sheetsUsed} sheets of ${job.offcut_size} offcut returned to stock`,
+        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}`,
         user: req.user,
       });
-      cutSummary = ` · cut to ${job.cut_size}, ${sheetsUsed} sheets of ${job.offcut_size} offcut returned to stock`;
+      if (job.cut_size && job.offcut_size) {
+        const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
+        await applyInventoryChange(sql, {
+          itemId: offcutItem.id,
+          change: +s.sheets,
+          reason: 'job-offcut',
+          jobId: job.id,
+          notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
+          user: req.user,
+        });
+      }
+      issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
     }
+
+    // Update job. Partial issuance: use the existing partial marker so
+    // Pending Stock still shows the remaining need.
+    const fullyIssued = totalIssued === needSheets;
+    const remaining = needSheets - totalIssued;
+    const nextParticulars = { ...(job.particulars || {}) };
+    if (fullyIssued) delete nextParticulars.partial_pending_sheets;
+    else             nextParticulars.partial_pending_sheets = remaining;
+    // Point inventory_item_id at whichever brand contributed the most —
+    // downstream displays that still read from it get the dominant brand
+    // rather than an arbitrary one. Any code that wants the full picture
+    // reads issued_items directly.
+    const primary = [...splits].sort((a, b) => b.sheets - a.sheets)[0];
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'issued',
-             issued_at = NOW(),
-             issued_by_id = ${req.user.id || null}
+             issued_at = COALESCE(issued_at, NOW()),
+             issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
+             inventory_item_id = ${primary.item_id},
+             particulars = ${JSON.stringify(nextParticulars)},
+             issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItems)}::jsonb)
        WHERE id = ${id}
        RETURNING *
     `;
+    const brandList = issuedItems.map(x => x.brand || 'no brand').join(', ');
     await logAudit(sql, req, {
       action: 'job.issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Issued ${sheetsUsed} sheets for Job E-${id}: ${job.name}${cutSummary}`,
+      summary: `Issued ${totalIssued} sheets for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${remaining} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${totalIssued} sheets of ${job.offcut_size} offcut returned` : ''}`,
     });
     res.json(updated[0]);
   } catch (err) {
@@ -2575,50 +2660,50 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     if ((job.stage_index || 0) > 0) {
       return res.status(400).json({ error: 'Cannot reverse — job has already moved past the first stage' });
     }
-    // Refund every un-reversed job-consumed row for this job (original
-    // issuance + any approved packets top-ups). Each refund links back to
-    // its source via reverses_tx_id so the report's pair-hiding drops both
-    // sides cleanly. Do the same for any un-reversed job-offcut rows.
-    if (job.inventory_item_id) {
-      const consumedRows = await sql`
-        SELECT t.id, t.item_id, t.change FROM inventory_transactions t
-        WHERE t.job_id = ${job.id} AND t.reason = 'job-consumed'
-          AND t.reverses_tx_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-        ORDER BY t.id ASC
-      `;
-      for (const row of consumedRows) {
-        await applyInventoryChange(sql, {
-          itemId: row.item_id,
-          change: -row.change, // change is negative on a consume, so this refunds +N
-          reason: 'job-issuance-reversed',
-          jobId: job.id,
-          notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: issuance reversed by ${req.user.email} — ${Math.abs(row.change)} sheets returned (TX #${row.id})`,
-          user: req.user,
-          reversesTxId: row.id,
-        });
-      }
-      const offcutRows = await sql`
-        SELECT t.id, t.item_id, t.change FROM inventory_transactions t
-        WHERE t.job_id = ${job.id} AND t.reason = 'job-offcut'
-          AND t.reverses_tx_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-        ORDER BY t.id ASC
-      `;
-      for (const row of offcutRows) {
-        await applyInventoryChange(sql, {
-          itemId: row.item_id,
-          change: -row.change,
-          reason: 'job-issuance-reversed',
-          jobId: job.id,
-          notes: `Job E-${job.id}: offcut return reversed by ${req.user.email} — ${Math.abs(row.change)} sheets pulled back (TX #${row.id})`,
-          user: req.user,
-          reversesTxId: row.id,
-        });
-      }
+    // Refund every un-reversed job-consumed row for this job — even if
+    // stock was split across brands, each row is already recorded per
+    // source brand in inventory_transactions, so this loop naturally
+    // reverses the whole split. Each refund links back via reverses_tx_id
+    // so the report's pair-hiding drops both sides cleanly. Do the same
+    // for the (per-source-brand) job-offcut rows.
+    const consumedRows = await sql`
+      SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+      WHERE t.job_id = ${job.id} AND t.reason = 'job-consumed'
+        AND t.reverses_tx_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+      ORDER BY t.id ASC
+    `;
+    for (const row of consumedRows) {
+      await applyInventoryChange(sql, {
+        itemId: row.item_id,
+        change: -row.change, // change is negative on a consume, so this refunds +N
+        reason: 'job-issuance-reversed',
+        jobId: job.id,
+        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: issuance reversed by ${req.user.email} — ${Math.abs(row.change)} sheets returned (TX #${row.id})`,
+        user: req.user,
+        reversesTxId: row.id,
+      });
     }
-    // Clear any partial-issuance marker so the job returns to a clean
-    // 'nothing issued' state.
+    const offcutRows = await sql`
+      SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+      WHERE t.job_id = ${job.id} AND t.reason = 'job-offcut'
+        AND t.reverses_tx_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+      ORDER BY t.id ASC
+    `;
+    for (const row of offcutRows) {
+      await applyInventoryChange(sql, {
+        itemId: row.item_id,
+        change: -row.change,
+        reason: 'job-issuance-reversed',
+        jobId: job.id,
+        notes: `Job E-${job.id}: offcut return reversed by ${req.user.email} — ${Math.abs(row.change)} sheets pulled back (TX #${row.id})`,
+        user: req.user,
+        reversesTxId: row.id,
+      });
+    }
+    // Clear the partial-issuance marker AND the split-issuance record so
+    // the job returns to a clean 'nothing issued' state.
     const cleanParticulars = { ...(job.particulars || {}) };
     delete cleanParticulars.partial_pending_sheets;
     const updated = await sql`
@@ -2626,7 +2711,8 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
          SET issuance_status = 'pending',
              issued_at = NULL,
              issued_by_id = NULL,
-             particulars = ${JSON.stringify(cleanParticulars)}
+             particulars = ${JSON.stringify(cleanParticulars)},
+             issued_items = '[]'::jsonb
        WHERE id = ${id}
        RETURNING *
     `;

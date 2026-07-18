@@ -1189,6 +1189,21 @@
 /* Job card style for the New/Edit form — mirrors paper layout */
 .modal-card { max-width: 760px !important; }
 .modal-wide { max-width: 880px !important; }
+/* Split-issuance popup — store keeper picks brand(s) at Issue Stock
+   time when the paper group has 2+ brands. Compact table with a live
+   "Issued X / Y" footer that colour-changes as they type. */
+.split-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.split-table th, .split-table td { border: 1px solid var(--border); padding: 8px 10px; }
+.split-table th { background: var(--bg2); text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; color: var(--text2); }
+.split-table .split-avail { text-align: right; color: var(--text2); font-variant-numeric: tabular-nums; }
+.split-table .split-qty { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-family: var(--font); font-size: 13px; font-variant-numeric: tabular-nums; }
+.split-table .split-qty:focus { outline: none; background: #fff7d6; border-color: var(--red-border); }
+.split-table .split-row-out { opacity: 0.55; }
+.split-table .split-row-out td { background: var(--bg2); }
+.split-footer { margin-top: 12px; padding: 10px 14px; border-radius: 8px; font-weight: 600; font-size: 13px; background: var(--bg2); color: var(--text2); border: 1px solid var(--border); }
+.split-footer-full    { background: #dcfce7; color: #14532d; border-color: #86efac; }
+.split-footer-partial { background: #fef3c7; color: #78350f; border-color: #fcd34d; }
+.split-footer-over    { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
 .jc-form { width: 100%; border-collapse: collapse; margin-top: 4px; }
 .jc-form td { border: 1px solid #c5c2b6; padding: 5px 8px; vertical-align: top; background: #fdfcf7; }
 .jc-form .jc-lbl { display: block; font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 2px; font-weight: 600; }
@@ -11677,15 +11692,18 @@ function jcalcRecalc() {
 }
 
 function specsSection(p, coatings, j) {
-  // Searchable paper combobox — replaces the old free-text checkbox row.
-  // Typing filters the list (paper type / size / gsm / brand). Selection
+  // Searchable paper combobox — brand-agnostic since v2026-07-18. The
+  // picker only shows paper GROUPS (paper_type + size + gsm + is_offcut);
+  // brand is chosen by the store keeper at Issue Stock time. Selection
   // fills the hidden input that getFormData() reads. See paperSelect().
   const currentItemId = j && j.inventory_item_id;
   const currentItem   = currentItemId ? inventory.find(i => i.id === currentItemId) : null;
-  const currentLabel  = currentItem
-    ? `${currentItem.paper_type}${currentItem.size?' · '+currentItem.size:''}${currentItem.gsm?' · '+currentItem.gsm+'gsm':''}${currentItem.brand?' · '+currentItem.brand:''}`
-    : '';
-  const currentBalance = currentItem ? (currentItem.current_balance || 0) : 0;
+  const currentLabel  = currentItem ? paperGroupLabel(currentItem) : '';
+  // Balance shown next to the picker is the POOLED total across every
+  // brand in the group — matches what updateStockHint() computes.
+  const currentBalance = currentItem
+    ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
+    : 0;
   const papersRow = `
     <tr class="jc-spec-row"><td colspan="5">
       <div class="paper-pick">
@@ -12065,7 +12083,11 @@ function jobForm(j={}) {
         <td colspan="1"><span class="jc-lbl">Mfg Date</span><input type="date" id="f-mfgdate" value="${v(j.mfgdate)}"></td>
         <td colspan="1"><span class="jc-lbl">Exp Date</span><input type="date" id="f-expdate" value="${v(j.expdate)}"></td>
         <td colspan="2"><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
-        <td colspan="3"><span class="jc-lbl">Brand <span style="font-weight:400;color:var(--text2);">(from paper)</span></span><div style="padding:6px 0;color:var(--text);">${(() => { const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null; return esc((it && it.brand) || '—'); })()}</div></td>
+        <td colspan="3"><span class="jc-lbl">Brand <span style="font-weight:400;color:var(--text2);">(picked at issue)</span></span><div style="padding:6px 0;color:var(--text);">${(() => {
+          const brands = jobDisplayBrands(j);
+          if (brands) return `<span style="text-transform:uppercase;letter-spacing:0.02em;">${esc(brands)}</span>`;
+          return '<span style="color:var(--text3);font-style:italic;">picked by store keeper</span>';
+        })()}</div></td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -12225,11 +12247,51 @@ function updateStockHint() {
 }
 
 // ── Paper combobox ───────────────────────────────────────────
-// A simple typeahead over the inventory list. Hidden input holds the chosen
-// item id so getFormData()/updateStockHint() can read it unchanged.
-function paperItemLabel(it) {
+// Brand-agnostic paper picker: the PM chooses a paper GROUP
+// (paper_type + size + gsm + is_offcut). Brand choice moves to the store
+// keeper at Issue Stock time — a group with 2+ brands opens a split
+// popup there, letting the store keeper pull from one brand or across
+// several. Under the hood the job still stores inventory_item_id, but
+// the value is a "representative" item in the group (the one with the
+// highest balance) — server-side validation only checks paper_type +
+// size + gsm + is_offcut, never brand.
+//
+// The hidden #f-inventory-item input holds that representative id so
+// getFormData() / updateStockHint() keep working with no rename.
+
+// Brands that were actually issued for this job — comma-joined, unique,
+// uppercase-ready. Empty until the store keeper has issued something;
+// used by the Edit modal's Brand cell so it's clear brand is decided at
+// issuance time, not at job creation.
+function jobDisplayBrands(j) {
+  const items = Array.isArray(j && j.issued_items) ? j.issued_items : [];
+  const seen = new Set();
+  const brands = [];
+  for (const x of items) {
+    const b = (x && x.brand ? String(x.brand) : '').trim();
+    if (!b) continue;
+    const k = b.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    brands.push(b);
+  }
+  return brands.join(', ');
+}
+
+// Group key used everywhere in the picker + the availability hint.
+function paperGroupKey(it) {
+  return [it.paper_type || '', it.size || '', String(it.gsm || ''), it.is_offcut ? 'offcut' : 'fresh'].join('||');
+}
+// All inventory items in the same group as `it`. Used for pooled
+// balance display + as the split-popup source list.
+function paperGroupMembers(it) {
+  const key = paperGroupKey(it);
+  return inventory.filter(x => paperGroupKey(x) === key);
+}
+// Group-only label — no brand shown. Prefixed OFFCUT · for cut leftovers.
+function paperGroupLabel(it) {
   const prefix = it.is_offcut ? 'OFFCUT · ' : '';
-  return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
 }
 function paperOpen() {
   const list = document.getElementById('paper-list');
@@ -12246,6 +12308,9 @@ function paperFilter() {
   const list  = document.getElementById('paper-list');
   if (!input || !list) return;
   const q = (input.value || '').toLowerCase().trim();
+  // Filter first — brand is intentionally searchable (some PMs still
+  // hunt by brand when they know they've ordered from a specific one),
+  // but the RESULT is grouped so the picker only shows the paper GROUP.
   const filtered = inventory.filter(it => {
     if (!q) return true;
     const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
@@ -12255,51 +12320,29 @@ function paperFilter() {
     list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
     return;
   }
-  // Group items by (paper_type, size, gsm, is_offcut). Within each group,
-  // brand variants render as indented rows. Singletons collapse the group
-  // header into the row (no extra heading row) to keep the list compact.
-  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || '', it.is_offcut ? 'offcut' : 'fresh'].join('||');
+  // Bucket the filtered items by group, then render one row per group.
   const order  = [];
   const groups = new Map();
   for (const it of filtered) {
-    const k = keyOf(it);
+    const k = paperGroupKey(it);
     if (!groups.has(k)) { groups.set(k, []); order.push(k); }
     groups.get(k).push(it);
   }
   list.innerHTML = order.map(k => {
     const items = groups.get(k);
-    const rep   = items[0];
-    if (items.length === 1) {
-      // Singleton — render the original single-line row.
-      const bal = (rep.current_balance || 0).toLocaleString();
-      const cls = (rep.current_balance || 0) <= 0 ? 'combo-item out' : 'combo-item';
-      return `<div class="${cls}" onclick="paperSelect(${rep.id})">
-        <span>${esc(paperItemLabel(rep))}</span>
-        <span class="combo-bal">${bal} sheets</span>
-      </div>`;
-    }
-    // Multi-brand group — non-clickable header + one clickable row per brand.
-    const totalSheets = items.reduce((a, it) => a + (it.current_balance || 0), 0);
-    const headerLabel = [rep.paper_type, rep.size, rep.gsm && (rep.gsm + 'gsm')].filter(Boolean).map(esc).join(' · ');
-    const sorted = [...items].sort((a, b) => (a.brand || '').localeCompare(b.brand || ''));
-    const brandRows = sorted.map(it => {
-      const bal = (it.current_balance || 0).toLocaleString();
-      const cls = (it.current_balance || 0) <= 0 ? 'combo-item combo-brand-row out' : 'combo-item combo-brand-row';
-      const brandText = it.brand
-        ? `<b style="text-transform:uppercase;letter-spacing:0.03em;">${esc(it.brand)}</b>`
-        : '<span style="font-style:italic;color:var(--text2);">no brand</span>';
-      const supplierText = it.supplier ? `<span style="color:var(--text2);"> · ${esc(it.supplier)}</span>` : '';
-      return `<div class="${cls}" onclick="paperSelect(${it.id})">
-        <span style="padding-left:16px;">${brandText}${supplierText}</span>
-        <span class="combo-bal">${bal} sheets</span>
-      </div>`;
-    }).join('');
-    return `
-      <div class="combo-group-head">
-        <span>${headerLabel}<span class="combo-group-tag">${items.length} brands</span></span>
-        <span class="combo-bal" style="font-weight:600;">${totalSheets.toLocaleString()} sheets total</span>
-      </div>
-      ${brandRows}`;
+    // Representative: the item with the highest balance in this group.
+    // If they're all zero we still pick the first — the row's rendered
+    // "out of stock" state comes from the pooled total, not the rep.
+    const rep = [...items].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0))[0];
+    const totalSheets = items.reduce((a, x) => a + (x.current_balance || 0), 0);
+    const cls = totalSheets <= 0 ? 'combo-item out' : 'combo-item';
+    const brandNote = items.length > 1
+      ? `<span class="combo-group-tag" style="margin-left:6px;">${items.length} brands · picked by store keeper</span>`
+      : '';
+    return `<div class="${cls}" onclick="paperSelect(${rep.id})">
+      <span>${esc(paperGroupLabel(rep))}${brandNote}</span>
+      <span class="combo-bal">${totalSheets.toLocaleString()} sheets</span>
+    </div>`;
   }).join('');
 }
 function paperSelect(itemId) {
@@ -12307,10 +12350,17 @@ function paperSelect(itemId) {
   if (!it) return;
   const search = document.getElementById('paper-search');
   const hidden = document.getElementById('f-inventory-item');
-  if (search) search.value = paperItemLabel(it);
+  // Show the group label (no brand) in the picker text field so the PM
+  // sees exactly what's on the job. Behind the scenes we store the
+  // representative item id — the store keeper picks the actual brand
+  // at Issue Stock time.
+  if (search) search.value = paperGroupLabel(it);
   if (hidden) {
+    // Balance stored on the hidden input is the GROUP total, so
+    // updateStockHint reads a pooled figure.
+    const total = paperGroupMembers(it).reduce((a, x) => a + (x.current_balance || 0), 0);
     hidden.value = String(itemId);
-    hidden.dataset.balance = String(it.current_balance || 0);
+    hidden.dataset.balance = String(total);
   }
   // Auto-populate Size / GSM (top field) from the inventory item.
   const sizeField = document.getElementById('f-size');
@@ -12898,40 +12948,163 @@ async function issueStock(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
-  const it = inventory.find(i => i.id === j.inventory_item_id);
-  if (!it) { notify('Paper item missing from inventory.'); return; }
-  // Inventory deduction is always Quantity of Packets × packetSize (raw
-  // sheets in inventory). Sheets Qty is the working post-cut count and is
-  // NOT used for deduction. If packets is empty, surface a clear error.
-  const ps        = packetSize(it.paper_type);
-  const unit      = packetUnitLabel(it.paper_type).toLowerCase();
+  const anchor = inventory.find(i => i.id === j.inventory_item_id);
+  if (!anchor) { notify('Paper item missing from inventory.'); return; }
+  const ps        = packetSize(anchor.paper_type);
+  const unit      = packetUnitLabel(anchor.paper_type).toLowerCase();
   const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets);
   if (!Number.isFinite(packetsIn) || packetsIn <= 0) {
     notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
-  const sheets = Math.round(packetsIn * ps);
-  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
-  const ok = await confirmDialog({
-    title: `Issue stock for Job E-${id}?`,
-    message: `${packetsIn} ${unit} (${sheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`,
-    confirmText: 'Issue stock',
-  });
-  if (!ok) return;
+  const needSheets = Math.round(packetsIn * ps);
+  // Group brands with any stock available. Zero-balance brands stay in
+  // the popup so the store keeper can see them (row disabled), but a
+  // group where EVERY brand is out is still a hard error.
+  const members = paperGroupMembers(anchor);
+  const totalAvail = members.reduce((a, x) => a + (x.current_balance || 0), 0);
+  if (totalAvail <= 0) {
+    notify('Every brand in this paper group is out of stock.');
+    return;
+  }
+  // Single-brand group → skip the popup, keep the old confirm dialog.
+  if (members.length === 1) {
+    const it = members[0];
+    const label = paperGroupLabel(it) + (it.brand ? ' · ' + it.brand : '');
+    const sheetsToIssue = Math.min(needSheets, it.current_balance || 0);
+    const partial = sheetsToIssue < needSheets;
+    const ok = await confirmDialog({
+      title: `Issue stock for Job E-${id}?`,
+      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nThis will deduct from inventory and start the job.`,
+      confirmText: partial ? 'Issue partial' : 'Issue stock',
+    });
+    if (!ok) return;
+    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }]);
+    return;
+  }
+  // Multi-brand group → open the split popup for the store keeper.
+  openIssueSplitPopup(j, anchor, members, needSheets, unit);
+}
+
+// Fire the /issue-stock POST with a splits payload and refresh state.
+// Shared by the single-brand fast path and the split popup's Save button.
+async function sendIssueStock(id, splits) {
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${id}/issue-stock`);
-    // Replace the local job copy with the updated one from the server so
-    // the badge flips from Pending to whatever stage applies next.
+    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits });
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
-    await loadInventory(); // balances changed — refresh
+    await loadInventory();
     render();
-    notify(`Stock issued · ${sheets.toLocaleString()} sheets deducted`);
+    const total = splits.reduce((a, s) => a + (s.sheets || 0), 0);
+    notify(`Stock issued · ${total.toLocaleString()} sheets deducted`);
   } catch (e) {
     notify('Error: ' + e.message);
   }
   showSaving(false);
+}
+
+// Popup for splitting an issuance across the brands in a paper group.
+// One row per brand — the store keeper types how many sheets to pull
+// from each. Live footer tallies "Issued: X / Y needed" and turns the
+// Save button into either a full-issuance, partial-issuance, or a
+// disabled over-issuance depending on the sum. Save is enabled as long
+// as at least one row has a value AND the sum doesn't exceed need.
+function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
+  const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
+  const rowHtml = rows.map((it, i) => {
+    const bal = it.current_balance || 0;
+    const brandTxt = it.brand ? esc(it.brand) : '<span style="color:var(--text3);font-style:italic;">no brand</span>';
+    return `
+      <tr class="split-row ${bal <= 0 ? 'split-row-out' : ''}">
+        <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
+        <td class="split-avail">${bal.toLocaleString()}</td>
+        <td>
+          <input type="number" class="split-qty" min="0" max="${bal}" step="1"
+                 data-item-id="${it.id}" data-avail="${bal}"
+                 value="" placeholder="0"
+                 ${bal <= 0 ? 'disabled' : ''}
+                 oninput="recomputeSplitFooter()">
+        </td>
+      </tr>`;
+  }).join('');
+  openModal(`
+    <div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width: 620px;">
+      <h2>Issue Stock · Job E-${j.id}</h2>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px;">
+        <b>${esc(j.name)}</b> &middot; needs <b>${needSheets.toLocaleString()}</b> sheets
+        (${esc(paperGroupLabel(anchor))})
+      </div>
+      <table class="split-table" data-need="${needSheets}">
+        <thead>
+          <tr>
+            <th>Brand</th>
+            <th style="text-align:right;">Available</th>
+            <th style="width:130px;">Issue (sheets)</th>
+          </tr>
+        </thead>
+        <tbody>${rowHtml}</tbody>
+      </table>
+      <div class="split-footer" id="split-footer">
+        <span id="split-footer-msg">Issued: 0 / ${needSheets.toLocaleString()}</span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" id="split-save-btn" disabled onclick="saveSplitIssue(${j.id})">Issue Stock</button>
+      </div>
+    </div>`);
+  recomputeSplitFooter();
+}
+
+// Live footer state — called from each input's oninput. Also drives the
+// Save button's disabled state so the store keeper gets immediate
+// feedback (over-issue = disabled, under-issue = partial-mode allowed).
+function recomputeSplitFooter() {
+  const table = document.querySelector('.split-table');
+  if (!table) return;
+  const need = parseInt(table.dataset.need, 10) || 0;
+  const qtyInputs = [...table.querySelectorAll('.split-qty')];
+  let total = 0;
+  let anyPositive = false;
+  let anyInvalid = false;
+  for (const inp of qtyInputs) {
+    const n = parseInt(inp.value, 10);
+    if (inp.value !== '' && (!Number.isFinite(n) || n < 0)) { anyInvalid = true; continue; }
+    if (Number.isFinite(n) && n > 0) {
+      const avail = parseInt(inp.dataset.avail, 10) || 0;
+      if (n > avail) { anyInvalid = true; continue; }
+      total += n;
+      anyPositive = true;
+    }
+  }
+  const footer = document.getElementById('split-footer');
+  const msg    = document.getElementById('split-footer-msg');
+  const btn    = document.getElementById('split-save-btn');
+  const over   = total > need;
+  footer.classList.toggle('split-footer-full',    !over && total === need);
+  footer.classList.toggle('split-footer-partial', !over && anyPositive && total < need);
+  footer.classList.toggle('split-footer-over',    over);
+  if (over) {
+    msg.textContent = `Over by ${(total - need).toLocaleString()} — reduce (Issued: ${total.toLocaleString()} / ${need.toLocaleString()})`;
+  } else if (total === need) {
+    msg.textContent = `Issued: ${total.toLocaleString()} / ${need.toLocaleString()} · full`;
+  } else if (anyPositive) {
+    msg.textContent = `Issued: ${total.toLocaleString()} / ${need.toLocaleString()} · ${(need - total).toLocaleString()} still pending`;
+  } else {
+    msg.textContent = `Issued: 0 / ${need.toLocaleString()}`;
+  }
+  btn.disabled = anyInvalid || over || !anyPositive;
+}
+
+async function saveSplitIssue(jobId) {
+  const table = document.querySelector('.split-table');
+  if (!table) return;
+  const splits = [...table.querySelectorAll('.split-qty')]
+    .map(inp => ({ item_id: parseInt(inp.dataset.itemId, 10), sheets: parseInt(inp.value, 10) }))
+    .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0);
+  if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
+  closeModal();
+  await sendIssueStock(jobId, splits);
 }
 
 // Request extra packets for an already-issued job. The job stays in its
@@ -13055,16 +13228,11 @@ function buildPrintCard(j) {
   // particulars fields for pre-inventory jobs.
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperType  = invItem ? (invItem.paper_type || '') : ((Array.isArray(p.paper_types) && p.paper_types[0]) || '');
-  const paperBrand = invItem ? (invItem.brand || '')      : (p.brand || '');
-  // Combined "PAPER - BRAND" cell (Row 5). Both pieces stay in their own
-  // storage columns; this is display-only concatenation. Renders just the
-  // paper if brand is empty and vice versa; blank if neither is set.
-  const paperBrandCombined = (() => {
-    const a = String(paperType || '').trim();
-    const b = String(paperBrand || '').trim();
-    if (a && b) return `${a} - ${b}`;
-    return a || b || '';
-  })();
+  // Row 5's "Paper — Brand" cell prints paper type ONLY. Brand is left
+  // blank by design so the cutting group can hand-write the actual
+  // brand pulled from the store (which may be split across brands when
+  // the store keeper issued from multiple sources).
+  const paperBrandCombined = String(paperType || '').trim();
   const coatLabel = name => {
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
     return `<span class="pc-coat-box pc-coat-on">✓</span><span class="pc-coat-label-on">${label}</span>`;
