@@ -1189,6 +1189,49 @@
 /* Job card style for the New/Edit form — mirrors paper layout */
 .modal-card { max-width: 760px !important; }
 .modal-wide { max-width: 880px !important; }
+/* Split-issuance popup — store keeper picks brand(s) at Issue Stock
+   time when the paper group has 2+ brands. Compact table with a live
+   "Issued X / Y" footer that colour-changes as they type. */
+.split-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.split-table th, .split-table td { border: 1px solid var(--border); padding: 8px 10px; }
+.split-table th { background: var(--bg2); text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; color: var(--text2); }
+.split-table .split-avail { text-align: right; color: var(--text2); font-variant-numeric: tabular-nums; }
+.split-table .split-qty { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-family: var(--font); font-size: 13px; font-variant-numeric: tabular-nums; }
+.split-table .split-qty:focus { outline: none; background: #fff7d6; border-color: var(--red-border); }
+.split-table .split-row-out { opacity: 0.55; }
+.split-table .split-row-out td { background: var(--bg2); }
+/* Row-level error: the store keeper typed more than the brand has on
+   hand. Red border + subtle red tint so the offending row jumps out
+   even before the footer message. */
+.split-table .split-row-over td { background: #fef2f2; }
+.split-table .split-row-over .split-qty { border: 1.5px solid var(--red-text); background: #fff1f1; color: var(--red-text); font-weight: 700; }
+.split-footer {
+  margin-top: 14px; padding: 12px 16px; border-radius: 10px;
+  font-weight: 600; font-size: 14px;
+  background: var(--bg2); color: var(--text2); border: 1px solid var(--border);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.split-footer-msg { display: flex; align-items: center; gap: 10px; }
+.split-footer-icon { font-size: 20px; line-height: 1; }
+.split-footer-tally { margin-left: auto; font-size: 12px; font-weight: 700; opacity: 0.85; padding: 3px 10px; border-radius: 999px; background: rgba(0,0,0,0.06); }
+.split-footer-full    { background: #dcfce7; color: #14532d; border-color: #86efac; }
+.split-footer-partial { background: #fef3c7; color: #78350f; border-color: #fcd34d; }
+/* Over-issue / bad-input state — the loudest state. Bigger font, red
+   fill, and a matching glow so Save-disabled has an obvious reason.
+   Icon + attention-grabbing pulse the first second so it registers. */
+.split-footer-over {
+  background: var(--red-text) !important; color: #fff !important;
+  border: 2px solid var(--red-text) !important;
+  font-size: 15px !important;
+  box-shadow: 0 0 0 2px rgba(121,31,31,0.25), 0 2px 14px rgba(121,31,31,0.35);
+  animation: splitFooterPulse 0.9s ease-out 1;
+}
+.split-footer-over .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; }
+@keyframes splitFooterPulse {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 2px rgba(121,31,31,0.15), 0 2px 14px rgba(121,31,31,0.35); }
+  40%  { transform: scale(1.015);box-shadow: 0 0 0 6px rgba(121,31,31,0.20), 0 4px 20px rgba(121,31,31,0.55); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 2px rgba(121,31,31,0.25), 0 2px 14px rgba(121,31,31,0.35); }
+}
 .jc-form { width: 100%; border-collapse: collapse; margin-top: 4px; }
 .jc-form td { border: 1px solid #c5c2b6; padding: 5px 8px; vertical-align: top; background: #fdfcf7; }
 .jc-form .jc-lbl { display: block; font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 2px; font-weight: 600; }
@@ -9420,6 +9463,25 @@ function toggleStockMovementRow(dir, txId, checked) {
     headChk.indeterminate = !allChecked && visible.some(t => stockMovementSel[dir].has(t.id));
   }
 }
+// Split-issuance group checkbox: ticks/unticks every underlying tx id
+// at once so bulk-actions (like Reverse) still target the actual ledger
+// rows behind the collapsed display line.
+function toggleStockMovementGroup(dir, ids, checked) {
+  for (const id of ids) {
+    if (checked) stockMovementSel[dir].add(id); else stockMovementSel[dir].delete(id);
+  }
+  renderStockMovementBulkBar(dir);
+  const anchorId = ids[0];
+  const tr = document.querySelector(`tr[data-sm-row="${dir}-${anchorId}"]`);
+  if (tr) tr.classList.toggle('bulk-row-selected', checked);
+  const headChk = document.getElementById(`sm-${dir}-bulk-all`);
+  if (headChk) {
+    const visible = currentVisibleStockMovement(dir);
+    const allChecked = visible.length && visible.every(t => stockMovementSel[dir].has(t.id));
+    headChk.checked = !!allChecked;
+    headChk.indeterminate = !allChecked && visible.some(t => stockMovementSel[dir].has(t.id));
+  }
+}
 function toggleStockMovementAll(dir, checked) {
   const visible = currentVisibleStockMovement(dir);
   if (checked) visible.forEach(t => stockMovementSel[dir].add(t.id));
@@ -9639,6 +9701,61 @@ async function loadStockMovement(direction) {
   }
 }
 
+// Collapse job-consumed rows that came from a single split-issuance click
+// into one synthetic row per (job_id + paper group + minute-level time).
+// Non-issuance rows pass through unchanged. Synthesized rows carry:
+//   - id           : first underlying id (used for anchor + row key)
+//   - group_ids    : every underlying id, so the bulk checkbox can
+//                    select/deselect the whole split at once
+//   - item_brand   : brands joined with "/" ("century/ningbo")
+//   - change       : summed
+//   - item_id      : null (multiple items) — balance cell knows to blank
+//   - notes        : first underlying notes (they're identical apart
+//                    from brand + qty)
+function collapseSplitIssuances(rows) {
+  const OUT = [];
+  const buckets = new Map();   // key -> array of tx rows
+  for (const t of rows) {
+    // Only issued-out rows are candidates for grouping; every other
+    // reason (stock-in, offcut return, top-up, correction) prints as-is.
+    if (t.reason !== 'job-consumed' || !t.job_id) { OUT.push(t); continue; }
+    // Bucket by job + paper group + minute of created_at so two brands
+    // pulled by the same Issue Stock click collapse, but a top-up done
+    // 3 hours later stays its own row.
+    const stamp = t.created_at ? new Date(t.created_at).toISOString().slice(0, 16) : '';
+    const key = [
+      t.job_id,
+      t.paper_type || '',
+      t.item_size  || '',
+      String(t.item_gsm || ''),
+      stamp,
+    ].join('||');
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(t);
+  }
+  for (const arr of buckets.values()) {
+    if (arr.length === 1) { OUT.push(arr[0]); continue; }
+    const brands = arr.map(x => (x.item_brand || '').trim()).filter(Boolean);
+    const uniqBrands = [...new Set(brands.map(b => b.toLowerCase()))]
+      .map(low => brands.find(b => b.toLowerCase() === low));
+    const summedChange = arr.reduce((a, x) => a + (x.change || 0), 0);
+    const first = arr[0];
+    OUT.push({
+      ...first,
+      id: first.id,
+      group_ids: arr.map(x => x.id),
+      change: summedChange,
+      item_brand: uniqBrands.join('/'),
+      item_id: null,           // multiple items — balance can't be shown
+      notes: first.notes,
+    });
+  }
+  // Preserve original ordering by created_at descending (matches the
+  // state.rows ordering the server delivers).
+  OUT.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return OUT;
+}
+
 function renderStockMovement(direction, from, to) {
   const state = stockMovementStates[direction];
   // Populate Size + GSM dropdowns from the data, scoped to the currently
@@ -9646,11 +9763,17 @@ function renderStockMovement(direction, from, to) {
   // subset — no dead "5,000gsm" options).
   refreshMovementFilterOptions(direction);
   // Apply all three filters (paper type / size / gsm) client-side before totals.
-  const txs = state.rows.filter(t =>
+  const rawTxs = state.rows.filter(t =>
        (!state.paperType || t.paper_type === state.paperType)
     && (!state.size      || (t.item_size || '') === state.size)
     && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
   );
+  // Split-issuance grouping: a single Issue Stock click may deduct from
+  // 2+ brands at once (same job, same paper group, within-a-second of
+  // each other). Collapse those rows into one synthetic row for display
+  // — brand becomes "century/ningbo", change is summed. Underlying ids
+  // are preserved in group_ids so the bulk checkbox still round-trips.
+  const txs = collapseSplitIssuances(rawTxs);
   // Direction is fixed so there's only one total to show. Net change column
   // would just duplicate that — skip it.
   let total = 0;
@@ -9687,6 +9810,7 @@ function renderStockMovement(direction, from, to) {
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
   const rows = txs.map(t => {
+    const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     const date = fmtDMYT(t.created_at);
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const s    = t.change > 0 ? '+' : '';
@@ -9695,25 +9819,38 @@ function renderStockMovement(direction, from, to) {
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const pkts  = t.change / ps;
-    const inv   = inventory.find(i => i.id === t.item_id);
+    // Balance / weight: a split-issuance group has no single item — it
+    // pulled from 2+ brands, each with its own inventory row. Showing a
+    // balance for a single brand would be misleading, so blank the cell.
+    const inv   = isGroup ? null : inventory.find(i => i.id === t.item_id);
     const bal   = inv ? (inv.current_balance || 0) : null;
-    const balCell = bal === null
-      ? '<span style="color:var(--text3)">—</span>'
-      : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
-    // Weight column — kg for THIS transaction. Shows both the change-weight
-    // (big, signed) and the current balance's weight (small, neutral) so the
-    // user can see both "how much moved" and "how much is on hand right now".
+    const balCell = isGroup
+      ? '<span style="color:var(--text3)" title="Split across brands — check individual brand balances in Inventory">split</span>'
+      : bal === null
+        ? '<span style="color:var(--text3)">—</span>'
+        : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
     const txWperPack  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     const txKg        = txWperPack !== null ? txWperPack * Math.abs(pkts) : null;
     const balKg       = (txWperPack !== null && bal !== null) ? txWperPack * (bal / ps) : null;
     const weightCell  = txKg === null
       ? '<span style="color:var(--text3)">—</span>'
-      : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
-    const isSel = stockMovementSel[direction].has(t.id);
+      : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${!isGroup && balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
+    // Bulk-selection: a grouped row's checkbox ticks/unticks every
+    // underlying tx id at once so bulk actions still target the right
+    // ledger rows. Selection state is "checked" only when EVERY id in
+    // the group is selected.
+    const ids = isGroup ? t.group_ids : [t.id];
+    const isSel = ids.every(id => stockMovementSel[direction].has(id));
+    const clickHandler = isGroup
+      ? `toggleStockMovementGroup('${direction}', [${t.group_ids.join(',')}], this.checked)`
+      : `toggleStockMovementRow('${direction}', ${t.id}, this.checked)`;
+    const groupBadge = isGroup
+      ? ` <span style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;letter-spacing:0.03em;margin-left:4px;">SPLIT · ${t.group_ids.length}</span>`
+      : '';
     return `<tr data-sm-row="${direction}-${t.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
-      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleStockMovementRow('${direction}', ${t.id}, this.checked)"></td>
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="${clickHandler}"></td>
       <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
-      <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
+      <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
       <td style="padding:8px 10px;font-weight:600;" class="${cls}">${s}${fmt(pkts)} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${t.change.toLocaleString()} sheets</span></td>
       <td style="padding:8px 10px;">${balCell}</td>
       <td style="padding:8px 10px;">${weightCell}</td>
@@ -10630,18 +10767,43 @@ function printStickers() {
   const area = document.getElementById('print-area');
   area.innerHTML = sheets.join('');
 
-  // Same image-wait pattern as the rest of the app's print flows so the
-  // logo isn't blank when the print dialog opens.
-  const imgs = Array.from(area.querySelectorAll('img'));
-  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
-  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+  // Defensive: a previous printJobCard() run may have left its
+  // 8.5in × 12.5in @page override in <head> if the user cancelled the
+  // dialog and afterprint didn't fire cleanly. That override would then
+  // apply to THIS sticker print and confuse the printer (wrong sheet
+  // size → jam / hang / reject). Nuke it before we plant our own A4
+  // rule. Same guard for any future non-A4 print flow.
+  document.querySelectorAll('#__jc-print-page, #__stk-print-page').forEach(el => el.remove());
+  const stkPageStyle = document.createElement('style');
+  stkPageStyle.id = '__stk-print-page';
+  stkPageStyle.textContent = '@media print { @page { size: A4 portrait; margin: 0; } }';
+  document.head.appendChild(stkPageStyle);
+  // Same title-blank trick the job-card printer uses so the browser's
+  // default page header ("Job Tracker Supreme Art") doesn't print on
+  // every sticker sheet.
+  const prevTitle = document.title;
+  document.title = ' ';
+  const restore = () => {
+    document.title = prevTitle;
+    if (stkPageStyle.parentNode) stkPageStyle.parentNode.removeChild(stkPageStyle);
+    window.removeEventListener('afterprint', restore);
+    clearTimeout(restoreFallback);
+  };
+  window.addEventListener('afterprint', restore);
+  // Belt-and-braces: afterprint doesn't always fire cleanly (Chrome tab
+  // switches, killed dialogs). Force cleanup after 30s so the title
+  // and injected @page never linger permanently.
+  const restoreFallback = setTimeout(restore, 30000);
+
+  // Wait for the logo/watermark to load before printing (shared helper —
+  // same trick job-card print uses to avoid a blank logo on cold prints).
+  waitForPrintImages(area).then(() => {
     // #print-area is display:none on screen, so its children have 0 width
     // — the auto-fit can't measure anything. Temporarily park the area
     // off-screen as a normal block, measure + shrink each cell, then
     // restore the inline style so the @media print rules take over.
     const prev = area.getAttribute('style') || '';
     area.style.cssText = 'display:block; position:absolute; left:-10000px; top:0; width:auto;';
-    // Force a synchronous layout pass before measuring.
     void area.offsetWidth;
     fitStickerText(area);
     area.setAttribute('style', prev);
@@ -11677,15 +11839,18 @@ function jcalcRecalc() {
 }
 
 function specsSection(p, coatings, j) {
-  // Searchable paper combobox — replaces the old free-text checkbox row.
-  // Typing filters the list (paper type / size / gsm / brand). Selection
+  // Searchable paper combobox — brand-agnostic since v2026-07-18. The
+  // picker only shows paper GROUPS (paper_type + size + gsm + is_offcut);
+  // brand is chosen by the store keeper at Issue Stock time. Selection
   // fills the hidden input that getFormData() reads. See paperSelect().
   const currentItemId = j && j.inventory_item_id;
   const currentItem   = currentItemId ? inventory.find(i => i.id === currentItemId) : null;
-  const currentLabel  = currentItem
-    ? `${currentItem.paper_type}${currentItem.size?' · '+currentItem.size:''}${currentItem.gsm?' · '+currentItem.gsm+'gsm':''}${currentItem.brand?' · '+currentItem.brand:''}`
-    : '';
-  const currentBalance = currentItem ? (currentItem.current_balance || 0) : 0;
+  const currentLabel  = currentItem ? paperGroupLabel(currentItem) : '';
+  // Balance shown next to the picker is the POOLED total across every
+  // brand in the group — matches what updateStockHint() computes.
+  const currentBalance = currentItem
+    ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
+    : 0;
   const papersRow = `
     <tr class="jc-spec-row"><td colspan="5">
       <div class="paper-pick">
@@ -12065,7 +12230,11 @@ function jobForm(j={}) {
         <td colspan="1"><span class="jc-lbl">Mfg Date</span><input type="date" id="f-mfgdate" value="${v(j.mfgdate)}"></td>
         <td colspan="1"><span class="jc-lbl">Exp Date</span><input type="date" id="f-expdate" value="${v(j.expdate)}"></td>
         <td colspan="2"><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
-        <td colspan="3"><span class="jc-lbl">Brand <span style="font-weight:400;color:var(--text2);">(from paper)</span></span><div style="padding:6px 0;color:var(--text);">${(() => { const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null; return esc((it && it.brand) || '—'); })()}</div></td>
+        <td colspan="3"><span class="jc-lbl">Brand <span style="font-weight:400;color:var(--text2);">(picked at issue)</span></span><div style="padding:6px 0;color:var(--text);">${(() => {
+          const brands = jobDisplayBrands(j);
+          if (brands) return `<span style="text-transform:uppercase;letter-spacing:0.02em;">${esc(brands)}</span>`;
+          return '<span style="color:var(--text3);font-style:italic;">picked by store keeper</span>';
+        })()}</div></td>
       </tr>
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
@@ -12225,11 +12394,51 @@ function updateStockHint() {
 }
 
 // ── Paper combobox ───────────────────────────────────────────
-// A simple typeahead over the inventory list. Hidden input holds the chosen
-// item id so getFormData()/updateStockHint() can read it unchanged.
-function paperItemLabel(it) {
+// Brand-agnostic paper picker: the PM chooses a paper GROUP
+// (paper_type + size + gsm + is_offcut). Brand choice moves to the store
+// keeper at Issue Stock time — a group with 2+ brands opens a split
+// popup there, letting the store keeper pull from one brand or across
+// several. Under the hood the job still stores inventory_item_id, but
+// the value is a "representative" item in the group (the one with the
+// highest balance) — server-side validation only checks paper_type +
+// size + gsm + is_offcut, never brand.
+//
+// The hidden #f-inventory-item input holds that representative id so
+// getFormData() / updateStockHint() keep working with no rename.
+
+// Brands that were actually issued for this job — comma-joined, unique,
+// uppercase-ready. Empty until the store keeper has issued something;
+// used by the Edit modal's Brand cell so it's clear brand is decided at
+// issuance time, not at job creation.
+function jobDisplayBrands(j) {
+  const items = Array.isArray(j && j.issued_items) ? j.issued_items : [];
+  const seen = new Set();
+  const brands = [];
+  for (const x of items) {
+    const b = (x && x.brand ? String(x.brand) : '').trim();
+    if (!b) continue;
+    const k = b.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    brands.push(b);
+  }
+  return brands.join(', ');
+}
+
+// Group key used everywhere in the picker + the availability hint.
+function paperGroupKey(it) {
+  return [it.paper_type || '', it.size || '', String(it.gsm || ''), it.is_offcut ? 'offcut' : 'fresh'].join('||');
+}
+// All inventory items in the same group as `it`. Used for pooled
+// balance display + as the split-popup source list.
+function paperGroupMembers(it) {
+  const key = paperGroupKey(it);
+  return inventory.filter(x => paperGroupKey(x) === key);
+}
+// Group-only label — no brand shown. Prefixed OFFCUT · for cut leftovers.
+function paperGroupLabel(it) {
   const prefix = it.is_offcut ? 'OFFCUT · ' : '';
-  return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
 }
 function paperOpen() {
   const list = document.getElementById('paper-list');
@@ -12246,6 +12455,9 @@ function paperFilter() {
   const list  = document.getElementById('paper-list');
   if (!input || !list) return;
   const q = (input.value || '').toLowerCase().trim();
+  // Filter first — brand is intentionally searchable (some PMs still
+  // hunt by brand when they know they've ordered from a specific one),
+  // but the RESULT is grouped so the picker only shows the paper GROUP.
   const filtered = inventory.filter(it => {
     if (!q) return true;
     const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
@@ -12255,51 +12467,29 @@ function paperFilter() {
     list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
     return;
   }
-  // Group items by (paper_type, size, gsm, is_offcut). Within each group,
-  // brand variants render as indented rows. Singletons collapse the group
-  // header into the row (no extra heading row) to keep the list compact.
-  const keyOf = (it) => [it.paper_type, it.size || '', it.gsm || '', it.is_offcut ? 'offcut' : 'fresh'].join('||');
+  // Bucket the filtered items by group, then render one row per group.
   const order  = [];
   const groups = new Map();
   for (const it of filtered) {
-    const k = keyOf(it);
+    const k = paperGroupKey(it);
     if (!groups.has(k)) { groups.set(k, []); order.push(k); }
     groups.get(k).push(it);
   }
   list.innerHTML = order.map(k => {
     const items = groups.get(k);
-    const rep   = items[0];
-    if (items.length === 1) {
-      // Singleton — render the original single-line row.
-      const bal = (rep.current_balance || 0).toLocaleString();
-      const cls = (rep.current_balance || 0) <= 0 ? 'combo-item out' : 'combo-item';
-      return `<div class="${cls}" onclick="paperSelect(${rep.id})">
-        <span>${esc(paperItemLabel(rep))}</span>
-        <span class="combo-bal">${bal} sheets</span>
-      </div>`;
-    }
-    // Multi-brand group — non-clickable header + one clickable row per brand.
-    const totalSheets = items.reduce((a, it) => a + (it.current_balance || 0), 0);
-    const headerLabel = [rep.paper_type, rep.size, rep.gsm && (rep.gsm + 'gsm')].filter(Boolean).map(esc).join(' · ');
-    const sorted = [...items].sort((a, b) => (a.brand || '').localeCompare(b.brand || ''));
-    const brandRows = sorted.map(it => {
-      const bal = (it.current_balance || 0).toLocaleString();
-      const cls = (it.current_balance || 0) <= 0 ? 'combo-item combo-brand-row out' : 'combo-item combo-brand-row';
-      const brandText = it.brand
-        ? `<b style="text-transform:uppercase;letter-spacing:0.03em;">${esc(it.brand)}</b>`
-        : '<span style="font-style:italic;color:var(--text2);">no brand</span>';
-      const supplierText = it.supplier ? `<span style="color:var(--text2);"> · ${esc(it.supplier)}</span>` : '';
-      return `<div class="${cls}" onclick="paperSelect(${it.id})">
-        <span style="padding-left:16px;">${brandText}${supplierText}</span>
-        <span class="combo-bal">${bal} sheets</span>
-      </div>`;
-    }).join('');
-    return `
-      <div class="combo-group-head">
-        <span>${headerLabel}<span class="combo-group-tag">${items.length} brands</span></span>
-        <span class="combo-bal" style="font-weight:600;">${totalSheets.toLocaleString()} sheets total</span>
-      </div>
-      ${brandRows}`;
+    // Representative: the item with the highest balance in this group.
+    // If they're all zero we still pick the first — the row's rendered
+    // "out of stock" state comes from the pooled total, not the rep.
+    const rep = [...items].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0))[0];
+    const totalSheets = items.reduce((a, x) => a + (x.current_balance || 0), 0);
+    const cls = totalSheets <= 0 ? 'combo-item out' : 'combo-item';
+    const brandNote = items.length > 1
+      ? `<span class="combo-group-tag" style="margin-left:6px;">${items.length} brands · picked by store keeper</span>`
+      : '';
+    return `<div class="${cls}" onclick="paperSelect(${rep.id})">
+      <span>${esc(paperGroupLabel(rep))}${brandNote}</span>
+      <span class="combo-bal">${totalSheets.toLocaleString()} sheets</span>
+    </div>`;
   }).join('');
 }
 function paperSelect(itemId) {
@@ -12307,10 +12497,17 @@ function paperSelect(itemId) {
   if (!it) return;
   const search = document.getElementById('paper-search');
   const hidden = document.getElementById('f-inventory-item');
-  if (search) search.value = paperItemLabel(it);
+  // Show the group label (no brand) in the picker text field so the PM
+  // sees exactly what's on the job. Behind the scenes we store the
+  // representative item id — the store keeper picks the actual brand
+  // at Issue Stock time.
+  if (search) search.value = paperGroupLabel(it);
   if (hidden) {
+    // Balance stored on the hidden input is the GROUP total, so
+    // updateStockHint reads a pooled figure.
+    const total = paperGroupMembers(it).reduce((a, x) => a + (x.current_balance || 0), 0);
     hidden.value = String(itemId);
-    hidden.dataset.balance = String(it.current_balance || 0);
+    hidden.dataset.balance = String(total);
   }
   // Auto-populate Size / GSM (top field) from the inventory item.
   const sizeField = document.getElementById('f-size');
@@ -12898,40 +13095,210 @@ async function issueStock(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
-  const it = inventory.find(i => i.id === j.inventory_item_id);
-  if (!it) { notify('Paper item missing from inventory.'); return; }
-  // Inventory deduction is always Quantity of Packets × packetSize (raw
-  // sheets in inventory). Sheets Qty is the working post-cut count and is
-  // NOT used for deduction. If packets is empty, surface a clear error.
-  const ps        = packetSize(it.paper_type);
-  const unit      = packetUnitLabel(it.paper_type).toLowerCase();
+  const anchor = inventory.find(i => i.id === j.inventory_item_id);
+  if (!anchor) { notify('Paper item missing from inventory.'); return; }
+  const ps        = packetSize(anchor.paper_type);
+  const unit      = packetUnitLabel(anchor.paper_type).toLowerCase();
   const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets);
   if (!Number.isFinite(packetsIn) || packetsIn <= 0) {
     notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
-  const sheets = Math.round(packetsIn * ps);
-  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
-  const ok = await confirmDialog({
-    title: `Issue stock for Job E-${id}?`,
-    message: `${packetsIn} ${unit} (${sheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}\n\nThis will deduct from inventory and start the job.`,
-    confirmText: 'Issue stock',
-  });
-  if (!ok) return;
+  const needSheets = Math.round(packetsIn * ps);
+  // Group brands with any stock available. Zero-balance brands stay in
+  // the popup so the store keeper can see them (row disabled), but a
+  // group where EVERY brand is out is still a hard error.
+  const members = paperGroupMembers(anchor);
+  const totalAvail = members.reduce((a, x) => a + (x.current_balance || 0), 0);
+  if (totalAvail <= 0) {
+    notify('Every brand in this paper group is out of stock.');
+    return;
+  }
+  // Single-brand group → skip the popup, keep the old confirm dialog.
+  if (members.length === 1) {
+    const it = members[0];
+    const label = paperGroupLabel(it) + (it.brand ? ' · ' + it.brand : '');
+    const sheetsToIssue = Math.min(needSheets, it.current_balance || 0);
+    const partial = sheetsToIssue < needSheets;
+    const ok = await confirmDialog({
+      title: `Issue stock for Job E-${id}?`,
+      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nThis will deduct from inventory and start the job.`,
+      confirmText: partial ? 'Issue partial' : 'Issue stock',
+    });
+    if (!ok) return;
+    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }]);
+    return;
+  }
+  // Multi-brand group → open the split popup for the store keeper.
+  openIssueSplitPopup(j, anchor, members, needSheets, unit);
+}
+
+// Fire the /issue-stock POST with a splits payload and refresh state.
+// Shared by the single-brand fast path and the split popup's Save button.
+async function sendIssueStock(id, splits) {
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${id}/issue-stock`);
-    // Replace the local job copy with the updated one from the server so
-    // the badge flips from Pending to whatever stage applies next.
+    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits });
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
-    await loadInventory(); // balances changed — refresh
+    await loadInventory();
     render();
-    notify(`Stock issued · ${sheets.toLocaleString()} sheets deducted`);
+    const total = splits.reduce((a, s) => a + (s.sheets || 0), 0);
+    notify(`Stock issued · ${total.toLocaleString()} sheets deducted`);
   } catch (e) {
     notify('Error: ' + e.message);
   }
   showSaving(false);
+}
+
+// Popup for splitting an issuance across the brands in a paper group.
+// Store keeper works in PACKETS (or REAMS depending on paper type) — the
+// units the storeroom is physically organised by. The table shows
+// packets per brand + the packets needed, and only converts to sheets
+// when POSTing to /issue-stock (server still deducts by sheets).
+//
+// Live footer tallies "Issued X / Y" (in packets) and drives the Save
+// button's enabled state:
+//   * full         → total == need           (green banner)
+//   * partial      → 0 < total < need        (amber banner)
+//   * over-any-row → any row exceeds its cap (red banner, LOUD)
+//   * over-total   → total > need            (red banner, LOUD)
+// Save stays disabled while there's a validation problem so the store
+// keeper knows exactly what to fix.
+function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
+  const paperType = anchor.paper_type || '';
+  const ps = packetSize(paperType);
+  const unitLabel = packetUnitLabel(paperType); // "Packets" | "Reams"
+  const needPackets = Math.ceil(needSheets / ps);
+  const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
+  const rowHtml = rows.map((it) => {
+    const balSheets  = it.current_balance || 0;
+    // Available packets: floor so a partial (e.g. 40 sheets on a
+    // 100-per-packet board) doesn't lie about being a whole packet.
+    const balPackets = Math.floor(balSheets / ps);
+    const brandTxt = it.brand ? esc(it.brand) : '<span style="color:var(--text3);font-style:italic;">no brand</span>';
+    const availNote = balPackets > 0
+      ? `${balPackets.toLocaleString()} <span style="color:var(--text3);font-size:11px;">(${balSheets.toLocaleString()} sheets)</span>`
+      : `<span style="color:var(--text3);">0</span>`;
+    return `
+      <tr class="split-row ${balPackets <= 0 ? 'split-row-out' : ''}">
+        <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
+        <td class="split-avail">${availNote}</td>
+        <td>
+          <input type="number" class="split-qty" min="0" max="${balPackets}" step="1"
+                 data-item-id="${it.id}" data-avail-packets="${balPackets}"
+                 value="" placeholder="0"
+                 ${balPackets <= 0 ? 'disabled' : ''}
+                 oninput="recomputeSplitFooter()">
+        </td>
+      </tr>`;
+  }).join('');
+  openModal(`
+    <div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width: 640px;">
+      <h2>Issue Stock · Job E-${j.id}</h2>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px;">
+        <b>${esc(j.name)}</b> &middot; needs <b>${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</b>
+        <span style="color:var(--text3);">(${needSheets.toLocaleString()} sheets)</span>
+        &middot; ${esc(paperGroupLabel(anchor))}
+      </div>
+      <table class="split-table"
+             data-need-packets="${needPackets}"
+             data-packet-size="${ps}"
+             data-unit-label="${esc(unitLabel)}">
+        <thead>
+          <tr>
+            <th>Brand</th>
+            <th style="text-align:right;">Available (${unitLabel.toLowerCase()})</th>
+            <th style="width:140px;">Issue (${unitLabel.toLowerCase()})</th>
+          </tr>
+        </thead>
+        <tbody>${rowHtml}</tbody>
+      </table>
+      <div class="split-footer" id="split-footer">
+        <div class="split-footer-msg" id="split-footer-msg">Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" id="split-save-btn" disabled onclick="saveSplitIssue(${j.id})">Issue Stock</button>
+      </div>
+    </div>`);
+  recomputeSplitFooter();
+}
+
+// Live footer state — called from each input's oninput. Reads packets
+// per row (not sheets); drives Save enabled/disabled and the banner
+// colour. Invalid rows (over a brand's cap) get their own visible red
+// border AND paint the footer red so the error can't be missed.
+function recomputeSplitFooter() {
+  const table = document.querySelector('.split-table');
+  if (!table) return;
+  const needPackets = parseInt(table.dataset.needPackets, 10) || 0;
+  const unitLabel   = (table.dataset.unitLabel || 'Packets').toLowerCase();
+  const qtyInputs = [...table.querySelectorAll('.split-qty')];
+  let total = 0;
+  let anyPositive = false;
+  let anyRowOver  = false;   // one or more rows exceeds its available cap
+  let anyBadInput = false;   // NaN / negative / non-integer entry
+  for (const inp of qtyInputs) {
+    const row = inp.closest('tr');
+    row.classList.remove('split-row-over');
+    if (inp.value === '') continue;
+    const n = parseInt(inp.value, 10);
+    if (!Number.isFinite(n) || n < 0) { anyBadInput = true; continue; }
+    const cap = parseInt(inp.dataset.availPackets, 10) || 0;
+    if (n > cap) {
+      anyRowOver = true;
+      row.classList.add('split-row-over');
+      // Still add to total so the footer reflects what the store keeper
+      // TYPED — otherwise it looks like the row was silently ignored.
+      total += n;
+      anyPositive = true;
+      continue;
+    }
+    if (n > 0) { total += n; anyPositive = true; }
+  }
+  const footer = document.getElementById('split-footer');
+  const msg    = document.getElementById('split-footer-msg');
+  const btn    = document.getElementById('split-save-btn');
+  const overTotal = total > needPackets;
+  const isError = anyBadInput || anyRowOver || overTotal;
+  footer.classList.toggle('split-footer-full',    !isError && total === needPackets && anyPositive);
+  footer.classList.toggle('split-footer-partial', !isError && anyPositive && total < needPackets);
+  footer.classList.toggle('split-footer-over',    isError);
+  const totalStr = `${total.toLocaleString()} / ${needPackets.toLocaleString()} ${unitLabel}`;
+  if (anyRowOver) {
+    msg.innerHTML = `<span class="split-footer-icon">&#9888;</span> One or more brands exceed their available stock — reduce the highlighted rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (overTotal) {
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${(total - needPackets).toLocaleString()} ${unitLabel} — reduce one of the rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (anyBadInput) {
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter whole ${unitLabel} in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (total === needPackets && anyPositive) {
+    msg.textContent = `Issued: ${totalStr} · full`;
+  } else if (anyPositive) {
+    msg.textContent = `Issued: ${totalStr} · ${(needPackets - total).toLocaleString()} ${unitLabel} still pending`;
+  } else {
+    msg.textContent = `Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel}`;
+  }
+  btn.disabled = isError || !anyPositive;
+}
+
+async function saveSplitIssue(jobId) {
+  const table = document.querySelector('.split-table');
+  if (!table) return;
+  const ps = parseInt(table.dataset.packetSize, 10) || 100;
+  // Convert packet input back to sheets for the server — the /issue-stock
+  // endpoint deducts by sheets. Same math the single-brand fast path uses
+  // (sheets = packets × packetSize).
+  const splits = [...table.querySelectorAll('.split-qty')]
+    .map(inp => ({
+      item_id: parseInt(inp.dataset.itemId, 10),
+      packets: parseInt(inp.value, 10),
+    }))
+    .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.packets) && s.packets > 0)
+    .map(s => ({ item_id: s.item_id, sheets: s.packets * ps }));
+  if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
+  closeModal();
+  await sendIssueStock(jobId, splits);
 }
 
 // Request extra packets for an already-issued job. The job stays in its
@@ -13055,16 +13422,11 @@ function buildPrintCard(j) {
   // particulars fields for pre-inventory jobs.
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperType  = invItem ? (invItem.paper_type || '') : ((Array.isArray(p.paper_types) && p.paper_types[0]) || '');
-  const paperBrand = invItem ? (invItem.brand || '')      : (p.brand || '');
-  // Combined "PAPER - BRAND" cell (Row 5). Both pieces stay in their own
-  // storage columns; this is display-only concatenation. Renders just the
-  // paper if brand is empty and vice versa; blank if neither is set.
-  const paperBrandCombined = (() => {
-    const a = String(paperType || '').trim();
-    const b = String(paperBrand || '').trim();
-    if (a && b) return `${a} - ${b}`;
-    return a || b || '';
-  })();
+  // Row 5's "Paper — Brand" cell prints paper type ONLY. Brand is left
+  // blank by design so the cutting group can hand-write the actual
+  // brand pulled from the store (which may be split across brands when
+  // the store keeper issued from multiple sources).
+  const paperBrandCombined = String(paperType || '').trim();
   const coatLabel = name => {
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
     return `<span class="pc-coat-box pc-coat-on">✓</span><span class="pc-coat-label-on">${label}</span>`;
@@ -13497,6 +13859,10 @@ function printJobCard(id) {
   // directive into <head> BEFORE calling print() guarantees it's the
   // one the engine picks. Removed on afterprint so other flows keep
   // their own paper size.
+  // Also nuke any leftover sticker page-rule (in case a previous
+  // printStickers() cancel didn't clean up) — otherwise the wrong
+  // @page could apply to this run and the printer could hang.
+  document.querySelectorAll('#__stk-print-page').forEach(el => el.remove());
   let jcPageStyle = document.getElementById('__jc-print-page');
   if (!jcPageStyle) {
     jcPageStyle = document.createElement('style');
@@ -13526,8 +13892,13 @@ function printJobCard(id) {
     document.title = prevTitle;
     if (jcPageStyle && jcPageStyle.parentNode) jcPageStyle.parentNode.removeChild(jcPageStyle);
     window.removeEventListener('afterprint', restoreTitle);
+    clearTimeout(restoreFallback);
   };
   window.addEventListener('afterprint', restoreTitle);
+  // Belt-and-braces: afterprint doesn't always fire (tab switch, killed
+  // dialog). Force cleanup after 30s so the injected @page and blanked
+  // title never linger and haunt the next print.
+  const restoreFallback = setTimeout(restoreTitle, 30000);
   waitForPrintImages(area).then(() => {
     window.print();
     setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
@@ -13588,6 +13959,9 @@ function printSelectedJobs() {
     </div>`).join('');
   // Same @page override printJobCard uses — Chrome sometimes ignores the
   // @page rule in a body-injected <style>, so plant it in <head> too.
+  // Also nuke any leftover sticker page-rule from a cancelled sticker
+  // print so the wrong paper size can't hijack this batch.
+  document.querySelectorAll('#__stk-print-page').forEach(el => el.remove());
   let jcPageStyle = document.getElementById('__jc-print-page');
   if (!jcPageStyle) {
     jcPageStyle = document.createElement('style');
@@ -13602,8 +13976,12 @@ function printSelectedJobs() {
     document.title = prevTitle;
     if (jcPageStyle && jcPageStyle.parentNode) jcPageStyle.parentNode.removeChild(jcPageStyle);
     window.removeEventListener('afterprint', restore);
+    clearTimeout(restoreFallback);
   };
   window.addEventListener('afterprint', restore);
+  // Belt-and-braces: afterprint doesn't always fire — force cleanup
+  // after 30s so the injected @page and blanked title never linger.
+  const restoreFallback = setTimeout(restore, 30000);
   waitForPrintImages(area).then(() => {
     window.print();
     setTimeout(() => {
