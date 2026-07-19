@@ -1200,10 +1200,38 @@
 .split-table .split-qty:focus { outline: none; background: #fff7d6; border-color: var(--red-border); }
 .split-table .split-row-out { opacity: 0.55; }
 .split-table .split-row-out td { background: var(--bg2); }
-.split-footer { margin-top: 12px; padding: 10px 14px; border-radius: 8px; font-weight: 600; font-size: 13px; background: var(--bg2); color: var(--text2); border: 1px solid var(--border); }
+/* Row-level error: the store keeper typed more than the brand has on
+   hand. Red border + subtle red tint so the offending row jumps out
+   even before the footer message. */
+.split-table .split-row-over td { background: #fef2f2; }
+.split-table .split-row-over .split-qty { border: 1.5px solid var(--red-text); background: #fff1f1; color: var(--red-text); font-weight: 700; }
+.split-footer {
+  margin-top: 14px; padding: 12px 16px; border-radius: 10px;
+  font-weight: 600; font-size: 14px;
+  background: var(--bg2); color: var(--text2); border: 1px solid var(--border);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.split-footer-msg { display: flex; align-items: center; gap: 10px; }
+.split-footer-icon { font-size: 20px; line-height: 1; }
+.split-footer-tally { margin-left: auto; font-size: 12px; font-weight: 700; opacity: 0.85; padding: 3px 10px; border-radius: 999px; background: rgba(0,0,0,0.06); }
 .split-footer-full    { background: #dcfce7; color: #14532d; border-color: #86efac; }
 .split-footer-partial { background: #fef3c7; color: #78350f; border-color: #fcd34d; }
-.split-footer-over    { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
+/* Over-issue / bad-input state — the loudest state. Bigger font, red
+   fill, and a matching glow so Save-disabled has an obvious reason.
+   Icon + attention-grabbing pulse the first second so it registers. */
+.split-footer-over {
+  background: var(--red-text) !important; color: #fff !important;
+  border: 2px solid var(--red-text) !important;
+  font-size: 15px !important;
+  box-shadow: 0 0 0 2px rgba(121,31,31,0.25), 0 2px 14px rgba(121,31,31,0.35);
+  animation: splitFooterPulse 0.9s ease-out 1;
+}
+.split-footer-over .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; }
+@keyframes splitFooterPulse {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 2px rgba(121,31,31,0.15), 0 2px 14px rgba(121,31,31,0.35); }
+  40%  { transform: scale(1.015);box-shadow: 0 0 0 6px rgba(121,31,31,0.20), 0 4px 20px rgba(121,31,31,0.55); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 2px rgba(121,31,31,0.25), 0 2px 14px rgba(121,31,31,0.35); }
+}
 .jc-form { width: 100%; border-collapse: collapse; margin-top: 4px; }
 .jc-form td { border: 1px solid #c5c2b6; padding: 5px 8px; vertical-align: top; background: #fdfcf7; }
 .jc-form .jc-lbl { display: block; font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 2px; font-weight: 600; }
@@ -9435,6 +9463,25 @@ function toggleStockMovementRow(dir, txId, checked) {
     headChk.indeterminate = !allChecked && visible.some(t => stockMovementSel[dir].has(t.id));
   }
 }
+// Split-issuance group checkbox: ticks/unticks every underlying tx id
+// at once so bulk-actions (like Reverse) still target the actual ledger
+// rows behind the collapsed display line.
+function toggleStockMovementGroup(dir, ids, checked) {
+  for (const id of ids) {
+    if (checked) stockMovementSel[dir].add(id); else stockMovementSel[dir].delete(id);
+  }
+  renderStockMovementBulkBar(dir);
+  const anchorId = ids[0];
+  const tr = document.querySelector(`tr[data-sm-row="${dir}-${anchorId}"]`);
+  if (tr) tr.classList.toggle('bulk-row-selected', checked);
+  const headChk = document.getElementById(`sm-${dir}-bulk-all`);
+  if (headChk) {
+    const visible = currentVisibleStockMovement(dir);
+    const allChecked = visible.length && visible.every(t => stockMovementSel[dir].has(t.id));
+    headChk.checked = !!allChecked;
+    headChk.indeterminate = !allChecked && visible.some(t => stockMovementSel[dir].has(t.id));
+  }
+}
 function toggleStockMovementAll(dir, checked) {
   const visible = currentVisibleStockMovement(dir);
   if (checked) visible.forEach(t => stockMovementSel[dir].add(t.id));
@@ -9654,6 +9701,61 @@ async function loadStockMovement(direction) {
   }
 }
 
+// Collapse job-consumed rows that came from a single split-issuance click
+// into one synthetic row per (job_id + paper group + minute-level time).
+// Non-issuance rows pass through unchanged. Synthesized rows carry:
+//   - id           : first underlying id (used for anchor + row key)
+//   - group_ids    : every underlying id, so the bulk checkbox can
+//                    select/deselect the whole split at once
+//   - item_brand   : brands joined with "/" ("century/ningbo")
+//   - change       : summed
+//   - item_id      : null (multiple items) — balance cell knows to blank
+//   - notes        : first underlying notes (they're identical apart
+//                    from brand + qty)
+function collapseSplitIssuances(rows) {
+  const OUT = [];
+  const buckets = new Map();   // key -> array of tx rows
+  for (const t of rows) {
+    // Only issued-out rows are candidates for grouping; every other
+    // reason (stock-in, offcut return, top-up, correction) prints as-is.
+    if (t.reason !== 'job-consumed' || !t.job_id) { OUT.push(t); continue; }
+    // Bucket by job + paper group + minute of created_at so two brands
+    // pulled by the same Issue Stock click collapse, but a top-up done
+    // 3 hours later stays its own row.
+    const stamp = t.created_at ? new Date(t.created_at).toISOString().slice(0, 16) : '';
+    const key = [
+      t.job_id,
+      t.paper_type || '',
+      t.item_size  || '',
+      String(t.item_gsm || ''),
+      stamp,
+    ].join('||');
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(t);
+  }
+  for (const arr of buckets.values()) {
+    if (arr.length === 1) { OUT.push(arr[0]); continue; }
+    const brands = arr.map(x => (x.item_brand || '').trim()).filter(Boolean);
+    const uniqBrands = [...new Set(brands.map(b => b.toLowerCase()))]
+      .map(low => brands.find(b => b.toLowerCase() === low));
+    const summedChange = arr.reduce((a, x) => a + (x.change || 0), 0);
+    const first = arr[0];
+    OUT.push({
+      ...first,
+      id: first.id,
+      group_ids: arr.map(x => x.id),
+      change: summedChange,
+      item_brand: uniqBrands.join('/'),
+      item_id: null,           // multiple items — balance can't be shown
+      notes: first.notes,
+    });
+  }
+  // Preserve original ordering by created_at descending (matches the
+  // state.rows ordering the server delivers).
+  OUT.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return OUT;
+}
+
 function renderStockMovement(direction, from, to) {
   const state = stockMovementStates[direction];
   // Populate Size + GSM dropdowns from the data, scoped to the currently
@@ -9661,11 +9763,17 @@ function renderStockMovement(direction, from, to) {
   // subset — no dead "5,000gsm" options).
   refreshMovementFilterOptions(direction);
   // Apply all three filters (paper type / size / gsm) client-side before totals.
-  const txs = state.rows.filter(t =>
+  const rawTxs = state.rows.filter(t =>
        (!state.paperType || t.paper_type === state.paperType)
     && (!state.size      || (t.item_size || '') === state.size)
     && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
   );
+  // Split-issuance grouping: a single Issue Stock click may deduct from
+  // 2+ brands at once (same job, same paper group, within-a-second of
+  // each other). Collapse those rows into one synthetic row for display
+  // — brand becomes "century/ningbo", change is summed. Underlying ids
+  // are preserved in group_ids so the bulk checkbox still round-trips.
+  const txs = collapseSplitIssuances(rawTxs);
   // Direction is fixed so there's only one total to show. Net change column
   // would just duplicate that — skip it.
   let total = 0;
@@ -9702,6 +9810,7 @@ function renderStockMovement(direction, from, to) {
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
   const rows = txs.map(t => {
+    const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     const date = fmtDMYT(t.created_at);
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const s    = t.change > 0 ? '+' : '';
@@ -9710,25 +9819,38 @@ function renderStockMovement(direction, from, to) {
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const pkts  = t.change / ps;
-    const inv   = inventory.find(i => i.id === t.item_id);
+    // Balance / weight: a split-issuance group has no single item — it
+    // pulled from 2+ brands, each with its own inventory row. Showing a
+    // balance for a single brand would be misleading, so blank the cell.
+    const inv   = isGroup ? null : inventory.find(i => i.id === t.item_id);
     const bal   = inv ? (inv.current_balance || 0) : null;
-    const balCell = bal === null
-      ? '<span style="color:var(--text3)">—</span>'
-      : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
-    // Weight column — kg for THIS transaction. Shows both the change-weight
-    // (big, signed) and the current balance's weight (small, neutral) so the
-    // user can see both "how much moved" and "how much is on hand right now".
+    const balCell = isGroup
+      ? '<span style="color:var(--text3)" title="Split across brands — check individual brand balances in Inventory">split</span>'
+      : bal === null
+        ? '<span style="color:var(--text3)">—</span>'
+        : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
     const txWperPack  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     const txKg        = txWperPack !== null ? txWperPack * Math.abs(pkts) : null;
     const balKg       = (txWperPack !== null && bal !== null) ? txWperPack * (bal / ps) : null;
     const weightCell  = txKg === null
       ? '<span style="color:var(--text3)">—</span>'
-      : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
-    const isSel = stockMovementSel[direction].has(t.id);
+      : `<span class="${cls}" style="font-weight:600;">${s}${fmt(txKg)} kg</span>${!isGroup && balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
+    // Bulk-selection: a grouped row's checkbox ticks/unticks every
+    // underlying tx id at once so bulk actions still target the right
+    // ledger rows. Selection state is "checked" only when EVERY id in
+    // the group is selected.
+    const ids = isGroup ? t.group_ids : [t.id];
+    const isSel = ids.every(id => stockMovementSel[direction].has(id));
+    const clickHandler = isGroup
+      ? `toggleStockMovementGroup('${direction}', [${t.group_ids.join(',')}], this.checked)`
+      : `toggleStockMovementRow('${direction}', ${t.id}, this.checked)`;
+    const groupBadge = isGroup
+      ? ` <span style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;letter-spacing:0.03em;margin-left:4px;">SPLIT · ${t.group_ids.length}</span>`
+      : '';
     return `<tr data-sm-row="${direction}-${t.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
-      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleStockMovementRow('${direction}', ${t.id}, this.checked)"></td>
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="${clickHandler}"></td>
       <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
-      <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}</td>
+      <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
       <td style="padding:8px 10px;font-weight:600;" class="${cls}">${s}${fmt(pkts)} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${s}${t.change.toLocaleString()} sheets</span></td>
       <td style="padding:8px 10px;">${balCell}</td>
       <td style="padding:8px 10px;">${weightCell}</td>
@@ -13005,48 +13127,70 @@ async function sendIssueStock(id, splits) {
 }
 
 // Popup for splitting an issuance across the brands in a paper group.
-// One row per brand — the store keeper types how many sheets to pull
-// from each. Live footer tallies "Issued: X / Y needed" and turns the
-// Save button into either a full-issuance, partial-issuance, or a
-// disabled over-issuance depending on the sum. Save is enabled as long
-// as at least one row has a value AND the sum doesn't exceed need.
+// Store keeper works in PACKETS (or REAMS depending on paper type) — the
+// units the storeroom is physically organised by. The table shows
+// packets per brand + the packets needed, and only converts to sheets
+// when POSTing to /issue-stock (server still deducts by sheets).
+//
+// Live footer tallies "Issued X / Y" (in packets) and drives the Save
+// button's enabled state:
+//   * full         → total == need           (green banner)
+//   * partial      → 0 < total < need        (amber banner)
+//   * over-any-row → any row exceeds its cap (red banner, LOUD)
+//   * over-total   → total > need            (red banner, LOUD)
+// Save stays disabled while there's a validation problem so the store
+// keeper knows exactly what to fix.
 function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
+  const paperType = anchor.paper_type || '';
+  const ps = packetSize(paperType);
+  const unitLabel = packetUnitLabel(paperType); // "Packets" | "Reams"
+  const needPackets = Math.ceil(needSheets / ps);
   const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
-  const rowHtml = rows.map((it, i) => {
-    const bal = it.current_balance || 0;
+  const rowHtml = rows.map((it) => {
+    const balSheets  = it.current_balance || 0;
+    // Available packets: floor so a partial (e.g. 40 sheets on a
+    // 100-per-packet board) doesn't lie about being a whole packet.
+    const balPackets = Math.floor(balSheets / ps);
     const brandTxt = it.brand ? esc(it.brand) : '<span style="color:var(--text3);font-style:italic;">no brand</span>';
+    const availNote = balPackets > 0
+      ? `${balPackets.toLocaleString()} <span style="color:var(--text3);font-size:11px;">(${balSheets.toLocaleString()} sheets)</span>`
+      : `<span style="color:var(--text3);">0</span>`;
     return `
-      <tr class="split-row ${bal <= 0 ? 'split-row-out' : ''}">
+      <tr class="split-row ${balPackets <= 0 ? 'split-row-out' : ''}">
         <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
-        <td class="split-avail">${bal.toLocaleString()}</td>
+        <td class="split-avail">${availNote}</td>
         <td>
-          <input type="number" class="split-qty" min="0" max="${bal}" step="1"
-                 data-item-id="${it.id}" data-avail="${bal}"
+          <input type="number" class="split-qty" min="0" max="${balPackets}" step="1"
+                 data-item-id="${it.id}" data-avail-packets="${balPackets}"
                  value="" placeholder="0"
-                 ${bal <= 0 ? 'disabled' : ''}
+                 ${balPackets <= 0 ? 'disabled' : ''}
                  oninput="recomputeSplitFooter()">
         </td>
       </tr>`;
   }).join('');
   openModal(`
-    <div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width: 620px;">
+    <div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width: 640px;">
       <h2>Issue Stock · Job E-${j.id}</h2>
       <div style="font-size:13px;color:var(--text2);margin-bottom:14px;">
-        <b>${esc(j.name)}</b> &middot; needs <b>${needSheets.toLocaleString()}</b> sheets
-        (${esc(paperGroupLabel(anchor))})
+        <b>${esc(j.name)}</b> &middot; needs <b>${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</b>
+        <span style="color:var(--text3);">(${needSheets.toLocaleString()} sheets)</span>
+        &middot; ${esc(paperGroupLabel(anchor))}
       </div>
-      <table class="split-table" data-need="${needSheets}">
+      <table class="split-table"
+             data-need-packets="${needPackets}"
+             data-packet-size="${ps}"
+             data-unit-label="${esc(unitLabel)}">
         <thead>
           <tr>
             <th>Brand</th>
-            <th style="text-align:right;">Available</th>
-            <th style="width:130px;">Issue (sheets)</th>
+            <th style="text-align:right;">Available (${unitLabel.toLowerCase()})</th>
+            <th style="width:140px;">Issue (${unitLabel.toLowerCase()})</th>
           </tr>
         </thead>
         <tbody>${rowHtml}</tbody>
       </table>
       <div class="split-footer" id="split-footer">
-        <span id="split-footer-msg">Issued: 0 / ${needSheets.toLocaleString()}</span>
+        <div class="split-footer-msg" id="split-footer-msg">Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</div>
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="closeModal()">Cancel</button>
@@ -13056,52 +13200,77 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
   recomputeSplitFooter();
 }
 
-// Live footer state — called from each input's oninput. Also drives the
-// Save button's disabled state so the store keeper gets immediate
-// feedback (over-issue = disabled, under-issue = partial-mode allowed).
+// Live footer state — called from each input's oninput. Reads packets
+// per row (not sheets); drives Save enabled/disabled and the banner
+// colour. Invalid rows (over a brand's cap) get their own visible red
+// border AND paint the footer red so the error can't be missed.
 function recomputeSplitFooter() {
   const table = document.querySelector('.split-table');
   if (!table) return;
-  const need = parseInt(table.dataset.need, 10) || 0;
+  const needPackets = parseInt(table.dataset.needPackets, 10) || 0;
+  const unitLabel   = (table.dataset.unitLabel || 'Packets').toLowerCase();
   const qtyInputs = [...table.querySelectorAll('.split-qty')];
   let total = 0;
   let anyPositive = false;
-  let anyInvalid = false;
+  let anyRowOver  = false;   // one or more rows exceeds its available cap
+  let anyBadInput = false;   // NaN / negative / non-integer entry
   for (const inp of qtyInputs) {
+    const row = inp.closest('tr');
+    row.classList.remove('split-row-over');
+    if (inp.value === '') continue;
     const n = parseInt(inp.value, 10);
-    if (inp.value !== '' && (!Number.isFinite(n) || n < 0)) { anyInvalid = true; continue; }
-    if (Number.isFinite(n) && n > 0) {
-      const avail = parseInt(inp.dataset.avail, 10) || 0;
-      if (n > avail) { anyInvalid = true; continue; }
+    if (!Number.isFinite(n) || n < 0) { anyBadInput = true; continue; }
+    const cap = parseInt(inp.dataset.availPackets, 10) || 0;
+    if (n > cap) {
+      anyRowOver = true;
+      row.classList.add('split-row-over');
+      // Still add to total so the footer reflects what the store keeper
+      // TYPED — otherwise it looks like the row was silently ignored.
       total += n;
       anyPositive = true;
+      continue;
     }
+    if (n > 0) { total += n; anyPositive = true; }
   }
   const footer = document.getElementById('split-footer');
   const msg    = document.getElementById('split-footer-msg');
   const btn    = document.getElementById('split-save-btn');
-  const over   = total > need;
-  footer.classList.toggle('split-footer-full',    !over && total === need);
-  footer.classList.toggle('split-footer-partial', !over && anyPositive && total < need);
-  footer.classList.toggle('split-footer-over',    over);
-  if (over) {
-    msg.textContent = `Over by ${(total - need).toLocaleString()} — reduce (Issued: ${total.toLocaleString()} / ${need.toLocaleString()})`;
-  } else if (total === need) {
-    msg.textContent = `Issued: ${total.toLocaleString()} / ${need.toLocaleString()} · full`;
+  const overTotal = total > needPackets;
+  const isError = anyBadInput || anyRowOver || overTotal;
+  footer.classList.toggle('split-footer-full',    !isError && total === needPackets && anyPositive);
+  footer.classList.toggle('split-footer-partial', !isError && anyPositive && total < needPackets);
+  footer.classList.toggle('split-footer-over',    isError);
+  const totalStr = `${total.toLocaleString()} / ${needPackets.toLocaleString()} ${unitLabel}`;
+  if (anyRowOver) {
+    msg.innerHTML = `<span class="split-footer-icon">&#9888;</span> One or more brands exceed their available stock — reduce the highlighted rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (overTotal) {
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${(total - needPackets).toLocaleString()} ${unitLabel} — reduce one of the rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (anyBadInput) {
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter whole ${unitLabel} in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (total === needPackets && anyPositive) {
+    msg.textContent = `Issued: ${totalStr} · full`;
   } else if (anyPositive) {
-    msg.textContent = `Issued: ${total.toLocaleString()} / ${need.toLocaleString()} · ${(need - total).toLocaleString()} still pending`;
+    msg.textContent = `Issued: ${totalStr} · ${(needPackets - total).toLocaleString()} ${unitLabel} still pending`;
   } else {
-    msg.textContent = `Issued: 0 / ${need.toLocaleString()}`;
+    msg.textContent = `Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel}`;
   }
-  btn.disabled = anyInvalid || over || !anyPositive;
+  btn.disabled = isError || !anyPositive;
 }
 
 async function saveSplitIssue(jobId) {
   const table = document.querySelector('.split-table');
   if (!table) return;
+  const ps = parseInt(table.dataset.packetSize, 10) || 100;
+  // Convert packet input back to sheets for the server — the /issue-stock
+  // endpoint deducts by sheets. Same math the single-brand fast path uses
+  // (sheets = packets × packetSize).
   const splits = [...table.querySelectorAll('.split-qty')]
-    .map(inp => ({ item_id: parseInt(inp.dataset.itemId, 10), sheets: parseInt(inp.value, 10) }))
-    .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0);
+    .map(inp => ({
+      item_id: parseInt(inp.dataset.itemId, 10),
+      packets: parseInt(inp.value, 10),
+    }))
+    .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.packets) && s.packets > 0)
+    .map(s => ({ item_id: s.item_id, sheets: s.packets * ps }));
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
   closeModal();
   await sendIssueStock(jobId, splits);
