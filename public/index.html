@@ -2612,7 +2612,12 @@ function isOperator()          { return hasRole('operator') && !isAdmin() && !is
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
 function canWriteInventory() { return isAdmin() || hasRole('store_manager'); }
-function canRunStation()     { return isAdmin() || isProductionManager() || hasRole('operator') || hasRole('ceo'); }
+// Station is a PIN-gated shop-floor terminal — every screen inside it is
+// a write flow (PIN entry, Save numbers, Advance stage, notes). There's
+// no "view only" mode after PIN, so CEO (read-only role) is intentionally
+// excluded. CEO already sees all job progress from the Jobs tab's Track
+// view (animated stage machines) which is the read-only equivalent.
+function canRunStation()     { return isAdmin() || isProductionManager() || hasRole('operator'); }
 // Operator roster management (Users tab → Floor Operators section).
 // Admin and production manager can add / edit / remove operators.
 function canManageOperators() { return isAdmin() || isProductionManager(); }
@@ -2872,8 +2877,10 @@ function setMode(m) {
   // so PM lands on a Users tab that's effectively just the Floor
   // Operators roster). Everyone else is bounced to Jobs.
   if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
-  // Station tab is gated to roles that can run it OR CEO (view-only).
-  if (m === 'station' && !canRunStation() && !hasRole('ceo')) m = 'jobs';
+  // Station tab: PIN-gated shop-floor terminal, admin / PM / operator
+  // only. CEO used to get a bypass here for "view only"; removed because
+  // the terminal has no read-only mode — every screen is a write action.
+  if (m === 'station' && !canRunStation()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
