@@ -68,6 +68,11 @@
   /* Inverse: .ceo-only elements only appear when role-ceo is active. */
   .ceo-only { display: none; }
   body.role-ceo .ceo-only { display: inline; }
+  /* Same idea but for block-level banners/notices (e.g. the "view only"
+     hint in the station update view). Kept separate from .ceo-only so
+     existing inline usages don't switch to block. */
+  .ceo-only-block { display: none; }
+  body.role-ceo .ceo-only-block { display: block; }
   /* Store Manager: read-only on Jobs (inventory is their write area).
      Production Manager: read-only on Inventory (jobs is their write area).
      Both still see the data — they just can't edit it. */
@@ -2612,12 +2617,12 @@ function isOperator()          { return hasRole('operator') && !isAdmin() && !is
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
 function canWriteInventory() { return isAdmin() || hasRole('store_manager'); }
-// Station is a PIN-gated shop-floor terminal — every screen inside it is
-// a write flow (PIN entry, Save numbers, Advance stage, notes). There's
-// no "view only" mode after PIN, so CEO (read-only role) is intentionally
-// excluded. CEO already sees all job progress from the Jobs tab's Track
-// view (animated stage machines) which is the read-only equivalent.
-function canRunStation()     { return isAdmin() || isProductionManager() || hasRole('operator'); }
+// Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
+// else with a PIN and sees the whole queue + update screens for that
+// station — but every WRITE control inside is tagged .ceo-hide so they
+// can only look, never process. Admin / PM / operator get full write
+// access as before.
+function canRunStation()     { return isAdmin() || isProductionManager() || hasRole('operator') || hasRole('ceo'); }
 // Operator roster management (Users tab → Floor Operators section).
 // Admin and production manager can add / edit / remove operators.
 function canManageOperators() { return isAdmin() || isProductionManager(); }
@@ -2877,9 +2882,9 @@ function setMode(m) {
   // so PM lands on a Users tab that's effectively just the Floor
   // Operators roster). Everyone else is bounced to Jobs.
   if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
-  // Station tab: PIN-gated shop-floor terminal, admin / PM / operator
-  // only. CEO used to get a bypass here for "view only"; removed because
-  // the terminal has no read-only mode — every screen is a write action.
+  // Station tab: PIN-gated shop-floor terminal. Admin / PM / operator
+  // process; CEO enters read-only (all write buttons are .ceo-hide, plus
+  // a server-side reject on station-update for the ceo role).
   if (m === 'station' && !canRunStation()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
@@ -16180,12 +16185,19 @@ function stationUpdateHtml() {
       ${fieldHtml}
       ${finishTailHtml}
       ${emptyHint}
-      <div class="station-actions-row">
+      <!-- Every action below writes to /station-update or /station-notes,
+           so hide them from CEO (read-only role). Server-side rejects
+           these endpoints for CEO too — .ceo-hide is UX; the server is
+           the authoritative gate. See canProcessStation() on the server. -->
+      <div class="station-actions-row ceo-hide">
         <button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
         ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
         ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}
       </div>
-      ${addNote}
+      <div class="station-viewonly ceo-only-block" style="margin-top:14px;padding:12px 16px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:14px;">
+        &#128065; View-only — your role can see the queue and numbers, but can't advance or save.
+      </div>
+      <div class="ceo-hide">${addNote}</div>
     </div>`;
 }
 function stationBackToQueue() {

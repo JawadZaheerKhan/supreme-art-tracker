@@ -736,6 +736,10 @@ function requireAdmin(req, res, next) {
 function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
 function canWriteInventory(user) { return userHasRole(user, 'admin', 'store_manager'); }
 function canRunStation(user)     { return userHasRole(user, 'admin', 'production_manager', 'operator', 'ceo'); }
+// Station WRITE actions — Save / Advance / Skip / Notes. CEO can enter
+// the terminal (view-only) via canRunStation, but must never process a
+// job. Admin / PM / operator still write freely.
+function canProcessStation(user) { return userHasRole(user, 'admin', 'production_manager', 'operator'); }
 // Operator roster CRUD — admin or production manager. The PM owns the
 // floor and needs to add / edit / retire operators without an admin
 // having to be involved every time.
@@ -3892,6 +3896,11 @@ app.patch('/api/jobs/:id/stage', requireJobsWriter, async (req, res) => {
 // server-side; the operator must be assigned to the job's current stage.
 app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) => {
   try {
+    // CEO can enter the terminal to observe, but every write action is
+    // blocked here so a dev-tools POST can't sneak past the hidden UI.
+    if (!canProcessStation(req.user)) {
+      return res.status(403).json({ error: 'View-only: your role cannot process jobs at the station.' });
+    }
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
@@ -4188,6 +4197,9 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 // (audio data-URL required, ≤ ~3MB so we stay under Vercel's body cap).
 app.post('/api/jobs/:id/station-notes', requireStationUser, async (req, res) => {
   try {
+    if (!canProcessStation(req.user)) {
+      return res.status(403).json({ error: 'View-only: your role cannot post notes at the station.' });
+    }
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
@@ -4302,6 +4314,9 @@ app.get('/api/jobs/:id/station-notes', requireAuth, async (req, res) => {
 // Mark a note heard/read — fired when the next station plays or views it.
 app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) => {
   try {
+    if (!canProcessStation(req.user)) {
+      return res.status(403).json({ error: 'View-only: your role cannot mark notes as heard.' });
+    }
     await dbReady;
     const sql = getDb();
     await sql`UPDATE station_notes SET heard_at = COALESCE(heard_at, NOW()) WHERE id = ${req.params.id}`;
