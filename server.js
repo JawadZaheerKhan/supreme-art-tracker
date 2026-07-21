@@ -2343,128 +2343,39 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     `;
     const job = result[0];
 
-    // Only adjust inventory if the job was already issued AND the linked
-    // paper/board (inventory_item_id) actually changed. Per user rule:
-    // editing a job card belongs to the job's own audit trail — the paper
-    // ledger should stay untouched unless the paper item itself was swapped.
-    // Changes to packets/qty/particulars alone do NOT trigger ledger writes.
+    // Paper swap after issuance = re-issuance REQUEST, not auto-adjustment.
+    // Per shop rule: production physically holds the old paper (already cut
+    // to size, offcut already generated), so the ledger for the OLD paper
+    // stays exactly as it was. Store keeper enters any manual return by
+    // hand when production hands unused sheets back.
     //
-    // Swap mechanics: behave like a manual reverse-and-reissue so the
-    // Stock Out report always names the paper the job ACTUALLY consumed.
-    //   1. Find the original un-reversed 'job-consumed' row on the old
-    //      item and reverse it WITH the reverses_tx_id link — the linked
-    //      pair drops out of Stock In/Out automatically.
-    //   2. Write a fresh, VISIBLE 'job-consumed' row on the new item.
-    // Legacy fallback: if no original row exists (very old jobs), fall
-    // back to the hidden compensating 'job-edit-revert' entry.
+    // What we DO change on paper swap:
+    //   - Flip issuance_status → 'pending' so the job re-appears in the
+    //     Pending Stock queue with the NEW paper.
+    //   - Clear issued_items so the fresh issuance starts clean.
+    //   - Clear any stale partial_pending_sheets marker.
+    //   - Leave stage_index untouched — job stays where it is (usually
+    //     Printing) and the operator carries on with the sheets they
+    //     already have while store keeper prepares the new issuance.
     const paperItemChanged = (oldItemId !== newItemId);
     if (wasIssued && paperItemChanged) {
-      // Reverse EVERY un-reversed job-consumed row on the old paper.
-      // A single job may have accumulated several rows over time —
-      // original issuance, approved top-ups, and manual partials all
-      // land here — so reversing only the latest would leak the older
-      // ones. Each reversal is linked via reverses_tx_id so the pair
-      // drops out of Stock In/Out reports cleanly.
-      if (oldItemId) {
-        const origRows = await sql`
-          SELECT t.id, t.change FROM inventory_transactions t
-          WHERE t.job_id = ${job.id} AND t.item_id = ${oldItemId}
-            AND t.reason = 'job-consumed' AND t.reverses_tx_id IS NULL
-            AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-          ORDER BY t.id ASC
-        `;
-        if (origRows.length) {
-          for (const row of origRows) {
-            await applyInventoryChange(sql, {
-              itemId: oldItemId,
-              change: -row.change,
-              reason: 'correction',
-              jobId: job.id,
-              notes: `Paper changed on Job E-${job.id}: reversal of TX #${row.id}`,
-              user: req.user,
-              reversesTxId: row.id,
-            });
-          }
-        } else if (oldSheets > 0) {
-          // Legacy fallback for very old jobs with no linked row.
-          await applyInventoryChange(sql, {
-            itemId: oldItemId,
-            change: +oldSheets,
-            reason: 'job-edit-revert',
-            jobId: job.id,
-            notes: `Edit on Job E-${job.id}: returned previous ${oldSheets} sheets`,
-            user: req.user,
-          });
-        }
-        // Same idea for offcut returns — reverse ALL un-reversed offcut rows.
-        if (oldSourceItem && oldOffcutSize) {
-          const oldOffcutItem = await findOrCreateOffcutItem(sql, oldSourceItem, oldOffcutSize);
-          const origOffRows = await sql`
-            SELECT t.id, t.change FROM inventory_transactions t
-            WHERE t.job_id = ${job.id} AND t.item_id = ${oldOffcutItem.id}
-              AND t.reason = 'job-offcut' AND t.reverses_tx_id IS NULL
-              AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-            ORDER BY t.id ASC
-          `;
-          if (origOffRows.length) {
-            for (const row of origOffRows) {
-              await applyInventoryChange(sql, {
-                itemId: oldOffcutItem.id,
-                change: -row.change,
-                reason: 'correction',
-                jobId: job.id,
-                notes: `Paper changed on Job E-${job.id}: reversal of offcut TX #${row.id}`,
-                user: req.user,
-                reversesTxId: row.id,
-              });
-            }
-          } else if (oldSheets > 0) {
-            await applyInventoryChange(sql, {
-              itemId: oldOffcutItem.id,
-              change: -oldSheets,
-              reason: 'job-edit-revert',
-              jobId: job.id,
-              notes: `Edit on Job E-${job.id}: removed previous ${oldSheets} sheets of ${oldOffcutSize} offcut`,
-              user: req.user,
-            });
-          }
-        }
-      }
-      if (newItemId && newSheets > 0) {
-        // Fresh, report-visible consumption on the new paper — full need,
-        // same shape as the issue-stock flow so Stock Out reads naturally.
-        const psNew   = packetSize(newPaperType);
-        const unitNew = REAM_PAPERS.has(newPaperType) ? 'reams' : 'packets';
-        await applyInventoryChange(sql, {
-          itemId: newItemId,
-          change: -newSheets,
-          reason: 'job-consumed',
-          jobId: job.id,
-          notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${newSheets / psNew} ${unitNew} (${newSheets} sheets) issued on paper change by ${req.user.email}`,
-          user: req.user,
-        });
-        if (newSourceItem && newOffcutSize) {
-          const newOffcutItem = await findOrCreateOffcutItem(sql, newSourceItem, newOffcutSize);
-          await applyInventoryChange(sql, {
-            itemId: newOffcutItem.id,
-            change: +newSheets,
-            reason: 'job-offcut',
-            jobId: job.id,
-            notes: `Job E-${job.id}: ${newSheets} sheets of ${newOffcutSize} offcut returned to stock (paper change)`,
-            user: req.user,
-          });
-        }
-      }
-      // Paper swap always re-issues the full need on the new paper, so
-      // any partial marker from the old paper is stale and must be
-      // cleared — otherwise the pending list would still flag this
-      // job as partially issued.
-      if (job.particulars && job.particulars.partial_pending_sheets) {
-        const cleanP = { ...job.particulars };
-        delete cleanP.partial_pending_sheets;
-        await sql`UPDATE jobs SET particulars=${JSON.stringify(cleanP)} WHERE id=${job.id}`;
-        job.particulars = cleanP;
-      }
+      const cleanP = { ...(job.particulars || {}) };
+      delete cleanP.partial_pending_sheets;
+      const updated2 = await sql`
+        UPDATE jobs
+           SET issuance_status = 'pending',
+               issued_items    = '[]'::jsonb,
+               particulars     = ${JSON.stringify(cleanP)}
+         WHERE id = ${job.id}
+         RETURNING *
+      `;
+      Object.assign(job, updated2[0]);
+      await logAudit(sql, req, {
+        action: 'job.paper_change_reissue',
+        entityType: 'job',
+        entityId: job.id,
+        summary: `Paper changed on Job E-${job.id} after issuance — sent back to Pending Stock for re-issuance. Old paper ledger left untouched; store keeper must enter any manual return.`,
+      });
     }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
     res.json(job);

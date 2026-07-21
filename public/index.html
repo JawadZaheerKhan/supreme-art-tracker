@@ -4476,7 +4476,15 @@ function renderInvPendingList() {
           </div>
         </div>
         <div class="inv-balance">
-          ${invIt ? `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div><div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${have.toLocaleString()} sheets</div>` : ''}
+          ${invIt ? (() => {
+            const psH = packetSize(invIt.paper_type);
+            const uH  = packetUnitLabel(invIt.paper_type).toLowerCase();
+            const pH  = psH ? have / psH : 0;
+            const pStr = Number.isInteger(pH) ? String(pH) : (+pH.toFixed(2)).toString();
+            return `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div>
+                    <div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${pStr} ${uH}</div>
+                    <div style="font-size:11px;color:var(--text2);">${have.toLocaleString()} sheets</div>`;
+          })() : ''}
         </div>
         <div class="inv-actions">
           ${approveBtn}
@@ -4518,7 +4526,7 @@ function renderInvPendingList() {
       ? `<span class="badge" style="background:#FEF3C7;color:#92400E;margin-left:8px;">PARTIAL &middot; ${partialPktsStr} ${unit} still needed</span>`
       : '';
     const topupBtn = (partial && canIssueStock())
-      ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partial.toLocaleString()} sheets to finish this job">&#8593; Top up ${partial.toLocaleString()} sheets</button>`
+      ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Top up ${partialPktsStr} ${unit}</button>`
       : '';
     const issueBtn = (!partial && canIssueStock())
       ? `<button class="btn btn-sm ${cls} ceo-hide" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
@@ -4539,7 +4547,15 @@ function renderInvPendingList() {
           </div>
         </div>
         <div class="inv-balance">
-          ${invIt ? `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div><div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${have.toLocaleString()} sheets</div>` : ''}
+          ${invIt ? (() => {
+            const psH = packetSize(invIt.paper_type);
+            const uH  = packetUnitLabel(invIt.paper_type).toLowerCase();
+            const pH  = psH ? have / psH : 0;
+            const pStr = Number.isInteger(pH) ? String(pH) : (+pH.toFixed(2)).toString();
+            return `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div>
+                    <div style="font-size:16px;font-weight:700;color:${enough?'var(--green-text)':'#A32D2D'};">${pStr} ${uH}</div>
+                    <div style="font-size:11px;color:var(--text2);">${have.toLocaleString()} sheets</div>`;
+          })() : ''}
         </div>
         <div class="inv-actions">
           ${topupBtn}
@@ -12846,11 +12862,22 @@ function openEdit(id) {
 async function saveEdit(id) {
   const data = getFormData();
   if (!data.name || !data.client) { await alertDialog({ title: 'Name and company are required', kind: 'warn' }); return; }
-  // Stock warning only fires when the paper item or sheets qty actually changed
-  // vs. what's saved on the job — otherwise editing unrelated fields wouldn't ask.
   const prior = jobs.find(j => j.id === id);
   const itemChanged   = prior && prior.inventory_item_id !== data.inventory_item_id;
   const sheetsChanged = prior && (prior.sheets || '') !== data.sheets;
+  // Paper swap AFTER issuance is a big deal — the job goes back to Pending
+  // Stock and the store keeper has to re-issue from the new paper, plus
+  // manually enter the return for the old paper when production hands it
+  // back. Make sure the editor knows before saving.
+  if (itemChanged && prior && prior.issuance_status === 'issued') {
+    const ok = await confirmDialog({
+      title: `Change paper on Job E-${id}?`,
+      message: `Stock was already issued for this job.\n\nChanging the paper will:\n  • Send this job BACK to Pending Stock (re-issuance request with the new paper).\n  • Leave the OLD paper's stock as-is — production still physically has it.\n  • Store keeper will issue the NEW paper from Pending Stock.\n  • When production returns any unused OLD paper, store keeper must enter that return manually.\n\nContinue?`,
+      danger: true,
+      confirmText: 'Change paper & send back to Pending Stock',
+    });
+    if (!ok) return;
+  }
   if ((itemChanged || sheetsChanged) && !(await checkStockBeforeSave(data))) return;
   showSaving(true);
   try {
@@ -15868,7 +15895,7 @@ function stationQueueHtml() {
   // coating they're qualified for (Coatings role → wet finishes;
   // Embellishments role → foil/emboss).
   let queue = jobs.filter(j =>
-    (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j)
+    (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j) && !isNewJob(j)
   );
   if (stIdx === 2 && myFinishes && myFinishes.size) {
     // Show a job only while it has a PENDING finish this machine can do.
