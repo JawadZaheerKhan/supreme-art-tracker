@@ -2530,12 +2530,20 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     // rather than an arbitrary one. Any code that wants the full picture
     // reads issued_items directly.
     const primary = [...splits].sort((a, b) => b.sheets - a.sheets)[0];
+    // Invariant: any stock issuance (full OR partial) means the job is
+    // physically in production — floor operators have real sheets in hand.
+    // Stage must be at Printing (stage 1) or beyond. Bump stage_index up
+    // from 0 → 1 here so any weird upstream state (manual DB reset, half-
+    // issued today/half tomorrow workflow, etc.) auto-corrects on the
+    // next issuance instead of leaving the job stuck at CTP.
+    const bumpedStage = Math.max(job.stage_index || 0, 1);
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'issued',
              issued_at = COALESCE(issued_at, NOW()),
              issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
              inventory_item_id = ${primary.item_id},
+             stage_index = ${bumpedStage},
              particulars = ${JSON.stringify(nextParticulars)},
              issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItems)}::jsonb)
        WHERE id = ${id}

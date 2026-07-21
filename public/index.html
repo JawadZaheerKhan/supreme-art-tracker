@@ -3289,13 +3289,19 @@ function renderJobsCompact() {
     // Status badge: 'New Job' takes priority (the job isn't in the
     // production queue yet), then CTP (plates being made, pre-paper),
     // then 'Pending Stock' (queued but no paper issued), then stage.
-    const badge = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+    // A pending packets top-up request stacks an extra badge so the
+    // store keeper spots the ask at a glance in any list.
+    const badge0 = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
       isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
       pending ? jobStockBadge(j) :
       done ? `<span class="badge badge-done">Delivered</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
+    const topupBadge = hasPendingPacketTopup(j)
+      ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
+      : '';
+    const badge = badge0 + topupBadge;
     // Stage pipeline is meaningless for a New Job / CTP-queue job —
     // it hasn't entered production yet, so showing all the stage pills
     // invites clicking one and confusing the workflow. Hide until stock.
@@ -3402,6 +3408,12 @@ function renderJobsCards() {
 //   - on-hand = 0:                                  red   'Out of Stock'
 //   - 0 < on-hand < need:                           yellow 'Low Stock'
 function jobStockBadge(j) {
+  // Partial-issued jobs already have real sheets on the floor — the shop
+  // just needs more to finish. "Requires More Stock" reads clearly for
+  // this case, whereas "Low Stock" implies the whole issuance is short.
+  if (isPartialIssuance(j)) {
+    return '<span class="badge badge-low-stock">&#9888; Requires More Stock</span>';
+  }
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const have  = invIt ? (invIt.current_balance || 0) : 0;
   const need  = parseFloat(j.sheets) || 0;
@@ -3445,13 +3457,17 @@ function renderJobCard(j) {
   const priNorm = normalizePriority(j.priority);
   const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
 
-  const badge = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+  const badge0 = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
     isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
     pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
     done ? `<span class="badge badge-done">Delivered</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
     `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
+  const topupBadge = hasPendingPacketTopup(j)
+    ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
+    : '';
+  const badge = badge0 + topupBadge;
 
   // Progress ribbon — 8 clickable dots, same moveToStage behavior as the
   // compact pills. done = filled, current = pulsing ring, future = muted.
