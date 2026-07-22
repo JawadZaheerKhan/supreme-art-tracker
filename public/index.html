@@ -2992,10 +2992,11 @@ function getFiltered() {
     if (!inDateRange(j)) return false;
     if (view === 'new')     return isNewJob(j);
     if (view === 'ctp')     return isCtpQueue(j);
-    if (view === 'pending') return isPendingIssuance(j);
-    // Pending / new / ctp jobs are excluded from "active" so the queue
-    // stays clean — they each show up in their own dedicated tab.
-    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && !isPendingIssuance(j) && !isDone(j) && !isStorage(j) && !isBlocked(j);
+    // Only TRUE-pending (never issued) lives in the Pending Stock tab.
+    // Partial-issued jobs are already in production with real sheets in
+    // hand, so they belong in Active with a "Requires More Stock" badge.
+    if (view === 'pending') return j.issuance_status === 'pending';
+    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j);
     if (view === 'storage') return isStorage(j);
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
@@ -3145,8 +3146,8 @@ function renderStats() {
     total: jobs.length,
     newJobs: jobs.filter(isNewJob).length,
     ctp: jobs.filter(isCtpQueue).length,
-    pending: jobs.filter(isPendingIssuance).length,
-    active: jobs.filter(j=>!isNewJob(j)&&!isCtpQueue(j)&&!isPendingIssuance(j)&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
+    pending: jobs.filter(j => j.issuance_status === 'pending').length,
+    active: jobs.filter(j=>!isNewJob(j)&&!isCtpQueue(j)&&j.issuance_status !== 'pending'&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
     storage: jobs.filter(isStorage).length,
     done: jobs.filter(isDone).length,
     blocked: jobs.filter(isBlocked).length
@@ -3283,14 +3284,17 @@ function renderJobsCompact() {
   el.innerHTML = filtered.map(j => {
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
-    const pending = isPendingIssuance(j);
+    const pending = j.issuance_status === 'pending';
+    const partial = isPartialIssuance(j);
     const isNew = isNewJob(j);
     const isCtp = isCtpQueue(j);
     // Status badge: 'New Job' takes priority (the job isn't in the
     // production queue yet), then CTP (plates being made, pre-paper),
-    // then 'Pending Stock' (queued but no paper issued), then stage.
-    // A pending packets top-up request stacks an extra badge so the
-    // store keeper spots the ask at a glance in any list.
+    // then 'Pending Stock' (true-pending only — never-issued), then stage.
+    // Partial-issued jobs render their stage badge like any active job
+    // and get a "Requires More Stock" badge stacked on top so it's clear
+    // production is running but still needs more sheets. Pending top-up
+    // requests stack their own badge alongside.
     const badge0 = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
       isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
       pending ? jobStockBadge(j) :
@@ -3298,10 +3302,13 @@ function renderJobsCompact() {
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
+    const partialBadge = partial
+      ? ` <span class="badge badge-low-stock">&#9888; Requires More Stock</span>`
+      : '';
     const topupBadge = hasPendingPacketTopup(j)
       ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
       : '';
-    const badge = badge0 + topupBadge;
+    const badge = badge0 + partialBadge + topupBadge;
     // Stage pipeline is meaningless for a New Job / CTP-queue job —
     // it hasn't entered production yet, so showing all the stage pills
     // invites clicking one and confusing the workflow. Hide until stock.
@@ -3451,7 +3458,9 @@ function cardIssueStockBtn(j) {
 
 function renderJobCard(j) {
   const si = j.stage_index || 0;
-  const done = isDone(j), blocked = isBlocked(j), pending = isPendingIssuance(j);
+  const done = isDone(j), blocked = isBlocked(j);
+  const pending = j.issuance_status === 'pending';
+  const partial = isPartialIssuance(j);
   const isNew = isNewJob(j);
   const isCtp = isCtpQueue(j);
   const priNorm = normalizePriority(j.priority);
@@ -3464,10 +3473,13 @@ function renderJobCard(j) {
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
     `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
+  const partialBadge = partial
+    ? ` <span class="badge badge-low-stock">&#9888; Requires More Stock</span>`
+    : '';
   const topupBadge = hasPendingPacketTopup(j)
     ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
     : '';
-  const badge = badge0 + topupBadge;
+  const badge = badge0 + partialBadge + topupBadge;
 
   // Progress ribbon — 8 clickable dots, same moveToStage behavior as the
   // compact pills. done = filled, current = pulsing ring, future = muted.
