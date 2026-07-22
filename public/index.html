@@ -12861,18 +12861,39 @@ function openEdit(id) {
     : (isCtpQueue(j) && canWriteJobs())
       ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
       : '';
-  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+  openModal(`<div class="modal modal-card job-edit-modal" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
+    <div class="ceo-only-block" style="margin:-4px 0 12px;padding:10px 14px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
+      &#128065; View-only — your role can review this job card but can&rsquo;t edit or save changes.
+    </div>
     ${jobForm(j)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       ${processBtn}
-      <button class="btn btn-primary" onclick="saveEdit(${j.id})">Save Changes</button>
+      <button class="btn btn-primary ceo-hide" onclick="saveEdit(${j.id})">Save Changes</button>
     </div>
   </div>`);
   updateStockHint();
   renderCutPreview();
   initSpecialsEditor();
+  // CEO gets the same modal so they can see EVERY spec, but nothing
+  // inside it is editable — every input/select/checkbox is locked,
+  // and any form-internal button (coating toggles, specials editor,
+  // add-package etc.) is disabled. Modal-actions buttons stay live so
+  // Cancel still closes the modal.
+  if (isCeo()) {
+    const root = document.querySelector('.job-edit-modal');
+    if (root) {
+      root.querySelectorAll('input, textarea').forEach(el => {
+        if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+        else el.readOnly = true;
+      });
+      root.querySelectorAll('select').forEach(el => { el.disabled = true; });
+      root.querySelectorAll('button').forEach(btn => {
+        if (!btn.closest('.modal-actions')) btn.disabled = true;
+      });
+    }
+  }
 }
 
 async function saveEdit(id) {
