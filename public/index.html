@@ -4478,13 +4478,15 @@ function renderInvPendingList() {
   }
   const topupHtml = topupRows.map(({ job: j, topup: t }) => {
     const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-    const have  = invIt ? (invIt.current_balance || 0) : 0;
+    const groupMembers = invIt ? paperGroupMembers(invIt) : [];
+    const have  = groupMembers.reduce((a, x) => a + (x.current_balance || 0), 0);
     const ps    = invIt ? packetSize(invIt.paper_type) : 100;
     const unit  = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
     const need  = Math.round(parseFloat(t.qty) * ps);
     const enough = invIt && have >= need;
+    const brandList = [...new Set(groupMembers.map(x => (x.brand || '').trim()).filter(Boolean))].join('/');
     const paperLabel = invIt
-      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${invIt.brand?' · '+esc(invIt.brand):''}`
+      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${brandList?' · '+esc(brandList):''}`
       : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
     const approveBtn = canIssueStock()
       ? `<button class="btn btn-sm ${enough ? 'btn-success' : 'btn-low-stock'} ceo-hide" onclick="approvePacketsTopup(${j.id}, '${esc(t.id)}')" title="Approve and deduct ${need.toLocaleString()} sheets">&#10003; Approve</button>` : '';
@@ -4523,7 +4525,12 @@ function renderInvPendingList() {
   }).join('');
   el.innerHTML = pendingJobs.map(j => {
     const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-    const have     = invIt ? (invIt.current_balance || 0) : 0;
+    // Store keeper can issue from ANY brand in the paper group — so on-hand
+    // and enough-checks pool the whole group, not just the linked item.
+    // Brand names of every group member are shown together (century/ningbo)
+    // so at a glance you see which brands make up that pooled balance.
+    const groupMembers = invIt ? paperGroupMembers(invIt) : [];
+    const have     = groupMembers.reduce((a, x) => a + (x.current_balance || 0), 0);
     const need     = parseFloat(j.sheets) || 0;
     const enough   = !need || (invIt && have >= need);
     const isOut    = !enough && have <= 0;
@@ -4536,8 +4543,9 @@ function renderInvPendingList() {
       : (invIt
           ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}).`
           : 'No paper picked yet — open the job’s Edit to link an inventory item.');
+    const brandList = [...new Set(groupMembers.map(x => (x.brand || '').trim()).filter(Boolean))].join('/');
     const paperLabel = invIt
-      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${invIt.brand?' · '+esc(invIt.brand):''}`
+      ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${brandList?' · '+esc(brandList):''}`
       : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
     const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
     const pktStr = packetsDisplay(j) || (packetsIn ? String(packetsIn) : '');
