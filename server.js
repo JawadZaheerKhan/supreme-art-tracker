@@ -3163,8 +3163,24 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     let partialRemaining = 0;
 
     if (isJobIssuance) {
-      if (jobRow.inventory_item_id !== itemId) {
-        return res.status(400).json({ error: `Job E-${jobRow.id} needs a different paper — cannot manually issue from this item.` });
+      // Brand-agnostic: the job specifies a paper GROUP (type + size +
+      // gsm + is_offcut). Store keeper is free to issue from any brand
+      // in that same group. Only reject when the manual item is in a
+      // truly different paper spec (e.g. wrong size / wrong gsm).
+      const grpRows = await sql`
+        SELECT
+          (SELECT to_jsonb(a) FROM inventory_items a WHERE a.id = ${jobRow.inventory_item_id}) AS anchor,
+          (SELECT to_jsonb(b) FROM inventory_items b WHERE b.id = ${itemId}) AS pick
+      `;
+      const anchor = grpRows[0]?.anchor;
+      const pick   = grpRows[0]?.pick;
+      const sameGroup = anchor && pick &&
+        (anchor.paper_type || '') === (pick.paper_type || '') &&
+        (anchor.size || '')       === (pick.size || '') &&
+        String(anchor.gsm || '')  === String(pick.gsm || '') &&
+        !!anchor.is_offcut         === !!pick.is_offcut;
+      if (!sameGroup) {
+        return res.status(400).json({ error: `Job E-${jobRow.id} needs a different paper (${anchor?.paper_type || '?'} · ${anchor?.size || ''} · ${anchor?.gsm || ''}gsm) — this item is not in the same paper group.` });
       }
       const needed = jobDeductionSheets({ paperType: (await sql`SELECT paper_type FROM inventory_items WHERE id=${itemId}`)[0]?.paper_type || '', particulars: jobRow.particulars });
       if (needed <= 0) {
