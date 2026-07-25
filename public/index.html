@@ -100,6 +100,15 @@
   body.role-operator #jobs-mode .ceo-hide { display: none !important; }
   body.role-operator #topbar-export,
   body.role-operator #topbar-add { display: none !important; }
+  /* Client portal: outside stakeholders see ONLY the portal — no internal
+     nav / actions / calculator / date stamp. Reuses the topbar for the
+     brand + user chip + Sign out only. */
+  body.role-client .mode-switch,
+  body.role-client #topbar-refresh,
+  body.role-client #topbar-export,
+  body.role-client #topbar-add,
+  body.role-client #calc-launcher,
+  body.role-client #app-date { display: none !important; }
   .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
   .report-card:hover { border-color: var(--blue-border); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-2px); }
   .report-card-icon { font-size: 28px; }
@@ -2187,6 +2196,23 @@
   <div id="station-root"></div>
 </div>
 
+<!-- Client portal — external stakeholders. Only shown to users whose
+     role is 'client'. Renders a filtered subset of jobs bound to the
+     signed-in user's client_company. Everything is server-filtered by
+     /api/client/jobs — this shell is UX only. -->
+<div class="main" id="client-mode" style="display:none;">
+  <div id="client-portal-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border);">
+    <div>
+      <div style="font-size:22px;font-weight:700;color:var(--text);letter-spacing:-0.01em;">Your Jobs</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:2px;">Live progress for <b id="client-company-name" style="color:var(--text);"></b> · updated when you open this page</div>
+    </div>
+    <button class="btn btn-sm" onclick="loadClientJobs(true)">&#8635; Refresh</button>
+  </div>
+  <div id="client-portal-list">
+    <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
+  </div>
+</div>
+
 <div id="modal-root"></div>
 <!-- Floating calculator popover. Stays above modals so it can be opened
      while a job card / inventory form is being edited. See toggleCalculator(). -->
@@ -2613,6 +2639,10 @@ function isStoreManager()      { return hasRole('store_manager') && !isAdmin() &
 function isCeo()               { return hasRole('ceo') && !isAdmin() && !isProductionManager() && !hasRole('store_manager'); }
 // Persona: operator-only account — locked to the Station view.
 function isOperator()          { return hasRole('operator') && !isAdmin() && !isProductionManager() && !hasRole('store_manager') && !hasRole('ceo'); }
+// Client role is mutually exclusive with internal roles (enforced server-side
+// in parseRolesInput). Presence of 'client' means the user is external and
+// gets routed to the client portal instead of the main app.
+function isClient()            { return hasRole('client'); }
 // Per-area write capability. Used to gate UI write buttons. Server enforces
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
@@ -2651,6 +2681,7 @@ function roleLabel(role) {
     production_manager: 'Production Manager',
     store_manager: 'Store Manager',
     operator: 'Operator',
+    client: 'Client',
     // Legacy role names that may still appear on un-migrated user rows.
     user: 'Production Manager',
     stock: 'Store Manager',
@@ -2702,6 +2733,9 @@ function showLogin(errorMsg) {
   document.getElementById('jobs-mode').style.display = 'none';
   document.getElementById('inventory-mode').style.display = 'none';
   document.getElementById('users-mode').style.display = 'none';
+  const clientMode = document.getElementById('client-mode');
+  if (clientMode) clientMode.style.display = 'none';
+  document.body.classList.remove('role-client');
   const err = document.getElementById('login-error');
   if (errorMsg) { err.textContent = errorMsg; err.style.display = 'block'; }
   else { err.style.display = 'none'; }
@@ -2710,6 +2744,23 @@ function showLogin(errorMsg) {
 function hideLogin() {
   document.getElementById('login-screen').style.display = 'none';
   document.querySelector('.topbar').style.display = 'flex';
+}
+// Client portal shell — hide every internal mode div, keep the topbar
+// visible (CSS hides the mode-switch buttons for role-client), show
+// the client-mode div and body class. Called after sign-in when the
+// user's role is 'client'; NOT called otherwise.
+function showClientPortal() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.querySelector('.topbar').style.display = 'flex';
+  const modes = ['jobs-mode','inventory-mode','stickers-mode','forms-mode','users-mode','station-mode'];
+  modes.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+  const cm = document.getElementById('client-mode');
+  if (cm) cm.style.display = 'block';
+  document.body.classList.add('role-client');
+  // Reports pane lives inline inside jobs-mode's ancestor; just make sure
+  // nothing else pokes through.
+  const companyEl = document.getElementById('client-company-name');
+  if (companyEl) companyEl.textContent = (currentUser && currentUser.client_company) || '';
 }
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
@@ -2792,6 +2843,14 @@ async function onGoogleCredential(response) {
   try {
     const out = await api('POST', '/api/auth/google', { credential: response.credential });
     currentUser = out.user;
+    // Client users never see the internal app — route straight to portal.
+    if (isClient()) {
+      showClientPortal();
+      renderUserChip();
+      await loadClientJobs();
+      document.getElementById('loading-screen').style.display = 'none';
+      return;
+    }
     hideLogin();
     renderUserChip();
     // Operators don't have permission to read inventory; skip the call so it
@@ -12264,6 +12323,13 @@ function jobForm(j={}) {
             <input type="checkbox" id="f-is-shade-card" ${j.is_shade_card ? 'checked' : ''} style="width:14px;height:14px;margin:0;accent-color:#166534;cursor:pointer;">
             <span style="font-weight:600;">Shade Card</span>
           </label>
+          <!-- Client portal opt-in: tick to expose this job to a matching
+               client-role account. Server also enforces company + delivered-
+               2-day cutoff filters in GET /api/client/jobs. -->
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;" title="Expose this job on the client portal for the matching client account.">
+            <input type="checkbox" id="f-client-visible" ${j.client_visible ? 'checked' : ''} style="width:14px;height:14px;margin:0;accent-color:#1e40af;cursor:pointer;">
+            <span style="font-weight:600;">Show to client</span>
+          </label>
         </div>
       </div>
       <img src="/logo.png" alt="Supreme Art">
@@ -12377,6 +12443,7 @@ function getFormData() {
     cut_size:    sendCut ? cutSizeRaw     : null,
     offcut_size: sendCut ? computedOffcut : null,
     is_shade_card: !!(document.getElementById('f-is-shade-card') || {}).checked,
+    client_visible: !!(document.getElementById('f-client-visible') || {}).checked,
   };
 }
 
@@ -16816,6 +16883,23 @@ function userRolesOf(u) {
   const alias = { user: 'production_manager', stock: 'store_manager' };
   return raw.map(r => alias[r] || r);
 }
+// Distinct client-company names from every job in memory. Used by the
+// Users tab's inline company dropdown for client-role users, and by the
+// invite dialog. Trimmed + case-preserving distinct-by-lowercase so
+// "Fenbro" and "fenbro" collapse but the original casing shows.
+function clientCompanyOptions(current) {
+  const seen = new Map(); // lowercase -> original
+  (jobs || []).forEach(j => {
+    const name = String(j.client || '').trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (!seen.has(key)) seen.set(key, name);
+  });
+  const cur = String(current || '').trim();
+  if (cur && !seen.has(cur.toLowerCase())) seen.set(cur.toLowerCase(), cur);
+  const opts = [...seen.values()].sort((a, b) => a.localeCompare(b));
+  return opts.map(n => `<option value="${esc(n)}" ${cur && cur.toLowerCase() === n.toLowerCase() ? 'selected' : ''}>${esc(n)}</option>`).join('');
+}
 function renderUsersTab() {
   const stats = {
     total: usersList.length,
@@ -16843,14 +16927,21 @@ function renderUsersTab() {
       </div>
       <div class="inv-balance">
         ${isCeo() || !isAdmin()
-          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(userRolesOf(u).map(roleLabel).join(' + '))}</span>`
-          : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-wrap:wrap;gap:4px 10px;max-width:280px;">
-              ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['ceo','CEO'],['operator','Operator']].map(([r,lbl]) => `
-                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
-                  <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
-                         ${isMe && r==='admin' ? 'disabled' : ''}
-                         onchange="changeUserRoles(${u.id})"> ${lbl}
-                </label>`).join('')}
+          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(userRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
+          : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
+              <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
+                ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['ceo','CEO'],['operator','Operator'],['client','Client']].map(([r,lbl]) => `
+                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
+                    <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
+                           ${isMe && r==='admin' ? 'disabled' : ''}
+                           onchange="changeUserRoles(${u.id})"> ${lbl}
+                  </label>`).join('')}
+              </div>
+              <select class="user-client-company" data-uid="${u.id}" onchange="changeUserRoles(${u.id})"
+                      style="${userRolesOf(u).includes('client') ? '' : 'display:none;'}font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;">
+                <option value="">— Pick company —</option>
+                ${clientCompanyOptions(u.client_company)}
+              </select>
             </div>`}
       </div>
       <div class="inv-actions">
@@ -16879,11 +16970,19 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
       <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
-        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false]].map(([r,lbl,def]) => `
+        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]].map(([r,lbl,def]) => `
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
-            <input type="checkbox" value="${r}" ${def?'checked':''}> ${lbl}
+            <input type="checkbox" value="${r}" ${def?'checked':''} onchange="onInviteRolesChanged()"> ${lbl}
           </label>`).join('')}
       </div>
+    </div>
+    <div class="form-group" id="invite-company-wrap" style="display:none;">
+      <label class="form-label">Client company *</label>
+      <select id="invite-company" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+        <option value="">— Pick company —</option>
+        ${clientCompanyOptions('')}
+      </select>
+      <div style="font-size:12px;color:var(--text2);margin-top:4px;">Client accounts see ONLY jobs whose Company field matches this exact value.</div>
     </div>
     <div style="font-size:12px;color:var(--text2);">They'll be able to sign in with this exact email via Google. If their Google account uses a different address, invite that one instead.</div>
     <div class="modal-actions">
@@ -16892,14 +16991,26 @@ function openInviteUser() {
     </div>
   </div>`);
 }
+function onInviteRolesChanged() {
+  const roles = [...document.querySelectorAll('#invite-roles input[type="checkbox"]:checked')].map(cb => cb.value);
+  const wrap = document.getElementById('invite-company-wrap');
+  if (!wrap) return;
+  wrap.style.display = roles.includes('client') ? '' : 'none';
+}
 async function saveInvite() {
   const email = document.getElementById('invite-email').value.trim();
   const roles = [...document.querySelectorAll('#invite-roles input[type="checkbox"]:checked')].map(cb => cb.value);
   if (!email) { await alertDialog({ title: 'Email is required', kind: 'warn' }); return; }
   if (!roles.length) { await alertDialog({ title: 'Pick at least one role', kind: 'warn' }); return; }
+  const payload = { email, roles };
+  if (roles.includes('client')) {
+    const company = (document.getElementById('invite-company') || {}).value || '';
+    if (!company.trim()) { await alertDialog({ title: 'Pick a company for the client', kind: 'warn' }); return; }
+    payload.client_company = company.trim();
+  }
   showSaving(true);
   try {
-    await api('POST', '/api/users', { email, roles });
+    await api('POST', '/api/users', payload);
     await loadUsersAndAudit();
     closeModal(); notify('User invited');
   } catch(e) { notify('Error: ' + e.message); }
@@ -16916,9 +17027,22 @@ async function changeUserRoles(id) {
     await loadUsersAndAudit();
     return;
   }
+  // Show or hide the company dropdown as soon as 'client' is toggled, so
+  // the admin doesn't have to save + reload to see it appear. If client
+  // is checked, the company MUST be picked before the change is saved —
+  // an unbound client account would sign in and see nothing.
+  const companyEl = wrap.querySelector('.user-client-company');
+  const hasClient = roles.includes('client');
+  if (companyEl) companyEl.style.display = hasClient ? '' : 'none';
+  const client_company = companyEl ? companyEl.value : '';
+  if (hasClient && !client_company) {
+    // Don't save yet — wait for the admin to pick a company. No toast,
+    // no reload; the dropdown is right there for them to fill in.
+    return;
+  }
   showSaving(true);
   try {
-    await api('PUT', `/api/users/${id}`, { roles });
+    await api('PUT', `/api/users/${id}`, { roles, client_company });
     await loadUsersAndAudit();
     notify('Roles updated');
   } catch(e) { notify('Error: ' + e.message); await loadUsersAndAudit(); }
@@ -16957,6 +17081,108 @@ async function openUserActivity(userId) {
   }
 }
 
+// ── Client portal ────────────────────────────────────────────
+// Cached list of visible jobs for the signed-in client. Populated by
+// loadClientJobs(), read by renderClientJobs(). Kept separate from the
+// internal `jobs` global so a bug in the internal renderer can't leak
+// data the client wasn't supposed to see (which is already server-filtered).
+let clientJobs = [];
+
+async function loadClientJobs(showToast) {
+  const listEl = document.getElementById('client-portal-list');
+  if (!listEl) return;
+  if (!clientJobs.length && !showToast) {
+    listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
+  }
+  try {
+    clientJobs = await api('GET', '/api/client/jobs');
+    renderClientJobs();
+    if (showToast) notify('Refreshed');
+  } catch (e) {
+    listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load your jobs: ${esc(e.message || String(e))}</div>`;
+  }
+}
+
+function renderClientJobs() {
+  const listEl = document.getElementById('client-portal-list');
+  if (!listEl) return;
+  if (!Array.isArray(clientJobs) || clientJobs.length === 0) {
+    listEl.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">
+      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px;">No jobs are visible to your account yet.</div>
+      <div style="font-size:13px;">When Supreme Art shares a job with your company, it will appear here.</div>
+    </div>`;
+    return;
+  }
+  // Stage badge style mirrors the internal stage-active badge but stays
+  // muted for the client — they just need to know where the job is, not
+  // click on stage pills.
+  const stageBadge = (name, idx) => {
+    const isDelivered = idx === (STAGES.length - 1);
+    const bg = isDelivered ? '#dcfce7' : '#e0e7ff';
+    const fg = isDelivered ? '#166534' : '#3730a3';
+    return `<span class="badge" style="background:${bg};color:${fg};font-weight:700;">${esc(name || '')}</span>`;
+  };
+  const coatingPill = (c) => {
+    const done = !!c.done;
+    const bg = done ? '#dcfce7' : '#fef3c7';
+    const fg = done ? '#166534' : '#92400e';
+    const mark = done ? '&#10003;' : '&#8987;';
+    return `<span class="badge" style="background:${bg};color:${fg};margin:0 4px 4px 0;font-weight:600;">${mark} ${esc(c.name || '')}</span>`;
+  };
+  const DASH = '—'; // em-dash — used verbatim so esc() doesn't turn it into "&mdash;" text.
+  const fmt = (iso) => {
+    if (!iso) return DASH;
+    const d = new Date(iso);
+    if (isNaN(d)) return esc(String(iso));
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  };
+  // Legacy job.dateissued is stored as free-form dd/mm/yyyy text; show it
+  // verbatim if it doesn't parse as an ISO date.
+  const fmtLoose = (v) => {
+    if (!v) return DASH;
+    const d = new Date(v);
+    if (!isNaN(d) && String(v).match(/^\d{4}/)) return fmt(v);
+    return esc(String(v));
+  };
+  listEl.innerHTML = clientJobs.map(j => {
+    const factLine = (label, val) =>
+      `<div style="font-size:12px;color:var(--text2);"><span style="font-weight:600;color:var(--text);">${label}</span> ${val}</div>`;
+    const coatingsBlock = (j.coatings && j.coatings.length)
+      ? `<div style="margin-top:10px;">
+           <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Coatings</div>
+           <div style="display:flex;flex-wrap:wrap;">${j.coatings.map(coatingPill).join('')}</div>
+         </div>`
+      : '';
+    return `
+      <div class="inv-card" style="padding:16px 18px;margin-bottom:12px;border-left:4px solid ${j.delivered_at ? '#166534' : '#4f46e5'};">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="font-size:16px;font-weight:700;color:var(--text);">${esc(j.name || '')}</div>
+            <div style="font-size:12px;color:var(--text2);margin-top:2px;">
+              ${j.code ? `<b style="color:var(--text);">${esc(j.code)}</b>` : ''}
+              ${j.po_no ? ` &middot; PO ${esc(j.po_no)}` : ''}
+              ${j.batch_no ? ` &middot; Batch ${esc(j.batch_no)}` : ''}
+            </div>
+          </div>
+          <div style="text-align:right;">
+            ${stageBadge(j.stage, j.stage_index)}
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:12px;">
+          ${factLine('Machine', j.machine ? esc(j.machine) : DASH)}
+          ${factLine('Paper', j.paper_type ? esc(j.paper_type) : DASH)}
+          ${factLine('Job Date', fmtLoose(j.job_date))}
+          ${factLine('Delivered', j.delivered_at ? fmt(j.delivered_at) : DASH)}
+          ${factLine('Delivered Qty', j.delivered_qty ? esc(j.delivered_qty) : DASH)}
+        </div>
+        ${coatingsBlock}
+      </div>`;
+  }).join('');
+}
+
 // ── Init ──────────────────────────────────────────────────────
 async function init() {
   try {
@@ -16964,6 +17190,16 @@ async function init() {
     currentUser = user;
   } catch {
     showLogin();
+    document.getElementById('loading-screen').style.display = 'none';
+    return;
+  }
+  // Client users have their own portal shell — internal loaders (jobs,
+  // inventory, printing machines) all 403 for them, so skip everything
+  // and just fetch the filtered client jobs.
+  if (isClient()) {
+    showClientPortal();
+    renderUserChip();
+    await loadClientJobs();
     document.getElementById('loading-screen').style.display = 'none';
     return;
   }
