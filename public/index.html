@@ -3554,7 +3554,11 @@ function cardIssueStockBtn(j) {
   return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
 }
 
-function renderJobCard(j) {
+function renderJobCard(j, opts) {
+  // clientPreview mode: strip every write button + make ribbon dots
+  // non-clickable. Used by the real client portal AND the admin's
+  // Client View tab so the two never drift.
+  const clientPreview = !!(opts && opts.clientPreview);
   const si = j.stage_index || 0;
   const done = isDone(j), blocked = isBlocked(j);
   const pending = j.issuance_status === 'pending';
@@ -3571,10 +3575,10 @@ function renderJobCard(j) {
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
     `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
-  const partialBadge = partial
+  const partialBadge = (!clientPreview && partial)
     ? ` <span class="badge badge-low-stock">&#9888; Requires More Stock</span>`
     : '';
-  const topupBadge = hasPendingPacketTopup(j)
+  const topupBadge = (!clientPreview && hasPendingPacketTopup(j))
     ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
     : '';
   const badge = badge0 + partialBadge + topupBadge;
@@ -3588,6 +3592,7 @@ function renderJobCard(j) {
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
     else if (i === si && !done) cls = blocked ? 'rib-blocked' : 'rib-current';
+    if (clientPreview) return `<span class="rib-dot ${cls}" title="${esc(s)}" style="cursor:default"></span>`;
     const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
     return `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
   }).join('');
@@ -3624,12 +3629,12 @@ function renderJobCard(j) {
   // CTP-queue job, surface "Process to Printing" so PM can bump plates
   // through when they're done. Both live on the tile so the PM doesn't
   // have to dig into the ⋯ menu.
-  const primary = (isNew && canWriteJobs())
+  const primary = clientPreview ? '' : (isNew && canWriteJobs())
     ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>`
     : (isCtp && canWriteJobs())
       ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
       : '';
-  const more = `
+  const more = clientPreview ? '' : `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
       <div class="job-more-menu">
@@ -3642,11 +3647,11 @@ function renderJobCard(j) {
       </div>
     </details>`;
   // Edit / View is the most-used action when not pending — surface it directly.
-  const updateBtn = !pending ? `<button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the dots above.">Edit / View</button>` : '';
+  const updateBtn = (!clientPreview && !pending) ? `<button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the dots above.">Edit / View</button>` : '';
 
   // Batch-print select box — same logic as the compact view. Renders on
   // the New Jobs tab only, and only for users who can print job cards.
-  const selBox = (isNew && view === 'new' && canPrintJobCard())
+  const selBox = (!clientPreview && isNew && view === 'new' && canPrintJobCard())
     ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
     : '';
   return `
@@ -3663,11 +3668,11 @@ function renderJobCard(j) {
     ${machine}
     <div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
-    <div class="tile-actions">
+    ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
       ${more}
-    </div>
+    </div>`}
   </div>`;
 }
 
@@ -17148,9 +17153,11 @@ function renderClientJobs() {
     emptyHint:  'When Supreme Art shares a job with your company, it will appear here.',
   });
 }
-// Shared card markup used by BOTH the real client portal and the admin
-// Client View preview. Same output either way — keep it that way so what
-// the admin previews is exactly what the client will see.
+// Shared renderer for BOTH the real client portal and the admin Client
+// View tab. Reuses renderJobCard so the tile look, machine SVG, ribbon
+// dots, and hover animations are identical to the Jobs Track view.
+// The projected row shape (from buildClientJobsView on the server) is
+// compatible with the internal job shape renderJobCard reads.
 function renderClientJobCardsInto(elId, rows, opts) {
   const listEl = document.getElementById(elId);
   if (!listEl) return;
@@ -17162,74 +17169,8 @@ function renderClientJobCardsInto(elId, rows, opts) {
     </div>`;
     return;
   }
-  // Stage badge style mirrors the internal stage-active badge but stays
-  // muted for the client — they just need to know where the job is, not
-  // click on stage pills.
-  const stageBadge = (name, idx) => {
-    const isDelivered = idx === (STAGES.length - 1);
-    const bg = isDelivered ? '#dcfce7' : '#e0e7ff';
-    const fg = isDelivered ? '#166534' : '#3730a3';
-    return `<span class="badge" style="background:${bg};color:${fg};font-weight:700;">${esc(name || '')}</span>`;
-  };
-  const coatingPill = (c) => {
-    const done = !!c.done;
-    const bg = done ? '#dcfce7' : '#fef3c7';
-    const fg = done ? '#166534' : '#92400e';
-    const mark = done ? '&#10003;' : '&#8987;';
-    return `<span class="badge" style="background:${bg};color:${fg};margin:0 4px 4px 0;font-weight:600;">${mark} ${esc(c.name || '')}</span>`;
-  };
-  const DASH = '—'; // em-dash — used verbatim so esc() doesn't turn it into "&mdash;" text.
-  const fmt = (iso) => {
-    if (!iso) return DASH;
-    const d = new Date(iso);
-    if (isNaN(d)) return esc(String(iso));
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    return `${dd}/${mm}/${yyyy}`;
-  };
-  // Legacy job.dateissued is stored as free-form dd/mm/yyyy text; show it
-  // verbatim if it doesn't parse as an ISO date.
-  const fmtLoose = (v) => {
-    if (!v) return DASH;
-    const d = new Date(v);
-    if (!isNaN(d) && String(v).match(/^\d{4}/)) return fmt(v);
-    return esc(String(v));
-  };
-  listEl.innerHTML = rows.map(j => {
-    const factLine = (label, val) =>
-      `<div style="font-size:12px;color:var(--text2);"><span style="font-weight:600;color:var(--text);">${label}</span> ${val}</div>`;
-    const coatingsBlock = (j.coatings && j.coatings.length)
-      ? `<div style="margin-top:10px;">
-           <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Coatings</div>
-           <div style="display:flex;flex-wrap:wrap;">${j.coatings.map(coatingPill).join('')}</div>
-         </div>`
-      : '';
-    return `
-      <div class="inv-card" style="padding:16px 18px;margin-bottom:12px;border-left:4px solid ${j.delivered_at ? '#166534' : '#4f46e5'};">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-          <div>
-            <div style="font-size:16px;font-weight:700;color:var(--text);">${esc(j.name || '')}</div>
-            <div style="font-size:12px;color:var(--text2);margin-top:2px;">
-              ${j.code ? `<b style="color:var(--text);">${esc(j.code)}</b>` : ''}
-              ${j.po_no ? ` &middot; PO ${esc(j.po_no)}` : ''}
-              ${j.batch_no ? ` &middot; Batch ${esc(j.batch_no)}` : ''}
-            </div>
-          </div>
-          <div style="text-align:right;">
-            ${stageBadge(j.stage, j.stage_index)}
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:12px;">
-          ${factLine('Machine', j.machine ? esc(j.machine) : DASH)}
-          ${factLine('Paper', j.paper_type ? esc(j.paper_type) : DASH)}
-          ${factLine('Job Date', fmtLoose(j.job_date))}
-          ${factLine('Delivered', j.delivered_at ? fmt(j.delivered_at) : DASH)}
-          ${factLine('Delivered Qty', j.delivered_qty ? esc(j.delivered_qty) : DASH)}
-        </div>
-        ${coatingsBlock}
-      </div>`;
-  }).join('');
+  // Use the same grid class the Jobs Track view uses, so spacing matches.
+  listEl.innerHTML = `<div class="jobs-list--cards">${rows.map(j => renderJobCard(j, { clientPreview: true })).join('')}</div>`;
 }
 
 // ── Client View (admin preview) ──────────────────────────────

@@ -2162,9 +2162,11 @@ async function buildClientJobsView(sql, companyRaw) {
   if (!company) return [];
   const rows = await sql`
     SELECT
-      j.id, j.name, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
-      j.paper, j.coatings, j.coatings_done, j.dateissued, j.delqty,
-      j.stages, j.deleted_at,
+      j.id, j.name, j.client, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
+      j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
+      j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
+      j.priority, j.stages, j.issuance_status,
+      j.cut_size, j.offcut_size, j.deleted_at,
       inv.paper_type AS inv_paper_type
     FROM jobs j
     LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2206,26 +2208,49 @@ async function buildClientJobsView(sql, companyRaw) {
       .map(x => (x && x.kind) ? String(x.kind).toLowerCase() : null)
       .filter(Boolean)
   );
+  // Sanitize stages before sending — strip operator identity, timestamps,
+  // and free-form notes. The client only needs {status, time} per stage
+  // so the ribbon can colour done/current/pending correctly.
+  const sanitizeStages = (stages) => {
+    if (!stages || typeof stages !== 'object') return {};
+    const out = {};
+    for (const [k, v] of Object.entries(stages)) {
+      if (v && typeof v === 'object') {
+        out[k] = { status: v.status || undefined, time: v.time || undefined };
+      }
+    }
+    return out;
+  };
   return filtered.map(j => {
-    const done = coatingsDoneKinds(j);
-    const deliveredAt = parseDeliveredAt(j.stages);
+    // Projected shape mirrors an internal job row so the same
+    // renderJobCard() renderer can consume it directly on the client.
+    // Nothing sensitive is included: no inventory_item_id, no particulars,
+    // no print_count / last_printed_at, no coatings_done, no created_at,
+    // no issued_at / issued_by_id, no deleted_at.
     return {
       id: j.id,
       name: j.name,
-      po_no: j.ref || null,
-      batch_no: j.bno || null,
-      code: j.jobcode || null,
-      stage_index: j.stage_index || 0,
-      stage: STAGES[j.stage_index || 0] || null,
+      client: j.client,
+      jobcode: j.jobcode || null,
+      ref: j.ref || null,
+      bno: j.bno || null,
+      dateissued: j.dateissued || null,
+      deadline: j.deadline || null,
+      size: j.size || null,
+      ups: j.ups || null,
+      sheets: j.sheets || null,
+      qty: j.qty || null,
+      paper: j.paper || j.inv_paper_type || null,
       machine: j.machine || null,
-      paper_type: j.paper || j.inv_paper_type || null,
-      coatings: coatingsList(j).map(name => ({
-        name,
-        done: done.has(String(name).toLowerCase()),
-      })),
-      job_date: j.dateissued || null,
-      delivered_at: deliveredAt ? new Date(deliveredAt).toISOString() : null,
-      delivered_qty: j.delqty || null,
+      coatings: coatingsList(j),
+      priority: j.priority || 'Normal',
+      delqty: j.delqty || null,
+      cartonqty: j.cartonqty || null,
+      cut_size: j.cut_size || null,
+      offcut_size: j.offcut_size || null,
+      stage_index: j.stage_index || 0,
+      stages: sanitizeStages(j.stages),
+      issuance_status: j.issuance_status || 'issued',
     };
   });
 }
