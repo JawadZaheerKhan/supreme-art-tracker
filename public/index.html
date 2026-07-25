@@ -3610,15 +3610,31 @@ function renderJobCard(j, opts) {
   // Coatings, cut size) lives on the printed job card and the Edit form.
   const invItemT = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paperLabelT = j.paper || (invItemT ? invItemT.paper_type : '');
-  const facts = [
-    paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
-    j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
-    j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
-  ].filter(Boolean).join('');
+  // Client-facing facts row is a curated subset — clients see only the
+  // job specs that concern their order (paper spec, coatings, PO
+  // details, delivered qty, deadline). Internal fields like Machine,
+  // Size/GSM, Sheets, Ups, Unit Carton, Code, Cut Size are not exposed.
+  const coatingsStr = Array.isArray(j.coatings) ? j.coatings.filter(Boolean).join(', ') : '';
+  const facts = clientPreview
+    ? [
+        j.ref     ? `<span><b>PO No.</b> ${esc(j.ref)}</span>` : '',
+        j.qty     ? `<span><b>PO Qty</b> ${esc(j.qty)}</span>` : '',
+        j.bno     ? `<span><b>Batch No.</b> ${esc(j.bno)}</span>` : '',
+        paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
+        coatingsStr ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
+        j.delqty  ? `<span><b>Delivered Qty</b> ${esc(j.delqty)}</span>` : '',
+        j.deadline ? `<span><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
+      ].filter(Boolean).join('')
+    : [
+        paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
+        j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
+        j.deadline ? `<span><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
+      ].filter(Boolean).join('');
 
-  // Right-side stats column on the tile: Day on top, Yield below.
-  const daysStr   = jobDaysInProduction(j);
-  const yieldP    = jobYieldParts(j);
+  // Right-side stats column on the tile: Day on top, Yield below. Hidden
+  // for clientPreview — internal production metrics, not client-facing.
+  const daysStr   = clientPreview ? '—' : jobDaysInProduction(j);
+  const yieldP    = clientPreview ? null : jobYieldParts(j);
   const sideStats = (daysStr !== '—' || yieldP) ? `
     <div class="tile-side-stats">
       ${daysStr !== '—' ? `<div class="tss-block"><div class="tss-lbl">Day</div><div class="tss-val">${esc(daysStr)}</div></div>` : ''}
@@ -3659,12 +3675,12 @@ function renderJobCard(j, opts) {
     ${sideStats}
     <div class="tile-head">
       ${selBox}
-      <span class="job-id">#${j.id}</span>
+      ${clientPreview ? '' : `<span class="job-id">#${j.id}</span>`}
       ${badge}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
     </div>
     <div class="tile-name">${esc(j.name)}</div>
-    <div class="tile-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' · ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>
+    ${clientPreview ? '' : `<div class="tile-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' · ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>`}
     ${machine}
     <div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
