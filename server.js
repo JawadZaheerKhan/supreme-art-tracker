@@ -2152,84 +2152,113 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
 // client sees the paper spec, not the storekeeper's brand choice.
 // Coatings are exposed as [{name, done}] pairs derived from
 // coatings_done, so the portal can render per-coating pills.
+// Shared: returns exactly the projected job list a client bound to
+// `company` would see. Called by /api/client/jobs (real clients) AND
+// /api/admin/client-view (admin previewing what a client sees).
+// Keeping both endpoints on the same helper guarantees the admin
+// preview never drifts from what the real client sees.
+async function buildClientJobsView(sql, companyRaw) {
+  const company = String(companyRaw || '').trim().toLowerCase();
+  if (!company) return [];
+  const rows = await sql`
+    SELECT
+      j.id, j.name, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
+      j.paper, j.coatings, j.coatings_done, j.dateissued, j.delqty,
+      j.stages, j.deleted_at,
+      inv.paper_type AS inv_paper_type
+    FROM jobs j
+    LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+    WHERE j.deleted_at IS NULL
+      AND j.client_visible = true
+      AND LOWER(TRIM(j.client)) = ${company}
+    ORDER BY j.id DESC
+  `;
+  const now = Date.now();
+  const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+  const parseDeliveredAt = (stages) => {
+    const s7 = stages && stages['7'];
+    if (!s7 || s7.status !== 'done') return null;
+    if (s7.at) {
+      const t = Date.parse(s7.at);
+      if (Number.isFinite(t)) return t;
+    }
+    // Legacy fallback: "dd/mm/yyyy hh:mm" (PKT). Parse loosely.
+    const m = String(s7.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    if (m) {
+      const [_, dd, mm, yyyy, hh='0', mi='0'] = m;
+      // PKT is UTC+5; convert display time back to UTC for comparison.
+      const utc = Date.UTC(+yyyy, +mm - 1, +dd, +hh - 5, +mi);
+      return Number.isFinite(utc) ? utc : null;
+    }
+    return null;
+  };
+  const filtered = rows.filter(r => {
+    const si = r.stage_index || 0;
+    const stageStatus = r.stages && r.stages[String(si)]?.status;
+    if (stageStatus === 'blocked') return false;
+    const deliveredAt = parseDeliveredAt(r.stages);
+    if (deliveredAt !== null && (now - deliveredAt) > twoDaysMs) return false;
+    return true;
+  });
+  const coatingsList = j => Array.isArray(j.coatings) ? j.coatings : [];
+  const coatingsDoneKinds = j => new Set(
+    (Array.isArray(j.coatings_done) ? j.coatings_done : [])
+      .map(x => (x && x.kind) ? String(x.kind).toLowerCase() : null)
+      .filter(Boolean)
+  );
+  return filtered.map(j => {
+    const done = coatingsDoneKinds(j);
+    const deliveredAt = parseDeliveredAt(j.stages);
+    return {
+      id: j.id,
+      name: j.name,
+      po_no: j.ref || null,
+      batch_no: j.bno || null,
+      code: j.jobcode || null,
+      stage_index: j.stage_index || 0,
+      stage: STAGES[j.stage_index || 0] || null,
+      machine: j.machine || null,
+      paper_type: j.paper || j.inv_paper_type || null,
+      coatings: coatingsList(j).map(name => ({
+        name,
+        done: done.has(String(name).toLowerCase()),
+      })),
+      job_date: j.dateissued || null,
+      delivered_at: deliveredAt ? new Date(deliveredAt).toISOString() : null,
+      delivered_qty: j.delqty || null,
+    };
+  });
+}
+
 app.get('/api/client/jobs', requireClient, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const company = String(req.user.client_company || '').trim().toLowerCase();
-    if (!company) return res.json([]);
-    // Postgres computes the delivered cutoff as "now - 2 days" so it stays
-    // correct regardless of the app's clock. Match against stages->'7'->>'at'
-    // (ISO from newer flows) with a fallback to stages->'7'->>'time' parsed
-    // as dd/mm/yyyy hh:mm for legacy rows.
-    const rows = await sql`
-      SELECT
-        j.id, j.name, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
-        j.paper, j.coatings, j.coatings_done, j.dateissued, j.delqty,
-        j.stages, j.deleted_at,
-        inv.paper_type AS inv_paper_type
-      FROM jobs j
-      LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
-      WHERE j.deleted_at IS NULL
-        AND j.client_visible = true
-        AND LOWER(TRIM(j.client)) = ${company}
-      ORDER BY j.id DESC
-    `;
-    const now = Date.now();
-    const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
-    const parseDeliveredAt = (stages) => {
-      const s7 = stages && stages['7'];
-      if (!s7 || s7.status !== 'done') return null;
-      if (s7.at) {
-        const t = Date.parse(s7.at);
-        if (Number.isFinite(t)) return t;
-      }
-      // Legacy fallback: "dd/mm/yyyy hh:mm" (PKT). Parse loosely.
-      const m = String(s7.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
-      if (m) {
-        const [_, dd, mm, yyyy, hh='0', mi='0'] = m;
-        // PKT is UTC+5; convert display time back to UTC for comparison.
-        const utc = Date.UTC(+yyyy, +mm - 1, +dd, +hh - 5, +mi);
-        return Number.isFinite(utc) ? utc : null;
-      }
-      return null;
-    };
-    const filtered = rows.filter(r => {
-      const si = r.stage_index || 0;
-      const stageStatus = r.stages && r.stages[String(si)]?.status;
-      if (stageStatus === 'blocked') return false;
-      const deliveredAt = parseDeliveredAt(r.stages);
-      if (deliveredAt !== null && (now - deliveredAt) > twoDaysMs) return false;
-      return true;
-    });
-    const coatingsList = j => Array.isArray(j.coatings) ? j.coatings : [];
-    const coatingsDoneKinds = j => new Set(
-      (Array.isArray(j.coatings_done) ? j.coatings_done : [])
-        .map(x => (x && x.kind) ? String(x.kind).toLowerCase() : null)
-        .filter(Boolean)
-    );
-    const projected = filtered.map(j => {
-      const done = coatingsDoneKinds(j);
-      const deliveredAt = parseDeliveredAt(j.stages);
-      return {
-        id: j.id,
-        name: j.name,
-        po_no: j.ref || null,
-        batch_no: j.bno || null,
-        code: j.jobcode || null,
-        stage_index: j.stage_index || 0,
-        stage: STAGES[j.stage_index || 0] || null,
-        machine: j.machine || null,
-        paper_type: j.paper || j.inv_paper_type || null,
-        coatings: coatingsList(j).map(name => ({
-          name,
-          done: done.has(String(name).toLowerCase()),
-        })),
-        job_date: j.dateissued || null,
-        delivered_at: deliveredAt ? new Date(deliveredAt).toISOString() : null,
-        delivered_qty: j.delqty || null,
-      };
-    });
+    const projected = await buildClientJobsView(sql, req.user.client_company);
+    res.json(projected);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin preview of the client portal. Same helper, so what the admin
+// sees IS what the client would see. Gated to internal roles that
+// already have full read access (admin, PM, CEO); operator + store
+// manager are excluded since neither has a legitimate reason to
+// review client-facing state. `company` param is required — no
+// default so the admin can't accidentally reveal the wrong client's
+// jobs from a saved link.
+app.get('/api/admin/client-view', requireAuth, async (req, res) => {
+  if (!userHasRole(req.user, 'admin', 'production_manager', 'ceo')) {
+    return res.status(403).json({ error: 'Admin / Production Manager / CEO only' });
+  }
+  try {
+    await dbReady;
+    const sql = getDb();
+    const company = String(req.query.company || '').trim();
+    if (!company) return res.status(400).json({ error: 'company query param required' });
+    const projected = await buildClientJobsView(sql, company);
     res.json(projected);
   } catch (err) {
     console.error(err);

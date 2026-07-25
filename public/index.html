@@ -1710,6 +1710,7 @@
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
     <button class="mode-btn" data-mode="forms" id="mode-forms-btn" onclick="setMode('forms')">Forms</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
+    <button class="mode-btn" data-mode="client-view" onclick="setMode('client-view')" id="mode-client-view-btn">&#128100; Client View</button>
   </div>
   <div class="topbar-right">
     <span id="save-indicator" style="display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:700;color:var(--red-text);background:var(--red-bg);border:1px solid var(--red-border);padding:5px 12px;border-radius:8px;opacity:0;transition:opacity 0.2s;">⟳ Saving…</span>
@@ -2194,6 +2195,29 @@
      see their section's job queue, and advance jobs / record numbers. -->
 <div class="main" id="station-mode" style="display:none;" onclick="stationResetIdle()">
   <div id="station-root"></div>
+</div>
+
+<!-- Client View (admin preview) — a top-level tab available to admin /
+     production_manager / CEO for reviewing exactly what a chosen client
+     sees. Uses the SAME /api/client/jobs helper server-side, so admin
+     preview and real client can never drift apart. -->
+<div class="main" id="client-view-mode" style="display:none;">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border);">
+    <div>
+      <div style="font-size:22px;font-weight:700;color:var(--text);letter-spacing:-0.01em;">Client View</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:2px;">Preview exactly what a client sees. Same filters as the real portal (client_visible + not-blocked + delivered &le; 2 days).</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <label style="font-size:12px;color:var(--text2);font-weight:600;">Company</label>
+      <select id="client-view-company" onchange="loadClientViewJobs()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;min-width:200px;">
+        <option value="">— Pick company —</option>
+      </select>
+      <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
+    </div>
+  </div>
+  <div id="client-view-list">
+    <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
+  </div>
 </div>
 
 <!-- Client portal — external stakeholders. Only shown to users whose
@@ -2796,6 +2820,10 @@ function renderUserChip() {
   // and production_manager (Floor Operators roster only — other sections
   // are tagged .pm-hide and hidden via the body.role-production-manager rule).
   lockTab('mode-users-btn',     isAdmin() || hasRole('ceo') || isProductionManager());
+  // Client View — admin / PM / CEO preview of the client portal.
+  // Store manager + operator have no reason to see it; locked out here
+  // and server-side (/api/admin/client-view rejects them too).
+  lockTab('mode-client-view-btn', isAdmin() || hasRole('ceo') || isProductionManager());
   // Trash card — visible to anyone who can navigate the app (so operators
   // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
@@ -2941,6 +2969,9 @@ function setMode(m) {
   // so PM lands on a Users tab that's effectively just the Floor
   // Operators roster). Everyone else is bounced to Jobs.
   if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
+  // Client View tab — admin preview only. Store manager / operator get
+  // bounced to Jobs since they don't have the role gate for it.
+  if (m === 'client-view' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
   // Station tab: PIN-gated shop-floor terminal. Admin / PM / operator
   // process; CEO enters read-only (all write buttons are .ceo-hide, plus
   // a server-side reject on station-update for the ceo role).
@@ -2954,6 +2985,8 @@ function setMode(m) {
   document.getElementById('forms-mode').style.display     = m === 'forms' ? 'block' : 'none';
   document.getElementById('users-mode').style.display     = m === 'users' ? 'block' : 'none';
   document.getElementById('station-mode').style.display   = m === 'station' ? 'block' : 'none';
+  const clientViewEl = document.getElementById('client-view-mode');
+  if (clientViewEl) clientViewEl.style.display = m === 'client-view' ? 'block' : 'none';
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('topbar-refresh');
@@ -2996,6 +3029,11 @@ function setMode(m) {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     loadUsersAndAudit();
+  } else if (m === 'client-view') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    refreshBtn.style.display = 'none';
+    enterClientView();
   } else if (m === 'station') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -3023,6 +3061,7 @@ function refreshCurrent() {
   else if (mode === 'inventory') loadInventory();
   else if (mode === 'users') loadUsersAndAudit();
   else if (mode === 'station') loadJobs().then(stationRender);
+  else if (mode === 'client-view') loadClientViewJobs(true);
 }
 
 // ── Filtering ─────────────────────────────────────────────────
@@ -17104,12 +17143,22 @@ async function loadClientJobs(showToast) {
 }
 
 function renderClientJobs() {
-  const listEl = document.getElementById('client-portal-list');
+  renderClientJobCardsInto('client-portal-list', clientJobs, {
+    emptyTitle: 'No jobs are visible to your account yet.',
+    emptyHint:  'When Supreme Art shares a job with your company, it will appear here.',
+  });
+}
+// Shared card markup used by BOTH the real client portal and the admin
+// Client View preview. Same output either way — keep it that way so what
+// the admin previews is exactly what the client will see.
+function renderClientJobCardsInto(elId, rows, opts) {
+  const listEl = document.getElementById(elId);
   if (!listEl) return;
-  if (!Array.isArray(clientJobs) || clientJobs.length === 0) {
+  opts = opts || {};
+  if (!Array.isArray(rows) || rows.length === 0) {
     listEl.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">
-      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px;">No jobs are visible to your account yet.</div>
-      <div style="font-size:13px;">When Supreme Art shares a job with your company, it will appear here.</div>
+      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px;">${esc(opts.emptyTitle || 'No jobs visible.')}</div>
+      ${opts.emptyHint ? `<div style="font-size:13px;">${esc(opts.emptyHint)}</div>` : ''}
     </div>`;
     return;
   }
@@ -17147,7 +17196,7 @@ function renderClientJobs() {
     if (!isNaN(d) && String(v).match(/^\d{4}/)) return fmt(v);
     return esc(String(v));
   };
-  listEl.innerHTML = clientJobs.map(j => {
+  listEl.innerHTML = rows.map(j => {
     const factLine = (label, val) =>
       `<div style="font-size:12px;color:var(--text2);"><span style="font-weight:600;color:var(--text);">${label}</span> ${val}</div>`;
     const coatingsBlock = (j.coatings && j.coatings.length)
@@ -17181,6 +17230,54 @@ function renderClientJobs() {
         ${coatingsBlock}
       </div>`;
   }).join('');
+}
+
+// ── Client View (admin preview) ──────────────────────────────
+// Same card renderer as the real client portal, but the admin picks
+// which company's view to preview from a dropdown. Data comes from
+// /api/admin/client-view?company=X so the exact same server-side
+// helper (buildClientJobsView) runs — admin and real client can
+// never see different lists for the same company.
+let clientViewCompany = '';
+let clientViewJobs = [];
+
+function enterClientView() {
+  // Populate the company dropdown with every distinct job.client value.
+  const sel = document.getElementById('client-view-company');
+  if (!sel) return;
+  sel.innerHTML = `<option value="">— Pick company —</option>` + clientCompanyOptions(clientViewCompany);
+  // Restore the last-picked company across setMode round-trips so the
+  // admin doesn't have to re-pick every time they open the tab.
+  if (clientViewCompany) {
+    sel.value = clientViewCompany;
+    loadClientViewJobs();
+  } else {
+    document.getElementById('client-view-list').innerHTML =
+      `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>`;
+  }
+}
+
+async function loadClientViewJobs(showToast) {
+  const sel = document.getElementById('client-view-company');
+  const listEl = document.getElementById('client-view-list');
+  if (!sel || !listEl) return;
+  const company = (sel.value || '').trim();
+  clientViewCompany = company;
+  if (!company) {
+    listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>`;
+    return;
+  }
+  listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
+  try {
+    clientViewJobs = await api('GET', `/api/admin/client-view?company=${encodeURIComponent(company)}`);
+    renderClientJobCardsInto('client-view-list', clientViewJobs, {
+      emptyTitle: `No jobs are visible to ${company} right now.`,
+      emptyHint:  `Tick "Show to client" on a job for this company (and it must not be blocked or delivered more than 2 days ago).`,
+    });
+    if (showToast) notify('Refreshed');
+  } catch (e) {
+    listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load client view: ${esc(e.message || String(e))}</div>`;
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────
