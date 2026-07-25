@@ -2202,18 +2202,13 @@
      sees. Uses the SAME /api/client/jobs helper server-side, so admin
      preview and real client can never drift apart. -->
 <div class="main" id="client-view-mode" style="display:none;">
-  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border);">
-    <div>
-      <div style="font-size:22px;font-weight:700;color:var(--text);letter-spacing:-0.01em;">Client View</div>
-      <div style="font-size:13px;color:var(--text2);margin-top:2px;">Preview exactly what a client sees. Same filters as the real portal (client_visible + not-blocked + delivered &le; 2 days).</div>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <label style="font-size:12px;color:var(--text2);font-weight:600;">Company</label>
-      <select id="client-view-company" onchange="loadClientViewJobs()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;min-width:200px;">
-        <option value="">— Pick company —</option>
-      </select>
-      <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
-    </div>
+  <div id="client-view-hero" class="hero-card"></div>
+  <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:12px 0 16px;flex-wrap:wrap;">
+    <label style="font-size:12px;color:var(--text2);font-weight:600;">Preview company:</label>
+    <select id="client-view-company" onchange="loadClientViewJobs()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;min-width:200px;">
+      <option value="">— Pick company —</option>
+    </select>
+    <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
   </div>
   <div id="client-view-list">
     <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
@@ -2225,14 +2220,8 @@
      signed-in user's client_company. Everything is server-filtered by
      /api/client/jobs — this shell is UX only. -->
 <div class="main" id="client-mode" style="display:none;">
-  <div id="client-portal-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border);">
-    <div>
-      <div style="font-size:22px;font-weight:700;color:var(--text);letter-spacing:-0.01em;">Your Jobs</div>
-      <div style="font-size:13px;color:var(--text2);margin-top:2px;">Live progress for <b id="client-company-name" style="color:var(--text);"></b> · updated when you open this page</div>
-    </div>
-    <button class="btn btn-sm" onclick="loadClientJobs(true)">&#8635; Refresh</button>
-  </div>
-  <div id="client-portal-list">
+  <div id="client-portal-hero" class="hero-card"></div>
+  <div id="client-portal-list" style="margin-top:16px;">
     <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
   </div>
 </div>
@@ -2781,10 +2770,11 @@ function showClientPortal() {
   const cm = document.getElementById('client-mode');
   if (cm) cm.style.display = 'block';
   document.body.classList.add('role-client');
-  // Reports pane lives inline inside jobs-mode's ancestor; just make sure
-  // nothing else pokes through.
-  const companyEl = document.getElementById('client-company-name');
-  if (companyEl) companyEl.textContent = (currentUser && currentUser.client_company) || '';
+  renderClientHero('client-portal-hero', {
+    filterId: 'client-portal-filter',
+    filterValue: clientPortalFilter,
+    onInputHandler: 'onClientPortalSearch',
+  });
 }
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
@@ -17147,6 +17137,53 @@ async function openUserActivity(userId) {
 // internal `jobs` global so a bug in the internal renderer can't leak
 // data the client wasn't supposed to see (which is already server-filtered).
 let clientJobs = [];
+let clientPortalFilter = '';
+
+// Shared hero card for both the client portal and the admin Client
+// View tab. Same visual as the internal jobs hero but with a search
+// field instead of + New Job / View All Jobs.
+function renderClientHero(elId, opts) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  opts = opts || {};
+  const firstName = opts.firstName
+    || (currentUser && (currentUser.name || currentUser.email || '').split(/[ @]/)[0])
+    || 'there';
+  const filterId = opts.filterId || 'client-hero-filter';
+  const currentVal = esc(opts.filterValue || '');
+  const onInput = esc(opts.onInputHandler || '');
+  el.innerHTML = `
+    <div class="hero-text">
+      <div class="hero-greet">${esc(greetingForNow())}, ${esc(firstName)} <span class="hero-wave">&#128075;</span></div>
+      <div class="hero-cta" style="align-items:center;">
+        <input type="text" id="${esc(filterId)}" value="${currentVal}" oninput="${onInput}(this.value)"
+               placeholder="Search job name, PO No., Batch No., Paper..."
+               style="min-width:280px;flex:1;max-width:520px;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.35);background:rgba(255,255,255,0.95);color:var(--text);font-size:14px;">
+      </div>
+    </div>
+    <div class="hero-mark">
+      <img class="hero-mark-img" alt="Supreme Art" onerror="this.style.display='none'">
+      <div class="hero-mark-text">Supreme Art (Pvt) Ltd.</div>
+    </div>`;
+  const markImg = el.querySelector('.hero-mark-img');
+  if (markImg) buildWhiteLogo().then(url => { if (url && markImg) markImg.src = url; });
+}
+
+// Case-insensitive substring match across the client-facing fields.
+function filterClientJobs(rows, text) {
+  const q = (text || '').trim().toLowerCase();
+  if (!q) return rows;
+  return (rows || []).filter(j => {
+    const hay = [j.name, j.ref, j.bno, j.jobcode, j.paper, j.qty, j.delqty,
+                 (Array.isArray(j.coatings) ? j.coatings.join(' ') : '')]
+      .map(v => String(v || '').toLowerCase()).join(' ');
+    return hay.includes(q);
+  });
+}
+function onClientPortalSearch(v) {
+  clientPortalFilter = v || '';
+  renderClientJobs();
+}
 
 async function loadClientJobs(showToast) {
   const listEl = document.getElementById('client-portal-list');
@@ -17164,9 +17201,11 @@ async function loadClientJobs(showToast) {
 }
 
 function renderClientJobs() {
-  renderClientJobCardsInto('client-portal-list', clientJobs, {
-    emptyTitle: 'No jobs are visible to your account yet.',
-    emptyHint:  'When Supreme Art shares a job with your company, it will appear here.',
+  const rows = filterClientJobs(clientJobs, clientPortalFilter);
+  const emptyForFilter = clientPortalFilter && clientJobs.length > 0;
+  renderClientJobCardsInto('client-portal-list', rows, {
+    emptyTitle: emptyForFilter ? 'No jobs match your search.' : 'No jobs are visible to your account yet.',
+    emptyHint:  emptyForFilter ? 'Try a different word from the job name, PO No., Batch No., or paper type.' : 'When Supreme Art shares a job with your company, it will appear here.',
   });
 }
 // Shared renderer for BOTH the real client portal and the admin Client
@@ -17197,14 +17236,39 @@ function renderClientJobCardsInto(elId, rows, opts) {
 // never see different lists for the same company.
 let clientViewCompany = '';
 let clientViewJobs = [];
+let clientViewFilter = '';
+
+function onClientViewSearch(v) {
+  clientViewFilter = v || '';
+  renderClientViewList();
+}
+
+function renderClientViewList() {
+  const company = clientViewCompany;
+  const rows = filterClientJobs(clientViewJobs, clientViewFilter);
+  const emptyForFilter = clientViewFilter && clientViewJobs.length > 0;
+  renderClientJobCardsInto('client-view-list', rows, {
+    emptyTitle: emptyForFilter
+      ? 'No jobs match your search.'
+      : `No jobs are visible to ${company} right now.`,
+    emptyHint: emptyForFilter
+      ? 'Try a different word from the job name, PO No., Batch No., or paper type.'
+      : `Tick "Show to client" on a job for this company (and it must not be blocked or delivered more than 2 days ago).`,
+  });
+}
 
 function enterClientView() {
+  renderClientHero('client-view-hero', {
+    firstName: (currentUser && (currentUser.name || currentUser.email || '').split(/[ @]/)[0]) || 'there',
+    filterId: 'client-view-filter',
+    filterValue: clientViewFilter,
+    onInputHandler: 'onClientViewSearch',
+  });
   // Populate the company dropdown with every distinct job.client value.
   const sel = document.getElementById('client-view-company');
   if (!sel) return;
   sel.innerHTML = `<option value="">— Pick company —</option>` + clientCompanyOptions(clientViewCompany);
-  // Restore the last-picked company across setMode round-trips so the
-  // admin doesn't have to re-pick every time they open the tab.
+  // Restore the last-picked company across setMode round-trips.
   if (clientViewCompany) {
     sel.value = clientViewCompany;
     loadClientViewJobs();
@@ -17227,10 +17291,7 @@ async function loadClientViewJobs(showToast) {
   listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
   try {
     clientViewJobs = await api('GET', `/api/admin/client-view?company=${encodeURIComponent(company)}`);
-    renderClientJobCardsInto('client-view-list', clientViewJobs, {
-      emptyTitle: `No jobs are visible to ${company} right now.`,
-      emptyHint:  `Tick "Show to client" on a job for this company (and it must not be blocked or delivered more than 2 days ago).`,
-    });
+    renderClientViewList();
     if (showToast) notify('Refreshed');
   } catch (e) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load client view: ${esc(e.message || String(e))}</div>`;
