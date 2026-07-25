@@ -17146,7 +17146,10 @@ function renderClientHero(elId, opts) {
   const el = document.getElementById(elId);
   if (!el) return;
   opts = opts || {};
-  const firstName = opts.firstName
+  // Greeting is "Hello, <name>" — for a real client that's their own name;
+  // for the admin's Client View tab, the caller passes the picked company
+  // so the preview matches what a client of that company would see.
+  const name = opts.greetingName
     || (currentUser && (currentUser.name || currentUser.email || '').split(/[ @]/)[0])
     || 'there';
   const filterId = opts.filterId || 'client-hero-filter';
@@ -17154,10 +17157,10 @@ function renderClientHero(elId, opts) {
   const onInput = esc(opts.onInputHandler || '');
   el.innerHTML = `
     <div class="hero-text">
-      <div class="hero-greet">${esc(greetingForNow())}, ${esc(firstName)} <span class="hero-wave">&#128075;</span></div>
+      <div class="hero-greet">Hello, ${esc(name)} <span class="hero-wave">&#128075;</span></div>
       <div class="hero-cta" style="align-items:center;">
         <input type="text" id="${esc(filterId)}" value="${currentVal}" oninput="${onInput}(this.value)"
-               placeholder="Search job name, PO No., Batch No., Paper..."
+               placeholder="Search job name, PO No., Batch No., Date..."
                style="min-width:280px;flex:1;max-width:520px;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.35);background:rgba(255,255,255,0.95);color:var(--text);font-size:14px;">
       </div>
     </div>
@@ -17169,14 +17172,20 @@ function renderClientHero(elId, opts) {
   if (markImg) buildWhiteLogo().then(url => { if (url && markImg) markImg.src = url; });
 }
 
-// Case-insensitive substring match across the client-facing fields.
+// Case-insensitive substring match across the client-facing search fields.
+// Dates are matched against the raw ISO/date string AND the dd/mm/yyyy
+// formatted version, so a client typing "05/08/2026" finds a job with
+// deadline 2026-08-05.
 function filterClientJobs(rows, text) {
   const q = (text || '').trim().toLowerCase();
   if (!q) return rows;
+  const fmtSafe = (v) => { try { return v ? fmtDMY(v) : ''; } catch { return ''; } };
   return (rows || []).filter(j => {
-    const hay = [j.name, j.ref, j.bno, j.jobcode, j.paper, j.qty, j.delqty,
-                 (Array.isArray(j.coatings) ? j.coatings.join(' ') : '')]
-      .map(v => String(v || '').toLowerCase()).join(' ');
+    const hay = [
+      j.name, j.ref, j.bno,
+      j.deadline, fmtSafe(j.deadline),
+      j.dateissued, fmtSafe(j.dateissued),
+    ].map(v => String(v || '').toLowerCase()).join(' ');
     return hay.includes(q);
   });
 }
@@ -17257,13 +17266,17 @@ function renderClientViewList() {
   });
 }
 
-function enterClientView() {
+function renderClientViewHero() {
   renderClientHero('client-view-hero', {
-    firstName: (currentUser && (currentUser.name || currentUser.email || '').split(/[ @]/)[0]) || 'there',
+    greetingName: clientViewCompany || 'preview',
     filterId: 'client-view-filter',
     filterValue: clientViewFilter,
     onInputHandler: 'onClientViewSearch',
   });
+}
+
+function enterClientView() {
+  renderClientViewHero();
   // Populate the company dropdown with every distinct job.client value.
   const sel = document.getElementById('client-view-company');
   if (!sel) return;
@@ -17284,6 +17297,7 @@ async function loadClientViewJobs(showToast) {
   if (!sel || !listEl) return;
   const company = (sel.value || '').trim();
   clientViewCompany = company;
+  renderClientViewHero(); // greeting reflects the picked company
   if (!company) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>`;
     return;
