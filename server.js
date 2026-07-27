@@ -3700,7 +3700,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       'job-issuance-reversed',
       // Manual stock-out reasons — added so the store keeper can undo
       // a wrong Sold/Damaged/Sample entry from the item History.
-      'sold', 'damaged', 'sample',
+      'sold', 'damaged', 'sample', 'manual-job-card',
     ]);
     if (!REVERSIBLE_REASONS.has(tx.reason)) {
       return res.status(400).json({ error: `Cannot reverse a '${tx.reason}' entry.` });

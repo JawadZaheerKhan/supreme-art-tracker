@@ -5557,6 +5557,11 @@ function bulkComboPick(prefix, idx, itemId) {
   // the numbers match whatever the user has already typed.
   const syncFn = prefix === 'bulk' ? bulkRowSync : bulkOutRowSync;
   if (typeof syncFn === 'function') syncFn(idx, 'packets');
+  // For bulkout Job Card rows, refresh the multi-select of matching
+  // pending jobs so the user sees only jobs waiting on THIS paper group.
+  if (prefix === 'bulkout' && typeof bulkOutRefreshJobsForRow === 'function') {
+    bulkOutRefreshJobsForRow(idx);
+  }
 }
 function bulkComboKey(prefix, idx, e) {
   if (e.key === 'Escape') { bulkComboClose(prefix, idx); return; }
@@ -5715,19 +5720,106 @@ function bulkOutRowHtml(idx) {
     <tr data-row="${idx}">
       <td>${bulkComboRowHtml('bulkout', idx, true)}</td>
       <td>
-        <select class="bulkout-reason">
-          <option value="job-card" selected>Job Card</option>
+        <select class="bulkout-reason" onchange="bulkOutReasonChanged(${idx})">
+          <option value="job-card" selected>Job Card (pending)</option>
+          <option value="manual-job-card">Manual Job Card</option>
           <option value="sold">Sold</option>
           <option value="damaged">Damaged</option>
           <option value="sample">Sample</option>
           <option value="adjustment">Adjustment</option>
         </select>
       </td>
-      <td><input type="text" class="bulkout-jobcard" placeholder="E-85 (optional)"></td>
+      <td>
+        <select class="bulkout-jobsel" multiple size="3" style="min-width:220px;padding:4px;border:1px solid var(--border);border-radius:6px;background:#fff;"
+                onchange="bulkOutJobsChanged(${idx})">
+          <option value="" disabled>(pick a paper first)</option>
+        </select>
+        <input type="text" class="bulkout-jobcard" placeholder="E-85 or ABC-123" style="display:none;width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+      </td>
       <td class="col-qty"><input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')"></td>
       <td class="col-qty"><input type="number" class="bulkout-qty" placeholder="0" min="1" oninput="bulkOutRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkOutRemoveRow(${idx})" title="Remove row">×</button></td>
     </tr>`;
+}
+// Called when the row's Reason dropdown changes. Job-card reason shows
+// the multi-select of matching pending jobs; every other reason (manual
+// job card, sold, damaged, sample, adjustment) shows the free-text
+// input so the user can type an ad-hoc reference or leave it blank.
+function bulkOutReasonChanged(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const reason = tr.querySelector('.bulkout-reason').value;
+  const jobSel = tr.querySelector('.bulkout-jobsel');
+  const jobTxt = tr.querySelector('.bulkout-jobcard');
+  if (reason === 'job-card') {
+    jobSel.style.display = '';
+    jobTxt.style.display = 'none';
+    bulkOutRefreshJobsForRow(idx);
+  } else {
+    jobSel.style.display = 'none';
+    jobTxt.style.display = '';
+    // Clear any prior job-select state so it doesn't leak into save.
+    [...jobSel.options].forEach(o => o.selected = false);
+  }
+}
+// Populate the row's job multi-select with every pending-stock job whose
+// paper group matches the picked item. Each option carries data-jobid
+// and data-need (in sheets) so save/auto-sum can read them directly.
+function bulkOutRefreshJobsForRow(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const jobSel = tr.querySelector('.bulkout-jobsel');
+  if (!jobSel) return;
+  const reason = tr.querySelector('.bulkout-reason').value;
+  if (reason !== 'job-card') return;
+  const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  if (!it) {
+    jobSel.innerHTML = `<option value="" disabled>(pick a paper first)</option>`;
+    return;
+  }
+  const ps  = packetSize(it.paper_type);
+  const key = paperGroupKey(it);
+  const candidates = (jobs || []).filter(j => {
+    if (!isPendingIssuance(j)) return false;
+    if (!j.inventory_item_id) return false;
+    const jIt = inventory.find(x => x.id === j.inventory_item_id);
+    return jIt && paperGroupKey(jIt) === key;
+  });
+  if (!candidates.length) {
+    jobSel.innerHTML = `<option value="" disabled>No pending jobs for this paper group</option>`;
+    return;
+  }
+  jobSel.innerHTML = candidates.map(j => {
+    const needSheets = jobDeductionSheetsClient(j);
+    const needPkts   = needSheets ? (needSheets / ps) : 0;
+    const pktStr     = needPkts ? (Number.isInteger(needPkts) ? String(needPkts) : (+needPkts.toFixed(2)).toString()) : '?';
+    return `<option value="${j.id}" data-jobid="${j.id}" data-need="${needSheets}">E-${j.id} · ${esc(j.name || '')} · ${pktStr} pkt${needPkts===1?'':'s'}</option>`;
+  }).join('');
+}
+// Client-side mirror of jobDeductionSheets on the server. Reads packet
+// count from particulars and multiplies by the paper's packet size.
+function jobDeductionSheetsClient(j) {
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  if (!invIt) return 0;
+  const ps = packetSize(invIt.paper_type);
+  const pkts = parseFloat((j.particulars || {}).quantity_of_packets);
+  if (!Number.isFinite(pkts) || pkts <= 0) return 0;
+  return Math.round(pkts * ps);
+}
+// When jobs multi-select changes, sum their needs into the packets +
+// sheets inputs so the store keeper sees the total and can override.
+function bulkOutJobsChanged(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const jobSel = tr.querySelector('.bulkout-jobsel');
+  const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const ps = it ? packetSize(it.paper_type) : 100;
+  let totalSheets = 0;
+  [...jobSel.selectedOptions].forEach(o => { totalSheets += parseInt(o.dataset.need, 10) || 0; });
+  tr.querySelector('.bulkout-qty').value = totalSheets || '';
+  tr.querySelector('.bulkout-packets').value = totalSheets ? +(totalSheets / ps).toFixed(2) : '';
 }
 function bulkOutRowSync(idx, source) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
@@ -5769,7 +5861,7 @@ function openBulkStockOut() {
     <div style="margin-top:8px;">
       <button class="btn btn-sm" onclick="bulkOutAddRow()">+ Add Row</button>
     </div>
-    <div class="bulk-summary">Pick an existing item, enter qty. Rows that would drive on-hand negative are rejected. Reason "Job Card" + a valid Job Card No. issues to that job (partial ok — job stays in Pending Stock until fully issued).</div>
+    <div class="bulk-summary">Reason <b>Job Card (pending)</b> — pick paper, tick one or more pending-stock jobs waiting on that paper group; packets auto-fill from the sum of their needs (editable — partial issuance still works). Reason <b>Manual Job Card</b> — type any offline job card number (not linked to an app job). Other reasons (Sold / Damaged / Sample / Adjustment) are plain ledger entries.</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveBulkStockOut()" style="background:#DC2626;border-color:#DC2626;">Remove All</button>
@@ -5806,9 +5898,21 @@ async function saveBulkStockOut() {
     const reason  = tr.querySelector('.bulkout-reason').value;
     const jobCard = tr.querySelector('.bulkout-jobcard').value.trim();
     const qty     = parseInt(tr.querySelector('.bulkout-qty').value, 10) || 0;
-    if (!itemId && !qty && !jobCard) continue;
+    // For 'job-card' rows, jobs come from the multi-select instead of
+    // the free-text field. Each option carries data-jobid + data-need.
+    const jobSel  = tr.querySelector('.bulkout-jobsel');
+    const selectedJobs = (reason === 'job-card' && jobSel)
+      ? [...jobSel.selectedOptions].map(o => ({
+          jobId: parseInt(o.dataset.jobid, 10),
+          needSheets: parseInt(o.dataset.need, 10) || 0,
+        })).filter(j => Number.isFinite(j.jobId))
+      : [];
+    if (!itemId && !qty && !jobCard && !selectedJobs.length) continue;
     if (!itemId) {
       await alertDialog({ title: 'Paper required', message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
+    }
+    if (reason === 'job-card' && !selectedJobs.length) {
+      await alertDialog({ title: 'Pick at least one pending job', message: 'For a Job Card row, tick one or more matching pending-stock jobs (or switch the reason to Manual Job Card).', kind: 'warn' }); return;
     }
     if (!qty || qty <= 0) {
       await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
@@ -5819,7 +5923,7 @@ async function saveBulkStockOut() {
       const label = match ? `${match.paper_type}${match.size?' · '+match.size:''}${match.gsm?' · '+match.gsm+'gsm':''}${match.brand?' · '+match.brand:''}` : `item ${itemId}`;
       await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
     }
-    plan.push({ match, reason, jobCard, qty });
+    plan.push({ match, reason, jobCard, qty, selectedJobs });
   }
   if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
 
@@ -5827,23 +5931,47 @@ async function saveBulkStockOut() {
   let saved = 0, errored = 0, flipped = 0, partials = 0;
   for (const p of plan) {
     try {
-      const result = await api('POST', `/api/inventory/${p.match.id}/transactions`, {
-        change: -p.qty,
-        reason: p.reason,
-        notes:  sharedNote,
-        job_card: p.jobCard || null,
-        challan_no: ref || null,
-      });
-      saved++;
-      if (result && result.job_fully_issued) flipped++;
-      if (result && result.job_partial_remaining) partials++;
+      if (p.reason === 'job-card' && p.selectedJobs.length) {
+        // Walk the selected jobs in listed order, issuing each its full
+        // need first; the last job gets the shortfall as a partial.
+        let remaining = p.qty;
+        for (const j of p.selectedJobs) {
+          if (remaining <= 0) break;
+          const share = Math.min(remaining, j.needSheets);
+          if (share <= 0) continue;
+          const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
+            splits: [{ item_id: p.match.id, sheets: share }],
+          });
+          remaining -= share;
+          if (result) {
+            if (result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
+            else if (result.particulars && result.particulars.partial_pending_sheets) partials++;
+          }
+        }
+        saved++;
+      } else {
+        // Manual / non-job flows — regular ledger row. Manual Job Card
+        // number goes into notes so it's preserved in reports.
+        let notes = sharedNote;
+        if (p.reason === 'manual-job-card' && p.jobCard) {
+          notes = ['Manual Job Card: ' + p.jobCard, sharedNote].filter(Boolean).join(' · ');
+        }
+        await api('POST', `/api/inventory/${p.match.id}/transactions`, {
+          change: -p.qty,
+          reason: p.reason,
+          notes,
+          job_card: null,       // manual card doesn't link to a real app job
+          challan_no: ref || null,
+        });
+        saved++;
+      }
     } catch (e) {
       console.error('Bulk stock-out row failed:', p, e);
       errored++;
     }
   }
   await loadInventory();
-  if (flipped || partials) await loadJobs();
+  if (flipped || partials || plan.some(p => p.reason === 'job-card')) await loadJobs();
   const stockOutPane = document.getElementById('rt-stock-out');
   if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
     loadStockMovement('out');
