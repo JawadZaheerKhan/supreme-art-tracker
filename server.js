@@ -2172,7 +2172,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
           j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
           j.priority, j.stages, j.issuance_status, j.client_visible,
-          j.cut_size, j.offcut_size, j.deleted_at,
+          j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2185,7 +2185,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
           j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
           j.priority, j.stages, j.issuance_status, j.client_visible,
-          j.cut_size, j.offcut_size, j.deleted_at,
+          j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2276,6 +2276,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       stages: sanitizeStages(j.stages, j.stage_index || 0),
       issuance_status: j.issuance_status || 'issued',
       client_visible: !!j.client_visible,
+      is_shade_card: !!j.is_shade_card,
     };
   });
 }
