@@ -2157,26 +2157,44 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
 // /api/admin/client-view (admin previewing what a client sees).
 // Keeping both endpoints on the same helper guarantees the admin
 // preview never drifts from what the real client sees.
-async function buildClientJobsView(sql, companyRaw) {
+async function buildClientJobsView(sql, companyRaw, opts) {
+  opts = opts || {};
+  const includeHidden = !!opts.includeHidden;
   const company = String(companyRaw || '').trim().toLowerCase();
   if (!company) return [];
-  const rows = await sql`
-    SELECT
-      j.id, j.name, j.client, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
-      j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
-      j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
-      j.priority, j.stages, j.issuance_status,
-      j.cut_size, j.offcut_size, j.deleted_at,
-      inv.paper_type AS inv_paper_type
-    FROM jobs j
-    LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
-    WHERE j.deleted_at IS NULL
-      AND j.client_visible = true
-      AND LOWER(TRIM(j.client)) = ${company}
-    ORDER BY j.id DESC
-  `;
+  // Admin's Client View passes includeHidden=true so admin can see AND
+  // toggle every job for the company. Real client callers never do —
+  // they only see rows where client_visible=true.
+  const rows = includeHidden
+    ? await sql`
+        SELECT
+          j.id, j.name, j.client, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
+          j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
+          j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
+          j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.cut_size, j.offcut_size, j.deleted_at,
+          inv.paper_type AS inv_paper_type
+        FROM jobs j
+        LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL
+          AND LOWER(TRIM(j.client)) = ${company}
+        ORDER BY j.id DESC`
+    : await sql`
+        SELECT
+          j.id, j.name, j.client, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
+          j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
+          j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
+          j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.cut_size, j.offcut_size, j.deleted_at,
+          inv.paper_type AS inv_paper_type
+        FROM jobs j
+        LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL
+          AND j.client_visible = true
+          AND LOWER(TRIM(j.client)) = ${company}
+        ORDER BY j.id DESC`;
   const now = Date.now();
-  const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+  const cutoffMs = 3 * 24 * 60 * 60 * 1000;
   const parseDeliveredAt = (stages) => {
     const s7 = stages && stages['7'];
     if (!s7 || s7.status !== 'done') return null;
@@ -2199,7 +2217,7 @@ async function buildClientJobsView(sql, companyRaw) {
   // still drop off after 2 days.
   const filtered = rows.filter(r => {
     const deliveredAt = parseDeliveredAt(r.stages);
-    if (deliveredAt !== null && (now - deliveredAt) > twoDaysMs) return false;
+    if (deliveredAt !== null && (now - deliveredAt) > cutoffMs) return false;
     return true;
   });
   const coatingsList = j => Array.isArray(j.coatings) ? j.coatings : [];
@@ -2257,6 +2275,7 @@ async function buildClientJobsView(sql, companyRaw) {
       stage_index: j.stage_index || 0,
       stages: sanitizeStages(j.stages, j.stage_index || 0),
       issuance_status: j.issuance_status || 'issued',
+      client_visible: !!j.client_visible,
     };
   });
 }
@@ -2289,8 +2308,39 @@ app.get('/api/admin/client-view', requireAuth, async (req, res) => {
     const sql = getDb();
     const company = String(req.query.company || '').trim();
     if (!company) return res.status(400).json({ error: 'company query param required' });
-    const projected = await buildClientJobsView(sql, company);
+    // includeHidden so the admin can see AND toggle every job for the
+    // company — hidden ones render dimmed on the client tile.
+    const projected = await buildClientJobsView(sql, company, { includeHidden: true });
     res.json(projected);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lightweight toggle used by the admin Client View tile so the admin
+// can flip client_visible without opening the full job edit modal.
+// Admin / PM only — CEO is read-only, so the toggle isn't shown to
+// them client-side and the server rejects them here too.
+app.post('/api/jobs/:id/client-visible', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const value = !!(req.body && req.body.value);
+    const updated = await sql`
+      UPDATE jobs SET client_visible = ${value}
+       WHERE id = ${id} AND deleted_at IS NULL
+       RETURNING id, name, client, client_visible
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Job not found' });
+    await logAudit(sql, req, {
+      action: 'job.client_visible',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} (${updated[0].name}): client_visible → ${value ? 'ON' : 'OFF'} for ${updated[0].client}`,
+    });
+    res.json(updated[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
