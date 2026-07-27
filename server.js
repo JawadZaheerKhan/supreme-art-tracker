@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-18-split-issuance';
+const SCHEMA_VERSION = 'v2026-07-25-client-portal';
 
 async function initDb() {
   try {
@@ -260,6 +260,12 @@ async function initDb() {
     // printed job card leaves brand blank for the cutting group to
     // handwrite regardless.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS issued_items JSONB NOT NULL DEFAULT '[]'::jsonb`;
+
+    // Client portal: PM ticks this on the job card to expose the job to
+    // the client (via the client's own portal). Defaults to false so
+    // nothing is visible until someone consciously opts in. Filtered by
+    // GET /api/client/jobs alongside role + company + delivered-cutoff.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false`;
 
     // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
     // delivered job, we set deleted_at instead of dropping the row, so the
@@ -386,13 +392,19 @@ async function initDb() {
     await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
     await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','operator','ceo'))`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','operator','ceo','client'))`;
     // Multi-role support: a user can hold several roles at once (e.g. CEO +
     // Admin). `roles` is the source of truth; the legacy `role` column keeps
     // the highest-priority role for back-compat with old JWT cookies and any
     // code that still reads the single value. Backfill from `role`.
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[]`;
     await sql`UPDATE users SET roles = ARRAY[role] WHERE roles IS NULL OR array_length(roles, 1) IS NULL`;
+    // Client portal: bind a client-role user to a single company name (must
+    // match a value in jobs.client for the portal to surface anything). Only
+    // used when the user's roles include 'client'; null for every internal
+    // role. Case-insensitive matching is done at query time so the admin
+    // doesn't have to worry about exact casing when picking from the dropdown.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS client_company TEXT`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -694,6 +706,7 @@ function authMiddleware(req, res, next) {
         // Multi-role: newer tokens carry the full list; tokens issued before
         // the feature only have the single role — wrap it.
         roles: Array.isArray(payload.roles) && payload.roles.length ? payload.roles : [payload.role],
+        client_company: payload.client_company || null,
       };
     } catch (e) {
       // Invalid/expired token — leave req.user undefined.
@@ -703,6 +716,14 @@ function authMiddleware(req, res, next) {
 }
 function requireAuth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  // Client-role users are external and must never see internal endpoints.
+  // Every existing GET /api/jobs, /api/inventory, /api/audit, /api/users
+  // etc. goes through this middleware, so blocking here is the single
+  // authoritative gate. Client-only endpoints live under /api/client/*
+  // and use requireClient instead.
+  if (userHasRole(req.user, 'client')) {
+    return res.status(403).json({ error: 'Client accounts can only access the client portal (/api/client/*).' });
+  }
   next();
 }
 // ── Role helpers ─────────────────────────────────────────────
@@ -793,6 +814,20 @@ function requireOperatorAdmin(req, res, next) {
   }
   next();
 }
+// Client portal — the only middleware that ADMITS 'client' role users.
+// requireAuth blocks them from everything else, so this is the sole gate
+// into /api/client/*. A client without client_company bound to a company
+// name is inert (would match no jobs), so we reject that here too.
+function requireClient(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasRole(req.user, 'client')) {
+    return res.status(403).json({ error: 'Client portal is only for client accounts.' });
+  }
+  if (!req.user.client_company || !String(req.user.client_company).trim()) {
+    return res.status(403).json({ error: 'Your account is not bound to a company yet — ask an admin to complete setup.' });
+  }
+  next();
+}
 // CAPA writes — admin, production_manager, or CEO. CAPA is governance,
 // not floor work; CEOs need to be able to file / close their own reports.
 function requireCapaWriter(req, res, next) {
@@ -879,6 +914,7 @@ app.post('/api/auth/google', async (req, res) => {
         id: user.id, email: user.email, name: user.name, picture: user.picture,
         role: user.role,
         roles: normalizeUserRoles(Array.isArray(user.roles) && user.roles.length ? user.roles : user.role),
+        client_company: user.client_company || null,
       },
       JWT_SECRET,
       { expiresIn: '30d' }
@@ -923,10 +959,14 @@ app.get('/api/auth/me', async (req, res) => {
       }
       const freshRoles = normalizeUserRoles(Array.isArray(dbUser.roles) && dbUser.roles.length ? dbUser.roles : dbUser.role);
       const tokenRoles = normalizeUserRoles(req.user.roles && req.user.roles.length ? req.user.roles : req.user.role);
-      if (freshRoles.join(',') !== tokenRoles.join(',')) {
-        req.user = { ...req.user, role: dbUser.role, roles: freshRoles };
+      const freshCompany = dbUser.client_company || null;
+      const tokenCompany = req.user.client_company || null;
+      const rolesChanged   = freshRoles.join(',') !== tokenRoles.join(',');
+      const companyChanged = freshCompany !== tokenCompany;
+      if (rolesChanged || companyChanged) {
+        req.user = { ...req.user, role: dbUser.role, roles: freshRoles, client_company: freshCompany };
         const sessionToken = jwt.sign(
-          { id: dbUser.id, email: dbUser.email, name: req.user.name, picture: req.user.picture, role: dbUser.role, roles: freshRoles },
+          { id: dbUser.id, email: dbUser.email, name: req.user.name, picture: req.user.picture, role: dbUser.role, roles: freshRoles, client_company: freshCompany },
           JWT_SECRET,
           { expiresIn: '30d' }
         );
@@ -948,19 +988,25 @@ function publicUser(u) {
     id: u.id, email: u.email, name: u.name, picture: u.picture,
     role: u.role,
     roles: normalizeUserRoles(Array.isArray(u.roles) && u.roles.length ? u.roles : u.role),
+    client_company: u.client_company || null,
     created_at: u.created_at, last_login_at: u.last_login_at, invited_by: u.invited_by,
   };
 }
 
 // Multi-role input parsing shared by invite + role-change. Returns the
 // cleaned roles array plus the single highest-priority role kept in the
-// legacy `role` column (admin outranks manager roles outranks ceo/operator).
-const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'ceo', 'operator'];
+// legacy `role` column (admin outranks manager roles outranks ceo/operator;
+// client is a mutually-exclusive external role, ranked last).
+const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'ceo', 'operator', 'client'];
 function parseRolesInput(body) {
   const ALLOWED = new Set(ROLE_PRIORITY);
   let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
     .filter(r => ALLOWED.has(r));
   if (!roles.length) roles = ['production_manager'];
+  // Client is external. If it appears alongside any internal role we drop
+  // the internal ones — an outside client account must never also carry
+  // admin/PM/store/operator/CEO privileges.
+  if (roles.includes('client') && roles.length > 1) roles = ['client'];
   const primary = ROLE_PRIORITY.find(r => roles.includes(r)) || 'production_manager';
   return { roles, primary };
 }
@@ -995,13 +1041,22 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     const email = (req.body.email || '').trim().toLowerCase();
     const { roles, primary } = parseRolesInput(req.body);
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
+    // Client-role invites need a company binding up front — a client
+    // without a bound company would sign in and see nothing.
+    const rawCompany = (req.body.client_company || '').trim();
+    const clientCompany = roles.includes('client') ? rawCompany : null;
+    if (roles.includes('client') && !clientCompany) {
+      return res.status(400).json({ error: 'Client accounts must be bound to a company at invite time.' });
+    }
     const inserted = await sql`
-      INSERT INTO users (email, role, roles, invited_by) VALUES (${email}, ${primary}, ${roles}, ${req.user.id})
+      INSERT INTO users (email, role, roles, client_company, invited_by)
+      VALUES (${email}, ${primary}, ${roles}, ${clientCompany}, ${req.user.id})
       ON CONFLICT (email) DO NOTHING
       RETURNING *
     `;
     if (!inserted.length) return res.status(409).json({ error: 'A user with this email already exists' });
-    await logAudit(sql, req, { action: 'user.invite', entityType: 'user', entityId: inserted[0].id, summary: `Invited ${email} as ${roles.join(' + ')}` });
+    const summary = `Invited ${email} as ${roles.join(' + ')}${clientCompany ? ` (client of ${clientCompany})` : ''}`;
+    await logAudit(sql, req, { action: 'user.invite', entityType: 'user', entityId: inserted[0].id, summary });
     res.json(publicUser(inserted[0]));
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -1019,9 +1074,23 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     if (parseInt(id, 10) === req.user.id && !roles.includes('admin')) {
       return res.status(400).json({ error: "You can't remove the Admin role from your own account." });
     }
-    const updated = await sql`UPDATE users SET role = ${primary}, roles = ${roles} WHERE id = ${id} RETURNING *`;
+    // client_company is only meaningful when the role IS client; drop it
+    // otherwise so switching a user away from 'client' also clears the
+    // company binding.
+    const rawCompany = (req.body.client_company || '').trim();
+    const clientCompany = roles.includes('client') ? rawCompany : null;
+    if (roles.includes('client') && !clientCompany) {
+      return res.status(400).json({ error: 'Client accounts must be bound to a company.' });
+    }
+    const updated = await sql`
+      UPDATE users
+         SET role = ${primary}, roles = ${roles}, client_company = ${clientCompany}
+       WHERE id = ${id}
+       RETURNING *
+    `;
     if (!updated.length) return res.status(404).json({ error: 'User not found' });
-    await logAudit(sql, req, { action: 'user.role-change', entityType: 'user', entityId: updated[0].id, summary: `Set ${updated[0].email} to ${roles.join(' + ')}` });
+    const summary = `Set ${updated[0].email} to ${roles.join(' + ')}${clientCompany ? ` (client of ${clientCompany})` : ''}`;
+    await logAudit(sql, req, { action: 'user.role-change', entityType: 'user', entityId: updated[0].id, summary });
     res.json(publicUser(updated[0]));
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -2067,6 +2136,218 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
   }
 });
 
+// ── Client portal ──────────────────────────────────────────────
+// Returns ONLY the jobs a client is allowed to see, with ONLY the
+// fields the client should ever see. Every filter is enforced here
+// so nothing from the client side can widen the view:
+//   1. Row belongs to the client's company (case-insensitive match
+//      of jobs.client against user.client_company).
+//   2. client_visible = true — PM explicitly opted this job in.
+//   3. NOT soft-deleted, NOT blocked at its current stage.
+//   4. Delivered ≤ 2 calendar days ago (or still in production).
+//      Older delivered jobs drop off the portal automatically.
+//
+// Paper type is resolved from jobs.paper when present, else from
+// the linked inventory item's paper_type — never the brand, so the
+// client sees the paper spec, not the storekeeper's brand choice.
+// Coatings are exposed as [{name, done}] pairs derived from
+// coatings_done, so the portal can render per-coating pills.
+// Shared: returns exactly the projected job list a client bound to
+// `company` would see. Called by /api/client/jobs (real clients) AND
+// /api/admin/client-view (admin previewing what a client sees).
+// Keeping both endpoints on the same helper guarantees the admin
+// preview never drifts from what the real client sees.
+async function buildClientJobsView(sql, companyRaw, opts) {
+  opts = opts || {};
+  const includeHidden = !!opts.includeHidden;
+  const company = String(companyRaw || '').trim().toLowerCase();
+  if (!company) return [];
+  // Admin's Client View passes includeHidden=true so admin can see AND
+  // toggle every job for the company. Real client callers never do —
+  // they only see rows where client_visible=true.
+  const rows = includeHidden
+    ? await sql`
+        SELECT
+          j.id, j.name, j.client, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
+          j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
+          j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
+          j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
+          inv.paper_type AS inv_paper_type
+        FROM jobs j
+        LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL
+          AND LOWER(TRIM(j.client)) = ${company}
+        ORDER BY j.id DESC`
+    : await sql`
+        SELECT
+          j.id, j.name, j.client, j.ref, j.bno, j.jobcode, j.stage_index, j.machine,
+          j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
+          j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
+          j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
+          inv.paper_type AS inv_paper_type
+        FROM jobs j
+        LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL
+          AND j.client_visible = true
+          AND LOWER(TRIM(j.client)) = ${company}
+        ORDER BY j.id DESC`;
+  const now = Date.now();
+  const cutoffMs = 3 * 24 * 60 * 60 * 1000;
+  const parseDeliveredAt = (stages) => {
+    const s7 = stages && stages['7'];
+    if (!s7 || s7.status !== 'done') return null;
+    if (s7.at) {
+      const t = Date.parse(s7.at);
+      if (Number.isFinite(t)) return t;
+    }
+    // Legacy fallback: "dd/mm/yyyy hh:mm" (PKT). Parse loosely.
+    const m = String(s7.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    if (m) {
+      const [_, dd, mm, yyyy, hh='0', mi='0'] = m;
+      // PKT is UTC+5; convert display time back to UTC for comparison.
+      const utc = Date.UTC(+yyyy, +mm - 1, +dd, +hh - 5, +mi);
+      return Number.isFinite(utc) ? utc : null;
+    }
+    return null;
+  };
+  // Blocked jobs are now INCLUDED in the client view (per user request) —
+  // clients need to see when a job is blocked and why. Delivered jobs
+  // still drop off after 2 days.
+  const filtered = rows.filter(r => {
+    const deliveredAt = parseDeliveredAt(r.stages);
+    if (deliveredAt !== null && (now - deliveredAt) > cutoffMs) return false;
+    return true;
+  });
+  const coatingsList = j => Array.isArray(j.coatings) ? j.coatings : [];
+  const coatingsDoneKinds = j => new Set(
+    (Array.isArray(j.coatings_done) ? j.coatings_done : [])
+      .map(x => (x && x.kind) ? String(x.kind).toLowerCase() : null)
+      .filter(Boolean)
+  );
+  // Sanitize stages before sending — strip operator identity and
+  // timestamps. Notes are kept ONLY on the currently-blocked stage
+  // (that's the block reason, which the client is supposed to see);
+  // notes on other stages are still stripped for privacy.
+  const sanitizeStages = (stages, currentSi) => {
+    if (!stages || typeof stages !== 'object') return {};
+    const out = {};
+    for (const [k, v] of Object.entries(stages)) {
+      if (v && typeof v === 'object') {
+        const isBlockedCurrent = v.status === 'blocked' && String(k) === String(currentSi);
+        out[k] = {
+          status: v.status || undefined,
+          time: v.time || undefined,
+          notes: isBlockedCurrent ? (v.notes || '') : undefined,
+        };
+      }
+    }
+    return out;
+  };
+  return filtered.map(j => {
+    // Projected shape mirrors an internal job row so the same
+    // renderJobCard() renderer can consume it directly on the client.
+    // Nothing sensitive is included: no inventory_item_id, no particulars,
+    // no print_count / last_printed_at, no coatings_done, no created_at,
+    // no issued_at / issued_by_id, no deleted_at.
+    return {
+      id: j.id,
+      name: j.name,
+      client: j.client,
+      jobcode: j.jobcode || null,
+      ref: j.ref || null,
+      bno: j.bno || null,
+      dateissued: j.dateissued || null,
+      deadline: j.deadline || null,
+      size: j.size || null,
+      ups: j.ups || null,
+      sheets: j.sheets || null,
+      qty: j.qty || null,
+      paper: j.paper || j.inv_paper_type || null,
+      machine: j.machine || null,
+      coatings: coatingsList(j),
+      priority: j.priority || 'Normal',
+      delqty: j.delqty || null,
+      cartonqty: j.cartonqty || null,
+      cut_size: j.cut_size || null,
+      offcut_size: j.offcut_size || null,
+      stage_index: j.stage_index || 0,
+      stages: sanitizeStages(j.stages, j.stage_index || 0),
+      issuance_status: j.issuance_status || 'issued',
+      client_visible: !!j.client_visible,
+      is_shade_card: !!j.is_shade_card,
+    };
+  });
+}
+
+app.get('/api/client/jobs', requireClient, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const projected = await buildClientJobsView(sql, req.user.client_company);
+    res.json(projected);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin preview of the client portal. Same helper, so what the admin
+// sees IS what the client would see. Gated to internal roles that
+// already have full read access (admin, PM, CEO); operator + store
+// manager are excluded since neither has a legitimate reason to
+// review client-facing state. `company` param is required — no
+// default so the admin can't accidentally reveal the wrong client's
+// jobs from a saved link.
+app.get('/api/admin/client-view', requireAuth, async (req, res) => {
+  if (!userHasRole(req.user, 'admin', 'production_manager', 'ceo')) {
+    return res.status(403).json({ error: 'Admin / Production Manager / CEO only' });
+  }
+  try {
+    await dbReady;
+    const sql = getDb();
+    const company = String(req.query.company || '').trim();
+    if (!company) return res.status(400).json({ error: 'company query param required' });
+    // includeHidden so the admin can see AND toggle every job for the
+    // company — hidden ones render dimmed on the client tile.
+    const projected = await buildClientJobsView(sql, company, { includeHidden: true });
+    res.json(projected);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lightweight toggle used by the admin Client View tile so the admin
+// can flip client_visible without opening the full job edit modal.
+// Admin / PM only — CEO is read-only, so the toggle isn't shown to
+// them client-side and the server rejects them here too.
+app.post('/api/jobs/:id/client-visible', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const value = !!(req.body && req.body.value);
+    const updated = await sql`
+      UPDATE jobs SET client_visible = ${value}
+       WHERE id = ${id} AND deleted_at IS NULL
+       RETURNING id, name, client, client_visible
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Job not found' });
+    await logAudit(sql, req, {
+      action: 'job.client_visible',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} (${updated[0].name}): client_visible → ${value ? 'ON' : 'OFF'} for ${updated[0].client}`,
+    });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Helper: parse the sheets-qty form field into an integer. Returns 0 on garbage.
 function parseSheets(v) {
   const n = parseInt(String(v ?? '').replace(/[^0-9-]/g, ''), 10);
@@ -2139,7 +2420,7 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible } = req.body;
     // Case rule (v2026-07-13): name and client are stored lowercase so
     // "Fenbro" / "FENBRO" / "fenbro" all collapse to one canonical value
     // in searches, dropdowns, and reports.
@@ -2152,8 +2433,8 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
     // store keeper's Pending Stock queue picks them up. Stock is only
     // deducted after that, via POST /api/jobs/:id/issue-stock.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, 'new')
+      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, issuance_status)
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible}, 'new')
       RETURNING *
     `;
     const job = result[0];
@@ -2297,7 +2578,7 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible } = req.body;
     if (name)   name   = String(name).trim().toLowerCase();
     if (client) client = String(client).trim().toLowerCase();
 
@@ -2338,7 +2619,8 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
         particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId},
         cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
-        is_shade_card=${!!is_shade_card}
+        is_shade_card=${!!is_shade_card},
+        client_visible=${!!client_visible}
       WHERE id=${id} RETURNING *
     `;
     const job = result[0];
