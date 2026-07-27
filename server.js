@@ -3636,18 +3636,17 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       reversesTxId: tx.id,
     });
 
-    // If we just reversed a 'job-consumed' row and the linked job is still
-    // sitting at the first stage with issuance_status='issued', flip the
-    // job back to Pending Stock so the store-keeper queue picks it up
-    // again. If the job has already moved past CTP we leave its state
-    // alone — refunding inventory while the floor is mid-flight is a
-    // judgment call the user just made; we don't second-guess them by
-    // also rewriting the job's progress.
+    // If we just reversed a 'job-consumed' row, flip the linked job back
+    // to Pending Stock regardless of what stage the job has reached —
+    // matches the paper-swap-after-issuance flow, which also sends the
+    // job back to Pending Stock from mid-flight so the store keeper can
+    // re-issue. Stage stays where it is; the operator will see the
+    // "Pending Stock" badge on the job until the store keeper acts.
     let jobReverted = false;
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
-      if (job && job.issuance_status === 'issued' && (job.stage_index || 0) === 0) {
+      if (job && job.issuance_status === 'issued') {
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
         await sql`
@@ -3655,6 +3654,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
              SET issuance_status = 'pending',
                  issued_at = NULL,
                  issued_by_id = NULL,
+                 issued_items = '[]'::jsonb,
                  particulars = ${JSON.stringify(cleanParticulars)}
            WHERE id = ${tx.job_id}
         `;
