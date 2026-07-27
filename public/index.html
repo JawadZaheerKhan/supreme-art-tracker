@@ -5561,6 +5561,9 @@ function bulkComboPick(prefix, idx, itemId) {
   // pending jobs so the user sees only jobs waiting on THIS paper group.
   if (prefix === 'bulkout' && typeof bulkOutRefreshJobsForRow === 'function') {
     bulkOutRefreshJobsForRow(idx);
+    // Also refresh brand-split inputs — multi-brand groups get per-brand
+    // rows so the user can deduct different amounts from each brand.
+    if (typeof bulkOutRefreshBrandSplits === 'function') bulkOutRefreshBrandSplits(idx);
   }
 }
 function bulkComboKey(prefix, idx, e) {
@@ -5735,10 +5738,73 @@ function bulkOutRowHtml(idx) {
         </div>
         <input type="text" class="bulkout-jobcard" placeholder="E-85 or ABC-123" style="display:none;width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
       </td>
-      <td class="col-qty"><input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')"></td>
+      <td class="col-qty">
+        <input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')">
+        <div class="bulkout-brand-splits" data-row="${idx}" style="display:none;margin-top:6px;font-size:11px;"></div>
+      </td>
       <td class="col-qty"><input type="number" class="bulkout-qty" placeholder="0" min="1" oninput="bulkOutRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkOutRemoveRow(${idx})" title="Remove row">×</button></td>
     </tr>`;
+}
+// Render per-brand split inputs when the picked paper's group has >1
+// brand. User distributes packets across brands; the main packets +
+// sheets fields become the SUM of brand inputs (read-only in this mode).
+function bulkOutRefreshBrandSplits(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const wrap = tr.querySelector('.bulkout-brand-splits');
+  const pktInput = tr.querySelector('.bulkout-packets');
+  const shtInput = tr.querySelector('.bulkout-qty');
+  const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  if (!it) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  const members = paperGroupMembers(it);
+  if (members.length <= 1) {
+    // Single-brand paper — hide the split UI, keep the plain inputs.
+    wrap.style.display = 'none';
+    wrap.innerHTML = '';
+    pktInput.readOnly = false;
+    shtInput.readOnly = false;
+    return;
+  }
+  const ps = packetSize(it.paper_type);
+  // Sort by balance desc so the highest-stock brand is first (matches
+  // the split popup's ordering).
+  const sorted = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
+  wrap.innerHTML = sorted.map(m => {
+    const balSheets = m.current_balance || 0;
+    const balPkts   = balSheets ? +(balSheets / ps).toFixed(2) : 0;
+    const brand     = m.brand || 'no brand';
+    return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
+      <span style="flex:1;text-transform:uppercase;letter-spacing:0.02em;font-weight:600;color:var(--text2);">${esc(brand)}</span>
+      <span style="color:var(--text3);font-size:10px;">avail ${balPkts}</span>
+      <input type="number" class="bulkout-brand-qty" data-item-id="${m.id}" data-avail-sheets="${balSheets}"
+             min="0" step="any" placeholder="0"
+             style="width:70px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;text-align:right;"
+             ${balSheets <= 0 ? 'disabled' : ''}
+             oninput="bulkOutBrandSplitChanged(${idx})">
+    </div>`;
+  }).join('');
+  wrap.style.display = 'block';
+  // In multi-brand mode, the row-total packets/sheets are SUMMED from
+  // per-brand inputs — read-only so the user can't desync them.
+  pktInput.readOnly = true;
+  shtInput.readOnly = true;
+  bulkOutBrandSplitChanged(idx);
+}
+function bulkOutBrandSplitChanged(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const ps = it ? packetSize(it.paper_type) : 100;
+  let totalPkts = 0;
+  tr.querySelectorAll('.bulkout-brand-qty').forEach(el => {
+    const v = parseFloat(el.value);
+    if (Number.isFinite(v) && v > 0) totalPkts += v;
+  });
+  tr.querySelector('.bulkout-packets').value = totalPkts ? +totalPkts.toFixed(2) : '';
+  tr.querySelector('.bulkout-qty').value = totalPkts ? Math.round(totalPkts * ps) : '';
 }
 // Called when the row's Reason dropdown changes. Job-card reason shows
 // the multi-select of matching pending jobs; every other reason (manual
@@ -5837,8 +5903,24 @@ function bulkOutJobsChanged(idx) {
   tr.querySelectorAll('.jobchip.is-sel').forEach(c => {
     totalSheets += parseInt(c.dataset.need, 10) || 0;
   });
-  tr.querySelector('.bulkout-qty').value = totalSheets || '';
-  tr.querySelector('.bulkout-packets').value = totalSheets ? +(totalSheets / ps).toFixed(2) : '';
+  const brandInputs = tr.querySelectorAll('.bulkout-brand-qty');
+  if (brandInputs.length) {
+    // Multi-brand: auto-distribute total across brands, filling each
+    // brand up to its available cap in stock-desc order (that order
+    // matches how bulkOutRefreshBrandSplits renders them). User can
+    // rebalance manually afterwards.
+    let remaining = totalSheets;
+    brandInputs.forEach(el => {
+      const avail = parseInt(el.dataset.availSheets, 10) || 0;
+      const share = Math.min(remaining, avail);
+      el.value = share > 0 ? +(share / ps).toFixed(2) : '';
+      remaining -= Math.max(share, 0);
+    });
+    bulkOutBrandSplitChanged(idx);
+  } else {
+    tr.querySelector('.bulkout-qty').value = totalSheets || '';
+    tr.querySelector('.bulkout-packets').value = totalSheets ? +(totalSheets / ps).toFixed(2) : '';
+  }
 }
 function bulkOutRowSync(idx, source) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
@@ -5925,6 +6007,19 @@ async function saveBulkStockOut() {
           needSheets: parseInt(c.dataset.need, 10) || 0,
         })).filter(j => Number.isFinite(j.jobId))
       : [];
+    // Per-brand splits (if the paper group has >1 brand). Each brand
+    // input carries item_id + packets → sheets. When no brand inputs
+    // are rendered (single-brand group), splits stays empty and the
+    // row deducts from the picked item as before.
+    const itemForRow = inventory.find(it => it.id === itemId);
+    const psRow = itemForRow ? packetSize(itemForRow.paper_type) : 100;
+    const brandSplits = [...tr.querySelectorAll('.bulkout-brand-qty')]
+      .map(el => ({
+        item_id: parseInt(el.dataset.itemId, 10),
+        pkts: parseFloat(el.value),
+      }))
+      .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.pkts) && s.pkts > 0)
+      .map(s => ({ item_id: s.item_id, sheets: Math.round(s.pkts * psRow) }));
     if (!itemId && !qty && !jobCard && !selectedJobs.length) continue;
     if (!itemId) {
       await alertDialog({ title: 'Paper required', message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
@@ -5936,12 +6031,25 @@ async function saveBulkStockOut() {
       await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
     const match = inventory.find(it => it.id === itemId);
-    const have = match ? (match.current_balance || 0) : 0;
-    if (qty > have) {
-      const label = match ? `${match.paper_type}${match.size?' · '+match.size:''}${match.gsm?' · '+match.gsm+'gsm':''}${match.brand?' · '+match.brand:''}` : `item ${itemId}`;
-      await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
+    // Per-brand cap check when brandSplits is in use (multi-brand
+    // group); otherwise fall back to the picked item's own balance.
+    if (brandSplits.length) {
+      for (const s of brandSplits) {
+        const item = inventory.find(it => it.id === s.item_id);
+        const have = item ? (item.current_balance || 0) : 0;
+        if (s.sheets > have) {
+          const label = item ? `${item.paper_type}${item.size?' · '+item.size:''}${item.gsm?' · '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}` : `item ${s.item_id}`;
+          await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${s.sheets.toLocaleString()} sheets`, kind: 'warn' }); return;
+        }
+      }
+    } else {
+      const have = match ? (match.current_balance || 0) : 0;
+      if (qty > have) {
+        const label = match ? `${match.paper_type}${match.size?' · '+match.size:''}${match.gsm?' · '+match.gsm+'gsm':''}${match.brand?' · '+match.brand:''}` : `item ${itemId}`;
+        await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
+      }
     }
-    plan.push({ match, reason, jobCard, qty, selectedJobs });
+    plan.push({ match, reason, jobCard, qty, selectedJobs, brandSplits });
   }
   if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
 
@@ -5950,17 +6058,35 @@ async function saveBulkStockOut() {
   for (const p of plan) {
     try {
       if (p.reason === 'job-card' && p.selectedJobs.length) {
-        // Walk the selected jobs in listed order, issuing each its full
-        // need first; the last job gets the shortfall as a partial.
-        let remaining = p.qty;
-        for (const j of p.selectedJobs) {
-          if (remaining <= 0) break;
-          const share = Math.min(remaining, j.needSheets);
-          if (share <= 0) continue;
-          const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
-            splits: [{ item_id: p.match.id, sheets: share }],
-          });
-          remaining -= share;
+        // Per-job share of the row's total sheets = job's need / row
+        // total. Within a job, we split the same brand ratio the row
+        // is using so the store keeper's brand distribution flows
+        // through evenly. Any rounding stub goes on the last brand.
+        const rowTotalSheets = p.brandSplits.length
+          ? p.brandSplits.reduce((a, s) => a + s.sheets, 0)
+          : p.qty;
+        let remainingRow = rowTotalSheets;
+        for (let ji = 0; ji < p.selectedJobs.length; ji++) {
+          const j = p.selectedJobs[ji];
+          if (remainingRow <= 0) break;
+          const isLastJob = (ji === p.selectedJobs.length - 1);
+          const jobShare = isLastJob ? remainingRow : Math.min(remainingRow, j.needSheets);
+          if (jobShare <= 0) continue;
+          let jobSplits;
+          if (p.brandSplits.length) {
+            // Distribute jobShare across brands using the row's ratio.
+            const ratio = jobShare / rowTotalSheets;
+            jobSplits = p.brandSplits.map((s, i) => ({
+              item_id: s.item_id,
+              sheets: (i === p.brandSplits.length - 1)
+                ? (jobShare - p.brandSplits.slice(0, i).reduce((a, x) => a + Math.round(x.sheets * ratio), 0))
+                : Math.round(s.sheets * ratio),
+            })).filter(s => s.sheets > 0);
+          } else {
+            jobSplits = [{ item_id: p.match.id, sheets: jobShare }];
+          }
+          const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits });
+          remainingRow -= jobShare;
           if (result) {
             if (result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
             else if (result.particulars && result.particulars.partial_pending_sheets) partials++;
@@ -5968,19 +6094,24 @@ async function saveBulkStockOut() {
         }
         saved++;
       } else {
-        // Manual / non-job flows — regular ledger row. Manual Job Card
-        // number goes into notes so it's preserved in reports.
+        // Manual / non-job flows — regular ledger row per brand when
+        // brand splits are set, else a single row on the picked item.
         let notes = sharedNote;
         if (p.reason === 'manual-job-card' && p.jobCard) {
           notes = ['Manual Job Card: ' + p.jobCard, sharedNote].filter(Boolean).join(' · ');
         }
-        await api('POST', `/api/inventory/${p.match.id}/transactions`, {
-          change: -p.qty,
-          reason: p.reason,
-          notes,
-          job_card: null,       // manual card doesn't link to a real app job
-          challan_no: ref || null,
-        });
+        const txSet = p.brandSplits.length
+          ? p.brandSplits.map(s => ({ item_id: s.item_id, sheets: s.sheets }))
+          : [{ item_id: p.match.id, sheets: p.qty }];
+        for (const s of txSet) {
+          await api('POST', `/api/inventory/${s.item_id}/transactions`, {
+            change: -s.sheets,
+            reason: p.reason,
+            notes,
+            job_card: null,
+            challan_no: ref || null,
+          });
+        }
         saved++;
       }
     } catch (e) {
