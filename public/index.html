@@ -5730,10 +5730,9 @@ function bulkOutRowHtml(idx) {
         </select>
       </td>
       <td>
-        <select class="bulkout-jobsel" multiple size="3" style="min-width:220px;padding:4px;border:1px solid var(--border);border-radius:6px;background:#fff;"
-                onchange="bulkOutJobsChanged(${idx})">
-          <option value="" disabled>(pick a paper first)</option>
-        </select>
+        <div class="bulkout-jobchips" data-row="${idx}" style="display:flex;flex-wrap:wrap;gap:4px;min-width:220px;max-width:320px;">
+          <span style="color:var(--text3);font-size:11px;">(pick a paper first)</span>
+        </div>
         <input type="text" class="bulkout-jobcard" placeholder="E-85 or ABC-123" style="display:none;width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
       </td>
       <td class="col-qty"><input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')"></td>
@@ -5749,36 +5748,35 @@ function bulkOutReasonChanged(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
   if (!tr) return;
   const reason = tr.querySelector('.bulkout-reason').value;
-  const jobSel = tr.querySelector('.bulkout-jobsel');
+  const chips  = tr.querySelector('.bulkout-jobchips');
   const jobTxt = tr.querySelector('.bulkout-jobcard');
   if (reason === 'job-card') {
-    jobSel.style.display = '';
+    chips.style.display = 'flex';
     jobTxt.style.display = 'none';
     bulkOutRefreshJobsForRow(idx);
   } else {
-    jobSel.style.display = 'none';
+    chips.style.display = 'none';
     jobTxt.style.display = '';
-    // Clear any prior job-select state so it doesn't leak into save.
-    [...jobSel.options].forEach(o => o.selected = false);
+    chips.querySelectorAll('.jobchip.is-sel').forEach(c => c.classList.remove('is-sel'));
   }
 }
-// Populate the row's job multi-select with every pending-stock job whose
-// paper group matches the picked item. Each option carries data-jobid
-// and data-need (in sheets) so save/auto-sum can read them directly.
+// Render one clickable chip per pending job in the picked paper's group.
+// Chip text is just the E-<id>; the need (in sheets) is on data-need so
+// bulkOutJobsChanged can sum only the selected chips. Selection state
+// lives on the .is-sel class, toggled by bulkOutToggleChip.
 function bulkOutRefreshJobsForRow(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
   if (!tr) return;
-  const jobSel = tr.querySelector('.bulkout-jobsel');
-  if (!jobSel) return;
+  const chips = tr.querySelector('.bulkout-jobchips');
+  if (!chips) return;
   const reason = tr.querySelector('.bulkout-reason').value;
   if (reason !== 'job-card') return;
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
   const it = itemId ? inventory.find(x => x.id === itemId) : null;
   if (!it) {
-    jobSel.innerHTML = `<option value="" disabled>(pick a paper first)</option>`;
+    chips.innerHTML = `<span style="color:var(--text3);font-size:11px;">(pick a paper first)</span>`;
     return;
   }
-  const ps  = packetSize(it.paper_type);
   const key = paperGroupKey(it);
   const candidates = (jobs || []).filter(j => {
     if (!isPendingIssuance(j)) return false;
@@ -5787,15 +5785,35 @@ function bulkOutRefreshJobsForRow(idx) {
     return jIt && paperGroupKey(jIt) === key;
   });
   if (!candidates.length) {
-    jobSel.innerHTML = `<option value="" disabled>No pending jobs for this paper group</option>`;
+    chips.innerHTML = `<span style="color:var(--text3);font-size:11px;">No pending jobs for this paper group</span>`;
     return;
   }
-  jobSel.innerHTML = candidates.map(j => {
+  chips.innerHTML = candidates.map(j => {
     const needSheets = jobDeductionSheetsClient(j);
-    const needPkts   = needSheets ? (needSheets / ps) : 0;
-    const pktStr     = needPkts ? (Number.isInteger(needPkts) ? String(needPkts) : (+needPkts.toFixed(2)).toString()) : '?';
-    return `<option value="${j.id}" data-jobid="${j.id}" data-need="${needSheets}">E-${j.id} · ${esc(j.name || '')} · ${pktStr} pkt${needPkts===1?'':'s'}</option>`;
+    return `<button type="button" class="jobchip" data-jobid="${j.id}" data-need="${needSheets}"
+             onclick="bulkOutToggleChip(${idx}, ${j.id})"
+             title="Toggle E-${j.id} for this row"
+             style="padding:5px 10px;border:1.5px solid var(--border);border-radius:999px;background:#fff;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">E-${j.id}</button>`;
   }).join('');
+}
+function bulkOutToggleChip(idx, jobId) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  if (!tr) return;
+  const chip = tr.querySelector(`.jobchip[data-jobid="${jobId}"]`);
+  if (!chip) return;
+  const sel = !chip.classList.contains('is-sel');
+  chip.classList.toggle('is-sel', sel);
+  // Solid brand-green when selected — matches the s-done stage pill.
+  if (sel) {
+    chip.style.background = '#166534';
+    chip.style.color = '#fff';
+    chip.style.borderColor = '#166534';
+  } else {
+    chip.style.background = '#fff';
+    chip.style.color = 'var(--text)';
+    chip.style.borderColor = 'var(--border)';
+  }
+  bulkOutJobsChanged(idx);
 }
 // Client-side mirror of jobDeductionSheets on the server. Reads packet
 // count from particulars and multiplies by the paper's packet size.
@@ -5812,12 +5830,13 @@ function jobDeductionSheetsClient(j) {
 function bulkOutJobsChanged(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
   if (!tr) return;
-  const jobSel = tr.querySelector('.bulkout-jobsel');
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
   const it = itemId ? inventory.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   let totalSheets = 0;
-  [...jobSel.selectedOptions].forEach(o => { totalSheets += parseInt(o.dataset.need, 10) || 0; });
+  tr.querySelectorAll('.jobchip.is-sel').forEach(c => {
+    totalSheets += parseInt(c.dataset.need, 10) || 0;
+  });
   tr.querySelector('.bulkout-qty').value = totalSheets || '';
   tr.querySelector('.bulkout-packets').value = totalSheets ? +(totalSheets / ps).toFixed(2) : '';
 }
@@ -5898,13 +5917,12 @@ async function saveBulkStockOut() {
     const reason  = tr.querySelector('.bulkout-reason').value;
     const jobCard = tr.querySelector('.bulkout-jobcard').value.trim();
     const qty     = parseInt(tr.querySelector('.bulkout-qty').value, 10) || 0;
-    // For 'job-card' rows, jobs come from the multi-select instead of
-    // the free-text field. Each option carries data-jobid + data-need.
-    const jobSel  = tr.querySelector('.bulkout-jobsel');
-    const selectedJobs = (reason === 'job-card' && jobSel)
-      ? [...jobSel.selectedOptions].map(o => ({
-          jobId: parseInt(o.dataset.jobid, 10),
-          needSheets: parseInt(o.dataset.need, 10) || 0,
+    // For 'job-card' rows, jobs come from the selected chips. Each chip
+    // carries data-jobid + data-need (sheets).
+    const selectedJobs = (reason === 'job-card')
+      ? [...tr.querySelectorAll('.jobchip.is-sel')].map(c => ({
+          jobId: parseInt(c.dataset.jobid, 10),
+          needSheets: parseInt(c.dataset.need, 10) || 0,
         })).filter(j => Number.isFinite(j.jobId))
       : [];
     if (!itemId && !qty && !jobCard && !selectedJobs.length) continue;
