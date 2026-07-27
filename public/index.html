@@ -5536,20 +5536,35 @@ function bulkComboFilter(prefix, idx, positiveOnly) {
         <span class="combo-bal">${bal} sheets</span>
       </div>`;
     }).join('');
+    // Group header is clickable — picks the whole paper group without
+    // committing to a specific brand. bulkComboPick receives the first
+    // brand's id as an anchor but bulkComboRelabelIfGroup rewrites the
+    // search label to a brand-neutral one ("... · all brands").
     return `
-      <div class="combo-group-head">
+      <div class="combo-group-head" style="cursor:pointer;" onclick="bulkComboPick('${prefix}', ${idx}, ${rep.id}, true)">
         <span>${headerLabel}<span class="combo-group-tag">${arr.length} brands</span></span>
         <span class="combo-bal" style="font-weight:600;">${totalSheets.toLocaleString()} sheets total</span>
       </div>
       ${brandRows}`;
   }).join('');
 }
-function bulkComboPick(prefix, idx, itemId) {
+function bulkComboPick(prefix, idx, itemId, groupPick) {
   const it = inventory.find(x => x.id === itemId);
   if (!it) return;
   const search = document.getElementById(`${prefix}-search-${idx}`);
   const hidden = document.getElementById(`${prefix}-item-${idx}`);
-  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  // Group pick: user clicked the multi-brand group header — show a
+  // brand-neutral label ("... · all brands / brand1/brand2") since
+  // the per-brand splits below let them deduct from any/all brands.
+  let label;
+  const members = paperGroupMembers(it);
+  if (groupPick && members.length > 1) {
+    const brands = members.map(m => (m.brand || '').trim()).filter(Boolean);
+    const brandStr = brands.length ? brands.join('/') : 'all brands';
+    label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''} · ${brandStr}`;
+  } else {
+    label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  }
   if (search) search.value = label;
   if (hidden) hidden.value = String(itemId);
   bulkComboClose(prefix, idx);
@@ -5777,7 +5792,7 @@ function bulkOutRefreshBrandSplits(idx) {
     const brand     = m.brand || 'no brand';
     return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
       <span style="flex:1;text-transform:uppercase;letter-spacing:0.02em;font-weight:600;color:var(--text2);">${esc(brand)}</span>
-      <span style="color:var(--text3);font-size:10px;">avail ${balPkts}</span>
+      <span style="color:${balSheets > 0 ? '#166534' : 'var(--text3)'};font-size:11px;font-weight:700;">avail ${balPkts}</span>
       <input type="number" class="bulkout-brand-qty" data-item-id="${m.id}" data-avail-sheets="${balSheets}"
              min="0" step="any" placeholder="0"
              style="width:70px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;text-align:right;"
@@ -5883,7 +5898,12 @@ function bulkOutToggleChip(idx, jobId) {
 }
 // Client-side mirror of jobDeductionSheets on the server. Reads packet
 // count from particulars and multiplies by the paper's packet size.
+// For partially-issued jobs, returns the REMAINING need (partial_pending_
+// sheets) instead of the full original — bulk stock-out chips need the
+// outstanding amount, not the total.
 function jobDeductionSheetsClient(j) {
+  const partial = parseInt((j.particulars || {}).partial_pending_sheets, 10);
+  if (Number.isFinite(partial) && partial > 0) return partial;
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   if (!invIt) return 0;
   const ps = packetSize(invIt.paper_type);
