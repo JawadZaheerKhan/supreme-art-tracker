@@ -634,13 +634,10 @@
   .btn-capa:hover { background: #facc15; border-color: #ca8a04; }
   .pipeline { display: flex; align-items: center; gap: 3px; margin-top: 10px; flex-wrap: wrap; }
   .stage-pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid; white-space: nowrap; font-weight: 500; }
-  /* Strong solid fills so pipeline progress reads at a glance:
-     green = done, sky blue = in progress. Muted grey for future
-     stages, red for blocked. */
-  .s-done    { background: #166534; color: #fff; border-color: #166534; font-weight: 700; }
-  .s-active  { background: #0284c7; color: #fff; border-color: #0284c7; font-weight: 700; box-shadow: 0 0 0 2px rgba(2,132,199,0.25); }
+  .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+  .s-active { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-border); }
   .s-pending { background: var(--bg2); color: var(--text3); border-color: var(--border); }
-  .s-blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); font-weight: 700; }
+  .s-blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
   .arrow { font-size: 10px; color: var(--text3); }
   .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
   .empty { text-align: center; padding: 3rem 1rem; color: var(--text2); font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
@@ -3622,14 +3619,30 @@ function renderJobCard(j, opts) {
   // compact pills. done = filled, current = pulsing ring, future = muted.
   // Hide for New Jobs AND CTP-queue jobs — neither has entered the paper
   // pipeline yet, so clicking a stage would be confusing.
+  const pending__ = (j.issuance_status === 'pending');
+  const issued__  = (j.issuance_status === 'issued');
+  const stockDotCls = (issued__ || (si > 1)) ? 'rib-done'
+                    : (pending__ ? 'rib-current' : 'rib-future');
   const ribbon = (isNew || isCtp) ? '' : STAGES.map((s, i) => {
     let cls = 'rib-future';
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
-    else if (i === si && !done) cls = blocked ? 'rib-blocked' : 'rib-current';
-    if (clientPreview) return `<span class="rib-dot ${cls}" title="${esc(s)}" style="cursor:default"></span>`;
-    const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
-    return `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
+    else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 'rib-blocked' : 'rib-current';
+    let dot;
+    if (clientPreview) dot = `<span class="rib-dot ${cls}" title="${esc(s)}" style="cursor:default"></span>`;
+    else {
+      const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+      dot = `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
+    }
+    if (i === 1) {
+      // Insert virtual "Stock" dot before Print — matches the compact
+      // pipeline pills so clients / admins see the same 9 steps.
+      const stockDot = clientPreview
+        ? `<span class="rib-dot ${stockDotCls}" title="Pending Stock" style="cursor:default"></span>`
+        : `<button class="rib-dot ${stockDotCls}" title="Send to Pending Stock" onclick="moveJobToPendingStock(${j.id})"></button>`;
+      return stockDot + dot;
+    }
+    return dot;
   }).join('');
 
   // The machine vignette reflects the current stage (or the pending pre-state).
