@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-25-client-portal';
+const SCHEMA_VERSION = 'v2026-07-28-challan-no';
 
 async function initDb() {
   try {
@@ -333,6 +333,12 @@ async function initDb() {
     // is safer and we already denormalize the email anyway.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_id    INTEGER`;
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_email TEXT`;
+    // Challan No. — supplier delivery / customer challan reference for
+    // bulk stock-in and bulk stock-out. Shown as a column + filter in
+    // the Stock In / Stock Out reports. Nullable — single-item entries
+    // and pre-existing rows leave it blank.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS challan_no TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS inventory_tx_challan_idx ON inventory_transactions(challan_no) WHERE challan_no IS NOT NULL`;
 
     // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
     // pending → received (creates a stock-in transaction) or pending → cancelled.
@@ -2374,13 +2380,14 @@ function jobDeductionSheets({ paperType, particulars }) {
 // in the same UPDATE so balance always matches the sum of ledger changes.
 // user / reversesTxId are optional metadata used by the History UI to show
 // who entered the row and to link reversals to their originals.
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId }) {
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, challanNo }) {
   if (!itemId || !change) return null;
   const userId    = user && user.id    ? user.id    : null;
   const userEmail = user && user.email ? user.email : null;
+  const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null})
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, challan_no)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${challan})
     RETURNING id
   `;
   await sql`
@@ -3514,7 +3521,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { change, reason, notes, job_card } = req.body;
+    const { change, reason, notes, job_card, challan_no } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
     const itemId = parseInt(id, 10);
@@ -3608,6 +3615,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       jobId,
       notes: finalNotes,
       user: req.user,
+      challanNo: challan_no,
     });
 
     // Job state after a manual issuance:
@@ -3798,6 +3806,9 @@ app.get('/api/inventory/transactions', async (req, res) => {
     const dir = req.query.direction === 'in' ? 'in'
               : req.query.direction === 'out' ? 'out'
               : 'all';
+    // Challan filter — matches a substring anywhere in the challan_no.
+    // Empty / missing = no filter (all rows).
+    const challanQ = req.query.challan ? String(req.query.challan).trim() : '';
     // Day boundaries in BUSINESS time. Passing the bare date string to
     // Postgres made it parse as UTC midnight = 05:00 PKT, so stock moved
     // between midnight and 5am showed under the previous day's filter.
@@ -3836,6 +3847,7 @@ app.get('/api/inventory/transactions', async (req, res) => {
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
+        AND (${challanQ} = '' OR t.challan_no ILIKE ${'%' + challanQ + '%'})
       ORDER BY t.id DESC
     `;
     res.json(txs);

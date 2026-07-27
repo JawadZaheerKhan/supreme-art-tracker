@@ -5615,7 +5615,7 @@ function openBulkStockIn() {
   const rows = [0, 1, 2].map(() => bulkRowHtml(bulkRowSeq++)).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Stock In · Bulk</h2>
-    <div class="form-group"><label class="form-label">Reference / Invoice (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. INV-2026-042"></div>
+    <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. CH-2026-042"></div>
     <div class="form-group"><label class="form-label">Shipment Notes</label><input type="text" id="bulk-notes" placeholder="Optional notes applied to every row"></div>
     <table class="bulk-table" id="bulk-table">
       <thead>
@@ -5658,7 +5658,9 @@ async function saveBulkStockIn() {
   if (!tbody) return;
   const ref      = document.getElementById('bulk-ref').value.trim();
   const notesIn  = document.getElementById('bulk-notes').value.trim();
-  const sharedNote = [ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
+  // Challan No. now goes on its own column, so keep the notes text free
+  // of the "Ref: XYZ" prefix — the report displays challan_no separately.
+  const sharedNote = notesIn || null;
 
   const rows = [];
   for (const tr of tbody.querySelectorAll('tr')) {
@@ -5680,7 +5682,7 @@ async function saveBulkStockIn() {
   for (const r of rows) {
     try {
       await api('POST', `/api/inventory/${r.itemId}/transactions`, {
-        change: r.qty, reason: 'delivery', notes: sharedNote || null,
+        change: r.qty, reason: 'delivery', notes: sharedNote, challan_no: ref || null,
       });
       saved++;
     } catch (e) {
@@ -5749,7 +5751,7 @@ function openBulkStockOut() {
   const rows = [0, 1, 2].map(() => bulkOutRowHtml(bulkOutRowSeq++)).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2 style="color:#991B1B;">Stock Out · Bulk</h2>
-    <div class="form-group"><label class="form-label">Reference (optional)</label><input type="text" id="bulkout-ref" placeholder="e.g. DC-2026-042"></div>
+    <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="bulkout-ref" placeholder="e.g. CH-2026-042"></div>
     <div class="form-group"><label class="form-label">Notes (applied to every row)</label><input type="text" id="bulkout-notes" placeholder="Optional shared notes"></div>
     <table class="bulk-table" id="bulkout-table">
       <thead>
@@ -5795,7 +5797,8 @@ async function saveBulkStockOut() {
   if (!tbody) return;
   const ref     = document.getElementById('bulkout-ref').value.trim();
   const notesIn = document.getElementById('bulkout-notes').value.trim();
-  const sharedNote = [ref && `Ref: ${ref}`, notesIn].filter(Boolean).join(' · ');
+  // Challan No. lives on its own column now, so don't prepend it into notes.
+  const sharedNote = notesIn || null;
 
   const plan = [];
   for (const tr of tbody.querySelectorAll('tr')) {
@@ -5827,8 +5830,9 @@ async function saveBulkStockOut() {
       const result = await api('POST', `/api/inventory/${p.match.id}/transactions`, {
         change: -p.qty,
         reason: p.reason,
-        notes:  sharedNote || null,
+        notes:  sharedNote,
         job_card: p.jobCard || null,
+        challan_no: ref || null,
       });
       saved++;
       if (result && result.job_fully_issued) flipped++;
@@ -9744,8 +9748,8 @@ function setReportsTab(name) {
 // paper type + period (today/week/month/custom). Each direction owns its own
 // state so flipping between tabs doesn't lose your filters.
 const stockMovementStates = {
-  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', rows: [] },
-  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', rows: [] },
+  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
+  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
 };
 
 // Per-direction bulk selection. Independent sets so flipping tabs keeps the
@@ -9904,6 +9908,13 @@ function openStockMovementPane(direction) {
         <div class="dash-flbl">Period</div>
         <select class="filter" id="sm-${direction}-period" onchange="setMovementPeriod('${direction}', this.value)">${periodOpts}</select>
       </div>
+      <div>
+        <div class="dash-flbl">Challan No.</div>
+        <input class="filter" type="text" id="sm-${direction}-challan" value="${esc(state.challan || '')}"
+               placeholder="Any challan"
+               oninput="setMovementChallan('${direction}', this.value)"
+               style="min-width:140px;">
+      </div>
       <div id="sm-${direction}-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
         <div><div class="dash-flbl">From</div><input class="filter" type="date" id="sm-${direction}-from" value="${state.from}" onchange="setMovementCustom('${direction}')"></div>
         <div><div class="dash-flbl">To</div><input class="filter" type="date" id="sm-${direction}-to" value="${state.to}" onchange="setMovementCustom('${direction}')"></div>
@@ -9936,6 +9947,15 @@ function setMovementGsm(dir, v) {
   stockMovementSel[dir].clear();
   const state = stockMovementStates[dir];
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+}
+// Challan filter is server-side (URL param), so a change re-fetches
+// the report. Debounced lightly to avoid a fetch per keystroke.
+let _smChallanTimer = { in: null, out: null };
+function setMovementChallan(dir, v) {
+  stockMovementStates[dir].challan = String(v || '').trim();
+  stockMovementSel[dir].clear();
+  clearTimeout(_smChallanTimer[dir]);
+  _smChallanTimer[dir] = setTimeout(() => loadStockMovement(dir), 250);
 }
 function resetMovementFilters(dir) {
   const state = stockMovementStates[dir];
@@ -9994,6 +10014,7 @@ async function loadStockMovement(direction) {
   if (from) qs.set('from', from);
   if (to)   qs.set('to',   to);
   qs.set('direction', direction);
+  if (state.challan) qs.set('challan', state.challan);
   try {
     const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     state.rows = txs;
@@ -10158,6 +10179,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${weightCell}</td>
       <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
       <td style="padding:8px 10px;">${job}</td>
+      <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
       <td style="padding:8px 10px;">${esc(t.notes||'')}</td>
     </tr>`;
   }).join('');
@@ -10174,7 +10196,7 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Notes</th>
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Challan No.</th><th ${th}>Notes</th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
