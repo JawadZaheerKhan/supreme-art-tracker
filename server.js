@@ -2523,6 +2523,113 @@ app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) =
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Send a job back to the CTP queue from ANY stage. Used by the pipeline
+// pill click on the job tile — admin/PM only. Broader than move-back-to-
+// ctp (which is gated to Pending Stock at stage <= 1) because this one
+// is a deliberate "reset back to CTP" action from anywhere in production.
+// Ledger untouched (mirrors paper-swap flow); store keeper handles any
+// physical paper return manually.
+app.post('/api/jobs/:id/move-to-ctp', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log, particulars FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status === 'new' || job.issuance_status === 'ctp') {
+      return res.status(400).json({ error: `Job E-${id} is already at CTP.` });
+    }
+    const time = businessStamp();
+    const nowIso = new Date().toISOString();
+    const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
+    // Reset stages: keep nothing past CTP (all downstream work must be
+    // redone once the job comes back through Pending Stock + Printing).
+    const stages = { 0: { status: 'active', by, time, at: nowIso, notes: 'Sent back to CTP from pipeline pill' } };
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    log.push({ stage: STAGES[0], status: 'active', notes: `Moved back to CTP by ${by} (from ${STAGES[job.stage_index || 0]})`, by, time });
+    // Clear the partial-issuance marker too — anything held over from the
+    // previous issuance is stale once the job resets.
+    const cleanP = { ...(job.particulars || {}) };
+    delete cleanP.partial_pending_sheets;
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status='ctp',
+             stage_index=0,
+             stages=${JSON.stringify(stages)},
+             log=${JSON.stringify(log)},
+             issued_items='[]'::jsonb,
+             coatings_done='[]'::jsonb,
+             particulars=${JSON.stringify(cleanP)},
+             issued_at=NULL,
+             issued_by_id=NULL
+       WHERE id=${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.move_to_ctp',
+      entityType: 'job',
+      entityId: id,
+      summary: `Moved Job E-${id}: ${job.name} back to CTP from ${STAGES[job.stage_index || 0]}. Ledger untouched — store keeper handles any manual return.`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Send a job back to Pending Stock from any downstream stage. Same idea
+// as move-to-ctp but stops one step further along the pipeline:
+// stage_index=1 (Printing), issuance_status='pending'. Used by the
+// Pending Stock pipeline pill on the job tile. Ledger untouched.
+app.post('/api/jobs/:id/move-to-pending-stock', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log, particulars FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status === 'new' || job.issuance_status === 'ctp') {
+      return res.status(400).json({ error: `Job E-${id} must be past CTP before it can move to Pending Stock (use Process to Printing).` });
+    }
+    if (job.issuance_status === 'pending' && (job.stage_index || 0) === 1) {
+      return res.status(400).json({ error: `Job E-${id} is already in Pending Stock.` });
+    }
+    const time = businessStamp();
+    const nowIso = new Date().toISOString();
+    const by = `${(req.user && req.user.name) || 'Manager'} (Pipeline)`;
+    // Keep the CTP-done marker, everything from stage 1 onwards is reset.
+    const oldStages = (job.stages && typeof job.stages === 'object') ? job.stages : {};
+    const stages = {};
+    if (oldStages[0]) stages[0] = oldStages[0];
+    else stages[0] = { status: 'done', by, time, at: nowIso };
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    log.push({ stage: 'Pending Stock', status: 'active', notes: `Sent back to Pending Stock by ${by} (from ${STAGES[job.stage_index || 0]})`, by, time });
+    const cleanP = { ...(job.particulars || {}) };
+    delete cleanP.partial_pending_sheets;
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status='pending',
+             stage_index=1,
+             stages=${JSON.stringify(stages)},
+             log=${JSON.stringify(log)},
+             issued_items='[]'::jsonb,
+             coatings_done='[]'::jsonb,
+             particulars=${JSON.stringify(cleanP)},
+             issued_at=NULL,
+             issued_by_id=NULL
+       WHERE id=${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.move_to_pending_stock',
+      entityType: 'job',
+      entityId: id,
+      summary: `Moved Job E-${id}: ${job.name} back to Pending Stock from ${STAGES[job.stage_index || 0]}. Ledger untouched — store keeper handles any manual return.`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // CTP -> Printing / Pending Stock. Marks CTP (stage 0) as done, advances
 // stage_index to 1 (Printing), and flips issuance_status to 'pending' so
 // the store keeper sees the job in Pending Stock (waiting for paper). Two

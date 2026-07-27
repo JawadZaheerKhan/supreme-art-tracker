@@ -3416,13 +3416,30 @@ function renderJobsCompact() {
     // Stage pipeline is meaningless for a New Job / CTP-queue job —
     // it hasn't entered production yet, so showing all the stage pills
     // invites clicking one and confusing the workflow. Hide until stock.
+    // Pipeline: real STAGES pills PLUS one virtual "Pending Stock" pill
+    // inserted between CTP (i=0) and Print (i=1). Clicking CTP or Pending
+    // Stock resets the job to that state via dedicated endpoints (ledger
+    // untouched). Regular stage pills use the existing moveToStage flow.
+    const pending_ = (j.issuance_status === 'pending');
+    const issued_  = (j.issuance_status === 'issued');
     const pipeline = (isNew || isCtp) ? '' : STAGES.map((s,i) => {
       let cls = 's-pending';
       const st = j.stages?.[i]?.status;
       if (st==='done') cls='s-done';
       else if (i===si && !done) cls = blocked ? 's-blocked' : 's-active';
-      const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
-      return `${i>0?'<span class="arrow">›</span>':''}<span class="stage-pill ${cls}" title="Move to ${s}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
+      const handler = (i === 0)
+        ? `moveJobToCtp(${j.id})`
+        : (i === STAGES.length - 1 ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`);
+      const pill = `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
+      if (i === 1) {
+        // Insert the virtual Pending Stock pill BEFORE Print.
+        let psCls = 's-pending';
+        if (issued_ || (si > 1)) psCls = 's-done';
+        else if (pending_) psCls = 's-active';
+        const psPill = `<span class="arrow">›</span><span class="stage-pill ${psCls}" title="Send to Pending Stock" onclick="moveJobToPendingStock(${j.id})" style="cursor:pointer">Stock</span>`;
+        return `${psPill}<span class="arrow">›</span>${pill}`;
+      }
+      return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
     }).join('');
     const note = j.stages?.[si]?.notes;
     // Priority class — two-level scheme (Normal / Urgent). Anything legacy
@@ -13201,6 +13218,53 @@ async function moveToDeliveredAndEdit(id) {
   openEdit(id);
 }
 
+// Pipeline pill click: send a job back to the CTP queue from any state
+// past CTP. Server clears issued_items + coatings_done + trailing
+// stage entries and flips issuance_status='ctp', stage_index=0.
+// Ledger is untouched — store keeper handles any manual return.
+async function moveJobToCtp(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
+  if (j.issuance_status === 'ctp' || j.issuance_status === 'new') return;
+  const ok = await confirmDialog({
+    title: `Send Job E-${id} back to CTP?`,
+    message: `"${j.name}" will leave ${STAGES[j.stage_index || 0]} and reset to the CTP queue.\n\n• Any issued paper stays on the OLD paper's ledger (store keeper enters any physical return manually).\n• Coatings-done history for this job is cleared — coatings will need to be recorded again.\n• Stage progress past CTP is cleared.\n\nContinue?`,
+    danger: true,
+    confirmText: 'Send back to CTP',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/move-to-ctp`);
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify(`Job E-${id} sent back to CTP`);
+    render();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function moveJobToPendingStock(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can move jobs to Pending Stock.'); return; }
+  if (j.issuance_status === 'new' || j.issuance_status === 'ctp') { notify('Job is at CTP — advance it to Printing first.'); return; }
+  if (j.issuance_status === 'pending' && (j.stage_index || 0) === 1) return;
+  const ok = await confirmDialog({
+    title: `Send Job E-${id} to Pending Stock?`,
+    message: `"${j.name}" will leave ${STAGES[j.stage_index || 0]} and go back to Pending Stock so the store keeper can re-issue paper.\n\n• Any issued paper stays on the OLD paper's ledger (store keeper enters any physical return manually).\n• Coatings-done history is cleared — coatings will need to be recorded again.\n• Stage progress past Printing is cleared.\n\nContinue?`,
+    danger: true,
+    confirmText: 'Send back to Pending Stock',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/move-to-pending-stock`);
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify(`Job E-${id} sent back to Pending Stock`);
+    render();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
 async function moveToStage(id, target) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
