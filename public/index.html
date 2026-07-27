@@ -13730,22 +13730,23 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
   const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
   const rowHtml = rows.map((it) => {
     const balSheets  = it.current_balance || 0;
-    // Available packets: floor so a partial (e.g. 40 sheets on a
-    // 100-per-packet board) doesn't lie about being a whole packet.
-    const balPackets = Math.floor(balSheets / ps);
+    // Available packets: show the true fractional value so a partial
+    // (e.g. 40 sheets on a 100-per-packet board) shows as 0.4, not 0.
+    const balPacketsRaw = balSheets / ps;
+    const balPackets = Number.isInteger(balPacketsRaw) ? balPacketsRaw : +balPacketsRaw.toFixed(2);
     const brandTxt = it.brand ? esc(it.brand) : '<span style="color:var(--text3);font-style:italic;">no brand</span>';
-    const availNote = balPackets > 0
+    const availNote = balSheets > 0
       ? `${balPackets.toLocaleString()} <span style="color:var(--text3);font-size:11px;">(${balSheets.toLocaleString()} sheets)</span>`
       : `<span style="color:var(--text3);">0</span>`;
     return `
-      <tr class="split-row ${balPackets <= 0 ? 'split-row-out' : ''}">
+      <tr class="split-row ${balSheets <= 0 ? 'split-row-out' : ''}">
         <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
         <td class="split-avail">${availNote}</td>
         <td>
-          <input type="number" class="split-qty" min="0" max="${balPackets}" step="1"
-                 data-item-id="${it.id}" data-avail-packets="${balPackets}"
+          <input type="number" class="split-qty" min="0" max="${balPackets}" step="any"
+                 data-item-id="${it.id}" data-avail-packets="${balPackets}" data-avail-sheets="${balSheets}"
                  value="" placeholder="0"
-                 ${balPackets <= 0 ? 'disabled' : ''}
+                 ${balSheets <= 0 ? 'disabled' : ''}
                  oninput="recomputeSplitFooter()">
         </td>
       </tr>`;
@@ -13800,10 +13801,10 @@ function recomputeSplitFooter() {
     const row = inp.closest('tr');
     row.classList.remove('split-row-over');
     if (inp.value === '') continue;
-    const n = parseInt(inp.value, 10);
+    const n = parseFloat(inp.value);
     if (!Number.isFinite(n) || n < 0) { anyBadInput = true; continue; }
-    const cap = parseInt(inp.dataset.availPackets, 10) || 0;
-    if (n > cap) {
+    const cap = parseFloat(inp.dataset.availPackets) || 0;
+    if (n > cap + 1e-9) {
       anyRowOver = true;
       row.classList.add('split-row-over');
       // Still add to total so the footer reflects what the store keeper
@@ -13828,7 +13829,7 @@ function recomputeSplitFooter() {
   } else if (overTotal) {
     msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${(total - needPackets).toLocaleString()} ${unitLabel} — reduce one of the rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (anyBadInput) {
-    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter whole ${unitLabel} in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter a positive number in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (total === needPackets && anyPositive) {
     msg.textContent = `Issued: ${totalStr} · full`;
   } else if (anyPositive) {
@@ -13849,10 +13850,10 @@ async function saveSplitIssue(jobId) {
   const splits = [...table.querySelectorAll('.split-qty')]
     .map(inp => ({
       item_id: parseInt(inp.dataset.itemId, 10),
-      packets: parseInt(inp.value, 10),
+      packets: parseFloat(inp.value),
     }))
     .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.packets) && s.packets > 0)
-    .map(s => ({ item_id: s.item_id, sheets: s.packets * ps }));
+    .map(s => ({ item_id: s.item_id, sheets: Math.round(s.packets * ps) }));
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
   closeModal();
   await sendIssueStock(jobId, splits);
