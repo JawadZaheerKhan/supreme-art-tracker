@@ -2194,10 +2194,10 @@ async function buildClientJobsView(sql, companyRaw) {
     }
     return null;
   };
+  // Blocked jobs are now INCLUDED in the client view (per user request) —
+  // clients need to see when a job is blocked and why. Delivered jobs
+  // still drop off after 2 days.
   const filtered = rows.filter(r => {
-    const si = r.stage_index || 0;
-    const stageStatus = r.stages && r.stages[String(si)]?.status;
-    if (stageStatus === 'blocked') return false;
     const deliveredAt = parseDeliveredAt(r.stages);
     if (deliveredAt !== null && (now - deliveredAt) > twoDaysMs) return false;
     return true;
@@ -2208,15 +2208,21 @@ async function buildClientJobsView(sql, companyRaw) {
       .map(x => (x && x.kind) ? String(x.kind).toLowerCase() : null)
       .filter(Boolean)
   );
-  // Sanitize stages before sending — strip operator identity, timestamps,
-  // and free-form notes. The client only needs {status, time} per stage
-  // so the ribbon can colour done/current/pending correctly.
-  const sanitizeStages = (stages) => {
+  // Sanitize stages before sending — strip operator identity and
+  // timestamps. Notes are kept ONLY on the currently-blocked stage
+  // (that's the block reason, which the client is supposed to see);
+  // notes on other stages are still stripped for privacy.
+  const sanitizeStages = (stages, currentSi) => {
     if (!stages || typeof stages !== 'object') return {};
     const out = {};
     for (const [k, v] of Object.entries(stages)) {
       if (v && typeof v === 'object') {
-        out[k] = { status: v.status || undefined, time: v.time || undefined };
+        const isBlockedCurrent = v.status === 'blocked' && String(k) === String(currentSi);
+        out[k] = {
+          status: v.status || undefined,
+          time: v.time || undefined,
+          notes: isBlockedCurrent ? (v.notes || '') : undefined,
+        };
       }
     }
     return out;
@@ -2249,7 +2255,7 @@ async function buildClientJobsView(sql, companyRaw) {
       cut_size: j.cut_size || null,
       offcut_size: j.offcut_size || null,
       stage_index: j.stage_index || 0,
-      stages: sanitizeStages(j.stages),
+      stages: sanitizeStages(j.stages, j.stage_index || 0),
       issuance_status: j.issuance_status || 'issued',
     };
   });

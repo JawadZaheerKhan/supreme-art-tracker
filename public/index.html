@@ -109,6 +109,22 @@
   body.role-client #topbar-add,
   body.role-client #calc-launcher,
   body.role-client #app-date { display: none !important; }
+  /* Client-preview tiles: make the stage badge in the tile head much
+     more prominent than the internal Track view — client needs the
+     stage / CTP / Pending Stock / New Job / Blocked call-out to read
+     at a glance. Same colours (matches the internal palette), bigger. */
+  .job-tile.is-client-preview .tile-head .badge {
+    font-size: 13px;
+    font-weight: 800;
+    padding: 5px 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .job-tile.is-client-preview .tile-head .badge-active {
+    background: #4338ca;
+    color: #fff;
+    border-color: transparent;
+  }
   .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 20px; text-align: left; cursor: pointer; transition: all 0.15s; font-family: var(--font); color: var(--text); display: flex; flex-direction: column; gap: 8px; }
   .report-card:hover { border-color: var(--blue-border); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-2px); }
   .report-card-icon { font-size: 28px; }
@@ -3660,8 +3676,20 @@ function renderJobCard(j, opts) {
   const selBox = (!clientPreview && isNew && view === 'new' && canPrintJobCard())
     ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
     : '';
+  // Blocked banner + red tint on the whole tile — clients need to see
+  // that a job is blocked AND why. Reason comes from stages[si].notes,
+  // which the server kept on the currently-blocked stage entry only.
+  const blockReason = blocked ? (j.stages?.[si]?.notes || '').trim() : '';
+  const clientBlockedStyle = (clientPreview && blocked)
+    ? ' style="background:#fef2f2;border-color:#fecaca;border-left-color:#A32D2D;"'
+    : '';
+  const clientBlockedBanner = (clientPreview && blocked)
+    ? `<div style="background:#fee2e2;color:#991b1b;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;">
+         &#128721; Blocked${blockReason ? ` — ${esc(blockReason)}` : ''}
+       </div>`
+    : '';
   return `
-  <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}">
+  <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${clientBlockedStyle}>
     ${sideStats}
     <div class="tile-head">
       ${selBox}
@@ -3671,6 +3699,7 @@ function renderJobCard(j, opts) {
     </div>
     <div class="tile-name">${esc(j.name)}</div>
     ${clientPreview ? '' : `<div class="tile-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' · ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>`}
+    ${clientBlockedBanner}
     ${machine}
     <div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
