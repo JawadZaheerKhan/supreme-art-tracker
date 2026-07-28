@@ -2614,6 +2614,29 @@ function fmtStageTime(s) {
   return str;
 }
 function showSaving(on) { document.getElementById('save-indicator').style.opacity = on ? '1' : '0'; }
+
+// ── Global double-click guard for modal Save / Issue / Remove buttons ──
+// Store keeper occasionally taps the Save button twice — before this
+// guard that would fire the API call twice, doubling stock movements.
+// Now: on the first click, disable the button for a short window; if
+// the modal closes (which happens on every success path), the button
+// disappears with it. If the request errors, the timeout re-enables
+// the button so the store keeper can retry. Cancel / plain btn stays
+// clickable — only primary / danger / success (i.e. commit-flavoured)
+// buttons are gated. Opt out per-button with data-no-double-guard="1".
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest && e.target.closest(
+    '.btn-primary, .btn-danger, .btn-success, .btn-low-stock, .btn-waiting'
+  );
+  if (!btn) return;
+  if (btn.disabled) return;
+  if (btn.dataset && btn.dataset.noDoubleGuard === '1') return;
+  // Only guard buttons INSIDE a modal / dialog — regular in-page action
+  // buttons (Refresh, filter chips, etc.) stay freely clickable.
+  if (!btn.closest('.modal, .dlg-box, .modal-card, .split-table')) return;
+  btn.disabled = true;
+  setTimeout(() => { if (btn.isConnected) btn.disabled = false; }, 4000);
+}, true);
 function notify(msg) {
   const el = document.getElementById('notif');
   el.textContent = msg; el.classList.add('show');
