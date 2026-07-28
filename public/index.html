@@ -13093,30 +13093,33 @@ function updateStockHint() {
   // Round up so 6.1 packets shows as 7 (you can't pull a fraction of a packet).
   const rawNeed    = sheetsNeed / cutPieces;
   const neededPkts = sheetsNeed > 0 ? Math.ceil(rawNeed / ps) : 0;
-  // "Available after issuance" — balance minus ALL pending jobs' sheet needs
-  // for this paper group, so the PM sees true remaining capacity.
+  // Other pending jobs on the same paper group.
   const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
   const key = it ? paperGroupKey(it) : null;
-  let totalPendingSheets = 0;
+  let otherPendingSheets = 0;
   if (key) {
     (jobs || []).forEach(j => {
       if (j.id === editingId) return;
       if (!isPendingIssuance(j) || !j.inventory_item_id) return;
       const jIt = inventory.find(x => x.id === j.inventory_item_id);
-      if (jIt && paperGroupKey(jIt) === key) totalPendingSheets += jobDeductionSheetsClient(j);
+      if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
     });
   }
-  const afterIssuanceSheets = balance - totalPendingSheets;
-  const afterPkts = Math.floor(afterIssuanceSheets / ps);
+  const thisJobSheets = Math.round(rawNeed);
+  const afterThisJob = Math.floor((balance - thisJobSheets) / ps);
+  const afterAll     = Math.floor((balance - thisJobSheets - otherPendingSheets) / ps);
 
   let cls = 'stock-hint';
   if (balance <= 0) cls += ' out';
   else if (neededPkts > availPkts) cls += ' low';
   hint.className = cls;
-  let text = neededPkts > 0
-    ? `Available: ${availPkts.toLocaleString()} ${unit} · Need: ${neededPkts.toLocaleString()} ${unit}${neededPkts > availPkts ? ' · Short by ' + (neededPkts - availPkts).toLocaleString() : ''}`
-    : `Available: ${availPkts.toLocaleString()} ${unit}`;
-  if (totalPendingSheets > 0) text += ` · After all pending: ${afterPkts.toLocaleString()} ${unit}`;
+  let text = `Available: ${availPkts.toLocaleString()} ${unit}`;
+  if (neededPkts > 0) {
+    text += ` · Need: ${neededPkts.toLocaleString()} ${unit}`;
+    if (neededPkts > availPkts) text += ` · Short by ${(neededPkts - availPkts).toLocaleString()}`;
+    text += ` · After issuance: ${afterThisJob.toLocaleString()} ${unit}`;
+    if (otherPendingSheets > 0) text += ` (${afterAll.toLocaleString()} after all pending)`;
+  }
   hint.textContent = text;
 }
 
