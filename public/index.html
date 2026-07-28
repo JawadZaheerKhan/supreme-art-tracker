@@ -13093,13 +13093,31 @@ function updateStockHint() {
   // Round up so 6.1 packets shows as 7 (you can't pull a fraction of a packet).
   const rawNeed    = sheetsNeed / cutPieces;
   const neededPkts = sheetsNeed > 0 ? Math.ceil(rawNeed / ps) : 0;
+  // "Available after issuance" — balance minus ALL pending jobs' sheet needs
+  // for this paper group, so the PM sees true remaining capacity.
+  const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
+  const key = it ? paperGroupKey(it) : null;
+  let totalPendingSheets = 0;
+  if (key) {
+    (jobs || []).forEach(j => {
+      if (j.id === editingId) return;
+      if (!isPendingIssuance(j) || !j.inventory_item_id) return;
+      const jIt = inventory.find(x => x.id === j.inventory_item_id);
+      if (jIt && paperGroupKey(jIt) === key) totalPendingSheets += jobDeductionSheetsClient(j);
+    });
+  }
+  const afterIssuanceSheets = balance - totalPendingSheets;
+  const afterPkts = Math.floor(afterIssuanceSheets / ps);
+
   let cls = 'stock-hint';
   if (balance <= 0) cls += ' out';
   else if (neededPkts > availPkts) cls += ' low';
   hint.className = cls;
-  hint.textContent = neededPkts > 0
+  let text = neededPkts > 0
     ? `Available: ${availPkts.toLocaleString()} ${unit} · Need: ${neededPkts.toLocaleString()} ${unit}${neededPkts > availPkts ? ' · Short by ' + (neededPkts - availPkts).toLocaleString() : ''}`
     : `Available: ${availPkts.toLocaleString()} ${unit}`;
+  if (totalPendingSheets > 0) text += ` · After all pending: ${afterPkts.toLocaleString()} ${unit}`;
+  hint.textContent = text;
 }
 
 // ── Paper combobox ───────────────────────────────────────────
@@ -13412,10 +13430,7 @@ function openDuplicateJob(id) {
   const template = {
     ...source,
     id:             undefined,           // new job, server assigns
-    // Code is intentionally BLANK on duplicate — PM types the new
-    // code themselves. Prior behavior auto-incremented (000234 →
-    // 000235) which silently overwrote codes the PM didn't intend.
-    jobcode:        '',
+    jobcode:        source.jobcode || '',
     ref:            '',                  // P.O. No. — different each order
     deadline:       '',                  // set fresh per order
     delqty:         '',                  // not delivered yet
@@ -14470,7 +14485,8 @@ function buildPrintCard(j) {
       /* Job priority — colored by new level names. Overrides the blue
          .pc-value rule. Normal=black, Urgent=dark blue, Most Urgent=green. */
       .pc-value.pc-prio-normal      { color: #000000 !important; font-weight: 700 !important; }
-      .pc-value.pc-prio-urgent      { color: #854d0e !important; font-weight: 700 !important; }
+      .pc-value.pc-prio-urgent      { color: #ca8a04 !important; font-weight: 700 !important; }
+      .pc-value.pc-deadline         { color: #ca8a04 !important; font-weight: 700 !important; }
       .pc-value.pc-prio-most-urgent { color: #166534 !important; font-weight: 700 !important; }
       .pc-value.pc-prio-normal, .pc-value.pc-prio-urgent, .pc-value.pc-prio-most-urgent {
         -webkit-print-color-adjust: exact !important;
@@ -14524,7 +14540,7 @@ function buildPrintCard(j) {
     <table class="pc-table">
       <tr>
         ${dateCell('Date', j.dateissued)}
-        ${dateCell('Deadline', j.deadline)}
+        <td><div class="pc-label">Deadline</div><div class="pc-value pc-deadline">${fmt(j.deadline)}</div></td>
         <td colspan="2"><div class="pc-label">P.O. Qty</div><div class="pc-value">${v(j.qty)}</div></td>
         <td colspan="2"><div class="pc-label">Machine Name</div><div class="pc-value pc-machine">${v(j.machine)}</div></td>
         ${cell('Ups', j.ups)}
