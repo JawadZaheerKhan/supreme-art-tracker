@@ -3702,7 +3702,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       // a wrong Sold/Damaged/Sample entry from the item History.
       'sold', 'damaged', 'sample', 'manual-job-card',
     ]);
-    if (!REVERSIBLE_REASONS.has(tx.reason)) {
+    // Admin can reverse ANY reason (including bookkeeping rows like
+    // 'correction' or 'opening-balance'). Non-admins are still bound
+    // to the standard reversible-reasons allow-list.
+    if (!REVERSIBLE_REASONS.has(tx.reason) && !userHasRole(req.user, 'admin')) {
       return res.status(400).json({ error: `Cannot reverse a '${tx.reason}' entry.` });
     }
     if (tx.reverses_tx_id) {
