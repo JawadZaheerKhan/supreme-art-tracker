@@ -2666,9 +2666,18 @@ document.addEventListener('click', (e) => {
   // Only guard buttons INSIDE a modal / dialog — regular in-page action
   // buttons (Refresh, filter chips, etc.) stay freely clickable.
   if (!btn.closest('.modal, .dlg-box, .modal-card, .split-table')) return;
-  btn.disabled = true;
-  setTimeout(() => { if (btn.isConnected) btn.disabled = false; }, 4000);
-}, true);
+  // IMPORTANT: disable in a microtask/setTimeout, NOT synchronously in
+  // this handler. Bubble-phase means the button's inline onclick has
+  // already fired — but setting .disabled here can still trip form-
+  // submission edge cases in some browsers. Defer to next tick so the
+  // first click's handler completes cleanly, then subsequent clicks
+  // hit the disabled state.
+  setTimeout(() => {
+    if (!btn.isConnected) return;
+    btn.disabled = true;
+    setTimeout(() => { if (btn.isConnected) btn.disabled = false; }, 4000);
+  }, 0);
+});
 function notify(msg) {
   const el = document.getElementById('notif');
   el.textContent = msg; el.classList.add('show');
