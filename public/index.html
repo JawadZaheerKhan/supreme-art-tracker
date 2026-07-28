@@ -3680,27 +3680,40 @@ function renderJobCard(j, opts) {
   const issued__  = (j.issuance_status === 'issued');
   const stockDotCls = (issued__ || (si > 1)) ? 'rib-done'
                     : (pending__ ? 'rib-current' : 'rib-future');
-  const ribbon = (isNew || isCtp) ? '' : STAGES.map((s, i) => {
+  // rib-dot compact strip for internal Track view. clientPreview mode
+  // renders pipeline pills below instead (better read at a glance).
+  const ribbon = (isNew || isCtp || clientPreview) ? '' : STAGES.map((s, i) => {
     let cls = 'rib-future';
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
     else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 'rib-blocked' : 'rib-current';
-    let dot;
-    if (clientPreview) dot = `<span class="rib-dot ${cls}" title="${esc(s)}" style="cursor:default"></span>`;
-    else {
-      const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
-      dot = `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
-    }
+    const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+    const dot = `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
     if (i === 1) {
-      // Insert virtual "Stock" dot before Print — matches the compact
-      // pipeline pills so clients / admins see the same 9 steps.
-      const stockDot = clientPreview
-        ? `<span class="rib-dot ${stockDotCls}" title="Pending Stock" style="cursor:default"></span>`
-        : `<button class="rib-dot ${stockDotCls}" title="Send to Pending Stock" onclick="moveJobToPendingStock(${j.id})"></button>`;
+      const stockDot = `<button class="rib-dot ${stockDotCls}" title="Send to Pending Stock" onclick="moveJobToPendingStock(${j.id})"></button>`;
       return stockDot + dot;
     }
     return dot;
   }).join('');
+  // Client-preview pipeline — pill-style, same look as the compact view
+  // (CTP · Stock · Print · Coat · ...). Non-clickable for clients.
+  const clientPipeline = (clientPreview && !isNew && !isCtp)
+    ? STAGES.map((s, i) => {
+        let cls = 's-pending';
+        const st = j.stages?.[i]?.status;
+        if (st === 'done') cls = 's-done';
+        else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 's-blocked' : 's-active';
+        const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}</span>`;
+        if (i === 1) {
+          let psCls = 's-pending';
+          if (issued__ || (si > 1)) psCls = 's-done';
+          else if (pending__) psCls = 's-active';
+          const psPill = `<span class="arrow">›</span><span class="stage-pill ${psCls}" title="Pending Stock" style="cursor:default;">Stock</span>`;
+          return `${psPill}<span class="arrow">›</span>${pill}`;
+        }
+        return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
+      }).join('')
+    : '';
 
   // The machine vignette reflects the current stage (or the pending pre-state).
   const stageLabel = pending ? 'Awaiting Stock' : STAGES[si];
@@ -3831,7 +3844,9 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : `<div class="tile-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' · ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>`}
     ${clientBlockedBanner}
     ${machine}
-    <div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>
+    ${clientPipeline
+      ? `<div class="pipeline" style="justify-content:center;">${clientPipeline}</div>`
+      : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
