@@ -370,6 +370,11 @@ async function initDb() {
     await sql`ALTER TABLE inventory_imports ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE inventory_imports ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS imports_deleted_at_idx ON inventory_imports(deleted_at) WHERE deleted_at IS NOT NULL`;
+    // Partial receive support: tracks how many packets have been received so
+    // far across possibly multiple deliveries. status flows pending →
+    // partial (some but not all received) → received (fully received), or
+    // pending → cancelled.
+    await sql`ALTER TABLE inventory_imports ADD COLUMN IF NOT EXISTS received_packets NUMERIC DEFAULT 0`;
 
     // Auth: allow-list of users keyed by email. role is enforced via CHECK so
     // the DB rejects typos. invited_by is just a breadcrumb for the Users tab.
@@ -4142,16 +4147,23 @@ app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
 // RECEIVE an import — converts it to a real stock-in transaction. If the
 // import has no linked inventory_item, we create one on the fly using the
 // import's paper_type/size/gsm/brand. The body may override `packets` (e.g.,
-// when the actual delivery differs from the booked quantity).
+// when the actual delivery differs from the booked quantity). Supports
+// partial receives: if the received quantity (added to whatever was already
+// received on earlier deliveries) is less than the booked total, the import
+// stays at status='partial' instead of 'received' so it remains actionable.
 app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
     const overridePackets = parseFloat(req.body?.packets);
+    const challanNo = req.body?.challan_no;
+    const receiveNotes = req.body?.notes;
     const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id} AND deleted_at IS NULL`)[0];
     if (!imp) return res.status(404).json({ error: 'Import not found' });
-    if (imp.status !== 'pending') return res.status(400).json({ error: 'Only pending imports can be received' });
+    if (imp.status !== 'pending' && imp.status !== 'partial') {
+      return res.status(400).json({ error: 'Only pending or partially-received imports can be received' });
+    }
 
     // Find or create the inventory item. The unique index on
     // (paper_type, COALESCE(size,''), COALESCE(gsm,''), COALESCE(brand,''))
@@ -4182,21 +4194,34 @@ app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) =>
     // Mirrors packetSize() in the frontend.
     const reamSet = new Set(['art paper', 'off-white', 'offset paper']);
     const perPack = reamSet.has(imp.paper_type) ? 500 : 100;
-    const pkts = Number.isFinite(overridePackets) && overridePackets > 0 ? overridePackets : parseFloat(imp.packets);
-    const sheets = Math.round(pkts * perPack);
+    const receivedPackets = Number.isFinite(overridePackets) && overridePackets > 0 ? overridePackets : parseFloat(imp.packets);
+    const sheets = Math.round(receivedPackets * perPack);
     if (!sheets || sheets <= 0) return res.status(400).json({ error: 'packets must be > 0' });
+
+    const notesParts = [
+      `Import #${imp.id}${imp.supplier ? ' · ' + imp.supplier : ''}`,
+      imp.notes || null,
+      receiveNotes ? String(receiveNotes).trim() || null : null,
+    ].filter(Boolean);
 
     await applyInventoryChange(sql, {
       itemId,
       change: +sheets,
       reason: 'import-received',
       jobId: null,
-      notes: `Import #${imp.id}${imp.supplier ? ' · ' + imp.supplier : ''}${imp.notes ? ' · ' + imp.notes : ''}`,
+      notes: notesParts.join(' · '),
       user: req.user,
+      challanNo,
     });
+
+    const newReceivedTotal = (parseFloat(imp.received_packets) || 0) + receivedPackets;
+    const newStatus = newReceivedTotal >= parseFloat(imp.packets) ? 'received' : 'partial';
     const updated = await sql`
       UPDATE inventory_imports SET
-        status='received', received_at=NOW(), inventory_item_id=${itemId}, packets=${pkts}
+        status=${newStatus},
+        received_at=NOW(),
+        inventory_item_id=${itemId},
+        received_packets=${newReceivedTotal}
       WHERE id=${id} RETURNING *
     `;
     res.json(updated[0]);
