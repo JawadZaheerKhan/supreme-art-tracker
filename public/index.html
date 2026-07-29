@@ -5385,6 +5385,7 @@ function openInvAddStock(id) {
       </div>
     </div>
     <div class="form-row">
+      <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stock-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Reason</label>
         <select id="stock-reason">
           <option value="delivery">Delivery</option>
@@ -5392,8 +5393,8 @@ function openInvAddStock(id) {
           <option value="return">Return / unused stock</option>
         </select>
       </div>
-      <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
     </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvAddStock(${id})">Add</button>
@@ -5420,6 +5421,7 @@ async function saveInvAddStock(id) {
     change: qty,
     reason: document.getElementById('stock-reason').value,
     notes:  document.getElementById('stock-notes').value.trim(),
+    challan_no: (document.getElementById('stock-challan').value || '').trim() || null,
   };
   showSaving(true);
   try {
@@ -5462,24 +5464,28 @@ function openInvRemoveStock(id, opts) {
       </div>
     </div>
     <div class="form-row">
+      <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Reason</label>
-        <select id="stockout-reason">
-          ${['job-card','sold','damaged','sample','adjustment'].map(r => {
-            const labels = {sold:'Sold / Delivered to customer',damaged:'Damaged',sample:'Sample',adjustment:'Manual adjustment','job-card':'Job Card (manual issue)'};
+        <select id="stockout-reason" onchange="stockOutReasonChanged(${id})">
+          ${['job-card','manual-job-card','sold','damaged','sample','adjustment'].map(r => {
+            const labels = {sold:'Sold / Delivered to customer',damaged:'Damaged',sample:'Sample',adjustment:'Manual adjustment','job-card':'Job Card (pending)','manual-job-card':'Manual Job Card'};
             const sel = r === 'job-card' ? ' selected' : '';
             return `<option value="${r}"${sel}>${labels[r]}</option>`;
           }).join('')}
         </select>
       </div>
-      <div class="form-group"><label class="form-label">Job Card No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-jobcard" value="${esc(preJobCard)}" placeholder="e.g. E-85 or 85"></div>
+    </div>
+    <div id="stockout-jobchips-wrap" style="margin-bottom:8px;"></div>
+    <div id="stockout-manual-wrap" style="display:none;margin-bottom:8px;">
+      <div class="form-group"><label class="form-label">Job Card No.</label><input type="text" id="stockout-jobcard" value="${esc(preJobCard)}" placeholder="e.g. E-85 or 85"></div>
     </div>
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stockout-notes" placeholder="Optional details"></div>
-    <div style="font-size:11px;color:var(--text2);margin-top:6px;">Linking a Job Card No. that's currently in Pending Stock will mark that job as issued and remove it from the pending queue.</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
     </div>
   </div>`);
+  stockOutReasonChanged(id);
 }
 function stockOutQtySync(source, ps) {
   const packetsEl = document.getElementById('stockout-packets');
@@ -5493,17 +5499,86 @@ function stockOutQtySync(source, ps) {
     packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
   }
 }
+function stockOutReasonChanged(itemId) {
+  const reason = document.getElementById('stockout-reason').value;
+  const chipsWrap = document.getElementById('stockout-jobchips-wrap');
+  const manualWrap = document.getElementById('stockout-manual-wrap');
+  if (!chipsWrap || !manualWrap) return;
+  if (reason === 'job-card') {
+    chipsWrap.style.display = '';
+    manualWrap.style.display = 'none';
+    stockOutLoadPendingChips(itemId);
+  } else if (reason === 'manual-job-card') {
+    chipsWrap.style.display = 'none';
+    manualWrap.style.display = '';
+  } else {
+    chipsWrap.style.display = 'none';
+    manualWrap.style.display = 'none';
+  }
+}
+function stockOutLoadPendingChips(itemId) {
+  const wrap = document.getElementById('stockout-jobchips-wrap');
+  if (!wrap) return;
+  const it = inventory.find(x => x.id === itemId);
+  if (!it) { wrap.innerHTML = ''; return; }
+  const key = paperGroupKey(it);
+  const ps = packetSize(it.paper_type);
+  const unit = packetUnitLabel(it.paper_type);
+  const candidates = (jobs || []).filter(j => {
+    if (!isPendingIssuance(j) || !j.inventory_item_id) return false;
+    const jIt = inventory.find(x => x.id === j.inventory_item_id);
+    return jIt && paperGroupKey(jIt) === key;
+  });
+  if (!candidates.length) {
+    wrap.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:4px 0;">No pending jobs for this paper group</div>';
+    return;
+  }
+  wrap.innerHTML = '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px;">Select pending job(s):</div><div id="stockout-chips" style="display:flex;flex-wrap:wrap;gap:6px;">' +
+    candidates.map(j => {
+      const need = jobDeductionSheetsClient(j);
+      const needPkts = Math.ceil(need / ps);
+      return `<button type="button" class="jobchip" data-jobid="${j.id}" data-need="${need}"
+        onclick="stockOutToggleChip(this, ${ps})"
+        title="E-${j.id} · ${needPkts} ${unit} needed"
+        style="padding:5px 10px;border:1.5px solid var(--border);border-radius:999px;background:#fff;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">E-${j.id} (${needPkts} ${unit.toLowerCase()})</button>`;
+    }).join('') + '</div>';
+}
+function stockOutToggleChip(chip, ps) {
+  const sel = !chip.classList.contains('is-sel');
+  chip.classList.toggle('is-sel', sel);
+  if (sel) { chip.style.background = '#166534'; chip.style.color = '#fff'; chip.style.borderColor = '#166534'; }
+  else { chip.style.background = '#fff'; chip.style.color = 'var(--text)'; chip.style.borderColor = 'var(--border)'; }
+  let totalSheets = 0;
+  document.querySelectorAll('#stockout-chips .jobchip.is-sel').forEach(c => {
+    totalSheets += parseInt(c.dataset.need, 10) || 0;
+  });
+  if (totalSheets > 0) {
+    const packetsEl = document.getElementById('stockout-packets');
+    const sheetsEl = document.getElementById('stockout-qty');
+    if (sheetsEl) sheetsEl.value = totalSheets;
+    if (packetsEl) packetsEl.value = +(totalSheets / ps).toFixed(2);
+  }
+}
 async function saveInvRemoveStock(id) {
   const it = inventory.find(x => x.id === id);
   const qty = parseInt(document.getElementById('stockout-qty').value, 10);
   if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
   const have = it ? (it.current_balance || 0) : 0;
   if (qty > have) { await alertDialog({ title: 'Not enough stock', message: `On hand is ${have.toLocaleString()} sheets. Requested ${qty.toLocaleString()}. Reconcile the count first (Edit → Adjust by).`, kind: 'warn' }); return; }
+  const reason = document.getElementById('stockout-reason').value;
+  let jobCard = null;
+  if (reason === 'job-card') {
+    const selected = document.querySelectorAll('#stockout-chips .jobchip.is-sel');
+    if (selected.length) jobCard = Array.from(selected).map(c => c.dataset.jobid).join(',');
+  } else if (reason === 'manual-job-card') {
+    jobCard = (document.getElementById('stockout-jobcard').value || '').trim() || null;
+  }
   const data = {
     change: -qty,
-    reason: document.getElementById('stockout-reason').value,
+    reason: reason,
     notes:  document.getElementById('stockout-notes').value.trim(),
-    job_card: document.getElementById('stockout-jobcard').value.trim() || null,
+    job_card: jobCard,
+    challan_no: (document.getElementById('stockout-challan').value || '').trim() || null,
   };
   showSaving(true);
   try {
@@ -6308,7 +6383,7 @@ async function renderInvHistory(id) {
         'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
         'job-issuance-reversed',
         // Manual stock-out reasons.
-        'sold', 'damaged', 'sample',
+        'sold', 'damaged', 'sample', 'job-card', 'manual-job-card',
       ]);
       // Calendar-day window: reversible if the tx was created today
       // (00:00–23:59 of the same calendar day), not rolling 24 hours.
@@ -6338,11 +6413,13 @@ async function renderInvHistory(id) {
       const rowStyle = hasBeenReversed
         ? 'background:#fff7ed;opacity:0.7;'
         : (isReversal ? 'background:#fff7ed;' : '');
+      const challan = t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>';
       return `<tr style="${rowStyle}">
         <td>${date}</td>
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
         <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
         <td>${reasonHtml}</td>
+        <td>${challan}</td>
         <td>${job}</td>
         <td>${by}</td>
         <td>${esc(t.notes||'')}</td>
@@ -6356,7 +6433,7 @@ async function renderInvHistory(id) {
     if (!box) return;
     box.innerHTML = txs.length
       ? `<table class="ledger-table">
-           <tr><th>When</th><th>Change (${unit})</th><th>Balance After</th><th>Reason</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
+           <tr><th>When</th><th>Change (${unit})</th><th>Balance After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';

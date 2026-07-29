@@ -3700,7 +3700,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       'job-issuance-reversed',
       // Manual stock-out reasons — added so the store keeper can undo
       // a wrong Sold/Damaged/Sample entry from the item History.
-      'sold', 'damaged', 'sample', 'manual-job-card',
+      'sold', 'damaged', 'sample', 'job-card', 'manual-job-card',
     ]);
     // Admin can reverse ANY reason (including bookkeeping rows like
     // 'correction' or 'opening-balance'). Non-admins are still bound
