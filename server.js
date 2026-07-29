@@ -61,7 +61,7 @@ function businessWallClockToMs(y, mo, d, h, mi) {
 
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
-const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Finished','Delivered'];
+const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Ready to Deliver','Delivered'];
 
 // Coating finish kinds split into wet (Coatings tab) and embellishment
 // (Embellishments tab) so each tab shows only the work that section does.
@@ -83,7 +83,7 @@ const ROLES = [
   { id: 'diecut',    label: 'Die Cutting',      stage_index: 3 },
   { id: 'break',     label: 'Sorting',          stage_index: 4 },
   { id: 'paste',     label: 'Pasting',          stage_index: 5 },
-  { id: 'storage',   label: 'Finished',         stage_index: 6 },
+  { id: 'storage',   label: 'Ready to Deliver',  stage_index: 6 },
 ];
 const ROLE_FINISHES = {
   coatings:  ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup','Color Seal'],
