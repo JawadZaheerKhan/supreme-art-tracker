@@ -7805,7 +7805,13 @@ function fmtImpDate(d) { return fmtDMY(d, true); }
 function filterImportsList() {
   const state = importsPageState;
   let list = importsCache.slice();
-  if (state.status !== 'all') list = list.filter(i => i.status === state.status);
+  if (state.status !== 'all') {
+    // Partial rows are still actionable (need a follow-up receive), so the
+    // Pending filter tab surfaces them alongside true 'pending' rows.
+    list = state.status === 'pending'
+      ? list.filter(i => i.status === 'pending' || i.status === 'partial')
+      : list.filter(i => i.status === state.status);
+  }
   if (state.paperType)        list = list.filter(i => (i.paper_type || '') === state.paperType);
   if (state.expectedDate) {
     list = list.filter(i => i.expected_arrival && String(i.expected_arrival).slice(0, 10) === state.expectedDate);
@@ -7816,9 +7822,10 @@ function filterImportsList() {
   // Sort: latest first by default (newest id = most recently booked).
   // When viewing All, still bubble Pending to the top (they're actionable),
   // but within each group order by id desc so the latest entry is on top.
+  const isActionable = s => s === 'pending' || s === 'partial';
   list.sort((a, b) => {
-    if (state.status === 'all' && (a.status === 'pending') !== (b.status === 'pending')) {
-      return a.status === 'pending' ? -1 : 1;
+    if (state.status === 'all' && isActionable(a.status) !== isActionable(b.status)) {
+      return isActionable(a.status) ? -1 : 1;
     }
     // Pick the most-relevant date for the current status, fall back to id.
     const dateA = a.received_at || a.booked_date || a.expected_arrival || '';
@@ -7868,7 +7875,9 @@ function renderImportsBulkBar() {
   // Inspect the selection: on the Pending tab we enable Receive/Cancel; on
   // other tabs only Delete makes sense (and only for non-received rows).
   const selectedItems = selected.map(id => importsCache.find(i => i.id === id)).filter(Boolean);
-  const allPending = selectedItems.length && selectedItems.every(i => i.status === 'pending');
+  // "Pending" here covers both true pending rows and partially-received
+  // ones — both still need a Receive action.
+  const allPending = selectedItems.length && selectedItems.every(i => i.status === 'pending' || i.status === 'partial');
   const noneReceived = selectedItems.every(i => i.status !== 'received');
   bar.style.display = 'flex';
   bar.innerHTML = `
@@ -7898,10 +7907,12 @@ function renderImportsTable() {
   const rows = list.map(i => {
     const status = i.status === 'pending'
       ? '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Pending</span>'
+      : i.status === 'partial'
+      ? '<span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Partial</span>'
       : i.status === 'received'
       ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
       : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
-    const actions = i.status === 'pending'
+    const actions = (i.status === 'pending' || i.status === 'partial')
       ? `<button class="btn btn-sm ceo-hide" onclick="receiveImport(${i.id})">Receive</button>
          <button class="btn btn-sm ceo-hide" onclick="editImport(${i.id})">Edit</button>
          <button class="btn btn-sm ceo-hide" onclick="cancelImport(${i.id})">Cancel</button>`
@@ -7910,6 +7921,13 @@ function renderImportsTable() {
     const weight = (i.weight_kg === null || i.weight_kg === undefined || i.weight_kg === '')
       ? '—'
       : (+i.weight_kg).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg';
+    // Partial rows show what's arrived so far vs the booked total, with the
+    // still-outstanding amount called out so it's obvious a follow-up
+    // delivery is expected.
+    const received = parseFloat(i.received_packets) || 0;
+    const qtyCell = (i.status === 'partial' && received > 0)
+      ? `${received.toLocaleString()} / ${(+i.packets).toLocaleString()} ${unit} <span style="color:#1e40af;font-weight:600;">(${(+i.packets - received).toLocaleString()} remaining)</span>`
+      : `${(+i.packets).toLocaleString()} ${unit}`;
     const isSel = importsBulkSel.has(i.id);
     return `<tr data-imp-row="${i.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleImportRow(${i.id}, this.checked)"></td>
@@ -7918,7 +7936,7 @@ function renderImportsTable() {
       <td style="padding:8px 10px;white-space:nowrap;">${esc(i.size || '—')}</td>
       <td style="padding:8px 10px;text-align:right;">${esc(i.gsm || '—')}</td>
       <td style="padding:8px 10px;">${esc(i.brand || '—')}</td>
-      <td style="padding:8px 10px;text-align:right;white-space:nowrap;font-weight:600;">${(+i.packets).toLocaleString()} ${unit}</td>
+      <td style="padding:8px 10px;text-align:right;white-space:nowrap;font-weight:600;">${qtyCell}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${weight}</td>
       <td style="padding:8px 10px;">${esc(i.supplier || '—')}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.booked_date))}</td>
@@ -8982,25 +9000,87 @@ async function saveImport(id) {
   } catch (e) { notify('Error: ' + e.message); }
 }
 
-async function receiveImport(id) {
+// Opens the full Receive modal for a single import — mirrors the Add Stock
+// modal (packets/sheets sync, challan, notes) with two additions specific to
+// imports: a "booked vs already received" header, and a "partial receive"
+// checkbox for shipments that arrive in more than one delivery. Quantity
+// defaults to whatever's still outstanding (booked − already received).
+function receiveImport(id) {
   const imp = importsCache.find(i => i.id === id); if (!imp) return;
-  const unit = packetUnitLabel(imp.paper_type).toLowerCase();
-  const answer = await promptDialog({
-    title: `Receive ${imp.packets} ${unit}?`,
-    message: 'Enter the actual quantity received (or click OK to accept the booked amount).',
-    defaultValue: String(imp.packets),
-    confirmText: 'Receive',
-  });
-  if (answer === null) return; // cancelled
-  const packets = parseFloat(answer);
-  if (!packets || packets <= 0) { notify('Quantity must be > 0'); return; }
+  const label = [imp.paper_type, imp.size, imp.gsm && (imp.gsm + 'gsm'), imp.brand].filter(Boolean).join(' · ');
+  const ps = packetSize(imp.paper_type);
+  const unit = packetUnitLabel(imp.paper_type);
+  const alreadyReceived = parseFloat(imp.received_packets) || 0;
+  const booked = parseFloat(imp.packets) || 0;
+  const remaining = Math.max(0, booked - alreadyReceived);
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>Receive Import</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;">
+      <b style="color:var(--text)">${esc(label)}</b><br>
+      Booked: ${booked.toLocaleString()} ${unit.toLowerCase()}${alreadyReceived > 0 ? ` · Already received: ${alreadyReceived.toLocaleString()} ${unit.toLowerCase()}` : ''}
+      · 1 ${unit.slice(0,-1).toLowerCase()} = ${ps} sheets
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Quantity — ${unit}</label>
+        <input type="number" id="recvimp-packets" placeholder="0" min="0" step="any" value="${remaining}" oninput="recvImpQtySync('packets', ${ps})">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Quantity — Sheets *</label>
+        <input type="number" id="recvimp-qty" placeholder="0" min="1" value="${Math.round(remaining * ps)}" oninput="recvImpQtySync('sheets', ${ps})">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="recvimp-challan" placeholder="e.g. CH-2026-042"></div>
+      <div class="form-group"><label class="form-label">Notes</label><input type="text" id="recvimp-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
+    </div>
+    <div class="form-group" style="margin-top:4px;">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;cursor:pointer;">
+        <input type="checkbox" id="recvimp-partial" style="width:auto;">
+        Partial receive (more deliveries coming)
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveReceiveImport(${id})">Receive</button>
+    </div>
+  </div>`);
+}
+// Two-way sync in the Receive Import modal — same idea as stockQtySync.
+function recvImpQtySync(source, ps) {
+  const packetsEl = document.getElementById('recvimp-packets');
+  const sheetsEl  = document.getElementById('recvimp-qty');
+  if (!packetsEl || !sheetsEl) return;
+  if (source === 'packets') {
+    const p = parseFloat(packetsEl.value);
+    sheetsEl.value = isNaN(p) ? '' : Math.round(p * ps);
+  } else {
+    const s = parseFloat(sheetsEl.value);
+    packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  }
+}
+async function saveReceiveImport(id) {
+  const imp = importsCache.find(i => i.id === id); if (!imp) return;
+  const ps = packetSize(imp.paper_type);
+  const sheets = parseFloat(document.getElementById('recvimp-qty').value);
+  if (!sheets || sheets <= 0) { notify('Quantity must be > 0'); return; }
+  const packets = +(sheets / ps).toFixed(2);
+  const body = {
+    packets,
+    challan_no: (document.getElementById('recvimp-challan').value || '').trim() || null,
+    notes:      (document.getElementById('recvimp-notes').value   || '').trim() || null,
+    partial:    document.getElementById('recvimp-partial').checked,
+  };
+  showSaving(true);
   try {
-    await api('POST', `/api/imports/${id}/receive`, { packets });
+    await api('POST', `/api/imports/${id}/receive`, body);
     notify('Import received · stock added');
     await loadInventory(); // refresh balances
     await loadImports();
     renderImportsTable();
+    closeModal();
   } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 
 // ── Dashboard ────────────────────────────────────────────────
@@ -10040,6 +10120,8 @@ function renderTrashImports() {
     const unit = packetUnitLabel(r.paper_type).toLowerCase();
     const statusBadge = r.status === 'pending'
       ? '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Pending</span>'
+      : r.status === 'partial'
+      ? '<span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Partial</span>'
       : r.status === 'received'
       ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
       : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
@@ -11808,9 +11890,11 @@ function bulkRecvConfirm(count) {
 
 async function bulkReceiveImports() {
   const ids = [...importsBulkSel];
-  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status === 'pending');
+  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && (i.status === 'pending' || i.status === 'partial'));
   if (!rows.length) { notify('No pending rows selected.'); return; }
-  // Build per-row qty body — table inside the branded dialog.
+  // Build per-row qty body — table inside the branded dialog. Default qty is
+  // whatever's still outstanding (booked − already received), so a partial
+  // row defaults to the remainder rather than the full booked amount.
   const bodyHtml = `
     <table class="recv-qty-table">
       <thead><tr><th>Paper · Size · GSM · Brand</th><th style="text-align:right;">Booked</th><th>Receive</th></tr></thead>
@@ -11818,15 +11902,20 @@ async function bulkReceiveImports() {
         ${rows.map((r, idx) => {
           const lbl = [r.paper_type, r.size, r.gsm && (r.gsm + 'gsm'), r.brand].filter(Boolean).map(esc).join(' · ');
           const unit = packetUnitLabel(r.paper_type).toLowerCase();
+          const already = parseFloat(r.received_packets) || 0;
+          const remaining = Math.max(0, (+r.packets) - already);
+          const bookedLabel = already > 0
+            ? `${(+r.packets).toLocaleString()} ${unit} <span style="color:var(--text2);">(${already.toLocaleString()} recv'd)</span>`
+            : `${(+r.packets).toLocaleString()} ${unit}`;
           return `<tr>
             <td>${lbl}</td>
-            <td style="text-align:right;">${(+r.packets).toLocaleString()} ${unit}</td>
-            <td class="col-qty"><input type="number" step="0.01" min="0" id="recv-qty-${idx}" value="${+r.packets}"></td>
+            <td style="text-align:right;">${bookedLabel}</td>
+            <td class="col-qty"><input type="number" step="0.01" min="0" id="recv-qty-${idx}" value="${remaining}"></td>
           </tr>`;
         }).join('')}
       </tbody>
     </table>
-    <div style="margin-top:8px;font-size:12px;color:var(--text2);">Edit any quantity to match what actually arrived. Set to 0 to skip a row.</div>
+    <div style="margin-top:8px;font-size:12px;color:var(--text2);">Edit any quantity to match what actually arrived. Set to 0 to skip a row. Rows left short of their booked total stay marked Partial.</div>
   `;
   const buttons = `
     <button class="btn" onclick="dlgClose(false)">Cancel</button>
