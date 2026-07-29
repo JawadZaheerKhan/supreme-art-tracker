@@ -2387,6 +2387,11 @@ function jobDeductionSheets({ paperType, particulars }) {
 // who entered the row and to link reversals to their originals.
 async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, challanNo }) {
   if (!itemId || !change) return null;
+  if (change < 0) {
+    const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
+    const bal = item ? parseFloat(item.current_balance) || 0 : 0;
+    if (bal + change < 0) throw new Error(`Insufficient stock: only ${bal} sheets available, cannot deduct ${Math.abs(change)}`);
+  }
   const userId    = user && user.id    ? user.id    : null;
   const userEmail = user && user.email ? user.email : null;
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
