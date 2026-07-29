@@ -4473,7 +4473,7 @@ async function loadDailyStats() {
   try {
     const txs = await api('GET', `/api/inventory/transactions?from=${today}&to=${today}&direction=out`);
     for (const t of txs) {
-      if (t.reason !== 'job-consumed') continue;
+      if (t.reason !== 'job-consumed' && t.reason !== 'job-card' && t.reason !== 'manual-job-card') continue;
       const pt = t.paper_type || '';
       const ps = packetSize(pt);
       const units = Math.abs(t.change) / ps;
@@ -6828,7 +6828,7 @@ function buildSummaryBuckets(from, to, granularity) {
 //   both     — one row per (brand, supplier) combination — both columns visible
 //   ignore   — collapse to paper/size/gsm/fresh-offcut only, NO brand/supplier columns
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
-let invReportState = { groupBy: 'brand', paperType: '', includeOffcuts: true, from: '', to: '' };
+let invReportState = { groupBy: 'brand', paperType: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {} };
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
@@ -6871,6 +6871,24 @@ function openInventoryReport() {
         <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
         Include offcuts
       </label>
+      <div>
+        <div class="dash-flbl">Stock level</div>
+        <select class="filter" id="ir-stock-level" onchange="setIRStockLevel(this.value)">
+          <option value=""${!invReportState.stockLevel?' selected':''}>All</option>
+          <option value="out"${invReportState.stockLevel==='out'?' selected':''}>Out of stock</option>
+          <option value="low"${invReportState.stockLevel==='low'?' selected':''}>Low stock</option>
+        </select>
+      </div>
+      <div id="ir-low-period-wrap" style="display:${invReportState.stockLevel==='low'?'block':'none'};">
+        <div class="dash-flbl">Consumption period</div>
+        <select class="filter" id="ir-low-period" onchange="setIRLowPeriod(this.value)">
+          <option value="7"${invReportState.lowPeriod===7?' selected':''}>Last week</option>
+          <option value="30"${invReportState.lowPeriod===30?' selected':''}>Last month</option>
+          <option value="90"${invReportState.lowPeriod===90?' selected':''}>Last 3 months</option>
+          <option value="180"${invReportState.lowPeriod===180?' selected':''}>Last 6 months</option>
+          <option value="365"${invReportState.lowPeriod===365?' selected':''}>Last year</option>
+        </select>
+      </div>
     </div>
     <div id="ir-content"></div>
   `;
@@ -6879,6 +6897,25 @@ function openInventoryReport() {
 function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
 function setIRPaperType(v)       { invReportState.paperType = v;      renderInventoryReport(); }
 function setIRIncludeOffcuts(v)  { invReportState.includeOffcuts = !!v; renderInventoryReport(); }
+function setIRStockLevel(v) {
+  invReportState.stockLevel = v;
+  const wrap = document.getElementById('ir-low-period-wrap');
+  if (wrap) wrap.style.display = v === 'low' ? 'block' : 'none';
+  if (v === 'low') { fetchIRConsumption(); return; }
+  renderInventoryReport();
+}
+function setIRLowPeriod(v) {
+  invReportState.lowPeriod = parseInt(v, 10) || 30;
+  fetchIRConsumption();
+}
+async function fetchIRConsumption() {
+  try {
+    const rows = await api('GET', `/api/inventory/consumption?days=${invReportState.lowPeriod}`);
+    invReportState.consumption = {};
+    for (const r of rows) invReportState.consumption[r.item_id] = parseFloat(r.consumed) || 0;
+  } catch (e) { console.error('IR consumption fetch failed', e); invReportState.consumption = {}; }
+  renderInventoryReport();
+}
 async function setIRFrom(v)      { invReportState.from = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
 async function setIRTo(v)        { invReportState.to   = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
 // When a date range is set, fetch transactions in that window once and
@@ -6904,11 +6941,16 @@ async function refreshIRActiveItemIds() {
 // implied by groupBy. is_offcut is always part of the key — fresh and
 // offcut of the same dimensions stay separate so users can see them apart.
 function buildInventoryReportRows() {
-  const { groupBy, paperType, includeOffcuts, _activeItemIds } = invReportState;
+  const { groupBy, paperType, includeOffcuts, _activeItemIds, stockLevel, consumption } = invReportState;
   let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
   if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
   // Date range narrows to items with at least one movement in [from, to].
   if (_activeItemIds instanceof Set) items = items.filter(i => _activeItemIds.has(i.id));
+  if (stockLevel === 'out') items = items.filter(i => (i.current_balance || 0) <= 0);
+  if (stockLevel === 'low') items = items.filter(i => {
+    const consumed = consumption[i.id] || 0;
+    return consumed > 0 && (i.current_balance || 0) < consumed;
+  });
   const keyOf = (i) => {
     const parts = [i.paper_type, i.size || '', i.gsm || '', i.is_offcut ? 'offcut' : 'fresh'];
     // 'both' groups by (brand, supplier) — a Nashra/Century row is
@@ -6922,9 +6964,10 @@ function buildInventoryReportRows() {
   const groups = new Map();
   for (const i of items) {
     const k = keyOf(i);
-    if (!groups.has(k)) groups.set(k, { rep: i, totalSheets: 0, itemCount: 0, brands: new Set(), suppliers: new Set() });
+    if (!groups.has(k)) groups.set(k, { rep: i, totalSheets: 0, consumedSheets: 0, itemCount: 0, brands: new Set(), suppliers: new Set() });
     const g = groups.get(k);
     g.totalSheets += (i.current_balance || 0);
+    g.consumedSheets += (consumption[i.id] || 0);
     g.itemCount++;
     if (i.brand)    g.brands.add(i.brand);
     if (i.supplier) g.suppliers.add(i.supplier);
@@ -6951,6 +6994,7 @@ function buildInventoryReportRows() {
       sheets:     g.totalSheets,
       weightKg:   wPerPack === null ? null : (g.totalSheets / ps) * wPerPack,
       unit:       packetUnitLabel(g.rep.paper_type),
+      consumedPkts: g.consumedSheets / ps,
     };
   });
   // Sort: paper type → gsm (numeric) → size (numeric) → fresh-before-offcut → brand/supplier.
@@ -6996,18 +7040,16 @@ function renderInventoryReport() {
     items:   a.items   + r.itemCount,
     packets: a.packets + (r.packets || 0),
   }), { sheets: 0, weight: 0, items: 0, packets: 0 });
-  // Column layout depends on group mode. 'ignore' shows neither brand
-  // nor supplier column; 'both' shows both. brandCells / supplierCells
-  // are built so injecting them into <th> / <td> markup is a one-liner.
   const showBrand    = groupBy === 'brand'    || groupBy === 'both';
   const showSupplier = groupBy === 'supplier' || groupBy === 'both';
+  const showConsumed = invReportState.stockLevel === 'low';
+  const periodLabel  = { 7:'week', 30:'month', 90:'3 months', 180:'6 months', 365:'year' }[invReportState.lowPeriod] || 'period';
   const brandHead    = showBrand    ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand</th>'    : '';
   const supplierHead = showSupplier ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Supplier</th>' : '';
+  const consumedHead = showConsumed ? `<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed (${esc(periodLabel)})</th>` : '';
   const brandCell    = (r) => showBrand    ? `<td style="padding:6px 8px;">${esc(r.brand)    || '—'}</td>` : '';
   const supplierCell = (r) => showSupplier ? `<td style="padding:6px 8px;">${esc(r.supplier) || '—'}</td>` : '';
-  // Total-row colspan spans everything BEFORE the numeric columns
-  // (Paper Type through the last segmentation column). 4 fixed cols +
-  // however many extra ones showed up.
+  const consumedCell = (r) => showConsumed ? `<td style="padding:6px 8px;text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(r.consumedPkts)}</td>` : '';
   const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
   el.innerHTML = `
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">
@@ -7026,6 +7068,7 @@ function renderInventoryReport() {
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Packets / Reams</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Sheets</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Weight (kg)</th>
+          ${consumedHead}
         </tr>
       </thead>
       <tbody>
@@ -7040,6 +7083,7 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.packets, {keepZero:true})}</td>
             <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
             <td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>
+            ${consumedCell(r)}
           </tr>`).join('')}
       </tbody>
       <tfoot>
@@ -7049,6 +7093,7 @@ function renderInventoryReport() {
           <td style="padding:8px;text-align:right;">${fmtPkts(total.packets, {keepZero:true})}</td>
           <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
           <td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>
+          ${showConsumed ? `<td style="padding:8px;text-align:right;color:#A32D2D;">${fmtPkts(rows.reduce((a,r) => a + r.consumedPkts, 0))}</td>` : ''}
         </tr>
       </tfoot>
     </table>`;
