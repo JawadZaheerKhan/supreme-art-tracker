@@ -4215,7 +4215,8 @@ app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) =>
     });
 
     const newReceivedTotal = (parseFloat(imp.received_packets) || 0) + receivedPackets;
-    const newStatus = newReceivedTotal >= parseFloat(imp.packets) ? 'received' : 'partial';
+    const finalDelivery = !!req.body?.final_delivery;
+    const newStatus = (newReceivedTotal >= parseFloat(imp.packets) || finalDelivery) ? 'received' : 'partial';
     const updated = await sql`
       UPDATE inventory_imports SET
         status=${newStatus},
