@@ -3865,6 +3865,29 @@ app.get('/api/inventory/transactions', async (req, res) => {
   }
 });
 
+// Consumption summary: total sheets consumed (stock-out) per item over
+// the last N days. Used by the Low Stock filter to compare current
+// balance against recent usage.
+app.get('/api/inventory/consumption', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 730);
+    const rows = await sql`
+      SELECT item_id, SUM(ABS(change)) AS consumed
+      FROM inventory_transactions
+      WHERE change < 0
+        AND created_at >= NOW() - (${days} || ' days')::interval
+        AND reverses_tx_id IS NULL
+      GROUP BY item_id
+    `;
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // LEDGER for one item — full transaction history, newest first.
 app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   try {
