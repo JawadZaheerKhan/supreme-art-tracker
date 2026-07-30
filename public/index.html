@@ -4862,11 +4862,28 @@ function renderInvPendingList() {
         <div class="inv-actions">
           ${topupBtn}
           ${issueBtn}
+          ${isDone(j) && isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="dismissPendingStock(${j.id})" title="Remove this delivered job from the pending queue">Dismiss</button>` : ''}
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
         </div>
       </div>`;
   }).join('') + topupHtml;
+}
+
+async function dismissPendingStock(jobId) {
+  const ok = await confirmDialog({
+    title: 'Dismiss pending stock?',
+    message: 'This job is already delivered. Dismissing removes it from the pending stock queue without issuing paper.',
+    danger: true,
+    confirmText: 'Dismiss',
+  });
+  if (!ok) return;
+  try {
+    await api('POST', `/api/jobs/${jobId}/dismiss-pending`);
+    notify('Pending stock dismissed');
+    await loadJobs();
+    renderInventory();
+  } catch (e) { notify('Error: ' + e.message); }
 }
 
 // ── Inventory modals ─────────────────────────────────────────

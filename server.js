@@ -2833,6 +2833,33 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 //     from job.inventory_item_id (backwards-compat with existing UIs).
 //
 // A per-split offcut is created when the job has a cut configured — the
+// Dismiss pending stock for a delivered job. Admin-only. Clears the
+// issuance_status to 'issued' and removes any partial_pending_sheets
+// so the job drops out of the pending queue.
+app.post('/api/jobs/:id/dismiss-pending', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const lastStage = STAGES.length - 1;
+    const delivered = job.stages && job.stages[lastStage] && job.stages[lastStage].status === 'done';
+    if (!delivered) return res.status(400).json({ error: 'Can only dismiss pending stock for delivered jobs.' });
+    const p = { ...(job.particulars || {}) };
+    delete p.partial_pending_sheets;
+    await sql`UPDATE jobs SET issuance_status = 'issued', particulars = ${JSON.stringify(p)} WHERE id = ${id}`;
+    await logAudit(sql, req, {
+      action: 'job.dismiss_pending',
+      entityType: 'job',
+      entityId: id,
+      summary: `Dismissed pending stock for delivered job E-${id}`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // offcut brand matches the source brand for that split.
 app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) => {
   try {
