@@ -4419,12 +4419,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         particulars[key] = {
           ...prev,
           entries: merged,
+          details: prev.details || businessStamp(),
           quantity: merged.map(e => e.qty).filter(q => q !== '').join(' | '),
           name: machinesList.join(' | ') || operator.machine || '',
           signature: opsList.join(' | '),
         };
       } else {
-        particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.machine || '', signature: operator.name };
+        particulars[key] = { ...prev, details: prev.details || businessStamp(), quantity: String(value ?? '').trim(), name: operator.machine || '', signature: operator.name };
       }
     }
 
