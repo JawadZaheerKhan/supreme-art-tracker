@@ -16935,10 +16935,18 @@ function stationUpdateHtml() {
   // the corner to add another pass for a different day.
   // At Coatings, TWO sections (Coatings + Embellishments) share stage 2
   // and the same coating_sheets_qty particulars row. Each machine must
-  // only see (and edit) its OWN pass rows — otherwise the UV operator's
-  // 1000 sheets shows up on the Emboss operator's screen. Entries with
-  // no machine stamp (legacy / admin-typed) stay visible to everyone.
-  const entryVisible = (e) => stIdx !== 2 || !e || !e.machine || e.machine === (stationOperator.machine || '');
+  // At Coatings (stage 2), entries are grouped by role — all coatings
+  // machines see each other's entries, embellishments see embellishments.
+  // Entries with no machine stamp (legacy / admin-typed) stay visible to all.
+  const myRoles = stIdx === 2 ? new Set(rolesOfOperator(stationOperator)) : null;
+  const entryVisible = (e) => {
+    if (stIdx !== 2 || !e || !e.machine) return true;
+    if (e.machine === (stationOperator.machine || '')) return true;
+    const entryOp = operatorsList.find(o => o.name === e.machine);
+    if (!entryOp) return true;
+    const entryRoles = rolesOfOperator(entryOp);
+    return entryRoles.some(r => myRoles.has(r));
+  };
   const entriesOf = (f) => {
     const ent = j.particulars && j.particulars[f.key] && j.particulars[f.key].entries;
     return Array.isArray(ent) ? ent : null;
