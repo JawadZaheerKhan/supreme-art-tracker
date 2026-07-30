@@ -3144,16 +3144,7 @@ function getFiltered() {
     }
     if (filterShadeCard === 'only' && !j.is_shade_card) return false;
     if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
-    if (filterMachine) {
-      const log = Array.isArray(j.log) ? j.log : [];
-      const seen = new Set();
-      for (const e of log) {
-        if (!e || !e.by) continue;
-        const m = /·\s*([^()]+?)\s*\(/.exec(String(e.by));
-        if (m) seen.add(m[1].trim());
-      }
-      if (!seen.has(filterMachine)) return false;
-    }
+    if (filterMachine && j.machine !== filterMachine) return false;
     if (!inDateRange(j)) return false;
     if (view === 'new')     return isNewJob(j);
     if (view === 'ctp')     return isCtpQueue(j);
@@ -3341,22 +3332,10 @@ function renderTabs() {
   const cf = document.getElementById('client-filter');
   const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
-  // Machine options: union of every machine that appears in any job's
-  // log byline ("Name · Machine (Stage)"). Picking one filters the
-  // Jobs list to jobs that ran on (or are running on) that machine.
   const mf = document.getElementById('machine-filter');
   if (mf) {
-    const machines = new Set();
-    for (const j of jobs) {
-      const log = Array.isArray(j.log) ? j.log : [];
-      for (const e of log) {
-        if (!e || !e.by) continue;
-        const m = /·\s*([^()]+?)\s*\(/.exec(String(e.by));
-        if (m) machines.add(m[1].trim());
-      }
-    }
-    const sorted = [...machines].filter(Boolean).sort((a, b) => a.localeCompare(b));
-    mf.innerHTML = `<option value="">All machines</option>` + sorted.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
+    const machines = [...new Set(jobs.map(j => j.machine).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    mf.innerHTML = `<option value="">All machines</option>` + machines.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
   }
 }
 
@@ -13022,18 +13001,48 @@ function ctpSetupRow(p) {
     </table>`;
 }
 
-function particularsTable(p) {
+const PARTICULARS_STAGE_MAP = {
+  printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
+  coating_sheets_qty: 'Coatings', uv_waste_sheets: 'Coatings',
+  die_cutting_sheets: 'Die Cutting', die_cutting_waste: 'Die Cutting',
+  sorted_cartons_qty: 'Sorting', sorted_cartons_waste: 'Sorting',
+  pasted_cartons_qty: 'Pasting', pasting_waste_qty: 'Pasting',
+  delivered_cartons_qty: 'Ready to Deliver',
+};
+
+function logOperatorForStage(log, stageName) {
+  if (!log || !stageName) return { name: '', machine: '', time: '' };
+  for (let i = log.length - 1; i >= 0; i--) {
+    const e = log[i];
+    if (!e || !e.by) continue;
+    const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String(e.by));
+    if (m && m[3].trim() === stageName) return { name: m[1].trim(), machine: m[2].trim(), time: e.time || '' };
+    const m2 = /^(.+?)\s*\((.+?)\)$/.exec(String(e.by));
+    if (m2 && m2[2].trim() === stageName) return { name: m2[1].trim(), machine: '', time: e.time || '' };
+  }
+  return { name: '', machine: '', time: '' };
+}
+
+function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
+  const log = job && Array.isArray(job.log) ? job.log : [];
   const rows = PARTICULARS_ROWS
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
-    .map(r => `
+    .map(r => {
+      const stage = PARTICULARS_STAGE_MAP[r.key];
+      const op = logOperatorForStage(log, stage);
+      const machine = op.machine || (stage === 'Printing' && job && job.machine ? job.machine : '');
+      const nameVal = get(r.key, 'name') || esc(machine);
+      const sigVal  = get(r.key, 'signature') || esc(op.name);
+      return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
-      <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details')}"></td>
+      <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details') || esc(op.time)}"></td>
       <td><input type="text" id="p-${r.key}-quantity"  value="${get(r.key,'quantity')}"></td>
-      <td><input type="text" id="p-${r.key}-name"      value="${get(r.key,'name')}"></td>
-      <td><input type="text" id="p-${r.key}-signature" value="${get(r.key,'signature')}"></td>
-    </tr>`).join('');
+      <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine"></td>
+      <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"></td>
+    </tr>`;
+    }).join('');
   return `
     <table class="jc-part">
       <tr>
@@ -13150,7 +13159,7 @@ function jobForm(j={}) {
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
-    ${particularsTable(j.particulars||{})}
+    ${particularsTable(j.particulars||{}, j)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
       <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${v(j.notes)}</textarea></div>
@@ -16926,10 +16935,18 @@ function stationUpdateHtml() {
   // the corner to add another pass for a different day.
   // At Coatings, TWO sections (Coatings + Embellishments) share stage 2
   // and the same coating_sheets_qty particulars row. Each machine must
-  // only see (and edit) its OWN pass rows — otherwise the UV operator's
-  // 1000 sheets shows up on the Emboss operator's screen. Entries with
-  // no machine stamp (legacy / admin-typed) stay visible to everyone.
-  const entryVisible = (e) => stIdx !== 2 || !e || !e.machine || e.machine === (stationOperator.machine || '');
+  // At Coatings (stage 2), entries are grouped by role — all coatings
+  // machines see each other's entries, embellishments see embellishments.
+  // Entries with no machine stamp (legacy / admin-typed) stay visible to all.
+  const myRoles = stIdx === 2 ? new Set(rolesOfOperator(stationOperator)) : null;
+  const entryVisible = (e) => {
+    if (stIdx !== 2 || !e || !e.machine) return true;
+    if (e.machine === (stationOperator.machine || '')) return true;
+    const entryOp = operatorsList.find(o => o.name === e.machine);
+    if (!entryOp) return true;
+    const entryRoles = rolesOfOperator(entryOp);
+    return entryRoles.some(r => myRoles.has(r));
+  };
   const entriesOf = (f) => {
     const ent = j.particulars && j.particulars[f.key] && j.particulars[f.key].entries;
     return Array.isArray(ent) ? ent : null;

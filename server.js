@@ -4415,14 +4415,17 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
           return { qty, date: todayISO, operator: operator.name, machine: operator.machine || null };
         });
         const opsList = [...new Set(merged.map(e => e.operator).filter(Boolean))];
+        const machinesList = [...new Set(merged.map(e => e.machine).filter(Boolean))];
         particulars[key] = {
           ...prev,
           entries: merged,
+          details: prev.details || businessStamp(),
           quantity: merged.map(e => e.qty).filter(q => q !== '').join(' | '),
-          name: opsList.join(' | '),
+          name: machinesList.join(' | ') || operator.machine || '',
+          signature: opsList.join(' | '),
         };
       } else {
-        particulars[key] = { ...prev, quantity: String(value ?? '').trim(), name: operator.name };
+        particulars[key] = { ...prev, details: prev.details || businessStamp(), quantity: String(value ?? '').trim(), name: operator.machine || '', signature: operator.name };
       }
     }
 
