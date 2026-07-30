@@ -3144,16 +3144,7 @@ function getFiltered() {
     }
     if (filterShadeCard === 'only' && !j.is_shade_card) return false;
     if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
-    if (filterMachine) {
-      const log = Array.isArray(j.log) ? j.log : [];
-      const seen = new Set();
-      for (const e of log) {
-        if (!e || !e.by) continue;
-        const m = /·\s*([^()]+?)\s*\(/.exec(String(e.by));
-        if (m) seen.add(m[1].trim());
-      }
-      if (!seen.has(filterMachine)) return false;
-    }
+    if (filterMachine && j.machine !== filterMachine) return false;
     if (!inDateRange(j)) return false;
     if (view === 'new')     return isNewJob(j);
     if (view === 'ctp')     return isCtpQueue(j);
@@ -3341,22 +3332,10 @@ function renderTabs() {
   const cf = document.getElementById('client-filter');
   const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
-  // Machine options: union of every machine that appears in any job's
-  // log byline ("Name · Machine (Stage)"). Picking one filters the
-  // Jobs list to jobs that ran on (or are running on) that machine.
   const mf = document.getElementById('machine-filter');
   if (mf) {
-    const machines = new Set();
-    for (const j of jobs) {
-      const log = Array.isArray(j.log) ? j.log : [];
-      for (const e of log) {
-        if (!e || !e.by) continue;
-        const m = /·\s*([^()]+?)\s*\(/.exec(String(e.by));
-        if (m) machines.add(m[1].trim());
-      }
-    }
-    const sorted = [...machines].filter(Boolean).sort((a, b) => a.localeCompare(b));
-    mf.innerHTML = `<option value="">All machines</option>` + sorted.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
+    const machines = [...new Set(jobs.map(j => j.machine).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    mf.innerHTML = `<option value="">All machines</option>` + machines.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
   }
 }
 
@@ -4883,11 +4862,28 @@ function renderInvPendingList() {
         <div class="inv-actions">
           ${topupBtn}
           ${issueBtn}
+          ${isDone(j) && isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="dismissPendingStock(${j.id})" title="Remove this delivered job from the pending queue">Dismiss</button>` : ''}
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
         </div>
       </div>`;
   }).join('') + topupHtml;
+}
+
+async function dismissPendingStock(jobId) {
+  const ok = await confirmDialog({
+    title: 'Dismiss pending stock?',
+    message: 'This job is already delivered. Dismissing removes it from the pending stock queue without issuing paper.',
+    danger: true,
+    confirmText: 'Dismiss',
+  });
+  if (!ok) return;
+  try {
+    await api('POST', `/api/jobs/${jobId}/dismiss-pending`);
+    notify('Pending stock dismissed');
+    await loadJobs();
+    renderInventory();
+  } catch (e) { notify('Error: ' + e.message); }
 }
 
 // ── Inventory modals ─────────────────────────────────────────
@@ -6877,9 +6873,10 @@ function openInventoryReport() {
           <option value=""${!invReportState.stockLevel?' selected':''}>All</option>
           <option value="out"${invReportState.stockLevel==='out'?' selected':''}>Out of stock</option>
           <option value="low"${invReportState.stockLevel==='low'?' selected':''}>Low stock</option>
+          <option value="lowAll"${invReportState.stockLevel==='lowAll'?' selected':''}>All + consumption</option>
         </select>
       </div>
-      <div id="ir-low-period-wrap" style="display:${invReportState.stockLevel==='low'?'block':'none'};">
+      <div id="ir-low-period-wrap" style="display:${invReportState.stockLevel==='low'||invReportState.stockLevel==='lowAll'?'block':'none'};">
         <div class="dash-flbl">Consumption period</div>
         <select class="filter" id="ir-low-period" onchange="setIRLowPeriod(this.value)">
           <option value="7"${invReportState.lowPeriod===7?' selected':''}>Last week</option>
@@ -6900,8 +6897,8 @@ function setIRIncludeOffcuts(v)  { invReportState.includeOffcuts = !!v; renderIn
 function setIRStockLevel(v) {
   invReportState.stockLevel = v;
   const wrap = document.getElementById('ir-low-period-wrap');
-  if (wrap) wrap.style.display = v === 'low' ? 'block' : 'none';
-  if (v === 'low') { fetchIRConsumption(); return; }
+  if (wrap) wrap.style.display = (v === 'low' || v === 'lowAll') ? 'block' : 'none';
+  if (v === 'low' || v === 'lowAll') { fetchIRConsumption(); return; }
   renderInventoryReport();
 }
 function setIRLowPeriod(v) {
@@ -7042,7 +7039,7 @@ function renderInventoryReport() {
   }), { sheets: 0, weight: 0, items: 0, packets: 0 });
   const showBrand    = groupBy === 'brand'    || groupBy === 'both';
   const showSupplier = groupBy === 'supplier' || groupBy === 'both';
-  const showConsumed = invReportState.stockLevel === 'low';
+  const showConsumed = invReportState.stockLevel === 'low' || invReportState.stockLevel === 'lowAll';
   const periodLabel  = { 7:'week', 30:'month', 90:'3 months', 180:'6 months', 365:'year' }[invReportState.lowPeriod] || 'period';
   const brandHead    = showBrand    ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand</th>'    : '';
   const supplierHead = showSupplier ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Supplier</th>' : '';
@@ -7072,8 +7069,11 @@ function renderInventoryReport() {
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => `
-          <tr style="border-bottom:1px solid var(--border);">
+        ${rows.map(r => {
+          const shortfall = showConsumed && r.consumedPkts > 0 && r.packets < r.consumedPkts;
+          const rowBg = shortfall ? 'background:rgba(220,38,38,0.08);' : '';
+          return `
+          <tr style="border-bottom:1px solid var(--border);${rowBg}">
             <td style="padding:6px 8px;">${esc(r.paperType)}</td>
             <td style="padding:6px 8px;">${esc(r.size) || '—'}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm) || '—'}</td>
@@ -7084,7 +7084,8 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
             <td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>
             ${consumedCell(r)}
-          </tr>`).join('')}
+          </tr>`;
+        }).join('')}
       </tbody>
       <tfoot>
         <tr style="background:var(--bg2);font-weight:600;">
@@ -13022,18 +13023,48 @@ function ctpSetupRow(p) {
     </table>`;
 }
 
-function particularsTable(p) {
+const PARTICULARS_STAGE_MAP = {
+  printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
+  coating_sheets_qty: 'Coatings', uv_waste_sheets: 'Coatings',
+  die_cutting_sheets: 'Die Cutting', die_cutting_waste: 'Die Cutting',
+  sorted_cartons_qty: 'Sorting', sorted_cartons_waste: 'Sorting',
+  pasted_cartons_qty: 'Pasting', pasting_waste_qty: 'Pasting',
+  delivered_cartons_qty: 'Ready to Deliver',
+};
+
+function logOperatorForStage(log, stageName) {
+  if (!log || !stageName) return { name: '', machine: '', time: '' };
+  for (let i = log.length - 1; i >= 0; i--) {
+    const e = log[i];
+    if (!e || !e.by) continue;
+    const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String(e.by));
+    if (m && m[3].trim() === stageName) return { name: m[1].trim(), machine: m[2].trim(), time: e.time || '' };
+    const m2 = /^(.+?)\s*\((.+?)\)$/.exec(String(e.by));
+    if (m2 && m2[2].trim() === stageName) return { name: m2[1].trim(), machine: '', time: e.time || '' };
+  }
+  return { name: '', machine: '', time: '' };
+}
+
+function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
+  const log = job && Array.isArray(job.log) ? job.log : [];
   const rows = PARTICULARS_ROWS
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
-    .map(r => `
+    .map(r => {
+      const stage = PARTICULARS_STAGE_MAP[r.key];
+      const op = logOperatorForStage(log, stage);
+      const machine = op.machine || (stage === 'Printing' && job && job.machine ? job.machine : '');
+      const nameVal = get(r.key, 'name') || esc(machine);
+      const sigVal  = get(r.key, 'signature') || esc(op.name);
+      return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
-      <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details')}"></td>
+      <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details') || esc(op.time)}"></td>
       <td><input type="text" id="p-${r.key}-quantity"  value="${get(r.key,'quantity')}"></td>
-      <td><input type="text" id="p-${r.key}-name"      value="${get(r.key,'name')}"></td>
-      <td><input type="text" id="p-${r.key}-signature" value="${get(r.key,'signature')}"></td>
-    </tr>`).join('');
+      <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine"></td>
+      <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"></td>
+    </tr>`;
+    }).join('');
   return `
     <table class="jc-part">
       <tr>
@@ -13150,7 +13181,7 @@ function jobForm(j={}) {
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
-    ${particularsTable(j.particulars||{})}
+    ${particularsTable(j.particulars||{}, j)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
       <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${v(j.notes)}</textarea></div>
@@ -16926,10 +16957,18 @@ function stationUpdateHtml() {
   // the corner to add another pass for a different day.
   // At Coatings, TWO sections (Coatings + Embellishments) share stage 2
   // and the same coating_sheets_qty particulars row. Each machine must
-  // only see (and edit) its OWN pass rows — otherwise the UV operator's
-  // 1000 sheets shows up on the Emboss operator's screen. Entries with
-  // no machine stamp (legacy / admin-typed) stay visible to everyone.
-  const entryVisible = (e) => stIdx !== 2 || !e || !e.machine || e.machine === (stationOperator.machine || '');
+  // At Coatings (stage 2), entries are grouped by role — all coatings
+  // machines see each other's entries, embellishments see embellishments.
+  // Entries with no machine stamp (legacy / admin-typed) stay visible to all.
+  const myRoles = stIdx === 2 ? new Set(rolesOfOperator(stationOperator)) : null;
+  const entryVisible = (e) => {
+    if (stIdx !== 2 || !e || !e.machine) return true;
+    if (e.machine === (stationOperator.machine || '')) return true;
+    const entryOp = operatorsList.find(o => o.name === e.machine);
+    if (!entryOp) return true;
+    const entryRoles = rolesOfOperator(entryOp);
+    return entryRoles.some(r => myRoles.has(r));
+  };
   const entriesOf = (f) => {
     const ent = j.particulars && j.particulars[f.key] && j.particulars[f.key].entries;
     return Array.isArray(ent) ? ent : null;
