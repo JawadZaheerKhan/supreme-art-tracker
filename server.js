@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-28-challan-no';
+const SCHEMA_VERSION = 'v2026-07-31-transfer-notes';
 
 async function initDb() {
   try {
@@ -652,6 +652,29 @@ async function initDb() {
     // pasting_waste_qty / coatings_done[].waste_sheets) and admin-
     // editable per machine row, same as Hours / Remarks.
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS waste TEXT`;
+
+    // Finished Goods Transfer Notes (PRD/QR/008)
+    await sql`
+      CREATE TABLE IF NOT EXISTS transfer_notes (
+        id               SERIAL PRIMARY KEY,
+        transfer_note_no TEXT NOT NULL,
+        date             TEXT NOT NULL,
+        po_no            TEXT,
+        client           TEXT,
+        transferred_from TEXT DEFAULT 'Production',
+        transferred_to   TEXT DEFAULT 'Store / Warehouse',
+        product_name     TEXT,
+        job_ids          JSONB DEFAULT '[]',
+        items            JSONB DEFAULT '[]',
+        total_qty        INTEGER DEFAULT 0,
+        total_packages   INTEGER DEFAULT 0,
+        qc_status        TEXT DEFAULT 'passed',
+        authorization    JSONB DEFAULT '{}',
+        remarks          TEXT,
+        created_by       TEXT,
+        created_at       TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
 
     // One-time rename of legacy paper-type labels — old "Bleach Card" and
     // "Box Board" are now "Bleach Board" and "Duplex Board" across the app.
@@ -4985,6 +5008,77 @@ app.delete('/api/capa/:id', requireCapaWriter, async (req, res) => {
       entityId: capa.id,
       summary: `CAPA ${capa.capa_ref} deleted`,
       metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref },
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Transfer Notes (Finished Goods Transfer) ────────────────
+app.get('/api/transfer-notes', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM transfer_notes ORDER BY id DESC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/transfer-notes/:id', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/transfer-notes', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const last = await sql`SELECT transfer_note_no FROM transfer_notes ORDER BY id DESC LIMIT 1`;
+    let nextNum = 1;
+    if (last.length) {
+      const m = /(\d+)$/.exec(last[0].transfer_note_no);
+      if (m) nextNum = parseInt(m[1], 10) + 1;
+    }
+    const tnNo = 'TN-' + String(nextNum).padStart(4, '0');
+    const b = req.body;
+    const [row] = await sql`
+      INSERT INTO transfer_notes (transfer_note_no, date, po_no, client, transferred_from, transferred_to,
+        product_name, job_ids, items, total_qty, total_packages, qc_status, authorization, remarks, created_by)
+      VALUES (${tnNo}, ${b.date || businessStamp()}, ${b.po_no || ''}, ${b.client || ''},
+        ${b.transferred_from || 'Production'}, ${b.transferred_to || 'Store / Warehouse'},
+        ${b.product_name || ''}, ${JSON.stringify(b.job_ids || [])}, ${JSON.stringify(b.items || [])},
+        ${b.total_qty || 0}, ${b.total_packages || 0}, ${b.qc_status || 'passed'},
+        ${JSON.stringify(b.authorization || {})}, ${b.remarks || ''}, ${req.user?.email || ''})
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'transfer_note.create',
+      entityType: 'transfer_note',
+      entityId: row.id,
+      summary: `Transfer Note ${tnNo} created`,
+      metadata: { transfer_note_no: tnNo, job_ids: b.job_ids, client: b.client },
+    });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    await sql`DELETE FROM transfer_notes WHERE id=${req.params.id}`;
+    await logAudit(sql, req, {
+      action: 'transfer_note.delete',
+      entityType: 'transfer_note',
+      entityId: rows[0].id,
+      summary: `Transfer Note ${rows[0].transfer_note_no} deleted`,
+      metadata: { transfer_note_no: rows[0].transfer_note_no },
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
