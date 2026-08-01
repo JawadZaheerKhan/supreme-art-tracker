@@ -5975,12 +5975,26 @@ function bulkOutRemoveRow(idx) {
   const tbody = document.getElementById('bulkout-rows');
   const row = tbody && tbody.querySelector(`tr[data-row="${idx}"]`);
   if (!row) return;
-  if (tbody.children.length <= 1) {
-    row.querySelectorAll('input').forEach(i => i.value = '');
-    row.querySelectorAll('select').forEach(s => { s.selectedIndex = 0; });
-    return;
-  }
-  row.remove();
+  if (tbody.children.length > 1) { row.remove(); return; }
+  // Only row left — clear everything in place so validation sees a blank
+  // row on the next submit. Chip selection, brand-split panel, and any
+  // readOnly flags all get reset — otherwise stale state on the "cleared"
+  // row could keep triggering the same warning after the user thought
+  // they had removed the offending entry.
+  row.querySelectorAll('input').forEach(i => i.value = '');
+  row.querySelectorAll('select').forEach(s => { s.selectedIndex = 0; });
+  row.querySelectorAll('.jobchip.is-sel').forEach(c => {
+    c.classList.remove('is-sel');
+    c.style.background = '#fff';
+    c.style.color = 'var(--text)';
+    c.style.borderColor = 'var(--border)';
+  });
+  const chips = row.querySelector('.bulkout-jobchips');
+  if (chips) chips.innerHTML = `<span style="color:var(--text3);font-size:11px;">(pick a paper first)</span>`;
+  const splits = row.querySelector('.bulkout-brand-splits');
+  if (splits) { splits.style.display = 'none'; splits.innerHTML = ''; }
+  const pkt = row.querySelector('.bulkout-packets'); if (pkt) pkt.readOnly = false;
+  const sht = row.querySelector('.bulkout-qty');     if (sht) sht.readOnly = false;
 }
 async function saveBulkStockOut() {
   const tbody = document.getElementById('bulkout-rows');
@@ -5991,7 +6005,10 @@ async function saveBulkStockOut() {
   const sharedNote = notesIn || null;
 
   const plan = [];
-  for (const tr of tbody.querySelectorAll('tr')) {
+  const trList = [...tbody.querySelectorAll('tr')];
+  for (let ri = 0; ri < trList.length; ri++) {
+    const tr = trList[ri];
+    const rowLabel = `Row ${ri + 1}`;
     const itemId  = parseInt(tr.querySelector('.bulkout-item').value, 10);
     const reason  = tr.querySelector('.bulkout-reason').value;
     const jobCard = tr.querySelector('.bulkout-jobcard').value.trim();
@@ -6019,13 +6036,13 @@ async function saveBulkStockOut() {
       .map(s => ({ item_id: s.item_id, sheets: Math.round(s.pkts * psRow) }));
     if (!itemId && !qty && !jobCard && !selectedJobs.length) continue;
     if (!itemId) {
-      await alertDialog({ title: 'Paper required', message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
+      await alertDialog({ title: `${rowLabel}: paper required`, message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
     }
     if (reason === 'job-card' && !selectedJobs.length) {
-      await alertDialog({ title: 'Pick at least one pending job', message: 'For a Job Card row, tick one or more matching pending-stock jobs (or switch the reason to Manual Job Card).', kind: 'warn' }); return;
+      await alertDialog({ title: `${rowLabel}: pick at least one pending job`, message: 'For a Job Card row, tick one or more matching pending-stock jobs (or switch the reason to Manual Job Card).', kind: 'warn' }); return;
     }
     if (!qty || qty <= 0) {
-      await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
+      await alertDialog({ title: `${rowLabel}: quantity required`, message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
     const match = inventory.find(it => it.id === itemId);
     // Per-brand cap check when brandSplits is in use (multi-brand
@@ -6036,14 +6053,14 @@ async function saveBulkStockOut() {
         const have = item ? (item.current_balance || 0) : 0;
         if (s.sheets > have) {
           const label = item ? `${item.paper_type}${item.size?' · '+item.size:''}${item.gsm?' · '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}` : `item ${s.item_id}`;
-          await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${s.sheets.toLocaleString()} sheets`, kind: 'warn' }); return;
+          await alertDialog({ title: `${rowLabel}: not enough stock`, message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${s.sheets.toLocaleString()} sheets`, kind: 'warn' }); return;
         }
       }
     } else {
       const have = match ? (match.current_balance || 0) : 0;
       if (qty > have) {
         const label = match ? `${match.paper_type}${match.size?' · '+match.size:''}${match.gsm?' · '+match.gsm+'gsm':''}${match.brand?' · '+match.brand:''}` : `item ${itemId}`;
-        await alertDialog({ title: 'Not enough stock', message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
+        await alertDialog({ title: `${rowLabel}: not enough stock`, message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
       }
     }
     plan.push({ match, reason, jobCard, qty, selectedJobs, brandSplits });
