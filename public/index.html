@@ -2206,11 +2206,6 @@
       <div style="color:var(--text2);font-size:13px;">Printable form templates. Type to fill in, or print blank to handwrite.</div>
     </div>
     <div class="reports-cards">
-      <button class="report-card" onclick="openFormCapa()">
-        <div class="report-card-icon">&#9888;</div>
-        <div class="report-card-title">CAPA Report</div>
-        <div class="report-card-desc">Corrective &amp; Preventive Action Report — 5-section form. Fill on screen or print blank to write by hand.</div>
-      </button>
       <button class="report-card" onclick="openFormTransferNote()">
         <div class="report-card-icon">&#128230;</div>
         <div class="report-card-title">Transfer Note</div>
@@ -2218,7 +2213,6 @@
       </button>
     </div>
   </div>
-  <div id="forms-capa-pane" style="display:none;"></div>
   <div id="forms-tn-pane" style="display:none;"></div>
 </div>
 
@@ -10949,268 +10943,9 @@ let stickerVariants = [{ qty: '', total: '' }];
 //   1) Add another <button class="report-card"> in #forms-landing.
 //   2) Write its openForm…() and printForm…() pair below.
 
-// Open the CAPA form in the Forms pane. Renders the editable 5-section
-// form into #forms-capa-pane and hides the landing. Click "Back to Forms"
-// to return without losing what's typed — see setMode('forms') which
-// only resets the landing visibility, not the pane contents.
-function openFormCapa() {
-  const pane = document.getElementById('forms-capa-pane');
-  document.getElementById('forms-landing').style.display = 'none';
-  pane.style.display = 'block';
-  // Only build once — if the user has already opened CAPA in this session
-  // and typed values, reopening keeps them. Refresh button starts fresh.
-  if (!pane.dataset.built) {
-    pane.innerHTML = buildFormCapaHtml();
-    pane.dataset.built = '1';
-  }
-}
-
 function backToForms() {
   document.getElementById('forms-landing').style.display = 'block';
-  document.getElementById('forms-capa-pane').style.display = 'none';
   document.getElementById('forms-tn-pane').style.display = 'none';
-}
-
-// Clear all CAPA form fields. Resets the date to today.
-function resetFormCapa() {
-  const pane = document.getElementById('forms-capa-pane');
-  pane.dataset.built = '';
-  pane.innerHTML = buildFormCapaHtml();
-}
-
-// Build the on-screen editable form. The structure mirrors the printed
-// layout 1:1 (same 5 sections, same field labels) so what you fill maps
-// directly to what prints.
-function buildFormCapaHtml() {
-  // Cell helpers — same look as the modal CAPA used to have, just rendered
-  // inline in the pane rather than inside a modal-card.
-  const cell = (label, key, ph = '') => `
-    <div class="capa-cell">
-      <div class="capa-lbl">${label}</div>
-      <input type="text" id="form-capa-${key}" placeholder="${esc(ph)}" autocomplete="off">
-    </div>`;
-  const dateCell = (label, key, val = '') => `
-    <div class="capa-cell">
-      <div class="capa-lbl">${label}</div>
-      <input type="date" id="form-capa-${key}" value="${esc(val)}">
-    </div>`;
-  const ta = (label, key, ph = '', rows = 2) => `
-    <div class="capa-cell capa-full">
-      <div class="capa-lbl">${label}</div>
-      <textarea id="form-capa-${key}" rows="${rows}" placeholder="${esc(ph)}"></textarea>
-    </div>`;
-  const dl = (label, key, options) => `
-    <div class="capa-cell">
-      <div class="capa-lbl">${label}</div>
-      <input type="text" id="form-capa-${key}" list="form-dl-${key}" placeholder="Pick or type…" autocomplete="off">
-      <datalist id="form-dl-${key}">${options.map(o => `<option value="${esc(o)}">`).join('')}</datalist>
-    </div>`;
-
-  return `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-      <button class="btn btn-sm" onclick="backToForms()">&larr; Back to Forms</button>
-      <h2 style="margin:0;font-size:20px;">CAPA Report</h2>
-      <span style="color:var(--text2);font-size:12px;">Fill on screen or print blank to write by hand.</span>
-      <div style="margin-left:auto;display:flex;gap:8px;">
-        <button class="btn btn-sm" onclick="resetFormCapa()" title="Clear all fields">&#8635; Reset</button>
-        <button class="btn btn-sm btn-primary" onclick="printFormCapa()">&#128424; Print / Save as PDF</button>
-      </div>
-    </div>
-
-    <div style="background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:24px;position:relative;max-width:900px;">
-      <img class="jc-watermark-screen" src="/logo.png" alt="">
-      <div style="position:relative;z-index:1;">
-        <div class="capa-modal-header">
-          <img class="capa-modal-logo" src="/logo.png" alt="Supreme Art">
-          <div class="capa-modal-title-block">
-            <div class="capa-modal-title">CORRECTIVE &amp; PREVENTIVE ACTION REPORT</div>
-            <div class="capa-modal-sub">Supreme Art (Private) Limited</div>
-          </div>
-          <div style="width:48px;"></div>
-        </div>
-        <div class="capa-header-bar">
-          <div>CAPA No.: <input type="text" id="form-capa-ref_no_capa" placeholder="e.g. CAPA-2026-01" style="border:none;font-weight:700;background:transparent;padding:2px 4px;min-width:160px;"></div>
-        </div>
-
-        <!-- Section 1: Company Details -->
-        <div class="capa-section-head">1. COMPANY DETAILS</div>
-        <div class="capa-grid">
-          ${cell('Company / Customer (raising the complaint)', 'company_name', 'e.g. Global Pharmaceuticals (Pvt) Ltd')}
-          ${cell('Contact Person', 'contact_person', 'Name + designation')}
-          ${cell('Job Name', 'job_name', 'e.g. Tavizem 100mg/5ml Suspension')}
-          ${cell('Reference / PO No.', 'ref_no', 'Optional')}
-          ${dateCell('Complaint Date', 'complaint_date')}
-        </div>
-
-        <!-- Section 2: Problem Description -->
-        <div class="capa-section-head">2. PROBLEM DESCRIPTION</div>
-        <div class="capa-grid">
-          ${ta('Description of Non-Conformance / Issue', 'problem_description', 'Describe the observed defect, deviation, or quality issue in detail', 8)}
-          ${dl('Detected At Stage', 'detected_at_stage', CAPA_STAGES)}
-          ${cell('Detected By', 'detected_by', 'Name')}
-          ${dateCell('Detection Date', 'detection_date')}
-        </div>
-
-        <!-- Section 3: Root Cause Analysis -->
-        <div class="capa-section-head">3. ROOT CAUSE ANALYSIS</div>
-        <div class="capa-grid">
-          ${ta('Root Cause (5-Why / Fishbone Analysis)', 'root_cause', 'Why → Why → Why…', 6)}
-          ${dl('Category', 'category', CAPA_CATEGORIES)}
-          ${cell('Analysis Done By', 'analysis_done_by', 'Name')}
-        </div>
-
-        <!-- Section 4: Actions -->
-        <div class="capa-section-head">4. ACTIONS</div>
-        <div class="capa-grid">
-          ${ta('Corrective Action (immediate steps to contain / correct)', 'corrective_action', '', 5)}
-          ${ta('Preventive Action (systematic changes to prevent recurrence)', 'preventive_action', '', 5)}
-        </div>
-
-        <!-- Section 5: Verification & Closure -->
-        <div class="capa-section-head">5. VERIFICATION &amp; CLOSURE</div>
-        <div class="capa-grid">
-          ${ta('Effectiveness Verification', 'verification', 'How was the corrective action verified as effective?', 5)}
-          ${cell('Verified By', 'verified_by', 'Name')}
-          ${dateCell('Verification Date', 'verification_date')}
-          ${cell('Approved By', 'approved_by', 'Name')}
-          ${dateCell('Approved Date', 'approved_date')}
-          ${ta('CEO Note / Review (for CEO to write)', 'ceo_note', 'CEO comments — additional review, resource requests, escalation notes', 5)}
-        </div>
-
-        <div style="margin-top:10px;font-size:11px;color:var(--text2);">Form Rev: 01 &middot; This document is confidential and for internal use only.</div>
-      </div>
-    </div>
-  `;
-}
-
-// Read every field from the on-screen form, then build the legal-paper
-// print HTML. Reuses .capa-print-* styles from the CSS block.
-function printFormCapa() {
-  const get = id => (document.getElementById(id) || {}).value || '';
-  const data = {
-    capa_no:           get('form-capa-ref_no_capa'),
-    company_name:      get('form-capa-company_name'),
-    contact_person:    get('form-capa-contact_person'),
-    job_name:          get('form-capa-job_name'),
-    ref_no:            get('form-capa-ref_no'),
-    complaint_date:    get('form-capa-complaint_date'),
-    problem_description:get('form-capa-problem_description'),
-    detected_at_stage: get('form-capa-detected_at_stage'),
-    detected_by:       get('form-capa-detected_by'),
-    detection_date:    get('form-capa-detection_date'),
-    root_cause:        get('form-capa-root_cause'),
-    category:          get('form-capa-category'),
-    analysis_done_by:  get('form-capa-analysis_done_by'),
-    corrective_action: get('form-capa-corrective_action'),
-    preventive_action: get('form-capa-preventive_action'),
-    verification:      get('form-capa-verification'),
-    verified_by:       get('form-capa-verified_by'),
-    verification_date: get('form-capa-verification_date'),
-    approved_by:       get('form-capa-approved_by'),
-    approved_date:     get('form-capa-approved_date'),
-    ceo_note:          get('form-capa-ceo_note'),
-  };
-  const area = document.getElementById('print-area');
-  area.innerHTML = buildFormCapaPrint(data);
-  const prevTitle = document.title;
-  document.title = ' ';
-  const restoreTitle = () => { document.title = prevTitle; window.removeEventListener('afterprint', restoreTitle); };
-  window.addEventListener('afterprint', restoreTitle);
-  setTimeout(() => {
-    window.print();
-    setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
-  }, 50);
-}
-
-// Print version of the CAPA form. Single legal page, dark section bars,
-// signature row at the bottom + CEO Note block. Empty cells print as blank
-// lines for handwriting.
-function buildFormCapaPrint(d) {
-  const dt = v => v ? fmtDMY(v) : '';
-  const sectHead = (n, label) => `<div class="capa-print-head">${n}. ${label}</div>`;
-  const fld = (lbl, val) => `<div class="capa-print-cell"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val">${esc(val || '')}</div></div>`;
-  // 22px per line matches the ruled-background spacing in .capa-print-lines
-  // so each handwriting rule lines up with one row of writing.
-  // Wide writing space — grows with the typed content so a long
-  // description gets more handwriting rows in print, not a cramped 2-line box.
-  // Take the larger of (default lines, newline-count+1, wrapped-char-count).
-  const fldWide = (lbl, val, lines = 2) => {
-    const s = String(val || '');
-    const nlLines = s ? (s.match(/\n/g) || []).length + 1 : 0;
-    const wrapLines = Math.ceil(s.length / 70);
-    const n = Math.max(lines, nlLines, wrapLines);
-    return `<div class="capa-print-cell capa-print-wide"><div class="capa-print-lbl">${lbl}</div><div class="capa-print-val capa-print-lines" style="min-height:${n*22}px;">${esc(s)}</div></div>`;
-  };
-  const sigBox = (lbl, name, date) => `
-    <div class="capa-print-sig">
-      <div class="capa-print-lbl">${lbl}</div>
-      <div class="capa-print-sig-line">${esc(name || '')}</div>
-      <div class="capa-print-lbl" style="margin-top:4px;">Date: ${esc(dt(date) || '')}</div>
-    </div>`;
-  return `
-    <div class="capa-print">
-      <img class="capa-print-watermark" src="/logo.png" alt="">
-      <div class="capa-print-content">
-      <div class="capa-print-header">
-        <img class="capa-print-logo" src="/logo.png" alt="Supreme Art">
-        <div class="capa-print-title-block">
-          <div class="capa-print-title">CORRECTIVE &amp; PREVENTIVE ACTION REPORT</div>
-          <div class="capa-print-subtitle">CAPA No.: ${esc(d.capa_no || '')}</div>
-        </div>
-      </div>
-      <div class="capa-print-note">Supreme Art (Private) Limited &mdash; Fill in all action fields and obtain signatures before closure.</div>
-
-      ${sectHead(1, 'COMPANY DETAILS')}
-      <div class="capa-print-grid">
-        ${fld('Company / Customer', d.company_name)}
-        ${fld('Contact Person', d.contact_person)}
-        ${fld('Job Name', d.job_name)}
-        ${fld('Reference / PO No.', d.ref_no)}
-        ${fld('Complaint Date', dt(d.complaint_date))}
-      </div>
-
-      ${sectHead(2, 'PROBLEM DESCRIPTION')}
-      <div class="capa-print-grid capa-print-grid3">
-        ${fld('Detected At Stage', d.detected_at_stage)}
-        ${fld('Detected By', d.detected_by)}
-        ${fld('Detection Date', dt(d.detection_date))}
-        ${fldWide('Description of Non-Conformance / Issue', d.problem_description, 7)}
-      </div>
-
-      ${sectHead(3, 'ROOT CAUSE ANALYSIS')}
-      <div class="capa-print-grid capa-print-grid3">
-        ${fld('Category', d.category)}
-        ${fld('Analysis Done By', d.analysis_done_by)}
-        <div class="capa-print-cell"></div>
-        ${fldWide('Root Cause (5-Why / Fishbone Analysis)', d.root_cause, 5)}
-      </div>
-
-      ${sectHead(4, 'ACTIONS')}
-      <div class="capa-print-grid">
-        ${fldWide('Corrective Action (immediate steps to contain / correct)', d.corrective_action, 4)}
-        ${fldWide('Preventive Action (systematic changes to prevent recurrence)', d.preventive_action, 4)}
-      </div>
-
-      ${sectHead(5, 'VERIFICATION & CLOSURE')}
-      <div class="capa-print-grid capa-print-grid3">
-        ${fld('Verified By', d.verified_by)}
-        ${fld('Verification Date', dt(d.verification_date))}
-        <div class="capa-print-cell"></div>
-        ${fldWide('Effectiveness Verification', d.verification, 4)}
-      </div>
-
-      <!-- Just the Approved By signature, centered. Prepared/Reviewed were
-           cut at the user's request — too many signature lines. -->
-      <div class="capa-print-sigrow" style="grid-template-columns: 1fr;">
-        ${sigBox('Approved By', d.approved_by, d.approved_date)}
-      </div>
-      <div class="capa-print-grid" style="margin-top:4px;">
-        ${fldWide('CEO Note / Review', d.ceo_note, 4)}
-      </div>
-
-      <div class="capa-print-footer">${esc(d.capa_no || 'CAPA Report')} | Form Rev: 01 | This document is confidential and for internal use only.</div>
-      </div>
-    </div>`;
 }
 
 // ── Transfer Note form (PRD/QR/008) ─────────────────────────
@@ -13746,8 +13481,8 @@ function jobForm(j={}) {
         <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
       </tr>
       <tr>
-        <td colspan="1"><span class="jc-lbl">Mfg Date</span><input type="date" id="f-mfgdate" value="${v(j.mfgdate)}"></td>
-        <td colspan="1"><span class="jc-lbl">Exp Date</span><input type="date" id="f-expdate" value="${v(j.expdate)}"></td>
+        <td colspan="1"><span class="jc-lbl">Mfg Date</span><input type="text" id="f-mfgdate" value="${v(j.mfgdate)}" placeholder="2026 or 07-2026 or 01-07-2026"></td>
+        <td colspan="1"><span class="jc-lbl">Exp Date</span><input type="text" id="f-expdate" value="${v(j.expdate)}" placeholder="2027 or 12-2027 or 01-12-2027"></td>
         <td colspan="2"><span class="jc-lbl">MRP</span><input type="text" id="f-mrp" value="${v(j.mrp)}" placeholder="Rs 250"></td>
         <td colspan="3"><span class="jc-lbl">Brand <span style="font-weight:400;color:var(--text2);">(picked at issue)</span></span><div style="padding:6px 0;color:var(--text);">${(() => {
           const brands = jobDisplayBrands(j);
