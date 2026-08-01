@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-28-challan-no';
+const SCHEMA_VERSION = 'v2026-07-31-transfer-notes';
 
 async function initDb() {
   try {
@@ -561,37 +561,6 @@ async function initDb() {
       )
     `;
 
-    // CAPA reports: Corrective & Preventive Action reports raised against a
-    // job card. A job can have multiple CAPAs (one per non-conformance issue).
-    // Section-1 job details are auto-snapshotted at creation in job_snapshot
-    // so the CAPA stays stable even if the underlying job is edited. The rest
-    // of the form lives in `data` JSONB so we can evolve fields without
-    // migrations. Status is denormalized out of `data` for easy filtering.
-    await sql`
-      CREATE TABLE IF NOT EXISTS capa_reports (
-        id               SERIAL PRIMARY KEY,
-        job_id           INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-        capa_ref         TEXT NOT NULL,
-        seq              INTEGER NOT NULL,
-        status           TEXT NOT NULL DEFAULT 'open',
-        issue_date       TEXT,
-        job_snapshot     JSONB NOT NULL DEFAULT '{}',
-        data             JSONB NOT NULL DEFAULT '{}',
-        created_at       TIMESTAMPTZ DEFAULT NOW(),
-        created_by_id    INTEGER,
-        created_by_email TEXT,
-        updated_at       TIMESTAMPTZ DEFAULT NOW(),
-        closed_at        TIMESTAMPTZ
-      )
-    `;
-    // Allow standalone CAPAs (not tied to a specific job). job_id stays a FK
-    // but is now nullable — the user fills Section 1 manually instead of
-    // snapshotting from a job. Idempotent migration on existing deployments.
-    await sql`ALTER TABLE capa_reports ALTER COLUMN job_id DROP NOT NULL`;
-    await sql`CREATE INDEX IF NOT EXISTS capa_reports_job_idx    ON capa_reports(job_id)`;
-    await sql`CREATE INDEX IF NOT EXISTS capa_reports_status_idx ON capa_reports(status)`;
-    await sql`CREATE UNIQUE INDEX IF NOT EXISTS capa_reports_job_seq_uidx ON capa_reports(job_id, seq)`;
-
     // Station notes — short text/voice messages an operator leaves on a job
     // for the NEXT station ("plate 2 runs dark, watch the left edge").
     // stage_index records where the note was written; it is shown at the
@@ -652,6 +621,29 @@ async function initDb() {
     // pasting_waste_qty / coatings_done[].waste_sheets) and admin-
     // editable per machine row, same as Hours / Remarks.
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS waste TEXT`;
+
+    // Finished Goods Transfer Notes (PRD/QR/008)
+    await sql`
+      CREATE TABLE IF NOT EXISTS transfer_notes (
+        id               SERIAL PRIMARY KEY,
+        transfer_note_no TEXT NOT NULL,
+        date             TEXT NOT NULL,
+        po_no            TEXT,
+        client           TEXT,
+        transferred_from TEXT DEFAULT 'Production',
+        transferred_to   TEXT DEFAULT 'Store / Warehouse',
+        product_name     TEXT,
+        job_ids          JSONB DEFAULT '[]',
+        items            JSONB DEFAULT '[]',
+        total_qty        INTEGER DEFAULT 0,
+        total_packages   INTEGER DEFAULT 0,
+        qc_status        TEXT DEFAULT 'passed',
+        authorization    JSONB DEFAULT '{}',
+        remarks          TEXT,
+        created_by       TEXT,
+        created_at       TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
 
     // One-time rename of legacy paper-type labels — old "Bleach Card" and
     // "Box Board" are now "Bleach Board" and "Duplex Board" across the app.
@@ -836,15 +828,6 @@ function requireClient(req, res, next) {
   }
   if (!req.user.client_company || !String(req.user.client_company).trim()) {
     return res.status(403).json({ error: 'Your account is not bound to a company yet — ask an admin to complete setup.' });
-  }
-  next();
-}
-// CAPA writes — admin, production_manager, or CEO. CAPA is governance,
-// not floor work; CEOs need to be able to file / close their own reports.
-function requireCapaWriter(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (!userHasRole(req.user, 'admin', 'production_manager', 'ceo')) {
-    return res.status(403).json({ error: 'Not allowed — CAPA write access required' });
   }
   next();
 }
@@ -4456,11 +4439,14 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       }
     }
 
-    // Byline used by every log entry below. Including the operator's
-    // assigned machine here means the job history shows e.g.
-    // "Wajid · SM-52 (Printing)" — same info whether the operator was
-    // advancing the stage or just recording numbers.
-    const stageLabel = STAGES[operator.stage_index] || 'Stage ' + operator.stage_index;
+    // Byline used by every log entry below. The stage in parentheses must
+    // reflect the stage the WORK is being done at (curStage), NOT the
+    // operator's primary stage_index. A machine authorized for multiple
+    // stages (e.g. Coatings + Die Cutting) has a single primary stage_index,
+    // and stamping that on every log entry would misattribute die-cutting
+    // work to Coatings — which the job card's particularsTable auto-fill
+    // then reads back into the wrong row.
+    const stageLabel = STAGES[curStage] || 'Stage ' + curStage;
     const by = `${operator.name}${operator.machine ? ' · ' + operator.machine : ''} (${stageLabel})`;
     const time = businessStamp();
     // Machine-comparable instant for the SAME moment as `time`. `time` is a
@@ -4747,244 +4733,73 @@ app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) =>
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// ── CAPA reports ─────────────────────────────────────────────
-// Corrective & Preventive Action reports raised against a job. Multiple
-// per job allowed (ref = JC-{jobcode}-{seq}). Section 1 (job details) is
-// snapshotted at creation so the CAPA stays stable if the job is edited
-// later. The rest of the form lives in a JSONB blob.
-//
-// Permissions:
-//   • Any signed-in user can read.
-//   • Admin + User + Stock can create/edit while status != 'closed'.
-//   • Once status='closed', only admin can edit/delete.
-//   • CEO is read-only everywhere (requireWriteUser blocks them).
 
-// Build a Section-1 snapshot from a job row. Frozen at CAPA creation time.
-// `issue_date` is the date the JOB CARD was issued — NOT the date this CAPA
-// was raised (that lives on capa.issue_date instead). Falls back to the
-// job's created_at if the user never typed a Date Issued on the job form.
-function buildJobSnapshot(job) {
-  const jobIssueDate = job.dateissued
-    || (job.created_at ? businessDateISO(new Date(job.created_at)) : '');
-  return {
-    job_card_no:  job.jobcode || (job.id ? `E-${job.id}` : ''),
-    job_ref_id:   job.id,
-    po_no:        job.ref || '',
-    issue_date:   jobIssueDate,
-    machine:      job.machine || '',
-    job_name:     job.name || '',
-    company:      job.client || '',
-    po_qty:       job.qty || '',
-    delivered_qty:job.delqty || '',
-  };
-}
-
-// GET all CAPAs across the whole shop with filters. Used by the CAPA Report
-// page under Jobs Reports — supports date range, company, and status filters,
-// and is the source for bulk export / bulk print on that page.
-app.get('/api/capa', requireAuth, async (req, res) => {
+// ── Transfer Notes (Finished Goods Transfer) ────────────────
+app.get('/api/transfer-notes', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { from, to, client, status } = req.query;
-    // Date filter is on the CAPA's issue_date (the day it was raised). We
-    // bind it loosely as text — values are 'yyyy-mm-dd' which sort lexically.
-    const fromTxt   = from   && /^\d{4}-\d{2}-\d{2}$/.test(from)   ? from   : null;
-    const toTxt     = to     && /^\d{4}-\d{2}-\d{2}$/.test(to)     ? to     : null;
-    const clientTxt = client && String(client).trim()              ? String(client).trim() : null;
-    const statusTxt = status && ['open','in_progress','closed'].includes(status) ? status : null;
-    const rows = await sql`
-      SELECT * FROM capa_reports
-      WHERE (${fromTxt}::text IS NULL OR issue_date >= ${fromTxt})
-        AND (${toTxt}::text   IS NULL OR issue_date <= ${toTxt})
-        AND (${clientTxt}::text IS NULL OR job_snapshot->>'company' = ${clientTxt})
-        AND (${statusTxt}::text IS NULL OR status = ${statusTxt})
-      ORDER BY created_at DESC
-    `;
+    const rows = await sql`SELECT * FROM transfer_notes ORDER BY id DESC`;
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// GET all CAPAs for a job, newest first.
-app.get('/api/jobs/:id/capa', requireAuth, async (req, res) => {
+app.get('/api/transfer-notes/:id', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`
-      SELECT * FROM capa_reports WHERE job_id=${req.params.id}
-      ORDER BY seq DESC
-    `;
-    res.json(rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// GET one CAPA.
-app.get('/api/capa/:id', requireAuth, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
-    if (!rows.length) return res.status(404).json({ error: 'CAPA not found' });
+    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// CREATE a standalone CAPA (not tied to any job). Used for shop-wide quality
-// issues that aren't a single-job event — supplier complaint, machine
-// calibration drift, safety incident, etc. capa_ref = GEN-{YYYY}-{seq}
-// where seq is monotonic across all standalone CAPAs ever raised. Section 1
-// stays empty in job_snapshot; the user types those fields themselves on
-// the edit form (capaFormHtml flips Section 1 to editable when snapshot is
-// empty).
-app.post('/api/capa', requireCapaWriter, async (req, res) => {
+app.post('/api/transfer-notes', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const year = businessDateISO().slice(0, 4); // business-local year (server clock is UTC)
-    // Count existing GEN- refs to find the next seq. Cheaper than a sequence
-    // and handles year-boundary resets cleanly.
-    const existing = await sql`
-      SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports
-      WHERE job_id IS NULL AND capa_ref LIKE ${'GEN-' + year + '-%'}
-    `;
-    const seq = (existing[0].m || 0) + 1;
-    const capaRef = `GEN-${year}-${seq}`;
-    const today = businessDateISO();
-    const inserted = await sql`
-      INSERT INTO capa_reports
-        (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
-      VALUES
-        (${null}, ${capaRef}, ${seq}, 'open', ${today}, ${JSON.stringify({})}, ${JSON.stringify(req.body && req.body.data || {})}, ${req.user.id}, ${req.user.email})
-      RETURNING *
-    `;
-    const capa = inserted[0];
-    await logAudit(sql, req, {
-      action: 'capa.create',
-      entityType: 'capa',
-      entityId: capa.id,
-      summary: `General CAPA ${capa.capa_ref} raised (no job)`,
-      metadata: { capa_ref: capa.capa_ref, general: true },
-    });
-    res.json(capa);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// CREATE a new CAPA against a job. Auto-snapshots Section 1, auto-assigns
-// the next seq, and builds capa_ref = JC-{jobcode||E-id}-{seq}.
-app.post('/api/jobs/:id/capa', requireCapaWriter, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const jobId = parseInt(req.params.id, 10);
-    if (!Number.isFinite(jobId)) return res.status(400).json({ error: 'Invalid job id' });
-
-    const jobs = await sql`SELECT * FROM jobs WHERE id=${jobId}`;
-    if (!jobs.length) return res.status(404).json({ error: 'Job not found' });
-    const job = jobs[0];
-
-    const snap = buildJobSnapshot(job);
-    const maxRows = await sql`SELECT COALESCE(MAX(seq),0) AS m FROM capa_reports WHERE job_id=${jobId}`;
-    const seq = (maxRows[0].m || 0) + 1;
-    const capaRef = `JC-${snap.job_card_no}-${seq}`;
-    const today = businessDateISO(); // yyyy-mm-dd, business-local
-
-    const inserted = await sql`
-      INSERT INTO capa_reports
-        (job_id, capa_ref, seq, status, issue_date, job_snapshot, data, created_by_id, created_by_email)
-      VALUES
-        (${jobId}, ${capaRef}, ${seq}, 'open', ${today}, ${JSON.stringify(snap)}, ${JSON.stringify(req.body && req.body.data || {})}, ${req.user.id}, ${req.user.email})
-      RETURNING *
-    `;
-    const capa = inserted[0];
-    await logAudit(sql, req, {
-      action: 'capa.create',
-      entityType: 'capa',
-      entityId: capa.id,
-      summary: `CAPA ${capa.capa_ref} raised on job E-${jobId}`,
-      metadata: { job_id: jobId, capa_ref: capa.capa_ref },
-    });
-    res.json(capa);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// UPDATE a CAPA. Anyone with write access can edit while open/in_progress.
-// Once closed, only admin can change it (including reopening).
-app.put('/api/capa/:id', requireCapaWriter, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
-    if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
-    const current = existing[0];
-
-    // Lock closed CAPAs to admin + CEO — CEO has full CAPA governance.
-    if (current.status === 'closed' && !userHasRole(req.user, 'admin', 'ceo')) {
-      return res.status(403).json({ error: 'This CAPA is closed. Only admin or CEO can edit it.' });
+    const last = await sql`SELECT transfer_note_no FROM transfer_notes ORDER BY id DESC LIMIT 1`;
+    let nextNum = 1;
+    if (last.length) {
+      const m = /(\d+)$/.exec(last[0].transfer_note_no);
+      if (m) nextNum = parseInt(m[1], 10) + 1;
     }
-
-    const { status, issue_date, data, job_snapshot } = req.body || {};
-    const nextStatus = ['open', 'in_progress', 'closed'].includes(status) ? status : current.status;
-    const nextData   = data && typeof data === 'object' ? data : current.data;
-    const nextIssue  = (issue_date === undefined || issue_date === null) ? current.issue_date : issue_date;
-    const closingNow = nextStatus === 'closed' && current.status !== 'closed';
-    const reopening  = nextStatus !== 'closed' && current.status === 'closed';
-    // Compute closed_at in JS so we don't have to embed a SQL fragment into a
-    // value slot (neon's tagged template parameterizes ${...} as bind values).
-    const nextClosedAt = closingNow ? new Date() : (reopening ? null : current.closed_at);
-    // Section 1 (job_snapshot) is only writable for General CAPAs (job_id IS
-    // NULL). Job-tied CAPAs keep their frozen snapshot — even if the client
-    // sends a different value, we ignore it. This preserves the audit
-    // guarantee that Section 1 reflects the job at CAPA creation.
-    const nextSnap = (current.job_id == null && job_snapshot && typeof job_snapshot === 'object')
-      ? job_snapshot
-      : current.job_snapshot;
-
-    const updated = await sql`
-      UPDATE capa_reports SET
-        status=${nextStatus},
-        issue_date=${nextIssue},
-        data=${JSON.stringify(nextData)},
-        job_snapshot=${JSON.stringify(nextSnap)},
-        updated_at=NOW(),
-        closed_at=${nextClosedAt}
-      WHERE id=${req.params.id}
+    const tnNo = 'TN-' + String(nextNum).padStart(4, '0');
+    const b = req.body;
+    const [row] = await sql`
+      INSERT INTO transfer_notes (transfer_note_no, date, po_no, client, transferred_from, transferred_to,
+        product_name, job_ids, items, total_qty, total_packages, qc_status, authorization, remarks, created_by)
+      VALUES (${tnNo}, ${b.date || businessStamp()}, ${b.po_no || ''}, ${b.client || ''},
+        ${b.transferred_from || 'Production'}, ${b.transferred_to || 'Store / Warehouse'},
+        ${b.product_name || ''}, ${JSON.stringify(b.job_ids || [])}, ${JSON.stringify(b.items || [])},
+        ${b.total_qty || 0}, ${b.total_packages || 0}, ${b.qc_status || 'passed'},
+        ${JSON.stringify(b.authorization || {})}, ${b.remarks || ''}, ${req.user?.email || ''})
       RETURNING *
     `;
-    const capa = updated[0];
-    let action = 'capa.update';
-    let summary = `CAPA ${capa.capa_ref} updated`;
-    if (closingNow) { action = 'capa.close'; summary = `CAPA ${capa.capa_ref} closed`; }
-    if (reopening)  { action = 'capa.reopen'; summary = `CAPA ${capa.capa_ref} reopened`; }
     await logAudit(sql, req, {
-      action, entityType: 'capa', entityId: capa.id, summary,
-      metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref, status: capa.status },
+      action: 'transfer_note.create',
+      entityType: 'transfer_note',
+      entityId: row.id,
+      summary: `Transfer Note ${tnNo} created`,
+      metadata: { transfer_note_no: tnNo, job_ids: b.job_ids, client: b.client },
     });
-    res.json(capa);
+    res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE a CAPA. Hard delete — CAPAs aren't trashed.
-//   • Admin can delete any CAPA, in any status.
-//   • User / Stock can delete a CAPA only if it's still Open or In Progress;
-//     once Closed it's locked to admin (matches the edit-lock behavior).
-//   • CEO can't reach this — requireWriteUser blocks them.
-app.delete('/api/capa/:id', requireCapaWriter, async (req, res) => {
+app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const existing = await sql`SELECT * FROM capa_reports WHERE id=${req.params.id}`;
-    if (!existing.length) return res.status(404).json({ error: 'CAPA not found' });
-    const capa = existing[0];
-    if (capa.status === 'closed' && !userHasRole(req.user, 'admin', 'ceo')) {
-      return res.status(403).json({ error: 'This CAPA is closed. Only admin or CEO can delete it.' });
-    }
-    await sql`DELETE FROM capa_reports WHERE id=${req.params.id}`;
+    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    await sql`DELETE FROM transfer_notes WHERE id=${req.params.id}`;
     await logAudit(sql, req, {
-      action: 'capa.delete',
-      entityType: 'capa',
-      entityId: capa.id,
-      summary: `CAPA ${capa.capa_ref} deleted`,
-      metadata: { job_id: capa.job_id, capa_ref: capa.capa_ref },
+      action: 'transfer_note.delete',
+      entityType: 'transfer_note',
+      entityId: rows[0].id,
+      summary: `Transfer Note ${rows[0].transfer_note_no} deleted`,
+      metadata: { transfer_note_no: rows[0].transfer_note_no },
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
