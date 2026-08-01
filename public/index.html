@@ -13195,8 +13195,10 @@ function particularsTable(p, job) {
     .map(r => {
       const stage = PARTICULARS_STAGE_MAP[r.key];
       const op = logOperatorForStage(log, stage);
-      const machine = op.machine || (stage === 'Printing' && job && job.machine ? job.machine : '');
-      const nameVal = get(r.key, 'name') || esc(machine);
+      // Only fill Name/Signature once the operator has actually submitted at
+      // this stage. No pre-fill from the top-of-card MACHINE NAME field —
+      // that would double up on the print and misrepresent who did the work.
+      const nameVal = get(r.key, 'name') || esc(op.machine);
       const sigVal  = get(r.key, 'signature') || esc(op.name);
       return `
     <tr>
@@ -13716,6 +13718,10 @@ document.addEventListener('input', (e) => {
 
 // Pre-save stock check — fires before POST/PUT. Returns true if okay to proceed,
 // false if the user chose to cancel after seeing the negative-stock warning.
+// Compares in packets (the unit the store keeper actually issues) so a job
+// that consumes N cut sheets from a 1/2-cut parent uses N/2 raw sheets, then
+// N/(2·packetSize) packets. Also nets out other pending jobs on the same
+// paper group so simultaneous demand shows up. Mirrors updateStockHint().
 async function checkStockBeforeSave(data) {
   if (!data.inventory_item_id) return true;
   const sheets = parseInt(data.sheets, 10) || 0;
@@ -13723,11 +13729,31 @@ async function checkStockBeforeSave(data) {
   const item = inventory.find(i => i.id === data.inventory_item_id);
   if (!item) return true;
   const groupBalance = paperGroupMembers(item).reduce((a, x) => a + (x.current_balance || 0), 0);
-  if (sheets <= groupBalance) return true;
-  const after = groupBalance - sheets;
+  const ps = packetSize(item.paper_type);
+  const unit = packetUnitLabel(item.paper_type);
+  const cutStr = (document.getElementById('f-sheet-cut') || {}).value || '1/1';
+  const cutPieces = parseInt(cutStr.split('/')[1], 10) || 1;
+  const rawNeed = sheets / cutPieces;
+  const neededPkts = Math.ceil(rawNeed / ps);
+  const availPkts = Math.floor(groupBalance / ps);
+  // Other jobs already on the same paper group but not yet issued (or
+  // partially issued) — same math updateStockHint uses.
+  const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
+  const key = paperGroupKey(item);
+  let otherPendingSheets = 0;
+  (jobs || []).forEach(j => {
+    if (j.id === editingId) return;
+    if (!j.inventory_item_id) return;
+    if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
+    const jIt = inventory.find(x => x.id === j.inventory_item_id);
+    if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
+  });
+  const afterPkts = Math.floor((groupBalance - rawNeed - otherPendingSheets) / ps);
+  // Only warn when it would actually go negative — hitting exactly 0 is fine.
+  if (afterPkts >= 0) return true;
   return confirmDialog({
     title: `Insufficient stock for ${item.paper_type}`,
-    message: `Available: ${groupBalance.toLocaleString()} sheets\nNeeded: ${sheets.toLocaleString()} sheets\nBalance after: ${after.toLocaleString()} sheets`,
+    message: `Available: ${availPkts.toLocaleString()} ${unit}\nNeeded: ${neededPkts.toLocaleString()} ${unit}\nBalance after: ${afterPkts.toLocaleString()} ${unit}`,
     danger: true,
     confirmText: 'Proceed anyway',
   });
