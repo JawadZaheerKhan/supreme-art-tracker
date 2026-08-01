@@ -4439,11 +4439,14 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       }
     }
 
-    // Byline used by every log entry below. Including the operator's
-    // assigned machine here means the job history shows e.g.
-    // "Wajid · SM-52 (Printing)" — same info whether the operator was
-    // advancing the stage or just recording numbers.
-    const stageLabel = STAGES[operator.stage_index] || 'Stage ' + operator.stage_index;
+    // Byline used by every log entry below. The stage in parentheses must
+    // reflect the stage the WORK is being done at (curStage), NOT the
+    // operator's primary stage_index. A machine authorized for multiple
+    // stages (e.g. Coatings + Die Cutting) has a single primary stage_index,
+    // and stamping that on every log entry would misattribute die-cutting
+    // work to Coatings — which the job card's particularsTable auto-fill
+    // then reads back into the wrong row.
+    const stageLabel = STAGES[curStage] || 'Stage ' + curStage;
     const by = `${operator.name}${operator.machine ? ' · ' + operator.machine : ''} (${stageLabel})`;
     const time = businessStamp();
     // Machine-comparable instant for the SAME moment as `time`. `time` is a
