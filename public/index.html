@@ -13488,12 +13488,21 @@ function updateStockHint() {
   // Round up so 6.1 packets shows as 7 (you can't pull a fraction of a packet).
   const rawNeed    = sheetsNeed / cutPieces;
   const neededPkts = sheetsNeed > 0 ? Math.ceil(rawNeed / ps) : 0;
+  // Other pending jobs on the same paper group.
+  const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
+  const key = it ? paperGroupKey(it) : null;
+  let otherPendingSheets = 0;
+  if (key) {
+    (jobs || []).forEach(j => {
+      if (j.id === editingId) return;
+      if (!j.inventory_item_id) return;
+      if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
+      const jIt = inventory.find(x => x.id === j.inventory_item_id);
+      if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
+    });
+  }
   const thisJobSheets = Math.round(rawNeed);
-  // "After issuance" reflects what THIS job alone consumes from stock, not
-  // the final pool remainder once every other pending job has also drained.
-  // The cumulative view produced the same "65 left" number on every job's
-  // card and made the number look wrong (375 − 67 clearly ≠ 65).
-  const afterThis = Math.floor((balance - thisJobSheets) / ps);
+  const afterAll = Math.floor((balance - thisJobSheets - otherPendingSheets) / ps);
 
   let cls = 'stock-hint';
   if (balance <= 0) cls += ' out';
@@ -13503,7 +13512,7 @@ function updateStockHint() {
   if (neededPkts > 0) {
     text += ` · Need: ${neededPkts.toLocaleString()} ${unit}`;
     if (neededPkts > availPkts) text += ` · Short by ${(neededPkts - availPkts).toLocaleString()}`;
-    text += ` · After issuance: ${afterThis.toLocaleString()} ${unit}`;
+    text += ` · After issuance: ${afterAll.toLocaleString()} ${unit}`;
   }
   hint.textContent = text;
 }
@@ -13728,8 +13737,8 @@ document.addEventListener('input', (e) => {
 // false if the user chose to cancel after seeing the negative-stock warning.
 // Compares in packets (the unit the store keeper actually issues) so a job
 // that consumes N cut sheets from a 1/2-cut parent uses N/2 raw sheets, then
-// N/(2·packetSize) packets. Warns only when THIS job alone would push the
-// group balance negative — matches updateStockHint's "After issuance" line.
+// N/(2·packetSize) packets. Also nets out other pending jobs on the same
+// paper group so simultaneous demand shows up. Mirrors updateStockHint().
 async function checkStockBeforeSave(data) {
   if (!data.inventory_item_id) return true;
   const sheets = parseInt(data.sheets, 10) || 0;
@@ -13744,7 +13753,19 @@ async function checkStockBeforeSave(data) {
   const rawNeed = sheets / cutPieces;
   const neededPkts = Math.ceil(rawNeed / ps);
   const availPkts = Math.floor(groupBalance / ps);
-  const afterPkts = Math.floor((groupBalance - rawNeed) / ps);
+  // Other jobs already on the same paper group but not yet issued (or
+  // partially issued) — same math updateStockHint uses.
+  const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
+  const key = paperGroupKey(item);
+  let otherPendingSheets = 0;
+  (jobs || []).forEach(j => {
+    if (j.id === editingId) return;
+    if (!j.inventory_item_id) return;
+    if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
+    const jIt = inventory.find(x => x.id === j.inventory_item_id);
+    if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
+  });
+  const afterPkts = Math.floor((groupBalance - rawNeed - otherPendingSheets) / ps);
   // Only warn when it would actually go negative — hitting exactly 0 is fine.
   if (afterPkts >= 0) return true;
   return confirmDialog({
