@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-02-partial-deliveries';
+const SCHEMA_VERSION = 'v2026-08-02-cartons-only-deliveries';
 
 async function initDb() {
   try {
@@ -282,23 +282,13 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deliveries JSONB NOT NULL DEFAULT '[]'::jsonb`;
     // Backfill: for any already-Delivered job (stage 7) that has a delqty
     // but no ledger entry yet, seed a single ledger entry so the mini table
-    // in the job card and the client view are not blank for old jobs. The
-    // cartons cell is derived from delqty / (pieces-per-carton) when we
-    // have both — otherwise left blank (better than fabricating a number).
+    // in the job card and the client view are not blank for old jobs. In
+    // this shop 1 carton == 1 piece, so cartons == delqty.
     await sql`
       UPDATE jobs
          SET deliveries = jsonb_build_array(
                jsonb_build_object(
-                 'pieces',   NULLIF(delqty,'')::text,
-                 'cartons',  CASE
-                               WHEN NULLIF(cartonqty,'') IS NOT NULL
-                                AND NULLIF(delqty,'')    IS NOT NULL
-                                AND cartonqty ~ '^[0-9]+$'
-                                AND delqty    ~ '^[0-9]+$'
-                                AND cartonqty::int > 0
-                               THEN (delqty::int / cartonqty::int)::text
-                               ELSE ''
-                             END,
+                 'cartons',  NULLIF(delqty,'')::text,
                  'date',     COALESCE(NULLIF(deadline,''), to_char(NOW(),'YYYY-MM-DD')),
                  'notes',    'Backfilled from legacy delqty on schema upgrade',
                  'by',       'system',
@@ -308,6 +298,28 @@ async function initDb() {
        WHERE stage_index = 7
          AND (deliveries IS NULL OR jsonb_array_length(deliveries) = 0)
          AND delqty IS NOT NULL AND delqty <> ''
+    `;
+    // Migrate any earlier backfilled/manually-added rows that stored the
+    // pieces + cartons split: rewrite each entry so `cartons` = legacy
+    // pieces value (they're the same unit here) and drop the pieces key.
+    await sql`
+      UPDATE jobs
+         SET deliveries = (
+           SELECT jsonb_agg(
+             CASE
+               WHEN d ? 'pieces' AND (d->>'cartons') IN ('', '0', NULL)
+                 THEN (d - 'pieces') || jsonb_build_object('cartons', d->>'pieces')
+               ELSE d - 'pieces'
+             END
+           )
+             FROM jsonb_array_elements(deliveries) AS d
+         )
+       WHERE deliveries IS NOT NULL
+         AND jsonb_array_length(deliveries) > 0
+         AND EXISTS (
+           SELECT 1 FROM jsonb_array_elements(deliveries) d
+            WHERE d ? 'pieces'
+         )
     `;
 
     // Inventory: paper (and future ink/etc) catalog + append-only ledger
@@ -2308,11 +2320,10 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       client_visible: !!j.client_visible,
       is_shade_card: !!j.is_shade_card,
       // Per-shipment breakdown for the client tile. Operator identity is
-      // stripped (clients don't need to see who recorded it) but pieces,
-      // cartons, date, and any notes ride through so the client sees the
-      // same running ledger the admin sees.
+      // stripped (clients don't need to see who recorded it) but cartons,
+      // date, and any notes ride through so the client sees the same
+      // running ledger the admin sees.
       deliveries: (Array.isArray(j.deliveries) ? j.deliveries : []).map(d => ({
-        pieces:  d && d.pieces  || '',
         cartons: d && d.cartons || '',
         date:    d && d.date    || '',
         notes:   d && d.notes   || '',
@@ -3241,18 +3252,21 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, 
 // of pieces so old reports/exports keep working. The job auto-advances
 // from stage 6 (Ready to Deliver) to stage 7 (Delivered) when the
 // running total meets or exceeds the booked P.O. qty.
-function sumDeliveryPieces(arr) {
+// Cartons is the ONE unit for deliveries in this shop — 1 carton == 1
+// piece in the way the owner counts P.O. qty. So the running total that
+// backs delqty is simply the sum of each entry's cartons value.
+function sumDeliveryCartons(arr) {
   if (!Array.isArray(arr)) return 0;
   return arr.reduce((a, d) => {
-    const n = parseInt(String((d && d.pieces) || '').replace(/[^0-9-]/g, ''), 10);
+    const n = parseFloat(String((d && d.cartons) || '').replace(/[^0-9.\-]/g, ''));
     return a + (Number.isFinite(n) ? n : 0);
   }, 0);
 }
 
-// CREATE a partial delivery. Input is CARTONS (the unit the store keeper
-// works in); pieces get derived as cartons × job.cartonqty (Unit Carton
-// Qty). If the job doesn't have a Unit Carton Qty set, pieces come in
-// as 0 and the running-total comparison against booked qty is skipped.
+// CREATE a partial delivery. Input is CARTONS — the only quantity unit
+// used for deliveries in this shop (1 carton == 1 piece per the owner).
+// delqty stays in sync as the running sum of cartons so the tile's
+// "Delivered Qty" and the client view keep working with no pieces math.
 app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
@@ -3273,19 +3287,13 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     if ((job.stage_index || 0) < 6) {
       return res.status(400).json({ error: `Job is at stage "${STAGES[job.stage_index]||'?'}" — reach "Ready to Deliver" before recording a delivery.` });
     }
-    const perCarton = parseInt(String(job.cartonqty || '').replace(/[^0-9-]/g, ''), 10) || 0;
-    const piecesN   = perCarton > 0 ? Math.round(cartonsN * perCarton) : 0;
-    const bookedQty = parseInt(String(job.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
-    const priorTotal = sumDeliveryPieces(job.deliveries);
-    const nextTotal  = priorTotal + piecesN;
-    // Only cap against booked qty when we can actually compute pieces —
-    // otherwise a partially-configured job (no Unit Carton Qty yet) would
-    // reject every delivery attempt.
-    if (piecesN > 0 && bookedQty && nextTotal > bookedQty) {
-      return res.status(400).json({ error: `This shipment (${piecesN.toLocaleString()} pcs) plus prior deliveries (${priorTotal.toLocaleString()}) exceeds the booked P.O. qty (${bookedQty.toLocaleString()}).` });
+    const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    const priorTotal = sumDeliveryCartons(job.deliveries);
+    const nextTotal  = priorTotal + cartonsN;
+    if (bookedQty && nextTotal > bookedQty) {
+      return res.status(400).json({ error: `This shipment (${cartonsN.toLocaleString()} cartons) plus prior deliveries (${priorTotal.toLocaleString()}) exceeds the booked P.O. qty (${bookedQty.toLocaleString()} cartons).` });
     }
     const entry = {
-      pieces: piecesN ? String(piecesN) : '',
       cartons: String(cartonsN),
       date, notes,
       by: req.user?.email || 'unknown',
@@ -3301,7 +3309,7 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
     let log = Array.isArray(job.log) ? [...job.log] : [];
     log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-      notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${piecesN ? ' (' + piecesN.toLocaleString() + ' pcs)' : ''}${notes ? ' — ' + notes : ''}`,
+      notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
       by: `${by} (${STAGES[stage_index] || '?'})`, time });
     if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
       // Mark 6 done, move to 7.
@@ -3313,7 +3321,7 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
-             delqty      = ${nextTotal > 0 ? String(nextTotal) : job.delqty},
+             delqty      = ${String(nextTotal)},
              stage_index = ${stage_index},
              stages      = ${JSON.stringify(stages)},
              log         = ${JSON.stringify(log)}
@@ -3324,8 +3332,8 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
       action: 'job.delivery.add',
       entityType: 'job',
       entityId: id,
-      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id}${piecesN ? ' (' + piecesN.toLocaleString() + ' pcs, total ' + nextTotal.toLocaleString() + (bookedQty ? '/' + bookedQty.toLocaleString() : '') + ')' : ''}`,
-      metadata: { pieces: piecesN, cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
+      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
+      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -3346,8 +3354,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => 
     const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
     if (ix < 0 || ix >= list.length) return res.status(400).json({ error: 'Delivery index out of range' });
     const removed = list.splice(ix, 1)[0] || null;
-    const totalPieces = sumDeliveryPieces(list);
-    const bookedQty   = parseInt(String(job.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+    const totalCartons = sumDeliveryCartons(list);
+    const bookedQty    = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
     const nowIso = new Date().toISOString();
     const time   = businessStamp();
     const by     = req.user?.email || 'unknown';
@@ -3357,19 +3365,19 @@ app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => 
     // If a corrected removal drops the running total below the booked qty
     // AND the job was Delivered, walk it back to Ready to Deliver so the
     // remaining balance shows in the queue again.
-    if (stage_index === 7 && bookedQty && totalPieces < bookedQty) {
+    if (stage_index === 7 && bookedQty && totalCartons < bookedQty) {
       stages[7] = { ...(stages[7] || {}), status: 'active' };
       stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
       delete stages[7];
       stage_index = 6;
     }
     log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-      notes: `Delivery entry removed (was ${(removed && removed.pieces) || '?'} pcs on ${(removed && removed.date) || '?'})`,
+      notes: `Delivery entry removed (was ${(removed && removed.cartons) || '?'} cartons on ${(removed && removed.date) || '?'})`,
       by: `${by} (${STAGES[stage_index] || '?'})`, time });
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(list)},
-             delqty      = ${totalPieces ? String(totalPieces) : null},
+             delqty      = ${totalCartons ? String(totalCartons) : null},
              stage_index = ${stage_index},
              stages      = ${JSON.stringify(stages)},
              log         = ${JSON.stringify(log)}
@@ -3381,7 +3389,7 @@ app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => 
       entityType: 'job',
       entityId: id,
       summary: `Removed delivery entry #${ix + 1} from Job E-${id}`,
-      metadata: { removed, remaining_total: totalPieces },
+      metadata: { removed, remaining_total: totalCartons },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
