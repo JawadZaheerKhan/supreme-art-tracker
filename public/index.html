@@ -8268,12 +8268,17 @@ function buildJobsReportRows() {
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
       if (!idHit && !nameHit) continue;
     }
-    // Delivery date — old jobs have stage.time in en-PK locale ("d/m/yyyy,
-    // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
-    // both into the app-wide dd/mm/yyyy HH:MM so the report column is
-    // consistent regardless of when the job was delivered.
+    // Delivery date(s) — for jobs shipped via the deliveries ledger, join
+    // every shipment's date (dd/mm/yyyy) so a job split across days shows
+    // both, matching how the Challan No. column joins each shipment's
+    // reference. For legacy jobs with no ledger entries, fall back to the
+    // Delivered stage timestamp (time stripped so the column stays tight).
     const stageRec = j.stages && j.stages[lastStageIdx];
-    const deliveryTime = stageRec && stageRec.time ? fmtStageTime(stageRec.time) : '';
+    const stampFromStage = stageRec && stageRec.time ? String(fmtStageTime(stageRec.time)).split(' ')[0] : '';
+    const ledgerDates = deliveriesList
+      .map(d => d && d.date ? fmtDMY(d.date) : '')
+      .filter(Boolean);
+    const deliveryTime = ledgerDates.length ? ledgerDates.join(', ') : stampFromStage;
     // Date-range filter. In delivered mode the range applies to the
     // Delivered stage timestamp; in created mode it applies to the job's
     // created_at.
@@ -8286,6 +8291,15 @@ function buildJobsReportRows() {
         if (!isFinite(refMs) && stageRec && stageRec.time) {
           const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
           if (m) refMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+        }
+        // Partial-delivery jobs may not have a Delivered stage timestamp
+        // yet. Fall back to the most recent shipment date from the
+        // ledger so date-range filters still surface them.
+        if (!isFinite(refMs) && deliveriesList.length) {
+          const stamps = deliveriesList
+            .map(d => (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN))
+            .filter(n => isFinite(n));
+          if (stamps.length) refMs = Math.max(...stamps);
         }
       }
       if (!isFinite(refMs)) continue;
