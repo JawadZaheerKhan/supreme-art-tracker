@@ -3366,9 +3366,14 @@ function renderJobsCompact() {
       // Half-blue Delivered pill for partial deliveries — matches the
       // card view and the client tile.
       if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
+      const readyIdx = STAGES.indexOf('Ready to Deliver');
       const handler = (i === 0)
         ? `moveJobToCtp(${j.id})`
-        : (i === STAGES.length - 1 ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`);
+        : (i === STAGES.length - 1
+            ? `moveToDeliveredAndEdit(${j.id})`
+            : (i === readyIdx
+                ? `moveToReadyAndEdit(${j.id})`
+                : `moveToStage(${j.id},${i})`));
       const pill = `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
       if (i === 1) {
         // Insert the virtual Pending Stock pill BEFORE Print.
@@ -3592,7 +3597,10 @@ function renderJobCard(j, opts) {
     // while any partial delivery is on the books — one glance tells the
     // floor "shipping has started but isn't finished".
     if (i === STAGES.length - 1 && partialDelv) cls = 'rib-partial';
-    const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+    const readyIdxR = STAGES.indexOf('Ready to Deliver');
+    const handler = (i === STAGES.length - 1)
+      ? `moveToDeliveredAndEdit(${j.id})`
+      : (i === readyIdxR ? `moveToReadyAndEdit(${j.id})` : `moveToStage(${j.id},${i})`);
     const dot = `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
     if (i === 1) {
       const stockDot = `<button class="rib-dot ${stockDotCls}" title="Send to Pending Stock" onclick="moveJobToPendingStock(${j.id})"></button>`;
@@ -8247,7 +8255,13 @@ function buildJobsReportRows() {
   const qIsNum = /^\d+$/.test(qId);
   const out = [];
   for (const j of jobs) {
-    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx) continue;  // Delivered-only in delivered mode
+    // Delivered mode now surfaces every job that has any shipment on the
+    // books — fully delivered jobs (stage 7) AND partial deliveries still
+    // sitting at Ready to Deliver. Partial rows get flagged (yellow dot)
+    // so the owner can tell at a glance which ones still owe cartons.
+    const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
+    const hasAnyShipment = deliveriesList.length > 0;
+    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
     if (client && j.client !== client) continue;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
@@ -8309,6 +8323,19 @@ function buildJobsReportRows() {
     // Previously computed above the date-range filter; now inlined per-row
     // since the range logic reads created_at directly for Created mode.
     const createdAt = j.created_at ? new Date(j.created_at) : null;
+    // Challan numbers from the delivery ledger — one job can have several
+    // shipments each with its own challan/vehicle note. Join non-empty
+    // notes so a row like "CH-1, CH-2" surfaces every reference number
+    // at a glance (matches how the deliveries panel lists them).
+    const challans = deliveriesList
+      .map(d => (d && d.notes ? String(d.notes).trim() : ''))
+      .filter(Boolean)
+      .join(', ');
+    // Partial when there's at least one shipment but the running total
+    // is still short of the booked qty. Uses the deliveries ledger, but
+    // falls back to delqty so legacy jobs (typed straight on the card)
+    // still register correctly.
+    const isPartial = isPartialDelivery(j);
     out.push({
       id: j.id,
       name: j.name || '',
@@ -8320,6 +8347,8 @@ function buildJobsReportRows() {
       poQty: j.qty || '',
       cartonQty: j.cartonqty || '',
       deliveredQty: j.delqty || '',
+      challan: challans,
+      isPartial,
       wastage,
       packets,
       paper,
@@ -8374,6 +8403,12 @@ function renderJobsReport() {
       ? '<td ' + tdR + '>—</td>'
       : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`;
     const isSel = jobsReportSel.has(r.id);
+    // Yellow dot next to Delivered Qty when the row is a partial shipment
+    // — quick visual for "delivered something, still owes more". Uses the
+    // amber palette that matches the PARTIAL badge on the job tile.
+    const partialDot = r.isPartial
+      ? `<span title="Partial delivery — still owes cartons" style="display:inline-block;width:9px;height:9px;border-radius:999px;background:#f59e0b;margin-left:6px;vertical-align:middle;box-shadow:0 0 0 1px #b45309;"></span>`
+      : '';
     return `<tr data-jr-row="${r.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>E-${r.id}</td>
@@ -8382,9 +8417,10 @@ function renderJobsReport() {
       <td ${tdN}>${esc(r.deliveredAt)}</td>
       <td ${td}>${esc(r.client)}</td>
       <td ${td}>${esc(r.poNo)}</td>
+      <td ${td}>${esc(r.challan)}</td>
       <td ${tdR}>${esc(r.poQty)}</td>
       <td ${tdR}>${esc(r.cartonQty)}</td>
-      <td ${tdR}>${esc(r.deliveredQty)}</td>
+      <td ${tdR}>${esc(r.deliveredQty)}${partialDot}</td>
       ${wastageCell}
       <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
       <td ${td}>${esc(r.paper)}</td>
@@ -8410,6 +8446,7 @@ function renderJobsReport() {
           <th ${th}>Delivered</th>
           <th ${th}>Company</th>
           <th ${th}>PO No.</th>
+          <th ${th}>Challan No.</th>
           <th ${thR}>PO Qty</th>
           <th ${thR}>Unit Carton Qty</th>
           <th ${thR}>Delivered Qty</th>
@@ -8425,7 +8462,7 @@ function renderJobsReport() {
         <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
           <td></td>
           <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
-          <td colspan="5" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
+          <td colspan="6" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
@@ -8446,9 +8483,15 @@ async function exportJobsReport() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Challan No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
+    // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
+    // spreadsheet reader can filter/sort them out without needing a
+    // separate flag column.
+    const deliveredCell = r.isPartial && r.deliveredQty
+      ? `${r.deliveredQty} (PARTIAL)`
+      : r.deliveredQty;
     aoa.push([
       'E-' + r.id,
       r.name,
@@ -8456,9 +8499,10 @@ async function exportJobsReport() {
       r.deliveredAt,
       r.client,
       r.poNo,
+      r.challan || '',
       r.poQty,
       r.cartonQty,
-      r.deliveredQty,
+      deliveredCell,
       r.wastage === null ? '' : r.wastage,
       r.packets ? +r.packets.toFixed(2) : '',
       r.paper,
@@ -8485,22 +8529,30 @@ function printJobsReport() {
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
-  const tableRows = rows.map(r => `<tr>
+  const tableRows = rows.map(r => {
+    // Partial rows get a solid amber marker before the delivered qty so
+    // the printout carries the same signal the on-screen dot does.
+    const partialMark = r.isPartial
+      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:#f59e0b;border:1px solid #b45309;margin-right:4px;vertical-align:middle;"></span>'
+      : '';
+    return `<tr>
     <td ${tdL}>E-${r.id}</td>
     <td ${tdL}>${esc(r.name)}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
     <td ${tdL}>${esc(r.deliveredAt)}</td>
     <td ${tdL}>${esc(r.client)}</td>
     <td ${tdL}>${esc(r.poNo)}</td>
+    <td ${tdL}>${esc(r.challan || '')}</td>
     <td ${tdR}>${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
-    <td ${tdR}>${esc(r.deliveredQty)}</td>
+    <td ${tdR}>${partialMark}${esc(r.deliveredQty)}</td>
     <td ${tdR}>${r.wastage === null ? '—' : fmt(r.wastage)}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   const html = `
     <style>@media print { @page { size: A4 landscape; margin: 0.3in; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
@@ -8524,6 +8576,7 @@ function printJobsReport() {
           <th ${tdL}>Delivered</th>
           <th ${tdL}>Company</th>
           <th ${tdL}>PO No.</th>
+          <th ${tdL}>Challan No.</th>
           <th ${tdR}>PO Qty</th>
           <th ${tdR}>Unit Carton Qty</th>
           <th ${tdR}>Delivered Qty</th>
@@ -14380,6 +14433,14 @@ async function saveUpdate(id) {
 // moveToStage() directly.
 async function moveToDeliveredAndEdit(id) {
   await moveToStage(id, STAGES.length - 1);
+  openEdit(id);
+}
+// Same "advance then open the card" flow for Ready to Deliver — the QC
+// person clicking Ready wants to double-check the numbers and record
+// the ready/packets qty before the job actually ships, so open the
+// edit modal right after the stage move.
+async function moveToReadyAndEdit(id) {
+  await moveToStage(id, STAGES.indexOf('Ready to Deliver'));
   openEdit(id);
 }
 
