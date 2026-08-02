@@ -13316,6 +13316,7 @@ function logOperatorForStage(log, stageName) {
 
 function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
+  const raw = (k, sub) => (p[k] && p[k][sub]) || '';
   const log = job && Array.isArray(job.log) ? job.log : [];
   const rows = PARTICULARS_ROWS
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
@@ -13327,11 +13328,23 @@ function particularsTable(p, job) {
       // that would double up on the print and misrepresent who did the work.
       const nameVal = get(r.key, 'name') || esc(op.machine);
       const sigVal  = get(r.key, 'signature') || esc(op.name);
+      // Ready to Delivery Qty row joins two station fields — cartons on
+      // the left of the pipe, packets/cartons on the right — so a single
+      // Quantity cell reads e.g. "20000 | 6" without cluttering the table
+      // with a second row. Admin edits the joined string directly; the
+      // station form still writes the two keys separately (used by
+      // reports and by the delivery-cap check).
+      let qtyDisplay = get(r.key, 'quantity');
+      if (r.key === 'delivered_cartons_qty') {
+        const cartons = String(raw(r.key, 'quantity') || '').trim();
+        const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
+        qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
+      }
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
       <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details') || esc(op.time)}"></td>
-      <td><input type="text" id="p-${r.key}-quantity"  value="${get(r.key,'quantity')}"></td>
+      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine"></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"></td>
     </tr>`;
@@ -13675,6 +13688,15 @@ function collectParticulars() {
     if (CTP_PARTICULARS_KEYS.has(r.key)) return;
     const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
     const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
+    // Ready to Delivery Qty is a joined "cartons | packets" input. Split
+    // it back into the two underlying particulars keys so the value the
+    // station wrote (and any admin edit) round-trips cleanly.
+    if (r.key === 'delivered_cartons_qty' && row.quantity.includes('|')) {
+      const [cartonsPart, packetsPart] = row.quantity.split('|').map(s => s.trim());
+      row.quantity = cartonsPart || '';
+      const pkt = (packetsPart || '').trim();
+      if (pkt) out.ready_packets_qty = { quantity: pkt };
+    }
     if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
   });
   // Row-7 (CTP setup) — writes back onto the same particulars keys so
@@ -13733,6 +13755,12 @@ function collectParticulars() {
     // Partial-issuance marker lives outside the form fields — preserve it
     // so an unrelated Edit doesn't wipe the store keeper's partial issue.
     if (priorP.partial_pending_sheets) out.partial_pending_sheets = priorP.partial_pending_sheets;
+    // ready_packets_qty is written by the Ready-to-Deliver station and
+    // shown on the "Ready to Delivery Qty" row joined as "cartons |
+    // packets". When the admin edits without touching that row, the
+    // split branch above doesn't fire, so preserve the prior value here
+    // instead of wiping it on save.
+    if (!out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
   }
   return out;
 }
@@ -15841,7 +15869,14 @@ const STATION_STAGE_FIELDS = {
   3: [{ key: 'die_cutting_sheets', label: 'Die Cutting Sheets' }, { key: 'die_cutting_waste', label: 'Die Cutting Waste' }],
   4: [{ key: 'sorted_cartons_qty', label: 'Sorted Cartons Qty' }, { key: 'sorted_cartons_waste', label: 'Sorted Cartons Waste' }],
   5: [{ key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' }],
-  6: [{ key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' }],
+  // Ready to Deliver has TWO inputs — Ready Cartons Qty AND
+  // Packets/Cartons. Both are saved to particulars separately; the
+  // job card joins them for display as "<cartons> | <packets>" on
+  // the "Ready to Delivery Qty" row.
+  6: [
+    { key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' },
+    { key: 'ready_packets_qty',     label: 'Packets / Cartons' },
+  ],
 };
 
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
@@ -16481,9 +16516,11 @@ function stationUpdateHtml() {
            these endpoints for CEO too — .ceo-hide is UX; the server is
            the authoritative gate. See canProcessStation() on the server. -->
       <div class="station-actions-row ceo-hide">
-        <button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
-        ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
-        ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}
+        ${stIdx === 6
+          ? (fields.length ? `<button class="btn station-primary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : '')
+          : `<button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
+             ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
+             ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}`}
       </div>
       <div class="station-viewonly ceo-only-block" style="margin-top:14px;padding:12px 16px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:14px;">
         &#128065; View-only — your role can see the queue and numbers, but can't advance or save.
