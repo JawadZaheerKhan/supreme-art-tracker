@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-07-31-transfer-notes';
+const SCHEMA_VERSION = 'v2026-08-02-partial-deliveries';
 
 async function initDb() {
   try {
@@ -273,6 +273,42 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_deleted_at_idx ON jobs(deleted_at) WHERE deleted_at IS NOT NULL`;
+
+    // Partial deliveries ledger: each entry is one shipment out of the total
+    // P.O. qty. { date, pieces, cartons, notes, by, at }. delqty is now a
+    // derived running total (sum of deliveries[].pieces) whenever the array
+    // has any entries; jobs without any deliveries still use the legacy
+    // scalar delqty column so historical data isn't disturbed.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deliveries JSONB NOT NULL DEFAULT '[]'::jsonb`;
+    // Backfill: for any already-Delivered job (stage 7) that has a delqty
+    // but no ledger entry yet, seed a single ledger entry so the mini table
+    // in the job card and the client view are not blank for old jobs. The
+    // cartons cell is derived from delqty / (pieces-per-carton) when we
+    // have both — otherwise left blank (better than fabricating a number).
+    await sql`
+      UPDATE jobs
+         SET deliveries = jsonb_build_array(
+               jsonb_build_object(
+                 'pieces',   NULLIF(delqty,'')::text,
+                 'cartons',  CASE
+                               WHEN NULLIF(cartonqty,'') IS NOT NULL
+                                AND NULLIF(delqty,'')    IS NOT NULL
+                                AND cartonqty ~ '^[0-9]+$'
+                                AND delqty    ~ '^[0-9]+$'
+                                AND cartonqty::int > 0
+                               THEN (delqty::int / cartonqty::int)::text
+                               ELSE ''
+                             END,
+                 'date',     COALESCE(NULLIF(deadline,''), to_char(NOW(),'YYYY-MM-DD')),
+                 'notes',    'Backfilled from legacy delqty on schema upgrade',
+                 'by',       'system',
+                 'at',       to_char(NOW(),'YYYY-MM-DD"T"HH24:MI:SSOF')
+               )
+             )
+       WHERE stage_index = 7
+         AND (deliveries IS NULL OR jsonb_array_length(deliveries) = 0)
+         AND delqty IS NOT NULL AND delqty <> ''
+    `;
 
     // Inventory: paper (and future ink/etc) catalog + append-only ledger
     await sql`
@@ -2271,6 +2307,16 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       issuance_status: j.issuance_status || 'issued',
       client_visible: !!j.client_visible,
       is_shade_card: !!j.is_shade_card,
+      // Per-shipment breakdown for the client tile. Operator identity is
+      // stripped (clients don't need to see who recorded it) but pieces,
+      // cartons, date, and any notes ride through so the client sees the
+      // same running ledger the admin sees.
+      deliveries: (Array.isArray(j.deliveries) ? j.deliveries : []).map(d => ({
+        pieces:  d && d.pieces  || '',
+        cartons: d && d.cartons || '',
+        date:    d && d.date    || '',
+        notes:   d && d.notes   || '',
+      })),
     };
   });
 }
@@ -3184,6 +3230,149 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, 
       entityType: 'job',
       entityId: id,
       summary: `Rejected +${t.qty} extra packets request for Job E-${id}`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Partial deliveries ──────────────────────────────────────────
+// Large P.O.s often ship out over multiple dates. Each entry in the
+// deliveries[] array is one shipment; delqty stays in sync as the sum
+// of pieces so old reports/exports keep working. The job auto-advances
+// from stage 6 (Ready to Deliver) to stage 7 (Delivered) when the
+// running total meets or exceeds the booked P.O. qty.
+function sumDeliveryPieces(arr) {
+  if (!Array.isArray(arr)) return 0;
+  return arr.reduce((a, d) => {
+    const n = parseInt(String((d && d.pieces) || '').replace(/[^0-9-]/g, ''), 10);
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
+
+// CREATE a partial delivery.
+app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const pieces  = String(req.body.pieces  ?? '').trim();
+    const cartons = String(req.body.cartons ?? '').trim();
+    const date    = String(req.body.date    ?? '').trim() || businessDateISO();
+    const notes   = String(req.body.notes   ?? '').trim() || null;
+    const piecesN = parseInt(pieces.replace(/[^0-9-]/g, ''), 10);
+    if (!Number.isFinite(piecesN) || piecesN <= 0) {
+      return res.status(400).json({ error: 'Delivery pieces must be a positive number.' });
+    }
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    // Delivery can only be recorded from Ready to Deliver (6) onward.
+    // Earlier stages don't have finished cartons to ship yet.
+    if ((job.stage_index || 0) < 6) {
+      return res.status(400).json({ error: `Job is at stage "${STAGES[job.stage_index]||'?'}" — reach "Ready to Deliver" before recording a delivery.` });
+    }
+    const bookedQty = parseInt(String(job.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+    const priorTotal = sumDeliveryPieces(job.deliveries);
+    const nextTotal  = priorTotal + piecesN;
+    if (bookedQty && nextTotal > bookedQty) {
+      return res.status(400).json({ error: `This shipment (${piecesN.toLocaleString()}) plus prior deliveries (${priorTotal.toLocaleString()}) exceeds the booked P.O. qty (${bookedQty.toLocaleString()}).` });
+    }
+    const entry = {
+      pieces, cartons, date, notes,
+      by: req.user?.email || 'unknown',
+      at: new Date().toISOString(),
+    };
+    const deliveries = [...(Array.isArray(job.deliveries) ? job.deliveries : []), entry];
+    // Auto-advance to Delivered when the total meets the booked qty. If the
+    // booked qty was never set, stay put — admin can advance manually.
+    const nowIso = new Date().toISOString();
+    const time   = businessStamp();
+    const by     = req.user?.email || 'unknown';
+    let stage_index = job.stage_index || 0;
+    let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    let log = Array.isArray(job.log) ? [...job.log] : [];
+    log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+      notes: `Delivery recorded: ${piecesN.toLocaleString()} pcs${entry.cartons ? ' · ' + entry.cartons + ' cartons' : ''}${notes ? ' — ' + notes : ''}`,
+      by: `${by} (${STAGES[stage_index] || '?'})`, time });
+    if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
+      // Mark 6 done, move to 7.
+      stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+      stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
+      stage_index = 7;
+      log.push({ stage: STAGES[7], status: 'done', notes: `All ${bookedQty.toLocaleString()} pcs delivered`, by: `${by} (${STAGES[7]})`, time });
+    }
+    const updated = await sql`
+      UPDATE jobs
+         SET deliveries  = ${JSON.stringify(deliveries)},
+             delqty      = ${String(nextTotal)},
+             stage_index = ${stage_index},
+             stages      = ${JSON.stringify(stages)},
+             log         = ${JSON.stringify(log)}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.delivery.add',
+      entityType: 'job',
+      entityId: id,
+      summary: `Recorded delivery of ${piecesN.toLocaleString()} pcs for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
+      metadata: { pieces: piecesN, cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// DELETE a specific delivery entry by index — admin only, for corrections.
+// If removing the last entry drops the job below full delivery, moves stage
+// back from Delivered (7) to Ready to Deliver (6).
+app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id  = parseInt(req.params.id, 10);
+    const ix  = parseInt(req.params.index, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
+    if (ix < 0 || ix >= list.length) return res.status(400).json({ error: 'Delivery index out of range' });
+    const removed = list.splice(ix, 1)[0] || null;
+    const totalPieces = sumDeliveryPieces(list);
+    const bookedQty   = parseInt(String(job.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+    const nowIso = new Date().toISOString();
+    const time   = businessStamp();
+    const by     = req.user?.email || 'unknown';
+    let stage_index = job.stage_index || 0;
+    let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    let log = Array.isArray(job.log) ? [...job.log] : [];
+    // If a corrected removal drops the running total below the booked qty
+    // AND the job was Delivered, walk it back to Ready to Deliver so the
+    // remaining balance shows in the queue again.
+    if (stage_index === 7 && bookedQty && totalPieces < bookedQty) {
+      stages[7] = { ...(stages[7] || {}), status: 'active' };
+      stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
+      delete stages[7];
+      stage_index = 6;
+    }
+    log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+      notes: `Delivery entry removed (was ${(removed && removed.pieces) || '?'} pcs on ${(removed && removed.date) || '?'})`,
+      by: `${by} (${STAGES[stage_index] || '?'})`, time });
+    const updated = await sql`
+      UPDATE jobs
+         SET deliveries  = ${JSON.stringify(list)},
+             delqty      = ${totalPieces ? String(totalPieces) : null},
+             stage_index = ${stage_index},
+             stages      = ${JSON.stringify(stages)},
+             log         = ${JSON.stringify(log)}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.delivery.remove',
+      entityType: 'job',
+      entityId: id,
+      summary: `Removed delivery entry #${ix + 1} from Job E-${id}`,
+      metadata: { removed, remaining_total: totalPieces },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }

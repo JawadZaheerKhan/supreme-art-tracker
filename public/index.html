@@ -2369,6 +2369,24 @@ function jobDaysInProduction(j) {
 }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
 function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Ready to Deliver'); }
+// Partial delivery: at least one shipment recorded but the running total
+// is still short of the booked P.O. qty. Sits between "Ready to Deliver"
+// (nothing shipped yet) and "Delivered" (all shipped). Own tab so admin
+// can see everything that needs another shipment at a glance.
+function totalDeliveredPieces(j) {
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  return list.reduce((a, d) => {
+    const n = parseInt(String((d && d.pieces) || '').replace(/[^0-9-]/g, ''), 10);
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
+function isPartialDelivery(j) {
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  if (!list.length) return false;
+  const booked = parseInt(String((j && j.qty) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+  if (!booked) return false;
+  return totalDeliveredPieces(j) < booked;
+}
 function dateRangeBounds(preset) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -2985,6 +3003,7 @@ function getFiltered() {
     if (view === 'pending') return j.issuance_status === 'pending';
     if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j);
     if (view === 'storage') return isStorage(j);
+    if (view === 'partial') return isPartialDelivery(j);
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
     // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
@@ -3156,7 +3175,7 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['blocked','Blocked'],['done','Delivered']];
+  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -3486,7 +3505,16 @@ function renderJobCard(j, opts) {
   const topupBadge = (!clientPreview && hasPendingPacketTopup(j))
     ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
     : '';
-  const badge = badge0 + partialBadge + topupBadge;
+  // Partial-delivery chip: shipped some, still short of the booked qty.
+  // Shows in both admin and client views so everyone can see at a glance
+  // that this job is mid-shipment (and how much is left).
+  const partialDelvBadge = (() => {
+    if (!isPartialDelivery(j)) return '';
+    const booked = parseInt(String(j.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+    const shipped = totalDeliveredPieces(j);
+    return ` <span class="badge" style="background:#f59e0b;color:#fff;">&#128230; Partial: ${shipped.toLocaleString()} / ${booked.toLocaleString()}</span>`;
+  })();
+  const badge = badge0 + partialBadge + topupBadge + partialDelvBadge;
 
   // Progress ribbon — 8 clickable dots, same moveToStage behavior as the
   // compact pills. done = filled, current = pulsing ring, future = muted.
@@ -3663,6 +3691,7 @@ function renderJobCard(j, opts) {
       ? `<div class="pipeline" style="justify-content:center;">${clientPipeline}</div>`
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
+    ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
@@ -13343,11 +13372,204 @@ function jobForm(j={}) {
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
     ${particularsTable(j.particulars||{}, j)}
+    ${deliveriesSection(j)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
       <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${v(j.notes)}</textarea></div>
     </div>
   `;
+}
+
+// Partial-delivery ledger + "Record Delivery" form. Renders inside the
+// job card between the particulars table and the Additional Notes box.
+// Only meaningful for saved jobs — hidden entirely on the New Job modal
+// since there's nothing to ship yet.
+function deliveriesSection(j) {
+  if (!j || !j.id) return '';
+  const list = Array.isArray(j.deliveries) ? j.deliveries : [];
+  const booked = parseInt(String(j.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+  const perCarton = parseInt(String(j.cartonqty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+  const sumPieces = list.reduce((a, d) => {
+    const n = parseInt(String((d && d.pieces) || '').replace(/[^0-9-]/g, ''), 10);
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+  const remaining = booked ? Math.max(0, booked - sumPieces) : 0;
+  const isDelivered = booked && sumPieces >= booked;
+  const stageIdx = j.stage_index || 0;
+  const canAddDelivery = stageIdx >= 6 && !isDelivered && canWriteJobs && canWriteJobs();
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+
+  const rows = list.length
+    ? list.map((d, i) => {
+        const pcs  = d.pieces  || '';
+        const ctns = d.cartons || '';
+        const dt   = d.date    || '';
+        const nt   = d.notes   || '';
+        const by   = d.by      || '';
+        const delBtn = isAdminUser
+          ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
+          : '';
+        return `<tr>
+          <td>${esc(dt)}</td>
+          <td style="text-align:right;">${esc(pcs)}</td>
+          <td style="text-align:right;">${esc(ctns)}</td>
+          <td>${esc(nt)}</td>
+          <td style="font-size:11px;color:var(--text2);">${esc(by)}</td>
+          <td style="text-align:center;">${delBtn}</td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="6" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
+
+  const totalCartonsShipped = list.reduce((a, d) => {
+    const n = parseInt(String((d && d.cartons) || '').replace(/[^0-9-]/g, ''), 10);
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+
+  const statusPill = isDelivered
+    ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">FULLY DELIVERED</span>`
+    : list.length
+      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL &mdash; ${remaining.toLocaleString()} PCS LEFT</span>`
+      : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>`;
+
+  const summaryLine = booked
+    ? `Booked: <b>${booked.toLocaleString()}</b> pcs &middot; Delivered: <b>${sumPieces.toLocaleString()}</b> pcs${totalCartonsShipped ? ' &middot; ' + totalCartonsShipped.toLocaleString() + ' cartons shipped' : ''} &middot; Remaining: <b>${remaining.toLocaleString()}</b> pcs`
+    : `Delivered: <b>${sumPieces.toLocaleString()}</b> pcs${totalCartonsShipped ? ' &middot; ' + totalCartonsShipped.toLocaleString() + ' cartons' : ''} (booked P.O. qty not set)`;
+
+  const addForm = canAddDelivery
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:1fr 1fr 1.2fr 2fr auto;gap:8px;align-items:end;">
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Pieces *</label>
+          <input type="number" id="deliv-pieces" min="1" placeholder="e.g. 25000" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;" oninput="deliverySyncFromPieces(${perCarton})">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons</label>
+          <input type="number" id="deliv-cartons" min="0" step="any" placeholder="${perCarton ? 'auto ('+perCarton+'/ctn)' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;" oninput="deliverySyncFromCartons(${perCarton})">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
+          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Notes (optional)</label>
+          <input type="text" id="deliv-notes" placeholder="Challan #, vehicle, etc." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
+      </div>`
+    : (stageIdx < 6
+        ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
+        : '');
+
+  return `<div class="jc-deliveries ceo-hide-inner" style="margin-top:16px;padding:12px 14px;background:#fff;border:1px solid var(--border);border-radius:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Deliveries</div>
+      ${statusPill}
+    </div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead>
+        <tr style="background:#f3f4f6;">
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Date</th>
+          <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Pieces</th>
+          <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Cartons</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Notes</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
+          <th style="width:36px;padding:6px 8px;border-bottom:1px solid var(--border);"></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${addForm}
+  </div>`;
+}
+
+// Auto-calc helpers for the delivery mini-form. Cartons = pieces ÷ per-carton
+// (and vice versa) — both fields stay editable so the user can override
+// when a partial carton or bonus was included in a shipment.
+function deliverySyncFromPieces(perCarton) {
+  const p = parseInt((document.getElementById('deliv-pieces')||{}).value, 10);
+  const c = document.getElementById('deliv-cartons');
+  if (!c) return;
+  if (perCarton > 0 && Number.isFinite(p) && p > 0) c.value = +(p / perCarton).toFixed(2);
+  else if (!Number.isFinite(p) || p <= 0) c.value = '';
+}
+function deliverySyncFromCartons(perCarton) {
+  const c = parseFloat((document.getElementById('deliv-cartons')||{}).value);
+  const p = document.getElementById('deliv-pieces');
+  if (!p) return;
+  if (perCarton > 0 && Number.isFinite(c) && c > 0) p.value = Math.round(c * perCarton);
+  else if (!Number.isFinite(c) || c <= 0) p.value = '';
+}
+
+// Compact per-shipment breakdown for the client-view tile. Silent when
+// there are no deliveries so tiles for unshipped jobs stay unchanged.
+// Only rendered inside the client tile — inline admin tiles keep the
+// tighter layout and rely on the full ledger inside the job card modal.
+function clientDeliveriesBreakdown(j, clientPreview) {
+  if (!clientPreview) return '';
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  if (!list.length) return '';
+  const booked = parseInt(String((j && j.qty) || '').replace(/[^0-9-]/g, ''), 10) || 0;
+  const shipped = totalDeliveredPieces(j);
+  const remaining = booked ? Math.max(0, booked - shipped) : 0;
+  const rows = list.map(d => {
+    const pcs = d.pieces ? Number(String(d.pieces).replace(/[^0-9-]/g, '')).toLocaleString() + ' pcs' : '';
+    const ct  = d.cartons ? ` &middot; ${esc(String(d.cartons))} ctns` : '';
+    const dt  = d.date ? esc(fmtDMY(d.date) || d.date) : '';
+    return `<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
+      <span style="color:var(--text2);">${dt}</span>
+      <span style="font-weight:600;">${pcs}${ct}</span>
+    </div>`;
+  }).join('');
+  const footer = booked
+    ? `<div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;">
+        <span>Total shipped</span>
+        <span>${shipped.toLocaleString()} / ${booked.toLocaleString()}${remaining ? ' &nbsp; (' + remaining.toLocaleString() + ' left)' : ''}</span>
+      </div>`
+    : `<div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;">
+        <span>Total shipped</span><span>${shipped.toLocaleString()} pcs</span>
+      </div>`;
+  return `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments</div>
+    ${rows}
+    ${footer}
+  </div>`;
+}
+
+async function recordDelivery(jobId) {
+  const pieces  = ((document.getElementById('deliv-pieces')||{}).value || '').trim();
+  const cartons = ((document.getElementById('deliv-cartons')||{}).value || '').trim();
+  const date    = ((document.getElementById('deliv-date')||{}).value || '').trim();
+  const notes   = ((document.getElementById('deliv-notes')||{}).value || '').trim();
+  if (!pieces || parseInt(pieces, 10) <= 0) { await alertDialog({ title: 'Enter delivery pieces', kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, { pieces, cartons, date, notes });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render(); notify('Delivery recorded');
+    setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function removeDelivery(jobId, index) {
+  const ok = await confirmDialog({
+    title: 'Remove this delivery entry?',
+    message: 'This corrects the running total. If the job was marked Delivered and this drop brings it below the booked qty, it will move back to Ready to Deliver.',
+    danger: true,
+    confirmText: 'Remove',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('DELETE', `/api/jobs/${jobId}/deliveries/${index}`);
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render(); notify('Delivery entry removed');
+    setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 
 function getFormData() {
