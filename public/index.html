@@ -664,6 +664,10 @@
   .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
   .s-active { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-border); }
   .s-pending { background: var(--bg2); color: var(--text3); border-color: var(--border); }
+  /* Half-filled Delivered pill for partial deliveries: left half solid
+     blue tint, right half muted, so the pipeline reads as "shipping in
+     progress" at a glance. Text sits on top of both halves. */
+  .s-partial { background: linear-gradient(to right, var(--blue-bg) 50%, var(--bg2) 50%); color: var(--blue-text); border-color: var(--blue-border); }
   .s-blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
   .arrow { font-size: 10px; color: var(--text3); }
   .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
@@ -714,6 +718,11 @@
   .rib-current { background: var(--blue-text); animation: ribPulse 1.4s ease-in-out infinite; }
   .rib-blocked { background: #dc2626; }
   .rib-future { background: var(--bg3); }
+  /* Partial-delivery indicator: fills the Delivered dot half-blue so the
+     ribbon reflects "some shipped, more to go". Left half solid blue,
+     right half muted so the direction (fill from left) reads like a
+     progress bar. Same trick for the pipeline pill below. */
+  .rib-partial { background: linear-gradient(to right, var(--blue-text) 50%, var(--bg3) 50%); }
   @keyframes ribPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
   /* ⋯ More menu (native <details> styled as a popover) */
@@ -3007,7 +3016,7 @@ function getFiltered() {
     // Partial-issued jobs are already in production with real sheets in
     // hand, so they belong in Active with a "Requires More Stock" badge.
     if (view === 'pending') return j.issuance_status === 'pending';
-    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j);
+    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelivery(j);
     if (view === 'storage') return isStorage(j);
     if (view === 'partial') return isPartialDelivery(j);
     if (view === 'done')    return isDone(j);
@@ -3544,6 +3553,10 @@ function renderJobCard(j, opts) {
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
     else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 'rib-blocked' : 'rib-current';
+    // Delivered dot (last stage) shows a half-blue "in progress" fill
+    // while any partial delivery is on the books — one glance tells the
+    // floor "shipping has started but isn't finished".
+    if (i === STAGES.length - 1 && partialDelv) cls = 'rib-partial';
     const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
     const dot = `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
     if (i === 1) {
@@ -3560,6 +3573,9 @@ function renderJobCard(j, opts) {
         const st = j.stages?.[i]?.status;
         if (st === 'done') cls = 's-done';
         else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 's-blocked' : 's-active';
+        // Match the ribbon dot behaviour: half-blue Delivered pill on
+        // partial deliveries so clients get the same in-progress cue.
+        if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
         const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}</span>`;
         if (i === 1) {
           let psCls = 's-pending';
