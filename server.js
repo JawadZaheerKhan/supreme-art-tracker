@@ -3249,19 +3249,21 @@ function sumDeliveryPieces(arr) {
   }, 0);
 }
 
-// CREATE a partial delivery.
+// CREATE a partial delivery. Input is CARTONS (the unit the store keeper
+// works in); pieces get derived as cartons × job.cartonqty (Unit Carton
+// Qty). If the job doesn't have a Unit Carton Qty set, pieces come in
+// as 0 and the running-total comparison against booked qty is skipped.
 app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const pieces  = String(req.body.pieces  ?? '').trim();
     const cartons = String(req.body.cartons ?? '').trim();
     const date    = String(req.body.date    ?? '').trim() || businessDateISO();
     const notes   = String(req.body.notes   ?? '').trim() || null;
-    const piecesN = parseInt(pieces.replace(/[^0-9-]/g, ''), 10);
-    if (!Number.isFinite(piecesN) || piecesN <= 0) {
-      return res.status(400).json({ error: 'Delivery pieces must be a positive number.' });
+    const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
+    if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
+      return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
     }
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -3271,14 +3273,21 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     if ((job.stage_index || 0) < 6) {
       return res.status(400).json({ error: `Job is at stage "${STAGES[job.stage_index]||'?'}" — reach "Ready to Deliver" before recording a delivery.` });
     }
+    const perCarton = parseInt(String(job.cartonqty || '').replace(/[^0-9-]/g, ''), 10) || 0;
+    const piecesN   = perCarton > 0 ? Math.round(cartonsN * perCarton) : 0;
     const bookedQty = parseInt(String(job.qty || '').replace(/[^0-9-]/g, ''), 10) || 0;
     const priorTotal = sumDeliveryPieces(job.deliveries);
     const nextTotal  = priorTotal + piecesN;
-    if (bookedQty && nextTotal > bookedQty) {
-      return res.status(400).json({ error: `This shipment (${piecesN.toLocaleString()}) plus prior deliveries (${priorTotal.toLocaleString()}) exceeds the booked P.O. qty (${bookedQty.toLocaleString()}).` });
+    // Only cap against booked qty when we can actually compute pieces —
+    // otherwise a partially-configured job (no Unit Carton Qty yet) would
+    // reject every delivery attempt.
+    if (piecesN > 0 && bookedQty && nextTotal > bookedQty) {
+      return res.status(400).json({ error: `This shipment (${piecesN.toLocaleString()} pcs) plus prior deliveries (${priorTotal.toLocaleString()}) exceeds the booked P.O. qty (${bookedQty.toLocaleString()}).` });
     }
     const entry = {
-      pieces, cartons, date, notes,
+      pieces: piecesN ? String(piecesN) : '',
+      cartons: String(cartonsN),
+      date, notes,
       by: req.user?.email || 'unknown',
       at: new Date().toISOString(),
     };
@@ -3292,7 +3301,7 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
     let log = Array.isArray(job.log) ? [...job.log] : [];
     log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-      notes: `Delivery recorded: ${piecesN.toLocaleString()} pcs${entry.cartons ? ' · ' + entry.cartons + ' cartons' : ''}${notes ? ' — ' + notes : ''}`,
+      notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${piecesN ? ' (' + piecesN.toLocaleString() + ' pcs)' : ''}${notes ? ' — ' + notes : ''}`,
       by: `${by} (${STAGES[stage_index] || '?'})`, time });
     if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
       // Mark 6 done, move to 7.
@@ -3304,7 +3313,7 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
-             delqty      = ${String(nextTotal)},
+             delqty      = ${nextTotal > 0 ? String(nextTotal) : job.delqty},
              stage_index = ${stage_index},
              stages      = ${JSON.stringify(stages)},
              log         = ${JSON.stringify(log)}
@@ -3315,7 +3324,7 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
       action: 'job.delivery.add',
       entityType: 'job',
       entityId: id,
-      summary: `Recorded delivery of ${piecesN.toLocaleString()} pcs for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
+      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id}${piecesN ? ' (' + piecesN.toLocaleString() + ' pcs, total ' + nextTotal.toLocaleString() + (bookedQty ? '/' + bookedQty.toLocaleString() : '') + ')' : ''}`,
       metadata: { pieces: piecesN, cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
     });
     res.json(updated[0]);
