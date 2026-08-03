@@ -3294,9 +3294,10 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
     const priorTotal = sumDeliveryCartons(job.deliveries);
     const nextTotal  = priorTotal + cartonsN;
-    if (bookedQty && nextTotal > bookedQty) {
-      return res.status(400).json({ error: `This shipment (${cartonsN.toLocaleString()} cartons) plus prior deliveries (${priorTotal.toLocaleString()}) exceeds the booked P.O. qty (${bookedQty.toLocaleString()} cartons).` });
-    }
+    // No cap against booked qty — the shop routinely ships slightly more
+    // or less than the P.O. asked for (yield, over-run, customer top-up
+    // request). Recording reality is the priority; the tile just shows
+    // the running total against the booked qty for context.
     const entry = {
       cartons: String(cartonsN),
       date, notes,
