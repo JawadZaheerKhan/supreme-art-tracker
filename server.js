@@ -3472,8 +3472,9 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    let { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier } = req.body;
+    let { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier, is_offcut } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
+    const isOffcut = !!is_offcut;
     // Brand is stored uppercase for consistency — Ningbo / ningbo / NINGBO
     // all save as NINGBO. The case-insensitive duplicate check below still
     // catches dupes against the existing data even if old rows aren't
@@ -3493,30 +3494,33 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
     // The user uses "+ Stock" on the existing card to top up instead.
     //
     // Only blocks against FRESH-STOCK rows (is_offcut = false). Offcut items
-    // are managed by the cut-sheets workflow at issuance time and may legitimately
-    // share dimensions with fresh stock — they're tracked as separate lines.
-    const existing = await sql`
-      SELECT * FROM inventory_items
-      WHERE is_offcut = false
-        AND lower(trim(paper_type))          = lower(trim(${paper_type}))
-        AND lower(trim(COALESCE(size,'')))   = lower(trim(COALESCE(${size||null},  '')))
-        AND lower(trim(COALESCE(gsm,'')))    = lower(trim(COALESCE(${gsm||null},   '')))
-        AND lower(trim(COALESCE(brand,'')))  = lower(trim(COALESCE(${brand||null}, '')))
-      LIMIT 1
-    `;
-    if (existing[0]) {
-      const item = existing[0];
-      const existingLabel = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
-      return res.status(409).json({
-        error: `This paper item already exists: ${existingLabel}. Use "+ Stock" on the existing card to add more.`,
-        existing_item: item,
-      });
+    // are managed by the cut-sheets workflow OR the manual Add Offcut form
+    // — either way they may legitimately share dimensions with fresh stock,
+    // so skip the check entirely when the caller is adding an offcut.
+    if (!isOffcut) {
+      const existing = await sql`
+        SELECT * FROM inventory_items
+        WHERE is_offcut = false
+          AND lower(trim(paper_type))          = lower(trim(${paper_type}))
+          AND lower(trim(COALESCE(size,'')))   = lower(trim(COALESCE(${size||null},  '')))
+          AND lower(trim(COALESCE(gsm,'')))    = lower(trim(COALESCE(${gsm||null},   '')))
+          AND lower(trim(COALESCE(brand,'')))  = lower(trim(COALESCE(${brand||null}, '')))
+        LIMIT 1
+      `;
+      if (existing[0]) {
+        const item = existing[0];
+        const existingLabel = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
+        return res.status(409).json({
+          error: `This paper item already exists: ${existingLabel}. Use "+ Stock" on the existing card to add more.`,
+          existing_item: item,
+        });
+      }
     }
 
-    // No match — fresh item.
+    // No match — fresh item (or a manually-added offcut).
     const inserted = await sql`
-      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier)
-      VALUES (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${reorder_threshold||0}, ${supplier||null})
+      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier, is_offcut)
+      VALUES (${paper_type}, ${size||null}, ${gsm||null}, ${brand||null}, ${reorder_threshold||0}, ${supplier||null}, ${isOffcut})
       RETURNING *
     `;
     const item = inserted[0];
