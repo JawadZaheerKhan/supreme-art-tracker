@@ -1615,7 +1615,7 @@
          admin / production manager see it — the store keeper role manages
          stock movements, not the offcut ledger itself. Hidden by default;
          setMode('inventory') shows it based on role. -->
-    <button class="btn" id="topbar-add-offcut" style="display:none;background:#7C1F1F;border-color:#7C1F1F;color:#fff;" onclick="openInvAddOffcut()">+ Add Offcut</button>
+    <button class="btn" id="topbar-add-offcut" style="display:none;background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openInvAddOffcut()">+ Add Offcut</button>
     <button class="btn btn-primary" id="topbar-add" onclick="openAdd()">+ New Job</button>
     <div id="user-chip" style="display:none; align-items:center; gap:8px; margin-left:10px; padding-left:10px; border-left:1px solid var(--border);">
       <img id="user-pic" src="" alt="" style="width:28px; height:28px; border-radius:50%; display:none;">
@@ -2641,6 +2641,19 @@ function canWrite() { return isAdmin() || isProductionManager() || hasRole('stor
 // Anyone who can write inventory can issue stock. CEO + operator are blocked
 // unless they also hold a write role.
 function canIssueStock() { return isAdmin() || hasRole('store_manager'); }
+// Offcut-based jobs are hand-managed by the production side (admin +
+// PM), not by the store keeper — the offcut ledger is thinner and
+// error-prone, so pending-stock issuance for those jobs is gated
+// separately here.
+function canIssueOffcutStock() { return isAdmin() || isProductionManager(); }
+// A job counts as offcut-based when its linked inventory item is an
+// offcut row. Used to swap the Issue Stock button to yellow and hide
+// it from the store keeper on the Pending Stock queue.
+function isOffcutJob(j) {
+  if (!j || !j.inventory_item_id) return false;
+  const it = inventory.find(x => x.id === j.inventory_item_id);
+  return !!(it && it.is_offcut);
+}
 // Print job card — admin / production manager / CEO. Store manager and
 // operator don't print job cards.
 function canPrintJobCard() { return isAdmin() || isProductionManager() || hasRole('ceo'); }
@@ -3538,7 +3551,15 @@ function cardIssueStockBtn(j) {
         : 'No paper picked yet — open Edit to link an inventory item.');
   const icon    = enough ? '&#10003;' : '&#9888;';
   const label   = enough ? 'Issue Stock' : (isOut ? 'Out of Stock' : 'Low Stock');
-  return `<button class="btn btn-sm ${cls}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
+  // Offcut-based jobs: hidden from store keeper (only admin / PM can
+  // issue), and rendered in yellow so the row visually flags that it's
+  // pulling from the offcut ledger rather than fresh stock.
+  const offcut = isOffcutJob(j);
+  if (offcut && !canIssueOffcutStock()) return '';
+  const offcutStyle = offcut
+    ? ' style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;"'
+    : '';
+  return `<button class="btn btn-sm ${offcut ? '' : cls}"${offcutStyle} onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
 }
 
 function renderJobCard(j, opts) {
@@ -4809,8 +4830,16 @@ function renderInvPendingList() {
     const topupBtn = (partial && canIssueStock())
       ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Top up ${partialPktsStr} ${unit}</button>`
       : '';
-    const issueBtn = (!partial && canIssueStock())
-      ? `<button class="btn btn-sm ${cls} ceo-hide" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
+    // Offcut jobs: store keeper doesn't see the Issue Stock button (only
+    // admin / PM can pull from offcut stock). When rendered, it's yellow
+    // so the row visually calls out "this pulls from the offcut ledger".
+    const offcut = isOffcutJob(j);
+    const offcutOk = !offcut || canIssueOffcutStock();
+    const offcutStyle = offcut
+      ? ' style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;"'
+      : '';
+    const issueBtn = (!partial && canIssueStock() && offcutOk)
+      ? `<button class="btn btn-sm ${offcut ? '' : cls} ceo-hide"${offcutStyle} onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
       : '';
     return `
       <div class="inv-card inv-pending-row"${partial ? ' style="border-left:3px solid #F59E0B;"' : ''}>
@@ -5163,7 +5192,7 @@ function openInvAddOffcut() {
   }
   const defaultPaperType = PAPER_TYPES[0] || '';
   openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2 style="color:#7C1F1F;">Add Offcut Item</h2>
+    <h2 style="color:#78350f;">Add Offcut Item</h2>
     <div style="margin:-4px 0 12px;padding:8px 12px;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;font-size:12px;color:#78350f;">
       Creates a manual offcut entry. Fresh-stock duplicate rules don&rsquo;t apply &mdash; offcut lines can share dimensions with existing paper.
     </div>
@@ -5198,7 +5227,7 @@ function openInvAddOffcut() {
     <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. From leftover run E-88"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" style="background:#7C1F1F;border-color:#7C1F1F;" onclick="saveInvAddOffcut()">Add Offcut</button>
+      <button class="btn btn-primary" style="background:#facc15;border-color:#eab308;color:#422006;" onclick="saveInvAddOffcut()">Add Offcut</button>
     </div>
   </div>`);
   invOpeningSync();
