@@ -664,6 +664,10 @@
   .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
   .s-active { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-border); }
   .s-pending { background: var(--bg2); color: var(--text3); border-color: var(--border); }
+  /* Half-filled Delivered pill for partial deliveries: left half solid
+     blue tint, right half muted, so the pipeline reads as "shipping in
+     progress" at a glance. Text sits on top of both halves. */
+  .s-partial { background: linear-gradient(to right, var(--blue-bg) 50%, var(--bg2) 50%); color: var(--blue-text); border-color: var(--blue-border); }
   .s-blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
   .arrow { font-size: 10px; color: var(--text3); }
   .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
@@ -714,6 +718,11 @@
   .rib-current { background: var(--blue-text); animation: ribPulse 1.4s ease-in-out infinite; }
   .rib-blocked { background: #dc2626; }
   .rib-future { background: var(--bg3); }
+  /* Partial-delivery indicator: fills the Delivered dot half-blue so the
+     ribbon reflects "some shipped, more to go". Left half solid blue,
+     right half muted so the direction (fill from left) reads like a
+     progress bar. Same trick for the pipeline pill below. */
+  .rib-partial { background: linear-gradient(to right, var(--blue-text) 50%, var(--bg3) 50%); }
   @keyframes ribPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
   /* ⋯ More menu (native <details> styled as a popover) */
@@ -2272,7 +2281,7 @@ const PARTICULARS_ROWS = [
   { key: 'sorted_cartons_waste',     label: 'Sorted Cartons Waste' },
   { key: 'pasted_cartons_qty',       label: 'Pasted Cartons Qty' },
   { key: 'pasting_waste_qty',        label: 'Pasting Waste Qty' },
-  { key: 'delivered_cartons_qty',    label: 'Delivered Cartons Qty' },
+  { key: 'delivered_cartons_qty',    label: 'Ready to Delivery Qty' },
 ];
 
 let jobs = [];
@@ -2368,7 +2377,36 @@ function jobDaysInProduction(j) {
   return String(days);
 }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
-function isStorage(j) { return !isDone(j) && (j.stage_index||0) === STAGES.indexOf('Ready to Deliver'); }
+// Ready to Deliver = at stage 6, not done, AND nothing has shipped yet.
+// The moment a partial delivery is recorded the job moves out of this
+// tab into "Partially Delivered" so the queue only shows work that hasn't
+// been touched at all.
+function isStorage(j) { return !isDone(j) && !isPartialDelivery(j) && (j.stage_index||0) === STAGES.indexOf('Ready to Deliver'); }
+// Partial delivery: at least one shipment recorded but the running total
+// is still short of the booked P.O. qty. Sits between "Ready to Deliver"
+// (nothing shipped yet) and "Delivered" (all shipped). Own tab so admin
+// can see everything that needs another shipment at a glance. Cartons is
+// the only unit tracked — booked qty (j.qty) and delivered totals live
+// in the same unit so no derivation is needed anywhere.
+function totalDeliveredCartons(j) {
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  return list.reduce((a, d) => {
+    const n = parseFloat(String((d && d.cartons) || '').replace(/[^0-9.\-]/g, ''));
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
+function isPartialDelivery(j) {
+  const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
+  if (!booked) return false;
+  // Prefer the deliveries[] running total (accurate per-shipment record);
+  // fall back to legacy delqty so jobs whose delivered qty was typed
+  // straight on the job card (before the ledger existed) still register
+  // as partial once shipping starts.
+  const fromLedger = totalDeliveredCartons(j);
+  const fromLegacy = parseFloat(String((j && j.delqty) || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const delivered = fromLedger || fromLegacy;
+  return delivered > 0 && delivered < booked;
+}
 function dateRangeBounds(preset) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -2983,8 +3021,9 @@ function getFiltered() {
     // Partial-issued jobs are already in production with real sheets in
     // hand, so they belong in Active with a "Requires More Stock" badge.
     if (view === 'pending') return j.issuance_status === 'pending';
-    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j);
+    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelivery(j);
     if (view === 'storage') return isStorage(j);
+    if (view === 'partial') return isPartialDelivery(j);
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
     // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
@@ -3156,7 +3195,7 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['blocked','Blocked'],['done','Delivered']];
+  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -3270,10 +3309,27 @@ function renderJobsCompact() {
     // and get a "Requires More Stock" badge stacked on top so it's clear
     // production is running but still needs more sheets. Pending top-up
     // requests stack their own badge alongside.
-    const badge0 = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+    // Partial-delivery treatment mirrors the card view: amber PARTIAL
+    // pill replaces the plain stage badge, and the Delivered pill in the
+    // pipeline gets the half-blue fill (below). Delivered badge also
+    // carries the shipped cartons so the row shows how much went out.
+    const bookedCartons = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    const shippedFromLedger = totalDeliveredCartons(j);
+    const shippedFromLegacy = parseFloat(String(j.delqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    const shippedCartons = shippedFromLedger || shippedFromLegacy;
+    const remainingCartons = bookedCartons ? Math.max(0, bookedCartons - shippedCartons) : 0;
+    const partialDelv = isPartialDelivery(j);
+    const partialPill = partialDelv
+      ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${remainingCartons.toLocaleString()} CARTONS LEFT` : 'PARTIAL DELIVERY'}</span>`
+      : '';
+    const deliveredLabel = shippedCartons
+      ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
+      : 'Delivered';
+    const badge0 = partialDelv ? partialPill :
+      isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
       isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
       pending ? jobStockBadge(j) :
-      done ? `<span class="badge badge-done">Delivered</span>` :
+      done ? `<span class="badge badge-done">${deliveredLabel}</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
@@ -3307,9 +3363,17 @@ function renderJobsCompact() {
       else if (i===si && !done && !(pending_ && i === 1)) {
         cls = blocked ? 's-blocked' : (regressed_ ? 's-blocked' : 's-active');
       }
+      // Half-blue Delivered pill for partial deliveries — matches the
+      // card view and the client tile.
+      if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
+      const readyIdx = STAGES.indexOf('Ready to Deliver');
       const handler = (i === 0)
         ? `moveJobToCtp(${j.id})`
-        : (i === STAGES.length - 1 ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`);
+        : (i === STAGES.length - 1
+            ? `moveToDeliveredAndEdit(${j.id})`
+            : (i === readyIdx
+                ? `moveToReadyAndEdit(${j.id})`
+                : `moveToStage(${j.id},${i})`));
       const pill = `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
       if (i === 1) {
         // Insert the virtual Pending Stock pill BEFORE Print.
@@ -3471,10 +3535,36 @@ function renderJobCard(j, opts) {
   const priNorm = normalizePriority(j.priority);
   const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
 
-  const badge0 = isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
+  // Delivered / partial-delivery quantity shown on the top badge. Same
+  // running-total helper both cases use: sum of deliveries[].cartons,
+  // falling back to legacy delqty so jobs whose delivered qty was typed
+  // straight on the job card still surface a number.
+  const bookedCartons = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shippedFromLedger = totalDeliveredCartons(j);
+  const shippedFromLegacy = parseFloat(String(j.delqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shippedCartons = shippedFromLedger || shippedFromLegacy;
+  const remainingCartons = bookedCartons ? Math.max(0, bookedCartons - shippedCartons) : 0;
+
+  // Partial-delivery prominence: when the job has shipped some but not
+  // all cartons, the top badge becomes an amber PARTIAL pill (with the
+  // remaining cartons) — REPLACING the plain "Ready to Deliver" pill so
+  // it's obvious at a glance in both the admin queue and the client tile.
+  const partialDelv = isPartialDelivery(j);
+  const partialPill = partialDelv
+    ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${remainingCartons.toLocaleString()} CARTONS LEFT` : 'PARTIAL DELIVERY'}</span>`
+    : '';
+
+  // Fully-delivered badge carries the shipped qty too, so at a glance
+  // the user sees "how much went out" without opening the card.
+  const deliveredLabel = shippedCartons
+    ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
+    : 'Delivered';
+
+  const badge0 = partialDelv ? partialPill :
+    isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
     isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
     pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
-    done ? `<span class="badge badge-done">Delivered</span>` :
+    done ? `<span class="badge badge-done">${deliveredLabel}</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
     (clientPreview
@@ -3503,7 +3593,14 @@ function renderJobCard(j, opts) {
     const st = j.stages?.[i]?.status;
     if (st === 'done') cls = 'rib-done';
     else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 'rib-blocked' : 'rib-current';
-    const handler = (i === STAGES.length - 1) ? `moveToDeliveredAndEdit(${j.id})` : `moveToStage(${j.id},${i})`;
+    // Delivered dot (last stage) shows a half-blue "in progress" fill
+    // while any partial delivery is on the books — one glance tells the
+    // floor "shipping has started but isn't finished".
+    if (i === STAGES.length - 1 && partialDelv) cls = 'rib-partial';
+    const readyIdxR = STAGES.indexOf('Ready to Deliver');
+    const handler = (i === STAGES.length - 1)
+      ? `moveToDeliveredAndEdit(${j.id})`
+      : (i === readyIdxR ? `moveToReadyAndEdit(${j.id})` : `moveToStage(${j.id},${i})`);
     const dot = `<button class="rib-dot ${cls}" title="Move to ${esc(s)}" onclick="${handler}"></button>`;
     if (i === 1) {
       const stockDot = `<button class="rib-dot ${stockDotCls}" title="Send to Pending Stock" onclick="moveJobToPendingStock(${j.id})"></button>`;
@@ -3519,6 +3616,9 @@ function renderJobCard(j, opts) {
         const st = j.stages?.[i]?.status;
         if (st === 'done') cls = 's-done';
         else if (i === si && !done && !(pending__ && i === 1)) cls = blocked ? 's-blocked' : 's-active';
+        // Match the ribbon dot behaviour: half-blue Delivered pill on
+        // partial deliveries so clients get the same in-progress cue.
+        if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
         const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}</span>`;
         if (i === 1) {
           let psCls = 's-pending';
@@ -3532,7 +3632,10 @@ function renderJobCard(j, opts) {
     : '';
 
   // The machine vignette reflects the current stage (or the pending pre-state).
-  const stageLabel = pending ? 'Awaiting Stock' : STAGES[si];
+  // If the job is mid-partial-delivery the label switches to "Partial
+  // Delivery" so the icon area agrees with the amber PARTIAL badge above.
+  const stageLabel = pending ? 'Awaiting Stock'
+    : (partialDelv ? 'Partial Delivery' : STAGES[si]);
   const machine = `
     <div class="stage-machine">
       ${stageMachineSVG(si, { pending })}
@@ -3559,7 +3662,7 @@ function renderJobCard(j, opts) {
         j.qty     ? `<span><b>PO Qty</b> ${esc(j.qty)}</span>` : '',
         j.bno     ? `<span><b>Batch No.</b> ${esc(j.bno)}</span>` : '',
         coatingsStr ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
-        j.delqty  ? `<span><b>Delivered Qty</b> ${esc(j.delqty)}</span>` : '',
+        j.delqty  ? `<span><b>Ready to Delivery Qty</b> ${esc(j.delqty)}</span>` : '',
         j.dateissued ? `<span><b>Job Date</b> ${esc(fmtDMY(j.dateissued))}</span>` : '',
         j.deadline ? `<span style="color:#dc2626;"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('')
@@ -3642,14 +3745,28 @@ function renderJobCard(j, opts) {
          Show to client
        </label>`
     : '';
+  // In the client-preview tile the job id sits at the top-left of the
+  // very first row, opposite the SHOW TO CLIENT toggle at the right —
+  // this keeps the identifier visible on skim and matches what the
+  // owner asked for. The stage badge + urgent + shade chips still ride
+  // in the row below.
+  const clientTopRow = (clientPreview && adminToggle)
+    ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+         <span class="job-id" title="Job Card No.">E-${j.id}</span>
+         ${adminToggle}
+       </div>`
+    : (clientPreview
+        ? `<div style="margin-bottom:4px;"><span class="job-id" title="Job Card No.">E-${j.id}</span></div>`
+        : (adminToggle ? `<div style="display:flex;justify-content:flex-end;margin-bottom:2px;">${adminToggle}</div>` : ''));
+
   return `
   <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${clientTintStyle}>
     ${sideStats}
-    ${adminToggle ? `<div style="display:flex;justify-content:flex-end;margin-bottom:2px;">${adminToggle}</div>` : ''}
+    ${clientTopRow}
     <div class="tile-head">
       ${selBox}
       ${clientPreview
-        ? `<span class="job-id" title="Job Card No.">E-${j.id}</span>`
+        ? ''
         : `<span class="job-id">#${j.id}</span>`}
       ${badge}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -3663,6 +3780,7 @@ function renderJobCard(j, opts) {
       ? `<div class="pipeline" style="justify-content:center;">${clientPipeline}</div>`
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
+    ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
@@ -8137,19 +8255,30 @@ function buildJobsReportRows() {
   const qIsNum = /^\d+$/.test(qId);
   const out = [];
   for (const j of jobs) {
-    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx) continue;  // Delivered-only in delivered mode
+    // Delivered mode now surfaces every job that has any shipment on the
+    // books — fully delivered jobs (stage 7) AND partial deliveries still
+    // sitting at Ready to Deliver. Partial rows get flagged (yellow dot)
+    // so the owner can tell at a glance which ones still owe cartons.
+    const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
+    const hasAnyShipment = deliveriesList.length > 0;
+    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
     if (client && j.client !== client) continue;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
       if (!idHit && !nameHit) continue;
     }
-    // Delivery date — old jobs have stage.time in en-PK locale ("d/m/yyyy,
-    // h:mm:ss am/pm"); new ones in fmtDMYT format. fmtStageTime normalizes
-    // both into the app-wide dd/mm/yyyy HH:MM so the report column is
-    // consistent regardless of when the job was delivered.
+    // Delivery date(s) — for jobs shipped via the deliveries ledger, join
+    // every shipment's date (dd/mm/yyyy) so a job split across days shows
+    // both, matching how the Challan No. column joins each shipment's
+    // reference. For legacy jobs with no ledger entries, fall back to the
+    // Delivered stage timestamp (time stripped so the column stays tight).
     const stageRec = j.stages && j.stages[lastStageIdx];
-    const deliveryTime = stageRec && stageRec.time ? fmtStageTime(stageRec.time) : '';
+    const stampFromStage = stageRec && stageRec.time ? String(fmtStageTime(stageRec.time)).split(' ')[0] : '';
+    const ledgerDates = deliveriesList
+      .map(d => d && d.date ? fmtDMY(d.date) : '')
+      .filter(Boolean);
+    const deliveryTime = ledgerDates.length ? ledgerDates.join(', ') : stampFromStage;
     // Date-range filter. In delivered mode the range applies to the
     // Delivered stage timestamp; in created mode it applies to the job's
     // created_at.
@@ -8162,6 +8291,15 @@ function buildJobsReportRows() {
         if (!isFinite(refMs) && stageRec && stageRec.time) {
           const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
           if (m) refMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+        }
+        // Partial-delivery jobs may not have a Delivered stage timestamp
+        // yet. Fall back to the most recent shipment date from the
+        // ledger so date-range filters still surface them.
+        if (!isFinite(refMs) && deliveriesList.length) {
+          const stamps = deliveriesList
+            .map(d => (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN))
+            .filter(n => isFinite(n));
+          if (stamps.length) refMs = Math.max(...stamps);
         }
       }
       if (!isFinite(refMs)) continue;
@@ -8199,6 +8337,19 @@ function buildJobsReportRows() {
     // Previously computed above the date-range filter; now inlined per-row
     // since the range logic reads created_at directly for Created mode.
     const createdAt = j.created_at ? new Date(j.created_at) : null;
+    // Challan numbers from the delivery ledger — one job can have several
+    // shipments each with its own challan/vehicle note. Join non-empty
+    // notes so a row like "CH-1, CH-2" surfaces every reference number
+    // at a glance (matches how the deliveries panel lists them).
+    const challans = deliveriesList
+      .map(d => (d && d.notes ? String(d.notes).trim() : ''))
+      .filter(Boolean)
+      .join(', ');
+    // Partial when there's at least one shipment but the running total
+    // is still short of the booked qty. Uses the deliveries ledger, but
+    // falls back to delqty so legacy jobs (typed straight on the card)
+    // still register correctly.
+    const isPartial = isPartialDelivery(j);
     out.push({
       id: j.id,
       name: j.name || '',
@@ -8210,6 +8361,8 @@ function buildJobsReportRows() {
       poQty: j.qty || '',
       cartonQty: j.cartonqty || '',
       deliveredQty: j.delqty || '',
+      challan: challans,
+      isPartial,
       wastage,
       packets,
       paper,
@@ -8264,6 +8417,12 @@ function renderJobsReport() {
       ? '<td ' + tdR + '>—</td>'
       : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`;
     const isSel = jobsReportSel.has(r.id);
+    // Yellow dot next to Delivered Qty when the row is a partial shipment
+    // — quick visual for "delivered something, still owes more". Uses the
+    // amber palette that matches the PARTIAL badge on the job tile.
+    const partialDot = r.isPartial
+      ? `<span title="Partial delivery — still owes cartons" style="display:inline-block;width:9px;height:9px;border-radius:999px;background:#f59e0b;margin-left:6px;vertical-align:middle;box-shadow:0 0 0 1px #b45309;"></span>`
+      : '';
     return `<tr data-jr-row="${r.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>E-${r.id}</td>
@@ -8272,9 +8431,10 @@ function renderJobsReport() {
       <td ${tdN}>${esc(r.deliveredAt)}</td>
       <td ${td}>${esc(r.client)}</td>
       <td ${td}>${esc(r.poNo)}</td>
+      <td ${td}>${esc(r.challan)}</td>
       <td ${tdR}>${esc(r.poQty)}</td>
       <td ${tdR}>${esc(r.cartonQty)}</td>
-      <td ${tdR}>${esc(r.deliveredQty)}</td>
+      <td ${tdR}>${esc(r.deliveredQty)}${partialDot}</td>
       ${wastageCell}
       <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
       <td ${td}>${esc(r.paper)}</td>
@@ -8300,6 +8460,7 @@ function renderJobsReport() {
           <th ${th}>Delivered</th>
           <th ${th}>Company</th>
           <th ${th}>PO No.</th>
+          <th ${th}>Challan No.</th>
           <th ${thR}>PO Qty</th>
           <th ${thR}>Unit Carton Qty</th>
           <th ${thR}>Delivered Qty</th>
@@ -8315,7 +8476,7 @@ function renderJobsReport() {
         <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
           <td></td>
           <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
-          <td colspan="5" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
+          <td colspan="6" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
@@ -8336,9 +8497,15 @@ async function exportJobsReport() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Challan No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
+    // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
+    // spreadsheet reader can filter/sort them out without needing a
+    // separate flag column.
+    const deliveredCell = r.isPartial && r.deliveredQty
+      ? `${r.deliveredQty} (PARTIAL)`
+      : r.deliveredQty;
     aoa.push([
       'E-' + r.id,
       r.name,
@@ -8346,9 +8513,10 @@ async function exportJobsReport() {
       r.deliveredAt,
       r.client,
       r.poNo,
+      r.challan || '',
       r.poQty,
       r.cartonQty,
-      r.deliveredQty,
+      deliveredCell,
       r.wastage === null ? '' : r.wastage,
       r.packets ? +r.packets.toFixed(2) : '',
       r.paper,
@@ -8375,22 +8543,30 @@ function printJobsReport() {
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
-  const tableRows = rows.map(r => `<tr>
+  const tableRows = rows.map(r => {
+    // Partial rows get a solid amber marker before the delivered qty so
+    // the printout carries the same signal the on-screen dot does.
+    const partialMark = r.isPartial
+      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:#f59e0b;border:1px solid #b45309;margin-right:4px;vertical-align:middle;"></span>'
+      : '';
+    return `<tr>
     <td ${tdL}>E-${r.id}</td>
     <td ${tdL}>${esc(r.name)}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
     <td ${tdL}>${esc(r.deliveredAt)}</td>
     <td ${tdL}>${esc(r.client)}</td>
     <td ${tdL}>${esc(r.poNo)}</td>
+    <td ${tdL}>${esc(r.challan || '')}</td>
     <td ${tdR}>${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
-    <td ${tdR}>${esc(r.deliveredQty)}</td>
+    <td ${tdR}>${partialMark}${esc(r.deliveredQty)}</td>
     <td ${tdR}>${r.wastage === null ? '—' : fmt(r.wastage)}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   const html = `
     <style>@media print { @page { size: A4 landscape; margin: 0.3in; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
@@ -8414,6 +8590,7 @@ function printJobsReport() {
           <th ${tdL}>Delivered</th>
           <th ${tdL}>Company</th>
           <th ${tdL}>PO No.</th>
+          <th ${tdL}>Challan No.</th>
           <th ${tdR}>PO Qty</th>
           <th ${tdR}>Unit Carton Qty</th>
           <th ${tdR}>Delivered Qty</th>
@@ -13206,6 +13383,7 @@ function logOperatorForStage(log, stageName) {
 
 function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
+  const raw = (k, sub) => (p[k] && p[k][sub]) || '';
   const log = job && Array.isArray(job.log) ? job.log : [];
   const rows = PARTICULARS_ROWS
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
@@ -13217,11 +13395,23 @@ function particularsTable(p, job) {
       // that would double up on the print and misrepresent who did the work.
       const nameVal = get(r.key, 'name') || esc(op.machine);
       const sigVal  = get(r.key, 'signature') || esc(op.name);
+      // Ready to Delivery Qty row joins two station fields — cartons on
+      // the left of the pipe, packets/cartons on the right — so a single
+      // Quantity cell reads e.g. "20000 | 6" without cluttering the table
+      // with a second row. Admin edits the joined string directly; the
+      // station form still writes the two keys separately (used by
+      // reports and by the delivery-cap check).
+      let qtyDisplay = get(r.key, 'quantity');
+      if (r.key === 'delivered_cartons_qty') {
+        const cartons = String(raw(r.key, 'quantity') || '').trim();
+        const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
+        qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
+      }
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
       <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details') || esc(op.time)}"></td>
-      <td><input type="text" id="p-${r.key}-quantity"  value="${get(r.key,'quantity')}"></td>
+      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine"></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"></td>
     </tr>`;
@@ -13343,11 +13533,172 @@ function jobForm(j={}) {
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
     ${particularsTable(j.particulars||{}, j)}
+    ${deliveriesSection(j)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
       <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${v(j.notes)}</textarea></div>
     </div>
   `;
+}
+
+// Partial-delivery ledger + "Record Delivery" form. Renders inside the
+// job card between the particulars table and the Additional Notes box.
+// Only meaningful for saved jobs — hidden entirely on the New Job modal
+// since there's nothing to ship yet.
+function deliveriesSection(j) {
+  if (!j || !j.id) return '';
+  const list = Array.isArray(j.deliveries) ? j.deliveries : [];
+  const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shipped = totalDeliveredCartons(j);
+  const remaining = booked ? Math.max(0, booked - shipped) : 0;
+  const isDelivered = booked && shipped >= booked;
+  const stageIdx = j.stage_index || 0;
+  const canAddDelivery = stageIdx >= 6 && !isDelivered && canWriteJobs && canWriteJobs();
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+
+  const rows = list.length
+    ? list.map((d, i) => {
+        const ctns = d.cartons || '';
+        const dt   = d.date    || '';
+        const nt   = d.notes   || '';
+        const by   = d.by      || '';
+        const delBtn = isAdminUser
+          ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
+          : '';
+        return `<tr>
+          <td>${esc(dt)}</td>
+          <td style="text-align:right;font-weight:600;">${esc(ctns)}</td>
+          <td>${esc(nt)}</td>
+          <td style="font-size:11px;color:var(--text2);">${esc(by)}</td>
+          <td style="text-align:center;">${delBtn}</td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="5" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
+
+  const statusPill = isDelivered
+    ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">FULLY DELIVERED</span>`
+    : list.length
+      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' CARTONS LEFT' : ''}</span>`
+      : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>`;
+
+  const summaryLine = booked
+    ? `Booked: <b>${booked.toLocaleString()}</b> cartons &middot; Shipped: <b>${shipped.toLocaleString()}</b> cartons &middot; Remaining: <b>${remaining.toLocaleString()}</b> cartons`
+    : `Shipped: <b>${shipped.toLocaleString()}</b> cartons (booked P.O. qty not set)`;
+
+  const addForm = canAddDelivery
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:1fr 1.2fr 2fr auto;gap:8px;align-items:end;">
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons *</label>
+          <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
+          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Notes (optional)</label>
+          <input type="text" id="deliv-notes" placeholder="Challan #, vehicle, etc." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
+      </div>`
+    : (stageIdx < 6
+        ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
+        : '');
+
+  return `<div class="jc-deliveries ceo-hide-inner" style="margin-top:16px;padding:12px 14px;background:#fff;border:1px solid var(--border);border-radius:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Deliveries</div>
+      ${statusPill}
+    </div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead>
+        <tr style="background:#f3f4f6;">
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Date</th>
+          <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Cartons</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Notes</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
+          <th style="width:36px;padding:6px 8px;border-bottom:1px solid var(--border);"></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${addForm}
+  </div>`;
+}
+
+// Compact per-shipment breakdown for the client-view tile. Silent when
+// there are no deliveries so tiles for unshipped jobs stay unchanged.
+// Only rendered inside the client tile — inline admin tiles keep the
+// tighter layout and rely on the full ledger inside the job card modal.
+function clientDeliveriesBreakdown(j, clientPreview) {
+  if (!clientPreview) return '';
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  if (!list.length) return '';
+  const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shipped = totalDeliveredCartons(j);
+  const remaining = booked ? Math.max(0, booked - shipped) : 0;
+  const rows = list.map(d => {
+    const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.\-]/g, '')).toLocaleString() + ' cartons' : '';
+    const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
+    return `<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
+      <span style="color:var(--text2);">${dt}</span>
+      <span style="font-weight:600;">${ct}</span>
+    </div>`;
+  }).join('');
+  const footer = booked
+    ? `<div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;">
+        <span>Total shipped</span>
+        <span>${shipped.toLocaleString()} / ${booked.toLocaleString()} cartons${remaining ? ' &nbsp; (' + remaining.toLocaleString() + ' left)' : ''}</span>
+      </div>`
+    : `<div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;">
+        <span>Total shipped</span><span>${shipped.toLocaleString()} cartons</span>
+      </div>`;
+  return `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments</div>
+    ${rows}
+    ${footer}
+  </div>`;
+}
+
+async function recordDelivery(jobId) {
+  const cartons = ((document.getElementById('deliv-cartons')||{}).value || '').trim();
+  const date    = ((document.getElementById('deliv-date')||{}).value || '').trim();
+  const notes   = ((document.getElementById('deliv-notes')||{}).value || '').trim();
+  const cartonsN = parseFloat(cartons);
+  if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    // Only cartons + date + notes ride to the server. The server multiplies
+    // cartons by the job's Unit Carton Qty to derive pieces and keep delqty
+    // in sync — no client-side computation to keep out of drift.
+    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, { cartons, date, notes });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render(); notify('Delivery recorded');
+    setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function removeDelivery(jobId, index) {
+  const ok = await confirmDialog({
+    title: 'Remove this delivery entry?',
+    message: 'This corrects the running total. If the job was marked Delivered and this drop brings it below the booked qty, it will move back to Ready to Deliver.',
+    danger: true,
+    confirmText: 'Remove',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('DELETE', `/api/jobs/${jobId}/deliveries/${index}`);
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render(); notify('Delivery entry removed');
+    setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 
 function getFormData() {
@@ -13404,6 +13755,15 @@ function collectParticulars() {
     if (CTP_PARTICULARS_KEYS.has(r.key)) return;
     const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
     const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
+    // Ready to Delivery Qty is a joined "cartons | packets" input. Split
+    // it back into the two underlying particulars keys so the value the
+    // station wrote (and any admin edit) round-trips cleanly.
+    if (r.key === 'delivered_cartons_qty' && row.quantity.includes('|')) {
+      const [cartonsPart, packetsPart] = row.quantity.split('|').map(s => s.trim());
+      row.quantity = cartonsPart || '';
+      const pkt = (packetsPart || '').trim();
+      if (pkt) out.ready_packets_qty = { quantity: pkt };
+    }
     if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
   });
   // Row-7 (CTP setup) — writes back onto the same particulars keys so
@@ -13462,6 +13822,12 @@ function collectParticulars() {
     // Partial-issuance marker lives outside the form fields — preserve it
     // so an unrelated Edit doesn't wipe the store keeper's partial issue.
     if (priorP.partial_pending_sheets) out.partial_pending_sheets = priorP.partial_pending_sheets;
+    // ready_packets_qty is written by the Ready-to-Deliver station and
+    // shown on the "Ready to Delivery Qty" row joined as "cartons |
+    // packets". When the admin edits without touching that row, the
+    // split branch above doesn't fire, so preserve the prior value here
+    // instead of wiping it on save.
+    if (!out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
   }
   return out;
 }
@@ -14081,6 +14447,14 @@ async function saveUpdate(id) {
 // moveToStage() directly.
 async function moveToDeliveredAndEdit(id) {
   await moveToStage(id, STAGES.length - 1);
+  openEdit(id);
+}
+// Same "advance then open the card" flow for Ready to Deliver — the QC
+// person clicking Ready wants to double-check the numbers and record
+// the ready/packets qty before the job actually ships, so open the
+// edit modal right after the stage move.
+async function moveToReadyAndEdit(id) {
+  await moveToStage(id, STAGES.indexOf('Ready to Deliver'));
   openEdit(id);
 }
 
@@ -15570,7 +15944,14 @@ const STATION_STAGE_FIELDS = {
   3: [{ key: 'die_cutting_sheets', label: 'Die Cutting Sheets' }, { key: 'die_cutting_waste', label: 'Die Cutting Waste' }],
   4: [{ key: 'sorted_cartons_qty', label: 'Sorted Cartons Qty' }, { key: 'sorted_cartons_waste', label: 'Sorted Cartons Waste' }],
   5: [{ key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' }],
-  6: [{ key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' }],
+  // Ready to Deliver has TWO inputs — Ready Cartons Qty AND
+  // Packets/Cartons. Both are saved to particulars separately; the
+  // job card joins them for display as "<cartons> | <packets>" on
+  // the "Ready to Delivery Qty" row.
+  6: [
+    { key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' },
+    { key: 'ready_packets_qty',     label: 'Packets / Cartons' },
+  ],
 };
 
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
@@ -16210,9 +16591,11 @@ function stationUpdateHtml() {
            these endpoints for CEO too — .ceo-hide is UX; the server is
            the authoritative gate. See canProcessStation() on the server. -->
       <div class="station-actions-row ceo-hide">
-        <button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
-        ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
-        ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}
+        ${stIdx === 6
+          ? (fields.length ? `<button class="btn station-primary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : '')
+          : `<button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
+             ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
+             ${stIdx < STAGES.length - 1 ? `<button class="btn station-skip" onclick="stationOpenSkip()">&#8631; Skip to stage&hellip;</button>` : ''}`}
       </div>
       <div class="station-viewonly ceo-only-block" style="margin-top:14px;padding:12px 16px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:14px;">
         &#128065; View-only — your role can see the queue and numbers, but can't advance or save.
