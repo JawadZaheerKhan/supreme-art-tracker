@@ -8294,7 +8294,7 @@ function buildJobsReportRows() {
     const ledgerDates = deliveriesList
       .map(d => d && d.date ? fmtDMY(d.date) : '')
       .filter(Boolean);
-    const deliveryTime = ledgerDates.length ? ledgerDates.join(', ') : stampFromStage;
+    const deliveryTime = ledgerDates.length ? ledgerDates.join(' | ') : stampFromStage;
     // Date-range filter. In delivered mode the range applies to the
     // Delivered stage timestamp; in created mode it applies to the job's
     // created_at.
@@ -8353,14 +8353,23 @@ function buildJobsReportRows() {
     // Previously computed above the date-range filter; now inlined per-row
     // since the range logic reads created_at directly for Created mode.
     const createdAt = j.created_at ? new Date(j.created_at) : null;
-    // Challan numbers from the delivery ledger — one job can have several
-    // shipments each with its own challan/vehicle note. Join non-empty
-    // notes so a row like "CH-1, CH-2" surfaces every reference number
-    // at a glance (matches how the deliveries panel lists them).
+    // Per-shipment references. One job can be split across multiple POs
+    // and batches, so join every ledger entry's value with " | " (matches
+    // the user's stated format: "1st po | 2nd po"). Falls back to the
+    // job-level j.ref / j.bno when the ledger doesn't carry that field.
+    const joinRefs = (key, fallback) => {
+      const vals = deliveriesList
+        .map(d => (d && d[key] ? String(d[key]).trim() : ''))
+        .filter(Boolean);
+      if (vals.length) return vals.join(' | ');
+      return String(fallback || '').trim();
+    };
     const challans = deliveriesList
       .map(d => (d && d.notes ? String(d.notes).trim() : ''))
       .filter(Boolean)
-      .join(', ');
+      .join(' | ');
+    const poNoJoined    = joinRefs('po_no',    j.ref);
+    const batchNoJoined = joinRefs('batch_no', j.bno);
     // Partial when there's at least one shipment but the running total
     // is still short of the booked qty. Uses the deliveries ledger, but
     // falls back to delqty so legacy jobs (typed straight on the card)
@@ -8373,7 +8382,8 @@ function buildJobsReportRows() {
       createdAtRaw: createdAt,
       deliveredAt: deliveryTime,
       client: j.client || '',
-      poNo: j.ref || '',
+      poNo: poNoJoined,
+      batchNo: batchNoJoined,
       poQty: j.qty || '',
       cartonQty: j.cartonqty || '',
       deliveredQty: j.delqty || '',
@@ -8447,6 +8457,7 @@ function renderJobsReport() {
       <td ${tdN}>${esc(r.deliveredAt)}</td>
       <td ${td}>${esc(r.client)}</td>
       <td ${td}>${esc(r.poNo)}</td>
+      <td ${td}>${esc(r.batchNo)}</td>
       <td ${td}>${esc(r.challan)}</td>
       <td ${tdR}>${esc(r.poQty)}</td>
       <td ${tdR}>${esc(r.cartonQty)}</td>
@@ -8476,6 +8487,7 @@ function renderJobsReport() {
           <th ${th}>Delivered</th>
           <th ${th}>Company</th>
           <th ${th}>PO No.</th>
+          <th ${th}>Batch No.</th>
           <th ${th}>Challan No.</th>
           <th ${thR}>PO Qty</th>
           <th ${thR}>Unit Carton Qty</th>
@@ -8492,7 +8504,7 @@ function renderJobsReport() {
         <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
           <td></td>
           <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
-          <td colspan="6" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
+          <td colspan="7" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
@@ -8513,7 +8525,7 @@ async function exportJobsReport() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Challan No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Challan No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -8529,6 +8541,7 @@ async function exportJobsReport() {
       r.deliveredAt,
       r.client,
       r.poNo,
+      r.batchNo || '',
       r.challan || '',
       r.poQty,
       r.cartonQty,
@@ -8572,6 +8585,7 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.deliveredAt)}</td>
     <td ${tdL}>${esc(r.client)}</td>
     <td ${tdL}>${esc(r.poNo)}</td>
+    <td ${tdL}>${esc(r.batchNo || '')}</td>
     <td ${tdL}>${esc(r.challan || '')}</td>
     <td ${tdR}>${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
@@ -8606,6 +8620,7 @@ function printJobsReport() {
           <th ${tdL}>Delivered</th>
           <th ${tdL}>Company</th>
           <th ${tdL}>PO No.</th>
+          <th ${tdL}>Batch No.</th>
           <th ${tdL}>Challan No.</th>
           <th ${tdR}>PO Qty</th>
           <th ${tdR}>Unit Carton Qty</th>
@@ -13574,22 +13589,26 @@ function deliveriesSection(j) {
 
   const rows = list.length
     ? list.map((d, i) => {
-        const ctns = d.cartons || '';
-        const dt   = d.date    || '';
-        const nt   = d.notes   || '';
-        const by   = d.by      || '';
+        const ctns = d.cartons  || '';
+        const dt   = d.date     || '';
+        const po   = d.po_no    || '';
+        const bat  = d.batch_no || '';
+        const nt   = d.notes    || '';
+        const by   = d.by       || '';
         const delBtn = isAdminUser
           ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
           : '';
         return `<tr>
           <td>${esc(dt)}</td>
           <td style="text-align:right;font-weight:600;">${esc(ctns)}</td>
+          <td>${esc(po)}</td>
+          <td>${esc(bat)}</td>
           <td>${esc(nt)}</td>
           <td style="font-size:11px;color:var(--text2);">${esc(by)}</td>
           <td style="text-align:center;">${delBtn}</td>
         </tr>`;
       }).join('')
-    : `<tr><td colspan="5" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
+    : `<tr><td colspan="7" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
 
   const statusPill = isDelivered
     ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">FULLY DELIVERED</span>`
@@ -13602,7 +13621,7 @@ function deliveriesSection(j) {
     : `Shipped: <b>${shipped.toLocaleString()}</b> cartons (booked P.O. qty not set)`;
 
   const addForm = canAddDelivery
-    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:1fr 1.2fr 2fr auto;gap:8px;align-items:end;">
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1.4fr auto;gap:8px;align-items:end;">
         <div>
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons *</label>
           <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
@@ -13610,6 +13629,14 @@ function deliveriesSection(j) {
         <div>
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
           <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
+          <input type="text" id="deliv-po" placeholder="e.g. PO-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
+          <input type="text" id="deliv-batch" placeholder="e.g. B-11" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
         </div>
         <div>
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Notes (optional)</label>
@@ -13632,6 +13659,8 @@ function deliveriesSection(j) {
         <tr style="background:#f3f4f6;">
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Date</th>
           <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Cartons</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Notes</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
           <th style="width:36px;padding:6px 8px;border-bottom:1px solid var(--border);"></th>
@@ -13657,8 +13686,9 @@ function clientDeliveriesBreakdown(j, clientPreview) {
   const rows = list.map(d => {
     const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.\-]/g, '')).toLocaleString() + ' cartons' : '';
     const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
+    const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
     return `<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
-      <span style="color:var(--text2);">${dt}</span>
+      <span style="color:var(--text2);">${dt}${refBits ? ' <span style="color:var(--text3);">· ' + refBits + '</span>' : ''}</span>
       <span style="font-weight:600;">${ct}</span>
     </div>`;
   }).join('');
@@ -13681,15 +13711,17 @@ async function recordDelivery(jobId) {
   const cartons = ((document.getElementById('deliv-cartons')||{}).value || '').trim();
   const date    = ((document.getElementById('deliv-date')||{}).value || '').trim();
   const notes   = ((document.getElementById('deliv-notes')||{}).value || '').trim();
+  const poNo    = ((document.getElementById('deliv-po')||{}).value    || '').trim();
+  const batchNo = ((document.getElementById('deliv-batch')||{}).value || '').trim();
   const cartonsN = parseFloat(cartons);
   if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
   showSaving(true);
   try {
-    // Only cartons + date + notes ride to the server. The server multiplies
-    // cartons by the job's Unit Carton Qty to derive pieces and keep delqty
-    // in sync — no client-side computation to keep out of drift.
-    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, { cartons, date, notes });
+    // Server keeps delqty in sync as the running sum of cartons. PO No.
+    // and Batch No. ride per-entry so the Jobs Report can join every
+    // shipment's PO / batch across a job that was split.
+    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, { cartons, date, notes, po_no: poNo, batch_no: batchNo });
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     closeModal(); render(); notify('Delivery recorded');

@@ -2324,9 +2324,11 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       // date, and any notes ride through so the client sees the same
       // running ledger the admin sees.
       deliveries: (Array.isArray(j.deliveries) ? j.deliveries : []).map(d => ({
-        cartons: d && d.cartons || '',
-        date:    d && d.date    || '',
-        notes:   d && d.notes   || '',
+        cartons:  d && d.cartons  || '',
+        date:     d && d.date     || '',
+        notes:    d && d.notes    || '',
+        po_no:    d && d.po_no    || '',
+        batch_no: d && d.batch_no || '',
       })),
     };
   });
@@ -3275,6 +3277,8 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const cartons = String(req.body.cartons ?? '').trim();
     const date    = String(req.body.date    ?? '').trim() || businessDateISO();
     const notes   = String(req.body.notes   ?? '').trim() || null;
+    const poNo    = String(req.body.po_no    ?? '').trim() || null;
+    const batchNo = String(req.body.batch_no ?? '').trim() || null;
     const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
       return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
@@ -3296,6 +3300,8 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const entry = {
       cartons: String(cartonsN),
       date, notes,
+      po_no: poNo,
+      batch_no: batchNo,
       by: req.user?.email || 'unknown',
       at: new Date().toISOString(),
     };
