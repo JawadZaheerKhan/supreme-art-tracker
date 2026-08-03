@@ -3446,6 +3446,7 @@ function renderJobsCompact() {
           <div class="job-actions">
             ${isNew && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
             ${isCtp && canWriteJobs() ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
+            ${partialDelv && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
@@ -3703,7 +3704,9 @@ function renderJobCard(j, opts) {
     ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>`
     : (isCtp && canWriteJobs())
       ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
-      : '';
+      : (partialDelv && canWriteJobs())
+        ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
+        : '';
   const more = clientPreview ? '' : `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
@@ -14318,7 +14321,9 @@ function openEdit(id) {
     ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
     : (isCtpQueue(j) && canWriteJobs())
       ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
-      : '';
+      : (isPartialDelivery(j) && canWriteJobs())
+        ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
+        : '';
   openModal(`<div class="modal modal-card job-edit-modal" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
     <div class="ceo-only-block" style="margin:-4px 0 12px;padding:10px 14px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
@@ -14655,6 +14660,31 @@ async function deleteJob(id) {
 // doesn't do it by accident (once processed, the store keeper sees it
 // and can start issuing paper). Refreshes locally so the tab counts
 // update in place.
+// Force-close a partially-delivered job as Delivered without waiting
+// for the remaining cartons — used when the shop decides not to ship
+// the balance (customer accepted a short lot, order cancelled, etc.).
+// Same green "Process" button style everywhere; confirmation includes
+// the remaining qty so the PM knows exactly what they're waiving.
+async function finalizeAsDelivered(id) {
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can finalize deliveries.'); return; }
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  if (!isPartialDelivery(j)) { notify('This job is not a partial delivery.'); return; }
+  const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shipped = totalDeliveredCartons(j) || (parseFloat(String(j.delqty || '').replace(/[^0-9.\-]/g, '')) || 0);
+  const remaining = booked ? Math.max(0, booked - shipped) : 0;
+  const ok = await confirmDialog({
+    title: `Finalize Job E-${id} as Delivered?`,
+    message: `"${j.name}" has ${shipped.toLocaleString()} of ${booked.toLocaleString()} cartons shipped.\n\nThis closes the job as Delivered and waives the remaining ${remaining.toLocaleString()} cartons — no more shipments can be recorded.`,
+    confirmText: 'Finalize as Delivered',
+  });
+  if (!ok) return;
+  await moveToStage(id, STAGES.length - 1);
+  closeModal();
+  render();
+  notify(`Job E-${id} finalized as Delivered`);
+}
+
 async function processJobToCtp(id) {
   if (!canWriteJobs()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
   const j = jobs.find(x => x.id === id);
