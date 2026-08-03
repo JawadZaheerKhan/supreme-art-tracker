@@ -99,7 +99,8 @@
      renderUserChip via showTab(). */
   body.role-operator #jobs-mode .ceo-hide { display: none !important; }
   body.role-operator #topbar-export,
-  body.role-operator #topbar-add { display: none !important; }
+  body.role-operator #topbar-add,
+  body.role-operator #topbar-add-offcut { display: none !important; }
   /* Client portal: outside stakeholders see ONLY the portal — no internal
      nav / actions / calculator / date stamp. Reuses the topbar for the
      brand + user chip + Sign out only. */
@@ -107,6 +108,7 @@
   body.role-client #topbar-refresh,
   body.role-client #topbar-export,
   body.role-client #topbar-add,
+  body.role-client #topbar-add-offcut,
   body.role-client #calc-launcher,
   body.role-client #app-date { display: none !important; }
   /* Client portal responsive tweaks — targets both the real client
@@ -1609,6 +1611,11 @@
          bottom-right corner — see #calc-launcher. Topbar button removed. -->
     <button class="btn btn-sm" id="topbar-refresh" onclick="refreshCurrent()">&#8635; Refresh</button>
     <button class="btn btn-sm" id="topbar-export" onclick="exportCSV()">Export to Excel</button>
+    <!-- Add Offcut lives beside "+ New Paper" on the Inventory tab. Only
+         admin / production manager see it — the store keeper role manages
+         stock movements, not the offcut ledger itself. Hidden by default;
+         setMode('inventory') shows it based on role. -->
+    <button class="btn" id="topbar-add-offcut" style="display:none;background:#7C1F1F;border-color:#7C1F1F;color:#fff;" onclick="openInvAddOffcut()">+ Add Offcut</button>
     <button class="btn btn-primary" id="topbar-add" onclick="openAdd()">+ New Job</button>
     <div id="user-chip" style="display:none; align-items:center; gap:8px; margin-left:10px; padding-left:10px; border-left:1px solid var(--border);">
       <img id="user-pic" src="" alt="" style="width:28px; height:28px; border-radius:50%; display:none;">
@@ -2932,6 +2939,10 @@ function setMode(m) {
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('topbar-refresh');
+  const offcutBtn = document.getElementById('topbar-add-offcut');
+  // Default the offcut button off — every mode below turns it on only
+  // when it's the Inventory tab AND the user isn't the store keeper.
+  if (offcutBtn) offcutBtn.style.display = 'none';
   if (m === 'jobs') {
     addBtn.style.display = canWriteJobs() ? '' : 'none';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
@@ -2944,6 +2955,9 @@ function setMode(m) {
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
+    // Offcuts are managed by the ops side (admin / production manager),
+    // not by the store keeper who handles day-to-day stock movements.
+    if (offcutBtn) offcutBtn.style.display = (canWriteInventory() && !isStoreManager()) ? '' : 'none';
     renderInventory();
     loadDailyStats();   // fetch today's activity in the background
   } else if (m === 'reports') {
@@ -5134,6 +5148,82 @@ async function saveInvAdd() {
     closeModal();
     notify('Paper item added');
   } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Add-Offcut modal — mirrors Add Paper Item but the row is created with
+// is_offcut = true so it shows in the Offcuts filter and doesn't collide
+// with fresh-stock duplicate checks. Same field set (paper type / size /
+// gsm / brand / supplier / opening) so the offcut ledger stays uniform
+// with the rest of inventory.
+function openInvAddOffcut() {
+  if (!canWriteInventory() || isStoreManager()) {
+    notify('Only admin / production manager can add offcuts.');
+    return;
+  }
+  const defaultPaperType = PAPER_TYPES[0] || '';
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2 style="color:#7C1F1F;">Add Offcut Item</h2>
+    <div style="margin:-4px 0 12px;padding:8px 12px;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;font-size:12px;color:#78350f;">
+      Creates a manual offcut entry. Fresh-stock duplicate rules don&rsquo;t apply &mdash; offcut lines can share dimensions with existing paper.
+    </div>
+    ${invDatalistsHtml()}
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Paper Type *</label>
+        ${invComboHtml({ id: 'inv-paper-type', options: PAPER_TYPES, value: defaultPaperType, placeholder: 'New paper type', onChange: 'invOpeningSync();' })}
+      </div>
+      <div class="form-group">
+        <label class="form-label">Brand</label>
+        ${invComboHtml({ id: 'inv-brand', options: invDistinct('brand'), placeholder: 'New brand (e.g. Century)', manageField: 'brand' })}
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Size (offcut) *</label><input type="text" id="inv-size" class="lc-input" list="inv-sizes" placeholder="e.g. 20x15"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="inv-gsm" list="inv-gsms" placeholder="e.g. 300"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Supplier</label>
+      ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), placeholder: 'New supplier', manageField: 'supplier' })}
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" id="inv-opening-packets-label">Opening &mdash; Packets</label>
+        <input type="number" id="inv-opening-packets" placeholder="0" min="0" step="any" oninput="invOpeningSync('packets')">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Opening &mdash; Sheets</label>
+        <input type="number" id="inv-opening" placeholder="0" min="0" oninput="invOpeningSync('sheets')">
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. From leftover run E-88"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#7C1F1F;border-color:#7C1F1F;" onclick="saveInvAddOffcut()">Add Offcut</button>
+    </div>
+  </div>`);
+  invOpeningSync();
+}
+
+async function saveInvAddOffcut() {
+  const data = {
+    paper_type: (document.getElementById('inv-paper-type').value || '').trim(),
+    size:       document.getElementById('inv-size').value.trim(),
+    gsm:        document.getElementById('inv-gsm').value.trim(),
+    brand:      (document.getElementById('inv-brand').value || '').trim(),
+    supplier:   (document.getElementById('inv-supplier').value || '').trim(),
+    opening_balance: parseInt(document.getElementById('inv-opening').value, 10) || 0,
+    opening_notes:   document.getElementById('inv-opening-notes').value.trim(),
+    is_offcut: true,
+  };
+  if (!data.paper_type) { await alertDialog({ title: 'Paper type is required', kind: 'warn' }); return; }
+  if (!data.size)       { await alertDialog({ title: 'Offcut size is required', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    await api('POST', '/api/inventory', data);
+    await loadInventory();
+    closeModal();
+    notify('Offcut item added');
+  } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
 
