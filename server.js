@@ -4069,7 +4069,8 @@ app.get('/api/inventory/transactions', async (req, res) => {
     const txs = await sql`
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
              i.paper_type, i.size AS item_size, i.gsm AS item_gsm,
-             i.brand AS item_brand, i.unit AS item_unit
+             i.brand AS item_brand, i.unit AS item_unit,
+             i.is_offcut AS item_is_offcut
       FROM inventory_transactions t
       LEFT JOIN jobs j ON j.id = t.job_id
       LEFT JOIN inventory_items i ON i.id = t.item_id
@@ -4083,6 +4084,10 @@ app.get('/api/inventory/transactions', async (req, res) => {
         AND NOT EXISTS (
           SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
         )
+        -- Offcut items are a side ledger managed by admin / PM; their
+        -- ins and outs don't belong in the movement report so drop them
+        -- server-side. Per-item History still shows the row unchanged.
+        AND COALESCE(i.is_offcut, false) = false
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
