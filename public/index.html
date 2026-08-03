@@ -2396,6 +2396,11 @@ function totalDeliveredCartons(j) {
   }, 0);
 }
 function isPartialDelivery(j) {
+  // A job that already reached the Delivered stage is closed — even if
+  // the delivered qty came in under the booked qty (yield shortfall,
+  // rounding, historical typos), it must not retro-flip into Partial.
+  // The partial-delivery system only applies to jobs still in flight.
+  if ((j && j.stage_index) === 7) return false;
   const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
   if (!booked) return false;
   // Prefer the deliveries[] running total (accurate per-shipment record);
@@ -3542,7 +3547,15 @@ function renderJobCard(j, opts) {
   const bookedCartons = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const shippedFromLedger = totalDeliveredCartons(j);
   const shippedFromLegacy = parseFloat(String(j.delqty || '').replace(/[^0-9.\-]/g, '')) || 0;
-  const shippedCartons = shippedFromLedger || shippedFromLegacy;
+  // For fully-Delivered jobs (stage 7), the authoritative shipped total
+  // is delqty — some legacy backfilled ledger entries carry stale
+  // cartons values (a earlier pieces/cartons integer-division bug), so
+  // trusting the ledger there would show e.g. "Delivered — 1 cartons"
+  // on a 53,550-piece job. Everywhere else the ledger is the source of
+  // truth and legacy delqty is the fallback.
+  const shippedCartons = (j && j.stage_index === 7)
+    ? (shippedFromLegacy || shippedFromLedger)
+    : (shippedFromLedger || shippedFromLegacy);
   const remainingCartons = bookedCartons ? Math.max(0, bookedCartons - shippedCartons) : 0;
 
   // Partial-delivery prominence: when the job has shipped some but not
