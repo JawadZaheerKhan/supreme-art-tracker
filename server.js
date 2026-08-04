@@ -2330,6 +2330,18 @@ async function buildClientJobsView(sql, companyRaw, opts) {
         po_no:    d && d.po_no    || '',
         batch_no: d && d.batch_no || '',
       })),
+      // Slim particulars slice — only the pasted_cartons_qty row goes
+      // through so the client tile can compute isPartialReady and show
+      // the green "N cartons ready" badge / half-green Ready pill. All
+      // other particulars stay server-side (internal production data).
+      particulars: (j.particulars && j.particulars.pasted_cartons_qty)
+        ? { pasted_cartons_qty: {
+            quantity: j.particulars.pasted_cartons_qty.quantity || '',
+            entries:  Array.isArray(j.particulars.pasted_cartons_qty.entries)
+              ? j.particulars.pasted_cartons_qty.entries.map(e => ({ qty: (e && e.qty) || '' }))
+              : undefined,
+          } }
+        : {},
     };
   });
 }
