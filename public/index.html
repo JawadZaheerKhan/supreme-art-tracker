@@ -2433,24 +2433,40 @@ function isPartialDelivery(j) {
 // officially at Pasting. Sums entries[] (multi-pass) or the joined
 // quantity string ("10000 | 5000"), whichever the row uses.
 function pastedCartonsTotal(j) {
+  if (!j) return 0;
   // Server-side pre-computed field (client-view projection). Trust it
   // when present so the tile still works even if the particulars slice
   // wasn't included in the projection for any reason.
-  if (j && typeof j.pasted_ready_cartons === 'number' && j.pasted_ready_cartons > 0) {
+  if (typeof j.pasted_ready_cartons === 'number' && j.pasted_ready_cartons > 0) {
     return j.pasted_ready_cartons;
   }
-  const p = j && j.particulars && j.particulars.pasted_cartons_qty;
-  if (!p) return 0;
-  if (Array.isArray(p.entries) && p.entries.length) {
-    return p.entries.reduce((a, e) => {
-      const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+  // Parse own particulars if present.
+  const readFrom = (p) => {
+    if (!p) return 0;
+    if (Array.isArray(p.entries) && p.entries.length) {
+      return p.entries.reduce((a, e) => {
+        const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+        return a + (Number.isFinite(n) ? n : 0);
+      }, 0);
+    }
+    return String(p.quantity || '').split('|').reduce((a, s) => {
+      const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
       return a + (Number.isFinite(n) ? n : 0);
     }, 0);
+  };
+  const fromOwn = readFrom(j.particulars && j.particulars.pasted_cartons_qty);
+  if (fromOwn > 0) return fromOwn;
+  // Client-view fallback: if we're rendering a slim projection (from
+  // /api/admin/client-view without the particulars slice), look up the
+  // full job in the admin's own `jobs` cache — that's already loaded
+  // on the page for anyone with admin rights. Real clients don't have
+  // this cache, but they get the pre-computed field above from the
+  // server so the tile still works.
+  if (typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const full = jobs.find(x => x && x.id === j.id);
+    if (full && full !== j) return readFrom(full.particulars && full.particulars.pasted_cartons_qty);
   }
-  return String(p.quantity || '').split('|').reduce((a, s) => {
-    const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
-    return a + (Number.isFinite(n) ? n : 0);
-  }, 0);
+  return 0;
 }
 function isPartialReady(j) {
   if (!j) return false;
