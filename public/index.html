@@ -16463,7 +16463,17 @@ function stationQueueHtml() {
     // pendingForMe and the job disappears from this machine — a UV job
     // stops showing to the UV machine after UV is done, and an Emboss
     // job only ever shows to the Emboss machine.
-    queue = queue.filter(j => jobCoatingsState(j, myFinishes).pendingForMe.length > 0);
+    //
+    // Exception: a job that's at Coatings with NO planned coatings at
+    // all (typically because the PM manually moved it back from a later
+    // stage) would otherwise be orphaned — no coatings machine picks it
+    // up because no coating is pending. Show those to every coatings
+    // operator so someone can move them onward.
+    queue = queue.filter(j => {
+      const plannedCount = Array.isArray(j.coatings) ? j.coatings.filter(Boolean).length : 0;
+      if (plannedCount === 0) return true;
+      return jobCoatingsState(j, myFinishes).pendingForMe.length > 0;
+    });
   }
   queue = queue.reverse();
   const rows = queue.length ? queue.map(j => {
