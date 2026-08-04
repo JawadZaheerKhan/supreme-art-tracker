@@ -666,10 +666,16 @@
   .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
   .s-active { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-border); }
   .s-pending { background: var(--bg2); color: var(--text3); border-color: var(--border); }
-  /* Half-filled Delivered pill for partial deliveries: left half solid
-     blue tint, right half muted, so the pipeline reads as "shipping in
-     progress" at a glance. Text sits on top of both halves. */
-  .s-partial { background: linear-gradient(to right, var(--blue-bg) 50%, var(--bg2) 50%); color: var(--blue-text); border-color: var(--blue-border); }
+  /* Half-filled Delivered pill for partial deliveries: green — same
+     palette as partial-ready — because 'some cartons are complete /
+     shipped' reads as GREEN in the pipeline. Full green = done, full
+     blue = active/processing, half green = partially completed. */
+  .s-partial { background: linear-gradient(to right, #bbf7d0 50%, var(--bg2) 50%); color: #14532d; border-color: #16a34a; font-weight: 700; }
+  /* Half-filled Ready pill for partial-ready jobs (Pasting operator
+     saved some cartons but hasn't advanced yet). Green so it visually
+     says "some cartons are ready/good" — separate from the amber
+     partial-delivery palette. */
+  .s-partial-ready { background: linear-gradient(to right, #bbf7d0 50%, var(--bg2) 50%); color: #14532d; border-color: #16a34a; font-weight: 700; }
   .s-blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
   .arrow { font-size: 10px; color: var(--text3); }
   .job-notes { font-size: 12px; color: var(--text2); margin-top: 6px; font-style: italic; }
@@ -724,7 +730,10 @@
      ribbon reflects "some shipped, more to go". Left half solid blue,
      right half muted so the direction (fill from left) reads like a
      progress bar. Same trick for the pipeline pill below. */
-  .rib-partial { background: linear-gradient(to right, var(--blue-text) 50%, var(--bg3) 50%); }
+  .rib-partial { background: linear-gradient(to right, #16a34a 50%, var(--bg3) 50%); }
+  /* Green counterpart for partial-ready — Pasting has some cartons on the
+     shelf but hasn't advanced. Half green, half muted. */
+  .rib-partial-ready { background: linear-gradient(to right, #16a34a 50%, var(--bg3) 50%); }
   @keyframes ribPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
   /* ⋯ More menu (native <details> styled as a popover) */
@@ -2419,6 +2428,53 @@ function isPartialDelivery(j) {
   const delivered = fromLedger || fromLegacy;
   return delivered > 0 && delivered < booked;
 }
+// Partial ready: the Pasting operator recorded some pasted qty but
+// hasn't advanced the job to Ready to Deliver yet. That means those
+// cartons are physically ready to ship even though the job is still
+// officially at Pasting. Sums entries[] (multi-pass) or the joined
+// quantity string ("10000 | 5000"), whichever the row uses.
+function pastedCartonsTotal(j) {
+  if (!j) return 0;
+  // Server-side pre-computed field (client-view projection). Trust it
+  // when present so the tile still works even if the particulars slice
+  // wasn't included in the projection for any reason.
+  if (typeof j.pasted_ready_cartons === 'number' && j.pasted_ready_cartons > 0) {
+    return j.pasted_ready_cartons;
+  }
+  // Parse own particulars if present.
+  const readFrom = (p) => {
+    if (!p) return 0;
+    if (Array.isArray(p.entries) && p.entries.length) {
+      return p.entries.reduce((a, e) => {
+        const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+        return a + (Number.isFinite(n) ? n : 0);
+      }, 0);
+    }
+    return String(p.quantity || '').split('|').reduce((a, s) => {
+      const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+      return a + (Number.isFinite(n) ? n : 0);
+    }, 0);
+  };
+  const fromOwn = readFrom(j.particulars && j.particulars.pasted_cartons_qty);
+  if (fromOwn > 0) return fromOwn;
+  // Client-view fallback: if we're rendering a slim projection (from
+  // /api/admin/client-view without the particulars slice), look up the
+  // full job in the admin's own `jobs` cache — that's already loaded
+  // on the page for anyone with admin rights. Real clients don't have
+  // this cache, but they get the pre-computed field above from the
+  // server so the tile still works.
+  if (typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const full = jobs.find(x => x && x.id === j.id);
+    if (full && full !== j) return readFrom(full.particulars && full.particulars.pasted_cartons_qty);
+  }
+  return 0;
+}
+function isPartialReady(j) {
+  if (!j) return false;
+  const stage = j.stage_index || 0;
+  if (stage >= 6) return false; // Already at Ready or later
+  return pastedCartonsTotal(j) > 0;
+}
 function dateRangeBounds(preset) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -3053,9 +3109,14 @@ function getFiltered() {
     // Partial-issued jobs are already in production with real sheets in
     // hand, so they belong in Active with a "Requires More Stock" badge.
     if (view === 'pending') return j.issuance_status === 'pending';
-    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelivery(j);
+    // Partial-delivery jobs at Ready to Deliver (6) or later move to
+    // their own tab; a partial-delivered job still at Pasting (5) or
+    // earlier stays in Active alongside the rest of its stage so the
+    // floor sees it in the queue it's actually working from.
+    const isPartialDelvPostReady = isPartialDelivery(j) && (j.stage_index || 0) >= 6;
+    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelvPostReady;
     if (view === 'storage') return isStorage(j);
-    if (view === 'partial') return isPartialDelivery(j);
+    if (view === 'partial') return isPartialDelvPostReady;
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
     // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
@@ -3352,11 +3413,19 @@ function renderJobsCompact() {
     const remainingCartons = bookedCartons ? Math.max(0, bookedCartons - shippedCartons) : 0;
     const partialDelv = isPartialDelivery(j);
     const partialPill = partialDelv
-      ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${remainingCartons.toLocaleString()} CARTONS LEFT` : 'PARTIAL DELIVERY'}</span>`
+      ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${shippedCartons.toLocaleString()} DELIVERED | ${remainingCartons.toLocaleString()} LEFT` : 'PARTIAL DELIVERY'}</span>`
       : '';
     const deliveredLabel = shippedCartons
       ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
       : 'Delivered';
+    // Partial-ready badge — yellow chip stacked alongside the stage
+    // badge to flag "N cartons ready to ship now" while the job is
+    // still officially at Pasting. Hidden once a real shipment is on
+    // the books (partial delivery takes precedence).
+    const partialReady = isPartialReady(j) && !partialDelv;
+    const partialReadyBadge = partialReady
+      ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${pastedCartonsTotal(j).toLocaleString()} CARTONS READY</span>`
+      : '';
     const badge0 = partialDelv ? partialPill :
       isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
       isCtp ? `<span class="badge badge-ctp">&#127912; CTP</span>` :
@@ -3371,7 +3440,7 @@ function renderJobsCompact() {
     const topupBadge = hasPendingPacketTopup(j)
       ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
       : '';
-    const badge = badge0 + partialBadge + topupBadge;
+    const badge = badge0 + partialBadge + topupBadge + partialReadyBadge;
     // Stage pipeline is meaningless for a New Job / CTP-queue job —
     // it hasn't entered production yet, so showing all the stage pills
     // invites clicking one and confusing the workflow. Hide until stock.
@@ -3398,6 +3467,10 @@ function renderJobsCompact() {
       // Half-blue Delivered pill for partial deliveries — matches the
       // card view and the client tile.
       if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
+      // Partial-ready: half-blue Ready pill when Pasting saved some
+      // cartons but hasn't advanced the job to Ready yet.
+      const readyIdxCL = STAGES.indexOf('Ready to Deliver');
+      if (i === readyIdxCL && partialReady && cls === 's-pending') cls = 's-partial-ready';
       const readyIdx = STAGES.indexOf('Ready to Deliver');
       const handler = (i === 0)
         ? `moveJobToCtp(${j.id})`
@@ -3567,6 +3640,22 @@ function renderJobCard(j, opts) {
   // non-clickable. Used by the real client portal AND the admin's
   // Client View tab so the two never drift.
   const clientPreview = !!(opts && opts.clientPreview);
+  // Client-view API projection may be running an older build that
+  // omits particulars / deliveries. When the ADMIN is previewing (they
+  // have the full jobs cache), backfill those fields from the admin
+  // job so the client tile computes partial-ready / partial-delivered
+  // exactly the same way the admin tile does. Real client portal users
+  // don't have the jobs cache; they rely on the server response.
+  if (clientPreview && typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const full = jobs.find(x => x && x.id === j.id);
+    if (full && full !== j) {
+      j = Object.assign({}, j, {
+        particulars: (j.particulars && Object.keys(j.particulars).length) ? j.particulars : full.particulars,
+        deliveries:  (Array.isArray(j.deliveries) && j.deliveries.length) ? j.deliveries : (full.deliveries || j.deliveries),
+        delqty:      j.delqty || full.delqty,
+      });
+    }
+  }
   const si = j.stage_index || 0;
   const done = isDone(j), blocked = isBlocked(j);
   const pending = j.issuance_status === 'pending';
@@ -3600,7 +3689,16 @@ function renderJobCard(j, opts) {
   // it's obvious at a glance in both the admin queue and the client tile.
   const partialDelv = isPartialDelivery(j);
   const partialPill = partialDelv
-    ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${remainingCartons.toLocaleString()} CARTONS LEFT` : 'PARTIAL DELIVERY'}</span>`
+    ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${shippedCartons.toLocaleString()} DELIVERED | ${remainingCartons.toLocaleString()} LEFT` : 'PARTIAL DELIVERY'}</span>`
+    : '';
+  // Partial-ready: Pasting operator saved some cartons but hasn't
+  // moved the job to Ready yet. Stacked ALONGSIDE the current stage
+  // badge — the job is still at Pasting, but the yellow chip flags
+  // "N cartons ready to deliver now". Suppressed once a real shipment
+  // is on the books (partial delivery takes precedence).
+  const partialReady = isPartialReady(j) && !partialDelv;
+  const partialReadyBadge = partialReady
+    ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${pastedCartonsTotal(j).toLocaleString()} CARTONS READY</span>`
     : '';
 
   // Fully-delivered badge carries the shipped qty too, so at a glance
@@ -3625,7 +3723,7 @@ function renderJobCard(j, opts) {
   const topupBadge = (!clientPreview && hasPendingPacketTopup(j))
     ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
     : '';
-  const badge = badge0 + partialBadge + topupBadge;
+  const badge = badge0 + partialBadge + topupBadge + partialReadyBadge;
 
   // Progress ribbon — 8 clickable dots, same moveToStage behavior as the
   // compact pills. done = filled, current = pulsing ring, future = muted.
@@ -3646,6 +3744,12 @@ function renderJobCard(j, opts) {
     // while any partial delivery is on the books — one glance tells the
     // floor "shipping has started but isn't finished".
     if (i === STAGES.length - 1 && partialDelv) cls = 'rib-partial';
+    // Same treatment on the Ready dot when the Pasting operator has
+    // recorded some cartons but hasn't advanced the job — half of the
+    // stock is ready to ship even though we're still officially at
+    // Pasting.
+    const readyIdx = STAGES.indexOf('Ready to Deliver');
+    if (i === readyIdx && partialReady && cls === 'rib-future') cls = 'rib-partial-ready';
     const readyIdxR = STAGES.indexOf('Ready to Deliver');
     const handler = (i === STAGES.length - 1)
       ? `moveToDeliveredAndEdit(${j.id})`
@@ -3668,6 +3772,11 @@ function renderJobCard(j, opts) {
         // Match the ribbon dot behaviour: half-blue Delivered pill on
         // partial deliveries so clients get the same in-progress cue.
         if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
+        // Partial-ready: same half-blue on the Ready pill when some
+        // pasted cartons are on the shelf but the job is still at
+        // Pasting.
+        const readyIdxC = STAGES.indexOf('Ready to Deliver');
+        if (i === readyIdxC && partialReady && cls === 's-pending') cls = 's-partial-ready';
         const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}</span>`;
         if (i === 1) {
           let psCls = 's-pending';
@@ -3711,7 +3820,17 @@ function renderJobCard(j, opts) {
         j.qty     ? `<span><b>PO Qty</b> ${esc(j.qty)}</span>` : '',
         j.bno     ? `<span><b>Batch No.</b> ${esc(j.bno)}</span>` : '',
         coatingsStr ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
-        j.delqty  ? `<span><b>Ready to Delivery Qty</b> ${esc(j.delqty)}</span>` : '',
+        (() => {
+          // Prefer the joined multi-pass string from pasted_cartons_qty
+          // ("1000 | 2000") so the client sees the same value the job
+          // card shows in its Ready to Delivery Qty row. Falls back to
+          // the plain delqty running total when there's no per-pass
+          // breakdown, or to pasted_ready_cartons from the projection.
+          const p = j.particulars && j.particulars.pasted_cartons_qty;
+          const joined = p && String(p.quantity || '').trim();
+          const readyQty = joined || j.delqty || (j.pasted_ready_cartons > 0 ? String(j.pasted_ready_cartons) : '');
+          return readyQty ? `<span><b>Ready to Delivery Qty</b> ${esc(readyQty)}</span>` : '';
+        })(),
         j.dateissued ? `<span><b>Job Date</b> ${esc(fmtDMY(j.dateissued))}</span>` : '',
         j.deadline ? `<span style="color:#dc2626;"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('')
@@ -13703,7 +13822,11 @@ function deliveriesSection(j) {
   const remaining = booked ? Math.max(0, booked - shipped) : 0;
   const isDelivered = booked && shipped >= booked;
   const stageIdx = j.stage_index || 0;
-  const canAddDelivery = stageIdx >= 6 && !isDelivered && canWriteJobs && canWriteJobs();
+  // Delivery is allowed from Ready to Deliver onward, and also from
+  // Pasting when the operator has recorded some pasted cartons but
+  // hasn't advanced yet — those cartons are physically ready to ship
+  // even though the job's still officially at Pasting.
+  const canAddDelivery = (stageIdx >= 6 || (stageIdx === 5 && isPartialReady(j))) && !isDelivered && canWriteJobs && canWriteJobs();
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
 
   const rows = list.length
@@ -13763,9 +13886,11 @@ function deliveriesSection(j) {
         </div>
         <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
       </div>`
-    : (stageIdx < 6
+    : (stageIdx < 5
         ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
-        : '');
+        : stageIdx === 5
+          ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job is at Pasting &mdash; record some pasted cartons on the Pasting station to enable partial shipping from here.</div>`
+          : '');
 
   return `<div class="jc-deliveries ceo-hide-inner" style="margin-top:16px;padding:12px 14px;background:#fff;border:1px solid var(--border);border-radius:10px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
@@ -17143,8 +17268,14 @@ function stationOpenSkip() {
   const j = jobs.find(x => x.id === stationJobId);
   if (!j || !stationOperator) return;
   const stIdx = stationOperator.stage_index;
+  // Delivered (last stage) is never a valid skip target from a station.
+  // Operators can only advance up to Ready to Deliver; the delivery
+  // stage flips only when a shipment hits the booked qty via the
+  // Record Delivery flow (or admin finalize).
+  const deliveredIdx = STAGES.length - 1;
   const opts = STAGES.map((s, i) => {
     if (i <= stIdx) return null;
+    if (i === deliveredIdx) return null;
     const gap = i - stIdx - 1;
     const hint = gap === 0
       ? 'Next stage (same as Done)'
@@ -17156,7 +17287,7 @@ function stationOpenSkip() {
   }).filter(Boolean).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
     <h2>Skip to which stage?</h2>
-    <p style="color:var(--text2);font-size:13px;margin:0 0 8px;line-height:1.4;">Any stages between here and the one you pick are marked done in the job's history with a 'Skipped' note. Use this when one machine handles two stages (e.g. Printing + Coatings) or when the job ships direct to Ready to Deliver / Delivery.</p>
+    <p style="color:var(--text2);font-size:13px;margin:0 0 8px;line-height:1.4;">Any stages between here and the one you pick are marked done in the job's history with a 'Skipped' note. Use this when one machine handles two stages (e.g. Printing + Coatings) or when the job ships direct to Ready to Deliver.</p>
     <div class="station-skip-grid">${opts}</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
