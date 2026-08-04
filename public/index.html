@@ -3640,6 +3640,22 @@ function renderJobCard(j, opts) {
   // non-clickable. Used by the real client portal AND the admin's
   // Client View tab so the two never drift.
   const clientPreview = !!(opts && opts.clientPreview);
+  // Client-view API projection may be running an older build that
+  // omits particulars / deliveries. When the ADMIN is previewing (they
+  // have the full jobs cache), backfill those fields from the admin
+  // job so the client tile computes partial-ready / partial-delivered
+  // exactly the same way the admin tile does. Real client portal users
+  // don't have the jobs cache; they rely on the server response.
+  if (clientPreview && typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const full = jobs.find(x => x && x.id === j.id);
+    if (full && full !== j) {
+      j = Object.assign({}, j, {
+        particulars: (j.particulars && Object.keys(j.particulars).length) ? j.particulars : full.particulars,
+        deliveries:  (Array.isArray(j.deliveries) && j.deliveries.length) ? j.deliveries : (full.deliveries || j.deliveries),
+        delqty:      j.delqty || full.delqty,
+      });
+    }
+  }
   const si = j.stage_index || 0;
   const done = isDone(j), blocked = isBlocked(j);
   const pending = j.issuance_status === 'pending';
