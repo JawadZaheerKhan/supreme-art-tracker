@@ -2689,6 +2689,37 @@ app.post('/api/jobs/:id/move-to-pending-stock', requireJobsWriter, async (req, r
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// ── Early stock issuance ──────────────────────────────────────────────
+// issuance_status doubles as the job's production-queue position while it
+// sits upstream of Pending Stock ('new' -> 'ctp'). The production office
+// moves faster than the app: it routinely sends the store keeper a stock
+// order before CTP has been marked done, so he is allowed to issue paper
+// during that window instead of recording it by hand.
+//
+// Issuing early must NOT drag the job through production — it only writes
+// the ledger. The status and stage stay put, so the job still owes its
+// New Jobs / CTP steps. What it does buy is the trip through Pending
+// Stock: process-from-ctp / station-update below send an already-issued
+// job straight to Printing, since there is nothing left to issue.
+function isPreStockQueue(job) {
+  return !!job && (job.issuance_status === 'new' || job.issuance_status === 'ctp');
+}
+// Has paper already been handed over? Early issuances keep their
+// 'new'/'ctp' status, so issuance_status alone can't answer this.
+function hasIssuedStock(job) {
+  return !!(job && (job.issuance_status === 'issued' || job.issued_at));
+}
+// Same, but false while a partial issuance still owes sheets.
+function isFullyIssued(job) {
+  const owed = job && job.particulars && parseInt(job.particulars.partial_pending_sheets, 10);
+  return hasIssuedStock(job) && !(Number.isFinite(owed) && owed > 0);
+}
+// Status a job lands on once stock is issued: 'issued' normally, but
+// unchanged when the issuance ran ahead of the Pending Stock stage.
+function statusAfterIssuance(job) {
+  return isPreStockQueue(job) ? job.issuance_status : 'issued';
+}
+
 // CTP -> Printing / Pending Stock. Marks CTP (stage 0) as done, advances
 // stage_index to 1 (Printing), and flips issuance_status to 'pending' so
 // the store keeper sees the job in Pending Stock (waiting for paper). Two
@@ -2702,7 +2733,7 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log, issued_at, particulars FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
     if (job.issuance_status !== 'ctp') {
@@ -2718,10 +2749,16 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
     // "pending stock" state — the Printing operator can only start once
     // the store keeper issues paper, same rule as before.
     stages[1] = { ...(stages[1] || {}), status: 'active', by, time, at: nowIso };
-    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to Pending Stock / Printing`, by, time });
+    // Store keeper may have already issued the paper against an off-cycle
+    // stock order while this job was still at CTP. If so there is nothing
+    // left for Pending Stock to do — land on 'issued' and go to Printing.
+    const preIssued = isFullyIssued(job);
+    const nextStatus = preIssued ? 'issued' : 'pending';
+    const dest = preIssued ? 'Printing (stock already issued)' : 'Pending Stock / Printing';
+    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to ${dest}`, by, time });
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status='pending',
+         SET issuance_status=${nextStatus},
              stage_index=1,
              stages=${JSON.stringify(stages)},
              log=${JSON.stringify(log)}
@@ -2732,7 +2769,7 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
       action: 'job.process_from_ctp',
       entityType: 'job',
       entityId: id,
-      summary: `CTP done for Job E-${id}: ${job.name} — moved to Pending Stock / Printing`,
+      summary: `CTP done for Job E-${id}: ${job.name} — moved to ${dest}`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -2752,8 +2789,11 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // job is still 'pending' (stock never issued), edits don't touch inventory
     // at all. Once 'issued', edits auto-adjust the ledger using the same
     // packet-first formula as initial issuance.
-    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
-    const wasIssued  = prior[0]?.issuance_status === 'issued';
+    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, issued_at, cut_size, offcut_size FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    // hasIssuedStock, not status === 'issued': paper issued early (job still
+    // at New Jobs / CTP) is just as physically out of the store, so a paper
+    // swap has to raise the same re-issuance request.
+    const wasIssued  = hasIssuedStock(prior[0]);
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const newItemId  = inventory_item_id || null;
     const oldOffcutSize = prior[0]?.offcut_size || null;
@@ -2809,9 +2849,16 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     if (wasIssued && paperItemChanged) {
       const cleanP = { ...(job.particulars || {}) };
       delete cleanP.partial_pending_sheets;
+      // An early issuance never took the job out of New Jobs / CTP, so
+      // clearing issued_at is enough to put it back on the store keeper's
+      // queue — forcing 'pending' would skip the steps it still owes.
+      const wasEarly = isPreStockQueue(prior[0]);
+      const backTo = wasEarly ? prior[0].issuance_status : 'pending';
       const updated2 = await sql`
         UPDATE jobs
-           SET issuance_status = 'pending',
+           SET issuance_status = ${backTo},
+               issued_at       = NULL,
+               issued_by_id    = NULL,
                issued_items    = '[]'::jsonb,
                particulars     = ${JSON.stringify(cleanP)}
          WHERE id = ${job.id}
@@ -2822,7 +2869,7 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         action: 'job.paper_change_reissue',
         entityType: 'job',
         entityId: job.id,
-        summary: `Paper changed on Job E-${job.id} after issuance — sent back to Pending Stock for re-issuance. Old paper ledger left untouched; store keeper must enter any manual return.`,
+        summary: `Paper changed on Job E-${job.id} after issuance — back on the store keeper's queue for re-issuance${wasEarly ? ` (job stays at ${backTo === 'new' ? 'New Jobs' : 'CTP'} — paper had been issued early)` : ' (sent back to Pending Stock)'}. Old paper ledger left untouched; store keeper must enter any manual return.`,
       });
     }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
@@ -2911,7 +2958,10 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    if (job.issuance_status === 'issued') {
+    // hasIssuedStock, not status === 'issued': an early issuance keeps the
+    // job at 'new'/'ctp', so the status check alone would let a second
+    // click deduct the paper all over again.
+    if (hasIssuedStock(job)) {
       return res.status(400).json({ error: 'Stock already issued for this job' });
     }
     if (!job.inventory_item_id) {
@@ -3011,10 +3061,17 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     // from 0 → 1 here so any weird upstream state (manual DB reset, half-
     // issued today/half tomorrow workflow, etc.) auto-corrects on the
     // next issuance instead of leaving the job stuck at CTP.
-    const bumpedStage = Math.max(job.stage_index || 0, 1);
+    //
+    // Early issuance is the deliberate exception: the store keeper is
+    // filling a stock order that reached him before the job reached his
+    // queue. The paper is recorded, but stage and status both stay put —
+    // the job still owes its New Jobs / CTP steps and must not teleport
+    // into Printing.
+    const early = isPreStockQueue(job);
+    const bumpedStage = early ? (job.stage_index || 0) : Math.max(job.stage_index || 0, 1);
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status = 'issued',
+         SET issuance_status = ${statusAfterIssuance(job)},
              issued_at = COALESCE(issued_at, NOW()),
              issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
              inventory_item_id = ${primary.item_id},
@@ -3029,7 +3086,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
       action: 'job.issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Issued ${totalIssued} sheets for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${remaining} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${totalIssued} sheets of ${job.offcut_size} offcut returned` : ''}`,
+      summary: `Issued ${totalIssued} sheets for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${remaining} sheets still needed)`}${early ? ` · issued early — job stays at ${job.issuance_status === 'new' ? 'New Jobs' : 'CTP'}, stage unchanged` : ''}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${totalIssued} sheets of ${job.offcut_size} offcut returned` : ''}`,
     });
     res.json(updated[0]);
   } catch (err) {
@@ -3868,7 +3925,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       const wasPending = jobRow.issuance_status === 'pending';
       await sql`
         UPDATE jobs
-           SET issuance_status='issued',
+           SET issuance_status=${statusAfterIssuance(jobRow)},
                issued_at = COALESCE(issued_at, NOW()),
                issued_by_id = COALESCE(issued_by_id, ${req.user?.id || null}),
                particulars = ${JSON.stringify(nextParticulars)}
@@ -4001,12 +4058,16 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
-      if (job && job.issuance_status === 'issued') {
+      if (job && hasIssuedStock(job)) {
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        // Paper issued early never moved the job, so undoing it leaves the
+        // status alone — clearing issued_at is what puts the row back on
+        // the store keeper's queue.
+        const revertStatus = isPreStockQueue(job) ? job.issuance_status : 'pending';
         await sql`
           UPDATE jobs
-             SET issuance_status = 'pending',
+             SET issuance_status = ${revertStatus},
                  issued_at = NULL,
                  issued_by_id = NULL,
                  issued_items = '[]'::jsonb,
@@ -4021,7 +4082,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       action: 'inventory.reverse',
       entityType: 'inventory',
       entityId: tx.item_id,
-      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}`,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} back on the store keeper's queue` : ''}`,
     });
 
     res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted });
@@ -4787,8 +4848,11 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // off stage 0, flip issuance_status from 'ctp' to 'pending' so the job
     // pops into Pending Stock for the store keeper to issue paper. Every
     // other transition leaves issuance_status alone.
+    // …unless the store keeper already issued the paper against an
+    // off-cycle stock order, in which case Pending Stock is a no-op and
+    // the job goes straight to 'issued' / Printing.
     const nextStatus = (job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0)
-      ? 'pending'
+      ? (isFullyIssued(job) ? 'issued' : 'pending')
       : job.issuance_status;
     const updated = await sql`
       UPDATE jobs

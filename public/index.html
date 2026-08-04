@@ -2687,12 +2687,31 @@ function partialPendingSheets(j) {
   const n = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
-function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
+// stockIssued rather than status === 'issued': paper issued early keeps the
+// job at 'new'/'ctp', and a short early issuance still owes sheets.
+function isPartialIssuance(j) { return !!j && stockIssued(j) && partialPendingSheets(j) > 0; }
 // A job is "in the Pending Stock queue" if it either was never issued OR
 // only some of its needed sheets have been issued so far. Partial jobs
 // stay visible in the queue so the store keeper knows to keep topping up,
 // even though the shop floor can already start processing them.
 function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j)); }
+
+// Has paper already been handed over for this job? An early issuance (see
+// below) leaves the job at 'new'/'ctp', so issuance_status alone lies.
+function stockIssued(j) { return !!(j && (j.issuance_status === 'issued' || j.issued_at)); }
+// The store keeper's queue is WIDER than isPendingIssuance. The production
+// office regularly sends him a stock order before CTP has been marked done
+// in the app, so the job he's been told to issue against isn't in 'pending'
+// yet — he used to have to record that paper by hand. The queue therefore
+// opens the moment the job card exists and stays open through CTP. Issuing
+// early doesn't move the job's stage; it just means the job skips Pending
+// Stock later, on its way from CTP to Printing.
+// Sits upstream of Pending Stock — still owes its New Jobs / CTP steps.
+function isPreStockQueueJob(j) {
+  return !!j && (j.issuance_status === 'new' || j.issuance_status === 'ctp');
+}
+function isEarlyStockJob(j) { return isPreStockQueueJob(j) && !stockIssued(j); }
+function isStockQueueJob(j) { return isPendingIssuance(j) || isEarlyStockJob(j); }
 
 // Packets top-up helpers. An issued job may have extra packets requested
 // after issuance; each entry lives in particulars.packets_topups with a
@@ -4703,7 +4722,7 @@ function renderInventory() {
 function renderInvPendingToggle() {
   const btn = document.getElementById('inv-pending-toggle');
   if (!btn) return;
-  const pendCount   = jobs.filter(isPendingIssuance).length;
+  const pendCount   = jobs.filter(isStockQueueJob).length;
   const topupCount  = jobs.reduce((n, j) => n + packetTopupsPending(j).length, 0);
   const count = pendCount + topupCount;
   const label = document.getElementById('inv-pending-label');
@@ -4726,7 +4745,7 @@ function renderInvPendingList() {
   const el = document.getElementById('inventory-list');
   if (!el) return;
   const pendingJobs = jobs
-    .filter(isPendingIssuance)
+    .filter(isStockQueueJob)
     .sort((a, b) => (a.deadline || '').localeCompare(b.deadline || '') || a.id - b.id);
   // Extra-packets top-up requests: one row per pending request, grouped
   // after the fresh-issuance rows. Approve/Reject buttons let the store
@@ -4805,7 +4824,9 @@ function renderInvPendingList() {
     const icon     = enough ? '&#10003;' : '&#9888;';
     const label    = enough ? 'Issue Stock' : (isOut ? 'Out of Stock' : 'Low Stock');
     const tip      = enough
-      ? 'Issue stock and start this job'
+      ? (isEarlyStockJob(j)
+          ? 'Issue paper now — records the deduction only. The job keeps its stage and skips Pending Stock later.'
+          : 'Issue stock and start this job')
       : (invIt
           ? `Stock short by ${shortBy.toLocaleString()} sheets (have ${have.toLocaleString()}, need ${need.toLocaleString()}).`
           : 'No paper picked yet — open the job’s Edit to link an inventory item.');
@@ -4827,6 +4848,14 @@ function renderInvPendingList() {
     const partialBadge = partial
       ? `<span class="badge" style="background:#FEF3C7;color:#92400E;margin-left:8px;">PARTIAL &middot; ${partialPktsStr} ${unit} still needed</span>`
       : '';
+    // Off-cycle rows: the job hasn't reached Pending Stock yet, but the
+    // production office has already ordered paper against it. Say where it
+    // actually sits so the store keeper knows this one is ahead of the
+    // queue — issuing here won't move it.
+    const early = isEarlyStockJob(j);
+    const earlyBadge = early
+      ? `<span class="badge" style="background:#E0E7FF;color:#3730A3;margin-left:8px;" title="Not at Pending Stock yet — issuing now records the paper without changing the job's stage.">&#9889; EARLY &middot; ${isNewJob(j) ? 'NEW JOB' : 'AT CTP'}</span>`
+      : '';
     const topupBtn = (partial && canIssueStock())
       ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Top up ${partialPktsStr} ${unit}</button>`
       : '';
@@ -4847,6 +4876,7 @@ function renderInvPendingList() {
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
             ${j.priority && normalizePriority(j.priority) === 'Urgent' ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : ''}
+            ${earlyBadge}
             ${partialBadge}
           </div>
           <div class="inv-sub">
@@ -5601,7 +5631,7 @@ function stockOutLoadPendingChips(itemId) {
   const ps = packetSize(it.paper_type);
   const unit = packetUnitLabel(it.paper_type);
   const candidates = (jobs || []).filter(j => {
-    if (!isPendingIssuance(j) || !j.inventory_item_id) return false;
+    if (!isStockQueueJob(j) || !j.inventory_item_id) return false;
     const jIt = inventory.find(x => x.id === j.inventory_item_id);
     return jIt && paperGroupKey(jIt) === key;
   });
@@ -6090,7 +6120,7 @@ function bulkOutRefreshJobsForRow(idx) {
   }
   const key = paperGroupKey(it);
   const candidates = (jobs || []).filter(j => {
-    if (!isPendingIssuance(j)) return false;
+    if (!isStockQueueJob(j)) return false;
     if (!j.inventory_item_id) return false;
     const jIt = inventory.find(x => x.id === j.inventory_item_id);
     return jIt && paperGroupKey(jIt) === key;
@@ -6355,7 +6385,7 @@ async function saveBulkStockOut() {
           const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits });
           remainingRow -= jobShare;
           if (result) {
-            if (result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
+            if (stockIssued(result) && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
             else if (result.particulars && result.particulars.partial_pending_sheets) partials++;
           }
         }
@@ -14029,7 +14059,7 @@ function updateStockHint() {
     (jobs || []).forEach(j => {
       if (j.id === editingId) return;
       if (!j.inventory_item_id) return;
-      if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
+      if (stockIssued(j) && !isPartialIssuance(j)) return;
       const jIt = inventory.find(x => x.id === j.inventory_item_id);
       if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
     });
@@ -14294,7 +14324,7 @@ async function checkStockBeforeSave(data) {
   (jobs || []).forEach(j => {
     if (j.id === editingId) return;
     if (!j.inventory_item_id) return;
-    if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
+    if (stockIssued(j) && !isPartialIssuance(j)) return;
     const jIt = inventory.find(x => x.id === j.inventory_item_id);
     if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
   });
@@ -14520,10 +14550,11 @@ async function saveEdit(id) {
   // Stock and the store keeper has to re-issue from the new paper, plus
   // manually enter the return for the old paper when production hands it
   // back. Make sure the editor knows before saving.
-  if (itemChanged && prior && prior.issuance_status === 'issued') {
+  if (itemChanged && prior && stockIssued(prior)) {
+    const wasEarly = isPreStockQueueJob(prior);
     const ok = await confirmDialog({
       title: `Change paper on Job E-${id}?`,
-      message: `Stock was already issued for this job.\n\nChanging the paper will:\n  • Send this job BACK to Pending Stock (re-issuance request with the new paper).\n  • Leave the OLD paper's stock as-is — production still physically has it.\n  • Store keeper will issue the NEW paper from Pending Stock.\n  • When production returns any unused OLD paper, store keeper must enter that return manually.\n\nContinue?`,
+      message: `Stock was already issued for this job${wasEarly ? ' (issued early — the job is still ' + (prior.issuance_status === 'new' ? 'in New Jobs' : 'at CTP') + ')' : ''}.\n\nChanging the paper will:\n  • ${wasEarly ? 'Put this job BACK on the store keeper\'s queue as a re-issuance request with the new paper — it stays where it is in production.' : 'Send this job BACK to Pending Stock (re-issuance request with the new paper).'}\n  • Leave the OLD paper's stock as-is — production still physically has it.\n  • Store keeper will issue the NEW paper.\n  • When production returns any unused OLD paper, store keeper must enter that return manually.\n\nContinue?`,
       danger: true,
       confirmText: 'Change paper & send back to Pending Stock',
     });
@@ -14918,7 +14949,9 @@ async function issueStock(id) {
     const partial = sheetsToIssue < needSheets;
     const ok = await confirmDialog({
       title: `Issue stock for Job E-${id}?`,
-      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nThis will deduct from inventory and start the job.`,
+      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\n${isEarlyStockJob(j)
+        ? `This job is still ${isNewJob(j) ? 'in New Jobs' : 'at CTP'}. Issuing now deducts the paper but does NOT move the job — it stays where it is, and skips Pending Stock once CTP is done.`
+        : 'This will deduct from inventory and start the job.'}`,
       confirmText: partial ? 'Issue partial' : 'Issue stock',
     });
     if (!ok) return;
