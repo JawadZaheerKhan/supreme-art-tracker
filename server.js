@@ -2342,6 +2342,23 @@ async function buildClientJobsView(sql, companyRaw, opts) {
               : undefined,
           } }
         : {},
+      // Belt-and-braces: pre-computed pasted-ready total so the client
+      // tile doesn't need to reconstruct it from particulars. Used by
+      // isPartialReady as a fallback if particulars is empty.
+      pasted_ready_cartons: (() => {
+        const p = j.particulars && j.particulars.pasted_cartons_qty;
+        if (!p) return 0;
+        if (Array.isArray(p.entries) && p.entries.length) {
+          return p.entries.reduce((a, e) => {
+            const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+            return a + (Number.isFinite(n) ? n : 0);
+          }, 0);
+        }
+        return String(p.quantity || '').split('|').reduce((a, s) => {
+          const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+          return a + (Number.isFinite(n) ? n : 0);
+        }, 0);
+      })(),
     };
   });
 }
