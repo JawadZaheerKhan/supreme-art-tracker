@@ -686,7 +686,7 @@ async function initDb() {
         total_qty        INTEGER DEFAULT 0,
         total_packages   INTEGER DEFAULT 0,
         qc_status        TEXT DEFAULT 'passed',
-        authorization    JSONB DEFAULT '{}',
+        auth_signatures  JSONB DEFAULT '{}',
         remarks          TEXT,
         created_by       TEXT,
         created_at       TIMESTAMPTZ DEFAULT NOW()
@@ -3286,10 +3286,26 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    // Delivery can only be recorded from Ready to Deliver (6) onward.
-    // Earlier stages don't have finished cartons to ship yet.
-    if ((job.stage_index || 0) < 6) {
-      return res.status(400).json({ error: `Job is at stage "${STAGES[job.stage_index]||'?'}" — reach "Ready to Deliver" before recording a delivery.` });
+    // Delivery is allowed from Ready to Deliver (6) onward, AND from
+    // Pasting (5) when the operator has recorded some pasted cartons
+    // (partial-ready). Anything earlier has no finished cartons to
+    // ship yet.
+    const curStage = job.stage_index || 0;
+    if (curStage < 5) {
+      return res.status(400).json({ error: `Job is at stage "${STAGES[curStage]||'?'}" — reach "Ready to Deliver" before recording a delivery.` });
+    }
+    if (curStage === 5) {
+      const pastedRow = (job.particulars && job.particulars.pasted_cartons_qty) || null;
+      const pastedFromEntries = pastedRow && Array.isArray(pastedRow.entries)
+        ? pastedRow.entries.reduce((a, e) => a + (parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, '')) || 0), 0)
+        : 0;
+      const pastedFromQty = pastedRow
+        ? String(pastedRow.quantity || '').split('|').reduce((a, s) => a + (parseFloat(String(s).replace(/[^0-9.\-]/g, '')) || 0), 0)
+        : 0;
+      const pastedReady = pastedFromEntries || pastedFromQty;
+      if (pastedReady <= 0) {
+        return res.status(400).json({ error: `Job is at Pasting with no cartons recorded — record some pasted cartons on the station first.` });
+      }
     }
     const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
     const priorTotal = sumDeliveryCartons(job.deliveries);
@@ -4990,7 +5006,7 @@ app.post('/api/transfer-notes', requireAuth, async (req, res) => {
     const b = req.body;
     const [row] = await sql`
       INSERT INTO transfer_notes (transfer_note_no, date, po_no, client, transferred_from, transferred_to,
-        product_name, job_ids, items, total_qty, total_packages, qc_status, authorization, remarks, created_by)
+        product_name, job_ids, items, total_qty, total_packages, qc_status, auth_signatures, remarks, created_by)
       VALUES (${tnNo}, ${b.date || businessStamp()}, ${b.po_no || ''}, ${b.client || ''},
         ${b.transferred_from || 'Production'}, ${b.transferred_to || 'Store / Warehouse'},
         ${b.product_name || ''}, ${JSON.stringify(b.job_ids || [])}, ${JSON.stringify(b.items || [])},
