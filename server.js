@@ -2330,18 +2330,27 @@ async function buildClientJobsView(sql, companyRaw, opts) {
         po_no:    d && d.po_no    || '',
         batch_no: d && d.batch_no || '',
       })),
-      // Slim particulars slice — only the pasted_cartons_qty row goes
-      // through so the client tile can compute isPartialReady and show
-      // the green "N cartons ready" badge / half-green Ready pill. All
-      // other particulars stay server-side (internal production data).
-      particulars: (j.particulars && j.particulars.pasted_cartons_qty)
-        ? { pasted_cartons_qty: {
-            quantity: j.particulars.pasted_cartons_qty.quantity || '',
-            entries:  Array.isArray(j.particulars.pasted_cartons_qty.entries)
-              ? j.particulars.pasted_cartons_qty.entries.map(e => ({ qty: (e && e.qty) || '' }))
-              : undefined,
-          } }
-        : {},
+      // Slim particulars slice — only the rows the client tile needs:
+      //   pasted_cartons_qty       → partial-ready detection + fallback
+      //   delivered_cartons_qty    → 'Ready to Delivery Qty' cartons value
+      //   ready_packets_qty        → 'Ready to Delivery Qty' packets value
+      // (both delivered/packets rows may be pipe-joined for multi-pass
+      // entries; the client tile joins them the same way the job card does)
+      // All other particulars stay server-side (internal production data).
+      particulars: (() => {
+        const src = j.particulars || {};
+        const slim = {};
+        const slice = (row) => ({
+          quantity: (row && row.quantity) || '',
+          entries: Array.isArray(row && row.entries)
+            ? row.entries.map(e => ({ qty: (e && e.qty) || '' }))
+            : undefined,
+        });
+        if (src.pasted_cartons_qty)    slim.pasted_cartons_qty    = slice(src.pasted_cartons_qty);
+        if (src.delivered_cartons_qty) slim.delivered_cartons_qty = slice(src.delivered_cartons_qty);
+        if (src.ready_packets_qty)     slim.ready_packets_qty     = slice(src.ready_packets_qty);
+        return slim;
+      })(),
       // Belt-and-braces: pre-computed pasted-ready total so the client
       // tile doesn't need to reconstruct it from particulars. Used by
       // isPartialReady as a fallback if particulars is empty.
