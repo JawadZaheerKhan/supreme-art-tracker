@@ -15090,7 +15090,11 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
   const paperType = anchor.paper_type || '';
   const ps = packetSize(paperType);
   const unitLabel = packetUnitLabel(paperType); // "Packets" | "Reams"
-  const needPackets = Math.ceil(needSheets / ps);
+  // Keep the true fractional value so a 2.5-packet need doesn't round
+  // up to 3 in the header, the data-need-packets attribute, or the
+  // "0 / N" footer tally. Round-tripped as float via parseFloat below.
+  const needPacketsRaw = ps ? needSheets / ps : 0;
+  const needPackets = Number.isInteger(needPacketsRaw) ? needPacketsRaw : +needPacketsRaw.toFixed(2);
   const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
   const rowHtml = rows.map((it) => {
     const balSheets  = it.current_balance || 0;
@@ -15154,7 +15158,10 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
 function recomputeSplitFooter() {
   const table = document.querySelector('.split-table');
   if (!table) return;
-  const needPackets = parseInt(table.dataset.needPackets, 10) || 0;
+  // parseFloat, not parseInt — needPackets may be fractional (e.g. 2.5)
+  // and parseInt would silently truncate to 2, breaking the "0.5 still
+  // pending" tally and the full/partial banner colour.
+  const needPackets = parseFloat(table.dataset.needPackets) || 0;
   const unitLabel   = (table.dataset.unitLabel || 'Packets').toLowerCase();
   const qtyInputs = [...table.querySelectorAll('.split-qty')];
   let total = 0;
@@ -15182,10 +15189,16 @@ function recomputeSplitFooter() {
   const footer = document.getElementById('split-footer');
   const msg    = document.getElementById('split-footer-msg');
   const btn    = document.getElementById('split-save-btn');
-  const overTotal = total > needPackets;
+  // Float-tolerant compare — needPackets can be fractional (e.g. 2.5)
+  // and typed inputs may round-trip through the browser with the odd
+  // trailing epsilon; strict === would misclassify a valid match.
+  const EPS = 1e-9;
+  const overTotal = total > needPackets + EPS;
+  const equalTotal = Math.abs(total - needPackets) < EPS;
+  const underTotal = total < needPackets - EPS;
   const isError = anyBadInput || anyRowOver || overTotal;
-  footer.classList.toggle('split-footer-full',    !isError && total === needPackets && anyPositive);
-  footer.classList.toggle('split-footer-partial', !isError && anyPositive && total < needPackets);
+  footer.classList.toggle('split-footer-full',    !isError && equalTotal && anyPositive);
+  footer.classList.toggle('split-footer-partial', !isError && anyPositive && underTotal);
   footer.classList.toggle('split-footer-over',    isError);
   const totalStr = `${total.toLocaleString()} / ${needPackets.toLocaleString()} ${unitLabel}`;
   if (anyRowOver) {
@@ -15194,10 +15207,14 @@ function recomputeSplitFooter() {
     msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${(total - needPackets).toLocaleString()} ${unitLabel} — reduce one of the rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (anyBadInput) {
     msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter a positive number in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
-  } else if (total === needPackets && anyPositive) {
+  } else if (equalTotal && anyPositive) {
     msg.textContent = `Issued: ${totalStr} · full`;
   } else if (anyPositive) {
-    msg.textContent = `Issued: ${totalStr} · ${(needPackets - total).toLocaleString()} ${unitLabel} still pending`;
+    // Round to 2dp so a 0.30000000004 residual reads as "0.3", not
+    // "0.30000000004".
+    const remaining = Math.max(0, needPackets - total);
+    const remStr = Number.isInteger(remaining) ? remaining.toLocaleString() : (+remaining.toFixed(2)).toLocaleString();
+    msg.textContent = `Issued: ${totalStr} · ${remStr} ${unitLabel} still pending`;
   } else {
     msg.textContent = `Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel}`;
   }
