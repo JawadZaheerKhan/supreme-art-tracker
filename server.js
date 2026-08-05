@@ -4837,6 +4837,21 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `Numbers recorded by ${operator.name}`, by, time });
     }
 
+    // Pasting → Ready: auto-fill delivered_cartons_qty from pasted_cartons_qty
+    // so the QC person at Ready just confirms and adds packets.
+    if (advance && curStage === 5 && stage_index === 6) {
+      const pasted = particulars.pasted_cartons_qty;
+      if (pasted && !particulars.delivered_cartons_qty) {
+        particulars.delivered_cartons_qty = {
+          quantity: pasted.quantity || '',
+          entries: Array.isArray(pasted.entries) ? JSON.parse(JSON.stringify(pasted.entries)) : undefined,
+          name: pasted.name || '',
+          signature: pasted.signature || '',
+          details: pasted.details || '',
+        };
+      }
+    }
+
     // When the CTP operator (stage 0) finishes plates and advances the job
     // off stage 0, flip issuance_status from 'ctp' to 'pending' so the job
     // pops into Pending Stock for the store keeper to issue paper. Every

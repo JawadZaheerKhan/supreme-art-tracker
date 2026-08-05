@@ -2475,6 +2475,29 @@ function isPartialReady(j) {
   if (stage >= 6) return false; // Already at Ready or later
   return pastedCartonsTotal(j) > 0;
 }
+function readyCartonsTotal(j) {
+  if (!j) return 0;
+  const readFrom = (p) => {
+    if (!p) return 0;
+    if (Array.isArray(p.entries) && p.entries.length) {
+      return p.entries.reduce((a, e) => {
+        const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+        return a + (Number.isFinite(n) ? n : 0);
+      }, 0);
+    }
+    return String(p.quantity || '').split('|').reduce((a, s) => {
+      const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+      return a + (Number.isFinite(n) ? n : 0);
+    }, 0);
+  };
+  const fromOwn = readFrom(j.particulars && j.particulars.delivered_cartons_qty);
+  if (fromOwn > 0) return fromOwn;
+  if (typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const full = jobs.find(x => x && x.id === j.id);
+    if (full && full !== j) return readFrom(full.particulars && full.particulars.delivered_cartons_qty);
+  }
+  return 0;
+}
 function dateRangeBounds(preset) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -3471,7 +3494,10 @@ function renderJobsCompact() {
       // cartons but hasn't advanced the job to Ready yet.
       const readyIdxCL = STAGES.indexOf('Ready to Deliver');
       if (i === readyIdxCL && partialReady && cls === 's-pending') cls = 's-partial-ready';
+      // Fully at Ready to Deliver: paint the Ready pill green and show cartons sum.
+      if (i === readyIdxCL && si === 6 && cls === 's-active') cls = 's-done';
       const readyIdx = STAGES.indexOf('Ready to Deliver');
+      const rctLabel = (i === readyIdx && si === 6) ? (() => { const rc = readyCartonsTotal(j); return rc > 0 ? ' ' + rc.toLocaleString() : ''; })() : '';
       const handler = (i === 0)
         ? `moveJobToCtp(${j.id})`
         : (i === STAGES.length - 1
@@ -3479,7 +3505,7 @@ function renderJobsCompact() {
             : (i === readyIdx
                 ? `moveToReadyAndEdit(${j.id})`
                 : `moveToStage(${j.id},${i})`));
-      const pill = `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}</span>`;
+      const pill = `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="${handler}" style="cursor:pointer">${SHORT[i]}${rctLabel}</span>`;
       if (i === 1) {
         // Insert the virtual Pending Stock pill BEFORE Print.
         let psCls = 's-pending';
@@ -3750,6 +3776,7 @@ function renderJobCard(j, opts) {
     // Pasting.
     const readyIdx = STAGES.indexOf('Ready to Deliver');
     if (i === readyIdx && partialReady && cls === 'rib-future') cls = 'rib-partial-ready';
+    if (i === readyIdx && si === 6 && cls === 'rib-current') cls = 'rib-done';
     const readyIdxR = STAGES.indexOf('Ready to Deliver');
     const handler = (i === STAGES.length - 1)
       ? `moveToDeliveredAndEdit(${j.id})`
@@ -3777,7 +3804,9 @@ function renderJobCard(j, opts) {
         // Pasting.
         const readyIdxC = STAGES.indexOf('Ready to Deliver');
         if (i === readyIdxC && partialReady && cls === 's-pending') cls = 's-partial-ready';
-        const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}</span>`;
+        if (i === readyIdxC && si === 6 && cls === 's-active') cls = 's-done';
+        const rctLabelC = (i === readyIdxC && si === 6) ? (() => { const rc = readyCartonsTotal(j); return rc > 0 ? ' ' + rc.toLocaleString() : ''; })() : '';
+        const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}${rctLabelC}</span>`;
         if (i === 1) {
           let psCls = 's-pending';
           if (issued__ || (si > 1)) psCls = 's-done';
@@ -13963,28 +13992,28 @@ function deliveriesSection(j) {
     : `Shipped: <b>${shipped.toLocaleString()}</b> cartons (booked P.O. qty not set)`;
 
   const addForm = canAddDelivery
-    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1.4fr auto;gap:8px;align-items:end;">
-        <div>
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1fr auto;gap:8px;align-items:end;">
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons *</label>
-          <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
-          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
-          <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
-          <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
-          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Notes (optional)</label>
-          <input type="text" id="deliv-notes" placeholder="Challan #, vehicle, etc." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        <div style="min-width:0;">
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Challan No.</label>
+          <input type="text" id="deliv-notes" placeholder="e.g. CH-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
+        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
       </div>`
     : (stageIdx < 5
         ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
@@ -14005,7 +14034,7 @@ function deliveriesSection(j) {
           <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Cartons</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Notes</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Challan No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
           <th style="width:36px;padding:6px 8px;border-bottom:1px solid var(--border);"></th>
         </tr>
@@ -14601,7 +14630,7 @@ function openDuplicateJob(id) {
   // like Printed Sheets, all the waste columns, Delivered Cartons Qty, and
   // free-text Comments) starts blank on the new job — those are filled in
   // afresh when the actual run happens.
-  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand'];
+  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand', 'artworks_matter_approval', 'shade_card', 'plates', 'no_of_colors'];
   const sp = source.particulars || {};
   const newParticulars = {};
   for (const k of KEEP_PARTICULARS) {
