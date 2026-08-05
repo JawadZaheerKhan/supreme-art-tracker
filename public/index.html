@@ -3821,14 +3821,18 @@ function renderJobCard(j, opts) {
         j.bno     ? `<span><b>Batch No.</b> ${esc(j.bno)}</span>` : '',
         coatingsStr ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
         (() => {
-          // Prefer the joined multi-pass string from pasted_cartons_qty
-          // ("1000 | 2000") so the client sees the same value the job
-          // card shows in its Ready to Delivery Qty row. Falls back to
-          // the plain delqty running total when there's no per-pass
-          // breakdown, or to pasted_ready_cartons from the projection.
-          const p = j.particulars && j.particulars.pasted_cartons_qty;
-          const joined = p && String(p.quantity || '').trim();
-          const readyQty = joined || j.delqty || (j.pasted_ready_cartons > 0 ? String(j.pasted_ready_cartons) : '');
+          // Mirror the job card's 'Ready to Delivery Qty' row exactly:
+          // delivered_cartons_qty.quantity + ' | ' + ready_packets_qty.quantity
+          // (both may themselves be pipe-joined for multi-pass entries).
+          // Falls back to pasted_cartons_qty (partial-ready case) and
+          // finally to delqty / pasted_ready_cartons so old jobs still
+          // surface something.
+          const parts = j.particulars || {};
+          const dc = parts.delivered_cartons_qty && String(parts.delivered_cartons_qty.quantity || '').trim();
+          const rp = parts.ready_packets_qty     && String(parts.ready_packets_qty.quantity     || '').trim();
+          const rtdJoined = rp ? `${dc || ''} | ${rp}` : (dc || '');
+          const pastedJoined = parts.pasted_cartons_qty && String(parts.pasted_cartons_qty.quantity || '').trim();
+          const readyQty = rtdJoined || pastedJoined || j.delqty || (j.pasted_ready_cartons > 0 ? String(j.pasted_ready_cartons) : '');
           return readyQty ? `<span><b>Ready to Delivery Qty</b> ${esc(readyQty)}</span>` : '';
         })(),
         j.dateissued ? `<span><b>Job Date</b> ${esc(fmtDMY(j.dateissued))}</span>` : '',
