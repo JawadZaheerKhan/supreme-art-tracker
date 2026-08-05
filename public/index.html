@@ -13650,10 +13650,94 @@ function logOperatorForStage(log, stageName) {
   return { name: '', machine: '', time: '' };
 }
 
+// Lazy-load operatorsList (machines + persons) so the job card's
+// Name / Signature dropdowns have data. Safe to call repeatedly —
+// no-op when the list is already populated or the fetch is in flight.
+let _operatorsLoadingPromise = null;
+function ensureOperatorsLoaded() {
+  if (Array.isArray(operatorsList) && operatorsList.length) return Promise.resolve();
+  if (_operatorsLoadingPromise) return _operatorsLoadingPromise;
+  const canFetch = (typeof isAdmin === 'function' && isAdmin())
+    || (typeof isProductionManager === 'function' && isProductionManager())
+    || (typeof hasRole === 'function' && hasRole('ceo'));
+  if (!canFetch) return Promise.resolve();
+  _operatorsLoadingPromise = api('GET', '/api/operators')
+    .then(ops => { operatorsList = Array.isArray(ops) ? ops : []; refreshParticularsDatalists(); })
+    .catch(() => {})
+    .finally(() => { _operatorsLoadingPromise = null; });
+  return _operatorsLoadingPromise;
+}
+
+// Machines that handle the given stage index. Uses each operator's
+// stage_indices array (multi-stage machines) with a fallback to the
+// legacy single stage_index.
+function machinesForStage(stageIdx) {
+  const out = [];
+  for (const o of (operatorsList || [])) {
+    const idxs = (Array.isArray(o.stage_indices) && o.stage_indices.length) ? o.stage_indices : [o.stage_index];
+    if (idxs.includes(stageIdx)) out.push(o);
+  }
+  return out;
+}
+// Persons on a given machine (by machine name).
+function personsForMachineName(name) {
+  const norm = String(name || '').trim().toLowerCase();
+  if (!norm) return [];
+  const op = (operatorsList || []).find(o => String(o.name || '').trim().toLowerCase() === norm);
+  return op && Array.isArray(op.persons) ? op.persons : [];
+}
+// Rebuild the datalists after operatorsList arrives — the modal's
+// already open by then, so we hydrate <datalist> elements in place
+// instead of re-rendering the whole particulars table.
+function refreshParticularsDatalists() {
+  document.querySelectorAll('datalist[data-particulars-stage]').forEach(dl => {
+    const stageName = dl.dataset.particularsStage;
+    const stageIdx = STAGES.indexOf(stageName);
+    if (stageIdx < 0) return;
+    dl.innerHTML = machinesForStage(stageIdx)
+      .map(m => `<option value="${esc(m.name)}"></option>`).join('');
+  });
+  // Signature datalists are per-row and depend on the row's current
+  // Name input value. Refresh each.
+  document.querySelectorAll('datalist[data-particulars-persons]').forEach(dl => {
+    const key = dl.dataset.particularsPersons;
+    const nameEl = document.getElementById(`p-${key}-name`);
+    const current = nameEl ? nameEl.value : '';
+    dl.innerHTML = personsForMachineName(current)
+      .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
+  });
+}
+// Called from the Name input's oninput — regenerates the sibling
+// persons datalist so Signature suggestions match the machine.
+function refreshRowPersonsList(key) {
+  const dl = document.getElementById(`p-${key}-persons-list`);
+  if (!dl) return;
+  const nameEl = document.getElementById(`p-${key}-name`);
+  const current = nameEl ? nameEl.value : '';
+  dl.innerHTML = personsForMachineName(current)
+    .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
+}
+
 function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
   const raw = (k, sub) => (p[k] && p[k][sub]) || '';
   const log = job && Array.isArray(job.log) ? job.log : [];
+  // Build one machines datalist per relevant stage (dedup) so multiple
+  // rows for the same stage (e.g. Printed Sheets + Printed Waste both
+  // point at Printing) share a single option list.
+  const stagesUsed = new Set();
+  PARTICULARS_ROWS.filter(r => !CTP_PARTICULARS_KEYS.has(r.key)).forEach(r => {
+    const stage = PARTICULARS_STAGE_MAP[r.key];
+    if (stage) stagesUsed.add(stage);
+  });
+  const machineDatalists = [...stagesUsed].map(stage => {
+    const stageIdx = STAGES.indexOf(stage);
+    const machines = stageIdx >= 0 ? machinesForStage(stageIdx) : [];
+    const id = 'p-machines-' + stage.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+    return `<datalist id="${id}" data-particulars-stage="${esc(stage)}">${
+      machines.map(m => `<option value="${esc(m.name)}"></option>`).join('')
+    }</datalist>`;
+  }).join('');
   const rows = PARTICULARS_ROWS
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
     .map(r => {
@@ -13676,16 +13760,28 @@ function particularsTable(p, job) {
         const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
         qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
       }
+      // Wire the Name input to the stage's shared machines datalist,
+      // and the Signature input to a per-row persons datalist that
+      // gets rebuilt whenever Name changes (via refreshRowPersonsList).
+      // Pre-populate the persons datalist based on the current name
+      // value so a reload with existing data still shows suggestions.
+      const machinesListId = stage
+        ? 'p-machines-' + stage.replace(/[^a-z0-9]/gi, '-').toLowerCase()
+        : '';
+      const personsListId = `p-${r.key}-persons-list`;
+      const personsOpts = personsForMachineName(nameVal)
+        .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
       <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details') || esc(op.time)}"></td>
       <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
-      <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine"></td>
-      <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"></td>
+      <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
+      <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>
     </tr>`;
     }).join('');
   return `
+    ${machineDatalists}
     <table class="jc-part">
       <tr>
         <th class="jc-row-label">Particulars</th>
@@ -14590,6 +14686,11 @@ function viewJobCard(id) {
 function openEdit(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // Lazy-load the machines/operators roster so the particulars-table
+  // Name / Signature dropdowns have data. Fire-and-forget — the render
+  // below runs immediately; when the fetch resolves we refresh the
+  // datalists in place so the dropdowns start showing options.
+  ensureOperatorsLoaded();
   // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
   // both offered from inside the Edit modal so the PM can flip status
   // right after tweaking specs, without closing back to the list.
