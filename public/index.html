@@ -9726,7 +9726,9 @@ function renderDailyProductionPasting(rows, date) {
   }
   const totals = rows.reduce((t, r) => ({
     units: t.units + (+r.units || 0),
-    jobs:  t.jobs  + (+r.jobs  || 0),
+    // r.jobs is now a display string like "E-152, E-153" — use jobs_count
+    // for the numeric total (falls back to +r.jobs for legacy/custom rows).
+    jobs:  t.jobs  + (+(r.jobs_count ?? r.jobs) || 0),
     waste: t.waste + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { units: 0, jobs: 0, waste: 0 });
 
@@ -9759,7 +9761,7 @@ function renderDailyProductionPasting(rows, date) {
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="pasting" data-field="hours"
                  value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
-      <td class="dp-num">${row.jobs || '—'}</td>
+      <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td>${row.operators ? esc(row.operators) : '—'}</td>
       <td>
         <input type="text" ${cellAttrs} class="dp-cell dp-remarks" data-machine="${esc(row.machine)}" data-section="pasting" data-field="remarks"
@@ -9799,7 +9801,7 @@ function renderDailyProductionCoatings(rows, date) {
   }
   const totals = rows.reduce((t, r) => ({
     sheets: t.sheets + (+r.sheets || 0),
-    jobs:   t.jobs   + (+r.jobs   || 0),
+    jobs:   t.jobs   + (+(r.jobs_count ?? r.jobs) || 0),
     waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, waste: 0 });
 
@@ -9830,7 +9832,7 @@ function renderDailyProductionCoatings(rows, date) {
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="hours"
                  value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
-      <td class="dp-num">${row.jobs || '—'}</td>
+      <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="blankets"
                  value="${esc(row.blankets || '')}" placeholder="—" onblur="saveDailyProductionCell(this)"></td>
       <td>${row.operators ? esc(row.operators) : '—'}</td>
@@ -9872,7 +9874,7 @@ function renderDailyProductionDie(rows, date) {
   }
   const totals = rows.reduce((t, r) => ({
     sheets: t.sheets + (+r.sheets || 0),
-    jobs:   t.jobs   + (+r.jobs   || 0),
+    jobs:   t.jobs   + (+(r.jobs_count ?? r.jobs) || 0),
     waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, waste: 0 });
 
@@ -9904,7 +9906,7 @@ function renderDailyProductionDie(rows, date) {
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="die" data-field="hours"
                  value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
-      <td class="dp-num">${row.jobs || '—'}</td>
+      <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="die" data-field="make_ready"
                  value="${esc(row.make_ready || '')}" placeholder="—" onblur="saveDailyProductionCell(this)"></td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="die" data-field="settings"
@@ -9947,10 +9949,14 @@ function renderDailyProductionPrinting(rows, date) {
     return;
   }
   // Totals row across all machines for the day — handy at-a-glance.
+  // r.jobs and r.plates are per-job display strings ("E-152, E-153" /
+  // "E-152-4 / E-153-3+1"); jobs_count and plates_count carry the numeric
+  // aggregates the footer needs. Falls back to the raw field for
+  // custom/legacy rows that lack the *_count sidecar.
   const totals = rows.reduce((t, r) => ({
     sheets: t.sheets + (+r.sheets || 0),
-    jobs:   t.jobs   + (+r.jobs   || 0),
-    plates: t.plates + (+r.plates || 0),
+    jobs:   t.jobs   + (+(r.jobs_count   ?? r.jobs)   || 0),
+    plates: t.plates + (+(r.plates_count ?? r.plates) || 0),
     waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, plates: 0, waste: 0 });
 
@@ -9985,9 +9991,9 @@ function renderDailyProductionPrinting(rows, date) {
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="printing" data-field="hours"
                  value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
-      <td class="dp-num">${row.jobs || '—'}</td>
+      <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td>${row.colors ? esc(row.colors) : '—'}</td>
-      <td class="dp-num">${row.plates || '—'}</td>
+      <td>${row.plates ? esc(row.plates) : '—'}</td>
       <td>${row.operators ? esc(row.operators) : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell dp-remarks" data-machine="${esc(row.machine)}" data-section="printing" data-field="remarks"
                  value="${esc(row.remarks || '')}" placeholder="—" onblur="saveDailyProductionCell(this)"></td>
