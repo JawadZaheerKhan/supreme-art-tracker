@@ -1421,11 +1421,9 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
 async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sheetsKey, wasteKey }) {
   const machineRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
   const machines = machineRows.map(r => r.name).filter(Boolean);
-  // Person-name → machine-name map for THIS section's operators only. Lets
-  // the fallback below credit "obaid" (typed on the Job Card's Die Cutting
-  // Sheets row) to the Die Cutting machine obaid is registered on, rather
-  // than blindly using the job's planned machine (which is the Printing
-  // machine and would be wrong for any non-Printing section).
+  // Person-name → machine-name map for THIS section's operators only. Used
+  // by the LEGACY (no-entries[]) fallback to credit "obaid" (typed on the
+  // Job Card's Die Cutting Sheets row) to obaid's registered machine.
   const personToMachine = new Map();
   for (const r of machineRows) {
     const list = Array.isArray(r.persons) ? r.persons : [];
@@ -1436,138 +1434,179 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
   }
   const jobs = await sql`SELECT id, particulars, log, machine, stages FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
 
+  // Per-machine accumulator. `jobsMap` keeps a per-job breakdown so the
+  // report can list "E-152-4clr / E-153-3+1clr" instead of the old
+  // "1-4clr / 1-3clr" count grouping — each job stamped with its colors,
+  // plates, and the earliest submission ms on that machine (used for
+  // ordering the display list).
   const acc = new Map();
   const ensure = (m) => {
     if (!acc.has(m)) acc.set(m, {
-      sheets: 0, waste: 0, jobIds: new Set(), colorsCounts: new Map(),
-      operators: new Set(), plates: 0,
+      sheets: 0, waste: 0,
+      jobsMap: new Map(),   // jobId -> { colorsRaw, platesRaw, firstMs }
+      operators: new Set(),
     });
     return acc.get(m);
+  };
+  // Track the earliest submission ms per (machine, jobId) — computed from
+  // log bylines matching this stage+date, so the per-machine job list
+  // orders by who-worked-first that day. Preserves the operator's chosen
+  // "+" notation in colors/plates by using the literal string as label.
+  const parseMs = t => {
+    const m = String(t || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    return m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
   };
 
   for (const job of jobs) {
     const log = Array.isArray(job.log) ? job.log : [];
-    const machinesThisJob = new Set();
-    const opsByMachine = new Map();
-    // Pick the LATEST log entry for this (date, stage). Earlier station
-    // submissions on the same day are treated as corrections — operator
-    // hit submit at the wrong station, then re-submitted at the right
-    // one — so only the most recent submission credits a machine. Stops
-    // the same job from being counted on two machines.
-    let latestMs = -1, latestMc = '', latestOp = '';
-    let sawStageEntry = false;
+    const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+
+    // Sheets / waste get credited to whichever machine each entry stamps.
+    // Legacy jobs (no entries[]) fall through to the old latest-byline
+    // rule further down. Skip any entry that doesn't stamp a machine —
+    // except Printing, which safely falls back to the job card's machine
+    // so unstamped historical Printing entries still land somewhere.
+    const sheetsField = part[sheetsKey];
+    const wasteField  = wasteKey ? part[wasteKey] : null;
+    const hasSheetEntries = sheetsField && Array.isArray(sheetsField.entries) && sheetsField.entries.length;
+    const hasWasteEntries = wasteField  && Array.isArray(wasteField.entries)  && wasteField.entries.length;
+    // Credits map: machine -> { sheets, waste, operators:Set, firstMs }.
+    const credits = new Map();
+    const bumpCredit = (mc, key, qty, op, ms) => {
+      if (!mc) return;
+      if (!credits.has(mc)) credits.set(mc, { sheets: 0, waste: 0, operators: new Set(), firstMs: Infinity });
+      const c = credits.get(mc);
+      c[key] += qty;
+      if (op) c.operators.add(op);
+      if (ms && ms < c.firstMs) c.firstMs = ms;
+    };
+    // Log-derived earliest ms per machine, so the per-machine job list
+    // orders by "who submitted first that day". Preferred over the entry
+    // itself, which only carries date-precision (no per-submission time).
+    const logFirstMsByMc = new Map();
     for (const e of log) {
       if (!e || !e.by) continue;
       if (logTimeToISODate(e.time) !== date) continue;
       if (parseByStage(e.by) !== stageLabel) continue;
-      sawStageEntry = true;
-      const m = String(e.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
-      const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
-      if (ms > latestMs) {
-        latestMs = ms;
-        latestMc = parseByMachine(e.by);
-        latestOp = parseByOperator(e.by);
-      }
+      const mc = parseByMachine(e.by);
+      if (!mc) continue;
+      const ms = parseMs(e.time);
+      if (!logFirstMsByMc.has(mc) || ms < logFirstMsByMc.get(mc)) logFirstMsByMc.set(mc, ms);
     }
-    if (latestMc) {
-      machinesThisJob.add(latestMc);
-      if (latestOp) {
-        if (!opsByMachine.has(latestMc)) opsByMachine.set(latestMc, new Set());
-        opsByMachine.get(latestMc).add(latestOp);
-      }
-    } else {
-      // No station log entry attributed a machine. Look for an admin entry
-      // on the Job Card: particulars[sheetsKey].name is the operator the
-      // admin typed in (e.g. "obaid"). Cross-reference against operators
-      // registered for THIS section's role to find their machine —
-      // crediting "Die cutting 1060" instead of the printing machine the
-      // job is planned on.
-      const part0 = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-      const cardOp = part0[sheetsKey] && String(part0[sheetsKey].name || '').trim();
-      const cardOpMachine = cardOp ? personToMachine.get(cardOp.toLowerCase()) : '';
-      const stageIdx = STAGES.indexOf(stageLabel);
-      const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
-      const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
-      // Admin entered a Job Card row with a recognised operator name?
-      // Credit the operator's machine ONLY when the stage was actually
-      // advanced on this date (stageTimeMatches) or a station log entry
-      // for this stage was recorded on this date (sawStageEntry). We do
-      // NOT default admin-only entries to "today" — that caused old jobs
-      // to reappear on every calendar day the report was viewed.
-      const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry);
-      if (cardEntryFits) {
-        machinesThisJob.add(cardOpMachine);
-        if (!opsByMachine.has(cardOpMachine)) opsByMachine.set(cardOpMachine, new Set());
-        opsByMachine.get(cardOpMachine).add(cardOp);
-      } else if (job.machine && (sawStageEntry || stageTimeMatches) && machines.includes(job.machine)) {
-        // Legacy fallback: the admin-typed name doesn't match any operator
-        // registered for this section, but the job's planned machine IS a
-        // machine for this section and the stage was advanced on the date.
-        machinesThisJob.add(job.machine);
-        if (cardOp) {
-          if (!opsByMachine.has(job.machine)) opsByMachine.set(job.machine, new Set());
-          opsByMachine.get(job.machine).add(cardOp);
-        }
-      }
-    }
-    if (!machinesThisJob.size) continue;
-    const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-    // Multi-pass entries[] is the source of truth when present — sum
-    // only entries whose date matches the report date so a job split
-    // across days gets attributed correctly. Falls back to the legacy
-    // single-quantity number for jobs that never used multi-pass.
-    let sheetsN = 0;
-    const partKey = part[sheetsKey];
-    if (partKey && Array.isArray(partKey.entries) && partKey.entries.length) {
-      for (const e of partKey.entries) {
-        if (!e || e.date !== date) continue;
-        const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-        if (Number.isFinite(n)) sheetsN += n;
-      }
-    } else {
-      // Legacy single-quantity fallback — pipe-aware (see sumPipeInts).
-      sheetsN = sumPipeInts(partKey && partKey.quantity);
-    }
-    const colors = parseInt(String((part.no_of_colors && part.no_of_colors.quantity) || '').replace(/[^0-9-]/g, ''), 10);
-    const colorsN = Number.isFinite(colors) ? colors : 0;
-    // Plates: read the job card's actual Plates row (CTP station writes
-    // it). Falls back to the colors count for older jobs where Plates was
-    // never filled in — the historical report faked plates from colors.
-    const platesTyped = parseInt(String((part.plates && part.plates.quantity) || '').replace(/[^0-9-]/g, ''), 10);
-    const platesN = Number.isFinite(platesTyped) && platesTyped > 0 ? platesTyped : colorsN;
-    // Waste — same per-date attribution as sheets. Multi-pass
-    // entries[] take precedence; legacy single-quantity falls back.
-    let wasteN = 0;
-    if (wasteKey) {
-      const partW = part[wasteKey];
-      if (partW && Array.isArray(partW.entries) && partW.entries.length) {
-        for (const e of partW.entries) {
+    const isPrinting = stageLabel === 'Printing';
+
+    if (hasSheetEntries || hasWasteEntries) {
+      // NEW-STYLE per-entry attribution.
+      if (hasSheetEntries) {
+        for (const e of sheetsField.entries) {
           if (!e || e.date !== date) continue;
           const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-          if (Number.isFinite(n)) wasteN += n;
+          if (!Number.isFinite(n) || n === 0) continue;
+          let mc = String(e.machine || '').trim();
+          if (!mc && isPrinting && job.machine) mc = job.machine;   // Printing-only safety fallback
+          if (!mc) continue;
+          bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
         }
-      } else {
-        // Legacy single-quantity fallback — pipe-aware (see sumPipeInts).
-        wasteN = sumPipeInts(partW && partW.quantity);
+      }
+      if (hasWasteEntries) {
+        for (const e of wasteField.entries) {
+          if (!e || e.date !== date) continue;
+          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (!Number.isFinite(n) || n === 0) continue;
+          let mc = String(e.machine || '').trim();
+          if (!mc && isPrinting && job.machine) mc = job.machine;
+          if (!mc) continue;
+          bumpCredit(mc, 'waste', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
+        }
+      }
+    } else {
+      // LEGACY jobs: no per-entry breakdown. Keep the previous behavior —
+      // latest-byline wins for machine attribution, whole pipe sum for
+      // sheets/waste, with the job-card-name / job.machine fallbacks.
+      let latestMs = -1, latestMc = '', latestOp = '';
+      let sawStageEntry = false;
+      for (const e of log) {
+        if (!e || !e.by) continue;
+        if (logTimeToISODate(e.time) !== date) continue;
+        if (parseByStage(e.by) !== stageLabel) continue;
+        sawStageEntry = true;
+        const ms = parseMs(e.time);
+        if (ms > latestMs) {
+          latestMs = ms;
+          latestMc = parseByMachine(e.by);
+          latestOp = parseByOperator(e.by);
+        }
+      }
+      let legacyMc = latestMc, legacyOp = latestOp;
+      if (!legacyMc) {
+        const cardOp = sheetsField && String(sheetsField.name || '').trim();
+        const cardOpMachine = cardOp ? personToMachine.get(cardOp.toLowerCase()) : '';
+        const stageIdx = STAGES.indexOf(stageLabel);
+        const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
+        const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
+        const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry);
+        if (cardEntryFits) {
+          legacyMc = cardOpMachine;
+          legacyOp = cardOp;
+        } else if (job.machine && (sawStageEntry || stageTimeMatches) && machines.includes(job.machine)) {
+          legacyMc = job.machine;
+          if (cardOp) legacyOp = cardOp;
+        }
+      }
+      if (legacyMc) {
+        const sN = sumPipeInts(sheetsField && sheetsField.quantity);
+        const wN = wasteField ? sumPipeInts(wasteField.quantity) : 0;
+        if (sN) bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
+        if (wN) bumpCredit(legacyMc, 'waste',  wN, legacyOp, latestMs > 0 ? latestMs : 0);
       }
     }
-    // Skip jobs the admin emptied out on the Job Card (no sheets, no
-    // waste, no colors). Otherwise a job whose particulars row was
-    // cleared would still inflate the jobs count and surface the
-    // operator name parsed from the log byline.
-    const hasData = sheetsN > 0 || wasteN > 0 || colorsN > 0 || platesN > 0;
-    if (!hasData) continue;
-    for (const mc of machinesThisJob) {
+
+    if (!credits.size) continue;
+
+    // Colors/Plates come from the job card, preserved as literals so a CTP
+    // shorthand like "3+1" (3 process + 1 spot) shows through unchanged.
+    const colorsRaw = String((part.no_of_colors && part.no_of_colors.quantity) || '').trim();
+    const platesRaw = String((part.plates && part.plates.quantity) || '').trim();
+    // Plates fallback: legacy jobs where plates was never filled in used
+    // colors as a stand-in. Preserved here for those historical rows.
+    const platesForJob = platesRaw || colorsRaw;
+
+    for (const [mc, c] of credits) {
       const row = ensure(mc);
-      row.jobIds.add(job.id);
-      row.sheets += sheetsN;
-      row.waste  += wasteN;
-      row.plates += platesN;
-      if (colorsN > 0) row.colorsCounts.set(colorsN, (row.colorsCounts.get(colorsN) || 0) + 1);
-      for (const op of (opsByMachine.get(mc) || [])) row.operators.add(op);
+      row.sheets += c.sheets;
+      row.waste  += c.waste;
+      for (const op of c.operators) row.operators.add(op);
+      if (!row.jobsMap.has(job.id)) {
+        row.jobsMap.set(job.id, {
+          colorsRaw, platesRaw: platesForJob,
+          firstMs: Number.isFinite(c.firstMs) ? c.firstMs : 0,
+        });
+      } else {
+        // Same job credited twice on the same machine (two entries in the
+        // same day) — merge, keeping the earlier ms so the display list
+        // orders by when the job first appeared on that machine.
+        const prev = row.jobsMap.get(job.id);
+        if (Number.isFinite(c.firstMs) && c.firstMs < (prev.firstMs || Infinity)) prev.firstMs = c.firstMs;
+      }
     }
   }
   return { machines, acc };
+}
+
+// Build the { jobs, jobs_count } pair the per-day endpoints attach to
+// each machine row. jobs is a comma-joined "E-152, E-153" display string
+// ordered by earliest-submission-ms, jobs_count is the numeric length
+// (used by the client's totals footer). Shared by Printing / Die /
+// Pasting / Coatings so the four tabs render the Jobs column the same
+// way.
+function jobsDisplayPair(jobsMap) {
+  if (!jobsMap || !jobsMap.size) return { jobs: '', jobs_count: 0 };
+  const ordered = [...jobsMap.entries()]
+    .sort((a, b) => (a[1].firstMs || 0) - (b[1].firstMs || 0) || a[0] - b[0]);
+  return {
+    jobs: ordered.map(([id]) => 'E-' + id).join(', '),
+    jobs_count: ordered.length,
+  };
 }
 
 // Daily Production register — Printing section.
@@ -1594,9 +1633,28 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
       const row = acc.get(m);
       const note = noteByMachine.get(m) || {};
       const isCustom = !machines.includes(m);
-      const colorsArr = row ? [...row.colorsCounts.entries()].sort((a, b) => a[0] - b[0]) : [];
-      const colorsStr = colorsArr.map(([clr, cnt]) => `${cnt}-${clr}clr`).join(' / ');
       const operators = row ? [...row.operators].sort() : [];
+      // Per-job Colors / Plates / Jobs strings, ordered by earliest
+      // submission ms — "E-152-4clr / E-153-3+1clr" instead of the old
+      // "2-4clr / 1-6clr" grouping. Numeric plates sum kept alongside
+      // for the footer total (parses only the leading digits, so "3+1"
+      // counts as 3 plates, not 31).
+      const orderedJobs = row
+        ? [...row.jobsMap.entries()].sort((a, b) => (a[1].firstMs || 0) - (b[1].firstMs || 0) || a[0] - b[0])
+        : [];
+      const colorsStr = orderedJobs
+        .filter(([, v]) => v.colorsRaw)
+        .map(([id, v]) => `E-${id}-${v.colorsRaw}clr`)
+        .join(' / ');
+      const platesStr = orderedJobs
+        .filter(([, v]) => v.platesRaw)
+        .map(([id, v]) => `E-${id}-${v.platesRaw}`)
+        .join(' / ');
+      const platesCount = orderedJobs.reduce((sum, [, v]) => {
+        const head = String(v.platesRaw || '').match(/^-?\d+/);
+        return sum + (head ? parseInt(head[0], 10) : 0);
+      }, 0);
+      const { jobs: jobsStr, jobs_count } = jobsDisplayPair(row && row.jobsMap);
       return {
         machine: m,
         // Source-of-truth columns (sheets / waste / operator / jobs /
@@ -1606,9 +1664,11 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
         // (ad-hoc) machines still read these from the notes row because
         // there's no aggregate behind them.
         sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        jobs: isCustom ? (note.jobs || '') : jobsStr,
+        jobs_count: isCustom ? (parseInt(note.jobs, 10) || 0) : jobs_count,
         colors: isCustom ? (note.colors || '') : colorsStr,
-        plates: isCustom ? (note.plates || '') : (row ? row.plates : 0),
+        plates: isCustom ? (note.plates || '') : platesStr,
+        plates_count: isCustom ? (parseInt(note.plates, 10) || 0) : platesCount,
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         hours: note.hours || '',
@@ -1663,10 +1723,18 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     const acc = new Map();
     const ensure = (m) => {
       if (!acc.has(m)) acc.set(m, {
-        sheets: 0, jobIds: new Set(), operators: new Set(),
+        sheets: 0, jobsMap: new Map(), operators: new Set(),
         finishCounts: new Map(), waste: 0,
       });
       return acc.get(m);
+    };
+    // Coatings has no station "byline" the same way Printing does — done_at
+    // on each coatings_done entry is our best per-job timestamp for that
+    // machine, so use it as the sort key when we build the per-machine
+    // Jobs display string.
+    const noteFirstMs = (row, jobId, ms) => {
+      if (!row.jobsMap.has(jobId)) row.jobsMap.set(jobId, { firstMs: ms || 0 });
+      else if (ms && ms < (row.jobsMap.get(jobId).firstMs || Infinity)) row.jobsMap.get(jobId).firstMs = ms;
     };
 
     for (const job of jobs) {
@@ -1706,7 +1774,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
           if (!Number.isFinite(v) || v === 0) continue;
           const row = ensure(mc);
           row[field] += v;
-          row.jobIds.add(job.id);
+          noteFirstMs(row, job.id, 0);
           const op = String(e.operator || '').trim();
           if (op) row.operators.add(op);
         }
@@ -1727,7 +1795,8 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         const mc = String(entry.machine || '').trim();
         if (!mc) continue;
         const row = ensure(mc);
-        row.jobIds.add(job.id);
+        const doneMs = (() => { const d = new Date(entry.done_at); return isNaN(d) ? 0 : d.getTime(); })();
+        noteFirstMs(row, job.id, doneMs);
         if (!qtyEntries && !sheetsCredited.has(mc)) {
           row.sheets += sheetsN;
           sheetsCredited.add(mc);
@@ -1756,10 +1825,12 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         ? [...row.finishCounts.entries()].sort((a, b) => b[1] - a[1])
             .map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(', ')
         : '';
+      const { jobs: jobsStr, jobs_count } = jobsDisplayPair(row && row.jobsMap);
       return {
         machine: m,
         sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        jobs: isCustom ? (note.jobs || '') : jobsStr,
+        jobs_count: isCustom ? (parseInt(note.jobs, 10) || 0) : jobs_count,
         finishes,
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
@@ -1854,11 +1925,13 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
       const note = noteByMachine.get(m) || {};
       const isCustom = !machines.includes(m);
       const operators = row ? [...row.operators].sort() : [];
+      const { jobs: jobsStr, jobs_count } = jobsDisplayPair(row && row.jobsMap);
       return {
         machine: m,
         // The helper calls it `sheets`; the Pasting register labels it Units.
         units: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        jobs: isCustom ? (note.jobs || '') : jobsStr,
+        jobs_count: isCustom ? (parseInt(note.jobs, 10) || 0) : jobs_count,
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         hours: note.hours || '',
@@ -1895,10 +1968,12 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
       const note = noteByMachine.get(m) || {};
       const isCustom = !machines.includes(m);
       const operators = row ? [...row.operators].sort() : [];
+      const { jobs: jobsStr, jobs_count } = jobsDisplayPair(row && row.jobsMap);
       return {
         machine: m,
         sheets: isCustom ? (note.sheets || '') : (row ? row.sheets : 0),
-        jobs: isCustom ? (note.jobs || '') : (row ? row.jobIds.size : 0),
+        jobs: isCustom ? (note.jobs || '') : jobsStr,
+        jobs_count: isCustom ? (parseInt(note.jobs, 10) || 0) : jobs_count,
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         hours: note.hours || '',
@@ -1965,36 +2040,72 @@ async function aggregateProductionRange(sql, { from, to }) {
     }
     return 0;
   };
-  const jobs = await sql`SELECT id, particulars, log, coatings_done FROM jobs WHERE deleted_at IS NULL`;
+  const jobs = await sql`SELECT id, particulars, log, machine, coatings_done FROM jobs WHERE deleted_at IS NULL`;
   for (const job of jobs) {
     const log = Array.isArray(job.log) ? job.log : [];
     const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
-    // Same dedupe rule as aggregateDailyProduction: a job can log several
-    // entries for the same (date, stage) — "Save numbers" + "Done", or a
-    // wrong-station submit followed by the right one. Pick the LATEST
-    // entry per (date, stage) and credit its machine/operator exactly
-    // once. Counting every entry doubled the sheets (26,000 → 52,000).
-    const latestByDateStage = new Map(); // 'date|stage' -> { ms, date, stageLabel, mc, op }
-    for (const e of log) {
-      if (!e || !e.by) continue;
-      const eDate = logTimeToISODate(e.time);
-      if (!eDate || eDate < from || eDate > to) continue;
-      const stageLabel = parseByStage(e.by);
-      if (!STAGE_KEYS[stageLabel]) continue;
-      const m = String(e.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
-      const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
-      const k = eDate + '|' + stageLabel;
-      const cur = latestByDateStage.get(k);
-      if (!cur || ms >= cur.ms) {
-        latestByDateStage.set(k, { ms, date: eDate, stageLabel, mc: parseByMachine(e.by), op: parseByOperator(e.by) });
+    // Per-entry attribution: iterate entries[] in each stage and credit
+    // (machine, operator) stamped on the entry with its own qty. Two
+    // operators sharing a job on the same day → each gets their own
+    // sheets/waste + job count instead of "latest byline wins".
+    // Legacy jobs with no entries[] fall back to the old latest-byline
+    // rule so historical rows still land somewhere.
+    for (const [stageLabel, [sheetsKey, wasteKey]] of Object.entries(STAGE_KEYS)) {
+      const sheetsField = part[sheetsKey];
+      const wasteField  = part[wasteKey];
+      const hasSheetEntries = sheetsField && Array.isArray(sheetsField.entries) && sheetsField.entries.length;
+      const hasWasteEntries = wasteField  && Array.isArray(wasteField.entries)  && wasteField.entries.length;
+      const isPrinting = stageLabel === 'Printing';
+      if (hasSheetEntries || hasWasteEntries) {
+        // NEW-STYLE per-entry attribution.
+        const bump = (mc, op, date, field, qty) => {
+          if (!date || date < from || date > to || !qty) return;
+          if (mc) { const r = ensureMD(date, mc); r[field] += qty; r.jobs.add(job.id); }
+          if (op) { const r = ensureOD(date, op); r[field] += qty; r.jobs.add(job.id); }
+        };
+        if (hasSheetEntries) {
+          for (const e of sheetsField.entries) {
+            if (!e) continue;
+            const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+            if (!Number.isFinite(n) || n === 0) continue;
+            let mc = String(e.machine || '').trim();
+            if (!mc && isPrinting && job.machine) mc = job.machine;
+            bump(mc, String(e.operator || '').trim(), e.date, 'sheets', n);
+          }
+        }
+        if (hasWasteEntries) {
+          for (const e of wasteField.entries) {
+            if (!e) continue;
+            const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+            if (!Number.isFinite(n) || n === 0) continue;
+            let mc = String(e.machine || '').trim();
+            if (!mc && isPrinting && job.machine) mc = job.machine;
+            bump(mc, String(e.operator || '').trim(), e.date, 'waste', n);
+          }
+        }
+      } else {
+        // LEGACY jobs: no entries[]. Pick the latest log byline per date
+        // and credit the whole pipe-sum quantity to that (mc, op).
+        const latestByDate = new Map(); // date -> { ms, mc, op }
+        for (const le of log) {
+          if (!le || !le.by) continue;
+          const eDate = logTimeToISODate(le.time);
+          if (!eDate || eDate < from || eDate > to) continue;
+          if (parseByStage(le.by) !== stageLabel) continue;
+          const m = String(le.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+          const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
+          const cur = latestByDate.get(eDate);
+          if (!cur || ms >= cur.ms) {
+            latestByDate.set(eDate, { ms, mc: parseByMachine(le.by), op: parseByOperator(le.by) });
+          }
+        }
+        for (const [eDate, { mc, op }] of latestByDate) {
+          const sheets = qtyForDate(sheetsField, eDate);
+          const waste  = qtyForDate(wasteField,  eDate);
+          if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
+          if (op) { const r = ensureOD(eDate, op); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
+        }
       }
-    }
-    for (const { date: eDate, stageLabel, mc, op } of latestByDateStage.values()) {
-      const [sheetsKey, wasteKey] = STAGE_KEYS[stageLabel];
-      const sheets = qtyForDate(part[sheetsKey], eDate);
-      const waste  = qtyForDate(part[wasteKey],  eDate);
-      if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
-      if (op) { const r = ensureOD(eDate, op); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
     }
     // Coatings: sheets AND waste come from the date+machine-stamped
     // entries (coating_sheets_qty / uv_waste_sheets) — same per-day source
