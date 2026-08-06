@@ -6647,7 +6647,7 @@ async function renderInvHistory(id) {
       // Color: positive=green, negative=red, reversal row=orange tint
       const cls  = isReversal ? 'ledger-reversal' : (t.change > 0 ? 'ledger-pos' : 'ledger-neg');
       const sign = t.change > 0 ? '+' : '';
-      const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+      const job  = t.job_id ? `Job E-${t.job_id}` : '—';
       const packets = fmtPackets(t.change);
 
       // Reason cell — show a "REVERSAL" badge when this row undoes another.
@@ -6903,7 +6903,7 @@ function renderStockReport(from, to) {
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-    const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const job  = t.job_id ? `Job E-${t.job_id}` : '—';
     // Convert sheets → packets/reams using the item's paper-type convention.
     // Show 2dp when fractional, integer otherwise, so "exactly 50 packets" reads cleanly.
     const ps    = packetSize(t.paper_type || '');
@@ -11082,7 +11082,7 @@ function renderStockMovement(direction, from, to) {
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const s    = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-    const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const job  = t.job_id ? `Job E-${t.job_id}` : '—';
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const pkts  = t.change / ps;
@@ -15217,19 +15217,22 @@ async function issueStock(id) {
     notify('Every brand in this paper group is out of stock.');
     return;
   }
-  // Single-brand group → skip the popup, keep the old confirm dialog.
+  // Single-brand group → skip the split popup. Prompt for the (optional)
+  // Challan No. and treat OK/Cancel as the confirm/abort of the deduction.
   if (members.length === 1) {
     const it = members[0];
     const label = paperGroupLabel(it) + (it.brand ? ' · ' + it.brand : '');
     const sheetsToIssue = Math.min(needSheets, it.current_balance || 0);
     const partial = sheetsToIssue < needSheets;
-    const ok = await confirmDialog({
+    const challanRaw = await promptDialog({
       title: `Issue stock for Job E-${id}?`,
-      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nThis will deduct from inventory and start the job.`,
+      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nEnter Challan No. (optional) and confirm to deduct from inventory.`,
+      placeholder: 'e.g. CH-2026-042',
       confirmText: partial ? 'Issue partial' : 'Issue stock',
     });
-    if (!ok) return;
-    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }]);
+    if (challanRaw === null) return;
+    const challanNo = (challanRaw || '').trim() || null;
+    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }], challanNo);
     return;
   }
   // Multi-brand group → open the split popup for the store keeper.
@@ -15238,10 +15241,10 @@ async function issueStock(id) {
 
 // Fire the /issue-stock POST with a splits payload and refresh state.
 // Shared by the single-brand fast path and the split popup's Save button.
-async function sendIssueStock(id, splits) {
+async function sendIssueStock(id, splits, challanNo) {
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits });
+    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits, challan_no: challanNo || null });
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
     await loadInventory();
@@ -15308,6 +15311,10 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
         <b>${esc(j.name)}</b> &middot; needs <b>${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</b>
         <span style="color:var(--text3);">(${needSheets.toLocaleString()} sheets)</span>
         &middot; ${esc(paperGroupLabel(anchor))}
+      </div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+        <input type="text" id="split-challan" placeholder="e.g. CH-2026-042" style="width:100%;box-sizing:border-box;">
       </div>
       <table class="split-table"
              data-need-packets="${needPackets}"
@@ -15418,8 +15425,10 @@ async function saveSplitIssue(jobId) {
     .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.packets) && s.packets > 0)
     .map(s => ({ item_id: s.item_id, sheets: Math.round(s.packets * ps) }));
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
+  const chIn = document.getElementById('split-challan');
+  const challanNo = chIn ? ((chIn.value || '').trim() || null) : null;
   closeModal();
-  await sendIssueStock(jobId, splits);
+  await sendIssueStock(jobId, splits, challanNo);
 }
 
 // Request extra packets for an already-issued job. The job stays in its

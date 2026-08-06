@@ -2955,6 +2955,9 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     if (!job.inventory_item_id) {
       return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
     }
+    const challanNo = (req.body && typeof req.body.challan_no === 'string')
+      ? (req.body.challan_no.trim() || null)
+      : null;
     // Resolve the paper GROUP from the job's representative item. The
     // group is (paper_type, size, gsm, is_offcut). Every accepted split
     // must live in this group.
@@ -3016,6 +3019,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
         jobId: job.id,
         notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}`,
         user: req.user,
+        challanNo,
       });
       if (job.cut_size && job.offcut_size) {
         const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
@@ -3026,6 +3030,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
           jobId: job.id,
           notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
           user: req.user,
+          challanNo,
         });
       }
       issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
