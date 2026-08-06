@@ -6655,13 +6655,13 @@ async function renderInvHistory(id) {
         ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
         : esc(t.reason || '');
 
-      // Reverse button — admin can reverse anytime; everyone else (store
-      // keeper, regular user) can reverse within 24h. CEO never sees it
-      // (read-only). Works for both stock-in and stock-OUT (job consumption,
-      // job edits, offcut returns, adjustments). Hidden if this row IS a
-      // reversal or HAS been reversed. The server enforces the same
-      // allow-list of reasons, so an unsupported row just won't expose the
-      // button client-side.
+      // Reverse button — admin can reverse anytime; store keeper and
+      // production manager can reverse within 7 days of the entry.
+      // CEO never sees it (read-only). Works for both stock-in and
+      // stock-OUT (job consumption, job edits, offcut returns, adjustments).
+      // Hidden if this row IS a reversal or HAS been reversed. The server
+      // enforces the same allow-list of reasons, so an unsupported row
+      // just won't expose the button client-side.
       const REVERSIBLE = new Set([
         'delivery', 'adjustment', 'opening',
         'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
@@ -6669,19 +6669,17 @@ async function renderInvHistory(id) {
         // Manual stock-out reasons.
         'sold', 'damaged', 'sample', 'job-card', 'manual-job-card',
       ]);
-      // Calendar-day window: reversible if the tx was created today
-      // (00:00–23:59 of the same calendar day), not rolling 24 hours.
-      const _tx = new Date(t.created_at);
-      const _now = new Date();
-      const within24 = _tx.getFullYear() === _now.getFullYear() &&
-                       _tx.getMonth()    === _now.getMonth() &&
-                       _tx.getDate()     === _now.getDate();
+      // Rolling 7-day window — reversible while the tx is at most a week
+      // old. Simpler and more forgiving than the previous same-calendar-day
+      // rule, and doesn't need business-timezone math.
+      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+      const within7Days = (Date.now() - new Date(t.created_at).getTime()) <= SEVEN_DAYS_MS;
       // Admin can reverse ANY reason at any time — no reason allow-list,
       // no time window. Non-admins are still bound by both.
       const canReverse =
         !isReversal &&
         !hasBeenReversed &&
-        (isAdmin() || (canWrite() && within24 && REVERSIBLE.has(t.reason)));
+        (isAdmin() || (canWrite() && within7Days && REVERSIBLE.has(t.reason)));
       const reverseTooltip = t.change > 0
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
         : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;

@@ -3968,7 +3968,8 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
 //
 // Permissions:
 //   • Admin can reverse any reversible transaction, any time.
-//   • Stock keeper / writer can only reverse entries from the last 24 hours.
+//   • Store manager / production manager can reverse entries created in
+//     the last 7 days (rolling window).
 //   • CEO can't reach this endpoint at all (requireWriteUser blocks them).
 //
 // Refused if:
@@ -4013,18 +4014,14 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       return res.status(409).json({ error: 'This entry has already been reversed.' });
     }
 
-    // 24-hour window applies to everyone except admin. Stock keepers and
-    // regular users can self-correct recent mistakes; anything older
-    // needs an admin to keep the audit trail intact.
+    // 7-day rolling window applies to everyone except admin. Store manager
+    // and production manager can self-correct mistakes for a week; anything
+    // older needs an admin to keep the audit trail intact.
     if (!userHasRole(req.user, 'admin')) {
-      // Calendar-day rule: reversible only if created on today's date
-      // (00:00–23:59 of the same day), not rolling 24 hours. Compared in
-      // the BUSINESS timezone — the server runs in UTC, so getDate() here
-      // would flip to "yesterday"/"tomorrow" at 05:00 PKT, wrongly
-      // blocking (or allowing) reversals around the UTC midnight.
-      const sameDay = businessDateISO(new Date(tx.created_at)) === businessDateISO();
-      if (!sameDay) {
-        return res.status(403).json({ error: 'You can only reverse entries created today. Ask an admin to reverse older entries.' });
+      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+      const within7Days = (Date.now() - new Date(tx.created_at).getTime()) <= SEVEN_DAYS_MS;
+      if (!within7Days) {
+        return res.status(403).json({ error: 'You can only reverse entries created in the last 7 days. Ask an admin to reverse older entries.' });
       }
     }
 
