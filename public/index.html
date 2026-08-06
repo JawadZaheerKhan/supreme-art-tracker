@@ -14322,12 +14322,15 @@ function updateStockHint() {
   const cutPieces = parseInt(cutStr.split('/')[1], 10) || 1;
   const ps   = it ? packetSize(it.paper_type)      : 100;
   const unit = it ? packetUnitLabel(it.paper_type) : 'Packets';
-  // Available in whole packets (floor — partial packets aren't a full one).
-  const availPkts  = Math.floor(balance / ps);
-  // Needed in packets: raw sheets consumed = working sheets ÷ cut pieces.
-  // Round up so 6.1 packets shows as 7 (you can't pull a fraction of a packet).
+  // 2dp fractional formatter — matches the split-issuance popup so a
+  // job that legitimately needs 0.73 reams shows as 0.73, not the old
+  // Math.ceil result of "Need: 1 Ream" which looked like an extra ream
+  // was being asked for. Store keeper can pull a partial packet via
+  // the split-issuance popup (see commits 97bc09b, 4bd218d).
+  const fracPkts = n => Number.isInteger(n) ? n : +(+n).toFixed(2);
+  const availPkts  = fracPkts(balance / ps);
   const rawNeed    = sheetsNeed / cutPieces;
-  const neededPkts = sheetsNeed > 0 ? Math.ceil(rawNeed / ps) : 0;
+  const neededPkts = sheetsNeed > 0 ? fracPkts(rawNeed / ps) : 0;
   // Other pending jobs on the same paper group.
   const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
   const key = it ? paperGroupKey(it) : null;
@@ -14342,7 +14345,7 @@ function updateStockHint() {
     });
   }
   const thisJobSheets = Math.round(rawNeed);
-  const afterAll = Math.floor((balance - thisJobSheets - otherPendingSheets) / ps);
+  const afterAll = fracPkts((balance - thisJobSheets - otherPendingSheets) / ps);
 
   let cls = 'stock-hint';
   if (balance <= 0) cls += ' out';
@@ -14591,8 +14594,11 @@ async function checkStockBeforeSave(data) {
   const cutStr = (document.getElementById('f-sheet-cut') || {}).value || '1/1';
   const cutPieces = parseInt(cutStr.split('/')[1], 10) || 1;
   const rawNeed = sheets / cutPieces;
-  const neededPkts = Math.ceil(rawNeed / ps);
-  const availPkts = Math.floor(groupBalance / ps);
+  // Fractional packets — matches updateStockHint / split-issuance popup
+  // so 0.73 shows as 0.73, not rounded up to 1.
+  const fracPkts = n => Number.isInteger(n) ? n : +(+n).toFixed(2);
+  const neededPkts = fracPkts(rawNeed / ps);
+  const availPkts = fracPkts(groupBalance / ps);
   // Other jobs already on the same paper group but not yet issued (or
   // partially issued) — same math updateStockHint uses.
   const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
@@ -14605,7 +14611,7 @@ async function checkStockBeforeSave(data) {
     const jIt = inventory.find(x => x.id === j.inventory_item_id);
     if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
   });
-  const afterPkts = Math.floor((groupBalance - rawNeed - otherPendingSheets) / ps);
+  const afterPkts = fracPkts((groupBalance - rawNeed - otherPendingSheets) / ps);
   // Only warn when it would actually go negative — hitting exactly 0 is fine.
   if (afterPkts >= 0) return true;
   return confirmDialog({
