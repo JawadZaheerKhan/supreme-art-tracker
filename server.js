@@ -2955,6 +2955,9 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     if (!job.inventory_item_id) {
       return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
     }
+    const challanNo = (req.body && typeof req.body.challan_no === 'string')
+      ? (req.body.challan_no.trim() || null)
+      : null;
     // Resolve the paper GROUP from the job's representative item. The
     // group is (paper_type, size, gsm, is_offcut). Every accepted split
     // must live in this group.
@@ -3016,6 +3019,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
         jobId: job.id,
         notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}`,
         user: req.user,
+        challanNo,
       });
       if (job.cut_size && job.offcut_size) {
         const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
@@ -3026,6 +3030,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
           jobId: job.id,
           notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
           user: req.user,
+          challanNo,
         });
       }
       issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
@@ -4835,6 +4840,21 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       // remaining finishes, so nothing else to log here.
     } else if (!finishKind) {
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `Numbers recorded by ${operator.name}`, by, time });
+    }
+
+    // Pasting → Ready: auto-fill delivered_cartons_qty from pasted_cartons_qty
+    // so the QC person at Ready just confirms and adds packets.
+    if (advance && curStage === 5 && stage_index === 6) {
+      const pasted = particulars.pasted_cartons_qty;
+      if (pasted && !particulars.delivered_cartons_qty) {
+        particulars.delivered_cartons_qty = {
+          quantity: pasted.quantity || '',
+          entries: Array.isArray(pasted.entries) ? JSON.parse(JSON.stringify(pasted.entries)) : undefined,
+          name: pasted.name || '',
+          signature: pasted.signature || '',
+          details: pasted.details || '',
+        };
+      }
     }
 
     // When the CTP operator (stage 0) finishes plates and advances the job

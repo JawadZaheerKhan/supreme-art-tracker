@@ -661,8 +661,10 @@
   /* Pending-queue rows in the inventory list view — slightly more padding
      than a paper card, faint green left border to match the toggle. */
   .inv-pending-row { border-left: 4px solid #86efac; }
-  .pipeline { display: flex; align-items: center; gap: 3px; margin-top: 10px; flex-wrap: wrap; }
-  .stage-pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid; white-space: nowrap; font-weight: 500; }
+  .pipeline { display: flex; align-items: center; gap: 2px; margin-top: 10px; flex-wrap: nowrap; overflow: hidden; min-width: 0; }
+  .pipeline::-webkit-scrollbar { display: none; }
+  .job-tile.is-client-preview .pipeline { flex-wrap: wrap; row-gap: 4px; overflow: visible; justify-content: center; }
+  .stage-pill { font-size: 10px; padding: 2px 6px; border-radius: 20px; border: 1px solid; white-space: nowrap; font-weight: 500; flex-shrink: 0; }
   .s-done { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
   .s-active { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-border); }
   .s-pending { background: var(--bg2); color: var(--text3); border-color: var(--border); }
@@ -2475,6 +2477,54 @@ function isPartialReady(j) {
   if (stage >= 6) return false; // Already at Ready or later
   return pastedCartonsTotal(j) > 0;
 }
+function readyCartonsTotal(j) {
+  if (!j) return 0;
+  const readFrom = (p) => {
+    if (!p) return 0;
+    if (Array.isArray(p.entries) && p.entries.length) {
+      return p.entries.reduce((a, e) => {
+        const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+        return a + (Number.isFinite(n) ? n : 0);
+      }, 0);
+    }
+    return String(p.quantity || '').split('|').reduce((a, s) => {
+      const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+      return a + (Number.isFinite(n) ? n : 0);
+    }, 0);
+  };
+  const fromOwn = readFrom(j.particulars && j.particulars.delivered_cartons_qty);
+  if (fromOwn > 0) return fromOwn;
+  if (typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const full = jobs.find(x => x && x.id === j.id);
+    if (full && full !== j) return readFrom(full.particulars && full.particulars.delivered_cartons_qty);
+  }
+  return 0;
+}
+// Break down a partial-delivery job into three visible buckets:
+//   delivered  — cartons already shipped (amber)
+//   ready      — cartons physically finished but not yet shipped (green)
+//   inProcess  — booked − delivered − ready (sky blue)
+// Any zero bucket is omitted. Returns segmented HTML for the top badge.
+function partialSegmentsHtml(j, booked, shipped) {
+  // "Ready" is whatever finished stock is sitting on the shelf but hasn't
+  // shipped yet. When the job is at Ready/Delivered stage, that comes from
+  // delivered_cartons_qty; when it's still at Pasting (partial-ready), it
+  // comes from pasted_cartons_qty. Subtract shipped so a full-delivery
+  // doesn't double-count.
+  const stage = j && j.stage_index || 0;
+  let readyTotal = 0;
+  if (stage >= 6) readyTotal = readyCartonsTotal(j);
+  else if (isPartialReady(j)) readyTotal = pastedCartonsTotal(j);
+  const ready = Math.max(0, readyTotal - shipped);
+  const inProcess = Math.max(0, (booked || 0) - shipped - ready);
+  const pill = (txt, bg) => `<span style="background:${bg};color:#fff;padding:2px 8px;border-radius:999px;font-weight:700;letter-spacing:0.03em;margin-right:3px;font-size:10px;white-space:nowrap;display:inline-block;">${txt}</span>`;
+  let out = '<span style="display:inline-flex;flex-wrap:nowrap;align-items:center;gap:0;">';
+  out += pill(`&#128230; DELIVERED - ${shipped.toLocaleString()}`, '#f59e0b');
+  if (ready > 0) out += pill(`READY - ${ready.toLocaleString()}`, '#16a34a');
+  if (inProcess > 0) out += pill(`IN PROCESS - ${inProcess.toLocaleString()}`, '#0ea5e9');
+  out += '</span>';
+  return out;
+}
 function dateRangeBounds(preset) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -3413,7 +3463,9 @@ function renderJobsCompact() {
     const remainingCartons = bookedCartons ? Math.max(0, bookedCartons - shippedCartons) : 0;
     const partialDelv = isPartialDelivery(j);
     const partialPill = partialDelv
-      ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${shippedCartons.toLocaleString()} DELIVERED | ${remainingCartons.toLocaleString()} LEFT` : 'PARTIAL DELIVERY'}</span>`
+      ? (bookedCartons
+          ? partialSegmentsHtml(j, bookedCartons, shippedCartons)
+          : `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; PARTIAL DELIVERY</span>`)
       : '';
     const deliveredLabel = shippedCartons
       ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
@@ -3426,6 +3478,10 @@ function renderJobsCompact() {
     const partialReadyBadge = partialReady
       ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${pastedCartonsTotal(j).toLocaleString()} CARTONS READY</span>`
       : '';
+    const readyTotalCL = si === 6 ? readyCartonsTotal(j) : 0;
+    const readyLabelCL = readyTotalCL > 0
+      ? `&#128230; READY TO DELIVER - ${readyTotalCL.toLocaleString()}`
+      : '&#128230; READY TO DELIVER';
     const badge0 = partialDelv ? partialPill :
       isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
       isCtp ? `<span class="badge badge-ctp">CTP</span>` :
@@ -3433,6 +3489,7 @@ function renderJobsCompact() {
       done ? `<span class="badge badge-done">${deliveredLabel}</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
+      si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">${readyLabelCL}</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
     const partialBadge = partial
       ? ` <span class="badge badge-low-stock">&#9888; Requires More Stock</span>`
@@ -3471,6 +3528,8 @@ function renderJobsCompact() {
       // cartons but hasn't advanced the job to Ready yet.
       const readyIdxCL = STAGES.indexOf('Ready to Deliver');
       if (i === readyIdxCL && partialReady && cls === 's-pending') cls = 's-partial-ready';
+      // Fully at Ready to Deliver: paint the Ready pill green and show cartons sum.
+      if (i === readyIdxCL && si === 6 && cls === 's-active') cls = 's-done';
       const readyIdx = STAGES.indexOf('Ready to Deliver');
       const handler = (i === 0)
         ? `moveJobToCtp(${j.id})`
@@ -3539,7 +3598,6 @@ function renderJobsCompact() {
             ${j.delqty?`<span><b>Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
             ${j.deadline?`<span style="color:#dc2626;"><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
           </div>
-          <div class="pipeline">${pipeline}</div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
         <div class="job-right">
@@ -3562,6 +3620,7 @@ function renderJobsCompact() {
           ${sidePanel}
         </div>
       </div>
+      <div class="pipeline">${pipeline}</div>
     </div>`;
   }).join('');
 }
@@ -3689,7 +3748,9 @@ function renderJobCard(j, opts) {
   // it's obvious at a glance in both the admin queue and the client tile.
   const partialDelv = isPartialDelivery(j);
   const partialPill = partialDelv
-    ? `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${bookedCartons ? `PARTIAL — ${shippedCartons.toLocaleString()} DELIVERED | ${remainingCartons.toLocaleString()} LEFT` : 'PARTIAL DELIVERY'}</span>`
+    ? (bookedCartons
+        ? partialSegmentsHtml(j, bookedCartons, shippedCartons)
+        : `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; PARTIAL DELIVERY</span>`)
     : '';
   // Partial-ready: Pasting operator saved some cartons but hasn't
   // moved the job to Ready yet. Stacked ALONGSIDE the current stage
@@ -3707,6 +3768,10 @@ function renderJobCard(j, opts) {
     ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
     : 'Delivered';
 
+  const readyTotalForBadge = si === 6 ? readyCartonsTotal(j) : 0;
+  const readyLabel = readyTotalForBadge > 0
+    ? `&#128230; READY TO DELIVER - ${readyTotalForBadge.toLocaleString()}`
+    : '&#128230; READY TO DELIVER';
   const badge0 = partialDelv ? partialPill :
     isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
     isCtp ? `<span class="badge badge-ctp">CTP</span>` :
@@ -3714,6 +3779,7 @@ function renderJobCard(j, opts) {
     done ? `<span class="badge badge-done">${deliveredLabel}</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
+    si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">${readyLabel}</span>` :
     (clientPreview
       ? `<span class="badge badge-active">${esc((STAGES[si] || '').toUpperCase())}</span>`
       : `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`);
@@ -3750,6 +3816,7 @@ function renderJobCard(j, opts) {
     // Pasting.
     const readyIdx = STAGES.indexOf('Ready to Deliver');
     if (i === readyIdx && partialReady && cls === 'rib-future') cls = 'rib-partial-ready';
+    if (i === readyIdx && si === 6 && cls === 'rib-current') cls = 'rib-done';
     const readyIdxR = STAGES.indexOf('Ready to Deliver');
     const handler = (i === STAGES.length - 1)
       ? `moveToDeliveredAndEdit(${j.id})`
@@ -3777,6 +3844,7 @@ function renderJobCard(j, opts) {
         // Pasting.
         const readyIdxC = STAGES.indexOf('Ready to Deliver');
         if (i === readyIdxC && partialReady && cls === 's-pending') cls = 's-partial-ready';
+        if (i === readyIdxC && si === 6 && cls === 's-active') cls = 's-done';
         const pill = `<span class="stage-pill ${cls}" title="${esc(s)}" style="cursor:default;">${SHORT[i]}</span>`;
         if (i === 1) {
           let psCls = 's-pending';
@@ -6579,7 +6647,7 @@ async function renderInvHistory(id) {
       // Color: positive=green, negative=red, reversal row=orange tint
       const cls  = isReversal ? 'ledger-reversal' : (t.change > 0 ? 'ledger-pos' : 'ledger-neg');
       const sign = t.change > 0 ? '+' : '';
-      const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+      const job  = t.job_id ? `Job E-${t.job_id}` : '—';
       const packets = fmtPackets(t.change);
 
       // Reason cell — show a "REVERSAL" badge when this row undoes another.
@@ -6835,7 +6903,7 @@ function renderStockReport(from, to) {
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-    const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const job  = t.job_id ? `Job E-${t.job_id}` : '—';
     // Convert sheets → packets/reams using the item's paper-type convention.
     // Show 2dp when fractional, integer otherwise, so "exactly 50 packets" reads cleanly.
     const ps    = packetSize(t.paper_type || '');
@@ -11014,7 +11082,7 @@ function renderStockMovement(direction, from, to) {
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const s    = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-    const job  = t.job_id ? `Job E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
+    const job  = t.job_id ? `Job E-${t.job_id}` : '—';
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const pkts  = t.change / ps;
@@ -13941,13 +14009,13 @@ function deliveriesSection(j) {
           ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
           : '';
         return `<tr>
-          <td>${esc(dt)}</td>
-          <td style="text-align:right;font-weight:600;">${esc(ctns)}</td>
-          <td>${esc(po)}</td>
-          <td>${esc(bat)}</td>
-          <td>${esc(nt)}</td>
-          <td style="font-size:11px;color:var(--text2);">${esc(by)}</td>
-          <td style="text-align:center;">${delBtn}</td>
+          <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(dt)}</td>
+          <td style="text-align:right;font-weight:600;padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(ctns)}</td>
+          <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(po)}</td>
+          <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(bat)}</td>
+          <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nt)}</td>
+          <td style="font-size:11px;color:var(--text2);padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(by)}</td>
+          <td style="text-align:center;padding:6px 4px;">${delBtn}</td>
         </tr>`;
       }).join('')
     : `<tr><td colspan="7" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
@@ -13963,28 +14031,28 @@ function deliveriesSection(j) {
     : `Shipped: <b>${shipped.toLocaleString()}</b> cartons (booked P.O. qty not set)`;
 
   const addForm = canAddDelivery
-    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1.4fr auto;gap:8px;align-items:end;">
-        <div>
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1fr auto;gap:8px;align-items:end;">
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons *</label>
-          <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
-          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
-          <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
+        <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
-          <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div>
-          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Notes (optional)</label>
-          <input type="text" id="deliv-notes" placeholder="Challan #, vehicle, etc." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+        <div style="min-width:0;">
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Challan No.</label>
+          <input type="text" id="deliv-notes" placeholder="e.g. CH-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
+        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
       </div>`
     : (stageIdx < 5
         ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
@@ -13998,16 +14066,25 @@ function deliveriesSection(j) {
       ${statusPill}
     </div>
     <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
-    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">
+      <colgroup>
+        <col style="width:14%;">
+        <col style="width:11%;">
+        <col style="width:12%;">
+        <col style="width:12%;">
+        <col style="width:14%;">
+        <col style="width:auto;">
+        <col style="width:36px;">
+      </colgroup>
       <thead>
         <tr style="background:#f3f4f6;">
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Date</th>
           <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Cartons</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Notes</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Challan No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
-          <th style="width:36px;padding:6px 8px;border-bottom:1px solid var(--border);"></th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border);"></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -14601,7 +14678,7 @@ function openDuplicateJob(id) {
   // like Printed Sheets, all the waste columns, Delivered Cartons Qty, and
   // free-text Comments) starts blank on the new job — those are filled in
   // afresh when the actual run happens.
-  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand'];
+  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand', 'artworks_matter_approval', 'shade_card', 'plates', 'no_of_colors'];
   const sp = source.particulars || {};
   const newParticulars = {};
   for (const k of KEEP_PARTICULARS) {
@@ -15140,19 +15217,22 @@ async function issueStock(id) {
     notify('Every brand in this paper group is out of stock.');
     return;
   }
-  // Single-brand group → skip the popup, keep the old confirm dialog.
+  // Single-brand group → skip the split popup. Prompt for the (optional)
+  // Challan No. and treat OK/Cancel as the confirm/abort of the deduction.
   if (members.length === 1) {
     const it = members[0];
     const label = paperGroupLabel(it) + (it.brand ? ' · ' + it.brand : '');
     const sheetsToIssue = Math.min(needSheets, it.current_balance || 0);
     const partial = sheetsToIssue < needSheets;
-    const ok = await confirmDialog({
+    const challanRaw = await promptDialog({
       title: `Issue stock for Job E-${id}?`,
-      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nThis will deduct from inventory and start the job.`,
+      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nEnter Challan No. (optional) and confirm to deduct from inventory.`,
+      placeholder: 'e.g. CH-2026-042',
       confirmText: partial ? 'Issue partial' : 'Issue stock',
     });
-    if (!ok) return;
-    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }]);
+    if (challanRaw === null) return;
+    const challanNo = (challanRaw || '').trim() || null;
+    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }], challanNo);
     return;
   }
   // Multi-brand group → open the split popup for the store keeper.
@@ -15161,10 +15241,10 @@ async function issueStock(id) {
 
 // Fire the /issue-stock POST with a splits payload and refresh state.
 // Shared by the single-brand fast path and the split popup's Save button.
-async function sendIssueStock(id, splits) {
+async function sendIssueStock(id, splits, challanNo) {
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits });
+    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits, challan_no: challanNo || null });
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
     await loadInventory();
@@ -15231,6 +15311,10 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
         <b>${esc(j.name)}</b> &middot; needs <b>${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</b>
         <span style="color:var(--text3);">(${needSheets.toLocaleString()} sheets)</span>
         &middot; ${esc(paperGroupLabel(anchor))}
+      </div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+        <input type="text" id="split-challan" placeholder="e.g. CH-2026-042" style="width:100%;box-sizing:border-box;">
       </div>
       <table class="split-table"
              data-need-packets="${needPackets}"
@@ -15341,8 +15425,10 @@ async function saveSplitIssue(jobId) {
     .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.packets) && s.packets > 0)
     .map(s => ({ item_id: s.item_id, sheets: Math.round(s.packets * ps) }));
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
+  const chIn = document.getElementById('split-challan');
+  const challanNo = chIn ? ((chIn.value || '').trim() || null) : null;
   closeModal();
-  await sendIssueStock(jobId, splits);
+  await sendIssueStock(jobId, splits, challanNo);
 }
 
 // Request extra packets for an already-issued job. The job stays in its
