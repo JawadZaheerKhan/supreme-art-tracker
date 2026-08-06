@@ -1495,70 +1495,73 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     }
     const isPrinting = stageLabel === 'Printing';
 
-    if (hasSheetEntries || hasWasteEntries) {
-      // NEW-STYLE per-entry attribution.
-      if (hasSheetEntries) {
-        for (const e of sheetsField.entries) {
-          if (!e || e.date !== date) continue;
-          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-          if (!Number.isFinite(n) || n === 0) continue;
-          let mc = String(e.machine || '').trim();
-          if (!mc && isPrinting && job.machine) mc = job.machine;   // Printing-only safety fallback
-          if (!mc) continue;
-          bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
-        }
+    // Compute the legacy attribution machine/operator once — used when
+    // EITHER field lacks entries[] and we need to attribute its pipe-sum
+    // total. Same rules as the pre-fix code: latest-byline first, then
+    // card-name-to-registered-machine, then job.machine.
+    let latestMs = -1, latestMc = '', latestOp = '';
+    let sawStageEntry = false;
+    for (const e of log) {
+      if (!e || !e.by) continue;
+      if (logTimeToISODate(e.time) !== date) continue;
+      if (parseByStage(e.by) !== stageLabel) continue;
+      sawStageEntry = true;
+      const ms = parseMs(e.time);
+      if (ms > latestMs) {
+        latestMs = ms;
+        latestMc = parseByMachine(e.by);
+        latestOp = parseByOperator(e.by);
       }
-      if (hasWasteEntries) {
-        for (const e of wasteField.entries) {
-          if (!e || e.date !== date) continue;
-          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-          if (!Number.isFinite(n) || n === 0) continue;
-          let mc = String(e.machine || '').trim();
-          if (!mc && isPrinting && job.machine) mc = job.machine;
-          if (!mc) continue;
-          bumpCredit(mc, 'waste', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
-        }
+    }
+    let legacyMc = latestMc, legacyOp = latestOp;
+    if (!legacyMc) {
+      const cardOp = sheetsField && String(sheetsField.name || '').trim();
+      const cardOpMachine = cardOp ? personToMachine.get(cardOp.toLowerCase()) : '';
+      const stageIdx = STAGES.indexOf(stageLabel);
+      const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
+      const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
+      const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry);
+      if (cardEntryFits) {
+        legacyMc = cardOpMachine;
+        legacyOp = cardOp;
+      } else if (job.machine && (sawStageEntry || stageTimeMatches) && machines.includes(job.machine)) {
+        legacyMc = job.machine;
+        if (cardOp) legacyOp = cardOp;
       }
-    } else {
-      // LEGACY jobs: no per-entry breakdown. Keep the previous behavior —
-      // latest-byline wins for machine attribution, whole pipe sum for
-      // sheets/waste, with the job-card-name / job.machine fallbacks.
-      let latestMs = -1, latestMc = '', latestOp = '';
-      let sawStageEntry = false;
-      for (const e of log) {
-        if (!e || !e.by) continue;
-        if (logTimeToISODate(e.time) !== date) continue;
-        if (parseByStage(e.by) !== stageLabel) continue;
-        sawStageEntry = true;
-        const ms = parseMs(e.time);
-        if (ms > latestMs) {
-          latestMs = ms;
-          latestMc = parseByMachine(e.by);
-          latestOp = parseByOperator(e.by);
-        }
+    }
+
+    // Sheets and waste are processed INDEPENDENTLY — one field can be
+    // new-style entries[] while the other is still a legacy pipe string
+    // (e.g. operator resubmitted printed_sheets_qty via the tablet but
+    // waste was only ever typed on the card). Each field picks its own
+    // path so the legacy side never gets silently dropped.
+    if (hasSheetEntries) {
+      for (const e of sheetsField.entries) {
+        if (!e || e.date !== date) continue;
+        const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+        if (!Number.isFinite(n) || n === 0) continue;
+        let mc = String(e.machine || '').trim();
+        if (!mc && isPrinting && job.machine) mc = job.machine;   // Printing-only safety fallback
+        if (!mc) continue;
+        bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
       }
-      let legacyMc = latestMc, legacyOp = latestOp;
-      if (!legacyMc) {
-        const cardOp = sheetsField && String(sheetsField.name || '').trim();
-        const cardOpMachine = cardOp ? personToMachine.get(cardOp.toLowerCase()) : '';
-        const stageIdx = STAGES.indexOf(stageLabel);
-        const stageRec = stageIdx >= 0 ? (job.stages && job.stages[stageIdx]) : null;
-        const stageTimeMatches = stageRec && stageRec.time && logTimeToISODate(stageRec.time) === date;
-        const cardEntryFits = cardOpMachine && (stageTimeMatches || sawStageEntry);
-        if (cardEntryFits) {
-          legacyMc = cardOpMachine;
-          legacyOp = cardOp;
-        } else if (job.machine && (sawStageEntry || stageTimeMatches) && machines.includes(job.machine)) {
-          legacyMc = job.machine;
-          if (cardOp) legacyOp = cardOp;
-        }
+    } else if (sheetsField && sheetsField.quantity && legacyMc) {
+      const sN = sumPipeInts(sheetsField.quantity);
+      if (sN) bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
+    }
+    if (hasWasteEntries) {
+      for (const e of wasteField.entries) {
+        if (!e || e.date !== date) continue;
+        const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+        if (!Number.isFinite(n) || n === 0) continue;
+        let mc = String(e.machine || '').trim();
+        if (!mc && isPrinting && job.machine) mc = job.machine;
+        if (!mc) continue;
+        bumpCredit(mc, 'waste', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
       }
-      if (legacyMc) {
-        const sN = sumPipeInts(sheetsField && sheetsField.quantity);
-        const wN = wasteField ? sumPipeInts(wasteField.quantity) : 0;
-        if (sN) bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
-        if (wN) bumpCredit(legacyMc, 'waste',  wN, legacyOp, latestMs > 0 ? latestMs : 0);
-      }
+    } else if (wasteField && wasteField.quantity && legacyMc) {
+      const wN = sumPipeInts(wasteField.quantity);
+      if (wN) bumpCredit(legacyMc, 'waste', wN, legacyOp, latestMs > 0 ? latestMs : 0);
     }
 
     if (!credits.size) continue;
@@ -2056,37 +2059,17 @@ async function aggregateProductionRange(sql, { from, to }) {
       const hasSheetEntries = sheetsField && Array.isArray(sheetsField.entries) && sheetsField.entries.length;
       const hasWasteEntries = wasteField  && Array.isArray(wasteField.entries)  && wasteField.entries.length;
       const isPrinting = stageLabel === 'Printing';
-      if (hasSheetEntries || hasWasteEntries) {
-        // NEW-STYLE per-entry attribution.
-        const bump = (mc, op, date, field, qty) => {
-          if (!date || date < from || date > to || !qty) return;
-          if (mc) { const r = ensureMD(date, mc); r[field] += qty; r.jobs.add(job.id); }
-          if (op) { const r = ensureOD(date, op); r[field] += qty; r.jobs.add(job.id); }
-        };
-        if (hasSheetEntries) {
-          for (const e of sheetsField.entries) {
-            if (!e) continue;
-            const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-            if (!Number.isFinite(n) || n === 0) continue;
-            let mc = String(e.machine || '').trim();
-            if (!mc && isPrinting && job.machine) mc = job.machine;
-            bump(mc, String(e.operator || '').trim(), e.date, 'sheets', n);
-          }
-        }
-        if (hasWasteEntries) {
-          for (const e of wasteField.entries) {
-            if (!e) continue;
-            const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
-            if (!Number.isFinite(n) || n === 0) continue;
-            let mc = String(e.machine || '').trim();
-            if (!mc && isPrinting && job.machine) mc = job.machine;
-            bump(mc, String(e.operator || '').trim(), e.date, 'waste', n);
-          }
-        }
-      } else {
-        // LEGACY jobs: no entries[]. Pick the latest log byline per date
-        // and credit the whole pipe-sum quantity to that (mc, op).
-        const latestByDate = new Map(); // date -> { ms, mc, op }
+      const bump = (mc, op, date, field, qty) => {
+        if (!date || date < from || date > to || !qty) return;
+        if (mc) { const r = ensureMD(date, mc); r[field] += qty; r.jobs.add(job.id); }
+        if (op) { const r = ensureOD(date, op); r[field] += qty; r.jobs.add(job.id); }
+      };
+      // Legacy attribution: latest byline per date, computed only if we
+      // actually need it below (a field lacks entries[]).
+      let legacyByDate = null;
+      const computeLegacyByDate = () => {
+        if (legacyByDate) return legacyByDate;
+        legacyByDate = new Map(); // date -> { ms, mc, op }
         for (const le of log) {
           if (!le || !le.by) continue;
           const eDate = logTimeToISODate(le.time);
@@ -2094,16 +2077,49 @@ async function aggregateProductionRange(sql, { from, to }) {
           if (parseByStage(le.by) !== stageLabel) continue;
           const m = String(le.time || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
           const ms = m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
-          const cur = latestByDate.get(eDate);
+          const cur = legacyByDate.get(eDate);
           if (!cur || ms >= cur.ms) {
-            latestByDate.set(eDate, { ms, mc: parseByMachine(le.by), op: parseByOperator(le.by) });
+            legacyByDate.set(eDate, { ms, mc: parseByMachine(le.by), op: parseByOperator(le.by) });
           }
         }
-        for (const [eDate, { mc, op }] of latestByDate) {
-          const sheets = qtyForDate(sheetsField, eDate);
-          const waste  = qtyForDate(wasteField,  eDate);
-          if (mc) { const r = ensureMD(eDate, mc); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
-          if (op) { const r = ensureOD(eDate, op); r.sheets += sheets; r.waste += waste; r.jobs.add(job.id); }
+        return legacyByDate;
+      };
+
+      // Sheets and waste are handled INDEPENDENTLY — one can be new-style
+      // while the other stays legacy (e.g. operator re-entered sheets
+      // through the tablet but waste was only ever typed on the card).
+      // Processing them separately keeps the legacy side from being
+      // silently dropped when only one field flipped to entries[].
+      if (hasSheetEntries) {
+        for (const e of sheetsField.entries) {
+          if (!e) continue;
+          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (!Number.isFinite(n) || n === 0) continue;
+          let mc = String(e.machine || '').trim();
+          if (!mc && isPrinting && job.machine) mc = job.machine;
+          bump(mc, String(e.operator || '').trim(), e.date, 'sheets', n);
+        }
+      } else if (sheetsField && sheetsField.quantity) {
+        const perDate = computeLegacyByDate();
+        for (const [eDate, { mc, op }] of perDate) {
+          const n = qtyForDate(sheetsField, eDate);
+          if (n) bump(mc, op, eDate, 'sheets', n);
+        }
+      }
+      if (hasWasteEntries) {
+        for (const e of wasteField.entries) {
+          if (!e) continue;
+          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (!Number.isFinite(n) || n === 0) continue;
+          let mc = String(e.machine || '').trim();
+          if (!mc && isPrinting && job.machine) mc = job.machine;
+          bump(mc, String(e.operator || '').trim(), e.date, 'waste', n);
+        }
+      } else if (wasteField && wasteField.quantity) {
+        const perDate = computeLegacyByDate();
+        for (const [eDate, { mc, op }] of perDate) {
+          const n = qtyForDate(wasteField, eDate);
+          if (n) bump(mc, op, eDate, 'waste', n);
         }
       }
     }
