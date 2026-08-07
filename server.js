@@ -3126,25 +3126,48 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
       }
     }
     const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
-    if (totalIssued > needSheets) {
-      return res.status(400).json({ error: `Would over-issue by ${(totalIssued - needSheets).toLocaleString()} sheets. Job needs ${needSheets.toLocaleString()} total.` });
-    }
     const ps   = packetSize(paperType);
     const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+
+    // Over-issuance is intentional (store keeper wants to pull 2 packets
+    // for a job that only needs 1). The excess goes back to inventory as
+    // an offcut item of the SAME size/paper/gsm/brand (whole packets
+    // returned) so it stays traceable and separate from fresh stock.
+    // Distributed across the splits proportionally, with the last split
+    // absorbing the rounding remainder so per-split integers still sum
+    // exactly to the total overage.
+    const overSheets = Math.max(0, totalIssued - needSheets);
+    const perSplitOver = new Array(splits.length).fill(0);
+    if (overSheets > 0 && totalIssued > 0) {
+      let accounted = 0;
+      for (let i = 0; i < splits.length; i++) {
+        perSplitOver[i] = (i === splits.length - 1)
+          ? overSheets - accounted
+          : Math.round((splits[i].sheets / totalIssued) * overSheets);
+        accounted += perSplitOver[i];
+      }
+    }
+    const fmtPack = n => Number.isInteger(n) ? n.toString() : (+n.toFixed(2)).toString();
 
     // Deduct each split; create per-split offcut if the job has a cut.
     // Record the ledger row's brand into issued_items so the app can
     // show all sourced brands at a glance (comma-joined) later.
     const issuedItems = [];
-    for (const s of splits) {
+    for (let i = 0; i < splits.length; i++) {
+      const s = splits[i];
       const it = itemsById.get(s.item_id);
       const packs = s.sheets / ps;
+      const overThis = perSplitOver[i];
+      const overPacks = overThis / ps;
+      const overNote = overThis > 0
+        ? ` · ${fmtPack(overPacks)} ${unit} added to offcut (over-issued)`
+        : '';
       await applyInventoryChange(sql, {
         itemId: s.item_id,
         change: -s.sheets,
         reason: 'job-consumed',
         jobId: job.id,
-        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${packs} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}`,
+        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${fmtPack(packs)} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}${overNote}`,
         user: req.user,
         challanNo,
       });
@@ -3160,13 +3183,30 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
           challanNo,
         });
       }
+      // Over-issuance offcut: whole extra packets returned to a
+      // same-size offcut bucket (paper_type + size + gsm + brand match,
+      // is_offcut=true). Separate from the cut-size offcut above so
+      // both can coexist on a job that has BOTH a cut AND an over-issue.
+      if (overThis > 0) {
+        const overOffcutItem = await findOrCreateOffcutItem(sql, it, it.size || '');
+        await applyInventoryChange(sql, {
+          itemId: overOffcutItem.id,
+          change: +overThis,
+          reason: 'job-offcut',
+          jobId: job.id,
+          notes: `Job E-${job.id}: ${fmtPack(overPacks)} ${unit} over-issued from ${it.brand || 'no brand'} added to offcut stock`,
+          user: req.user,
+          challanNo,
+        });
+      }
       issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
     }
 
     // Update job. Partial issuance: use the existing partial marker so
-    // Pending Stock still shows the remaining need.
-    const fullyIssued = totalIssued === needSheets;
-    const remaining = needSheets - totalIssued;
+    // Pending Stock still shows the remaining need. Over-issue counts as
+    // fully issued (need was met, extras went to offcut).
+    const fullyIssued = totalIssued >= needSheets;
+    const remaining = Math.max(0, needSheets - totalIssued);
     const nextParticulars = { ...(job.particulars || {}) };
     if (fullyIssued) delete nextParticulars.partial_pending_sheets;
     else             nextParticulars.partial_pending_sheets = remaining;
