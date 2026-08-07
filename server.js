@@ -4221,6 +4221,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     // re-issue. Stage stays where it is; the operator will see the
     // "Pending Stock" badge on the job until the store keeper acts.
     let jobReverted = false;
+    let offcutRefundedSheets = 0;
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
@@ -4238,16 +4239,41 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
         `;
         jobReverted = true;
       }
+      // Cascade-reverse every unreversed job-offcut row for this same
+      // job. Without this, the paired offcut credits (cut-size return
+      // and/or over-issue offcut) stay in inventory as ghost stock even
+      // though the consume that spawned them has been undone. Job is
+      // going back to Pending Stock anyway — the entire issuance's
+      // side-effects should unwind together.
+      const pairedOffcuts = await sql`
+        SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+        WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-offcut'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+        ORDER BY t.id ASC
+      `;
+      for (const orow of pairedOffcuts) {
+        await applyInventoryChange(sql, {
+          itemId: orow.item_id,
+          change: -orow.change,
+          reason: 'correction',
+          jobId: null,
+          notes: `Auto-reversal of paired offcut TX #${orow.id} (job E-${tx.job_id} issuance was reversed via TX #${tx.id})`,
+          user: req.user,
+          reversesTxId: orow.id,
+        });
+        offcutRefundedSheets += Math.abs(orow.change);
+      }
     }
 
     await logAudit(sql, req, {
       action: 'inventory.reverse',
       entityType: 'inventory',
       entityId: tx.item_id,
-      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}`,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
     });
 
-    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted });
+    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, offcut_refunded_sheets: offcutRefundedSheets });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
