@@ -1297,10 +1297,29 @@
 .split-footer-full    { background: #dcfce7; color: #14532d; border-color: #86efac; }
 .split-footer-partial { background: #fef3c7; color: #78350f; border-color: #fcd34d; }
 /* Over-total warning — Save stays enabled; the excess goes to offcut on
-   submit. Amber like partial but heavier so it registers as an
-   intentional-override state, not a blocking error. */
-.split-footer-warn { background: #fed7aa; color: #7c2d12; border: 2px solid #ea580c; }
-.split-footer-warn .split-footer-tally { background: rgba(0,0,0,0.10); color: #7c2d12; }
+   submit. Same loud red as .split-footer-over so it reads as a strong
+   heads-up, not a bland notice — but without the pulse animation since
+   the store keeper's action here is intentional. */
+.split-footer-warn {
+  background: var(--red-text); color: #fff;
+  border: 2px solid var(--red-text);
+  font-size: 15px;
+  box-shadow: 0 0 0 2px rgba(121,31,31,0.25), 0 2px 14px rgba(121,31,31,0.35);
+}
+.split-footer-warn .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; }
+/* Bulk stock-out per-row over-issue warning — same red banner style so
+   the store keeper gets the same visual cue in bulk mode as in the
+   single-issue popup. Sits in a sibling <tr> below the row. */
+.bulkout-warn-cell { padding: 0 12px 10px 12px; background: transparent; border: none; }
+.bulkout-warn-banner {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--red-text); color: #fff;
+  border: 2px solid var(--red-text); border-radius: 8px;
+  padding: 8px 14px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 0 0 2px rgba(121,31,31,0.20), 0 2px 12px rgba(121,31,31,0.30);
+}
+.bulkout-warn-banner .split-footer-icon { font-size: 18px; }
+.bulkout-warn-banner .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; margin-left: auto; font-size: 11px; padding: 3px 10px; border-radius: 999px; font-weight: 700; }
 /* Over-issue / bad-input state — the loudest state. Bigger font, red
    fill, and a matching glow so Save-disabled has an obvious reason.
    Icon + attention-grabbing pulse the first second so it registers. */
@@ -6186,7 +6205,53 @@ function bulkOutRowHtml(idx) {
       </td>
       <td class="col-qty"><input type="number" class="bulkout-qty" placeholder="0" min="1" oninput="bulkOutRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkOutRemoveRow(${idx})" title="Remove row">×</button></td>
+    </tr>
+    <tr class="bulkout-warn-row" data-warn-for="${idx}" style="display:none;">
+      <td class="bulkout-warn-cell" colspan="6">
+        <div class="bulkout-warn-banner">
+          <span class="split-footer-icon">&#9888;</span>
+          <span class="bulkout-warn-msg">Over-issuing — extra will be added to offcut stock.</span>
+          <span class="split-footer-tally bulkout-warn-tally"></span>
+        </div>
+      </td>
     </tr>`;
+}
+// Per-row over-issue live check for bulk stock-out. Fires whenever the
+// row's qty, brand splits, chip selection, or reason changes. Shows the
+// same-red warning banner as the split popup when the row is a job-card
+// reason with chips selected AND the typed sheets exceed the sum of
+// selected chip needs. Silent in all other states.
+function bulkOutRecomputeWarning(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+  const warnTr = document.querySelector(`#bulkout-rows tr[data-warn-for="${idx}"]`);
+  if (!tr || !warnTr) return;
+  const reasonEl = tr.querySelector('.bulkout-reason');
+  const reason = reasonEl ? reasonEl.value : '';
+  const chips = tr.querySelectorAll('.jobchip.is-sel');
+  const sheetsEl = tr.querySelector('.bulkout-qty');
+  const sheets = parseInt(sheetsEl && sheetsEl.value, 10) || 0;
+  if (reason !== 'job-card' || !chips.length || sheets <= 0) {
+    warnTr.style.display = 'none';
+    return;
+  }
+  let needSheets = 0;
+  chips.forEach(c => { needSheets += parseInt(c.dataset.need, 10) || 0; });
+  const overSheets = sheets - needSheets;
+  if (overSheets <= 0) {
+    warnTr.style.display = 'none';
+    return;
+  }
+  const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
+  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const ps = it ? packetSize(it.paper_type) : 100;
+  const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+  const overPktsRaw = overSheets / ps;
+  const overPkts = Number.isInteger(overPktsRaw) ? overPktsRaw : +overPktsRaw.toFixed(2);
+  const msgEl = warnTr.querySelector('.bulkout-warn-msg');
+  const tallyEl = warnTr.querySelector('.bulkout-warn-tally');
+  if (msgEl) msgEl.textContent = `Over by ${overPkts.toLocaleString()} ${unit} — extra will be added to offcut stock.`;
+  if (tallyEl) tallyEl.textContent = `Jobs need ${(needSheets / ps).toLocaleString()} · issuing ${(sheets / ps).toLocaleString()} ${unit}`;
+  warnTr.style.display = '';
 }
 // Render per-brand split inputs when the picked paper's group has >1
 // brand. User distributes packets across brands; the main packets +
@@ -6247,6 +6312,7 @@ function bulkOutBrandSplitChanged(idx) {
   });
   tr.querySelector('.bulkout-packets').value = totalPkts ? +totalPkts.toFixed(2) : '';
   tr.querySelector('.bulkout-qty').value = totalPkts ? Math.round(totalPkts * ps) : '';
+  bulkOutRecomputeWarning(idx);
 }
 // Called when the row's Reason dropdown changes. Job-card reason shows
 // the multi-select of matching pending jobs; every other reason (manual
@@ -6267,6 +6333,7 @@ function bulkOutReasonChanged(idx) {
     jobTxt.style.display = '';
     chips.querySelectorAll('.jobchip.is-sel').forEach(c => c.classList.remove('is-sel'));
   }
+  bulkOutRecomputeWarning(idx);
 }
 // Render one clickable chip per pending job in the picked paper's group.
 // Chip text is just the E-<id>; the need (in sheets) is on data-need so
@@ -6368,6 +6435,7 @@ function bulkOutJobsChanged(idx) {
     tr.querySelector('.bulkout-qty').value = totalSheets || '';
     tr.querySelector('.bulkout-packets').value = totalSheets ? +(totalSheets / ps).toFixed(2) : '';
   }
+  bulkOutRecomputeWarning(idx);
 }
 function bulkOutRowSync(idx, source) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
@@ -6385,6 +6453,7 @@ function bulkOutRowSync(idx, source) {
     const s = parseFloat(sheetsEl.value);
     packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
   }
+  bulkOutRecomputeWarning(idx);
 }
 function openBulkStockOut() {
   bulkOutRowSeq = 0;
@@ -6424,8 +6493,16 @@ function bulkOutAddRow() {
 function bulkOutRemoveRow(idx) {
   const tbody = document.getElementById('bulkout-rows');
   const row = tbody && tbody.querySelector(`tr[data-row="${idx}"]`);
+  const warnRow = tbody && tbody.querySelector(`tr[data-warn-for="${idx}"]`);
   if (!row) return;
-  if (tbody.children.length > 1) { row.remove(); return; }
+  // Count only the actual data rows (not the paired warning rows) when
+  // deciding whether to remove or clear-in-place.
+  const mainRowCount = tbody.querySelectorAll('tr[data-row]').length;
+  if (mainRowCount > 1) {
+    row.remove();
+    if (warnRow) warnRow.remove();
+    return;
+  }
   // Only row left — clear everything in place so validation sees a blank
   // row on the next submit. Chip selection, brand-split panel, and any
   // readOnly flags all get reset — otherwise stale state on the "cleared"
@@ -6445,6 +6522,7 @@ function bulkOutRemoveRow(idx) {
   if (splits) { splits.style.display = 'none'; splits.innerHTML = ''; }
   const pkt = row.querySelector('.bulkout-packets'); if (pkt) pkt.readOnly = false;
   const sht = row.querySelector('.bulkout-qty');     if (sht) sht.readOnly = false;
+  if (warnRow) warnRow.style.display = 'none';
 }
 async function saveBulkStockOut() {
   const tbody = document.getElementById('bulkout-rows');
@@ -6455,7 +6533,9 @@ async function saveBulkStockOut() {
   const sharedNote = notesIn || null;
 
   const plan = [];
-  const trList = [...tbody.querySelectorAll('tr')];
+  // Only data rows — skip the paired .bulkout-warn-row sibling rows,
+  // which have no .bulkout-item and would throw on the selectors below.
+  const trList = [...tbody.querySelectorAll('tr[data-row]')];
   for (let ri = 0; ri < trList.length; ri++) {
     const tr = trList[ri];
     const rowLabel = `Row ${ri + 1}`;
