@@ -15320,6 +15320,15 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
   const needPacketsRaw = ps ? needSheets / ps : 0;
   const needPackets = Number.isInteger(needPacketsRaw) ? needPacketsRaw : +needPacketsRaw.toFixed(2);
   const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
+  // Single-brand pre-fill: keeps the old fast-path UX. If the group has
+  // only one brand, pre-populate its Issue field with min(need, avail) so
+  // the store keeper can click Issue Stock immediately when they want
+  // the exact need — or adjust up for an intentional over-issue.
+  const singleRow = rows.length === 1 ? rows[0] : null;
+  const singleBalSheets = singleRow ? (singleRow.current_balance || 0) : 0;
+  const singlePreSheets = singleRow ? Math.min(needSheets, singleBalSheets) : 0;
+  const singlePrePkts = ps ? singlePreSheets / ps : 0;
+  const singlePre = Number.isInteger(singlePrePkts) ? singlePrePkts : +singlePrePkts.toFixed(2);
   const rowHtml = rows.map((it) => {
     const balSheets  = it.current_balance || 0;
     // Available packets: show the true fractional value so a partial
@@ -15330,6 +15339,7 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
     const availNote = balSheets > 0
       ? `${balPackets.toLocaleString()} <span style="color:var(--text3);font-size:11px;">(${balSheets.toLocaleString()} sheets)</span>`
       : `<span style="color:var(--text3);">0</span>`;
+    const preFillValue = (singleRow && it.id === singleRow.id && singlePre > 0) ? String(singlePre) : '';
     return `
       <tr class="split-row ${balSheets <= 0 ? 'split-row-out' : ''}">
         <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
@@ -15337,7 +15347,7 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
         <td>
           <input type="number" class="split-qty" min="0" max="${balPackets}" step="any"
                  data-item-id="${it.id}" data-avail-packets="${balPackets}" data-avail-sheets="${balSheets}"
-                 value="" placeholder="0"
+                 value="${preFillValue}" placeholder="0"
                  ${balSheets <= 0 ? 'disabled' : ''}
                  oninput="recomputeSplitFooter()">
         </td>
