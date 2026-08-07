@@ -1307,19 +1307,29 @@
   box-shadow: 0 0 0 2px rgba(121,31,31,0.25), 0 2px 14px rgba(121,31,31,0.35);
 }
 .split-footer-warn .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; }
-/* Bulk stock-out per-row over-issue warning — same red banner style so
-   the store keeper gets the same visual cue in bulk mode as in the
-   single-issue popup. Sits in a sibling <tr> below the row. */
+/* Bulk stock-out per-row status banner — sits in a sibling <tr> below
+   the row. Two variants: --over (red loud, extras go to offcut) and
+   --partial (amber quiet, N still pending). Same palettes as the
+   single-issue popup so the visual cue is consistent across flows. */
 .bulkout-warn-cell { padding: 0 12px 10px 12px; background: transparent; border: none; }
 .bulkout-warn-banner {
   display: flex; align-items: center; gap: 10px;
-  background: var(--red-text); color: #fff;
-  border: 2px solid var(--red-text); border-radius: 8px;
-  padding: 8px 14px; font-size: 13px; font-weight: 600;
-  box-shadow: 0 0 0 2px rgba(121,31,31,0.20), 0 2px 12px rgba(121,31,31,0.30);
+  border-radius: 8px; padding: 8px 14px;
+  font-size: 13px; font-weight: 600;
 }
 .bulkout-warn-banner .split-footer-icon { font-size: 18px; }
-.bulkout-warn-banner .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; margin-left: auto; font-size: 11px; padding: 3px 10px; border-radius: 999px; font-weight: 700; }
+.bulkout-warn-banner .split-footer-tally { margin-left: auto; font-size: 11px; padding: 3px 10px; border-radius: 999px; font-weight: 700; }
+.bulkout-warn-banner--over {
+  background: var(--red-text); color: #fff;
+  border: 2px solid var(--red-text);
+  box-shadow: 0 0 0 2px rgba(121,31,31,0.20), 0 2px 12px rgba(121,31,31,0.30);
+}
+.bulkout-warn-banner--over .split-footer-tally { background: rgba(255,255,255,0.18); color: #fff; }
+.bulkout-warn-banner--partial {
+  background: #fef3c7; color: #78350f;
+  border: 2px solid #fcd34d;
+}
+.bulkout-warn-banner--partial .split-footer-tally { background: rgba(0,0,0,0.08); color: #78350f; }
 /* Over-issue / bad-input state — the loudest state. Bigger font, red
    fill, and a matching glow so Save-disabled has an obvious reason.
    Icon + attention-grabbing pulse the first second so it registers. */
@@ -6208,7 +6218,7 @@ function bulkOutRowHtml(idx) {
     </tr>
     <tr class="bulkout-warn-row" data-warn-for="${idx}" style="display:none;">
       <td class="bulkout-warn-cell" colspan="6">
-        <div class="bulkout-warn-banner">
+        <div class="bulkout-warn-banner bulkout-warn-banner--over">
           <span class="split-footer-icon">&#9888;</span>
           <span class="bulkout-warn-msg">Over-issuing — extra will be added to offcut stock.</span>
           <span class="split-footer-tally bulkout-warn-tally"></span>
@@ -6236,8 +6246,12 @@ function bulkOutRecomputeWarning(idx) {
   }
   let needSheets = 0;
   chips.forEach(c => { needSheets += parseInt(c.dataset.need, 10) || 0; });
-  const overSheets = sheets - needSheets;
-  if (overSheets <= 0) {
+  const diff = sheets - needSheets;
+  const banner = warnTr.querySelector('.bulkout-warn-banner');
+  const msgEl = warnTr.querySelector('.bulkout-warn-msg');
+  const tallyEl = warnTr.querySelector('.bulkout-warn-tally');
+  if (!banner || diff === 0) {
+    // Exact-match issuance — nothing to warn about.
     warnTr.style.display = 'none';
     return;
   }
@@ -6245,12 +6259,19 @@ function bulkOutRecomputeWarning(idx) {
   const it = itemId ? inventory.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
-  const overPktsRaw = overSheets / ps;
-  const overPkts = Number.isInteger(overPktsRaw) ? overPktsRaw : +overPktsRaw.toFixed(2);
-  const msgEl = warnTr.querySelector('.bulkout-warn-msg');
-  const tallyEl = warnTr.querySelector('.bulkout-warn-tally');
-  if (msgEl) msgEl.textContent = `Over by ${overPkts.toLocaleString()} ${unit} — extra will be added to offcut stock.`;
-  if (tallyEl) tallyEl.textContent = `Jobs need ${(needSheets / ps).toLocaleString()} · issuing ${(sheets / ps).toLocaleString()} ${unit}`;
+  const fmt = n => { const v = n / ps; return Number.isInteger(v) ? v.toLocaleString() : (+v.toFixed(2)).toLocaleString(); };
+  banner.classList.toggle('bulkout-warn-banner--over',    diff > 0);
+  banner.classList.toggle('bulkout-warn-banner--partial', diff < 0);
+  if (diff > 0) {
+    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra will be added to offcut stock.`;
+    if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · issuing ${fmt(sheets)} ${unit}`;
+  } else {
+    // diff < 0: under-issued → partial issuance, remaining stays on the
+    // pending queue. Same amber palette as the single-issue popup's
+    // partial state so operators recognise it.
+    if (msgEl)   msgEl.textContent   = `Issued: ${fmt(sheets)} / ${fmt(needSheets)} ${unit} · ${fmt(-diff)} ${unit} still pending`;
+    if (tallyEl) tallyEl.textContent = `Short by ${fmt(-diff)} ${unit}`;
+  }
   warnTr.style.display = '';
 }
 // Render per-brand split inputs when the picked paper's group has >1
