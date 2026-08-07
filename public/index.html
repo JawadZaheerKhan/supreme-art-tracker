@@ -5779,7 +5779,14 @@ function openInvRemoveStock(id, opts) {
     </div>
     <div id="stockout-jobchips-wrap" style="margin-bottom:8px;"></div>
     <div id="stockout-manual-wrap" style="display:none;margin-bottom:8px;">
-      <div class="form-group"><label class="form-label">Job Card No.</label><input type="text" id="stockout-jobcard" value="${esc(preJobCard)}" placeholder="e.g. E-85 or 85"></div>
+      <div class="form-group"><label class="form-label">Manual Job Card No.</label><input type="text" id="stockout-jobcard" value="${esc(preJobCard)}" placeholder="e.g. any offline reference — 11729, ABC-42"></div>
+    </div>
+    <div id="stockout-warn-wrap" style="display:none;margin-bottom:8px;">
+      <div class="bulkout-warn-banner bulkout-warn-banner--over" id="stockout-warn-banner">
+        <span class="split-footer-icon">&#9888;</span>
+        <span id="stockout-warn-msg">Over-issuing — extra will be added to offcut stock.</span>
+        <span class="split-footer-tally" id="stockout-warn-tally"></span>
+      </div>
     </div>
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stockout-notes" placeholder="Optional details"></div>
     <div class="modal-actions">
@@ -5788,6 +5795,42 @@ function openInvRemoveStock(id, opts) {
     </div>
   </div>`);
   stockOutReasonChanged(id);
+}
+// Live over/partial warning for the Remove Stock dialog — same banner
+// style + rules as the bulk stock-out row warning. Only fires when the
+// reason is Job Card (pending) with at least one chip selected and a
+// non-zero sheets value that doesn't match the sum of the selected
+// chips' needs. Silent in every other state.
+function stockOutRecomputeWarning(itemId) {
+  const wrap = document.getElementById('stockout-warn-wrap');
+  const banner = document.getElementById('stockout-warn-banner');
+  const msgEl = document.getElementById('stockout-warn-msg');
+  const tallyEl = document.getElementById('stockout-warn-tally');
+  if (!wrap || !banner) return;
+  const reasonEl = document.getElementById('stockout-reason');
+  const reason = reasonEl ? reasonEl.value : '';
+  const chips = document.querySelectorAll('#stockout-chips .jobchip.is-sel');
+  const sheetsEl = document.getElementById('stockout-qty');
+  const sheets = parseInt(sheetsEl && sheetsEl.value, 10) || 0;
+  if (reason !== 'job-card' || !chips.length || sheets <= 0) { wrap.style.display = 'none'; return; }
+  let needSheets = 0;
+  chips.forEach(c => { needSheets += parseInt(c.dataset.need, 10) || 0; });
+  const diff = sheets - needSheets;
+  if (diff === 0) { wrap.style.display = 'none'; return; }
+  const it = inventory.find(x => x.id === itemId);
+  const ps = it ? packetSize(it.paper_type) : 100;
+  const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+  const fmt = n => { const v = n / ps; return Number.isInteger(v) ? v.toLocaleString() : (+v.toFixed(2)).toLocaleString(); };
+  banner.classList.toggle('bulkout-warn-banner--over',    diff > 0);
+  banner.classList.toggle('bulkout-warn-banner--partial', diff < 0);
+  if (diff > 0) {
+    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra will be added to offcut stock.`;
+    if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · issuing ${fmt(sheets)} ${unit}`;
+  } else {
+    if (msgEl)   msgEl.textContent   = `Issued: ${fmt(sheets)} / ${fmt(needSheets)} ${unit} · ${fmt(-diff)} ${unit} still pending`;
+    if (tallyEl) tallyEl.textContent = `Short by ${fmt(-diff)} ${unit}`;
+  }
+  wrap.style.display = '';
 }
 function stockOutQtySync(source, ps) {
   const packetsEl = document.getElementById('stockout-packets');
@@ -5800,12 +5843,15 @@ function stockOutQtySync(source, ps) {
     const s = parseFloat(sheetsEl.value);
     packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
   }
+  const it = sheetsEl.dataset.itemId ? inventory.find(x => x.id === parseInt(sheetsEl.dataset.itemId, 10)) : null;
+  stockOutRecomputeWarning(it ? it.id : (window._stockOutItemId || 0));
 }
 function stockOutReasonChanged(itemId) {
   const reason = document.getElementById('stockout-reason').value;
   const chipsWrap = document.getElementById('stockout-jobchips-wrap');
   const manualWrap = document.getElementById('stockout-manual-wrap');
   if (!chipsWrap || !manualWrap) return;
+  window._stockOutItemId = itemId;   // remembered so stockOutQtySync can recompute the warning
   if (reason === 'job-card') {
     chipsWrap.style.display = '';
     manualWrap.style.display = 'none';
@@ -5817,6 +5863,7 @@ function stockOutReasonChanged(itemId) {
     chipsWrap.style.display = 'none';
     manualWrap.style.display = 'none';
   }
+  stockOutRecomputeWarning(itemId);
 }
 function stockOutLoadPendingChips(itemId) {
   const wrap = document.getElementById('stockout-jobchips-wrap');
@@ -5860,6 +5907,7 @@ function stockOutToggleChip(chip, ps) {
     if (sheetsEl) sheetsEl.value = totalSheets;
     if (packetsEl) packetsEl.value = +(totalSheets / ps).toFixed(2);
   }
+  stockOutRecomputeWarning(window._stockOutItemId || 0);
 }
 async function saveInvRemoveStock(id) {
   const it = inventory.find(x => x.id === id);
@@ -5868,26 +5916,102 @@ async function saveInvRemoveStock(id) {
   const have = it ? (it.current_balance || 0) : 0;
   if (qty > have) { await alertDialog({ title: 'Not enough stock', message: `On hand is ${have.toLocaleString()} sheets. Requested ${qty.toLocaleString()}. Reconcile the count first (Edit → Adjust by).`, kind: 'warn' }); return; }
   const reason = document.getElementById('stockout-reason').value;
-  let jobCard = null;
+  const challanNo = (document.getElementById('stockout-challan').value || '').trim() || null;
+  const notes = document.getElementById('stockout-notes').value.trim();
+
+  // Job Card (pending) reason — route through /api/jobs/:id/issue-stock
+  // per selected chip, mirroring the bulk-out job-card branch. This
+  // guarantees challan_no is saved on the job-consumed row (the manual
+  // /api/inventory/:id/transactions path only linked the FIRST chip
+  // because job_card was a comma-joined string — over-issues, offcuts,
+  // and multi-chip issuance all fell through the cracks there).
   if (reason === 'job-card') {
-    const selected = document.querySelectorAll('#stockout-chips .jobchip.is-sel');
-    if (selected.length) jobCard = Array.from(selected).map(c => c.dataset.jobid).join(',');
-  } else if (reason === 'manual-job-card') {
+    const selected = [...document.querySelectorAll('#stockout-chips .jobchip.is-sel')].map(c => ({
+      jobId: parseInt(c.dataset.jobid, 10),
+      needSheets: parseInt(c.dataset.need, 10) || 0,
+    })).filter(j => Number.isFinite(j.jobId));
+    if (!selected.length) { await alertDialog({ title: 'Pick at least one pending job', message: 'Tick one or more pending-stock jobs for this paper — or switch the reason to Manual Job Card.', kind: 'warn' }); return; }
+    // Pre-submit over-issue confirm — mirrors the bulk-out flow: LAST
+    // selected chip absorbs whatever's left over, so only that one can
+    // exceed its need. Fire one dialog if it will.
+    let remaining = qty;
+    const overageWarnings = [];
+    const ps = it ? packetSize(it.paper_type) : 100;
+    const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+    for (let ji = 0; ji < selected.length; ji++) {
+      const j = selected[ji];
+      if (remaining <= 0) break;
+      const isLast = (ji === selected.length - 1);
+      const share = isLast ? remaining : Math.min(remaining, j.needSheets);
+      if (share > j.needSheets) {
+        const over = share - j.needSheets;
+        const overPk = over / ps;
+        overageWarnings.push(`E-${j.jobId}: +${(Number.isInteger(overPk) ? overPk : +overPk.toFixed(2)).toLocaleString()} ${unit}`);
+      }
+      remaining -= share;
+    }
+    if (overageWarnings.length) {
+      const ok = await confirmDialog({
+        title: 'Over-issuance detected',
+        message: `These jobs will receive more stock than they need — the excess will be added to offcut inventory:\n\n${overageWarnings.join('\n')}\n\nProceed?`,
+        confirmText: 'Issue with overage',
+      });
+      if (!ok) return;
+    }
+
+    showSaving(true);
+    let flipped = 0, partials = 0, errored = 0;
+    remaining = qty;
+    try {
+      for (let ji = 0; ji < selected.length; ji++) {
+        const j = selected[ji];
+        if (remaining <= 0) break;
+        const isLast = (ji === selected.length - 1);
+        const share = isLast ? remaining : Math.min(remaining, j.needSheets);
+        if (share <= 0) continue;
+        try {
+          const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
+            splits: [{ item_id: id, sheets: share }],
+            challan_no: challanNo,
+          });
+          remaining -= share;
+          if (result && result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
+          else if (result && result.particulars && result.particulars.partial_pending_sheets) partials++;
+        } catch (e) { console.error('Issue for E-' + j.jobId + ' failed:', e); errored++; }
+      }
+      await loadInventory();
+      await loadJobs();
+      closeModal();
+      render();
+      const bits = [];
+      if (flipped) bits.push(`${flipped} job${flipped === 1 ? '' : 's'} fully issued`);
+      if (partials) bits.push(`${partials} partial`);
+      if (errored)  bits.push(`${errored} failed`);
+      notify(`−${qty.toLocaleString()} sheets removed${bits.length ? ' · ' + bits.join(', ') : ''}`);
+    } catch(e) { notify('Error: ' + e.message); }
+    showSaving(false);
+    return;
+  }
+
+  // Manual Job Card / Sold / Damaged / Sample / Adjustment — plain
+  // inventory transaction. Manual mode stores the typed reference in
+  // job_card so the server records it in the ledger notes; server
+  // doesn't attempt to resolve it to an app job.
+  let jobCard = null;
+  if (reason === 'manual-job-card') {
     jobCard = (document.getElementById('stockout-jobcard').value || '').trim() || null;
   }
   const data = {
     change: -qty,
     reason: reason,
-    notes:  document.getElementById('stockout-notes').value.trim(),
+    notes,
     job_card: jobCard,
-    challan_no: (document.getElementById('stockout-challan').value || '').trim() || null,
+    challan_no: challanNo,
   };
   showSaving(true);
   try {
     const result = await api('POST', `/api/inventory/${id}/transactions`, data);
     await loadInventory();
-    // Any change that touched a job's state — full flip, partial issuance,
-    // or just a jobId link — needs jobs reloaded so Pending Stock updates.
     if (result && (result.job_flipped || result.job_fully_issued || result.job_partial_remaining || result.linked_job_id)) {
       await loadJobs();
     }
