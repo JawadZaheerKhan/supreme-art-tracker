@@ -1296,6 +1296,11 @@
 .split-footer-tally { margin-left: auto; font-size: 12px; font-weight: 700; opacity: 0.85; padding: 3px 10px; border-radius: 999px; background: rgba(0,0,0,0.06); }
 .split-footer-full    { background: #dcfce7; color: #14532d; border-color: #86efac; }
 .split-footer-partial { background: #fef3c7; color: #78350f; border-color: #fcd34d; }
+/* Over-total warning — Save stays enabled; the excess goes to offcut on
+   submit. Amber like partial but heavier so it registers as an
+   intentional-override state, not a blocking error. */
+.split-footer-warn { background: #fed7aa; color: #7c2d12; border: 2px solid #ea580c; }
+.split-footer-warn .split-footer-tally { background: rgba(0,0,0,0.10); color: #7c2d12; }
 /* Over-issue / bad-input state — the loudest state. Bigger font, red
    fill, and a matching glow so Save-disabled has an obvious reason.
    Icon + attention-grabbing pulse the first second so it registers. */
@@ -6511,6 +6516,44 @@ async function saveBulkStockOut() {
     plan.push({ match, reason, jobCard, qty, selectedJobs, brandSplits });
   }
   if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
+
+  // Pre-flight over-issuance check — mirrors the jobShare math in the
+  // submit loop below (LAST selected job on each row absorbs whatever's
+  // left after every prior job takes its exact need). If any job ends up
+  // with more sheets than it needs, warn the store keeper up front —
+  // the server will route the excess to an offcut inventory bucket on
+  // submit, and this dialog is the only visible confirmation of that.
+  const overageWarnings = [];
+  for (const p of plan) {
+    if (p.reason !== 'job-card' || !p.selectedJobs.length) continue;
+    const rowTotalSheets = p.brandSplits.length
+      ? p.brandSplits.reduce((a, s) => a + s.sheets, 0)
+      : p.qty;
+    let remainingRow = rowTotalSheets;
+    const ps = p.match ? packetSize(p.match.paper_type) : 100;
+    const unit = p.match ? packetUnitLabel(p.match.paper_type).toLowerCase() : 'packets';
+    for (let ji = 0; ji < p.selectedJobs.length; ji++) {
+      const j = p.selectedJobs[ji];
+      if (remainingRow <= 0) break;
+      const isLastJob = (ji === p.selectedJobs.length - 1);
+      const jobShare = isLastJob ? remainingRow : Math.min(remainingRow, j.needSheets);
+      if (jobShare > j.needSheets) {
+        const overSheets = jobShare - j.needSheets;
+        const overPacks = overSheets / ps;
+        const label = Number.isInteger(overPacks) ? overPacks.toString() : (+overPacks.toFixed(2)).toString();
+        overageWarnings.push(`E-${j.jobId}: +${label} ${unit}`);
+      }
+      remainingRow -= jobShare;
+    }
+  }
+  if (overageWarnings.length) {
+    const ok = await confirmDialog({
+      title: 'Over-issuance detected',
+      message: `These jobs will receive more stock than they need — the excess will be added to offcut inventory:\n\n${overageWarnings.join('\n')}\n\nProceed?`,
+      confirmText: 'Issue with overage',
+    });
+    if (!ok) return;
+  }
 
   showSaving(true);
   let saved = 0, errored = 0, flipped = 0, partials = 0;
@@ -15228,25 +15271,10 @@ async function issueStock(id) {
     notify('Every brand in this paper group is out of stock.');
     return;
   }
-  // Single-brand group → skip the split popup. Prompt for the (optional)
-  // Challan No. and treat OK/Cancel as the confirm/abort of the deduction.
-  if (members.length === 1) {
-    const it = members[0];
-    const label = paperGroupLabel(it) + (it.brand ? ' · ' + it.brand : '');
-    const sheetsToIssue = Math.min(needSheets, it.current_balance || 0);
-    const partial = sheetsToIssue < needSheets;
-    const challanRaw = await promptDialog({
-      title: `Issue stock for Job E-${id}?`,
-      message: `${packetsIn} ${unit} (${needSheets.toLocaleString()} raw sheets) — "${j.name}"\nPaper: ${label}${partial ? `\n\nOnly ${sheetsToIssue.toLocaleString()} sheets available — the rest (${(needSheets - sheetsToIssue).toLocaleString()}) will stay pending.` : ''}\n\nEnter Challan No. (optional) and confirm to deduct from inventory.`,
-      placeholder: 'e.g. CH-2026-042',
-      confirmText: partial ? 'Issue partial' : 'Issue stock',
-    });
-    if (challanRaw === null) return;
-    const challanNo = (challanRaw || '').trim() || null;
-    await sendIssueStock(id, [{ item_id: it.id, sheets: sheetsToIssue }], challanNo);
-    return;
-  }
-  // Multi-brand group → open the split popup for the store keeper.
+  // Always open the split popup — even for a single-brand group. Gives
+  // the store keeper one canonical UI where they can over-issue (the
+  // excess is routed to an offcut inventory bucket) or partial-issue
+  // if needed. The one-row single-brand case is trivial to fill in.
   openIssueSplitPopup(j, anchor, members, needSheets, unit);
 }
 
@@ -15396,17 +15424,24 @@ function recomputeSplitFooter() {
   const overTotal = total > needPackets + EPS;
   const equalTotal = Math.abs(total - needPackets) < EPS;
   const underTotal = total < needPackets - EPS;
-  const isError = anyBadInput || anyRowOver || overTotal;
-  footer.classList.toggle('split-footer-full',    !isError && equalTotal && anyPositive);
-  footer.classList.toggle('split-footer-partial', !isError && anyPositive && underTotal);
+  // Over-total is no longer a hard error — the store keeper can
+  // intentionally pull extra packets and the server routes the excess
+  // to an offcut inventory bucket. anyRowOver / anyBadInput still block
+  // Save because they're real problems (can't pull more than a brand
+  // has on hand, and typos need fixing before submit).
+  const isError = anyBadInput || anyRowOver;
+  footer.classList.toggle('split-footer-full',    !isError && !overTotal && equalTotal && anyPositive);
+  footer.classList.toggle('split-footer-partial', !isError && !overTotal && anyPositive && underTotal);
+  footer.classList.toggle('split-footer-warn',    !isError && overTotal);
   footer.classList.toggle('split-footer-over',    isError);
   const totalStr = `${total.toLocaleString()} / ${needPackets.toLocaleString()} ${unitLabel}`;
   if (anyRowOver) {
     msg.innerHTML = `<span class="split-footer-icon">&#9888;</span> One or more brands exceed their available stock — reduce the highlighted rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
-  } else if (overTotal) {
-    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${(total - needPackets).toLocaleString()} ${unitLabel} — reduce one of the rows. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (anyBadInput) {
     msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter a positive number in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+  } else if (overTotal) {
+    const overAmt = +(total - needPackets).toFixed(2);
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${overAmt.toLocaleString()} ${unitLabel} — extra will be added to offcut stock. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (equalTotal && anyPositive) {
     msg.textContent = `Issued: ${totalStr} · full`;
   } else if (anyPositive) {
