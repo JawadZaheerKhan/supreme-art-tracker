@@ -8859,8 +8859,16 @@ async function bulkDeleteJobsReport() {
   if (!isAdmin()) { notify('Admin only.'); return; }
   const ids = [...jobsReportSel];
   if (!ids.length) { notify('Nothing selected.'); return; }
+  // Expand merged rows first so the confirm dialog shows the true count.
+  const rows = buildJobsReportRows();
+  const allIds = new Set(ids);
+  for (const id of ids) {
+    const row = rows.find(r => r.id === id);
+    if (row && row.mergedPartnerId) allIds.add(row.mergedPartnerId);
+  }
+  const count = allIds.size;
   const ok = await confirmDialog({
-    title: `Move ${ids.length} delivered job${ids.length===1?'':'s'} to Archive?`,
+    title: `Move ${count} delivered job${count===1?'':'s'} to Archive?`,
     message: 'They\'ll stay in the Archive for 30 days where an admin can restore them, then auto-purge. Their issued stock is NOT returned. After 30 days they\'re gone for good.',
     danger: true,
     confirmText: 'Move to Archive',
@@ -8868,7 +8876,7 @@ async function bulkDeleteJobsReport() {
   if (!ok) return;
   let good = 0, failed = 0;
   showSaving(true);
-  for (const id of ids) {
+  for (const id of allIds) {
     try { await api('DELETE', `/api/jobs/${id}`); good++; }
     catch (e) { failed++; console.error('Delete failed for job', id, e); }
   }
@@ -9065,6 +9073,7 @@ function buildJobsReportRows() {
         machine: sameOrPipe(lo.machine, hi.machine),
         coatings: sameOrPipe(lo.coatings, hi.coatings),
         linkPartner: null,
+        mergedPartnerId: hi.id,
       });
     } else {
       merged.push(r);
