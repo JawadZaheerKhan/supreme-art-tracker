@@ -658,6 +658,11 @@
   .sc-toggle-idle:hover   { background: #ddd6fe; border-color: #a78bfa; }
   .sc-toggle-active { background: #c4b5fd; color: #4c1d95; border: 1.5px solid #a78bfa; }
   .sc-toggle-active:hover { background: #a78bfa; border-color: #8b5cf6; }
+  /* Stock Group tile — purple accent top-border to distinguish from job cards */
+  .group-card { border-top: 4px solid #7c3aed !important; }
+  .group-stat { display:inline-flex;flex-direction:column;align-items:center;padding:6px 12px;border-radius:8px;min-width:74px;text-align:center;gap:1px; }
+  .group-stat-label { font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px; }
+  .group-stat-value { font-size:17px;font-weight:800;line-height:1; }
   /* Pending-queue rows in the inventory list view — slightly more padding
      than a paper card, faint green left border to match the toggle. */
   .inv-pending-row { border-left: 4px solid #86efac; }
@@ -1710,6 +1715,9 @@
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
+    <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Stock Group">
+      <option value="">All groups</option>
+    </select>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
       <option value="this-week">This week</option>
@@ -2364,6 +2372,7 @@ let filterMachine = '';
 let filterPO = '';
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
+let filterGroup = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
@@ -3223,6 +3232,7 @@ function getFiltered() {
     if (filterShadeCard === 'only' && !j.is_shade_card) return false;
     if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
     if (filterMachine && j.machine !== filterMachine) return false;
+    if (filterGroup && j.stock_group_name !== filterGroup) return false;
     if (!inDateRange(j)) return false;
     if (view === 'new')     return isNewJob(j);
     if (view === 'ctp')     return isCtpQueue(j);
@@ -3421,6 +3431,11 @@ function renderTabs() {
     const machines = [...new Set(jobs.map(j => j.machine).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     mf.innerHTML = `<option value="">All machines</option>` + machines.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
   }
+  const gfl = document.getElementById('group-filter');
+  if (gfl) {
+    const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
+    gfl.innerHTML = `<option value="">All groups</option>` + groups.map(g => `<option value="${esc(g)}" ${filterGroup===g?'selected':''}>${esc(g)}</option>`).join('');
+  }
 }
 
 // Dispatcher — picks the card grid or the dense list, syncs the toggle UI,
@@ -3509,7 +3524,14 @@ function renderJobsCompact() {
     el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
     return;
   }
+  const seenGroupsC = new Set();
   el.innerHTML = filtered.map(j => {
+    if (j.stock_group_name) {
+      if (seenGroupsC.has(j.stock_group_name)) return '';
+      seenGroupsC.add(j.stock_group_name);
+      const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
+      return renderGroupTileCompact(j.stock_group_name, gJobs);
+    }
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
     const pending = j.issuance_status === 'pending';
@@ -3683,6 +3705,7 @@ function renderJobsCompact() {
             ${canWriteJobs() ? (j.linked_job_id
               ? `<button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Remove the link with Job E-${j.linked_job_id}">&#128279; Unlink</button>`
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
+            ${canWriteJobs() && !j.stock_group_name ? `<button class="btn btn-sm ceo-hide" onclick="openCreateGroupModal(${j.id})" title="Start a Stock Group with this job">&#128230; Create Group</button><button class="btn btn-sm ceo-hide" onclick="openAddToGroupModal(${j.id})" title="Add this job to an existing Stock Group">&#128230; Add to Group</button>` : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
@@ -3708,7 +3731,16 @@ function renderJobsCards() {
     el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
     return;
   }
-  el.innerHTML = filtered.map(renderJobCard).join('');
+  const seenGroups = new Set();
+  el.innerHTML = filtered.map(j => {
+    if (j.stock_group_name) {
+      if (seenGroups.has(j.stock_group_name)) return '';
+      seenGroups.add(j.stock_group_name);
+      const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
+      return renderGroupTile(j.stock_group_name, gJobs);
+    }
+    return renderJobCard(j);
+  }).join('');
 }
 
 // The green "Issue Stock" / red "Waiting for Stock" button. Shared shape with
@@ -4018,6 +4050,7 @@ function renderJobCard(j, opts) {
         ${canWriteJobs() ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
+        ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Group</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
@@ -14733,6 +14766,421 @@ async function submitDeliverLinked(jobId, partnerId) {
   showSaving(false);
 }
 
+// ── Stock Groups ─────────────────────────────────────────────────────
+// Named group tag for ongoing reprints of the same product. FIFO delivery
+// drains oldest job first, spilling into newer ones automatically.
+
+// Safe JS string for double-quoted onclick attributes — JSON.stringify then
+// replace " with &quot; so the HTML attribute doesn't break.
+function jsStr(s) { return JSON.stringify(String(s)).replace(/"/g, '&quot;'); }
+
+function setGroupFilter(v) { filterGroup = v; renderJobs(); }
+
+// Aggregate ready, in-process, and delivered cartons across a group.
+function groupStats(groupJobs) {
+  let ready = 0, inProcess = 0, delivered = 0;
+  for (const j of groupJobs) {
+    const si = j.stage_index || 0;
+    const done = isDone(j);
+    if (!done && si >= 6) {
+      ready += Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j));
+    } else if (!done && !isNewJob(j) && j.issuance_status !== 'pending' && si >= 1 && si <= 5) {
+      inProcess += parseFloat(String(j.cartonqty || '').replace(/[^0-9.]/g, '')) || 0;
+    }
+    delivered += totalDeliveredCartons(j);
+  }
+  return { ready, inProcess, delivered };
+}
+
+// ── Group Tile (card view) ────────────────────────────────────────────
+function renderGroupTile(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
+  const stats = groupStats(groupJobs);
+  const sorted = [...groupJobs].sort((a, b) => b.id - a.id);
+  const repr = sorted.find(j => !isDone(j)) || sorted[0];
+  const clientName = repr ? esc(repr.client || '') : '';
+  const jobIdList = sorted.map(j => `E-${j.id}`).join(', ');
+  const n = groupJobs.length;
+  const gName = jsStr(groupName);
+  const reprId = repr ? repr.id : 'null';
+  const hasReady = stats.ready > 0;
+  return `
+  <div class="job-card group-card p-normal">
+    <div class="job-top">
+      <div class="job-meta">
+        <div class="job-id-row">
+          <span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;padding:2px 8px;">&#128230; Stock Group</span>
+        </div>
+        <div class="job-name" style="color:#5b21b6;">${esc(groupName)}</div>
+        <div class="job-sub">${clientName}${clientName ? ' &middot; ' : ''}${n} job${n===1?'':'s'}: <span style="font-size:11px;color:var(--text2);">${jobIdList}</span></div>
+        <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
+          ${stats.ready > 0 ? `<div class="group-stat" style="background:#dcfce7;border:1px solid #bbf7d0;">
+            <div class="group-stat-label" style="color:#166534;">Ready</div>
+            <div class="group-stat-value" style="color:#166534;">${stats.ready.toLocaleString()}</div>
+            <div style="font-size:9px;color:#166534;">cartons</div>
+          </div>` : ''}
+          ${stats.inProcess > 0 ? `<div class="group-stat" style="background:#dbeafe;border:1px solid #bfdbfe;">
+            <div class="group-stat-label" style="color:#1e40af;">In-Process</div>
+            <div class="group-stat-value" style="color:#1e40af;">${stats.inProcess.toLocaleString()}</div>
+            <div style="font-size:9px;color:#1e40af;">cartons</div>
+          </div>` : ''}
+          ${stats.delivered > 0 ? `<div class="group-stat" style="background:#f3f4f6;border:1px solid #e5e7eb;">
+            <div class="group-stat-label" style="color:var(--text2);">Delivered</div>
+            <div class="group-stat-value" style="color:var(--text);">${stats.delivered.toLocaleString()}</div>
+            <div style="font-size:9px;color:var(--text2);">cartons</div>
+          </div>` : ''}
+          ${!stats.ready && !stats.inProcess && !stats.delivered ? `<div style="color:var(--text2);font-size:12px;padding:6px 0;">No active stock</div>` : ''}
+        </div>
+      </div>
+      <div class="job-right">
+        <div class="job-actions">
+          <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})">&#128203; View All Jobs</button>
+          ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})">&#128230; Deliver from Group</button>` : ''}
+          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})">&#10133; Create Next Job</button>` : ''}
+          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Group Tile (compact list view) ────────────────────────────────────
+function renderGroupTileCompact(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
+  const stats = groupStats(groupJobs);
+  const sorted = [...groupJobs].sort((a, b) => b.id - a.id);
+  const repr = sorted.find(j => !isDone(j)) || sorted[0];
+  const clientName = repr ? esc(repr.client || '') : '';
+  const n = groupJobs.length;
+  const gName = jsStr(groupName);
+  const reprId = repr ? repr.id : 'null';
+  const hasReady = stats.ready > 0;
+  return `
+  <div class="job-card group-card p-normal">
+    <div class="job-top">
+      <div class="job-meta">
+        <div class="job-id-row" style="flex-wrap:wrap;gap:6px;">
+          <span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;padding:2px 8px;">&#128230; Stock Group</span>
+          <span style="font-weight:700;font-size:14px;">${esc(groupName)}</span>
+          <span style="color:var(--text2);font-size:12px;">${clientName}${clientName ? ' &middot; ' : ''}${n} job${n===1?'':'s'}</span>
+        </div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:13px;">
+          ${stats.ready > 0 ? `<span style="color:#166534;font-weight:700;">Ready: ${stats.ready.toLocaleString()}</span>` : ''}
+          ${stats.inProcess > 0 ? `<span style="color:#1e40af;font-weight:700;">In-process: ${stats.inProcess.toLocaleString()}</span>` : ''}
+          ${stats.delivered > 0 ? `<span style="color:var(--text2);">Delivered: ${stats.delivered.toLocaleString()}</span>` : ''}
+          ${!stats.ready && !stats.inProcess && !stats.delivered ? `<span style="color:var(--text2);">No active stock</span>` : ''}
+        </div>
+      </div>
+      <div class="job-right">
+        <div class="job-actions">
+          <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})">&#128203; View All</button>
+          ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})">&#128230; Deliver</button>` : ''}
+          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})">&#10133; Next Job</button>` : ''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── View All Jobs modal ───────────────────────────────────────────────
+function openGroupJobsModal(groupName) {
+  const groupJobs = jobs.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
+  if (!groupJobs.length) { notify('No jobs found for this group'); return; }
+  const stats = groupStats(groupJobs);
+  const gName = jsStr(groupName);
+  const rows = groupJobs.map(j => {
+    const si = j.stage_index || 0;
+    const done = isDone(j);
+    const stageName = done ? 'Delivered' : (STAGES[si] || `Stage ${si+1}`);
+    const ready = si >= 6 && !done ? readyCartonsTotal(j) : 0;
+    const delivered = totalDeliveredCartons(j);
+    const booked = parseFloat(String(j.qty||'').replace(/[^0-9.]/g,''))||0;
+    const statusBadge = done
+      ? `<span style="background:#e5e7eb;color:var(--text2);font-size:10px;padding:1px 5px;border-radius:4px;">Delivered</span>`
+      : si === 6
+        ? `<span style="background:#dcfce7;color:#166534;font-size:10px;padding:1px 5px;border-radius:4px;">Ready</span>`
+        : si >= 1
+          ? `<span style="background:#dbeafe;color:#1e40af;font-size:10px;padding:1px 5px;border-radius:4px;">${esc(stageName)}</span>`
+          : `<span style="background:#f3f4f6;color:var(--text2);font-size:10px;padding:1px 5px;border-radius:4px;">New</span>`;
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:700;font-size:13px;">E-${j.id} &middot; ${esc(j.name)}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px;">${statusBadge}
+          ${ready > 0 ? ` &nbsp; Ready: <b>${ready.toLocaleString()}</b>` : ''}
+          ${delivered > 0 ? ` &nbsp; Delivered: <b>${delivered.toLocaleString()}</b>${booked ? '/'+booked.toLocaleString() : ''}` : ''}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        <button class="btn btn-sm" onclick="closeModal();setTimeout(()=>openEdit(${j.id}),50)">View</button>
+        ${canWriteJobs() ? `<button class="btn btn-sm btn-danger ceo-hide" onclick="removeJobFromGroup(${j.id},${gName})">Remove</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:540px;">
+    <h2 style="margin:0 0 4px;">&#128230; ${esc(groupName)}</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
+      ${stats.ready > 0 ? `<span style="color:#166534;font-weight:600;">Ready: ${stats.ready.toLocaleString()}</span> &nbsp;` : ''}
+      ${stats.inProcess > 0 ? `<span style="color:#1e40af;font-weight:600;">In-process: ${stats.inProcess.toLocaleString()}</span> &nbsp;` : ''}
+      ${stats.delivered > 0 ? `<span style="color:var(--text2);">Delivered: ${stats.delivered.toLocaleString()}</span>` : ''}
+    </div>
+    <div style="max-height:55vh;overflow-y:auto;">${rows}</div>
+    ${canWriteJobs() ? `<div style="margin-top:12px;"><button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job to Group</button></div>` : ''}
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
+
+// ── FIFO Group Delivery modal ─────────────────────────────────────────
+function openDeliverGroupModal(groupName) {
+  if (!canWriteJobs()) return;
+  const groupJobs = jobs.filter(j => j && j.stock_group_name === groupName).sort((a, b) => a.id - b.id);
+  const available = groupJobs.filter(j => {
+    const si = j.stage_index || 0;
+    return !isDone(j) && si >= 6;
+  }).map(j => {
+    const avail = Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j));
+    return { j, avail };
+  }).filter(x => x.avail > 0);
+  const totalAvail = available.reduce((s, x) => s + x.avail, 0);
+  const availRows = available.length
+    ? available.map(x => `<div style="font-size:11px;color:var(--text2);padding:1px 0;">E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></div>`).join('')
+    : `<div style="font-size:11px;color:#dc2626;padding:1px 0;">No jobs at Ready to Deliver — advance a job there first.</div>`;
+  const gName = jsStr(groupName);
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:440px;">
+    <h2 style="margin:0 0 4px;">&#128230; Deliver from Group</h2>
+    <div style="font-size:12px;color:#5b21b6;font-weight:600;margin-bottom:10px;">${esc(groupName)}</div>
+    <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:8px 10px;margin-bottom:12px;">
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#5b21b6;margin-bottom:4px;">FIFO order (oldest job first)</div>
+      ${availRows}
+      ${totalAvail > 0 ? `<div style="margin-top:4px;font-size:11px;font-weight:700;color:#166534;">Total available: ${totalAvail.toLocaleString()} cartons</div>` : ''}
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Total Cartons *</label><input type="number" id="dg-cartons" min="0" placeholder="e.g. 5000" style="width:100%;"></div>
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dg-date" value="${new Date().toISOString().slice(0,10)}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">PO No.</label><input type="text" id="dg-po" placeholder="e.g. PO-2025-001"></div>
+      <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="dg-batch" placeholder="e.g. B-101"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="dg-notes" placeholder="Optional"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#5b21b6;border-color:#5b21b6;" onclick="submitGroupDelivery(${gName})">&#128230; Record Delivery</button>
+    </div>
+  </div>`);
+}
+async function submitGroupDelivery(groupName) {
+  const cartons = ((document.getElementById('dg-cartons')||{}).value||'').trim();
+  const date    = ((document.getElementById('dg-date')||{}).value||'').trim();
+  const po      = ((document.getElementById('dg-po')||{}).value||'').trim();
+  const batch   = ((document.getElementById('dg-batch')||{}).value||'').trim();
+  const notes   = ((document.getElementById('dg-notes')||{}).value||'').trim();
+  if (!parseFloat(cartons) || parseFloat(cartons) <= 0) { await alertDialog({ title: 'Enter cartons to deliver', kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    const result = await api('POST', '/api/groups/deliver', { group_name: groupName, cartons, date, po_no: po, batch_no: batch, notes });
+    await loadJobs();
+    closeModal(); render();
+    const parts = (result.deliveries_made || []).map(d => `E-${d.job_id}: ${Number(d.cartons).toLocaleString()} cartons`).join(', ');
+    const warn = result.unfulfilled > 0 ? ` — ${result.unfulfilled.toLocaleString()} unfulfilled (insufficient ready stock)` : '';
+    notify(`Delivery recorded: ${parts}${warn}`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Create Group from job ─────────────────────────────────────────────
+async function openCreateGroupModal(jobId) {
+  if (!canWriteJobs()) return;
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  const name = await promptDialog({
+    title: 'Create Stock Group',
+    message: `Name this group — it will be shared by E-${jobId} and any future reprints.\nExample: "Manacid 60ml — Stanley"`,
+    placeholder: 'e.g. Manacid 60ml — Stanley',
+    confirmText: 'Create Group',
+  });
+  if (name === null) return;
+  const groupName = String(name).trim();
+  if (!groupName) { notify('Group name cannot be empty'); return; }
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: groupName });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    render();
+    notify(`Group "${groupName}" created`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Add job to existing Group ─────────────────────────────────────────
+async function openAddToGroupModal(jobId) {
+  if (!canWriteJobs()) return;
+  const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
+  if (!groups.length) {
+    await alertDialog({ title: 'No groups exist yet', message: 'Use "Create Group" on a job card to start the first group.', kind: 'info' });
+    return;
+  }
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+    <h2>Add E-${jobId} to Group</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">${esc(j.name)}</div>
+    <div class="form-group">
+      <label class="form-label">Select Group</label>
+      <select id="atg-select" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+        ${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmAddToGroup(${jobId})">Add to Group</button>
+    </div>
+  </div>`);
+}
+async function confirmAddToGroup(jobId) {
+  const sel = document.getElementById('atg-select');
+  if (!sel || !sel.value) return;
+  const groupName = sel.value;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: groupName });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`E-${jobId} added to group "${groupName}"`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Add an existing job to a group from inside the group's modal.
+async function openAddExistingToGroupModal(groupName) {
+  if (!canWriteJobs()) return;
+  const val = await promptDialog({
+    title: `Add existing job to group`,
+    message: `Enter a job number to add to "${groupName}" (e.g. 85 or E-85).`,
+    placeholder: 'e.g. 85',
+    confirmText: 'Add',
+  });
+  if (val === null) return;
+  const m = String(val).match(/(\d+)/);
+  if (!m) { notify('Enter a valid job number.'); return; }
+  const targetId = parseInt(m[1], 10);
+  const target = jobs.find(j => j && j.id === targetId);
+  if (!target) { notify(`Job E-${targetId} not found.`); return; }
+  if (target.stock_group_name && target.stock_group_name !== groupName) {
+    const ok = await confirmDialog({ title: `E-${targetId} is already in group "${target.stock_group_name}" — move to "${groupName}"?`, confirmText: 'Move' });
+    if (!ok) return;
+  }
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${targetId}/group`, { group_name: groupName });
+    const ix = jobs.findIndex(x => x.id === targetId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`E-${targetId} added to group "${groupName}"`);
+    setTimeout(() => openGroupJobsModal(groupName), 50);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Remove a job from its group.
+async function removeJobFromGroup(jobId, groupName) {
+  const ok = await confirmDialog({
+    title: `Remove E-${jobId} from group "${groupName}"?`,
+    message: 'The job will appear individually in the Jobs list again. Delivery history is unchanged.',
+    confirmText: 'Remove',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: null });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`E-${jobId} removed from group`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Create Next Job in Group ──────────────────────────────────────────
+// Pending group to auto-assign after the new job is saved.
+let _pendingGroupName = null;
+function createNextJobInGroup(groupName, templateJobId) {
+  if (!canWriteJobs()) return;
+  if (!templateJobId) { notify('No template job found.'); return; }
+  _pendingGroupName = groupName;
+  openDuplicateJob(templateJobId);
+}
+
+// ── Client portal group tile ──────────────────────────────────────────
+function renderClientGroupTile(groupName, groupJobs) {
+  const stats = groupStats(groupJobs);
+  const totalBooked = groupJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.]/g,''))||0), 0);
+  const allDeliveries = [];
+  for (const j of groupJobs) {
+    for (const d of (Array.isArray(j.deliveries) ? j.deliveries : [])) {
+      if (d) allDeliveries.push(d);
+    }
+  }
+  const sorted = [...allDeliveries].sort((a, b) => (b.date > a.date ? 1 : -1));
+  const VISIBLE = 3;
+  const renderShipRow = d => {
+    const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.]/g,'')).toLocaleString() + ' cartons' : '';
+    const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
+    const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
+    return `<div style="padding:2px 0;"><div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--text2);">${dt}${refBits ? ' <span style="color:var(--text3);">· ' + refBits + '</span>' : ''}</span><span style="font-weight:600;">${ct}</span></div></div>`;
+  };
+  const visRows = sorted.slice(0, VISIBLE).map(renderShipRow).join('');
+  const hidRows = sorted.slice(VISIBLE).map(renderShipRow).join('');
+  const moreId = `cg-more-${String(groupName).replace(/[^a-z0-9]/gi,'_')}`;
+  const shipHtml = sorted.length ? `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments</div>
+    ${visRows}
+    ${hidRows ? `<div id="${esc(moreId)}" style="display:none;">${hidRows}</div><div style="text-align:center;margin-top:4px;"><button type="button" onclick="const m=document.getElementById('${esc(moreId)}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sorted.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sorted.length})</button></div>` : ''}
+    <div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;"><span>Total shipped</span><span>${stats.delivered.toLocaleString()}${totalBooked ? ' / ' + totalBooked.toLocaleString() + ' cartons' : ' cartons'}</span></div>
+  </div>` : '';
+  // Stage pipeline from the most-active non-delivered job
+  const activeJob = groupJobs.filter(j => !isDone(j)).sort((a, b) => (b.stage_index||0) - (a.stage_index||0))[0];
+  const pipeHtml = activeJob ? (() => {
+    const si = activeJob.stage_index || 0;
+    const done = isDone(activeJob);
+    const pending__ = activeJob.issuance_status === 'pending';
+    return STAGES.map((s, i) => {
+      let cls = 's-pending';
+      const st = activeJob.stages?.[i]?.status;
+      if (st === 'done') cls = 's-done';
+      else if (i === si && !done && !(pending__ && i === 1)) cls = 's-active';
+      if (i === STAGES.length - 1 && isPartialDelivery(activeJob)) cls = 's-partial';
+      const readyIdx = STAGES.indexOf('Ready to Deliver');
+      if (i === readyIdx && si === 6 && cls === 's-active') cls = 's-done';
+      const pill = `<span class="stage-pill ${cls}" title="${esc(s)}">${SHORT[i]}</span>`;
+      if (i === 1) {
+        const psCls = (activeJob.issuance_status === 'issued' || si > 1) ? 's-done' : (pending__ ? 's-active' : 's-pending');
+        return `<span class="arrow">›</span><span class="stage-pill ${psCls}" title="Stock">Stock</span><span class="arrow">›</span>${pill}`;
+      }
+      return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
+    }).join('');
+  })() : '';
+  const factsHtml = [
+    stats.ready > 0 ? `<span style="color:#166534;font-weight:700;">&#128230; Ready: ${stats.ready.toLocaleString()} cartons</span>` : '',
+    stats.inProcess > 0 ? `<span style="color:#1e40af;font-weight:600;">In-process: ${stats.inProcess.toLocaleString()} cartons</span>` : '',
+  ].filter(Boolean).join(' &nbsp; ');
+  return `<div class="job-card group-card p-normal">
+    <div class="job-top">
+      <div class="job-meta">
+        <div class="job-id-row">
+          <span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;padding:2px 8px;">&#128230; Stock Group</span>
+        </div>
+        <div class="job-name" style="color:#5b21b6;">${esc(groupName)}</div>
+        ${factsHtml ? `<div class="tile-facts" style="margin-top:6px;">${factsHtml}</div>` : ''}
+        ${pipeHtml ? `<div class="pipeline" style="justify-content:center;margin-top:8px;">${pipeHtml}</div>` : ''}
+        ${shipHtml}
+      </div>
+    </div>
+  </div>`;
+}
+
 function getFormData() {
   const itemEl = document.getElementById('f-inventory-item');
   const inventory_item_id = itemEl && itemEl.value ? parseInt(itemEl.value, 10) : null;
@@ -15292,9 +15740,25 @@ async function saveAdd() {
     const newJob = await api('POST', '/api/jobs', data);
     jobs.push(newJob);
     await loadInventory();   // refresh balances after server-side deduction
-    closeModal(); notify('Job created!'); render();
+    // Auto-assign to group if this job was created via "Create Next Job in Group"
+    if (_pendingGroupName) {
+      const gn = _pendingGroupName;
+      _pendingGroupName = null;
+      try {
+        const updated = await api('PATCH', `/api/jobs/${newJob.id}/group`, { group_name: gn });
+        const ix = jobs.findIndex(x => x.id === newJob.id);
+        if (ix >= 0) jobs[ix] = updated;
+        notify(`Job created and added to group "${gn}"!`);
+      } catch(e) { notify('Job created! (Group assign failed: ' + e.message + ')'); }
+    } else {
+      notify('Job created!');
+    }
+    closeModal(); render();
     setTimeout(() => printJobCard(newJob.id), 100);
-  } catch(e) { notify('Error: ' + e.message); }
+  } catch(e) {
+    _pendingGroupName = null;
+    notify('Error: ' + e.message);
+  }
   showSaving(false);
 }
 
@@ -18566,8 +19030,18 @@ function renderClientJobCardsInto(elId, rows, opts) {
     </div>`;
     return;
   }
-  // Use the same grid class the Jobs Track view uses, so spacing matches.
-  listEl.innerHTML = `<div class="jobs-list--cards">${rows.map(j => renderJobCard(j, { clientPreview: true, adminControls: !!opts.adminControls })).join('')}</div>`;
+  // Collapse grouped jobs into a single tile each (FIFO, oldest first).
+  const seenGrps = new Set();
+  const html = rows.map(j => {
+    if (j && j.stock_group_name) {
+      if (seenGrps.has(j.stock_group_name)) return '';
+      seenGrps.add(j.stock_group_name);
+      const gJobs = rows.filter(r => r && r.stock_group_name === j.stock_group_name);
+      return renderClientGroupTile(j.stock_group_name, gJobs);
+    }
+    return renderJobCard(j, { clientPreview: true, adminControls: !!opts.adminControls });
+  }).join('');
+  listEl.innerHTML = `<div class="jobs-list--cards">${html}</div>`;
 }
 
 // ── Client View (admin preview) ──────────────────────────────
