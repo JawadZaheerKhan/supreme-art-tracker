@@ -14496,13 +14496,25 @@ function clientDeliveriesBreakdown(j, clientPreview) {
     const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.\-]/g, '')).toLocaleString() + ' cartons' : '';
     const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
     const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
-    // Linked-delivery tag — client thinks in PO numbers, not internal
-    // E-job ids, so resolve the partner job and show ITS PO instead.
+    // Linked-delivery tag — client thinks in PO/Batch numbers, not internal
+    // E-job ids. Read PO/Batch from the partner's delivery entry (entered per
+    // shipment in the modal) rather than the job-level ref/bno default.
     let linkedLine = '';
     if (d.linked_job_id) {
       const partner = resolveJobForClient(d.linked_job_id);
-      const partnerPo = partner && partner.ref ? esc(partner.ref) : '';
-      linkedLine = `<div style="color:#7c3aed;font-size:11px;font-weight:600;margin-top:1px;">&#128279; Combined shipment${partnerPo ? ' — also covers PO ' + partnerPo : ' with another order'}</div>`;
+      // Find partner's delivery entry that links back to this job on the same date
+      let pd = null;
+      if (partner && Array.isArray(partner.deliveries)) {
+        pd = partner.deliveries.find(x => x && String(x.linked_job_id) === String(j.id) && x.date === d.date);
+      }
+      // PO/Batch: delivery-entry values first, fall back to job-level ref/bno
+      const partnerPo  = (pd && pd.po_no)   ? esc(pd.po_no)   : (partner && partner.ref ? esc(partner.ref)  : '');
+      const partnerBno = (pd && pd.batch_no) ? esc(pd.batch_no): (partner && partner.bno ? esc(partner.bno)  : '');
+      const partnerCartons = pd ? (parseFloat(String(pd.cartons || '').replace(/[^0-9.]/g, '')) || 0) : 0;
+      const thisCartons    = parseFloat(String(d.cartons || '').replace(/[^0-9.]/g, '')) || 0;
+      const totalCartons   = thisCartons + partnerCartons;
+      const partnerRef = [partnerPo && ('PO ' + partnerPo), partnerBno && ('Batch ' + partnerBno)].filter(Boolean).join(' \xb7 ');
+      linkedLine = `<div style="color:#7c3aed;font-size:11px;font-weight:600;margin-top:1px;">&#128279; Combined shipment${partnerRef ? ' with ' + partnerRef : ''}${totalCartons ? ' — ' + totalCartons.toLocaleString() + ' cartons total' : ''}</div>`;
     }
     return `<div style="padding:2px 0;">
       <div style="display:flex;justify-content:space-between;gap:8px;">
@@ -14634,21 +14646,22 @@ function openDeliverLinkedModal(jobId) {
   if (!job || !job.linked_job_id) return;
   const partner = jobs.find(x => x.id === job.linked_job_id);
   if (!partner) { notify('Linked partner job not found — refresh and try again.'); return; }
-  const remainingFor = (jb) => {
-    const booked = parseFloat(String(jb.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
-    const shipped = totalDeliveredCartons(jb);
-    if (booked) return Math.max(0, booked - shipped);
-    return (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(jb) : 0) || 0;
+  // Split weight: readyCartonsTotal first, fall back to unit cartonqty
+  const splitWeight = (jb) => {
+    const r = (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(jb) : 0) || 0;
+    if (r > 0) return r;
+    return parseFloat(String(jb.cartonqty || '').replace(/[^0-9.]/g, '')) || 1;
   };
-  const remA = remainingFor(job);
-  const remB = remainingFor(partner);
-  const rowHtml = (jb, remaining, prefix) => `
+  const wA = splitWeight(job);
+  const wB = splitWeight(partner);
+  const wT = wA + wB;
+  const rowHtml = (jb, prefix) => `
     <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
       <div style="font-weight:700;margin-bottom:8px;">E-${jb.id} &middot; ${esc(jb.name)}</div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Cartons *</label>
-          <input type="number" id="${prefix}-cartons" min="1" step="any" value="${remaining || ''}" placeholder="e.g. 50">
+          <input type="number" id="${prefix}-cartons" min="1" step="any" placeholder="auto from total" style="background:var(--bg2);">
         </div>
         <div class="form-group">
           <label class="form-label">PO No.</label>
@@ -14662,9 +14675,15 @@ function openDeliverLinkedModal(jobId) {
     </div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>&#128279; Deliver Linked Jobs</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">One challan / invoice, both jobs — each ships its own cartons figure.</div>
-    ${rowHtml(job, remA, 'dl-a')}
-    ${rowHtml(partner, remB, 'dl-b')}
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">One challan / invoice, both jobs. Enter total cartons — they split automatically by ready qty (or unit carton qty).</div>
+    <div style="margin-bottom:14px;">
+      <label class="form-label" style="font-weight:700;font-size:13px;">Total Cartons (both jobs) *</label>
+      <input type="number" id="dl-total" min="1" step="any"
+        style="width:100%;max-width:220px;font-size:16px;font-weight:700;border:2px solid #7c3aed;border-radius:6px;padding:6px 10px;"
+        oninput="var t=parseFloat(this.value)||0,a=t?Math.round(t*${wA}/${wT}):0,b=t?t-a:0;var ea=document.getElementById('dl-a-cartons'),eb=document.getElementById('dl-b-cartons');if(ea)ea.value=t?a:'';if(eb)eb.value=t?b:'';">
+    </div>
+    ${rowHtml(job, 'dl-a')}
+    ${rowHtml(partner, 'dl-b')}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dl-date" value="${new Date().toISOString().slice(0,10)}"></div>
       <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(shared)</span></label><input type="text" id="dl-challan" placeholder="e.g. CH-042"></div>
