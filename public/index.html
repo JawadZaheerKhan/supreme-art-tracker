@@ -14497,22 +14497,24 @@ function clientDeliveriesBreakdown(j, clientPreview) {
     const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
     const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
     // Linked-delivery tag — client thinks in PO/Batch numbers, not internal
-    // E-job ids. Resolve the partner job, show its PO+Batch, and sum cartons.
+    // E-job ids. Read PO/Batch from the partner's delivery entry (entered per
+    // shipment in the modal) rather than the job-level ref/bno default.
     let linkedLine = '';
     if (d.linked_job_id) {
       const partner = resolveJobForClient(d.linked_job_id);
-      const partnerPo  = partner && partner.ref ? esc(partner.ref)  : '';
-      const partnerBno = partner && partner.bno ? esc(partner.bno)  : '';
-      // Find the partner's matching delivery entry (same date, linked back to this job)
-      let partnerCartons = 0;
+      // Find partner's delivery entry that links back to this job on the same date
+      let pd = null;
       if (partner && Array.isArray(partner.deliveries)) {
-        const pd = partner.deliveries.find(x => x && x.linked_job_id === j.id && x.date === d.date);
-        if (pd) partnerCartons = parseFloat(String(pd.cartons || '').replace(/[^0-9.]/g, '')) || 0;
+        pd = partner.deliveries.find(x => x && String(x.linked_job_id) === String(j.id) && x.date === d.date);
       }
-      const thisCartons  = parseFloat(String(d.cartons || '').replace(/[^0-9.]/g, '')) || 0;
-      const totalCartons = thisCartons + partnerCartons;
-      const partnerRef = [partnerPo && ('PO ' + partnerPo), partnerBno && ('Batch ' + partnerBno)].filter(Boolean).join(' · ');
-      linkedLine = `<div style="color:#7c3aed;font-size:11px;font-weight:600;margin-top:1px;">&#128279; Combined shipment${partnerRef ? ' with ' + partnerRef : ''}${totalCartons ? ' &mdash; ' + totalCartons.toLocaleString() + ' cartons total' : ''}</div>`;
+      // PO/Batch: delivery-entry values first, fall back to job-level ref/bno
+      const partnerPo  = (pd && pd.po_no)   ? esc(pd.po_no)   : (partner && partner.ref ? esc(partner.ref)  : '');
+      const partnerBno = (pd && pd.batch_no) ? esc(pd.batch_no): (partner && partner.bno ? esc(partner.bno)  : '');
+      const partnerCartons = pd ? (parseFloat(String(pd.cartons || '').replace(/[^0-9.]/g, '')) || 0) : 0;
+      const thisCartons    = parseFloat(String(d.cartons || '').replace(/[^0-9.]/g, '')) || 0;
+      const totalCartons   = thisCartons + partnerCartons;
+      const partnerRef = [partnerPo && ('PO ' + partnerPo), partnerBno && ('Batch ' + partnerBno)].filter(Boolean).join(' \xb7 ');
+      linkedLine = `<div style="color:#7c3aed;font-size:11px;font-weight:600;margin-top:1px;">&#128279; Combined shipment${partnerRef ? ' with ' + partnerRef : ''}${totalCartons ? ' — ' + totalCartons.toLocaleString() + ' cartons total' : ''}</div>`;
     }
     return `<div style="padding:2px 0;">
       <div style="display:flex;justify-content:space-between;gap:8px;">
@@ -14676,7 +14678,7 @@ function openDeliverLinkedModal(jobId) {
     <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">One challan / invoice, both jobs. Enter total cartons — they split automatically by ready qty (or unit carton qty).</div>
     <div style="margin-bottom:14px;">
       <label class="form-label" style="font-weight:700;font-size:13px;">Total Cartons (both jobs) *</label>
-      <input type="number" id="dl-total" min="1" step="any" placeholder="e.g. 5000"
+      <input type="number" id="dl-total" min="1" step="any"
         style="width:100%;max-width:220px;font-size:16px;font-weight:700;border:2px solid #7c3aed;border-radius:6px;padding:6px 10px;"
         oninput="var t=parseFloat(this.value)||0,a=t?Math.round(t*${wA}/${wT}):0,b=t?t-a:0;var ea=document.getElementById('dl-a-cartons'),eb=document.getElementById('dl-b-cartons');if(ea)ea.value=t?a:'';if(eb)eb.value=t?b:'';">
     </div>
