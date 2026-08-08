@@ -14815,52 +14815,82 @@ function groupStats(groupJobs) {
   return { ready, inProcess, delivered };
 }
 
-// ── Group Tile — shared body used by both Track (card) and Jobs (compact)
-// views. Same visual shape as a normal job tile, minus the job #ID and
-// the stages ribbon. Aggregate Ready / In-Process cartons show as
-// prominent green/blue stat tiles. Actions: Edit/View (opens the latest
-// job), Duplicate (creates the next job auto-tagged to the group),
-// View Jobs (opens a modal that lists every member as a full job tile).
-function groupTileHtml(groupName, groupJobs) {
-  if (!groupJobs.length) return '';
-  const stats = groupStats(groupJobs);
-  const sorted = [...groupJobs].sort((a, b) => b.id - a.id);
-  const repr = sorted.find(j => !isDone(j)) || sorted[0];
-  const clientName = repr ? esc(repr.client || '') : '';
-  const productName = repr ? esc(repr.name || '') : '';
-  const n = groupJobs.length;
+// ── Stock Group tile ─────────────────────────────────────────────────
+// The group tile is a normal job tile rendered from the *representative*
+// job — the same renderer produces the same stages, ribbon, animation,
+// facts row, and (in Track view) machine SVG. Only the header id and
+// the actions column are swapped so the tile reads as an aggregate:
+//   - #ID  →  purple GROUP badge with the group name
+//   - Aggregate READY / IN PROCESS / DELIVERED chips added alongside
+//   - Actions row →  Edit / View, Duplicate, View Jobs, Deliver
+//
+// Representative job (whose stage/animation the tile shows):
+//   oldest job that is still in production (stage < 6, not delivered).
+//   Once that job reaches Ready to Deliver, the next-oldest in-progress
+//   job takes over. Falls back to the newest job when all members are
+//   Ready/Delivered.
+function groupRepresentative(groupJobs) {
+  const byOldest = [...groupJobs].sort((a, b) => a.id - b.id);
+  const inProgress = byOldest.find(j => !isDone(j) && (j.stage_index || 0) < 6);
+  if (inProgress) return inProgress;
+  return byOldest[byOldest.length - 1] || byOldest[0];
+}
+
+// Group badges — replace the #ID span in a normal tile header.
+function groupBadgesHtml(groupName, stats) {
+  const g = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;">&#128230; GROUP &middot; ${esc(groupName)}</span>`;
+  const r = stats.ready > 0     ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : '';
+  const p = stats.inProcess > 0 ? ` <span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : '';
+  const d = stats.delivered > 0 ? ` <span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">DELIVERED - ${stats.delivered.toLocaleString()}</span>` : '';
+  return g + r + p + d;
+}
+
+// Group actions — replace the actions block in a normal tile.
+// containerClass matches what the underlying renderer uses:
+//   compact row  →  "job-actions"
+//   card / Track →  "tile-actions"
+function groupActionsHtml(groupName, reprId, count, hasReady, containerClass) {
   const gName = jsStr(groupName);
-  const reprId = repr ? repr.id : 0;
-  const hasReady = stats.ready > 0;
-  return `
-  <div class="job-card group-card p-normal">
-    <div class="job-top">
-      <div class="job-meta">
-        <div class="job-id-row">
-          <span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;">&#128230; GROUP &middot; ${esc(groupName)}</span>
-          ${hasReady ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : ''}
-          ${stats.inProcess > 0 ? `<span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : ''}
-          ${stats.delivered > 0 ? `<span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">DELIVERED - ${stats.delivered.toLocaleString()}</span>` : ''}
-        </div>
-        <div class="job-name">${productName}</div>
-        <div class="job-sub">${clientName}${clientName ? ' &middot; ' : ''}${n} job${n===1?'':'s'} in group</div>
-        ${!stats.ready && !stats.inProcess && !stats.delivered ? `<div style="color:var(--text2);font-size:12px;margin-top:6px;">No active stock</div>` : ''}
-      </div>
-      <div class="job-right">
-        <div class="job-actions">
-          <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the latest job in this group">Edit / View</button>
-          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})" title="Duplicate the latest job and auto-tag it to this group">&#128203; Duplicate</button>` : ''}
-          <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group with full controls">&#128194; View Jobs (${n})</button>
-          ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})" title="FIFO delivery — oldest job ships first">&#128230; Deliver from Group</button>` : ''}
-        </div>
-      </div>
-    </div>
+  return `<div class="${containerClass}">
+    <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>
+    ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})" title="Duplicate the latest job and auto-tag it to this group">&#128203; Duplicate</button>` : ''}
+    <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group">&#128194; View Jobs (${count})</button>
+    ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})" title="FIFO delivery — oldest job ships first">&#128230; Deliver from Group</button>` : ''}
   </div>`;
 }
-// Both renderers use the same body so Track and Jobs views look identical
-// (that's what the user asked for: one tile shape everywhere).
-function renderGroupTile(groupName, groupJobs) { return groupTileHtml(groupName, groupJobs); }
-function renderGroupTileCompact(groupName, groupJobs) { return groupTileHtml(groupName, groupJobs); }
+
+// Track (card) view — render the representative job as a full card,
+// then swap header id + tile-actions for the group equivalents.
+function renderGroupTile(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
+  const stats = groupStats(groupJobs);
+  const repr = groupRepresentative(groupJobs);
+  const badges = groupBadgesHtml(groupName, stats);
+  const actions = groupActionsHtml(groupName, repr.id, groupJobs.length, stats.ready > 0, 'tile-actions');
+  return renderJobCard(repr)
+    // Replace `<span class="job-id">#ID</span>` with the GROUP + aggregate badges
+    .replace(`<span class="job-id">#${repr.id}</span>`, badges)
+    // Replace the whole tile-actions block — it contains the ⋯ <details>
+    // menu with a nested <div class="job-more-menu">, so the closing is
+    // `</details>` immediately followed by `</div>`.
+    .replace(/<div class="tile-actions">[\s\S]*?<\/details>\s*<\/div>/, actions)
+    // Add the purple top border used to mark group tiles
+    .replace('class="job-tile ', 'class="job-tile group-card ');
+}
+
+// Compact (Jobs) view — same idea, different container classes.
+function renderGroupTileCompact(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
+  const stats = groupStats(groupJobs);
+  const repr = groupRepresentative(groupJobs);
+  const badges = groupBadgesHtml(groupName, stats);
+  const actions = groupActionsHtml(groupName, repr.id, groupJobs.length, stats.ready > 0, 'job-actions');
+  return renderJobRowCompact(repr)
+    .replace(`<span class="job-id">#${repr.id}</span>`, badges)
+    // Compact .job-actions only contains <button> children — no nested divs.
+    .replace(/<div class="job-actions">[\s\S]*?<\/div>/, actions)
+    .replace('class="job-card ', 'class="job-card group-card ');
+}
 
 // ── View All Jobs modal ───────────────────────────────────────────────
 // Renders every member job as a full job tile — identical to what the
