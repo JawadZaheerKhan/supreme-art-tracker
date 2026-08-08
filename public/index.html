@@ -14860,7 +14860,10 @@ function groupActionsHtml(groupName, reprId, count, hasReady, containerClass) {
 }
 
 // Track (card) view — render the representative job as a full card,
-// then swap header id + tile-actions for the group equivalents.
+// then swap the whole tile-head (drops the per-job stage badge that
+// was color-clashing with the purple GROUP chip) and the tile-actions
+// (drops the ⋯ menu). Everything else — name, machine SVG animation,
+// stages ribbon, facts, side panel — stays exactly as the normal tile.
 function renderGroupTile(groupName, groupJobs) {
   if (!groupJobs.length) return '';
   const stats = groupStats(groupJobs);
@@ -14868,13 +14871,14 @@ function renderGroupTile(groupName, groupJobs) {
   const badges = groupBadgesHtml(groupName, stats);
   const actions = groupActionsHtml(groupName, repr.id, groupJobs.length, stats.ready > 0, 'tile-actions');
   return renderJobCard(repr)
-    // Replace `<span class="job-id">#ID</span>` with the GROUP + aggregate badges
-    .replace(`<span class="job-id">#${repr.id}</span>`, badges)
-    // Replace the whole tile-actions block — it contains the ⋯ <details>
-    // menu with a nested <div class="job-more-menu">, so the closing is
-    // `</details>` immediately followed by `</div>`.
+    // .tile-head content is a flat sequence of spans / small labels — no
+    // nested divs — so a lazy match to the first </div> is safe here.
+    .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
+    // .tile-actions wraps a <details class="job-more"> whose inner
+    // <div class="job-more-menu"> has its own </div>, so match the block
+    // by anchoring on </details></div>.
     .replace(/<div class="tile-actions">[\s\S]*?<\/details>\s*<\/div>/, actions)
-    // Add the purple top border used to mark group tiles
+    // Purple top border marker
     .replace('class="job-tile ', 'class="job-tile group-card ');
 }
 
@@ -14886,8 +14890,9 @@ function renderGroupTileCompact(groupName, groupJobs) {
   const badges = groupBadgesHtml(groupName, stats);
   const actions = groupActionsHtml(groupName, repr.id, groupJobs.length, stats.ready > 0, 'job-actions');
   return renderJobRowCompact(repr)
-    .replace(`<span class="job-id">#${repr.id}</span>`, badges)
-    // Compact .job-actions only contains <button> children — no nested divs.
+    // .job-id-row content is flat spans only.
+    .replace(/<div class="job-id-row">[\s\S]*?<\/div>/, `<div class="job-id-row">${badges}</div>`)
+    // .job-actions contains only <button> children.
     .replace(/<div class="job-actions">[\s\S]*?<\/div>/, actions)
     .replace('class="job-card ', 'class="job-card group-card ');
 }
@@ -15175,8 +15180,23 @@ function createNextJobInGroup(groupName, templateJobId) {
 }
 
 // ── Client portal group tile ──────────────────────────────────────────
+// Same trick as the admin group tile: render the representative job as
+// a client-preview card, then swap the header id for group badges and
+// the repr job's shipments block for aggregate group shipments. This
+// gives us the same .job-tile.is-client-preview shape (wrapping stage
+// pipeline, correct card size) as any other client tile.
 function renderClientGroupTile(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
   const stats = groupStats(groupJobs);
+  const repr = groupRepresentative(groupJobs);
+  const gName = jsStr(groupName);
+
+  // Group header badges — replace the E-{id} span at the top.
+  const headerHtml = groupBadgesHtml(groupName, stats)
+    + ` <button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" style="margin-left:8px;" title="See every job in this group">&#128194; View Jobs (${groupJobs.length})</button>`;
+
+  // Aggregate shipments across every member — replaces clientDeliveriesBreakdown
+  // for the repr job, which would otherwise show only that job's own history.
   const totalBooked = groupJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.]/g,''))||0), 0);
   const allDeliveries = [];
   for (const j of groupJobs) {
@@ -15184,7 +15204,7 @@ function renderClientGroupTile(groupName, groupJobs) {
       if (d) allDeliveries.push(d);
     }
   }
-  const sorted = [...allDeliveries].sort((a, b) => (b.date > a.date ? 1 : -1));
+  const sortedShips = [...allDeliveries].sort((a, b) => (b.date > a.date ? 1 : -1));
   const VISIBLE = 3;
   const renderShipRow = d => {
     const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.]/g,'')).toLocaleString() + ' cartons' : '';
@@ -15192,61 +15212,45 @@ function renderClientGroupTile(groupName, groupJobs) {
     const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
     return `<div style="padding:2px 0;"><div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--text2);">${dt}${refBits ? ' <span style="color:var(--text3);">· ' + refBits + '</span>' : ''}</span><span style="font-weight:600;">${ct}</span></div></div>`;
   };
-  const visRows = sorted.slice(0, VISIBLE).map(renderShipRow).join('');
-  const hidRows = sorted.slice(VISIBLE).map(renderShipRow).join('');
+  const visRows = sortedShips.slice(0, VISIBLE).map(renderShipRow).join('');
+  const hidRows = sortedShips.slice(VISIBLE).map(renderShipRow).join('');
   const moreId = `cg-more-${String(groupName).replace(/[^a-z0-9]/gi,'_')}`;
-  const shipHtml = sorted.length ? `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
-    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments</div>
+  const groupShipHtml = sortedShips.length ? `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments (all jobs in group)</div>
     ${visRows}
-    ${hidRows ? `<div id="${esc(moreId)}" style="display:none;">${hidRows}</div><div style="text-align:center;margin-top:4px;"><button type="button" onclick="const m=document.getElementById('${esc(moreId)}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sorted.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sorted.length})</button></div>` : ''}
+    ${hidRows ? `<div id="${esc(moreId)}" style="display:none;">${hidRows}</div><div style="text-align:center;margin-top:4px;"><button type="button" onclick="const m=document.getElementById('${esc(moreId)}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sortedShips.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sortedShips.length})</button></div>` : ''}
     <div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;"><span>Total shipped</span><span>${stats.delivered.toLocaleString()}${totalBooked ? ' / ' + totalBooked.toLocaleString() + ' cartons' : ' cartons'}</span></div>
   </div>` : '';
-  // Stage pipeline from the most-active non-delivered job
-  const activeJob = groupJobs.filter(j => !isDone(j)).sort((a, b) => (b.stage_index||0) - (a.stage_index||0))[0];
-  const pipeHtml = activeJob ? (() => {
-    const si = activeJob.stage_index || 0;
-    const done = isDone(activeJob);
-    const pending__ = activeJob.issuance_status === 'pending';
-    return STAGES.map((s, i) => {
-      let cls = 's-pending';
-      const st = activeJob.stages?.[i]?.status;
-      if (st === 'done') cls = 's-done';
-      else if (i === si && !done && !(pending__ && i === 1)) cls = 's-active';
-      if (i === STAGES.length - 1 && isPartialDelivery(activeJob)) cls = 's-partial';
-      const readyIdx = STAGES.indexOf('Ready to Deliver');
-      if (i === readyIdx && si === 6 && cls === 's-active') cls = 's-done';
-      const pill = `<span class="stage-pill ${cls}" title="${esc(s)}">${SHORT[i]}</span>`;
-      if (i === 1) {
-        const psCls = (activeJob.issuance_status === 'issued' || si > 1) ? 's-done' : (pending__ ? 's-active' : 's-pending');
-        return `<span class="arrow">›</span><span class="stage-pill ${psCls}" title="Stock">Stock</span><span class="arrow">›</span>${pill}`;
-      }
-      return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
-    }).join('');
-  })() : '';
-  const repr = groupJobs.slice().sort((a, b) => b.id - a.id).find(j => !isDone(j)) || groupJobs[0];
-  const productName = repr ? esc(repr.name || '') : '';
-  const gName = jsStr(groupName);
-  return `<div class="job-card group-card p-normal">
-    <div class="job-top">
-      <div class="job-meta">
-        <div class="job-id-row">
-          <span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;">&#128230; GROUP &middot; ${esc(groupName)}</span>
-          ${stats.ready > 0 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : ''}
-          ${stats.inProcess > 0 ? `<span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : ''}
-          ${stats.delivered > 0 ? `<span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">DELIVERED - ${stats.delivered.toLocaleString()}</span>` : ''}
-        </div>
-        <div class="job-name">${productName}</div>
-        <div class="job-sub">${groupJobs.length} job${groupJobs.length===1?'':'s'} in group</div>
-        ${pipeHtml ? `<div class="pipeline" style="justify-content:center;margin-top:8px;">${pipeHtml}</div>` : ''}
-        ${shipHtml}
-      </div>
-      <div class="job-right">
-        <div class="job-actions">
-          <button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group">&#128194; View Jobs (${groupJobs.length})</button>
-        </div>
-      </div>
-    </div>
-  </div>`;
+
+  let html = renderJobCard(repr, { clientPreview: true });
+
+  // 1. Replace the E-{id} span at the top of the client tile with group
+  //    badges + View Jobs button.
+  html = html.replace(/<span class="job-id" title="Job Card No\."[^>]*>E-\d+<\/span>/, headerHtml);
+
+  // 2. Blank the .tile-head badges — the aggregate info is in the header
+  //    above already, and the repr job's stage badge would be misleading
+  //    for a group aggregate.
+  html = html.replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head"></div>`);
+
+  // 3. Replace the repr job's shipments block with the aggregate one.
+  //    clientDeliveriesBreakdown emits a distinctive outer div; if it
+  //    ran, cut from its start to just before the tile-closing </div>
+  //    (in clientPreview, the shipments block is the last thing in the
+  //    tile). Otherwise, insert the aggregate block just before the
+  //    tile close.
+  const shipStart = html.indexOf('<div style="margin-top:6px;padding:8px 10px;background:#fff8ed');
+  const lastClose = html.lastIndexOf('</div>');
+  if (shipStart !== -1 && shipStart < lastClose) {
+    html = html.slice(0, shipStart) + groupShipHtml + '\n  </div>';
+  } else if (groupShipHtml) {
+    html = html.slice(0, lastClose) + groupShipHtml + '\n  </div>';
+  }
+
+  // 4. Purple top-border marker for the group.
+  html = html.replace('class="job-tile ', 'class="job-tile group-card ');
+
+  return html;
 }
 
 // Client-side "View Jobs" — read-only modal showing every member job as
