@@ -659,6 +659,18 @@
   .sc-toggle-idle:hover   { background: #ddd6fe; border-color: #a78bfa; }
   .sc-toggle-active { background: #c4b5fd; color: #4c1d95; border: 1.5px solid #a78bfa; }
   .sc-toggle-active:hover { background: #a78bfa; border-color: #8b5cf6; }
+  /* Create Stock Group toolbar button — same pill shape as the Shade Cards
+     toggle so it feels part of the toolbar, red palette to stand out as
+     a create action. */
+  #create-group-btn {
+    font-weight: 600; font-size: 14px;
+    padding: 8px 16px; border-radius: 7px;
+    font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--red-bg); color: var(--red-text); border: 1.5px solid var(--red-border);
+    transition: background 0.12s, border-color 0.12s;
+  }
+  #create-group-btn:hover { background: #f9d5d5; border-color: #e78888; }
   /* Stock Group tile — purple accent top-border to distinguish from job cards */
   .group-card { border-top: 4px solid #7c3aed !important; }
   .group-stat { display:inline-flex;flex-direction:column;align-items:center;padding:6px 12px;border-radius:8px;min-width:74px;text-align:center;gap:1px; }
@@ -1716,8 +1728,7 @@
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
-    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Stock Group — pick a job and give the group a name"
-            style="background:#dc2626;border-color:#dc2626;color:#fff;font-weight:700;">
+    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Stock Group — pick a job and give the group a name">
       &#128230; Create Stock Group
     </button>
     <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Stock Group">
@@ -4055,6 +4066,7 @@ function renderJobCard(j, opts) {
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
         ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Group</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Group</button>` : ''}
+        ${canWriteJobs() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
@@ -14796,140 +14808,92 @@ function groupStats(groupJobs) {
   return { ready, inProcess, delivered };
 }
 
-// ── Group Tile (card view) ────────────────────────────────────────────
-function renderGroupTile(groupName, groupJobs) {
+// ── Group Tile — shared body used by both Track (card) and Jobs (compact)
+// views. Same visual shape as a normal job tile, minus the job #ID and
+// the stages ribbon. Aggregate Ready / In-Process cartons show as
+// prominent green/blue stat tiles. Actions: Edit/View (opens the latest
+// job), Duplicate (creates the next job auto-tagged to the group),
+// View Jobs (opens a modal that lists every member as a full job tile).
+function groupTileHtml(groupName, groupJobs) {
   if (!groupJobs.length) return '';
   const stats = groupStats(groupJobs);
   const sorted = [...groupJobs].sort((a, b) => b.id - a.id);
   const repr = sorted.find(j => !isDone(j)) || sorted[0];
   const clientName = repr ? esc(repr.client || '') : '';
-  const jobIdList = sorted.map(j => `E-${j.id}`).join(', ');
+  const productName = repr ? esc(repr.name || '') : '';
   const n = groupJobs.length;
   const gName = jsStr(groupName);
-  const reprId = repr ? repr.id : 'null';
+  const reprId = repr ? repr.id : 0;
   const hasReady = stats.ready > 0;
   return `
   <div class="job-card group-card p-normal">
     <div class="job-top">
       <div class="job-meta">
         <div class="job-id-row">
-          <span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;padding:2px 8px;">&#128230; Stock Group</span>
+          <span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;">&#128230; GROUP &middot; ${esc(groupName)}</span>
+          ${hasReady ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : ''}
+          ${stats.inProcess > 0 ? `<span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : ''}
+          ${stats.delivered > 0 ? `<span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">DELIVERED - ${stats.delivered.toLocaleString()}</span>` : ''}
         </div>
-        <div class="job-name" style="color:#5b21b6;">${esc(groupName)}</div>
-        <div class="job-sub">${clientName}${clientName ? ' &middot; ' : ''}${n} job${n===1?'':'s'}: <span style="font-size:11px;color:var(--text2);">${jobIdList}</span></div>
-        <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
-          ${stats.ready > 0 ? `<div class="group-stat" style="background:#dcfce7;border:1px solid #bbf7d0;">
-            <div class="group-stat-label" style="color:#166534;">Ready</div>
-            <div class="group-stat-value" style="color:#166534;">${stats.ready.toLocaleString()}</div>
-            <div style="font-size:9px;color:#166534;">cartons</div>
-          </div>` : ''}
-          ${stats.inProcess > 0 ? `<div class="group-stat" style="background:#dbeafe;border:1px solid #bfdbfe;">
-            <div class="group-stat-label" style="color:#1e40af;">In-Process</div>
-            <div class="group-stat-value" style="color:#1e40af;">${stats.inProcess.toLocaleString()}</div>
-            <div style="font-size:9px;color:#1e40af;">cartons</div>
-          </div>` : ''}
-          ${stats.delivered > 0 ? `<div class="group-stat" style="background:#f3f4f6;border:1px solid #e5e7eb;">
-            <div class="group-stat-label" style="color:var(--text2);">Delivered</div>
-            <div class="group-stat-value" style="color:var(--text);">${stats.delivered.toLocaleString()}</div>
-            <div style="font-size:9px;color:var(--text2);">cartons</div>
-          </div>` : ''}
-          ${!stats.ready && !stats.inProcess && !stats.delivered ? `<div style="color:var(--text2);font-size:12px;padding:6px 0;">No active stock</div>` : ''}
-        </div>
+        <div class="job-name">${productName}</div>
+        <div class="job-sub">${clientName}${clientName ? ' &middot; ' : ''}${n} job${n===1?'':'s'} in group</div>
+        ${!stats.ready && !stats.inProcess && !stats.delivered ? `<div style="color:var(--text2);font-size:12px;margin-top:6px;">No active stock</div>` : ''}
       </div>
       <div class="job-right">
         <div class="job-actions">
-          <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})">&#128203; View All Jobs</button>
-          ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})">&#128230; Deliver from Group</button>` : ''}
-          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})">&#10133; Create Next Job</button>` : ''}
-          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
+          <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the latest job in this group">Edit / View</button>
+          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})" title="Duplicate the latest job and auto-tag it to this group">&#128203; Duplicate</button>` : ''}
+          <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group with full controls">&#128194; View Jobs (${n})</button>
+          ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})" title="FIFO delivery — oldest job ships first">&#128230; Deliver from Group</button>` : ''}
         </div>
       </div>
     </div>
   </div>`;
 }
-
-// ── Group Tile (compact list view) ────────────────────────────────────
-function renderGroupTileCompact(groupName, groupJobs) {
-  if (!groupJobs.length) return '';
-  const stats = groupStats(groupJobs);
-  const sorted = [...groupJobs].sort((a, b) => b.id - a.id);
-  const repr = sorted.find(j => !isDone(j)) || sorted[0];
-  const clientName = repr ? esc(repr.client || '') : '';
-  const n = groupJobs.length;
-  const gName = jsStr(groupName);
-  const reprId = repr ? repr.id : 'null';
-  const hasReady = stats.ready > 0;
-  return `
-  <div class="job-card group-card p-normal">
-    <div class="job-top">
-      <div class="job-meta">
-        <div class="job-id-row" style="flex-wrap:wrap;gap:6px;">
-          <span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;padding:2px 8px;">&#128230; Stock Group</span>
-          <span style="font-weight:700;font-size:14px;">${esc(groupName)}</span>
-          <span style="color:var(--text2);font-size:12px;">${clientName}${clientName ? ' &middot; ' : ''}${n} job${n===1?'':'s'}</span>
-        </div>
-        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:13px;">
-          ${stats.ready > 0 ? `<span style="color:#166534;font-weight:700;">Ready: ${stats.ready.toLocaleString()}</span>` : ''}
-          ${stats.inProcess > 0 ? `<span style="color:#1e40af;font-weight:700;">In-process: ${stats.inProcess.toLocaleString()}</span>` : ''}
-          ${stats.delivered > 0 ? `<span style="color:var(--text2);">Delivered: ${stats.delivered.toLocaleString()}</span>` : ''}
-          ${!stats.ready && !stats.inProcess && !stats.delivered ? `<span style="color:var(--text2);">No active stock</span>` : ''}
-        </div>
-      </div>
-      <div class="job-right">
-        <div class="job-actions">
-          <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})">&#128203; View All</button>
-          ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})">&#128230; Deliver</button>` : ''}
-          ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${reprId})">&#10133; Next Job</button>` : ''}
-        </div>
-      </div>
-    </div>
-  </div>`;
-}
+// Both renderers use the same body so Track and Jobs views look identical
+// (that's what the user asked for: one tile shape everywhere).
+function renderGroupTile(groupName, groupJobs) { return groupTileHtml(groupName, groupJobs); }
+function renderGroupTileCompact(groupName, groupJobs) { return groupTileHtml(groupName, groupJobs); }
 
 // ── View All Jobs modal ───────────────────────────────────────────────
+// Renders every member job as a full job tile — identical to what the
+// user sees in the flat Jobs list (stages ribbon, Edit/View, History,
+// Duplicate, Link, Print, Block, Delete, Process-to-stage buttons, etc.).
+// A per-tile "Remove from Group" chip sits above each card so users can
+// take a job out of the group without leaving the modal.
 function openGroupJobsModal(groupName) {
   const groupJobs = jobs.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
   if (!groupJobs.length) { notify('No jobs found for this group'); return; }
   const stats = groupStats(groupJobs);
   const gName = jsStr(groupName);
-  const rows = groupJobs.map(j => {
-    const si = j.stage_index || 0;
-    const done = isDone(j);
-    const stageName = done ? 'Delivered' : (STAGES[si] || `Stage ${si+1}`);
-    const ready = si >= 6 && !done ? readyCartonsTotal(j) : 0;
-    const delivered = totalDeliveredCartons(j);
-    const booked = parseFloat(String(j.qty||'').replace(/[^0-9.]/g,''))||0;
-    const statusBadge = done
-      ? `<span style="background:#e5e7eb;color:var(--text2);font-size:10px;padding:1px 5px;border-radius:4px;">Delivered</span>`
-      : si === 6
-        ? `<span style="background:#dcfce7;color:#166534;font-size:10px;padding:1px 5px;border-radius:4px;">Ready</span>`
-        : si >= 1
-          ? `<span style="background:#dbeafe;color:#1e40af;font-size:10px;padding:1px 5px;border-radius:4px;">${esc(stageName)}</span>`
-          : `<span style="background:#f3f4f6;color:var(--text2);font-size:10px;padding:1px 5px;border-radius:4px;">New</span>`;
-    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">
-      <div style="flex:1;min-width:0;">
-        <div style="font-weight:700;font-size:13px;">E-${j.id} &middot; ${esc(j.name)}</div>
-        <div style="font-size:11px;color:var(--text2);margin-top:2px;">${statusBadge}
-          ${ready > 0 ? ` &nbsp; Ready: <b>${ready.toLocaleString()}</b>` : ''}
-          ${delivered > 0 ? ` &nbsp; Delivered: <b>${delivered.toLocaleString()}</b>${booked ? '/'+booked.toLocaleString() : ''}` : ''}
+  const useCards = (typeof jobsView !== 'undefined' && jobsView === 'cards');
+  const tiles = groupJobs.map(j => {
+    const removeChip = canWriteJobs()
+      ? `<div style="display:flex;justify-content:flex-end;margin-bottom:-4px;">
+          <button class="btn btn-sm btn-danger ceo-hide" onclick="removeJobFromGroup(${j.id},${gName})" title="Take this job out of the group (job itself is not deleted)">&minus; Remove from Group</button>
+         </div>`
+      : '';
+    return `<div style="margin-bottom:12px;">${removeChip}${renderJobCard(j)}</div>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:1100px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex:0 0 auto;">
+      <div>
+        <h2 style="margin:0 0 4px;">&#128230; ${esc(groupName)}</h2>
+        <div style="font-size:12px;color:var(--text2);">
+          ${groupJobs.length} job${groupJobs.length===1?'':'s'}
+          ${stats.ready > 0 ? ` &middot; <span style="color:#166534;font-weight:600;">Ready: ${stats.ready.toLocaleString()}</span>` : ''}
+          ${stats.inProcess > 0 ? ` &middot; <span style="color:#1e40af;font-weight:600;">In-process: ${stats.inProcess.toLocaleString()}</span>` : ''}
+          ${stats.delivered > 0 ? ` &middot; <span style="color:var(--text2);">Delivered: ${stats.delivered.toLocaleString()}</span>` : ''}
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0;">
-        <button class="btn btn-sm" onclick="closeModal();setTimeout(()=>openEdit(${j.id}),50)">View</button>
-        ${canWriteJobs() ? `<button class="btn btn-sm btn-danger ceo-hide" onclick="removeJobFromGroup(${j.id},${gName})">Remove</button>` : ''}
+        ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
+        <button class="btn btn-sm" onclick="closeModal()">Close</button>
       </div>
-    </div>`;
-  }).join('');
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:540px;">
-    <h2 style="margin:0 0 4px;">&#128230; ${esc(groupName)}</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
-      ${stats.ready > 0 ? `<span style="color:#166534;font-weight:600;">Ready: ${stats.ready.toLocaleString()}</span> &nbsp;` : ''}
-      ${stats.inProcess > 0 ? `<span style="color:#1e40af;font-weight:600;">In-process: ${stats.inProcess.toLocaleString()}</span> &nbsp;` : ''}
-      ${stats.delivered > 0 ? `<span style="color:var(--text2);">Delivered: ${stats.delivered.toLocaleString()}</span>` : ''}
     </div>
-    <div style="max-height:55vh;overflow-y:auto;">${rows}</div>
-    ${canWriteJobs() ? `<div style="margin-top:12px;"><button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job to Group</button></div>` : ''}
-    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+    <div class="${useCards ? 'jobs-list--cards' : ''}" style="flex:1 1 auto;overflow-y:auto;padding-right:6px;">
+      ${tiles}
+    </div>
   </div>`);
 }
 
@@ -15217,23 +15181,52 @@ function renderClientGroupTile(groupName, groupJobs) {
       return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
     }).join('');
   })() : '';
-  const factsHtml = [
-    stats.ready > 0 ? `<span style="color:#166534;font-weight:700;">&#128230; Ready: ${stats.ready.toLocaleString()} cartons</span>` : '',
-    stats.inProcess > 0 ? `<span style="color:#1e40af;font-weight:600;">In-process: ${stats.inProcess.toLocaleString()} cartons</span>` : '',
-  ].filter(Boolean).join(' &nbsp; ');
+  const repr = groupJobs.slice().sort((a, b) => b.id - a.id).find(j => !isDone(j)) || groupJobs[0];
+  const productName = repr ? esc(repr.name || '') : '';
+  const gName = jsStr(groupName);
   return `<div class="job-card group-card p-normal">
     <div class="job-top">
       <div class="job-meta">
         <div class="job-id-row">
-          <span class="badge" style="background:#7c3aed;color:#fff;font-size:11px;padding:2px 8px;">&#128230; Stock Group</span>
+          <span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;">&#128230; GROUP &middot; ${esc(groupName)}</span>
+          ${stats.ready > 0 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : ''}
+          ${stats.inProcess > 0 ? `<span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : ''}
+          ${stats.delivered > 0 ? `<span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">DELIVERED - ${stats.delivered.toLocaleString()}</span>` : ''}
         </div>
-        <div class="job-name" style="color:#5b21b6;">${esc(groupName)}</div>
-        ${factsHtml ? `<div class="tile-facts" style="margin-top:6px;">${factsHtml}</div>` : ''}
+        <div class="job-name">${productName}</div>
+        <div class="job-sub">${groupJobs.length} job${groupJobs.length===1?'':'s'} in group</div>
         ${pipeHtml ? `<div class="pipeline" style="justify-content:center;margin-top:8px;">${pipeHtml}</div>` : ''}
         ${shipHtml}
       </div>
+      <div class="job-right">
+        <div class="job-actions">
+          <button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group">&#128194; View Jobs (${groupJobs.length})</button>
+        </div>
+      </div>
     </div>
   </div>`;
+}
+
+// Client-side "View Jobs" — read-only modal showing every member job as
+// a clientPreview job card (no admin controls). Uses the SAME renderer
+// the client portal already uses so the visual is 1:1.
+function openClientGroupJobsModal(groupName) {
+  const src = (typeof clientViewJobs !== 'undefined' && Array.isArray(clientViewJobs) && clientViewJobs.length)
+    ? clientViewJobs
+    : (typeof clientPortalJobs !== 'undefined' && Array.isArray(clientPortalJobs) ? clientPortalJobs : []);
+  const groupJobs = src.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
+  if (!groupJobs.length) { notify('No jobs found for this group'); return; }
+  const tiles = groupJobs.map(j => `<div style="margin-bottom:12px;">${renderJobCard(j, { clientPreview: true })}</div>`).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:1100px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex:0 0 auto;">
+      <div>
+        <h2 style="margin:0 0 4px;">&#128230; ${esc(groupName)}</h2>
+        <div style="font-size:12px;color:var(--text2);">${groupJobs.length} job${groupJobs.length===1?'':'s'} in this group</div>
+      </div>
+      <button class="btn btn-sm" onclick="closeModal()">Close</button>
+    </div>
+    <div class="jobs-list--cards" style="flex:1 1 auto;overflow-y:auto;padding-right:6px;">${tiles}</div>
+  </div>`);
 }
 
 function getFormData() {
