@@ -280,6 +280,12 @@ async function initDb() {
     // has any entries; jobs without any deliveries still use the legacy
     // scalar delqty column so historical data isn't disturbed.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deliveries JSONB NOT NULL DEFAULT '[]'::jsonb`;
+    // Linked Jobs — pairwise, one-off pairing for orders printed together
+    // but placed at different times (different PO/qty). Symmetric: linking
+    // A<->B sets both rows' linked_job_id to each other. Used to run one
+    // joint delivery (1 challan, both jobs' own qty) and to merge their
+    // rows in the Jobs Report.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS linked_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL`;
     // Backfill: for any already-Delivered job (stage 7) that has a delqty
     // but no ledger entry yet, seed a single ledger entry so the mini table
     // in the job card and the client view are not blank for old jobs. In
@@ -2446,6 +2452,11 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       issuance_status: j.issuance_status || 'issued',
       client_visible: !!j.client_visible,
       is_shade_card: !!j.is_shade_card,
+      // Linked Jobs — lets the client see from the start that this order
+      // is tied to another one (same product, printed together). Only the
+      // id rides through; the client tile resolves it to the OTHER job's
+      // PO number, which is what the client actually recognises.
+      linked_job_id: j.linked_job_id || null,
       // Per-shipment breakdown for the client tile. Operator identity is
       // stripped (clients don't need to see who recorded it) but cartons,
       // date, and any notes ride through so the client sees the same
@@ -2456,6 +2467,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
         notes:    d && d.notes    || '',
         po_no:    d && d.po_no    || '',
         batch_no: d && d.batch_no || '',
+        linked_job_id: d && d.linked_job_id || null,
       })),
       // Slim particulars slice — only the rows the client tile needs:
       //   pasted_cartons_qty       → partial-ready detection + fallback
@@ -3475,6 +3487,70 @@ function sumDeliveryCartons(arr) {
   }, 0);
 }
 
+// Delivery eligibility — same rule everywhere a delivery can be recorded
+// (single-job endpoint AND Linked-Jobs joint delivery): from Ready to
+// Deliver (6) onward, or from Pasting (5) once the operator has recorded
+// some pasted cartons (partial-ready). Returns an error string, or null
+// when eligible.
+function deliveryEligibilityError(job) {
+  const curStage = job.stage_index || 0;
+  if (curStage < 5) {
+    return `Job E-${job.id} is at stage "${STAGES[curStage]||'?'}" — reach "Ready to Deliver" before recording a delivery.`;
+  }
+  if (curStage === 5) {
+    const pastedRow = (job.particulars && job.particulars.pasted_cartons_qty) || null;
+    const pastedFromEntries = pastedRow && Array.isArray(pastedRow.entries)
+      ? pastedRow.entries.reduce((a, e) => a + (parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, '')) || 0), 0)
+      : 0;
+    const pastedFromQty = pastedRow
+      ? String(pastedRow.quantity || '').split('|').reduce((a, s) => a + (parseFloat(String(s).replace(/[^0-9.\-]/g, '')) || 0), 0)
+      : 0;
+    const pastedReady = pastedFromEntries || pastedFromQty;
+    if (pastedReady <= 0) {
+      return `Job E-${job.id} is at Pasting with no cartons recorded — record some pasted cartons on the station first.`;
+    }
+  }
+  return null;
+}
+
+// Builds the { deliveries, delqty, stage_index, stages, log } fields to
+// persist for one delivery entry on one job — shared by the single-job
+// delivery endpoint and the Linked-Jobs joint delivery endpoint so the
+// two never drift out of sync (auto-advance-to-Delivered logic identical
+// in both places).
+function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, linkedJobId, byEmail }) {
+  const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const priorTotal = sumDeliveryCartons(job.deliveries);
+  const nextTotal  = priorTotal + cartonsN;
+  const entry = {
+    cartons: String(cartonsN),
+    date, notes,
+    po_no: poNo,
+    batch_no: batchNo,
+    by: byEmail || 'unknown',
+    at: new Date().toISOString(),
+    linked_job_id: linkedJobId || null,
+  };
+  const deliveries = [...(Array.isArray(job.deliveries) ? job.deliveries : []), entry];
+  const nowIso = new Date().toISOString();
+  const time   = businessStamp();
+  const by     = byEmail || 'unknown';
+  let stage_index = job.stage_index || 0;
+  let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+  let log = Array.isArray(job.log) ? [...job.log] : [];
+  log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+    notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
+    by: `${by} (${STAGES[stage_index] || '?'})`, time });
+  if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
+    // Mark 6 done, move to 7.
+    stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+    stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
+    stage_index = 7;
+    log.push({ stage: STAGES[7], status: 'done', notes: `All ${bookedQty.toLocaleString()} pcs delivered`, by: `${by} (${STAGES[7]})`, time });
+  }
+  return { deliveries, delqty: String(nextTotal), stage_index, stages, log, entry, nextTotal, bookedQty };
+}
+
 // CREATE a partial delivery. Input is CARTONS — the only quantity unit
 // used for deliveries in this shop (1 carton == 1 piece per the owner).
 // delqty stays in sync as the running sum of cartons so the tile's
@@ -3496,65 +3572,18 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    // Delivery is allowed from Ready to Deliver (6) onward, AND from
-    // Pasting (5) when the operator has recorded some pasted cartons
-    // (partial-ready). Anything earlier has no finished cartons to
-    // ship yet.
-    const curStage = job.stage_index || 0;
-    if (curStage < 5) {
-      return res.status(400).json({ error: `Job is at stage "${STAGES[curStage]||'?'}" — reach "Ready to Deliver" before recording a delivery.` });
-    }
-    if (curStage === 5) {
-      const pastedRow = (job.particulars && job.particulars.pasted_cartons_qty) || null;
-      const pastedFromEntries = pastedRow && Array.isArray(pastedRow.entries)
-        ? pastedRow.entries.reduce((a, e) => a + (parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, '')) || 0), 0)
-        : 0;
-      const pastedFromQty = pastedRow
-        ? String(pastedRow.quantity || '').split('|').reduce((a, s) => a + (parseFloat(String(s).replace(/[^0-9.\-]/g, '')) || 0), 0)
-        : 0;
-      const pastedReady = pastedFromEntries || pastedFromQty;
-      if (pastedReady <= 0) {
-        return res.status(400).json({ error: `Job is at Pasting with no cartons recorded — record some pasted cartons on the station first.` });
-      }
-    }
-    const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
-    const priorTotal = sumDeliveryCartons(job.deliveries);
-    const nextTotal  = priorTotal + cartonsN;
+    const eligErr = deliveryEligibilityError(job);
+    if (eligErr) return res.status(400).json({ error: eligErr });
     // No cap against booked qty — the shop routinely ships slightly more
     // or less than the P.O. asked for (yield, over-run, customer top-up
     // request). Recording reality is the priority; the tile just shows
     // the running total against the booked qty for context.
-    const entry = {
-      cartons: String(cartonsN),
-      date, notes,
-      po_no: poNo,
-      batch_no: batchNo,
-      by: req.user?.email || 'unknown',
-      at: new Date().toISOString(),
-    };
-    const deliveries = [...(Array.isArray(job.deliveries) ? job.deliveries : []), entry];
-    // Auto-advance to Delivered when the total meets the booked qty. If the
-    // booked qty was never set, stay put — admin can advance manually.
-    const nowIso = new Date().toISOString();
-    const time   = businessStamp();
-    const by     = req.user?.email || 'unknown';
-    let stage_index = job.stage_index || 0;
-    let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
-    let log = Array.isArray(job.log) ? [...job.log] : [];
-    log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-      notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
-      by: `${by} (${STAGES[stage_index] || '?'})`, time });
-    if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
-      // Mark 6 done, move to 7.
-      stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
-      stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
-      stage_index = 7;
-      log.push({ stage: STAGES[7], status: 'done', notes: `All ${bookedQty.toLocaleString()} pcs delivered`, by: `${by} (${STAGES[7]})`, time });
-    }
+    const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
+      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, byEmail: req.user?.email });
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
-             delqty      = ${String(nextTotal)},
+             delqty      = ${delqty},
              stage_index = ${stage_index},
              stages      = ${JSON.stringify(stages)},
              log         = ${JSON.stringify(log)}
@@ -3569,6 +3598,135 @@ app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
       metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
     });
     res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Linked Jobs (pairwise) ────────────────────────────────────────
+// Two job cards for the same product placed at different times, printed
+// together to save cost. Linking is symmetric (A<->B) and one-off — a
+// job can only be linked to ONE partner at a time. Purpose: run one
+// joint delivery (1 challan, each job's own qty) and merge their rows in
+// the Jobs Report.
+app.post('/api/jobs/:id/link', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const targetId = parseInt(req.body?.target_id, 10);
+    if (!Number.isFinite(targetId) || targetId === id) {
+      return res.status(400).json({ error: 'Pick a different job to link with.' });
+    }
+    const rows = await sql`SELECT * FROM jobs WHERE id = ANY(${[id, targetId]}) AND deleted_at IS NULL`;
+    const job = rows.find(r => r.id === id);
+    const target = rows.find(r => r.id === targetId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (!target) return res.status(404).json({ error: 'Target job not found' });
+    if (job.linked_job_id) return res.status(400).json({ error: `Job E-${id} is already linked to E-${job.linked_job_id}. Unlink it first.` });
+    if (target.linked_job_id) return res.status(400).json({ error: `Job E-${targetId} is already linked to E-${target.linked_job_id}. Unlink it first.` });
+    await sql`UPDATE jobs SET linked_job_id = ${targetId} WHERE id = ${id}`;
+    await sql`UPDATE jobs SET linked_job_id = ${id} WHERE id = ${targetId}`;
+    await logAudit(sql, req, {
+      action: 'job.link',
+      entityType: 'job',
+      entityId: id,
+      summary: `Linked Job E-${id} with Job E-${targetId}`,
+    });
+    const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/jobs/:id/unlink', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const partnerId = job.linked_job_id;
+    await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${id}`;
+    if (partnerId) await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${partnerId}`;
+    await logAudit(sql, req, {
+      action: 'job.unlink',
+      entityType: 'job',
+      entityId: id,
+      summary: `Unlinked Job E-${id}${partnerId ? ' from Job E-' + partnerId : ''}`,
+    });
+    const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Joint delivery — ONE challan number stamped across both linked jobs.
+// Each job ships its OWN cartons figure (no auto-splitting: the store
+// keeper/QC already know each job's own ready quantity). Runs the exact
+// same per-job eligibility + auto-advance logic as a normal delivery,
+// just twice, wrapped in one response so the UI can show one confirmation.
+// Payload: { challan_no, date, entries: [{ job_id, cartons, po_no, batch_no }, ...] }
+app.post('/api/jobs/:id/deliver-linked', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const challanNo = String(req.body?.challan_no ?? '').trim() || null;
+    const date = String(req.body?.date ?? '').trim() || businessDateISO();
+    const entriesIn = Array.isArray(req.body?.entries) ? req.body.entries : [];
+    if (entriesIn.length !== 2) {
+      return res.status(400).json({ error: 'Linked delivery needs exactly 2 job entries.' });
+    }
+    const rows = await sql`SELECT * FROM jobs WHERE id = ANY(${entriesIn.map(e => parseInt(e.job_id, 10))}) AND deleted_at IS NULL`;
+    const jobsById = new Map(rows.map(r => [r.id, r]));
+    const jobA = jobsById.get(id);
+    if (!jobA) return res.status(404).json({ error: 'Job not found' });
+    if (!jobA.linked_job_id) return res.status(400).json({ error: `Job E-${id} is not linked to another job.` });
+    const partnerId = jobA.linked_job_id;
+    const jobB = jobsById.get(partnerId);
+    if (!jobB) return res.status(404).json({ error: 'Linked partner job not found' });
+    if (jobB.linked_job_id !== id) return res.status(400).json({ error: 'Link is inconsistent — unlink and relink these jobs.' });
+    // Match each payload entry to its job by id.
+    const entryFor = (jobId) => entriesIn.find(e => parseInt(e.job_id, 10) === jobId);
+    const eA = entryFor(id);
+    const eB = entryFor(partnerId);
+    if (!eA || !eB) return res.status(400).json({ error: 'Both linked jobs need a cartons entry.' });
+    const cartonsA = parseFloat(String(eA.cartons ?? '').replace(/[^0-9.\-]/g, ''));
+    const cartonsB = parseFloat(String(eB.cartons ?? '').replace(/[^0-9.\-]/g, ''));
+    if (!Number.isFinite(cartonsA) || cartonsA <= 0) return res.status(400).json({ error: `Job E-${id}: cartons must be a positive number.` });
+    if (!Number.isFinite(cartonsB) || cartonsB <= 0) return res.status(400).json({ error: `Job E-${partnerId}: cartons must be a positive number.` });
+    const errA = deliveryEligibilityError(jobA);
+    if (errA) return res.status(400).json({ error: errA });
+    const errB = deliveryEligibilityError(jobB);
+    if (errB) return res.status(400).json({ error: errB });
+
+    const byEmail = req.user?.email;
+    const updA = computeDeliveryUpdate(jobA, {
+      cartonsN: cartonsA, date, notes: challanNo,
+      poNo: String(eA.po_no ?? '').trim() || null,
+      batchNo: String(eA.batch_no ?? '').trim() || null,
+      linkedJobId: partnerId, byEmail,
+    });
+    const updB = computeDeliveryUpdate(jobB, {
+      cartonsN: cartonsB, date, notes: challanNo,
+      poNo: String(eB.po_no ?? '').trim() || null,
+      batchNo: String(eB.batch_no ?? '').trim() || null,
+      linkedJobId: id, byEmail,
+    });
+    const [rowA] = await sql`
+      UPDATE jobs SET deliveries=${JSON.stringify(updA.deliveries)}, delqty=${updA.delqty},
+             stage_index=${updA.stage_index}, stages=${JSON.stringify(updA.stages)}, log=${JSON.stringify(updA.log)}
+       WHERE id=${id} RETURNING *`;
+    const [rowB] = await sql`
+      UPDATE jobs SET deliveries=${JSON.stringify(updB.deliveries)}, delqty=${updB.delqty},
+             stage_index=${updB.stage_index}, stages=${JSON.stringify(updB.stages)}, log=${JSON.stringify(updB.log)}
+       WHERE id=${partnerId} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'job.delivery.add_linked',
+      entityType: 'job',
+      entityId: id,
+      summary: `Joint delivery (Challan ${challanNo || '—'}): E-${id} ${cartonsA.toLocaleString()} cartons + E-${partnerId} ${cartonsB.toLocaleString()} cartons`,
+      metadata: { challan_no: challanNo, date, a: { job_id: id, cartons: cartonsA }, b: { job_id: partnerId, cartons: cartonsB } },
+    });
+    res.json({ job: rowA, partner: rowB });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

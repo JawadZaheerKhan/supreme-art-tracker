@@ -2542,6 +2542,35 @@ function readyCartonsTotal(j) {
   }
   return 0;
 }
+// ── Linked Jobs (pairwise) ────────────────────────────────────────
+// Resolve a job by id from whichever cache is loaded — the admin `jobs`
+// array (admin dashboard + admin's "Client View" preview) or the real
+// client portal's `clientJobs` array. Used to look up a linked partner's
+// details (PO number, name) from either context without duplicating data
+// on the wire.
+function resolveJobForClient(id) {
+  if (typeof jobs !== 'undefined' && Array.isArray(jobs)) {
+    const hit = jobs.find(x => x && x.id === id);
+    if (hit) return hit;
+  }
+  if (typeof clientJobs !== 'undefined' && Array.isArray(clientJobs)) {
+    return clientJobs.find(x => x && x.id === id) || null;
+  }
+  return null;
+}
+// Persistent "🔗 Linked with E-x" badge — shown on both linked jobs, in
+// the admin compact list, card view, AND client view, so the connection
+// is visible from the moment they're linked, not just at delivery time.
+// Clickable to jump to the partner's card in admin views; static in the
+// real client portal (clients don't have an edit modal to jump into).
+function linkedJobBadgeHtml(j, clientPreview) {
+  if (!j || !j.linked_job_id) return '';
+  const lid = j.linked_job_id;
+  const clickable = !clientPreview;
+  const cursor = clickable ? 'cursor:pointer;' : '';
+  const click = clickable ? ` onclick="event.stopPropagation();openEdit(${lid})"` : '';
+  return `<span class="badge" title="Linked with Job E-${lid} — printed together to share cost"${click} style="background:#ede9fe;color:#5b21b6;font-weight:700;letter-spacing:0.02em;${cursor}">&#128279; E-${lid}</span>`;
+}
 // Break down a partial-delivery job into three visible buckets:
 //   delivered  — cartons already shipped (amber)
 //   ready      — cartons physically finished but not yet shipped (green)
@@ -3621,6 +3650,7 @@ function renderJobsCompact() {
             ${selBox}
             <span class="job-id">#${j.id}</span>
             ${badge}
+            ${linkedJobBadgeHtml(j, false)}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
           </div>
           <div class="job-name">${esc(j.name)}</div>
@@ -3650,6 +3680,9 @@ function renderJobsCompact() {
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
+            ${canWriteJobs() ? (j.linked_job_id
+              ? `<button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Remove the link with Job E-${j.linked_job_id}">&#128279; Unlink</button>`
+              : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
@@ -3982,6 +4015,9 @@ function renderJobCard(j, opts) {
         <button onclick="closeJobMore(this); openEdit(${j.id})">Edit / View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
+        ${canWriteJobs() ? (j.linked_job_id
+          ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
+          : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
@@ -4053,6 +4089,7 @@ function renderJobCard(j, opts) {
         ? ''
         : `<span class="job-id">#${j.id}</span>`}
       ${badge}
+      ${linkedJobBadgeHtml(j, clientPreview)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
       ${j.is_shade_card ? '<span class="badge" style="background:#dcfce7;color:#166534;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;">&#127912; Shade Card</span>' : ''}
     </div>
@@ -8959,8 +8996,15 @@ function buildJobsReportRows() {
     // falls back to delqty so legacy jobs (typed straight on the card)
     // still register correctly.
     const isPartial = isPartialDelivery(j);
+    // Linked-delivery partner — set on any delivery entry recorded via
+    // "Deliver Linked Jobs". Used below to merge this job's row with its
+    // partner's row into one combined line (only when BOTH rows survive
+    // this function's filters).
+    const linkEntry = [...deliveriesList].reverse().find(d => d && d.linked_job_id);
+    const linkPartner = linkEntry ? linkEntry.linked_job_id : null;
     out.push({
       id: j.id,
+      idDisplay: 'E-' + j.id,
       name: j.name || '',
       createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
@@ -8978,16 +9022,62 @@ function buildJobsReportRows() {
       paper,
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
+      linkPartner,
     });
   }
+  // Merge Linked-Jobs pairs into one combined row — only when BOTH rows
+  // survived the filters above (same date range / client / search). IDs,
+  // PO No., Batch No. are pipe-joined; Challan No. shown once (it's the
+  // whole point — one invoice); PO Qty is ALSO pipe-joined (each job kept
+  // its own PO Qty); Unit Carton Qty / Delivered Qty / Wastage / Packets
+  // are summed; Paper / Machine / Coatings shown once when identical,
+  // pipe-joined when they differ.
+  const byId = new Map(out.map(r => [r.id, r]));
+  const consumed = new Set();
+  const merged = [];
+  const sameOrPipe = (a, b) => (String(a || '') === String(b || '')) ? (a || '') : [a, b].filter(Boolean).join(' | ');
+  for (const r of out) {
+    if (consumed.has(r.id)) continue;
+    const partner = r.linkPartner ? byId.get(r.linkPartner) : null;
+    if (partner && partner.linkPartner === r.id && !consumed.has(partner.id)) {
+      const [lo, hi] = [r, partner].sort((a, b) => a.id - b.id);
+      consumed.add(lo.id); consumed.add(hi.id);
+      merged.push({
+        id: lo.id,
+        idDisplay: `E-${lo.id} | E-${hi.id}`,
+        name: sameOrPipe(lo.name, hi.name),
+        createdAt: lo.createdAt,
+        createdAtRaw: lo.createdAtRaw && hi.createdAtRaw
+          ? (lo.createdAtRaw > hi.createdAtRaw ? lo.createdAtRaw : hi.createdAtRaw)
+          : (lo.createdAtRaw || hi.createdAtRaw),
+        deliveredAt: sameOrPipe(lo.deliveredAt, hi.deliveredAt) || lo.deliveredAt,
+        client: sameOrPipe(lo.client, hi.client),
+        poNo: [lo.poNo, hi.poNo].filter(Boolean).join(' | '),
+        batchNo: [lo.batchNo, hi.batchNo].filter(Boolean).join(' | '),
+        poQty: [lo.poQty, hi.poQty].filter(v => v !== '' && v != null).join(' | '),
+        cartonQty: (+lo.cartonQty || 0) + (+hi.cartonQty || 0),
+        deliveredQty: (+lo.deliveredQty || 0) + (+hi.deliveredQty || 0),
+        challan: sameOrPipe(lo.challan, hi.challan),
+        isPartial: !!(lo.isPartial || hi.isPartial),
+        wastage: (lo.wastage == null && hi.wastage == null) ? null : ((lo.wastage || 0) + (hi.wastage || 0)),
+        packets: (+lo.packets || 0) + (+hi.packets || 0),
+        paper: sameOrPipe(lo.paper, hi.paper),
+        machine: sameOrPipe(lo.machine, hi.machine),
+        coatings: sameOrPipe(lo.coatings, hi.coatings),
+        linkPartner: null,
+      });
+    } else {
+      merged.push(r);
+    }
+  }
   // Newest delivery first (by created_at ish — using the parsed timestamp).
-  out.sort((a, b) => {
+  merged.sort((a, b) => {
     if (!a.createdAtRaw && !b.createdAtRaw) return 0;
     if (!a.createdAtRaw) return 1;
     if (!b.createdAtRaw) return -1;
     return b.createdAtRaw - a.createdAtRaw;
   });
-  return out;
+  return merged;
 }
 
 function renderJobsReport() {
@@ -9035,7 +9125,7 @@ function renderJobsReport() {
       : '';
     return `<tr data-jr-row="${r.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleJobsReportRow(${r.id}, this.checked)"></td>
-      <td ${td}>E-${r.id}</td>
+      <td ${td}>${esc(r.idDisplay || 'E-' + r.id)}</td>
       <td ${td}>${esc(r.name)}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
       <td ${tdN}>${esc(r.deliveredAt)}</td>
@@ -9119,7 +9209,7 @@ async function exportJobsReport() {
       ? `${r.deliveredQty} (PARTIAL)`
       : r.deliveredQty;
     aoa.push([
-      'E-' + r.id,
+      r.idDisplay || ('E-' + r.id),
       r.name,
       r.createdAt,
       r.deliveredAt,
@@ -9163,7 +9253,7 @@ function printJobsReport() {
       ? '<span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:#f59e0b;border:1px solid #b45309;margin-right:4px;vertical-align:middle;"></span>'
       : '';
     return `<tr>
-    <td ${tdL}>E-${r.id}</td>
+    <td ${tdL}>${esc(r.idDisplay || 'E-' + r.id)}</td>
     <td ${tdL}>${esc(r.name)}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
     <td ${tdL}>${esc(r.deliveredAt)}</td>
@@ -14285,6 +14375,12 @@ function deliveriesSection(j) {
         const bat  = d.batch_no || '';
         const nt   = d.notes    || '';
         const by   = d.by       || '';
+        // Linked-delivery tag — this shipment was recorded via "Deliver
+        // Linked Jobs" alongside the partner job, sharing this same
+        // challan/invoice. Shows which job it rode with.
+        const linkedTag = d.linked_job_id
+          ? ` <span title="Linked delivery with Job E-${d.linked_job_id} — shares this challan/invoice" style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:9px;font-weight:700;padding:1px 5px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#128279; E-${d.linked_job_id}</span>`
+          : '';
         const delBtn = isAdminUser
           ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
           : '';
@@ -14293,7 +14389,7 @@ function deliveriesSection(j) {
           <td style="text-align:right;font-weight:600;padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(ctns)}</td>
           <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(po)}</td>
           <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(bat)}</td>
-          <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nt)}</td>
+          <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(nt)}${linkedTag}</td>
           <td style="font-size:11px;color:var(--text2);padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(by)}</td>
           <td style="text-align:center;padding:6px 4px;">${delBtn}</td>
         </tr>`;
@@ -14333,7 +14429,9 @@ function deliveriesSection(j) {
           <input type="text" id="deliv-notes" placeholder="e.g. CH-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
-      </div>`
+      </div>${j.linked_job_id ? `<div style="margin-top:8px;">
+        <button type="button" class="btn btn-sm" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>
+      </div>` : ''}`
     : (stageIdx < 5
         ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
         : stageIdx === 5
@@ -14384,15 +14482,46 @@ function clientDeliveriesBreakdown(j, clientPreview) {
   const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
   const shipped = totalDeliveredCartons(j);
   const remaining = booked ? Math.max(0, booked - shipped) : 0;
-  const rows = list.map(d => {
+  // Newest first, capped to the latest 3 by default — with many shipments
+  // over time (mill-quantity buffer stock etc.) the client shouldn't have
+  // to scroll a growing wall of history. Nothing is deleted, just
+  // collapsed behind a "Show all" toggle.
+  const sorted = [...list].map((d, i) => ({ d, i })).sort((a, b) => {
+    const ta = a.d && a.d.date ? new Date(a.d.date).getTime() : 0;
+    const tb = b.d && b.d.date ? new Date(b.d.date).getTime() : 0;
+    return tb - ta;
+  });
+  const VISIBLE = 3;
+  const renderRow = ({ d }) => {
     const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.\-]/g, '')).toLocaleString() + ' cartons' : '';
     const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
     const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
-    return `<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
-      <span style="color:var(--text2);">${dt}${refBits ? ' <span style="color:var(--text3);">· ' + refBits + '</span>' : ''}</span>
-      <span style="font-weight:600;">${ct}</span>
+    // Linked-delivery tag — client thinks in PO numbers, not internal
+    // E-job ids, so resolve the partner job and show ITS PO instead.
+    let linkedLine = '';
+    if (d.linked_job_id) {
+      const partner = resolveJobForClient(d.linked_job_id);
+      const partnerPo = partner && partner.ref ? esc(partner.ref) : '';
+      linkedLine = `<div style="color:#7c3aed;font-size:11px;font-weight:600;margin-top:1px;">&#128279; Combined shipment${partnerPo ? ' — also covers PO ' + partnerPo : ' with another order'}</div>`;
+    }
+    return `<div style="padding:2px 0;">
+      <div style="display:flex;justify-content:space-between;gap:8px;">
+        <span style="color:var(--text2);">${dt}${refBits ? ' <span style="color:var(--text3);">· ' + refBits + '</span>' : ''}</span>
+        <span style="font-weight:600;">${ct}</span>
+      </div>
+      ${linkedLine}
     </div>`;
-  }).join('');
+  };
+  const visibleRows = sorted.slice(0, VISIBLE).map(renderRow).join('');
+  const hiddenRows = sorted.slice(VISIBLE).map(renderRow).join('');
+  const moreId = `client-ship-more-${j.id}`;
+  const rows = hiddenRows
+    ? `${visibleRows}
+       <div id="${moreId}" style="display:none;">${hiddenRows}</div>
+       <div style="text-align:center;margin-top:4px;">
+         <button type="button" onclick="const m=document.getElementById('${moreId}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sorted.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sorted.length})</button>
+       </div>`
+    : visibleRows;
   const footer = booked
     ? `<div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;">
         <span>Total shipped</span>
@@ -14445,6 +14574,132 @@ async function removeDelivery(jobId, index) {
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     closeModal(); render(); notify('Delivery entry removed');
+    setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Linked Jobs (pairwise) ────────────────────────────────────────
+// Two job cards for the same product placed at different times, printed
+// together to save cost. Link is symmetric and one-off (a job can only
+// have ONE partner at a time).
+async function openLinkJobPicker(jobId) {
+  if (!canWriteJobs()) return;
+  const val = await promptDialog({
+    title: `Link Job E-${jobId} with…`,
+    message: 'Enter the OTHER job\'s number (e.g. 85 or E-85). Both jobs must not already be linked to someone else.',
+    placeholder: 'e.g. 85',
+    confirmText: 'Link',
+  });
+  if (val === null) return;
+  const m = String(val).match(/(\d+)/);
+  if (!m) { notify('Enter a valid job number.'); return; }
+  const targetId = parseInt(m[1], 10);
+  if (targetId === jobId) { notify('A job can\'t be linked with itself.'); return; }
+  showSaving(true);
+  try {
+    await api('POST', `/api/jobs/${jobId}/link`, { target_id: targetId });
+    await loadJobs();
+    closeModal();
+    render();
+    notify(`Linked E-${jobId} with E-${targetId}`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function unlinkJob(jobId) {
+  const ok = await confirmDialog({
+    title: 'Unlink this job?',
+    message: 'Removes the connection between both linked job cards. Delivery history already recorded stays intact.',
+    confirmText: 'Unlink',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('POST', `/api/jobs/${jobId}/unlink`);
+    await loadJobs();
+    closeModal();
+    render();
+    notify('Jobs unlinked');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Joint delivery — ONE challan number stamped across both linked jobs,
+// each shipping its OWN cartons (no auto-splitting — the store keeper
+// already knows each job's own ready quantity from QC/Pasting). Cartons
+// fields pre-fill with each job's own remaining qty (booked − already
+// shipped, falling back to its own ready-to-deliver total) as a starting
+// point the user can adjust.
+function openDeliverLinkedModal(jobId) {
+  const job = jobs.find(x => x.id === jobId);
+  if (!job || !job.linked_job_id) return;
+  const partner = jobs.find(x => x.id === job.linked_job_id);
+  if (!partner) { notify('Linked partner job not found — refresh and try again.'); return; }
+  const remainingFor = (jb) => {
+    const booked = parseFloat(String(jb.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    const shipped = totalDeliveredCartons(jb);
+    if (booked) return Math.max(0, booked - shipped);
+    return (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(jb) : 0) || 0;
+  };
+  const remA = remainingFor(job);
+  const remB = remainingFor(partner);
+  const rowHtml = (jb, remaining, prefix) => `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
+      <div style="font-weight:700;margin-bottom:8px;">E-${jb.id} &middot; ${esc(jb.name)}</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Cartons *</label>
+          <input type="number" id="${prefix}-cartons" min="1" step="any" value="${remaining || ''}" placeholder="e.g. 50">
+        </div>
+        <div class="form-group">
+          <label class="form-label">PO No.</label>
+          <input type="text" id="${prefix}-po" value="${esc(jb.ref || '')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Batch No.</label>
+          <input type="text" id="${prefix}-batch" value="${esc(jb.bno || '')}">
+        </div>
+      </div>
+    </div>`;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>&#128279; Deliver Linked Jobs</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">One challan / invoice, both jobs — each ships its own cartons figure.</div>
+    ${rowHtml(job, remA, 'dl-a')}
+    ${rowHtml(partner, remB, 'dl-b')}
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dl-date" value="${new Date().toISOString().slice(0,10)}"></div>
+      <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(shared)</span></label><input type="text" id="dl-challan" placeholder="e.g. CH-042"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#166534;border-color:#166534;" onclick="submitDeliverLinked(${job.id}, ${partner.id})">Record Joint Delivery</button>
+    </div>
+  </div>`);
+}
+async function submitDeliverLinked(jobId, partnerId) {
+  const cartonsA = ((document.getElementById('dl-a-cartons')||{}).value || '').trim();
+  const cartonsB = ((document.getElementById('dl-b-cartons')||{}).value || '').trim();
+  const poA      = ((document.getElementById('dl-a-po')||{}).value || '').trim();
+  const poB      = ((document.getElementById('dl-b-po')||{}).value || '').trim();
+  const batchA   = ((document.getElementById('dl-a-batch')||{}).value || '').trim();
+  const batchB   = ((document.getElementById('dl-b-batch')||{}).value || '').trim();
+  const date     = ((document.getElementById('dl-date')||{}).value || '').trim();
+  const challan  = ((document.getElementById('dl-challan')||{}).value || '').trim();
+  if (!parseFloat(cartonsA) || parseFloat(cartonsA) <= 0) { await alertDialog({ title: `E-${jobId}: enter cartons`, kind: 'warn' }); return; }
+  if (!parseFloat(cartonsB) || parseFloat(cartonsB) <= 0) { await alertDialog({ title: `E-${partnerId}: enter cartons`, kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    await api('POST', `/api/jobs/${jobId}/deliver-linked`, {
+      challan_no: challan, date,
+      entries: [
+        { job_id: jobId,    cartons: cartonsA, po_no: poA, batch_no: batchA },
+        { job_id: partnerId, cartons: cartonsB, po_no: poB, batch_no: batchB },
+      ],
+    });
+    await loadJobs();
+    closeModal();
+    render();
+    notify('Joint delivery recorded for both jobs');
     setTimeout(() => openEdit(jobId), 50);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
