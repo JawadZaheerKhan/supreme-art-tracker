@@ -1029,7 +1029,14 @@
   @keyframes numpadUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
   .numpad-head { display: flex; align-items: baseline; gap: 12px; width: 100%; max-width: 420px; justify-content: space-between; }
   .numpad-label { font-size: 15px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.03em; }
-  .numpad-value { font-size: 30px; font-weight: 800; color: var(--text); min-height: 38px; }
+  .numpad-value {
+    font-size: 32px; font-weight: 800; color: var(--text);
+    min-height: 48px; width: 100%; max-width: 420px;
+    text-align: right; padding: 6px 14px; box-sizing: border-box;
+    background: var(--bg); border: 2px solid var(--border2); border-radius: 10px;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+    overflow-x: auto; white-space: nowrap;
+  }
   .numpad-grid { display: grid; grid-template-columns: repeat(3, minmax(86px, 124px)); gap: 10px; width: 100%; max-width: 420px; }
   .numpad-key {
     height: 66px; font-size: 28px; font-weight: 600;
@@ -17490,26 +17497,42 @@ function stationOpenPad(inputId, label) {
     if (k === 'plus') return `<button class="numpad-key numpad-op" onclick="stationPadPress('+')">+</button>`;
     return `<button class="numpad-key" onclick="stationPadPress('${k}')">${k}</button>`;
   }).join('');
+  // Live-value strip inside the numpad — mirrors the actual input value
+  // so the operator can always see what they've typed, even when the
+  // sheet slides up and covers the real input field below (was the whole
+  // reason they had to hit Done just to peek at the value).
+  const initialValue = input ? (input.value || '') : '';
   pad.innerHTML = `
     <div class="numpad-head">
       <span class="numpad-label">${esc(label || '')}</span>
       <button class="btn btn-sm" onclick="stationPadClear()">Clear</button>
     </div>
+    <div class="numpad-value" id="numpad-value-display">${esc(initialValue) || '<span style="color:var(--text3);font-weight:500;">0</span>'}</div>
     <div class="numpad-grid">${keys}</div>`;
   // Scroll the field into view above the pad.
   if (input) setTimeout(() => input.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60);
 }
 
 function stationPadInput() { return stationPadKey ? document.getElementById(stationPadKey) : null; }
+// Sync the numpad's live-value strip with the underlying input so what
+// the operator sees on the numpad matches what will get submitted.
+function stationPadSyncDisplay() {
+  const disp = document.getElementById('numpad-value-display');
+  const input = stationPadInput();
+  if (!disp) return;
+  const v = input ? (input.value || '') : '';
+  disp.innerHTML = v ? esc(v) : '<span style="color:var(--text3);font-weight:500;">0</span>';
+}
 function stationPadPress(d) {
   const input = stationPadInput();
   if (!input) return;
   if (input.value.length >= 20) return;         // sanity cap — leaves room for sums like 5000+3000+2000
   input.value = input.value + d;
+  stationPadSyncDisplay();
   stationResetIdle();
 }
-function stationPadBack()  { const i = stationPadInput(); if (i) i.value = i.value.slice(0, -1); stationResetIdle(); }
-function stationPadClear() { const i = stationPadInput(); if (i) i.value = ''; stationResetIdle(); }
+function stationPadBack()  { const i = stationPadInput(); if (i) i.value = i.value.slice(0, -1); stationPadSyncDisplay(); stationResetIdle(); }
+function stationPadClear() { const i = stationPadInput(); if (i) i.value = ''; stationPadSyncDisplay(); stationResetIdle(); }
 function stationPadDone()  { stationClosePad(); }
 function stationClosePad() {
   stationPadKey = null;
