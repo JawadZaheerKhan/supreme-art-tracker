@@ -723,7 +723,11 @@
   .tile-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; color: var(--text); }
   .tile-facts b { font-weight: 700; color: var(--text2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
   .tile-cut { font-size: 12px; color: var(--blue-text); background: var(--blue-bg); border: 1px solid var(--blue-border); border-radius: 6px; padding: 3px 8px; align-self: flex-start; }
-  .tile-actions { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+  /* margin-top:auto pushes the actions row to the bottom of the flex
+     column, so Record Delivery buttons across tiles in the same grid
+     row line up at the same y-position instead of floating at different
+     heights based on how much content each tile has above them. */
+  .tile-actions { display: flex; gap: 6px; align-items: center; margin-top: auto; flex-wrap: wrap; }
 
   /* Stage machine vignette — frameless. The SVG and label float directly
      on the card so the animation feels native to the card, not boxed in.
@@ -3750,10 +3754,12 @@ function renderJobRowCompact(j) {
           ${sidePanel}
         </div>
       </div>
-      <div class="pipeline">${pipeline}</div>
-      ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="display:flex;justify-content:flex-end;margin-top:4px;">
-        <button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
-      </div>` : ''}
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
+        ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
+          <button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
+        </div>` : ''}
+      </div>
     </div>`;
 }
 
@@ -4138,13 +4144,20 @@ function renderJobCard(j, opts) {
   // this keeps the identifier visible on skim and matches what the
   // owner asked for. The stage badge + urgent + shade chips still ride
   // in the row below.
+  // Client tile: pin the 🔗 E-{partner} chip next to E-{id} at the top,
+  // where there's already empty space. Leaving it in .tile-head added a
+  // whole row of vertical clutter for what is really just an id-level
+  // annotation ("this job shipped with that other job").
+  const linkChipClient = clientPreview ? linkedJobBadgeHtml(j, true) : '';
   const clientTopRow = (clientPreview && adminToggle)
     ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
-         <span class="job-id" title="Job Card No.">E-${j.id}</span>
+         <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;">
+           <span class="job-id" title="Job Card No.">E-${j.id}</span>${linkChipClient}
+         </span>
          ${adminToggle}
        </div>`
     : (clientPreview
-        ? `<div style="margin-bottom:4px;"><span class="job-id" title="Job Card No.">E-${j.id}</span></div>`
+        ? `<div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span class="job-id" title="Job Card No.">E-${j.id}</span>${linkChipClient}</div>`
         : (adminToggle ? `<div style="display:flex;justify-content:flex-end;margin-bottom:2px;">${adminToggle}</div>` : ''));
 
   return `
@@ -4157,7 +4170,7 @@ function renderJobCard(j, opts) {
         ? ''
         : `<span class="job-id">#${j.id}</span>`}
       ${badge}
-      ${linkedJobBadgeHtml(j, clientPreview)}
+      ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
       ${j.is_shade_card ? '<span class="badge" style="background:#dcfce7;color:#166534;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;">&#127912; Shade Card</span>' : ''}
     </div>
@@ -14864,11 +14877,16 @@ function groupRepresentative(groupJobs) {
 }
 
 // Group badges — replace the #ID span in a normal tile header.
+// GROUP chip is name-less: the product name is already the .tile-name
+// / .job-name right below the badges, so repeating it in the chip was
+// just clutter. DELIVERED chip uses the same amber palette as the
+// partial-delivery segment chip so shipped totals read consistently
+// across the app.
 function groupBadgesHtml(groupName, stats) {
-  const g = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;">&#128230; GROUP &middot; ${esc(groupName)}</span>`;
+  const g = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
   const r = stats.ready > 0     ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : '';
   const p = stats.inProcess > 0 ? ` <span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : '';
-  const d = stats.delivered > 0 ? ` <span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">DELIVERED - ${stats.delivered.toLocaleString()}</span>` : '';
+  const d = stats.delivered > 0 ? ` <span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; DELIVERED - ${stats.delivered.toLocaleString()}</span>` : '';
   return g + r + p + d;
 }
 
