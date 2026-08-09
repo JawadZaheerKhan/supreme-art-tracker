@@ -289,6 +289,32 @@ async function initDb() {
     // Stock Groups — named tag shared by multiple job cards for the same
     // product (ongoing reprints). FIFO delivery deducts from oldest first.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stock_group_name TEXT`;
+    // Group-level client visibility — INDEPENDENT from per-job client_visible.
+    // When ON, the client sees the group tile with ALL member data aggregated,
+    // regardless of individual jobs' client_visible. Individual client_visible
+    // only controls whether that job appears in the client's "View Jobs" modal.
+    // Shared across all members of a group (server updates every row on toggle).
+    {
+      const colExists = await sql`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'jobs' AND column_name = 'stock_group_visible'
+      `;
+      await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stock_group_visible BOOLEAN NOT NULL DEFAULT false`;
+      // Backfill only when the column was just added: preserve existing behavior
+      // by turning group visibility ON for any group that had at least one
+      // client-visible member. Runs exactly once — later toggles won't be undone.
+      if (!colExists.length) {
+        await sql`
+          UPDATE jobs j SET stock_group_visible = true
+           WHERE j.stock_group_name IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM jobs g
+                WHERE g.stock_group_name = j.stock_group_name
+                  AND g.client_visible = true
+             )
+        `;
+      }
+    }
     // Backfill: for any already-Delivered job (stage 7) that has a delqty
     // but no ledger entry yet, seed a single ledger entry so the mini table
     // in the job card and the client view are not blank for old jobs. In
@@ -2350,6 +2376,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
           j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
           j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
           j.linked_job_id, j.deliveries, j.stock_group_name,
           inv.paper_type AS inv_paper_type
@@ -2364,13 +2391,14 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
           j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
           j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
           j.linked_job_id, j.deliveries, j.stock_group_name,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
         WHERE j.deleted_at IS NULL
-          AND j.client_visible = true
+          AND (j.client_visible = true OR j.stock_group_visible = true)
           AND LOWER(TRIM(j.client)) = ${company}
         ORDER BY j.id DESC`;
   const now = Date.now();
@@ -2456,6 +2484,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       stages: sanitizeStages(j.stages, j.stage_index || 0),
       issuance_status: j.issuance_status || 'issued',
       client_visible: !!j.client_visible,
+      stock_group_visible: !!j.stock_group_visible,
       is_shade_card: !!j.is_shade_card,
       // Linked Jobs — lets the client see from the start that this order
       // is tied to another one (same product, printed together). Only the
@@ -2578,6 +2607,34 @@ app.post('/api/jobs/:id/client-visible', requireJobsWriter, async (req, res) => 
       summary: `Job E-${id} (${updated[0].name}): client_visible → ${value ? 'ON' : 'OFF'} for ${updated[0].client}`,
     });
     res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Group-level client visibility toggle. Sets stock_group_visible on ALL
+// members of the group at once (they must agree — the group is one
+// visibility unit). Independent from per-job client_visible.
+app.post('/api/groups/client-visible', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = String((req.body && req.body.name) || '').trim();
+    const value = !!(req.body && req.body.value);
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const updated = await sql`
+      UPDATE jobs SET stock_group_visible = ${value}
+       WHERE stock_group_name = ${name} AND deleted_at IS NULL
+       RETURNING id
+    `;
+    await logAudit(sql, req, {
+      action: 'group.client_visible',
+      entityType: 'group',
+      entityId: null,
+      summary: `Group "${name}": stock_group_visible → ${value ? 'ON' : 'OFF'} (${updated.length} jobs)`,
+    });
+    res.json({ ok: true, updated: updated.length });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -3679,7 +3736,18 @@ app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
     const groupName = body.group_name ? String(body.group_name).trim() || null : null;
     const rows = await sql`SELECT id FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
-    await sql`UPDATE jobs SET stock_group_name = ${groupName} WHERE id = ${id}`;
+    // Inherit the group's current stock_group_visible so the new member
+    // matches the rest. If joining a new/empty group, defaults to false.
+    let inherit = false;
+    if (groupName) {
+      const existing = await sql`
+        SELECT stock_group_visible FROM jobs
+         WHERE stock_group_name = ${groupName} AND deleted_at IS NULL
+         LIMIT 1
+      `;
+      inherit = !!(existing.length && existing[0].stock_group_visible);
+    }
+    await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = ${inherit} WHERE id = ${id}`;
     await logAudit(sql, req, {
       action: groupName ? 'job.group_set' : 'job.group_clear',
       entityType: 'job', entityId: id,

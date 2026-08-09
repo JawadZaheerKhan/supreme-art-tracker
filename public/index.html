@@ -15301,16 +15301,22 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
   const repr = groupRepresentative(groupJobs);
   const gName = jsStr(groupName);
 
-  const reprVisible = repr.client_visible !== false;
+  // Group visibility is stored independently on every member row —
+  // reading any one is fine since the server keeps them in sync.
+  const groupVisible = groupJobs.some(j => j.stock_group_visible === true);
   const groupToggle = adminControls
     ? `<label class="cv-toggle" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--text2);cursor:pointer;margin-left:auto;text-transform:uppercase;letter-spacing:0.04em;flex-shrink:0;">
-         <input type="checkbox" ${reprVisible ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleGroupClientVisible(${gName}, this.checked)" style="width:16px;height:16px;accent-color:#166534;cursor:pointer;">
+         <input type="checkbox" ${groupVisible ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleGroupClientVisible(${gName}, this.checked)" style="width:16px;height:16px;accent-color:#166534;cursor:pointer;">
          Show to client
        </label>`
     : '';
 
   const groupBadge = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
-  const viewJobsBtn = `<button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${groupJobs.length})</button>`;
+  // Real client only counts individually-visible jobs; admin sees the full count.
+  const viewCount = adminControls ? groupJobs.length : groupJobs.filter(j => j.client_visible !== false).length;
+  const viewJobsBtn = viewCount > 0
+    ? `<button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${viewCount})</button>`
+    : '';
   const statChips = groupStatChipsHtml(stats);
 
   // Aggregate shipments across every member — replaces clientDeliveriesBreakdown
@@ -15387,9 +15393,13 @@ function openClientGroupJobsModal(groupName) {
   const src = (typeof clientViewJobs !== 'undefined' && Array.isArray(clientViewJobs) && clientViewJobs.length)
     ? clientViewJobs
     : (typeof clientPortalJobs !== 'undefined' && Array.isArray(clientPortalJobs) ? clientPortalJobs : []);
-  const groupJobs = src.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
-  if (!groupJobs.length) { notify('No jobs found for this group'); return; }
+  const allGroupJobs = src.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
+  if (!allGroupJobs.length) { notify('No jobs found for this group'); return; }
   const isAdmin = src === clientViewJobs;
+  // Real client only sees individually-visible jobs in this modal; admin
+  // preview sees all so they can flip toggles for each one.
+  const groupJobs = isAdmin ? allGroupJobs : allGroupJobs.filter(j => j.client_visible !== false);
+  if (!groupJobs.length) { notify('No individually-visible jobs in this group'); return; }
   const tiles = groupJobs.map(j => `<div style="margin-bottom:12px;">${renderJobCard(j, { clientPreview: true, adminControls: isAdmin })}</div>`).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:1100px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex:0 0 auto;">
@@ -19333,14 +19343,13 @@ async function toggleClientVisible(id, value) {
 async function toggleGroupClientVisible(groupName, value) {
   const members = clientViewJobs.filter(j => j && j.stock_group_name === groupName);
   if (!members.length) return;
-  const repr = groupRepresentative(members);
-  repr.client_visible = !!value;
+  members.forEach(j => { j.stock_group_visible = !!value; });
   renderClientViewList();
   try {
-    await api('POST', `/api/jobs/${repr.id}/client-visible`, { value: !!value });
+    await api('POST', '/api/groups/client-visible', { name: groupName, value: !!value });
   } catch (e) {
     notify('Error: ' + e.message);
-    repr.client_visible = !value;
+    members.forEach(j => { j.stock_group_visible = !value; });
     renderClientViewList();
   }
 }
