@@ -659,7 +659,7 @@
   .sc-toggle-idle:hover   { background: #ddd6fe; border-color: #a78bfa; }
   .sc-toggle-active { background: #c4b5fd; color: #4c1d95; border: 1.5px solid #a78bfa; }
   .sc-toggle-active:hover { background: #a78bfa; border-color: #8b5cf6; }
-  /* Create Stock Group toolbar button — same pill shape as the Shade Cards
+  /* Create Job Group toolbar button — same pill shape as the Shade Cards
      toggle so it feels part of the toolbar, red palette to stand out as
      a create action. */
   #create-group-btn {
@@ -1728,10 +1728,10 @@
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
-    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Stock Group — pick a job and give the group a name">
-      &#128230; Create Stock Group
+    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group is named after it">
+      &#128230; Create Job Group
     </button>
-    <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Stock Group">
+    <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group">
       <option value="">All groups</option>
     </select>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
@@ -3732,6 +3732,7 @@ function renderJobRowCompact(j) {
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+            ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
@@ -4072,8 +4073,8 @@ function renderJobCard(j, opts) {
         ${canWriteJobs() ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
-        ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Group</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Group</button>` : ''}
-        ${canWriteJobs() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Group</button>` : ''}
+        ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Job Group</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
+        ${canWriteJobs() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
@@ -4161,6 +4162,7 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
+      ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
       ${more}
     </div>`}
   </div>`;
@@ -14851,10 +14853,17 @@ function groupBadgesHtml(groupName, stats) {
 //   card / Track →  "tile-actions"
 function groupActionsHtml(groupName, reprId, count, hasReady, containerClass) {
   const gName = jsStr(groupName);
+  // Yellow Record Delivery matches the normal-job tile's Record Delivery
+  // button — same color, same right-side placement. For groups it opens
+  // the FIFO delivery modal (oldest job ships first) instead of a single
+  // job's ledger.
+  const recordDeliveryBtn = (hasReady && canWriteJobs())
+    ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openDeliverGroupModal(${gName})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button>`
+    : '';
   return `<div class="${containerClass}">
     <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>
     <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group">&#128194; View Jobs (${count})</button>
-    ${hasReady && canWriteJobs() ? `<button class="btn btn-sm ceo-hide" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverGroupModal(${gName})" title="FIFO delivery — oldest job ships first">&#128230; Deliver from Group</button>` : ''}
+    ${recordDeliveryBtn}
   </div>`;
 }
 
@@ -15002,20 +15011,23 @@ async function submitGroupDelivery(groupName) {
   showSaving(false);
 }
 
-// ── Create Group from job ─────────────────────────────────────────────
+// ── Create Group from job (⋯ menu on a specific job) ─────────────────
+// Auto-names the group after the job — same logic as the toolbar
+// picker's confirmCreateGroupPicker. No name prompt; if the user
+// wants a different name later they can rename via the group ⋯ menu
+// (add a rename entry only if this becomes a common ask).
 async function openCreateGroupModal(jobId) {
   if (!canWriteJobs()) return;
   const j = jobs.find(x => x.id === jobId);
   if (!j) return;
-  const name = await promptDialog({
-    title: 'Create Stock Group',
-    message: `Name this group — it will be shared by E-${jobId} and any future reprints.\nExample: "Manacid 60ml — Stanley"`,
-    placeholder: 'e.g. Manacid 60ml — Stanley',
+  const baseName = String(j.name || '').trim() || `Job E-${jobId}`;
+  const groupName = j.jobcode ? `${baseName} (${j.jobcode})` : baseName;
+  const ok = await confirmDialog({
+    title: 'Create Job Group',
+    message: `Group will be named "${groupName}" and start with E-${jobId}. More jobs can be added later.`,
     confirmText: 'Create Group',
   });
-  if (name === null) return;
-  const groupName = String(name).trim();
-  if (!groupName) { notify('Group name cannot be empty'); return; }
+  if (!ok) return;
   showSaving(true);
   try {
     const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: groupName });
@@ -15027,46 +15039,49 @@ async function openCreateGroupModal(jobId) {
   showSaving(false);
 }
 
-// Toolbar Create Group — global entry point: pick a job + name the group.
+// Toolbar Create Group — pick a job; the group is auto-named after
+// that job (name + code if present, so two jobs with the same product
+// name but different codes don't accidentally collide into one group).
+// The group tile inherits all of the seed job's info via the shared
+// tile renderer.
 async function openCreateGroupPicker() {
   if (!canWriteJobs()) return;
   const ungrouped = jobs
     .filter(j => j && !j.stock_group_name && !j.deleted_at)
     .sort((a, b) => b.id - a.id);
   if (!ungrouped.length) {
-    await alertDialog({ title: 'No ungrouped jobs available', message: 'All existing jobs are already in a Stock Group.', kind: 'info' });
+    await alertDialog({ title: 'No ungrouped jobs available', message: 'All existing jobs are already in a Job Group.', kind: 'info' });
     return;
   }
   const rowHtml = ungrouped.slice(0, 200).map(j =>
     `<option value="${j.id}">E-${j.id} &middot; ${esc(j.name)}${j.client?' &middot; '+esc(j.client):''}</option>`
   ).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
-    <h2 style="margin:0 0 4px;">&#128230; Create Stock Group</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick a job to seed the group, then give the group a name. More jobs can be added later.</div>
+    <h2 style="margin:0 0 4px;">&#128230; Create Job Group</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick the seed job. The group is named after it and its tile shows the seed job's details. More jobs can be added later.</div>
     <div class="form-group">
       <label class="form-label">Seed Job *</label>
       <select id="cgp-job" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
         ${rowHtml}
       </select>
     </div>
-    <div class="form-group">
-      <label class="form-label">Group Name *</label>
-      <input type="text" id="cgp-name" placeholder="e.g. Manacid 60ml &mdash; Stanley" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
-    </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" style="background:#dc2626;border-color:#dc2626;" onclick="confirmCreateGroupPicker()">Create Group</button>
     </div>
   </div>`);
-  setTimeout(() => { const el = document.getElementById('cgp-name'); if (el) el.focus(); }, 30);
+  setTimeout(() => { const el = document.getElementById('cgp-job'); if (el) el.focus(); }, 30);
 }
 async function confirmCreateGroupPicker() {
   const sel = document.getElementById('cgp-job');
-  const nameEl = document.getElementById('cgp-name');
   const jobId = sel && sel.value ? parseInt(sel.value, 10) : null;
-  const name = nameEl ? String(nameEl.value || '').trim() : '';
   if (!jobId) { notify('Pick a job to seed the group'); return; }
-  if (!name) { notify('Group name cannot be empty'); return; }
+  const seed = jobs.find(x => x.id === jobId);
+  if (!seed) { notify('Seed job not found'); return; }
+  // Auto-name after the seed job. Include the job code to disambiguate
+  // when two jobs share a product name but are different SKUs.
+  const baseName = String(seed.name || '').trim() || `Job E-${jobId}`;
+  const name = seed.jobcode ? `${baseName} (${seed.jobcode})` : baseName;
   showSaving(true);
   try {
     const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: name });
@@ -15083,7 +15098,7 @@ async function openAddToGroupModal(jobId) {
   if (!canWriteJobs()) return;
   const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
   if (!groups.length) {
-    await alertDialog({ title: 'No groups exist yet', message: 'Use "Create Group" on a job card to start the first group.', kind: 'info' });
+    await alertDialog({ title: 'No groups exist yet', message: 'Use "Create Job Group" on a job card to start the first group.', kind: 'info' });
     return;
   }
   const j = jobs.find(x => x.id === jobId);
@@ -15894,6 +15909,24 @@ function viewJobCard(id) {
   };
   setTimeout(fitCard, 30);
   window.addEventListener('resize', fitCard);
+}
+
+// Yellow "Record Delivery" shortcut — opens the job's edit modal and
+// scrolls the delivery ledger into view + focuses the cartons input,
+// so the user is one keystroke away from entering the shipment. The
+// small delay lets openEdit's modal mount before we look for the input.
+function openEditWithDelivery(id) {
+  openEdit(id);
+  const grab = (tries = 0) => {
+    const el = document.getElementById('deliv-cartons');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => { try { el.focus(); } catch(_) {} }, 250);
+    } else if (tries < 20) {
+      setTimeout(() => grab(tries + 1), 60);
+    }
+  };
+  setTimeout(() => grab(), 120);
 }
 
 function openEdit(id) {
