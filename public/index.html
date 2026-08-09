@@ -15310,11 +15310,8 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
     : '';
 
   const groupBadge = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
+  const viewJobsBtn = `<button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${groupJobs.length})</button>`;
   const statChips = groupStatChipsHtml(stats);
-  const headerHtml = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1 1 auto;min-width:0;">
-    ${groupBadge}
-    <button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${groupJobs.length})</button>
-  </div>`;
 
   // Aggregate shipments across every member — replaces clientDeliveriesBreakdown
   // for the repr job, which would otherwise show only that job's own history.
@@ -15343,18 +15340,21 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
     <div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;"><span>Total shipped</span><span>${stats.delivered.toLocaleString()}${totalBooked ? ' / ' + totalBooked.toLocaleString() + ' cartons' : ' cartons'}</span></div>
   </div>` : '';
 
-  let html = renderJobCard(repr, { clientPreview: true, adminControls });
+  // Render repr WITHOUT adminControls — we build our own top row with
+  // the group toggle so it's independent from individual job toggles.
+  let html = renderJobCard(repr, { clientPreview: true });
 
-  // 1. Replace the clientTopRow content with group badges + toggle.
-  //    When adminControls is on, the rendered tile has a flex row with
-  //    E-{id} + toggle; replace that whole row. Otherwise just the E-{id}.
-  if (adminControls) {
-    html = html.replace(
-      /<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">[\s\S]*?<\/label>\s*<\/div>/,
-      `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">${headerHtml}${groupToggle}</div>`
-    );
+  // 1. Replace the E-{id} + any surrounding clientTopRow with our group header.
+  const groupTopRow = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
+    <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">${groupBadge}${viewJobsBtn}</span>
+    ${groupToggle}
+  </div>`;
+  // The clientTopRow is either a flex row with E-{id} or a simple div with E-{id}.
+  // Replace whichever form it takes.
+  if (html.includes('display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;')) {
+    html = html.replace(/<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">[\s\S]*?<\/div>\s*<\/div>/, groupTopRow);
   } else {
-    html = html.replace(/<span class="job-id" title="Job Card No\."[^>]*>E-\d+<\/span>/, headerHtml);
+    html = html.replace(/<div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">[\s\S]*?<\/div>/, groupTopRow);
   }
 
   // 2. Replace the repr job's stage badge with group stat chips.
