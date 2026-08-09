@@ -15290,17 +15290,22 @@ function createNextJobInGroup(groupName, templateJobId) {
 // the repr job's shipments block for aggregate group shipments. This
 // gives us the same .job-tile.is-client-preview shape (wrapping stage
 // pipeline, correct card size) as any other client tile.
-function renderClientGroupTile(groupName, groupJobs) {
+function renderClientGroupTile(groupName, groupJobs, opts) {
   if (!groupJobs.length) return '';
+  opts = opts || {};
+  const adminControls = !!opts.adminControls;
   const stats = groupStats(groupJobs);
   const repr = groupRepresentative(groupJobs);
   const gName = jsStr(groupName);
 
-  // Group header — wrap the badges + View Jobs button in a min-width:0
-  // flex-wrap:wrap container so they can share the clientTopRow flex
-  // parent with the "SHOW TO CLIENT" toggle (admin preview) without
-  // overlapping it. On narrow widths the badges wrap under themselves
-  // and the toggle stays pinned to the right.
+  const allVisible = groupJobs.every(j => j.client_visible !== false);
+  const groupToggle = adminControls
+    ? `<label class="cv-toggle" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--text2);cursor:pointer;margin-left:auto;text-transform:uppercase;letter-spacing:0.04em;flex-shrink:0;">
+         <input type="checkbox" ${allVisible ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleGroupClientVisible(${gName}, this.checked)" style="width:16px;height:16px;accent-color:#166534;cursor:pointer;">
+         Show to client
+       </label>`
+    : '';
+
   const headerHtml = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1 1 auto;min-width:0;">
     ${groupBadgesHtml(groupName, stats)}
     <button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${groupJobs.length})</button>
@@ -15333,11 +15338,19 @@ function renderClientGroupTile(groupName, groupJobs) {
     <div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;"><span>Total shipped</span><span>${stats.delivered.toLocaleString()}${totalBooked ? ' / ' + totalBooked.toLocaleString() + ' cartons' : ' cartons'}</span></div>
   </div>` : '';
 
-  let html = renderJobCard(repr, { clientPreview: true });
+  let html = renderJobCard(repr, { clientPreview: true, adminControls });
 
-  // 1. Replace the E-{id} span at the top of the client tile with group
-  //    badges + View Jobs button.
-  html = html.replace(/<span class="job-id" title="Job Card No\."[^>]*>E-\d+<\/span>/, headerHtml);
+  // 1. Replace the clientTopRow content with group badges + toggle.
+  //    When adminControls is on, the rendered tile has a flex row with
+  //    E-{id} + toggle; replace that whole row. Otherwise just the E-{id}.
+  if (adminControls) {
+    html = html.replace(
+      /<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">[\s\S]*?<\/label>\s*<\/div>/,
+      `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">${headerHtml}${groupToggle}</div>`
+    );
+  } else {
+    html = html.replace(/<span class="job-id" title="Job Card No\."[^>]*>E-\d+<\/span>/, headerHtml);
+  }
 
   // 2. Blank the .tile-head badges — the aggregate info is in the header
   //    above already, and the repr job's stage badge would be misleading
@@ -15373,7 +15386,8 @@ function openClientGroupJobsModal(groupName) {
     : (typeof clientPortalJobs !== 'undefined' && Array.isArray(clientPortalJobs) ? clientPortalJobs : []);
   const groupJobs = src.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
   if (!groupJobs.length) { notify('No jobs found for this group'); return; }
-  const tiles = groupJobs.map(j => `<div style="margin-bottom:12px;">${renderJobCard(j, { clientPreview: true })}</div>`).join('');
+  const isAdmin = src === clientViewJobs;
+  const tiles = groupJobs.map(j => `<div style="margin-bottom:12px;">${renderJobCard(j, { clientPreview: true, adminControls: isAdmin })}</div>`).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:1100px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex:0 0 auto;">
       <div>
@@ -19260,7 +19274,7 @@ function renderClientJobCardsInto(elId, rows, opts) {
       if (seenGrps.has(j.stock_group_name)) return '';
       seenGrps.add(j.stock_group_name);
       const gJobs = rows.filter(r => r && r.stock_group_name === j.stock_group_name);
-      return renderClientGroupTile(j.stock_group_name, gJobs);
+      return renderClientGroupTile(j.stock_group_name, gJobs, { adminControls: !!opts.adminControls });
     }
     return renderJobCard(j, { clientPreview: true, adminControls: !!opts.adminControls });
   }).join('');
@@ -19309,6 +19323,19 @@ async function toggleClientVisible(id, value) {
     notify('Error: ' + e.message);
     // Revert local optimistic update.
     if (local) local.client_visible = !value;
+    renderClientViewList();
+  }
+}
+
+async function toggleGroupClientVisible(groupName, value) {
+  const members = clientViewJobs.filter(j => j && j.stock_group_name === groupName);
+  members.forEach(j => { j.client_visible = !!value; });
+  renderClientViewList();
+  try {
+    await Promise.all(members.map(j => api('POST', `/api/jobs/${j.id}/client-visible`, { value: !!value })));
+  } catch (e) {
+    notify('Error: ' + e.message);
+    members.forEach(j => { j.client_visible = !value; });
     renderClientViewList();
   }
 }
