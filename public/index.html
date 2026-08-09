@@ -2612,7 +2612,16 @@ function partialSegmentsHtml(j, booked, shipped) {
   if (stage >= 6) readyTotal = readyCartonsTotal(j);
   else if (isPartialReady(j)) readyTotal = pastedCartonsTotal(j);
   const ready = Math.max(0, readyTotal - shipped);
-  const inProcess = Math.max(0, (booked || 0) - shipped - ready);
+  // In-process = cartons still being produced.
+  //   Once Pasting forwards the job to Ready (stage >= 6), the operator
+  //   has decided the final qty — the gap between booked and that final
+  //   qty is scrap / waste, not still-in-production. So in-process = 0
+  //   once the job is at Ready or later.
+  //   While the job is still in production (stage < 6), what's left is
+  //   what's booked minus what's already shipped and what's staged ready.
+  const inProcess = (stage >= 6)
+    ? 0
+    : Math.max(0, (booked || 0) - shipped - ready);
   const pill = (txt, bg) => `<span style="background:${bg};color:#fff;padding:2px 8px;border-radius:999px;font-weight:700;letter-spacing:0.03em;margin-right:3px;margin-bottom:3px;font-size:10px;white-space:nowrap;display:inline-block;">${txt}</span>`;
   let out = '<span style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:0;max-width:100%;">';
   out += pill(`&#128230; DELIVERED - ${shipped.toLocaleString()}`, '#f59e0b');
@@ -14810,9 +14819,23 @@ function groupStats(groupJobs) {
     const si = j.stage_index || 0;
     const done = isDone(j);
     if (!done && si >= 6) {
+      // At Ready or later — Pasting has finalized the qty. Only the
+      // unshipped ready cartons are "ready"; anything else is either
+      // already delivered or scrap (not in-process).
       ready += Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j));
     } else if (!done && !isNewJob(j) && j.issuance_status !== 'pending' && si >= 1 && si <= 5) {
-      inProcess += parseFloat(String(j.cartonqty || '').replace(/[^0-9.]/g, '')) || 0;
+      // Still in production. If Pasting has already saved some cartons
+      // (partial-ready) but hasn't advanced to Ready yet, those pasted
+      // cartons are the "ready" segment and the rest is in-process.
+      // Without partial-ready, the whole booked qty is in-process.
+      const booked = parseFloat(String(j.cartonqty || '').replace(/[^0-9.]/g, '')) || 0;
+      if (si === 5 && isPartialReady(j)) {
+        const pasted = pastedCartonsTotal(j);
+        ready     += Math.max(0, pasted - totalDeliveredCartons(j));
+        inProcess += Math.max(0, booked - pasted);
+      } else {
+        inProcess += booked;
+      }
     }
     delivered += totalDeliveredCartons(j);
   }
