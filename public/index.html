@@ -3732,7 +3732,6 @@ function renderJobRowCompact(j) {
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
-            ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
@@ -3743,6 +3742,9 @@ function renderJobRowCompact(j) {
         </div>
       </div>
       <div class="pipeline">${pipeline}</div>
+      ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="display:flex;justify-content:flex-end;margin-top:4px;">
+        <button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
+      </div>` : ''}
     </div>`;
 }
 
@@ -4162,8 +4164,8 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
-      ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
       ${more}
+      ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -14853,17 +14855,21 @@ function groupBadgesHtml(groupName, stats) {
 //   card / Track →  "tile-actions"
 function groupActionsHtml(groupName, reprId, count, hasReady, containerClass) {
   const gName = jsStr(groupName);
-  // Yellow Record Delivery matches the normal-job tile's Record Delivery
-  // button — same color, same right-side placement. For groups it opens
-  // the FIFO delivery modal (oldest job ships first) instead of a single
-  // job's ledger.
-  const recordDeliveryBtn = (hasReady && canWriteJobs())
-    ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openDeliverGroupModal(${gName})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button>`
-    : '';
   return `<div class="${containerClass}">
     <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>
     <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group">&#128194; View Jobs (${count})</button>
-    ${recordDeliveryBtn}
+  </div>`;
+}
+
+// Yellow bottom-right Record Delivery for a group tile — always shown
+// (even when ready qty is zero, so users can see the button and get a
+// meaningful error message if there's nothing to ship yet, rather than
+// wondering why the button disappeared).
+function groupRecordDeliveryHtml(groupName) {
+  if (!canWriteJobs()) return '';
+  const gName = jsStr(groupName);
+  return `<div class="tile-record-delivery" style="display:flex;justify-content:flex-end;margin-top:4px;">
+    <button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${gName})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button>
   </div>`;
 }
 
@@ -14878,7 +14884,8 @@ function renderGroupTile(groupName, groupJobs) {
   const repr = groupRepresentative(groupJobs);
   const badges = groupBadgesHtml(groupName, stats);
   const actions = groupActionsHtml(groupName, repr.id, groupJobs.length, stats.ready > 0, 'tile-actions');
-  return renderJobCard(repr)
+  const recordDelivery = groupRecordDeliveryHtml(groupName);
+  let html = renderJobCard(repr)
     // .tile-head content is a flat sequence of spans / small labels — no
     // nested divs — so a lazy match to the first </div> is safe here.
     .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
@@ -14888,6 +14895,17 @@ function renderGroupTile(groupName, groupJobs) {
     .replace(/<div class="tile-actions">[\s\S]*?<\/details>\s*<\/div>/, actions)
     // Purple top border marker
     .replace('class="job-tile ', 'class="job-tile group-card ');
+  // Bottom Record Delivery — replace whatever came from the seed's
+  // tile-actions Record Delivery button (single-job ledger) with the
+  // group's FIFO version. If the seed wasn't delivery-eligible (no
+  // button in tile-actions), inject the group's before the tile-close.
+  // Track view's Record Delivery is INSIDE .tile-actions (already
+  // replaced above), so we always inject here.
+  if (recordDelivery) {
+    const lastClose = html.lastIndexOf('</div>');
+    html = html.slice(0, lastClose) + recordDelivery + '\n  </div>';
+  }
+  return html;
 }
 
 // Compact (Jobs) view — same idea, different container classes.
@@ -14897,12 +14915,23 @@ function renderGroupTileCompact(groupName, groupJobs) {
   const repr = groupRepresentative(groupJobs);
   const badges = groupBadgesHtml(groupName, stats);
   const actions = groupActionsHtml(groupName, repr.id, groupJobs.length, stats.ready > 0, 'job-actions');
-  return renderJobRowCompact(repr)
+  const recordDelivery = groupRecordDeliveryHtml(groupName);
+  let html = renderJobRowCompact(repr)
     // .job-id-row content is flat spans only.
     .replace(/<div class="job-id-row">[\s\S]*?<\/div>/, `<div class="job-id-row">${badges}</div>`)
     // .job-actions contains only <button> children.
     .replace(/<div class="job-actions">[\s\S]*?<\/div>/, actions)
     .replace('class="job-card ', 'class="job-card group-card ');
+  // Bottom Record Delivery — seed's own (single-job ledger) is replaced
+  // with the group's FIFO version. If the seed didn't render one (not
+  // delivery-eligible), inject the group's before the tile-close.
+  if (/<div class="tile-record-delivery"/.test(html)) {
+    html = html.replace(/<div class="tile-record-delivery"[\s\S]*?<\/div>\s*<\/div>/, `${recordDelivery}\n    </div>`);
+  } else if (recordDelivery) {
+    const lastClose = html.lastIndexOf('</div>');
+    html = html.slice(0, lastClose) + recordDelivery + '\n    </div>';
+  }
+  return html;
 }
 
 // ── View All Jobs modal ───────────────────────────────────────────────
