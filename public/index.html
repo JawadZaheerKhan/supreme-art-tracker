@@ -14980,14 +14980,18 @@ function renderGroupTileCompact(groupName, groupJobs) {
     // .job-actions contains only <button> children.
     .replace(/<div class="job-actions">[\s\S]*?<\/div>/, actions)
     .replace('class="job-card ', 'class="job-card group-card ');
-  // Bottom Record Delivery — seed's own (single-job ledger) is replaced
-  // with the group's FIFO version. If the seed didn't render one (not
-  // delivery-eligible), inject the group's before the tile-close.
+  // Bottom Record Delivery — the normal compact tile puts pipeline +
+  // tile-record-delivery in a single flex row. Replace only the inner
+  // tile-record-delivery content so the flex row stays intact.
+  const groupDelivBtn = canWriteJobs()
+    ? `<div class="tile-record-delivery" style="flex:0 0 auto;"><button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${jsStr(groupName)})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button></div>`
+    : '';
   if (/<div class="tile-record-delivery"/.test(html)) {
-    html = html.replace(/<div class="tile-record-delivery"[\s\S]*?<\/div>\s*<\/div>/, `${recordDelivery}\n    </div>`);
-  } else if (recordDelivery) {
-    const lastClose = html.lastIndexOf('</div>');
-    html = html.slice(0, lastClose) + recordDelivery + '\n    </div>';
+    html = html.replace(/<div class="tile-record-delivery"[\s\S]*?<\/div>\s*<\/div>/, groupDelivBtn ? groupDelivBtn : '');
+  } else if (groupDelivBtn) {
+    // Inject before the closing </div> of the pipeline flex row
+    const pipelineRowEnd = html.lastIndexOf('</div>', html.lastIndexOf('</div>') - 1);
+    html = html.slice(0, pipelineRowEnd) + groupDelivBtn + html.slice(pipelineRowEnd);
   }
   return html;
 }
