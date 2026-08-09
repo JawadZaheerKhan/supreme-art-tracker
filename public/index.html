@@ -14896,12 +14896,15 @@ function groupRepresentative(groupJobs) {
 // just clutter. DELIVERED chip uses the same amber palette as the
 // partial-delivery segment chip so shipped totals read consistently
 // across the app.
+function groupStatChipsHtml(stats) {
+  const r = stats.ready > 0     ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${stats.ready.toLocaleString()}</span> ` : '';
+  const p = stats.inProcess > 0 ? `<span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span> ` : '';
+  const d = stats.delivered > 0 ? `<span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#128230; DELIVERED - ${stats.delivered.toLocaleString()}</span> ` : '';
+  return p + r + d;
+}
 function groupBadgesHtml(groupName, stats) {
   const g = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
-  const r = stats.ready > 0     ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">READY - ${stats.ready.toLocaleString()}</span>` : '';
-  const p = stats.inProcess > 0 ? ` <span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span>` : '';
-  const d = stats.delivered > 0 ? ` <span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;">&#128230; DELIVERED - ${stats.delivered.toLocaleString()}</span>` : '';
-  return g + r + p + d;
+  return g + ' ' + groupStatChipsHtml(stats);
 }
 
 // Group actions — replace the actions block in a normal tile.
@@ -15298,16 +15301,18 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
   const repr = groupRepresentative(groupJobs);
   const gName = jsStr(groupName);
 
-  const allVisible = groupJobs.every(j => j.client_visible !== false);
+  const reprVisible = repr.client_visible !== false;
   const groupToggle = adminControls
     ? `<label class="cv-toggle" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--text2);cursor:pointer;margin-left:auto;text-transform:uppercase;letter-spacing:0.04em;flex-shrink:0;">
-         <input type="checkbox" ${allVisible ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleGroupClientVisible(${gName}, this.checked)" style="width:16px;height:16px;accent-color:#166534;cursor:pointer;">
+         <input type="checkbox" ${reprVisible ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleGroupClientVisible(${gName}, this.checked)" style="width:16px;height:16px;accent-color:#166534;cursor:pointer;">
          Show to client
        </label>`
     : '';
 
+  const groupBadge = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
+  const statChips = groupStatChipsHtml(stats);
   const headerHtml = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1 1 auto;min-width:0;">
-    ${groupBadgesHtml(groupName, stats)}
+    ${groupBadge}
     <button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${groupJobs.length})</button>
   </div>`;
 
@@ -15352,10 +15357,8 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
     html = html.replace(/<span class="job-id" title="Job Card No\."[^>]*>E-\d+<\/span>/, headerHtml);
   }
 
-  // 2. Blank the .tile-head badges — the aggregate info is in the header
-  //    above already, and the repr job's stage badge would be misleading
-  //    for a group aggregate.
-  html = html.replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head"></div>`);
+  // 2. Replace the repr job's stage badge with group stat chips.
+  html = html.replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${statChips}</div>`);
 
   // 3. Replace the repr job's shipments block with the aggregate one.
   //    clientDeliveriesBreakdown emits a distinctive outer div; if it
@@ -19329,13 +19332,15 @@ async function toggleClientVisible(id, value) {
 
 async function toggleGroupClientVisible(groupName, value) {
   const members = clientViewJobs.filter(j => j && j.stock_group_name === groupName);
-  members.forEach(j => { j.client_visible = !!value; });
+  if (!members.length) return;
+  const repr = groupRepresentative(members);
+  repr.client_visible = !!value;
   renderClientViewList();
   try {
-    await Promise.all(members.map(j => api('POST', `/api/jobs/${j.id}/client-visible`, { value: !!value })));
+    await api('POST', `/api/jobs/${repr.id}/client-visible`, { value: !!value });
   } catch (e) {
     notify('Error: ' + e.message);
-    members.forEach(j => { j.client_visible = !value; });
+    repr.client_visible = !value;
     renderClientViewList();
   }
 }
