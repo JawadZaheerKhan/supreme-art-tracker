@@ -2398,8 +2398,11 @@ async function buildClientJobsView(sql, companyRaw, opts) {
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
         WHERE j.deleted_at IS NULL
-          AND (j.client_visible = true OR j.stock_group_visible = true)
           AND LOWER(TRIM(j.client)) = ${company}
+          AND (
+            (j.stock_group_name IS NULL AND j.client_visible = true)
+            OR (j.stock_group_name IS NOT NULL AND j.stock_group_visible = true)
+          )
         ORDER BY j.id DESC`;
   const now = Date.now();
   const cutoffMs = 3 * 24 * 60 * 60 * 1000;
@@ -2623,11 +2626,22 @@ app.post('/api/groups/client-visible', requireJobsWriter, async (req, res) => {
     const name = String((req.body && req.body.name) || '').trim();
     const value = !!(req.body && req.body.value);
     if (!name) return res.status(400).json({ error: 'name required' });
-    const updated = await sql`
-      UPDATE jobs SET stock_group_visible = ${value}
-       WHERE stock_group_name = ${name} AND deleted_at IS NULL
-       RETURNING id
-    `;
+    // Turning the group ON also flips client_visible=true on every member,
+    // so the client can immediately see them in the View Jobs modal without
+    // admin having to tick each one. Turning OFF only flips group visibility
+    // and leaves per-job client_visible alone (admin's earlier per-job
+    // choices are preserved for next time).
+    const updated = value
+      ? await sql`
+          UPDATE jobs SET stock_group_visible = true, client_visible = true
+           WHERE stock_group_name = ${name} AND deleted_at IS NULL
+           RETURNING id
+        `
+      : await sql`
+          UPDATE jobs SET stock_group_visible = false
+           WHERE stock_group_name = ${name} AND deleted_at IS NULL
+           RETURNING id
+        `;
     await logAudit(sql, req, {
       action: 'group.client_visible',
       entityType: 'group',
@@ -3736,8 +3750,9 @@ app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
     const groupName = body.group_name ? String(body.group_name).trim() || null : null;
     const rows = await sql`SELECT id FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
-    // Inherit the group's current stock_group_visible so the new member
-    // matches the rest. If joining a new/empty group, defaults to false.
+    // Inherit the group's current visibility so the new member matches
+    // the rest. If the group is on, also flip client_visible=true on the
+    // new member so it shows up in the client's View Jobs modal by default.
     let inherit = false;
     if (groupName) {
       const existing = await sql`
@@ -3747,7 +3762,11 @@ app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
       `;
       inherit = !!(existing.length && existing[0].stock_group_visible);
     }
-    await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = ${inherit} WHERE id = ${id}`;
+    if (inherit) {
+      await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = true, client_visible = true WHERE id = ${id}`;
+    } else {
+      await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = ${inherit} WHERE id = ${id}`;
+    }
     await logAudit(sql, req, {
       action: groupName ? 'job.group_set' : 'job.group_clear',
       entityType: 'job', entityId: id,

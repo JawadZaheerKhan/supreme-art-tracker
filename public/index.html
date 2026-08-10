@@ -19343,13 +19343,22 @@ async function toggleClientVisible(id, value) {
 async function toggleGroupClientVisible(groupName, value) {
   const members = clientViewJobs.filter(j => j && j.stock_group_name === groupName);
   if (!members.length) return;
-  members.forEach(j => { j.stock_group_visible = !!value; });
+  // Snapshot for rollback.
+  const snapshot = members.map(j => ({ id: j.id, sgv: j.stock_group_visible, cv: j.client_visible }));
+  members.forEach(j => {
+    j.stock_group_visible = !!value;
+    // Turning group ON also exposes each member individually (matches server).
+    if (value) j.client_visible = true;
+  });
   renderClientViewList();
   try {
     await api('POST', '/api/groups/client-visible', { name: groupName, value: !!value });
   } catch (e) {
     notify('Error: ' + e.message);
-    members.forEach(j => { j.stock_group_visible = !value; });
+    snapshot.forEach(s => {
+      const m = members.find(j => j.id === s.id);
+      if (m) { m.stock_group_visible = s.sgv; m.client_visible = s.cv; }
+    });
     renderClientViewList();
   }
 }
