@@ -5322,11 +5322,18 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         // Seed from existing entries[], or back-fill a single legacy
         // entry from prev.quantity so a job's first multi-pass save
         // doesn't lose its original day-1 number.
+        // prev.name holds the MACHINE and prev.signature holds the
+        // OPERATOR (per particulars[key]'s render contract). Older code
+        // wrote { operator: prev.name, machine: null } into the seed,
+        // which flipped them and left "MACHINENAME | person" in the
+        // Signature column forever after. Swap so the seed matches the
+        // rest of the pipeline.
         const seed = Array.isArray(prev.entries) && prev.entries.length
           ? prev.entries
           : (prev.quantity != null && String(prev.quantity).trim() !== ''
               ? [{ qty: String(prev.quantity).trim(), date: null,
-                   operator: prev.name || null, machine: null }]
+                   operator: prev.signature || null,
+                   machine:  prev.name      || null }]
               : []);
         const merged = value.map((v, i) => {
           const qty = String(v ?? '').trim();
@@ -5346,8 +5353,15 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
           }
           return { qty, date: todayISO, operator: operator.name, machine: operator.machine || null };
         });
-        const opsList = [...new Set(merged.map(e => e.operator).filter(Boolean))];
-        const machinesList = [...new Set(merged.map(e => e.machine).filter(Boolean))];
+        // Trim before dedup so subtle whitespace variants ("Ar" vs " Ar")
+        // collapse to one entry — the owner wants a person / machine that
+        // did N passes shown once, not N times.
+        const opsList = [...new Set(
+          merged.map(e => String((e && e.operator) || '').trim()).filter(Boolean)
+        )];
+        const machinesList = [...new Set(
+          merged.map(e => String((e && e.machine) || '').trim()).filter(Boolean)
+        )];
         particulars[key] = {
           ...prev,
           entries: merged,
