@@ -843,6 +843,9 @@ function requireAdmin(req, res, next) {
 function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
 function canWriteInventory(user) { return userHasRole(user, 'admin', 'store_manager'); }
 function canRunStation(user)     { return userHasRole(user, 'admin', 'production_manager', 'operator', 'ceo'); }
+// Delivery ledger — admin, PM, or the dedicated finance role. Finance is
+// otherwise fully read-only; recording shipments is the one thing they own.
+function canRecordDelivery(user) { return userHasRole(user, 'admin', 'production_manager', 'finance'); }
 // Station WRITE actions — Save / Advance / Skip / Notes. CEO can enter
 // the terminal (view-only) via canRunStation, but must never process a
 // job. Admin / PM / operator still write freely.
@@ -870,6 +873,16 @@ function requireJobsWriter(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (!canWriteJobs(req.user)) {
     return res.status(403).json({ error: 'Not allowed — jobs write access required' });
+  }
+  next();
+}
+// Deliveries — admin, PM, or finance. Finance holds no other job-write
+// role but is the only user allowed to record shipments (which is why it
+// exists as a separate middleware from requireJobsWriter).
+function requireDeliveryWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canRecordDelivery(req.user)) {
+    return res.status(403).json({ error: 'Not allowed — delivery write access required' });
   }
   next();
 }
@@ -1074,7 +1087,7 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'ceo', 'operator', 'client'];
+const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
 function parseRolesInput(body) {
   const ALLOWED = new Set(ROLE_PRIORITY);
   let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
@@ -3657,7 +3670,7 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, link
 // used for deliveries in this shop (1 carton == 1 piece per the owner).
 // delqty stays in sync as the running sum of cartons so the tile's
 // "Delivered Qty" and the client view keep working with no pieces math.
-app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3818,7 +3831,7 @@ app.get('/api/groups', requireAuth, async (req, res) => {
 // FIFO group delivery — auto-deducts from oldest job first, spilling into
 // newer jobs as needed. Uses computeDeliveryUpdate so auto-advance-to-
 // Delivered fires identically to a normal single-job delivery.
-app.post('/api/groups/deliver', requireJobsWriter, async (req, res) => {
+app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3878,7 +3891,7 @@ app.post('/api/groups/deliver', requireJobsWriter, async (req, res) => {
 // same per-job eligibility + auto-advance logic as a normal delivery,
 // just twice, wrapped in one response so the UI can show one confirmation.
 // Payload: { challan_no, date, entries: [{ job_id, cartons, po_no, batch_no }, ...] }
-app.post('/api/jobs/:id/deliver-linked', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();

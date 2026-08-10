@@ -65,6 +65,39 @@
   /* Read-only CEO role: any element tagged with class="ceo-hide" disappears.
      Backend still enforces the lock; this is just the UI nicety. */
   body.role-ceo .ceo-hide { display: none !important; }
+  /* Finance role: read-only across the entire app EXCEPT for delivery
+     controls, which carry .finance-allow to punch through the mass hide.
+     Backend also enforces the same matrix (requireDeliveryWriter). */
+  body.role-finance .ceo-hide:not(.finance-allow) { display: none !important; }
+  body.role-finance #topbar-add,
+  body.role-finance #topbar-add-offcut,
+  body.role-finance #topbar-export { display: none !important; }
+  /* Finance-blocked tabs: they stay VISIBLE and clickable in the top nav
+     (per user request) but the entire tab body is replaced by a friendly
+     "not for your role" message. .role-block-msg is injected into each
+     blocked mode div at boot and stays display:none for everyone else. */
+  body.role-finance #station-mode > *:not(.role-block-msg),
+  body.role-finance #users-mode > *:not(.role-block-msg),
+  body.role-finance #client-view-mode > *:not(.role-block-msg),
+  body.role-finance #stickers-mode > *:not(.role-block-msg) { display: none !important; }
+  body.role-finance .role-block-msg { display: flex !important; }
+  .role-block-msg {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 60px 20px;
+    min-height: 320px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 20px auto;
+    max-width: 640px;
+  }
+  .role-block-msg .rbm-icon { font-size: 44px; margin-bottom: 12px; opacity: 0.75; }
+  .role-block-msg .rbm-title { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+  .role-block-msg .rbm-sub { font-size: 13px; color: var(--text2); max-width: 460px; line-height: 1.5; }
   /* Inverse: .ceo-only elements only appear when role-ceo is active. */
   .ceo-only { display: none; }
   body.role-ceo .ceo-only { display: inline; }
@@ -2843,7 +2876,12 @@ function isProductionManager() { return hasRole('production_manager'); }
 function isStoreManager()      { return hasRole('store_manager') && !isAdmin() && !isProductionManager(); }
 // Persona: pure read-only CEO (no write role). Drives all the .ceo-hide
 // gating — a CEO who is ALSO admin/manager gets the full UI.
-function isCeo()               { return hasRole('ceo') && !isAdmin() && !isProductionManager() && !hasRole('store_manager'); }
+function isCeo()               { return hasRole('ceo') && !isAdmin() && !isProductionManager() && !hasRole('store_manager') && !hasRole('finance'); }
+// Persona: finance-only account. View-only across the app EXCEPT for the
+// delivery ledger, which they own. Blocked from Station, Users, Client
+// View, and Stickers — they see the tab labels but a friendly message
+// replaces the content.
+function isFinance()           { return hasRole('finance') && !isAdmin() && !isProductionManager() && !hasRole('store_manager'); }
 // Persona: operator-only account — locked to the Station view.
 function isOperator()          { return hasRole('operator') && !isAdmin() && !isProductionManager() && !hasRole('store_manager') && !hasRole('ceo'); }
 // Client role is mutually exclusive with internal roles (enforced server-side
@@ -2853,6 +2891,10 @@ function isClient()            { return hasRole('client'); }
 // Per-area write capability. Used to gate UI write buttons. Server enforces
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
+// Delivery ledger — admin, PM, or finance. Finance is the only role
+// that can write only this narrow slice of the job while being otherwise
+// read-only. Every delivery button / form uses this instead of canWriteJobs.
+function canRecordDelivery() { return isAdmin() || isProductionManager() || hasRole('finance'); }
 function canWriteInventory() { return isAdmin() || hasRole('store_manager'); }
 // Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
 // else with a PIN and sees the whole queue + update screens for that
@@ -2894,6 +2936,7 @@ function roleLabel(role) {
     ceo: 'CEO',
     production_manager: 'Production Manager',
     store_manager: 'Store Manager',
+    finance: 'Finance',
     operator: 'Operator',
     client: 'Client',
     // Legacy role names that may still appear on un-migrated user rows.
@@ -2977,6 +3020,32 @@ function showClientPortal() {
     onInputHandler: 'onClientPortalSearch',
   });
 }
+// Inject the "not for your role" placeholder into each finance-blocked
+// mode div (once, idempotent). CSS toggles between the message and the
+// real content based on body.role-finance. Non-finance users never see
+// these overlays because the .role-block-msg class stays display:none.
+function ensureRoleBlockMessages() {
+  const blocked = [
+    { id: 'station-mode',     icon: '&#127981;', title: 'Station is view-only for your role',
+      sub: 'The shop-floor terminal is limited to production users. Your role can view records and reports in Jobs, Inventory, and Reports. Ask an administrator if you need station access.' },
+    { id: 'users-mode',       icon: '&#128100;', title: 'User management is not available for your role',
+      sub: 'Managing users, roles, and the activity log is limited to administrators. Ask an administrator if you need edit access.' },
+    { id: 'client-view-mode', icon: '&#128065;', title: 'Client View is not available for your role',
+      sub: 'The client-facing preview is limited to admin, production manager, and CEO roles. Ask an administrator if you need access.' },
+    { id: 'stickers-mode',    icon: '&#127991;&#65039;', title: 'Stickers is not available for your role',
+      sub: 'Job card stickers are printed by production users. Ask an administrator if you need access.' },
+  ];
+  for (const b of blocked) {
+    const el = document.getElementById(b.id);
+    if (!el || el.querySelector(':scope > .role-block-msg')) continue;
+    const msg = document.createElement('div');
+    msg.className = 'role-block-msg';
+    msg.innerHTML = `<div class="rbm-icon">${b.icon}</div>
+                     <div class="rbm-title">${b.title}</div>
+                     <div class="rbm-sub">${b.sub}</div>`;
+    el.insertBefore(msg, el.firstChild);
+  }
+}
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
   if (!currentUser) { chip.style.display = 'none'; return; }
@@ -3000,21 +3069,22 @@ function renderUserChip() {
   // Operators get Station (default) + Jobs (read-only). Store Manager
   // skips Station/Forms. Production Manager + Admin + CEO see everything
   // (CEO is read-only via the .role-ceo body class below).
-  const op = isOperator(), sm = isStoreManager();
+  const op = isOperator(), sm = isStoreManager(), fin = isFinance();
   lockTab('mode-jobs-btn',      true);
   lockTab('mode-inventory-btn', !op);
   lockTab('mode-reports-btn',   !op);
-  lockTab('mode-stickers-btn',  !op && !sm);
-  lockTab('mode-station-btn',   canRunStation());
+  // Finance keeps every tab clickable — the blocked ones render a
+  // .role-block-msg overlay instead of the real content (see CSS above).
+  lockTab('mode-stickers-btn',  fin || (!op && !sm));
+  lockTab('mode-station-btn',   fin || canRunStation());
   lockTab('mode-forms-btn',     !op && !sm);
   // Users tab — open to admin (full control), CEO (read-only audit feed),
-  // and production_manager (Floor Operators roster only — other sections
-  // are tagged .pm-hide and hidden via the body.role-production-manager rule).
-  lockTab('mode-users-btn',     isAdmin() || hasRole('ceo') || isProductionManager());
-  // Client View — admin / PM / CEO preview of the client portal.
-  // Store manager + operator have no reason to see it; locked out here
-  // and server-side (/api/admin/client-view rejects them too).
-  lockTab('mode-client-view-btn', isAdmin() || hasRole('ceo') || isProductionManager());
+  // production_manager (Floor Operators roster only — other sections
+  // tagged .pm-hide), and finance (sees the block-msg placeholder).
+  lockTab('mode-users-btn',     fin || isAdmin() || hasRole('ceo') || isProductionManager());
+  // Client View — admin / PM / CEO preview; finance sees the block-msg
+  // placeholder. Store manager + operator remain locked.
+  lockTab('mode-client-view-btn', fin || isAdmin() || hasRole('ceo') || isProductionManager());
   // Trash card — visible to anyone who can navigate the app (so operators
   // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
@@ -3027,6 +3097,8 @@ function renderUserChip() {
   document.body.classList.toggle('role-store-manager', sm);
   document.body.classList.toggle('role-production-manager', isProductionManager());
   document.body.classList.toggle('role-operator', op);
+  document.body.classList.toggle('role-finance', fin);
+  if (fin) ensureRoleBlockMessages();
   // Capability-driven read-only locks — a user who holds BOTH a jobs-side
   // and inventory-side role keeps write access to both. Lock Jobs writes
   // only when the user can VIEW jobs but not write them; likewise Inventory.
@@ -3159,14 +3231,16 @@ function setMode(m) {
   // Authorized Users + Recent Activity sections are tagged .pm-hide
   // so PM lands on a Users tab that's effectively just the Floor
   // Operators roster). Everyone else is bounced to Jobs.
-  if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
+  if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager() && !isFinance()) m = 'jobs';
   // Client View tab — admin preview only. Store manager / operator get
-  // bounced to Jobs since they don't have the role gate for it.
-  if (m === 'client-view' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
+  // bounced to Jobs since they don't have the role gate for it. Finance
+  // may enter to see the role-block-msg placeholder.
+  if (m === 'client-view' && !isAdmin() && !hasRole('ceo') && !isProductionManager() && !isFinance()) m = 'jobs';
   // Station tab: PIN-gated shop-floor terminal. Admin / PM / operator
   // process; CEO enters read-only (all write buttons are .ceo-hide, plus
-  // a server-side reject on station-update for the ceo role).
-  if (m === 'station' && !canRunStation()) m = 'jobs';
+  // a server-side reject on station-update for the ceo role). Finance
+  // may enter to see the role-block-msg placeholder.
+  if (m === 'station' && !canRunStation() && !isFinance()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
@@ -3770,8 +3844,8 @@ function renderJobRowCompact(j) {
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
-        ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
-          <button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
+        ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
+          <button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
         </div>` : ''}
       </div>
     </div>`;
@@ -4201,7 +4275,7 @@ function renderJobCard(j, opts) {
       ${primary}
       ${updateBtn}
       ${more}
-      ${(canWriteJobs() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
+      ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -14469,7 +14543,7 @@ function deliveriesSection(j) {
   // Pasting when the operator has recorded some pasted cartons but
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
-  const canAddDelivery = (stageIdx >= 6 || (stageIdx === 5 && isPartialReady(j))) && !isDelivered && canWriteJobs && canWriteJobs();
+  const canAddDelivery = (stageIdx >= 6 || (stageIdx === 5 && isPartialReady(j))) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
 
   const rows = list.length
@@ -14925,10 +14999,10 @@ function groupActionsHtml(groupName, reprId, latestId, count, hasReady, containe
 // meaningful error message if there's nothing to ship yet, rather than
 // wondering why the button disappeared).
 function groupRecordDeliveryHtml(groupName) {
-  if (!canWriteJobs()) return '';
+  if (!canRecordDelivery()) return '';
   const gName = jsStr(groupName);
   return `<div class="tile-record-delivery" style="display:flex;justify-content:flex-end;margin-top:4px;">
-    <button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${gName})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button>
+    <button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${gName})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button>
   </div>`;
 }
 
@@ -14987,7 +15061,7 @@ function renderGroupTileCompact(groupName, groupJobs) {
   // tile-record-delivery in a single flex row. Replace only the inner
   // tile-record-delivery content so the flex row stays intact.
   const groupDelivBtn = canWriteJobs()
-    ? `<div class="tile-record-delivery" style="flex:0 0 auto;"><button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${jsStr(groupName)})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button></div>`
+    ? `<div class="tile-record-delivery" style="flex:0 0 auto;"><button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${jsStr(groupName)})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button></div>`
     : '';
   if (/<div class="tile-record-delivery"/.test(html)) {
     html = html.replace(/<div class="tile-record-delivery"[\s\S]*?<\/div>\s*<\/div>/, groupDelivBtn ? groupDelivBtn : '');
@@ -19031,7 +19105,7 @@ function renderUsersTab() {
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(userRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
-                ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['ceo','CEO'],['operator','Operator'],['client','Client']].map(([r,lbl]) => `
+                ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['operator','Operator'],['client','Client']].map(([r,lbl]) => `
                   <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
                     <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
                            ${isMe && r==='admin' ? 'disabled' : ''}
@@ -19071,7 +19145,7 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
       <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
-        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]].map(([r,lbl,def]) => `
+        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]].map(([r,lbl,def]) => `
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
             <input type="checkbox" value="${r}" ${def?'checked':''} onchange="onInviteRolesChanged()"> ${lbl}
           </label>`).join('')}
