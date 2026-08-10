@@ -1019,6 +1019,21 @@
   .station-pass-label {
     font-size: 13px; font-weight: 700; color: var(--text2);
     text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  /* Admin / PM only × next to a saved pass label — removes the entry
+     server-side. Rendered inline with the label so it stays close to
+     the row it refers to and never overlaps the +/− pass buttons. */
+  .station-pass-delete {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; padding: 0; border-radius: 50%;
+    background: #fee2e2; color: #991b1b;
+    border: 1px solid #fecaca;
+    font-size: 14px; font-weight: 900; line-height: 1; cursor: pointer;
+    transition: background 0.12s ease, transform 0.12s ease;
+  }
+  .station-pass-delete:hover, .station-pass-delete:focus {
+    background: #991b1b; color: #fff; transform: scale(1.08); outline: none;
   }
   .station-pass-add {
     position: absolute; top: -8px; right: -8px;
@@ -18262,7 +18277,12 @@ function stationUpdateHtml() {
   // machines see each other's entries, embellishments see embellishments.
   // Entries with no machine stamp (legacy / admin-typed) stay visible to all.
   const myRoles = stIdx === 2 ? new Set(rolesOfOperator(stationOperator)) : null;
+  // Admin / PM bypass the per-machine visibility filter at Coatings so they
+  // see every historical entry across all coating sections — needed because
+  // the delete button below only appears on entries this render can see.
+  const canDeleteEntry = isAdmin() || isProductionManager();
   const entryVisible = (e) => {
+    if (canDeleteEntry) return true;
     if (stIdx !== 2 || !e || !e.machine) return true;
     if (e.machine === (stationOperator.machine || '')) return true;
     const entryOp = operatorsList.find(o => o.name === e.machine);
@@ -18337,6 +18357,27 @@ function stationUpdateHtml() {
       ? `${m.date ? esc(m.date) : ''}${m.date && m.operator ? ' &middot; ' : ''}${m.operator ? esc(m.operator) : ''}`
       : (isNewPass ? 'New entry &mdash; today' : '');
     const isLast = passIdx === stationPassCount - 1;
+    // Admin / PM only: little × next to saved passes so a mis-entered row
+    // can be removed without a DB touch. Skipped for the unsaved new-entry
+    // row (no data yet) and for operators (they'd delete other machines'
+    // entries by mistake). The button posts the field keys + real entry
+    // index for this pass — the server rebuilds derived .quantity strings.
+    const savedPass = m && (m.date || m.operator);
+    const deleteBtnHtml = (canDeleteEntry && savedPass) ? (() => {
+      const firstFieldWithEntry = fields.find(f => {
+        const vis = visibleIdxsOf(f);
+        return vis && vis[passIdx] !== undefined;
+      });
+      if (!firstFieldWithEntry) return '';
+      const realIdx = visibleIdxsOf(firstFieldWithEntry)[passIdx];
+      const keyList = fields.filter(f => {
+        const vis = visibleIdxsOf(f);
+        return vis && vis[passIdx] !== undefined;
+      }).map(f => f.key);
+      const keysJson = esc(JSON.stringify(keyList));
+      return `<button type="button" class="station-pass-delete" title="Delete this entry (admin / production manager only)"
+        onclick="stationDeleteEntry(${j.id}, ${realIdx}, '${keysJson}')">&times;</button>`;
+    })() : '';
     const inputs = fields.map(f => {
       const cur = passValue(f, passIdx);
       const inputId = `sf-${f.key}-p${passIdx}`;
@@ -18373,7 +18414,7 @@ function stationUpdateHtml() {
     const allowMultiPass = stIdx !== 0;
     return `
       <div class="station-pass">
-        ${label ? `<div class="station-pass-label">${label}</div>` : ''}
+        ${label ? `<div class="station-pass-label">${label}${deleteBtnHtml}</div>` : ''}
         <div class="station-field-grid">
           ${inputs}
           ${isLast && allowMultiPass ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
@@ -18560,6 +18601,42 @@ function stationRemovePass() {
   stationSnapshotDraft();
   if (stationPassCount > 1) stationPassCount--;
   stationRender();
+}
+
+// Admin / PM only: delete one already-saved pass from a job's particulars.
+// Called from the × next to a pass label. Confirms first (irreversible),
+// then posts field keys + the real entries[] index; the server rebuilds
+// derived quantity strings and refreshes the job. keysJson is a JSON
+// string of the field keys touched by this pass (usually 1-2 keys).
+async function stationDeleteEntry(jobId, idx, keysJson) {
+  if (!(isAdmin() || isProductionManager())) return;
+  let keys;
+  try { keys = JSON.parse(keysJson); } catch { keys = []; }
+  if (!Array.isArray(keys) || !keys.length) return;
+  const ok = await confirmDialog({
+    title: 'Delete this saved entry?',
+    message: 'This removes the entry from the job’s history and the totals recalculate immediately. This cannot be undone from the app.',
+    danger: true,
+    confirmText: 'Delete',
+  });
+  if (!ok) return;
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/particulars/delete-entry`, { idx, keys });
+    // Merge the updated job back into memory so the station re-render
+    // picks up fresh entries[] without another full loadJobs round-trip.
+    if (updated && updated.id) {
+      const i = jobs.findIndex(j => j.id === updated.id);
+      if (i !== -1) jobs[i] = updated;
+    }
+    stationSnapshotDraft();
+    // Reset the pass counter so the render re-derives from entries[].
+    stationPassCount = 1;
+    stationJobPassKey = null;
+    stationRender();
+    notify('Entry deleted');
+  } catch (e) {
+    notify('Error: ' + (e.message || String(e)));
+  }
 }
 
 function stationOpenPad(inputId, label) {

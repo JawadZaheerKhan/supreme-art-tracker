@@ -4017,6 +4017,68 @@ app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => 
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Admin / PM only: delete one saved particulars entry (a station "pass")
+// from a job. The station view now surfaces a small × next to each saved
+// pass so a mis-entered coating / printing row can be removed without an
+// admin-only DB touch. Removes the entry at `idx` from every key in the
+// request body's `keys` array, then rebuilds each key's derived
+// `quantity` / `name` / `signature` display strings from the remaining
+// entries so the job card stays in sync.
+app.post('/api/jobs/:id/particulars/delete-entry', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const idx = parseInt(req.body && req.body.idx, 10);
+    const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys.filter(k => typeof k === 'string' && k) : [];
+    if (!Number.isFinite(idx) || idx < 0) return res.status(400).json({ error: 'idx required (non-negative integer)' });
+    if (!keys.length) return res.status(400).json({ error: 'keys[] required' });
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+    const removedSummary = [];
+    for (const key of keys) {
+      const p = particulars[key];
+      if (!p || !Array.isArray(p.entries) || idx >= p.entries.length) continue;
+      const next = [...p.entries];
+      const gone = next.splice(idx, 1)[0] || {};
+      const opsList = [...new Set(next.map(e => e && e.operator).filter(Boolean))];
+      const machinesList = [...new Set(next.map(e => e && e.machine).filter(Boolean))];
+      particulars[key] = {
+        ...p,
+        entries: next,
+        quantity: next.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | '),
+        name: machinesList.join(' | ') || p.name || '',
+        signature: opsList.join(' | '),
+      };
+      if (gone.qty) removedSummary.push(`${key}=${gone.qty}${gone.date ? '@' + gone.date : ''}`);
+    }
+    const nowLog = Array.isArray(job.log) ? [...job.log] : [];
+    nowLog.push({
+      stage: STAGES[job.stage_index || 0] || '?',
+      status: (job.stages && job.stages[job.stage_index || 0] && job.stages[job.stage_index || 0].status) || 'active',
+      notes: `Particulars entry #${idx + 1} removed by admin${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
+      by: req.user?.email || 'unknown',
+      time: businessStamp(),
+    });
+    const updated = await sql`
+      UPDATE jobs SET particulars = ${JSON.stringify(particulars)}, log = ${JSON.stringify(nowLog)}
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.particulars.delete-entry',
+      entityType: 'job', entityId: id,
+      summary: `Job E-${id}: removed particulars entry #${idx + 1}${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
+    });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE a job — admin only. SOFT delete: flips deleted_at so the row stays
 // recoverable from the Trash page for 30 days. Inventory ledger entries are
 // unaffected (their FK is ON DELETE SET NULL and we don't actually delete).
