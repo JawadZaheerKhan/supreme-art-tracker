@@ -13281,7 +13281,16 @@ function setDateCustom() {
 
 // ── Modals ────────────────────────────────────────────────────
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
-function closeModal() { document.getElementById('modal-root').innerHTML=''; selSection=null; }
+function closeModal() {
+  document.getElementById('modal-root').innerHTML='';
+  selSection=null;
+  // Any modal close drops the pending "auto-join group after save" intent.
+  // saveAdd/saveEdit have already read + cleared it before their closeModal
+  // call, so this only matters when the user cancels a Duplicate modal
+  // opened via createNextJobInGroup — without this reset the intent would
+  // leak into the next unrelated New Job or Duplicate save.
+  _pendingGroupName = null;
+}
 function overlayClick(e) { if(e.target.id==='overlay') closeModal(); }
 
 // ── Branded Dialogs (confirm / alert / prompt replacements) ──────
@@ -15024,9 +15033,11 @@ function renderGroupTile(groupName, groupJobs) {
     // nested divs — so a lazy match to the first </div> is safe here.
     .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
     // .tile-actions wraps a <details class="job-more"> whose inner
-    // <div class="job-more-menu"> has its own </div>, so match the block
-    // by anchoring on </details></div>.
-    .replace(/<div class="tile-actions">[\s\S]*?<\/details>\s*<\/div>/, actions)
+    // <div class="job-more-menu"> has its own </div>. renderJobCard may
+    // also emit a Record Delivery button AFTER </details> and before
+    // the tile-actions closing </div>, so anchor on </details> then
+    // lazily consume anything up to the next </div>.
+    .replace(/<div class="tile-actions">[\s\S]*?<\/details>[\s\S]*?<\/div>/, actions)
     // Purple top border marker
     .replace('class="job-tile ', 'class="job-tile group-card ');
   // Bottom Record Delivery — replace whatever came from the seed's
@@ -15060,7 +15071,7 @@ function renderGroupTileCompact(groupName, groupJobs) {
   // Bottom Record Delivery — the normal compact tile puts pipeline +
   // tile-record-delivery in a single flex row. Replace only the inner
   // tile-record-delivery content so the flex row stays intact.
-  const groupDelivBtn = canWriteJobs()
+  const groupDelivBtn = canRecordDelivery()
     ? `<div class="tile-record-delivery" style="flex:0 0 auto;"><button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${jsStr(groupName)})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button></div>`
     : '';
   if (/<div class="tile-record-delivery"/.test(html)) {
@@ -15122,7 +15133,7 @@ function openGroupJobsModal(groupName) {
 
 // ── FIFO Group Delivery modal ─────────────────────────────────────────
 function openDeliverGroupModal(groupName) {
-  if (!canWriteJobs()) return;
+  if (!canRecordDelivery()) return;
   const groupJobs = jobs.filter(j => j && j.stock_group_name === groupName).sort((a, b) => a.id - b.id);
   const available = groupJobs.filter(j => {
     const si = j.stage_index || 0;
@@ -15939,6 +15950,10 @@ async function checkStockBeforeSave(data) {
 }
 
 function openAdd() {
+  // Fresh New Job entry — clear any stale group-join intent left by a
+  // previously-cancelled "Duplicate into group" flow, so this unrelated
+  // job doesn't silently PATCH itself into that group on save.
+  _pendingGroupName = null;
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD</h2>
     ${jobForm()}
