@@ -18357,27 +18357,48 @@ function stationUpdateHtml() {
       ? `${m.date ? esc(m.date) : ''}${m.date && m.operator ? ' &middot; ' : ''}${m.operator ? esc(m.operator) : ''}`
       : (isNewPass ? 'New entry &mdash; today' : '');
     const isLast = passIdx === stationPassCount - 1;
-    // Admin / PM only: little × next to saved passes so a mis-entered row
-    // can be removed without a DB touch. Skipped for the unsaved new-entry
-    // row (no data yet) and for operators (they'd delete other machines'
-    // entries by mistake). The button posts the field keys + real entry
-    // index for this pass — the server rebuilds derived .quantity strings.
+    // Reuse the existing "−" circle button (previously only shown on the
+    // last pass to undo an accidental Add-pass) as the per-pass delete for
+    // ALREADY-SAVED entries too. Visibility rule per pass:
+    //   • Admin / PM: minus on every saved pass they can see, so they can
+    //     fix any mis-typed row without a DB touch.
+    //   • Machine operator: NO minus on saved passes — the delete power is
+    //     admin/PM only per the current owner spec. The example the owner
+    //     gave (an Emboss op removing a UV op's earlier entry) is the exact
+    //     scenario this prevents.
+    //   • Last pass (unsaved local new-row): keeps the existing local
+    //     decrement behaviour so hitting + and then − backs out the add.
     const savedPass = m && (m.date || m.operator);
-    const deleteBtnHtml = (canDeleteEntry && savedPass) ? (() => {
+    const canDeleteThisPass = savedPass && canDeleteEntry;
+    let realIdxForPass = null;
+    let keysJsonForPass = '';
+    if (savedPass) {
       const firstFieldWithEntry = fields.find(f => {
         const vis = visibleIdxsOf(f);
         return vis && vis[passIdx] !== undefined;
       });
-      if (!firstFieldWithEntry) return '';
-      const realIdx = visibleIdxsOf(firstFieldWithEntry)[passIdx];
-      const keyList = fields.filter(f => {
-        const vis = visibleIdxsOf(f);
-        return vis && vis[passIdx] !== undefined;
-      }).map(f => f.key);
-      const keysJson = esc(JSON.stringify(keyList));
-      return `<button type="button" class="station-pass-delete" title="Delete this entry (admin / production manager only)"
-        onclick="stationDeleteEntry(${j.id}, ${realIdx}, '${keysJson}')">&times;</button>`;
-    })() : '';
+      if (firstFieldWithEntry) {
+        realIdxForPass = visibleIdxsOf(firstFieldWithEntry)[passIdx];
+        const keyList = fields.filter(f => {
+          const vis = visibleIdxsOf(f);
+          return vis && vis[passIdx] !== undefined;
+        }).map(f => f.key);
+        keysJsonForPass = esc(JSON.stringify(keyList));
+      }
+    }
+    const localMinusOnLast = isLast && !savedPass && stationPassCount > 1;
+    // Mirror `allowMultiPass = stIdx !== 0` below — CTP (stage 0) is one-shot,
+    // no minus at all.
+    const showMinus = stIdx !== 0 && (canDeleteThisPass || localMinusOnLast);
+    // Saved-pass minus posts to the server delete endpoint; unsaved-last
+    // minus just decrements the local pass counter.
+    const minusOnClick = (savedPass && realIdxForPass !== null)
+      ? `stationDeleteEntry(${j.id}, ${realIdxForPass}, '${keysJsonForPass}')`
+      : 'stationRemovePass()';
+    const minusTitle = savedPass ? 'Delete this saved entry' : 'Remove this pass';
+    // Default CSS puts − at right:38px (beside the + on the last pass).
+    // Non-last passes have no +, so pin − to the rightmost slot instead.
+    const minusRightOverride = isLast ? '' : 'right:-8px;';
     const inputs = fields.map(f => {
       const cur = passValue(f, passIdx);
       const inputId = `sf-${f.key}-p${passIdx}`;
@@ -18414,11 +18435,11 @@ function stationUpdateHtml() {
     const allowMultiPass = stIdx !== 0;
     return `
       <div class="station-pass">
-        ${label ? `<div class="station-pass-label">${label}${deleteBtnHtml}</div>` : ''}
+        ${label ? `<div class="station-pass-label">${label}</div>` : ''}
         <div class="station-field-grid">
           ${inputs}
           ${isLast && allowMultiPass ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
-          ${isLast && allowMultiPass && stationPassCount > 1 ? `<button type="button" class="station-pass-remove" onclick="stationRemovePass()" title="Remove this pass">&minus;</button>` : ''}
+          ${showMinus && allowMultiPass ? `<button type="button" class="station-pass-remove" style="${minusRightOverride}" onclick="${minusOnClick}" title="${minusTitle}">&minus;</button>` : ''}
         </div>
       </div>`;
   }).join('') : '';
