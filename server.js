@@ -2378,7 +2378,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.priority, j.stages, j.issuance_status, j.client_visible,
           j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
-          j.linked_job_id, j.deliveries, j.stock_group_name,
+          j.linked_job_id, j.deliveries, j.stock_group_name, j.particulars,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2393,7 +2393,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.priority, j.stages, j.issuance_status, j.client_visible,
           j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
-          j.linked_job_id, j.deliveries, j.stock_group_name,
+          j.linked_job_id, j.deliveries, j.stock_group_name, j.particulars,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2488,6 +2488,31 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       issuance_status: j.issuance_status || 'issued',
       client_visible: !!j.client_visible,
       stock_group_visible: !!j.stock_group_visible,
+      // Minimal particulars — ONLY the two qty fields the client tile
+      // needs for READY / partial-ready chips. Everything else in
+      // particulars (paper specs, colors, weights, brand, etc.) stays
+      // server-side.
+      particulars: (() => {
+        const p = j.particulars || {};
+        const out = {};
+        if (p.delivered_cartons_qty) {
+          out.delivered_cartons_qty = {
+            quantity: p.delivered_cartons_qty.quantity || '',
+            entries: Array.isArray(p.delivered_cartons_qty.entries)
+              ? p.delivered_cartons_qty.entries.map(e => ({ qty: (e && e.qty) || '' }))
+              : undefined,
+          };
+        }
+        if (p.pasted_cartons_qty) {
+          out.pasted_cartons_qty = {
+            quantity: p.pasted_cartons_qty.quantity || '',
+            entries: Array.isArray(p.pasted_cartons_qty.entries)
+              ? p.pasted_cartons_qty.entries.map(e => ({ qty: (e && e.qty) || '' }))
+              : undefined,
+          };
+        }
+        return out;
+      })(),
       is_shade_card: !!j.is_shade_card,
       // Linked Jobs — lets the client see from the start that this order
       // is tied to another one (same product, printed together). Only the
