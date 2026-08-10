@@ -3789,16 +3789,20 @@ app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
     const rows = await sql`SELECT id FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     // Inherit the group's current visibility so the new member matches
-    // the rest. If the group is on, also flip client_visible=true on the
-    // new member so it shows up in the client's View Jobs modal by default.
+    // the rest. bool_or() picks "visible" if ANY member has it — so a
+    // group where a hand-edit / interrupted sync left the flags disagreeing
+    // still inherits deterministically (the sooner-visible wins rather than
+    // a random Postgres LIMIT 1 pick). If the group is visible, also flip
+    // client_visible=true on the new member so it shows up in the client's
+    // View Jobs modal by default.
     let inherit = false;
     if (groupName) {
       const existing = await sql`
-        SELECT stock_group_visible FROM jobs
+        SELECT COALESCE(bool_or(stock_group_visible), false) AS visible
+          FROM jobs
          WHERE stock_group_name = ${groupName} AND deleted_at IS NULL
-         LIMIT 1
       `;
-      inherit = !!(existing.length && existing[0].stock_group_visible);
+      inherit = !!(existing.length && existing[0].visible);
     }
     if (inherit) {
       await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = true, client_visible = true WHERE id = ${id}`;
