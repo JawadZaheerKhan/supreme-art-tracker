@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-10-linked-jobs-and-group-visibility';
+const SCHEMA_VERSION = 'v2026-08-10-finance-role-check';
 
 async function initDb() {
   try {
@@ -486,7 +486,7 @@ async function initDb() {
     await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
     await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','operator','ceo','client'))`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client'))`;
     // Multi-role support: a user can hold several roles at once (e.g. CEO +
     // Admin). `roles` is the source of truth; the legacy `role` column keeps
     // the highest-priority role for back-compat with old JWT cookies and any
