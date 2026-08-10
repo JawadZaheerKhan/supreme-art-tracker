@@ -65,6 +65,39 @@
   /* Read-only CEO role: any element tagged with class="ceo-hide" disappears.
      Backend still enforces the lock; this is just the UI nicety. */
   body.role-ceo .ceo-hide { display: none !important; }
+  /* Finance role: read-only across the entire app EXCEPT for delivery
+     controls, which carry .finance-allow to punch through the mass hide.
+     Backend also enforces the same matrix (requireDeliveryWriter). */
+  body.role-finance .ceo-hide:not(.finance-allow) { display: none !important; }
+  body.role-finance #topbar-add,
+  body.role-finance #topbar-add-offcut,
+  body.role-finance #topbar-export { display: none !important; }
+  /* Finance-blocked tabs: they stay VISIBLE and clickable in the top nav
+     (per user request) but the entire tab body is replaced by a friendly
+     "not for your role" message. .role-block-msg is injected into each
+     blocked mode div at boot and stays display:none for everyone else. */
+  body.role-finance #station-mode > *:not(.role-block-msg),
+  body.role-finance #users-mode > *:not(.role-block-msg),
+  body.role-finance #client-view-mode > *:not(.role-block-msg),
+  body.role-finance #stickers-mode > *:not(.role-block-msg) { display: none !important; }
+  body.role-finance .role-block-msg { display: flex !important; }
+  .role-block-msg {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 60px 20px;
+    min-height: 320px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 20px auto;
+    max-width: 640px;
+  }
+  .role-block-msg .rbm-icon { font-size: 44px; margin-bottom: 12px; opacity: 0.75; }
+  .role-block-msg .rbm-title { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+  .role-block-msg .rbm-sub { font-size: 13px; color: var(--text2); max-width: 460px; line-height: 1.5; }
   /* Inverse: .ceo-only elements only appear when role-ceo is active. */
   .ceo-only { display: none; }
   body.role-ceo .ceo-only { display: inline; }
@@ -155,7 +188,7 @@
     text-transform: uppercase;
   }
   .job-tile.is-client-preview .tile-head .badge-active {
-    background: #4338ca;
+    background: #2563eb;   /* matches the IN PROCESS aggregate chip */
     color: #fff;
     border-color: transparent;
   }
@@ -561,10 +594,11 @@
      Declared AFTER the priority rules so the cascade lets it win when both
      classes are present on the same card. */
   .job-card.is-pending    { border-left-color: #166534; }
-  .job-card.is-done { opacity: 0.72; }
+  .job-card.is-done { background: #f0fdf4; border-left-color: #16a34a; opacity: 0.85; }
   .job-top { display: flex; align-items: flex-start; gap: 16px; }
   .job-meta { flex: 1; min-width: 0; }
-  .job-id-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .job-id-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+  .job-id-row > .badge, .job-id-row > .job-id { flex-shrink: 0; }
   /* Job ID is the primary identifier — a bit larger, bolder, and tinted
      with the brand blue so it pops against the all-black labels. */
   .job-id { font-size: 16px; font-weight: 800; color: var(--blue-text); letter-spacing: -0.01em; }
@@ -595,17 +629,26 @@
   .job-side { display: flex; flex-direction: column; gap: 6px; min-width: 180px; font-size: 14px; color: var(--text); line-height: 1.4; }
   .job-side .lbl { font-size: 10px; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 0.05em; }
   .job-side .val { font-size: 14px; font-weight: 500; color: var(--text); }
-  .job-right { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+  /* Cap the right column so the actions row can't dominate the tile
+     and squeeze the .job-facts area into 5+ wrapped rows. With this
+     cap .job-meta always gets at least ~55% of the tile width, which
+     is enough for the facts to fit in exactly 2 rows in the common
+     case (up to ~10 facts). Buttons wrap into a second row if they
+     don't fit — that's an intentional trade: tile height is driven by
+     the taller of the two columns, and 2 rows of buttons + 2 rows of
+     facts side-by-side is much shorter than 1 row of buttons on top
+     of 5 rows of wrapped facts. */
+  .job-right { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; max-width: 45%; }
   .badge { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
   .badge-active { background: var(--blue-bg); color: var(--blue-text); }
   .badge-done { background: var(--green-bg); color: var(--green-text); }
   .badge-blocked { background: var(--red-bg); color: var(--red-text); }
-  .badge-new { background: var(--amber-bg); color: var(--amber-text); }
+  .badge-new { background: #2563eb; color: #fff; }
   /* CTP queue — job is out of New Jobs but plates aren't done yet. Purple
      so it's visually distinct from New (amber), Pending (green), and
      In Progress (blue). Sits between New Jobs and Pending Stock in the
      tab flow. */
-  .badge-ctp { background: #ede9fe; color: #5b21b6; border: 1px solid #c4b5fd; }
+  .badge-ctp { background: #2563eb; color: #fff; }
   /* Pending stock issuance — green for "stock is ready, just click Issue". */
   .badge-pending { background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); }
   /* On-hand = 0: nothing to issue yet. Red, same visual weight as Blocked. */
@@ -658,6 +701,25 @@
   .sc-toggle-idle:hover   { background: #ddd6fe; border-color: #a78bfa; }
   .sc-toggle-active { background: #c4b5fd; color: #4c1d95; border: 1.5px solid #a78bfa; }
   .sc-toggle-active:hover { background: #a78bfa; border-color: #8b5cf6; }
+  /* Create Job Group toolbar button — same pill shape as the Shade Cards
+     toggle so it feels part of the toolbar, red palette to stand out as
+     a create action. */
+  #create-group-btn {
+    font-weight: 600; font-size: 14px;
+    padding: 8px 16px; border-radius: 7px;
+    font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--red-bg); color: var(--red-text); border: 1.5px solid var(--red-border);
+    transition: background 0.12s, border-color 0.12s;
+  }
+  #create-group-btn:hover { background: #f9d5d5; border-color: #e78888; }
+  /* Stock Group tile — purple accent top-border to distinguish from job cards */
+  .group-card { border-top: 4px solid #7c3aed !important; }
+  .job-tile.group-card .tile-ribbon,
+  .job-tile.group-card .pipeline { margin-top: auto; }
+  .group-stat { display:inline-flex;flex-direction:column;align-items:center;padding:6px 12px;border-radius:8px;min-width:74px;text-align:center;gap:1px; }
+  .group-stat-label { font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px; }
+  .group-stat-value { font-size:17px;font-weight:800;line-height:1; }
   /* Pending-queue rows in the inventory list view — slightly more padding
      than a paper card, faint green left border to match the toggle. */
   .inv-pending-row { border-left: 4px solid #86efac; }
@@ -691,7 +753,7 @@
   .job-tile.p-urgent { border-left-color: #dc2626; }
   .job-tile.is-pending { border-left-color: #166534; }
   .job-tile.is-blocked { border-left-color: #A32D2D; }
-  .job-tile.is-done { opacity: 0.7; }
+  .job-tile.is-done { background: #f0fdf4 !important; border-color: #bbf7d0 !important; border-left-color: #16a34a !important; opacity: 0.88; }
   .tile-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding-right: 110px; }
   /* Right-side info column on the card — Days (top) above Yield (bottom).
      Positioned absolutely so it doesn't reflow the rest of the tile. */
@@ -705,7 +767,11 @@
   .tile-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; color: var(--text); }
   .tile-facts b { font-weight: 700; color: var(--text2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
   .tile-cut { font-size: 12px; color: var(--blue-text); background: var(--blue-bg); border: 1px solid var(--blue-border); border-radius: 6px; padding: 3px 8px; align-self: flex-start; }
-  .tile-actions { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+  /* margin-top:auto pushes the actions row to the bottom of the flex
+     column, so Record Delivery buttons across tiles in the same grid
+     row line up at the same y-position instead of floating at different
+     heights based on how much content each tile has above them. */
+  .tile-actions { display: flex; gap: 6px; align-items: center; margin-top: auto; flex-wrap: wrap; }
 
   /* Stage machine vignette — frameless. The SVG and label float directly
      on the card so the animation feels native to the card, not boxed in.
@@ -1710,6 +1776,12 @@
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
+    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group is named after it">
+      &#128230; Create Job Group
+    </button>
+    <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group">
+      <option value="">All groups</option>
+    </select>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
       <option value="this-week">This week</option>
@@ -2364,6 +2436,7 @@ let filterMachine = '';
 let filterPO = '';
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
+let filterGroup = '';
 let filterDateRange = '';
 let filterDateFrom = '';
 let filterDateTo = '';
@@ -2587,13 +2660,25 @@ function partialSegmentsHtml(j, booked, shipped) {
   if (stage >= 6) readyTotal = readyCartonsTotal(j);
   else if (isPartialReady(j)) readyTotal = pastedCartonsTotal(j);
   const ready = Math.max(0, readyTotal - shipped);
-  const inProcess = Math.max(0, (booked || 0) - shipped - ready);
-  const pill = (txt, bg) => `<span style="background:${bg};color:#fff;padding:2px 8px;border-radius:999px;font-weight:700;letter-spacing:0.03em;margin-right:3px;font-size:10px;white-space:nowrap;display:inline-block;">${txt}</span>`;
-  let out = '<span style="display:inline-flex;flex-wrap:nowrap;align-items:center;gap:0;">';
-  out += pill(`&#128230; DELIVERED - ${shipped.toLocaleString()}`, '#f59e0b');
-  if (ready > 0) out += pill(`READY - ${ready.toLocaleString()}`, '#16a34a');
-  if (inProcess > 0) out += pill(`IN PROCESS - ${inProcess.toLocaleString()}`, '#0ea5e9');
-  out += '</span>';
+  // In-process = cartons still being produced.
+  //   Once Pasting forwards the job to Ready (stage >= 6), the operator
+  //   has decided the final qty — the gap between booked and that final
+  //   qty is scrap / waste, not still-in-production. So in-process = 0
+  //   once the job is at Ready or later.
+  //   While the job is still in production (stage < 6), what's left is
+  //   what's booked minus what's already shipped and what's staged ready.
+  const inProcess = (stage >= 6)
+    ? 0
+    : Math.max(0, (booked || 0) - shipped - ready);
+  // Use the shared .badge base class + the same font-weight / letter-
+  // spacing / color palette as the group badges so DELIVERED / READY /
+  // IN PROCESS chips are visually identical everywhere they appear —
+  // group tile, normal job tile (admin + client). One consistent size
+  // across the whole app.
+  const pill = (txt, bg, fg) => `<span class="badge" style="background:${bg};color:${fg || '#fff'};font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${txt}</span>`;
+  let out = pill(`&#128230; DELIVERED - ${shipped.toLocaleString()}`, '#facc15', '#422006');
+  if (ready > 0) out += ` ` + pill(`READY - ${ready.toLocaleString()}`, '#16a34a');
+  if (inProcess > 0) out += ` ` + pill(`IN PROCESS - ${inProcess.toLocaleString()}`, '#2563eb');
   return out;
 }
 function dateRangeBounds(preset) {
@@ -2791,7 +2876,12 @@ function isProductionManager() { return hasRole('production_manager'); }
 function isStoreManager()      { return hasRole('store_manager') && !isAdmin() && !isProductionManager(); }
 // Persona: pure read-only CEO (no write role). Drives all the .ceo-hide
 // gating — a CEO who is ALSO admin/manager gets the full UI.
-function isCeo()               { return hasRole('ceo') && !isAdmin() && !isProductionManager() && !hasRole('store_manager'); }
+function isCeo()               { return hasRole('ceo') && !isAdmin() && !isProductionManager() && !hasRole('store_manager') && !hasRole('finance'); }
+// Persona: finance-only account. View-only across the app EXCEPT for the
+// delivery ledger, which they own. Blocked from Station, Users, Client
+// View, and Stickers — they see the tab labels but a friendly message
+// replaces the content.
+function isFinance()           { return hasRole('finance') && !isAdmin() && !isProductionManager() && !hasRole('store_manager'); }
 // Persona: operator-only account — locked to the Station view.
 function isOperator()          { return hasRole('operator') && !isAdmin() && !isProductionManager() && !hasRole('store_manager') && !hasRole('ceo'); }
 // Client role is mutually exclusive with internal roles (enforced server-side
@@ -2801,6 +2891,10 @@ function isClient()            { return hasRole('client'); }
 // Per-area write capability. Used to gate UI write buttons. Server enforces
 // the same matrix server-side so the UI gates are convenience, not security.
 function canWriteJobs()      { return isAdmin() || isProductionManager(); }
+// Delivery ledger — admin, PM, or finance. Finance is the only role
+// that can write only this narrow slice of the job while being otherwise
+// read-only. Every delivery button / form uses this instead of canWriteJobs.
+function canRecordDelivery() { return isAdmin() || isProductionManager() || hasRole('finance'); }
 function canWriteInventory() { return isAdmin() || hasRole('store_manager'); }
 // Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
 // else with a PIN and sees the whole queue + update screens for that
@@ -2842,6 +2936,7 @@ function roleLabel(role) {
     ceo: 'CEO',
     production_manager: 'Production Manager',
     store_manager: 'Store Manager',
+    finance: 'Finance',
     operator: 'Operator',
     client: 'Client',
     // Legacy role names that may still appear on un-migrated user rows.
@@ -2925,6 +3020,32 @@ function showClientPortal() {
     onInputHandler: 'onClientPortalSearch',
   });
 }
+// Inject the "not for your role" placeholder into each finance-blocked
+// mode div (once, idempotent). CSS toggles between the message and the
+// real content based on body.role-finance. Non-finance users never see
+// these overlays because the .role-block-msg class stays display:none.
+function ensureRoleBlockMessages() {
+  const blocked = [
+    { id: 'station-mode',     icon: '&#127981;', title: 'Station is view-only for your role',
+      sub: 'The shop-floor terminal is limited to production users. Your role can view records and reports in Jobs, Inventory, and Reports. Ask an administrator if you need station access.' },
+    { id: 'users-mode',       icon: '&#128100;', title: 'User management is not available for your role',
+      sub: 'Managing users, roles, and the activity log is limited to administrators. Ask an administrator if you need edit access.' },
+    { id: 'client-view-mode', icon: '&#128065;', title: 'Client View is not available for your role',
+      sub: 'The client-facing preview is limited to admin, production manager, and CEO roles. Ask an administrator if you need access.' },
+    { id: 'stickers-mode',    icon: '&#127991;&#65039;', title: 'Stickers is not available for your role',
+      sub: 'Job card stickers are printed by production users. Ask an administrator if you need access.' },
+  ];
+  for (const b of blocked) {
+    const el = document.getElementById(b.id);
+    if (!el || el.querySelector(':scope > .role-block-msg')) continue;
+    const msg = document.createElement('div');
+    msg.className = 'role-block-msg';
+    msg.innerHTML = `<div class="rbm-icon">${b.icon}</div>
+                     <div class="rbm-title">${b.title}</div>
+                     <div class="rbm-sub">${b.sub}</div>`;
+    el.insertBefore(msg, el.firstChild);
+  }
+}
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
   if (!currentUser) { chip.style.display = 'none'; return; }
@@ -2948,21 +3069,22 @@ function renderUserChip() {
   // Operators get Station (default) + Jobs (read-only). Store Manager
   // skips Station/Forms. Production Manager + Admin + CEO see everything
   // (CEO is read-only via the .role-ceo body class below).
-  const op = isOperator(), sm = isStoreManager();
+  const op = isOperator(), sm = isStoreManager(), fin = isFinance();
   lockTab('mode-jobs-btn',      true);
   lockTab('mode-inventory-btn', !op);
   lockTab('mode-reports-btn',   !op);
-  lockTab('mode-stickers-btn',  !op && !sm);
-  lockTab('mode-station-btn',   canRunStation());
+  // Finance keeps every tab clickable — the blocked ones render a
+  // .role-block-msg overlay instead of the real content (see CSS above).
+  lockTab('mode-stickers-btn',  fin || (!op && !sm));
+  lockTab('mode-station-btn',   fin || canRunStation());
   lockTab('mode-forms-btn',     !op && !sm);
   // Users tab — open to admin (full control), CEO (read-only audit feed),
-  // and production_manager (Floor Operators roster only — other sections
-  // are tagged .pm-hide and hidden via the body.role-production-manager rule).
-  lockTab('mode-users-btn',     isAdmin() || hasRole('ceo') || isProductionManager());
-  // Client View — admin / PM / CEO preview of the client portal.
-  // Store manager + operator have no reason to see it; locked out here
-  // and server-side (/api/admin/client-view rejects them too).
-  lockTab('mode-client-view-btn', isAdmin() || hasRole('ceo') || isProductionManager());
+  // production_manager (Floor Operators roster only — other sections
+  // tagged .pm-hide), and finance (sees the block-msg placeholder).
+  lockTab('mode-users-btn',     fin || isAdmin() || hasRole('ceo') || isProductionManager());
+  // Client View — admin / PM / CEO preview; finance sees the block-msg
+  // placeholder. Store manager + operator remain locked.
+  lockTab('mode-client-view-btn', fin || isAdmin() || hasRole('ceo') || isProductionManager());
   // Trash card — visible to anyone who can navigate the app (so operators
   // never see it). Admin can act (restore / empty); others browse only.
   const trashBtn = document.getElementById('trash-card-btn');
@@ -2975,6 +3097,8 @@ function renderUserChip() {
   document.body.classList.toggle('role-store-manager', sm);
   document.body.classList.toggle('role-production-manager', isProductionManager());
   document.body.classList.toggle('role-operator', op);
+  document.body.classList.toggle('role-finance', fin);
+  if (fin) ensureRoleBlockMessages();
   // Capability-driven read-only locks — a user who holds BOTH a jobs-side
   // and inventory-side role keeps write access to both. Lock Jobs writes
   // only when the user can VIEW jobs but not write them; likewise Inventory.
@@ -3107,14 +3231,16 @@ function setMode(m) {
   // Authorized Users + Recent Activity sections are tagged .pm-hide
   // so PM lands on a Users tab that's effectively just the Floor
   // Operators roster). Everyone else is bounced to Jobs.
-  if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
+  if (m === 'users' && !isAdmin() && !hasRole('ceo') && !isProductionManager() && !isFinance()) m = 'jobs';
   // Client View tab — admin preview only. Store manager / operator get
-  // bounced to Jobs since they don't have the role gate for it.
-  if (m === 'client-view' && !isAdmin() && !hasRole('ceo') && !isProductionManager()) m = 'jobs';
+  // bounced to Jobs since they don't have the role gate for it. Finance
+  // may enter to see the role-block-msg placeholder.
+  if (m === 'client-view' && !isAdmin() && !hasRole('ceo') && !isProductionManager() && !isFinance()) m = 'jobs';
   // Station tab: PIN-gated shop-floor terminal. Admin / PM / operator
   // process; CEO enters read-only (all write buttons are .ceo-hide, plus
-  // a server-side reject on station-update for the ceo role).
-  if (m === 'station' && !canRunStation()) m = 'jobs';
+  // a server-side reject on station-update for the ceo role). Finance
+  // may enter to see the role-block-msg placeholder.
+  if (m === 'station' && !canRunStation() && !isFinance()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
@@ -3223,6 +3349,7 @@ function getFiltered() {
     if (filterShadeCard === 'only' && !j.is_shade_card) return false;
     if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
     if (filterMachine && j.machine !== filterMachine) return false;
+    if (filterGroup && j.stock_group_name !== filterGroup) return false;
     if (!inDateRange(j)) return false;
     if (view === 'new')     return isNewJob(j);
     if (view === 'ctp')     return isCtpQueue(j);
@@ -3421,6 +3548,11 @@ function renderTabs() {
     const machines = [...new Set(jobs.map(j => j.machine).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     mf.innerHTML = `<option value="">All machines</option>` + machines.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
   }
+  const gfl = document.getElementById('group-filter');
+  if (gfl) {
+    const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
+    gfl.innerHTML = `<option value="">All groups</option>` + groups.map(g => `<option value="${esc(g)}" ${filterGroup===g?'selected':''}>${esc(g)}</option>`).join('');
+  }
 }
 
 // Dispatcher — picks the card grid or the dense list, syncs the toggle UI,
@@ -3509,7 +3641,22 @@ function renderJobsCompact() {
     el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
     return;
   }
+  const seenGroupsC = new Set();
   el.innerHTML = filtered.map(j => {
+    if (j.stock_group_name) {
+      if (seenGroupsC.has(j.stock_group_name)) return '';
+      seenGroupsC.add(j.stock_group_name);
+      const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
+      return renderGroupTileCompact(j.stock_group_name, gJobs);
+    }
+    return renderJobRowCompact(j);
+  }).join('');
+}
+
+// Per-row template for the Jobs (compact) list — extracted so the
+// Stock Group "View Jobs" modal can render each member with the exact
+// same tile shape and no Track-view clock animation.
+function renderJobRowCompact(j) {
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
     const pending = j.issuance_status === 'pending';
@@ -3547,7 +3694,7 @@ function renderJobsCompact() {
     // the books (partial delivery takes precedence).
     const partialReady = isPartialReady(j) && !partialDelv;
     const partialReadyBadge = partialReady
-      ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${pastedCartonsTotal(j).toLocaleString()} CARTONS READY</span>`
+      ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${pastedCartonsTotal(j).toLocaleString()}</span>`
       : '';
     const readyTotalCL = si === 6 ? readyCartonsTotal(j) : 0;
     const readyLabelCL = readyTotalCL > 0
@@ -3557,10 +3704,10 @@ function renderJobsCompact() {
       isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
       isCtp ? `<span class="badge badge-ctp">CTP</span>` :
       pending ? jobStockBadge(j) :
-      done ? `<span class="badge badge-done">${deliveredLabel}</span>` :
+      done ? `<span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#128230; DELIVERED${shippedCartons ? ' - ' + shippedCartons.toLocaleString() : ''}</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
       si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
-      si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">${readyLabelCL}</span>` :
+      si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${readyLabelCL}</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
     const partialBadge = partial
       ? ` <span class="badge badge-low-stock">&#9888; Requires More Stock</span>`
@@ -3695,9 +3842,13 @@ function renderJobsCompact() {
           ${sidePanel}
         </div>
       </div>
-      <div class="pipeline">${pipeline}</div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
+        ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
+          <button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
+        </div>` : ''}
+      </div>
     </div>`;
-  }).join('');
 }
 
 // ── Card grid view ───────────────────────────────────────────
@@ -3708,7 +3859,16 @@ function renderJobsCards() {
     el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
     return;
   }
-  el.innerHTML = filtered.map(renderJobCard).join('');
+  const seenGroups = new Set();
+  el.innerHTML = filtered.map(j => {
+    if (j.stock_group_name) {
+      if (seenGroups.has(j.stock_group_name)) return '';
+      seenGroups.add(j.stock_group_name);
+      const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
+      return renderGroupTile(j.stock_group_name, gJobs);
+    }
+    return renderJobCard(j);
+  }).join('');
 }
 
 // The green "Issue Stock" / red "Waiting for Stock" button. Shared shape with
@@ -3834,7 +3994,7 @@ function renderJobCard(j, opts) {
   // is on the books (partial delivery takes precedence).
   const partialReady = isPartialReady(j) && !partialDelv;
   const partialReadyBadge = partialReady
-    ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">&#128230; ${pastedCartonsTotal(j).toLocaleString()} CARTONS READY</span>`
+    ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${pastedCartonsTotal(j).toLocaleString()}</span>`
     : '';
 
   // Fully-delivered badge carries the shipped qty too, so at a glance
@@ -3851,10 +4011,10 @@ function renderJobCard(j, opts) {
     isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
     isCtp ? `<span class="badge badge-ctp">CTP</span>` :
     pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
-    done ? `<span class="badge badge-done">${deliveredLabel}</span>` :
+    done ? `<span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#128230; DELIVERED${shippedCartons ? ' - ' + shippedCartons.toLocaleString() : ''}</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
     si === 0 && !j.stages?.[0] ? `<span class="badge badge-new">New</span>` :
-    si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;">${readyLabel}</span>` :
+    si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${readyLabel}</span>` :
     (clientPreview
       ? `<span class="badge badge-active">${esc((STAGES[si] || '').toUpperCase())}</span>`
       : `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`);
@@ -4018,6 +4178,8 @@ function renderJobCard(j, opts) {
         ${canWriteJobs() ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
+        ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Job Group</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
+        ${canWriteJobs() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
@@ -4070,13 +4232,20 @@ function renderJobCard(j, opts) {
   // this keeps the identifier visible on skim and matches what the
   // owner asked for. The stage badge + urgent + shade chips still ride
   // in the row below.
+  // Client tile: pin the 🔗 E-{partner} chip next to E-{id} at the top,
+  // where there's already empty space. Leaving it in .tile-head added a
+  // whole row of vertical clutter for what is really just an id-level
+  // annotation ("this job shipped with that other job").
+  const linkChipClient = clientPreview ? linkedJobBadgeHtml(j, true) : '';
   const clientTopRow = (clientPreview && adminToggle)
     ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
-         <span class="job-id" title="Job Card No.">E-${j.id}</span>
+         <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;">
+           <span class="job-id" title="Job Card No.">E-${j.id}</span>${linkChipClient}
+         </span>
          ${adminToggle}
        </div>`
     : (clientPreview
-        ? `<div style="margin-bottom:4px;"><span class="job-id" title="Job Card No.">E-${j.id}</span></div>`
+        ? `<div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span class="job-id" title="Job Card No.">E-${j.id}</span>${linkChipClient}</div>`
         : (adminToggle ? `<div style="display:flex;justify-content:flex-end;margin-bottom:2px;">${adminToggle}</div>` : ''));
 
   return `
@@ -4089,7 +4258,7 @@ function renderJobCard(j, opts) {
         ? ''
         : `<span class="job-id">#${j.id}</span>`}
       ${badge}
-      ${linkedJobBadgeHtml(j, clientPreview)}
+      ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
       ${j.is_shade_card ? '<span class="badge" style="background:#dcfce7;color:#166534;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;">&#127912; Shade Card</span>' : ''}
     </div>
@@ -4106,6 +4275,7 @@ function renderJobCard(j, opts) {
       ${primary}
       ${updateBtn}
       ${more}
+      ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;margin-left:auto;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -14373,7 +14543,7 @@ function deliveriesSection(j) {
   // Pasting when the operator has recorded some pasted cartons but
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
-  const canAddDelivery = (stageIdx >= 6 || (stageIdx === 5 && isPartialReady(j))) && !isDelivered && canWriteJobs && canWriteJobs();
+  const canAddDelivery = (stageIdx >= 6 || (stageIdx === 5 && isPartialReady(j))) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
 
   const rows = list.length
@@ -14731,6 +14901,594 @@ async function submitDeliverLinked(jobId, partnerId) {
     setTimeout(() => openEdit(jobId), 50);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// ── Stock Groups ─────────────────────────────────────────────────────
+// Named group tag for ongoing reprints of the same product. FIFO delivery
+// drains oldest job first, spilling into newer ones automatically.
+
+// Safe JS string for double-quoted onclick attributes — JSON.stringify then
+// replace " with &quot; so the HTML attribute doesn't break.
+function jsStr(s) { return JSON.stringify(String(s)).replace(/"/g, '&quot;'); }
+
+function setGroupFilter(v) { filterGroup = v; renderJobs(); }
+
+// Aggregate ready, in-process, and delivered cartons across a group.
+function groupStats(groupJobs) {
+  let ready = 0, inProcess = 0, delivered = 0;
+  for (const j of groupJobs) {
+    const si = j.stage_index || 0;
+    const done = isDone(j);
+    if (!done && si >= 6) {
+      // At Ready or later — Pasting has finalized the qty. Only the
+      // unshipped ready cartons are "ready"; anything else is either
+      // already delivered or scrap (not in-process).
+      ready += Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j));
+    } else if (!done && !isNewJob(j) && j.issuance_status !== 'pending' && si >= 1 && si <= 5) {
+      // Still in production. If Pasting has already saved some cartons
+      // (partial-ready) but hasn't advanced to Ready yet, those pasted
+      // cartons are the "ready" segment and the rest is in-process.
+      // Without partial-ready, the whole booked qty is in-process.
+      const booked = parseFloat(String(j.cartonqty || '').replace(/[^0-9.]/g, '')) || 0;
+      if (si === 5 && isPartialReady(j)) {
+        const pasted = pastedCartonsTotal(j);
+        ready     += Math.max(0, pasted - totalDeliveredCartons(j));
+        inProcess += Math.max(0, booked - pasted);
+      } else {
+        inProcess += booked;
+      }
+    }
+    delivered += totalDeliveredCartons(j);
+  }
+  return { ready, inProcess, delivered };
+}
+
+// ── Stock Group tile ─────────────────────────────────────────────────
+// The group tile is a normal job tile rendered from the *representative*
+// job — the same renderer produces the same stages, ribbon, animation,
+// facts row, and (in Track view) machine SVG. Only the header id and
+// the actions column are swapped so the tile reads as an aggregate:
+//   - #ID  →  purple GROUP badge with the group name
+//   - Aggregate READY / IN PROCESS / DELIVERED chips added alongside
+//   - Actions row →  Edit / View, Duplicate, View Jobs, Deliver
+//
+// Representative job (whose stage/animation the tile shows):
+//   oldest job that is still in production (stage < 6, not delivered).
+//   Once that job reaches Ready to Deliver, the next-oldest in-progress
+//   job takes over. Falls back to the newest job when all members are
+//   Ready/Delivered.
+function groupRepresentative(groupJobs) {
+  const byOldest = [...groupJobs].sort((a, b) => a.id - b.id);
+  const inProgress = byOldest.find(j => !isDone(j) && (j.stage_index || 0) < 6);
+  if (inProgress) return inProgress;
+  return byOldest[byOldest.length - 1] || byOldest[0];
+}
+
+// Group badges — replace the #ID span in a normal tile header.
+// GROUP chip is name-less: the product name is already the .tile-name
+// / .job-name right below the badges, so repeating it in the chip was
+// just clutter. DELIVERED chip uses the same amber palette as the
+// partial-delivery segment chip so shipped totals read consistently
+// across the app.
+function groupStatChipsHtml(stats) {
+  const r = stats.ready > 0     ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${stats.ready.toLocaleString()}</span> ` : '';
+  const p = stats.inProcess > 0 ? `<span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">IN PROCESS - ${stats.inProcess.toLocaleString()}</span> ` : '';
+  const d = stats.delivered > 0 ? `<span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#128230; DELIVERED - ${stats.delivered.toLocaleString()}</span> ` : '';
+  return p + r + d;
+}
+function groupBadgesHtml(groupName, stats) {
+  const g = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
+  return g + ' ' + groupStatChipsHtml(stats);
+}
+
+// Group actions — replace the actions block in a normal tile.
+// containerClass matches what the underlying renderer uses:
+//   compact row  →  "job-actions"
+//   card / Track →  "tile-actions"
+function groupActionsHtml(groupName, reprId, latestId, count, hasReady, containerClass) {
+  const gName = jsStr(groupName);
+  return `<div class="${containerClass}">
+    <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>
+    <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${count})</button>
+    <button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${latestId})" title="Duplicate the latest job in this group — new job is auto-added to the same group">&#128203; Duplicate</button>
+  </div>`;
+}
+
+// Yellow bottom-right Record Delivery for a group tile — always shown
+// (even when ready qty is zero, so users can see the button and get a
+// meaningful error message if there's nothing to ship yet, rather than
+// wondering why the button disappeared).
+function groupRecordDeliveryHtml(groupName) {
+  if (!canRecordDelivery()) return '';
+  const gName = jsStr(groupName);
+  return `<div class="tile-record-delivery" style="display:flex;justify-content:flex-end;margin-top:4px;">
+    <button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${gName})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button>
+  </div>`;
+}
+
+// Track (card) view — render the representative job as a full card,
+// then swap the whole tile-head (drops the per-job stage badge that
+// was color-clashing with the purple GROUP chip) and the tile-actions
+// (drops the ⋯ menu). Everything else — name, machine SVG animation,
+// stages ribbon, facts, side panel — stays exactly as the normal tile.
+function renderGroupTile(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
+  const stats = groupStats(groupJobs);
+  const repr = groupRepresentative(groupJobs);
+  const badges = groupBadgesHtml(groupName, stats);
+  const latestId = Math.max(...groupJobs.map(j => j.id));
+  const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'tile-actions');
+  const recordDelivery = groupRecordDeliveryHtml(groupName);
+  let html = renderJobCard(repr)
+    // .tile-head content is a flat sequence of spans / small labels — no
+    // nested divs — so a lazy match to the first </div> is safe here.
+    .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
+    // .tile-actions wraps a <details class="job-more"> whose inner
+    // <div class="job-more-menu"> has its own </div>, so match the block
+    // by anchoring on </details></div>.
+    .replace(/<div class="tile-actions">[\s\S]*?<\/details>\s*<\/div>/, actions)
+    // Purple top border marker
+    .replace('class="job-tile ', 'class="job-tile group-card ');
+  // Bottom Record Delivery — replace whatever came from the seed's
+  // tile-actions Record Delivery button (single-job ledger) with the
+  // group's FIFO version. If the seed wasn't delivery-eligible (no
+  // button in tile-actions), inject the group's before the tile-close.
+  // Track view's Record Delivery is INSIDE .tile-actions (already
+  // replaced above), so we always inject here.
+  if (recordDelivery) {
+    const lastClose = html.lastIndexOf('</div>');
+    html = html.slice(0, lastClose) + recordDelivery + '\n  </div>';
+  }
+  return html;
+}
+
+// Compact (Jobs) view — same idea, different container classes.
+function renderGroupTileCompact(groupName, groupJobs) {
+  if (!groupJobs.length) return '';
+  const stats = groupStats(groupJobs);
+  const repr = groupRepresentative(groupJobs);
+  const badges = groupBadgesHtml(groupName, stats);
+  const latestId = Math.max(...groupJobs.map(j => j.id));
+  const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'job-actions');
+  const recordDelivery = groupRecordDeliveryHtml(groupName);
+  let html = renderJobRowCompact(repr)
+    // .job-id-row content is flat spans only.
+    .replace(/<div class="job-id-row">[\s\S]*?<\/div>/, `<div class="job-id-row">${badges}</div>`)
+    // .job-actions contains only <button> children.
+    .replace(/<div class="job-actions">[\s\S]*?<\/div>/, actions)
+    .replace('class="job-card ', 'class="job-card group-card ');
+  // Bottom Record Delivery — the normal compact tile puts pipeline +
+  // tile-record-delivery in a single flex row. Replace only the inner
+  // tile-record-delivery content so the flex row stays intact.
+  const groupDelivBtn = canWriteJobs()
+    ? `<div class="tile-record-delivery" style="flex:0 0 auto;"><button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${jsStr(groupName)})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button></div>`
+    : '';
+  if (/<div class="tile-record-delivery"/.test(html)) {
+    html = html.replace(/<div class="tile-record-delivery"[\s\S]*?<\/div>\s*<\/div>/, groupDelivBtn ? groupDelivBtn : '');
+  } else if (groupDelivBtn) {
+    // Inject before the closing </div> of the pipeline flex row
+    const pipelineRowEnd = html.lastIndexOf('</div>', html.lastIndexOf('</div>') - 1);
+    html = html.slice(0, pipelineRowEnd) + groupDelivBtn + html.slice(pipelineRowEnd);
+  }
+  return html;
+}
+
+// ── View All Jobs modal ───────────────────────────────────────────────
+// Renders every member job as a full job tile — identical to what the
+// user sees in the flat Jobs list (stages ribbon, Edit/View, History,
+// Duplicate, Link, Print, Block, Delete, Process-to-stage buttons, etc.).
+// A per-tile "Remove from Group" chip sits above each card so users can
+// take a job out of the group without leaving the modal.
+function openGroupJobsModal(groupName) {
+  const groupJobs = jobs.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
+  if (!groupJobs.length) { notify('No jobs found for this group'); return; }
+  const stats = groupStats(groupJobs);
+  const gName = jsStr(groupName);
+  // Pick the SAME renderer the main list is currently using so the
+  // modal tiles are visually identical to what the user sees behind the
+  // modal. Track view => renderJobCard (animated clock). Jobs view =>
+  // renderJobRowCompact (dense row, no animation).
+  const useCards = (typeof jobsView !== 'undefined' && jobsView === 'cards');
+  const perJob = useCards ? renderJobCard : renderJobRowCompact;
+  const tiles = groupJobs.map(j => {
+    const removeChip = canWriteJobs()
+      ? `<div style="display:flex;justify-content:flex-end;margin-bottom:-4px;">
+          <button class="btn btn-sm ceo-hide" onclick="removeJobFromGroup(${j.id},${gName})" title="Take this job out of the group (job itself is not deleted)" style="background:#991b1b;color:#fff;border-color:#991b1b;">&minus; Remove from Group</button>
+         </div>`
+      : '';
+    return `<div style="margin-bottom:12px;">${removeChip}${perJob(j)}</div>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:1200px;width:calc(100vw - 40px);max-height:calc(100vh - 40px);display:flex;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex:0 0 auto;">
+      <div>
+        <h2 style="margin:0 0 4px;">&#128230; ${esc(groupName)}</h2>
+        <div style="font-size:12px;color:var(--text2);">
+          ${groupJobs.length} job${groupJobs.length===1?'':'s'}
+          ${stats.ready > 0 ? ` &middot; <span style="color:#166534;font-weight:600;">Ready: ${stats.ready.toLocaleString()}</span>` : ''}
+          ${stats.inProcess > 0 ? ` &middot; <span style="color:#1e40af;font-weight:600;">In-process: ${stats.inProcess.toLocaleString()}</span>` : ''}
+          ${stats.delivered > 0 ? ` &middot; <span style="color:var(--text2);">Delivered: ${stats.delivered.toLocaleString()}</span>` : ''}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
+        <button class="btn btn-sm" onclick="closeModal()">Close</button>
+      </div>
+    </div>
+    <div class="${useCards ? 'jobs-list--cards' : ''}" style="flex:1 1 auto;overflow-y:auto;padding-right:6px;">
+      ${tiles}
+    </div>
+  </div>`);
+}
+
+// ── FIFO Group Delivery modal ─────────────────────────────────────────
+function openDeliverGroupModal(groupName) {
+  if (!canWriteJobs()) return;
+  const groupJobs = jobs.filter(j => j && j.stock_group_name === groupName).sort((a, b) => a.id - b.id);
+  const available = groupJobs.filter(j => {
+    const si = j.stage_index || 0;
+    return !isDone(j) && si >= 6;
+  }).map(j => {
+    const avail = Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j));
+    return { j, avail };
+  }).filter(x => x.avail > 0);
+  const totalAvail = available.reduce((s, x) => s + x.avail, 0);
+  const availRows = available.length
+    ? available.map(x => `<div style="font-size:11px;color:var(--text2);padding:1px 0;">E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></div>`).join('')
+    : `<div style="font-size:11px;color:#dc2626;padding:1px 0;">No jobs at Ready to Deliver — advance a job there first.</div>`;
+  const gName = jsStr(groupName);
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:440px;">
+    <h2 style="margin:0 0 4px;">&#128230; Deliver from Group</h2>
+    <div style="font-size:12px;color:#5b21b6;font-weight:600;margin-bottom:10px;">${esc(groupName)}</div>
+    <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:8px 10px;margin-bottom:12px;">
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#5b21b6;margin-bottom:4px;">FIFO order (oldest job first)</div>
+      ${availRows}
+      ${totalAvail > 0 ? `<div style="margin-top:4px;font-size:11px;font-weight:700;color:#166534;">Total available: ${totalAvail.toLocaleString()} cartons</div>` : ''}
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Total Cartons *</label><input type="number" id="dg-cartons" min="0" placeholder="e.g. 5000" style="width:100%;"></div>
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dg-date" value="${new Date().toISOString().slice(0,10)}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">PO No.</label><input type="text" id="dg-po" placeholder="e.g. PO-2025-001"></div>
+      <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="dg-batch" placeholder="e.g. B-101"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="dg-notes" placeholder="Optional"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#5b21b6;border-color:#5b21b6;" onclick="submitGroupDelivery(${gName})">&#128230; Record Delivery</button>
+    </div>
+  </div>`);
+}
+async function submitGroupDelivery(groupName) {
+  const cartons = ((document.getElementById('dg-cartons')||{}).value||'').trim();
+  const date    = ((document.getElementById('dg-date')||{}).value||'').trim();
+  const po      = ((document.getElementById('dg-po')||{}).value||'').trim();
+  const batch   = ((document.getElementById('dg-batch')||{}).value||'').trim();
+  const notes   = ((document.getElementById('dg-notes')||{}).value||'').trim();
+  if (!parseFloat(cartons) || parseFloat(cartons) <= 0) { await alertDialog({ title: 'Enter cartons to deliver', kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    const result = await api('POST', '/api/groups/deliver', { group_name: groupName, cartons, date, po_no: po, batch_no: batch, notes });
+    await loadJobs();
+    closeModal(); render();
+    const parts = (result.deliveries_made || []).map(d => `E-${d.job_id}: ${Number(d.cartons).toLocaleString()} cartons`).join(', ');
+    const warn = result.unfulfilled > 0 ? ` — ${result.unfulfilled.toLocaleString()} unfulfilled (insufficient ready stock)` : '';
+    notify(`Delivery recorded: ${parts}${warn}`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Create Group from job (⋯ menu on a specific job) ─────────────────
+// Auto-names the group after the job — same logic as the toolbar
+// picker's confirmCreateGroupPicker. No name prompt; if the user
+// wants a different name later they can rename via the group ⋯ menu
+// (add a rename entry only if this becomes a common ask).
+async function openCreateGroupModal(jobId) {
+  if (!canWriteJobs()) return;
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  const baseName = String(j.name || '').trim() || `Job E-${jobId}`;
+  const groupName = j.jobcode ? `${baseName} (${j.jobcode})` : baseName;
+  const ok = await confirmDialog({
+    title: 'Create Job Group',
+    message: `Group will be named "${groupName}" and start with E-${jobId}. More jobs can be added later.`,
+    confirmText: 'Create Group',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: groupName });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    render();
+    notify(`Group "${groupName}" created`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Toolbar Create Group — pick a job; the group is auto-named after
+// that job (name + code if present, so two jobs with the same product
+// name but different codes don't accidentally collide into one group).
+// The group tile inherits all of the seed job's info via the shared
+// tile renderer.
+async function openCreateGroupPicker() {
+  if (!canWriteJobs()) return;
+  const ungrouped = jobs
+    .filter(j => j && !j.stock_group_name && !j.deleted_at)
+    .sort((a, b) => b.id - a.id);
+  if (!ungrouped.length) {
+    await alertDialog({ title: 'No ungrouped jobs available', message: 'All existing jobs are already in a Job Group.', kind: 'info' });
+    return;
+  }
+  const rowHtml = ungrouped.slice(0, 200).map(j =>
+    `<option value="${j.id}">E-${j.id} &middot; ${esc(j.name)}${j.client?' &middot; '+esc(j.client):''}</option>`
+  ).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
+    <h2 style="margin:0 0 4px;">&#128230; Create Job Group</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick the seed job. The group is named after it and its tile shows the seed job's details. More jobs can be added later.</div>
+    <div class="form-group">
+      <label class="form-label">Seed Job *</label>
+      <select id="cgp-job" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+        ${rowHtml}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#dc2626;border-color:#dc2626;" onclick="confirmCreateGroupPicker()">Create Group</button>
+    </div>
+  </div>`);
+  setTimeout(() => { const el = document.getElementById('cgp-job'); if (el) el.focus(); }, 30);
+}
+async function confirmCreateGroupPicker() {
+  const sel = document.getElementById('cgp-job');
+  const jobId = sel && sel.value ? parseInt(sel.value, 10) : null;
+  if (!jobId) { notify('Pick a job to seed the group'); return; }
+  const seed = jobs.find(x => x.id === jobId);
+  if (!seed) { notify('Seed job not found'); return; }
+  // Auto-name after the seed job. Include the job code to disambiguate
+  // when two jobs share a product name but are different SKUs.
+  const baseName = String(seed.name || '').trim() || `Job E-${jobId}`;
+  const name = seed.jobcode ? `${baseName} (${seed.jobcode})` : baseName;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: name });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`Group "${name}" created with E-${jobId}`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Add job to existing Group ─────────────────────────────────────────
+async function openAddToGroupModal(jobId) {
+  if (!canWriteJobs()) return;
+  const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
+  if (!groups.length) {
+    await alertDialog({ title: 'No groups exist yet', message: 'Use "Create Job Group" on a job card to start the first group.', kind: 'info' });
+    return;
+  }
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+    <h2>Add E-${jobId} to Group</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">${esc(j.name)}</div>
+    <div class="form-group">
+      <label class="form-label">Select Group</label>
+      <select id="atg-select" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+        ${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmAddToGroup(${jobId})">Add to Group</button>
+    </div>
+  </div>`);
+}
+async function confirmAddToGroup(jobId) {
+  const sel = document.getElementById('atg-select');
+  if (!sel || !sel.value) return;
+  const groupName = sel.value;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: groupName });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`E-${jobId} added to group "${groupName}"`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Add an existing job to a group from inside the group's modal.
+async function openAddExistingToGroupModal(groupName) {
+  if (!canWriteJobs()) return;
+  const val = await promptDialog({
+    title: `Add existing job to group`,
+    message: `Enter a job number to add to "${groupName}" (e.g. 85 or E-85).`,
+    placeholder: 'e.g. 85',
+    confirmText: 'Add',
+  });
+  if (val === null) return;
+  const m = String(val).match(/(\d+)/);
+  if (!m) { notify('Enter a valid job number.'); return; }
+  const targetId = parseInt(m[1], 10);
+  const target = jobs.find(j => j && j.id === targetId);
+  if (!target) { notify(`Job E-${targetId} not found.`); return; }
+  if (target.stock_group_name && target.stock_group_name !== groupName) {
+    const ok = await confirmDialog({ title: `E-${targetId} is already in group "${target.stock_group_name}" — move to "${groupName}"?`, confirmText: 'Move' });
+    if (!ok) return;
+  }
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${targetId}/group`, { group_name: groupName });
+    const ix = jobs.findIndex(x => x.id === targetId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`E-${targetId} added to group "${groupName}"`);
+    setTimeout(() => openGroupJobsModal(groupName), 50);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Remove a job from its group.
+async function removeJobFromGroup(jobId, groupName) {
+  const ok = await confirmDialog({
+    title: `Remove E-${jobId} from group "${groupName}"?`,
+    message: 'The job will appear individually in the Jobs list again. Delivery history is unchanged.',
+    confirmText: 'Remove',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: null });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    closeModal(); render();
+    notify(`E-${jobId} removed from group`);
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Create Next Job in Group ──────────────────────────────────────────
+// Pending group to auto-assign after the new job is saved.
+let _pendingGroupName = null;
+function createNextJobInGroup(groupName, templateJobId) {
+  if (!canWriteJobs()) return;
+  if (!templateJobId) { notify('No template job found.'); return; }
+  _pendingGroupName = groupName;
+  openDuplicateJob(templateJobId);
+}
+
+// ── Client portal group tile ──────────────────────────────────────────
+// Same trick as the admin group tile: render the representative job as
+// a client-preview card, then swap the header id for group badges and
+// the repr job's shipments block for aggregate group shipments. This
+// gives us the same .job-tile.is-client-preview shape (wrapping stage
+// pipeline, correct card size) as any other client tile.
+function renderClientGroupTile(groupName, groupJobs, opts) {
+  if (!groupJobs.length) return '';
+  opts = opts || {};
+  const adminControls = !!opts.adminControls;
+  const stats = groupStats(groupJobs);
+  const repr = groupRepresentative(groupJobs);
+  const gName = jsStr(groupName);
+
+  // Group visibility is stored independently on every member row —
+  // reading any one is fine since the server keeps them in sync.
+  const groupVisible = groupJobs.some(j => j.stock_group_visible === true);
+  const groupToggle = adminControls
+    ? `<label class="cv-toggle" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--text2);cursor:pointer;margin-left:auto;text-transform:uppercase;letter-spacing:0.04em;flex-shrink:0;">
+         <input type="checkbox" ${groupVisible ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleGroupClientVisible(${gName}, this.checked)" style="width:16px;height:16px;accent-color:#166534;cursor:pointer;">
+         Show to client
+       </label>`
+    : '';
+
+  const groupBadge = `<span class="badge" style="background:#7c3aed;color:#fff;font-weight:700;" title="${esc(groupName)}">&#128230; GROUP</span>`;
+  // Real client only counts individually-visible jobs; admin sees the full count.
+  const viewCount = adminControls ? groupJobs.length : groupJobs.filter(j => j.client_visible !== false).length;
+  const viewJobsBtn = viewCount > 0
+    ? `<button class="btn btn-sm" onclick="openClientGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${viewCount})</button>`
+    : '';
+  const statChips = groupStatChipsHtml(stats);
+
+  // Aggregate shipments across every member — replaces clientDeliveriesBreakdown
+  // for the repr job, which would otherwise show only that job's own history.
+  const totalBooked = groupJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.]/g,''))||0), 0);
+  const allDeliveries = [];
+  for (const j of groupJobs) {
+    for (const d of (Array.isArray(j.deliveries) ? j.deliveries : [])) {
+      if (d) allDeliveries.push(d);
+    }
+  }
+  const sortedShips = [...allDeliveries].sort((a, b) => (b.date > a.date ? 1 : -1));
+  const VISIBLE = 3;
+  const renderShipRow = d => {
+    const ct = d.cartons ? Number(String(d.cartons).replace(/[^0-9.]/g,'')).toLocaleString() + ' cartons' : '';
+    const dt = d.date ? esc(fmtDMY(d.date) || d.date) : '';
+    const refBits = [d.po_no && ('PO ' + esc(d.po_no)), d.batch_no && ('Batch ' + esc(d.batch_no))].filter(Boolean).join(' · ');
+    return `<div style="padding:2px 0;"><div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--text2);">${dt}${refBits ? ' <span style="color:var(--text3);">· ' + refBits + '</span>' : ''}</span><span style="font-weight:600;">${ct}</span></div></div>`;
+  };
+  const visRows = sortedShips.slice(0, VISIBLE).map(renderShipRow).join('');
+  const hidRows = sortedShips.slice(VISIBLE).map(renderShipRow).join('');
+  const moreId = `cg-more-${String(groupName).replace(/[^a-z0-9]/gi,'_')}`;
+  const groupShipHtml = sortedShips.length ? `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments (all jobs in group)</div>
+    ${visRows}
+    ${hidRows ? `<div id="${esc(moreId)}" style="display:none;">${hidRows}</div><div style="text-align:center;margin-top:4px;"><button type="button" onclick="const m=document.getElementById('${esc(moreId)}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sortedShips.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sortedShips.length})</button></div>` : ''}
+    <div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;"><span>Total shipped</span><span>${stats.delivered.toLocaleString()}${totalBooked ? ' / ' + totalBooked.toLocaleString() + ' cartons' : ' cartons'}</span></div>
+  </div>` : '';
+
+  // Render repr WITHOUT adminControls — we build our own top row with
+  // the group toggle so it's independent from individual job toggles.
+  let html = renderJobCard(repr, { clientPreview: true });
+
+  // 1. Replace the E-{id} + any surrounding clientTopRow with our group header.
+  const groupTopRow = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
+    <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">${groupBadge}${viewJobsBtn}</span>
+    ${groupToggle}
+  </div>`;
+  // The clientTopRow is either a flex row with E-{id} or a simple div with E-{id}.
+  // Replace whichever form it takes.
+  if (html.includes('display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;')) {
+    html = html.replace(/<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">[\s\S]*?<\/div>\s*<\/div>/, groupTopRow);
+  } else {
+    html = html.replace(/<div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">[\s\S]*?<\/div>/, groupTopRow);
+  }
+
+  // 2. Replace the repr job's stage badge with group stat chips.
+  html = html.replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${statChips}</div>`);
+
+  // 3. Replace the repr job's shipments block with the aggregate one.
+  //    clientDeliveriesBreakdown emits a distinctive outer div; if it
+  //    ran, cut from its start to just before the tile-closing </div>
+  //    (in clientPreview, the shipments block is the last thing in the
+  //    tile). Otherwise, insert the aggregate block just before the
+  //    tile close.
+  const shipStart = html.indexOf('<div style="margin-top:6px;padding:8px 10px;background:#fff8ed');
+  const lastClose = html.lastIndexOf('</div>');
+  if (shipStart !== -1 && shipStart < lastClose) {
+    html = html.slice(0, shipStart) + groupShipHtml + '\n  </div>';
+  } else if (groupShipHtml) {
+    html = html.slice(0, lastClose) + groupShipHtml + '\n  </div>';
+  }
+
+  // 4. Purple top-border marker for the group.
+  html = html.replace('class="job-tile ', 'class="job-tile group-card ');
+
+  return html;
+}
+
+// Client-side "View Jobs" — read-only modal showing every member job as
+// a clientPreview job card (no admin controls). Uses the SAME renderer
+// the client portal already uses so the visual is 1:1.
+function openClientGroupJobsModal(groupName) {
+  // Admin's Client View preview uses clientViewJobs; the real client
+  // portal uses clientJobs (populated by GET /api/client/jobs).
+  const adminSrc = (typeof clientViewJobs !== 'undefined' && Array.isArray(clientViewJobs) && clientViewJobs.length)
+    ? clientViewJobs : null;
+  const clientSrc = (typeof clientJobs !== 'undefined' && Array.isArray(clientJobs) && clientJobs.length)
+    ? clientJobs : null;
+  const src = adminSrc || clientSrc || [];
+  const isAdmin = !!adminSrc;
+  const allGroupJobs = src.filter(j => j && j.stock_group_name === groupName).sort((a, b) => b.id - a.id);
+  if (!allGroupJobs.length) { notify('No jobs found for this group'); return; }
+  // Real client only sees individually-visible jobs in this modal; admin
+  // preview sees all so they can flip toggles for each one.
+  const groupJobs = isAdmin ? allGroupJobs : allGroupJobs.filter(j => j.client_visible !== false);
+  if (!groupJobs.length) { notify('No individually-visible jobs in this group'); return; }
+  const tiles = groupJobs.map(j => `<div style="margin-bottom:12px;">${renderJobCard(j, { clientPreview: true, adminControls: isAdmin })}</div>`).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:1100px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex:0 0 auto;">
+      <div>
+        <h2 style="margin:0 0 4px;">&#128230; ${esc(groupName)}</h2>
+        <div style="font-size:12px;color:var(--text2);">${groupJobs.length} job${groupJobs.length===1?'':'s'} in this group</div>
+      </div>
+      <button class="btn btn-sm" onclick="closeModal()">Close</button>
+    </div>
+    <div class="jobs-list--cards" style="flex:1 1 auto;overflow-y:auto;padding-right:6px;">${tiles}</div>
+  </div>`);
 }
 
 function getFormData() {
@@ -15292,9 +16050,25 @@ async function saveAdd() {
     const newJob = await api('POST', '/api/jobs', data);
     jobs.push(newJob);
     await loadInventory();   // refresh balances after server-side deduction
-    closeModal(); notify('Job created!'); render();
+    // Auto-assign to group if this job was created via "Create Next Job in Group"
+    if (_pendingGroupName) {
+      const gn = _pendingGroupName;
+      _pendingGroupName = null;
+      try {
+        const updated = await api('PATCH', `/api/jobs/${newJob.id}/group`, { group_name: gn });
+        const ix = jobs.findIndex(x => x.id === newJob.id);
+        if (ix >= 0) jobs[ix] = updated;
+        notify(`Job created and added to group "${gn}"!`);
+      } catch(e) { notify('Job created! (Group assign failed: ' + e.message + ')'); }
+    } else {
+      notify('Job created!');
+    }
+    closeModal(); render();
     setTimeout(() => printJobCard(newJob.id), 100);
-  } catch(e) { notify('Error: ' + e.message); }
+  } catch(e) {
+    _pendingGroupName = null;
+    notify('Error: ' + e.message);
+  }
   showSaving(false);
 }
 
@@ -15331,6 +16105,24 @@ function viewJobCard(id) {
   };
   setTimeout(fitCard, 30);
   window.addEventListener('resize', fitCard);
+}
+
+// Yellow "Record Delivery" shortcut — opens the job's edit modal and
+// scrolls the delivery ledger into view + focuses the cartons input,
+// so the user is one keystroke away from entering the shipment. The
+// small delay lets openEdit's modal mount before we look for the input.
+function openEditWithDelivery(id) {
+  openEdit(id);
+  const grab = (tries = 0) => {
+    const el = document.getElementById('deliv-cartons');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => { try { el.focus(); } catch(_) {} }, 250);
+    } else if (tries < 20) {
+      setTimeout(() => grab(tries + 1), 60);
+    }
+  };
+  setTimeout(() => grab(), 120);
 }
 
 function openEdit(id) {
@@ -18313,7 +19105,7 @@ function renderUsersTab() {
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(userRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
-                ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['ceo','CEO'],['operator','Operator'],['client','Client']].map(([r,lbl]) => `
+                ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['operator','Operator'],['client','Client']].map(([r,lbl]) => `
                   <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
                     <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
                            ${isMe && r==='admin' ? 'disabled' : ''}
@@ -18353,7 +19145,7 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
       <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
-        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]].map(([r,lbl,def]) => `
+        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]].map(([r,lbl,def]) => `
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
             <input type="checkbox" value="${r}" ${def?'checked':''} onchange="onInviteRolesChanged()"> ${lbl}
           </label>`).join('')}
@@ -18566,8 +19358,18 @@ function renderClientJobCardsInto(elId, rows, opts) {
     </div>`;
     return;
   }
-  // Use the same grid class the Jobs Track view uses, so spacing matches.
-  listEl.innerHTML = `<div class="jobs-list--cards">${rows.map(j => renderJobCard(j, { clientPreview: true, adminControls: !!opts.adminControls })).join('')}</div>`;
+  // Collapse grouped jobs into a single tile each (FIFO, oldest first).
+  const seenGrps = new Set();
+  const html = rows.map(j => {
+    if (j && j.stock_group_name) {
+      if (seenGrps.has(j.stock_group_name)) return '';
+      seenGrps.add(j.stock_group_name);
+      const gJobs = rows.filter(r => r && r.stock_group_name === j.stock_group_name);
+      return renderClientGroupTile(j.stock_group_name, gJobs, { adminControls: !!opts.adminControls });
+    }
+    return renderJobCard(j, { clientPreview: true, adminControls: !!opts.adminControls });
+  }).join('');
+  listEl.innerHTML = `<div class="jobs-list--cards">${html}</div>`;
 }
 
 // ── Client View (admin preview) ──────────────────────────────
@@ -18612,6 +19414,29 @@ async function toggleClientVisible(id, value) {
     notify('Error: ' + e.message);
     // Revert local optimistic update.
     if (local) local.client_visible = !value;
+    renderClientViewList();
+  }
+}
+
+async function toggleGroupClientVisible(groupName, value) {
+  const members = clientViewJobs.filter(j => j && j.stock_group_name === groupName);
+  if (!members.length) return;
+  // Snapshot for rollback.
+  const snapshot = members.map(j => ({ id: j.id, sgv: j.stock_group_visible, cv: j.client_visible }));
+  members.forEach(j => {
+    j.stock_group_visible = !!value;
+    // Turning group ON also exposes each member individually (matches server).
+    if (value) j.client_visible = true;
+  });
+  renderClientViewList();
+  try {
+    await api('POST', '/api/groups/client-visible', { name: groupName, value: !!value });
+  } catch (e) {
+    notify('Error: ' + e.message);
+    snapshot.forEach(s => {
+      const m = members.find(j => j.id === s.id);
+      if (m) { m.stock_group_visible = s.sgv; m.client_visible = s.cv; }
+    });
     renderClientViewList();
   }
 }

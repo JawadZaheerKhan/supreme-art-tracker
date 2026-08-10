@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-02-cartons-only-deliveries';
+const SCHEMA_VERSION = 'v2026-08-10-linked-jobs-and-group-visibility';
 
 async function initDb() {
   try {
@@ -286,6 +286,35 @@ async function initDb() {
     // joint delivery (1 challan, both jobs' own qty) and to merge their
     // rows in the Jobs Report.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS linked_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL`;
+    // Stock Groups — named tag shared by multiple job cards for the same
+    // product (ongoing reprints). FIFO delivery deducts from oldest first.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stock_group_name TEXT`;
+    // Group-level client visibility — INDEPENDENT from per-job client_visible.
+    // When ON, the client sees the group tile with ALL member data aggregated,
+    // regardless of individual jobs' client_visible. Individual client_visible
+    // only controls whether that job appears in the client's "View Jobs" modal.
+    // Shared across all members of a group (server updates every row on toggle).
+    {
+      const colExists = await sql`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'jobs' AND column_name = 'stock_group_visible'
+      `;
+      await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stock_group_visible BOOLEAN NOT NULL DEFAULT false`;
+      // Backfill only when the column was just added: preserve existing behavior
+      // by turning group visibility ON for any group that had at least one
+      // client-visible member. Runs exactly once — later toggles won't be undone.
+      if (!colExists.length) {
+        await sql`
+          UPDATE jobs j SET stock_group_visible = true
+           WHERE j.stock_group_name IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM jobs g
+                WHERE g.stock_group_name = j.stock_group_name
+                  AND g.client_visible = true
+             )
+        `;
+      }
+    }
     // Backfill: for any already-Delivered job (stage 7) that has a delqty
     // but no ledger entry yet, seed a single ledger entry so the mini table
     // in the job card and the client view are not blank for old jobs. In
@@ -814,6 +843,9 @@ function requireAdmin(req, res, next) {
 function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
 function canWriteInventory(user) { return userHasRole(user, 'admin', 'store_manager'); }
 function canRunStation(user)     { return userHasRole(user, 'admin', 'production_manager', 'operator', 'ceo'); }
+// Delivery ledger — admin, PM, or the dedicated finance role. Finance is
+// otherwise fully read-only; recording shipments is the one thing they own.
+function canRecordDelivery(user) { return userHasRole(user, 'admin', 'production_manager', 'finance'); }
 // Station WRITE actions — Save / Advance / Skip / Notes. CEO can enter
 // the terminal (view-only) via canRunStation, but must never process a
 // job. Admin / PM / operator still write freely.
@@ -841,6 +873,16 @@ function requireJobsWriter(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (!canWriteJobs(req.user)) {
     return res.status(403).json({ error: 'Not allowed — jobs write access required' });
+  }
+  next();
+}
+// Deliveries — admin, PM, or finance. Finance holds no other job-write
+// role but is the only user allowed to record shipments (which is why it
+// exists as a separate middleware from requireJobsWriter).
+function requireDeliveryWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canRecordDelivery(req.user)) {
+    return res.status(403).json({ error: 'Not allowed — delivery write access required' });
   }
   next();
 }
@@ -1045,7 +1087,7 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'ceo', 'operator', 'client'];
+const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
 function parseRolesInput(body) {
   const ALLOWED = new Set(ROLE_PRIORITY);
   let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
@@ -2347,8 +2389,9 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
           j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
           j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
-          j.linked_job_id, j.deliveries,
+          j.linked_job_id, j.deliveries, j.stock_group_name, j.particulars,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2361,14 +2404,18 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.paper, j.coatings, j.coatings_done, j.dateissued, j.deadline,
           j.size, j.ups, j.sheets, j.qty, j.cartonqty, j.delqty,
           j.priority, j.stages, j.issuance_status, j.client_visible,
+          j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
-          j.linked_job_id, j.deliveries,
+          j.linked_job_id, j.deliveries, j.stock_group_name, j.particulars,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
         WHERE j.deleted_at IS NULL
-          AND j.client_visible = true
           AND LOWER(TRIM(j.client)) = ${company}
+          AND (
+            (j.stock_group_name IS NULL AND j.client_visible = true)
+            OR (j.stock_group_name IS NOT NULL AND j.stock_group_visible = true)
+          )
         ORDER BY j.id DESC`;
   const now = Date.now();
   const cutoffMs = 3 * 24 * 60 * 60 * 1000;
@@ -2453,12 +2500,39 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       stages: sanitizeStages(j.stages, j.stage_index || 0),
       issuance_status: j.issuance_status || 'issued',
       client_visible: !!j.client_visible,
+      stock_group_visible: !!j.stock_group_visible,
+      // Minimal particulars — ONLY the two qty fields the client tile
+      // needs for READY / partial-ready chips. Everything else in
+      // particulars (paper specs, colors, weights, brand, etc.) stays
+      // server-side.
+      particulars: (() => {
+        const p = j.particulars || {};
+        const out = {};
+        if (p.delivered_cartons_qty) {
+          out.delivered_cartons_qty = {
+            quantity: p.delivered_cartons_qty.quantity || '',
+            entries: Array.isArray(p.delivered_cartons_qty.entries)
+              ? p.delivered_cartons_qty.entries.map(e => ({ qty: (e && e.qty) || '' }))
+              : undefined,
+          };
+        }
+        if (p.pasted_cartons_qty) {
+          out.pasted_cartons_qty = {
+            quantity: p.pasted_cartons_qty.quantity || '',
+            entries: Array.isArray(p.pasted_cartons_qty.entries)
+              ? p.pasted_cartons_qty.entries.map(e => ({ qty: (e && e.qty) || '' }))
+              : undefined,
+          };
+        }
+        return out;
+      })(),
       is_shade_card: !!j.is_shade_card,
       // Linked Jobs — lets the client see from the start that this order
       // is tied to another one (same product, printed together). Only the
       // id rides through; the client tile resolves it to the OTHER job's
       // PO number, which is what the client actually recognises.
       linked_job_id: j.linked_job_id || null,
+      stock_group_name: j.stock_group_name || null,
       // Per-shipment breakdown for the client tile. Operator identity is
       // stripped (clients don't need to see who recorded it) but cartons,
       // date, and any notes ride through so the client sees the same
@@ -2574,6 +2648,45 @@ app.post('/api/jobs/:id/client-visible', requireJobsWriter, async (req, res) => 
       summary: `Job E-${id} (${updated[0].name}): client_visible → ${value ? 'ON' : 'OFF'} for ${updated[0].client}`,
     });
     res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Group-level client visibility toggle. Sets stock_group_visible on ALL
+// members of the group at once (they must agree — the group is one
+// visibility unit). Independent from per-job client_visible.
+app.post('/api/groups/client-visible', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = String((req.body && req.body.name) || '').trim();
+    const value = !!(req.body && req.body.value);
+    if (!name) return res.status(400).json({ error: 'name required' });
+    // Turning the group ON also flips client_visible=true on every member,
+    // so the client can immediately see them in the View Jobs modal without
+    // admin having to tick each one. Turning OFF only flips group visibility
+    // and leaves per-job client_visible alone (admin's earlier per-job
+    // choices are preserved for next time).
+    const updated = value
+      ? await sql`
+          UPDATE jobs SET stock_group_visible = true, client_visible = true
+           WHERE stock_group_name = ${name} AND deleted_at IS NULL
+           RETURNING id
+        `
+      : await sql`
+          UPDATE jobs SET stock_group_visible = false
+           WHERE stock_group_name = ${name} AND deleted_at IS NULL
+           RETURNING id
+        `;
+    await logAudit(sql, req, {
+      action: 'group.client_visible',
+      entityType: 'group',
+      entityId: null,
+      summary: `Group "${name}": stock_group_visible → ${value ? 'ON' : 'OFF'} (${updated.length} jobs)`,
+    });
+    res.json({ ok: true, updated: updated.length });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -3557,7 +3670,7 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, link
 // used for deliveries in this shop (1 carton == 1 piece per the owner).
 // delqty stays in sync as the running sum of cartons so the tile's
 // "Delivered Qty" and the client view keep working with no pieces math.
-app.post('/api/jobs/:id/deliveries', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3660,13 +3773,125 @@ app.post('/api/jobs/:id/unlink', requireJobsWriter, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// ── Stock Groups ─────────────────────────────────────────────────
+// Named tag shared by multiple job cards for the same product (ongoing
+// reprints). FIFO delivery deducts from oldest-id job first.
+
+// Set or clear a job's group tag. Send group_name=null to remove.
+app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const body = req.body || {};
+    if (!('group_name' in body)) return res.status(400).json({ error: 'group_name field required (null to remove)' });
+    const groupName = body.group_name ? String(body.group_name).trim() || null : null;
+    const rows = await sql`SELECT id FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    // Inherit the group's current visibility so the new member matches
+    // the rest. If the group is on, also flip client_visible=true on the
+    // new member so it shows up in the client's View Jobs modal by default.
+    let inherit = false;
+    if (groupName) {
+      const existing = await sql`
+        SELECT stock_group_visible FROM jobs
+         WHERE stock_group_name = ${groupName} AND deleted_at IS NULL
+         LIMIT 1
+      `;
+      inherit = !!(existing.length && existing[0].stock_group_visible);
+    }
+    if (inherit) {
+      await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = true, client_visible = true WHERE id = ${id}`;
+    } else {
+      await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = ${inherit} WHERE id = ${id}`;
+    }
+    await logAudit(sql, req, {
+      action: groupName ? 'job.group_set' : 'job.group_clear',
+      entityType: 'job', entityId: id,
+      summary: groupName ? `Added job E-${id} to group "${groupName}"` : `Removed job E-${id} from its group`,
+    });
+    const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// List all unique group names (for the group filter dropdown).
+app.get('/api/groups', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT DISTINCT stock_group_name FROM jobs
+      WHERE stock_group_name IS NOT NULL AND deleted_at IS NULL
+      ORDER BY stock_group_name`;
+    res.json(rows.map(r => r.stock_group_name));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// FIFO group delivery — auto-deducts from oldest job first, spilling into
+// newer jobs as needed. Uses computeDeliveryUpdate so auto-advance-to-
+// Delivered fires identically to a normal single-job delivery.
+app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { group_name, cartons: cartonsRaw, date, notes, po_no, batch_no } = req.body || {};
+    if (!group_name || !String(group_name).trim()) return res.status(400).json({ error: 'group_name required' });
+    const totalCartons = parseFloat(String(cartonsRaw || '').replace(/[^0-9.\-]/g, ''));
+    if (!Number.isFinite(totalCartons) || totalCartons <= 0) return res.status(400).json({ error: 'cartons must be a positive number' });
+    const delivDate = String(date || '').trim() || businessDateISO();
+    const poNo     = String(po_no    || '').trim() || null;
+    const batchNo  = String(batch_no || '').trim() || null;
+    const notesStr = String(notes    || '').trim() || null;
+    const byEmail  = req.user?.email || 'unknown';
+    const groupJobs = await sql`
+      SELECT * FROM jobs
+      WHERE stock_group_name = ${String(group_name).trim()} AND deleted_at IS NULL
+      ORDER BY id ASC`;
+    if (!groupJobs.length) return res.status(404).json({ error: 'No jobs found in this group' });
+    let remaining = totalCartons;
+    const deliveriesMade = [];
+    for (const job of groupJobs) {
+      if (remaining <= 0) break;
+      if (deliveryEligibilityError(job)) continue;
+      const readyQty = parseFloat(
+        ((job.particulars || {}).delivered_cartons_qty || {}).quantity || ''
+      ) || parseFloat(String(job.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      const alreadyDelivered = sumDeliveryCartons(job.deliveries);
+      const available = Math.max(0, readyQty - alreadyDelivered);
+      if (available <= 0) continue;
+      const allocate = Math.min(available, remaining);
+      remaining -= allocate;
+      const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
+        cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, byEmail,
+      });
+      await sql`
+        UPDATE jobs
+           SET deliveries  = ${JSON.stringify(deliveries)},
+               delqty      = ${delqty},
+               stage_index = ${stage_index},
+               stages      = ${JSON.stringify(stages)},
+               log         = ${JSON.stringify(log)}
+         WHERE id = ${job.id}`;
+      deliveriesMade.push({ job_id: job.id, cartons: allocate });
+    }
+    if (!deliveriesMade.length) return res.status(400).json({ error: 'No cartons available — all group jobs may be at an early stage or fully delivered.' });
+    const fulfilled = totalCartons - remaining;
+    await logAudit(sql, req, {
+      action: 'group.deliver', entityType: 'group', entityId: null,
+      summary: `FIFO delivery from group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
+    });
+    res.json({ ok: true, deliveries_made: deliveriesMade, unfulfilled: remaining });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Joint delivery — ONE challan number stamped across both linked jobs.
 // Each job ships its OWN cartons figure (no auto-splitting: the store
 // keeper/QC already know each job's own ready quantity). Runs the exact
 // same per-job eligibility + auto-advance logic as a normal delivery,
 // just twice, wrapped in one response so the UI can show one confirmation.
 // Payload: { challan_no, date, entries: [{ job_id, cartons, po_no, batch_no }, ...] }
-app.post('/api/jobs/:id/deliver-linked', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
