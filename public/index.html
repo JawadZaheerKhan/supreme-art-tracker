@@ -18361,15 +18361,20 @@ function stationUpdateHtml() {
     // last pass to undo an accidental Add-pass) as the per-pass delete for
     // ALREADY-SAVED entries too. Visibility rule per pass:
     //   • Admin / PM: minus on every saved pass they can see, so they can
-    //     fix any mis-typed row without a DB touch.
-    //   • Machine operator: NO minus on saved passes — the delete power is
-    //     admin/PM only per the current owner spec. The example the owner
-    //     gave (an Emboss op removing a UV op's earlier entry) is the exact
-    //     scenario this prevents.
+    //     fix any mis-typed row.
+    //   • Machine operator: minus ONLY on saved passes stamped with THEIR
+    //     own machine — so a person can undo their own entry, but the
+    //     Emboss operator can't nuke the UV entry sitting next to it.
     //   • Last pass (unsaved local new-row): keeps the existing local
     //     decrement behaviour so hitting + and then − backs out the add.
+    // The server enforces the same matrix (admin/PM cookie OR valid PIN
+    // whose machine matches the entry's), so a browser-console POST can't
+    // cheat.
     const savedPass = m && (m.date || m.operator);
-    const canDeleteThisPass = savedPass && canDeleteEntry;
+    const entMachine = (m && m.machine) ? String(m.machine).trim().toLowerCase() : '';
+    const myMachine = (stationOperator && stationOperator.machine) ? String(stationOperator.machine).trim().toLowerCase() : '';
+    const opMatchesMachine = savedPass && !!entMachine && !!myMachine && entMachine === myMachine;
+    const canDeleteThisPass = savedPass && (canDeleteEntry || opMatchesMachine);
     let realIdxForPass = null;
     let keysJsonForPass = '';
     if (savedPass) {
@@ -18630,7 +18635,12 @@ function stationRemovePass() {
 // derived quantity strings and refreshes the job. keysJson is a JSON
 // string of the field keys touched by this pass (usually 1-2 keys).
 async function stationDeleteEntry(jobId, idx, keysJson) {
-  if (!(isAdmin() || isProductionManager())) return;
+  const isPrivileged = isAdmin() || isProductionManager();
+  const stationPin   = stationOperator && stationOperator.pin;
+  // Either admin/PM (auth cookie is enough) or a PIN'd operator whose
+  // machine matches the entry (server verifies). No other caller has a
+  // valid combination.
+  if (!isPrivileged && !stationPin) return;
   let keys;
   try { keys = JSON.parse(keysJson); } catch { keys = []; }
   if (!Array.isArray(keys) || !keys.length) return;
@@ -18642,7 +18652,9 @@ async function stationDeleteEntry(jobId, idx, keysJson) {
   });
   if (!ok) return;
   try {
-    const updated = await api('POST', `/api/jobs/${jobId}/particulars/delete-entry`, { idx, keys });
+    const body = { idx, keys };
+    if (stationPin) body.pin = stationPin;
+    const updated = await api('POST', `/api/jobs/${jobId}/particulars/delete-entry`, body);
     // Merge the updated job back into memory so the station re-render
     // picks up fresh entries[] without another full loadJobs round-trip.
     if (updated && updated.id) {

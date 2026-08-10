@@ -4017,34 +4017,72 @@ app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => 
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// Admin / PM only: delete one saved particulars entry (a station "pass")
-// from a job. The station view now surfaces a small × next to each saved
-// pass so a mis-entered coating / printing row can be removed without an
-// admin-only DB touch. Removes the entry at `idx` from every key in the
-// request body's `keys` array, then rebuilds each key's derived
-// `quantity` / `name` / `signature` display strings from the remaining
-// entries so the job card stays in sync.
-app.post('/api/jobs/:id/particulars/delete-entry', requireJobsWriter, async (req, res) => {
+// Delete one saved particulars entry (a station "pass") from a job.
+// The station view surfaces a "−" on each saved pass so a mis-entered
+// coating / printing row can be undone without a DB touch.
+//
+// Auth matrix (server enforces so a console POST can't cheat):
+//   • admin / production_manager: allowed for any entry (no PIN needed)
+//   • anyone else: must send a valid station PIN in the body, AND every
+//     entry being removed must carry that PIN's machine name in its
+//     `.machine` field — so an Emboss operator can undo an Emboss pass
+//     but never a UV pass sitting in the same field.
+// Rebuilds each key's derived quantity / name / signature display strings
+// from the remaining entries so the job card stays in sync.
+app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const idx = parseInt(req.body && req.body.idx, 10);
     const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys.filter(k => typeof k === 'string' && k) : [];
+    const pin = String((req.body && req.body.pin) || '').trim();
     if (!Number.isFinite(idx) || idx < 0) return res.status(400).json({ error: 'idx required (non-negative integer)' });
     if (!keys.length) return res.status(400).json({ error: 'keys[] required' });
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
     const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+
+    const adminOrPm = canWriteJobs(req.user);
+    let allowedMachine = null;
+    let actorLabel = req.user?.email || 'unknown';
+    if (!adminOrPm) {
+      if (!validPin(pin)) {
+        return res.status(403).json({ error: 'Enter your machine PIN to delete an entry — only admin / production manager can delete without one.' });
+      }
+      const ops = await sql`SELECT id, name FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+      if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+      allowedMachine = String(ops[0].name || '').trim().toLowerCase();
+      actorLabel = `${actorLabel} · machine ${ops[0].name}`;
+      // Machine-match check: every entry we're about to delete must belong
+      // to this PIN's machine, else reject the whole request so nothing
+      // gets deleted piecemeal.
+      for (const key of keys) {
+        const p = particulars[key];
+        if (!p || !Array.isArray(p.entries) || idx >= p.entries.length) continue;
+        const ent = p.entries[idx] || {};
+        const entMachine = String(ent.machine || '').trim().toLowerCase();
+        if (entMachine !== allowedMachine) {
+          return res.status(403).json({
+            error: `Cannot delete: entry belongs to a different machine${ent.machine ? ' (' + ent.machine + ')' : ''}. Only that machine's PIN, admin, or the production manager can remove it.`,
+          });
+        }
+      }
+    }
+
     const removedSummary = [];
     for (const key of keys) {
       const p = particulars[key];
       if (!p || !Array.isArray(p.entries) || idx >= p.entries.length) continue;
       const next = [...p.entries];
       const gone = next.splice(idx, 1)[0] || {};
-      const opsList = [...new Set(next.map(e => e && e.operator).filter(Boolean))];
-      const machinesList = [...new Set(next.map(e => e && e.machine).filter(Boolean))];
+      const opsList = [...new Set(
+        next.map(e => String((e && e.operator) || '').trim()).filter(Boolean)
+      )];
+      const machinesList = [...new Set(
+        next.map(e => String((e && e.machine) || '').trim()).filter(Boolean)
+      )];
       particulars[key] = {
         ...p,
         entries: next,
@@ -4058,8 +4096,8 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireJobsWriter, async (req
     nowLog.push({
       stage: STAGES[job.stage_index || 0] || '?',
       status: (job.stages && job.stages[job.stage_index || 0] && job.stages[job.stage_index || 0].status) || 'active',
-      notes: `Particulars entry #${idx + 1} removed by admin${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
-      by: req.user?.email || 'unknown',
+      notes: `Particulars entry #${idx + 1} removed${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
+      by: actorLabel,
       time: businessStamp(),
     });
     const updated = await sql`
@@ -4070,7 +4108,7 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireJobsWriter, async (req
     await logAudit(sql, req, {
       action: 'job.particulars.delete-entry',
       entityType: 'job', entityId: id,
-      summary: `Job E-${id}: removed particulars entry #${idx + 1}${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
+      summary: `Job E-${id}: removed particulars entry #${idx + 1} by ${actorLabel}${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
     });
     res.json(updated[0]);
   } catch (err) {
