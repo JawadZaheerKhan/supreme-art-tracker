@@ -3463,9 +3463,30 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
       });
     }
     // Clear the partial-issuance marker AND the split-issuance record so
-    // the job returns to a clean 'nothing issued' state.
+    // the job returns to a clean 'nothing issued' state. Also drop
+    // anything that was CREATED BY THIS SPECIFIC ISSUANCE:
+    //   • over_issue_pending — the store keeper's over-issue awaiting a
+    //     PM decision; that issuance is gone now, so the decision is
+    //     moot.
+    //   • over_issue_decisions — the archived PM decisions on this
+    //     issuance's over-issue.
+    //   • packet_topups where source==='over-issue-reconcile' — these
+    //     were auto-created by the PM's "Use" click on the pending
+    //     over-issue; without the underlying issuance they'd wrongly
+    //     inflate the job's packet count (owner report: "still saying
+    //     2 top up after reversal").
+    // Real manual top-ups (packet_topups without that source flag)
+    // stay intact — they were separate PM requests, not tied to this
+    // one issuance.
     const cleanParticulars = { ...(job.particulars || {}) };
     delete cleanParticulars.partial_pending_sheets;
+    delete cleanParticulars.over_issue_pending;
+    delete cleanParticulars.over_issue_decisions;
+    if (Array.isArray(cleanParticulars.packets_topups)) {
+      cleanParticulars.packets_topups = cleanParticulars.packets_topups
+        .filter(t => !t || t.source !== 'over-issue-reconcile');
+      if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
+    }
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'pending',
@@ -4842,8 +4863,19 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
       if (job && job.issuance_status === 'issued') {
+        // Same cleanup as /reverse-issuance: drop anything created by
+        // the specific issuance we're undoing so the job doesn't keep
+        // ghost effects (owner report: reversal left a "+2 top-up" chip
+        // on a job whose over-issue had been "Use"-decided).
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.over_issue_pending;
+        delete cleanParticulars.over_issue_decisions;
+        if (Array.isArray(cleanParticulars.packets_topups)) {
+          cleanParticulars.packets_topups = cleanParticulars.packets_topups
+            .filter(t => !t || t.source !== 'over-issue-reconcile');
+          if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
+        }
         await sql`
           UPDATE jobs
              SET issuance_status = 'pending',
