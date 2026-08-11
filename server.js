@@ -3310,23 +3310,33 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
           challanNo,
         });
       }
-      // Over-issuance offcut: whole extra packets returned to a
-      // same-size offcut bucket (paper_type + size + gsm + brand match,
-      // is_offcut=true). Separate from the cut-size offcut above so
-      // both can coexist on a job that has BOTH a cut AND an over-issue.
-      if (overThis > 0) {
-        const overOffcutItem = await findOrCreateOffcutItem(sql, it, it.size || '');
-        await applyInventoryChange(sql, {
-          itemId: overOffcutItem.id,
-          change: +overThis,
-          reason: 'job-offcut',
-          jobId: job.id,
-          notes: `Job E-${job.id}: ${fmtPack(overPacks)} ${unit} over-issued from ${it.brand || 'no brand'} added to offcut stock`,
-          user: req.user,
-          challanNo,
+      // Over-issuance handling — the auto-offcut credit that used to run
+      // here has moved to POST /api/jobs/:id/over-issue/decide. Instead
+      // we stash a per-split record and the PM chooses on the job tile:
+      //   • Use     → creates an approved packet top-up on the job
+      //                (no offcut credit)
+      //   • Offcut  → creates the offcut inventory credit that used to
+      //                run automatically
+      //   • Send Back → logs the return; store keeper does the physical
+      //                 return manually
+      // Source deduction stays unchanged (still the -s.sheets applied
+      // above), so the inventory report keeps recording the extra
+      // issuance exactly as before.
+      issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
+    }
+    // Build the pending decision record from every split that got extras.
+    const overIssueSplits = [];
+    if (overSheets > 0 && totalIssued > 0) {
+      for (let i = 0; i < splits.length; i++) {
+        if (perSplitOver[i] <= 0) continue;
+        const it = itemsById.get(splits[i].item_id);
+        overIssueSplits.push({
+          source_item_id: splits[i].item_id,
+          brand: (it && it.brand) || null,
+          sheets: perSplitOver[i],
+          packets: perSplitOver[i] / ps,
         });
       }
-      issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
     }
 
     // Update job. Partial issuance: use the existing partial marker so
@@ -3337,6 +3347,21 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const nextParticulars = { ...(job.particulars || {}) };
     if (fullyIssued) delete nextParticulars.partial_pending_sheets;
     else             nextParticulars.partial_pending_sheets = remaining;
+    // Over-issue decision pending — PM picks Use / Offcut / Send Back on
+    // the job tile. See POST /api/jobs/:id/over-issue/decide.
+    if (overIssueSplits.length > 0) {
+      nextParticulars.over_issue_pending = {
+        id: 'oi' + Date.now() + Math.floor(Math.random() * 1000),
+        total_sheets: overSheets,
+        total_packets: overSheets / ps,
+        unit,
+        ps,
+        splits: overIssueSplits,
+        challan_no: challanNo || null,
+        issued_by_email: req.user?.email || null,
+        issued_at: new Date().toISOString(),
+      };
+    }
     // Point inventory_item_id at whichever brand contributed the most —
     // downstream displays that still read from it get the dominant brand
     // rather than an arbitrary one. Any code that wants the full picture
@@ -3580,6 +3605,108 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, 
       entityType: 'job',
       entityId: id,
       summary: `Rejected +${t.qty} extra packets request for Job E-${id}`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Over-issuance decision ───────────────────────────────────────
+// When the store keeper issues more sheets than the job needs, the
+// extras used to auto-credit an offcut item. Now the job flags an
+// over_issue_pending record and the PM (admin / production manager)
+// picks what happens to those extras on the job tile:
+//   • use     → creates an approved packet top-up on the job so the
+//                job's packet count effectively grows by that amount.
+//                No inventory movement (sheets were already deducted
+//                at issue-stock time).
+//   • offcut  → runs the offcut credit that used to happen automatically
+//                (per-split findOrCreateOffcutItem + applyInventoryChange).
+//   • return  → logs the decision only. Store keeper does the physical
+//                return through the normal manual inventory tools.
+// The source item's original deduction stays untouched, so the inventory
+// report keeps recording the extra issuance exactly as it did before.
+app.post('/api/jobs/:id/over-issue/decide', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const decision = String((req.body && req.body.decision) || '').trim();
+    if (!['use', 'offcut', 'return'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be use, offcut, or return' });
+    }
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const p = { ...(job.particulars || {}) };
+    const pending = p.over_issue_pending;
+    if (!pending || !Array.isArray(pending.splits)) {
+      return res.status(400).json({ error: 'No pending over-issue decision on this job' });
+    }
+    const unit = pending.unit || 'packets';
+    const totalPackets = Number(pending.total_packets) || 0;
+    let summary = '';
+    if (decision === 'use') {
+      const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
+      topups.push({
+        id: 't' + Date.now() + Math.floor(Math.random() * 1000),
+        qty: totalPackets,
+        status: 'approved',
+        source: 'over-issue-reconcile',
+        requested_at: pending.issued_at || new Date().toISOString(),
+        requested_by_email: pending.issued_by_email || null,
+        approved_at: new Date().toISOString(),
+        approved_by_id: req.user?.id || null,
+        approved_by_email: req.user?.email || null,
+        note: 'Auto-created from PM \"Use\" decision on over-issuance (sheets already deducted at issuance).',
+      });
+      p.packets_topups = topups;
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} added to job as approved packet top-up (PM: Use)`;
+    } else if (decision === 'offcut') {
+      for (const s of pending.splits) {
+        if (!s || !s.source_item_id || !(s.sheets > 0)) continue;
+        const invRows = await sql`SELECT * FROM inventory_items WHERE id=${s.source_item_id}`;
+        if (!invRows.length) continue;
+        const it = invRows[0];
+        const offcutItem = await findOrCreateOffcutItem(sql, it, it.size || '');
+        await applyInventoryChange(sql, {
+          itemId: offcutItem.id,
+          change: +s.sheets,
+          reason: 'job-offcut',
+          jobId: id,
+          notes: `Job E-${id}: ${s.packets} ${unit} over-issued from ${it.brand || 'no brand'} added to offcut stock (PM: Add to Offcut)`,
+          user: req.user,
+          challanNo: pending.challan_no || null,
+        });
+      }
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} credited to offcut (PM: Add to Offcut)`;
+    } else {
+      // return — no inventory transaction; ledger note comes from the
+      // audit log line below.
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} marked as returned to store — store keeper handles the physical return (PM: Send Back)`;
+    }
+    // Archive the decision on the job so the history is inspectable.
+    const decisions = Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions.slice() : [];
+    decisions.push({
+      id: pending.id,
+      decision,
+      total_sheets: pending.total_sheets,
+      total_packets: pending.total_packets,
+      unit: pending.unit,
+      challan_no: pending.challan_no || null,
+      issued_by_email: pending.issued_by_email || null,
+      issued_at: pending.issued_at,
+      decided_at: new Date().toISOString(),
+      decided_by_id: req.user?.id || null,
+      decided_by_email: req.user?.email || null,
+    });
+    p.over_issue_decisions = decisions;
+    delete p.over_issue_pending;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'job.over_issue.decide',
+      entityType: 'job',
+      entityId: id,
+      summary,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }

@@ -3054,6 +3054,33 @@ function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || 
 // status of pending/approved/rejected. Original packets stay in
 // particulars.quantity_of_packets — approved top-ups add to it visually.
 function packetTopups(j)          { const arr = (j && j.particulars && j.particulars.packets_topups) || []; return Array.isArray(arr) ? arr : []; }
+// Over-issuance pending decision — set by the server when the store
+// keeper issues more sheets than the job needed. PM picks Use / Offcut
+// / Send Back from a banner on the job tile (see decideOverIssue).
+function overIssuePending(j)      { return j && j.particulars && j.particulars.over_issue_pending; }
+function hasOverIssuePending(j)   { return !!overIssuePending(j); }
+// Yellow warning banner shown on the job tile when a PM decision is
+// still owed on an over-issuance. Admin / PM only — the store keeper's
+// job here is done at issue time; nobody else has authority.
+function overIssueBannerHtml(j) {
+  const p = overIssuePending(j);
+  if (!p) return '';
+  if (!(isAdmin() || isProductionManager())) return '';
+  const pkts = p.total_packets;
+  const pktsStr = (typeof pkts === 'number')
+    ? (Number.isInteger(pkts) ? pkts.toString() : pkts.toFixed(2))
+    : String(pkts || '');
+  const unit = p.unit || 'packets';
+  const challan = p.challan_no ? ` · challan ${esc(p.challan_no)}` : '';
+  return `<div class="over-issue-banner" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12px;color:#78350f;margin:6px 0;">
+    <div style="font-weight:700;margin-bottom:6px;">&#9888; Over-issued <b>${esc(pktsStr)} ${esc(unit)}</b> — pick where the extras go${challan}:</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+      <button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'use')" title="Add these extras to the job's packet count (existing top-up system). No inventory movement — sheets were already deducted at issuance.">&#10003; Use in job</button>
+      <button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="decideOverIssue(${j.id}, 'offcut')" title="Credit the extras to the matching offcut item — the same automatic behaviour the app used to do at issuance.">&#128230; Add to Offcut</button>
+      <button class="btn btn-sm" style="background:#6b7280;border-color:#4b5563;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'return')" title="Mark the extras as sent back to the store. Store keeper handles the physical return manually.">&#8630; Send Back</button>
+    </div>
+  </div>`;
+}
 function packetTopupsPending(j)   { return packetTopups(j).filter(t => t.status === 'pending'); }
 function packetTopupsApproved(j)  { return packetTopups(j).filter(t => t.status === 'approved'); }
 function hasPendingPacketTopup(j) { return packetTopupsPending(j).length > 0; }
@@ -3925,6 +3952,7 @@ function renderJobRowCompact(j) {
           ${sidePanel}
         </div>
       </div>
+      ${overIssueBannerHtml(j)}
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
         ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
@@ -4353,6 +4381,7 @@ function renderJobCard(j, opts) {
       ? `<div class="pipeline" style="justify-content:center;">${clientPipeline}</div>`
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
+    ${clientPreview ? '' : overIssueBannerHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
@@ -16982,6 +17011,47 @@ async function approvePacketsTopup(jobId, topupId) {
     render();
     notify(`Approved · ${sheets.toLocaleString()} sheets deducted`);
   } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// PM / admin decides where over-issued sheets go. Server routes:
+//   use    → creates an approved packet top-up on the job (no inventory movement)
+//   offcut → credits the matching offcut item (what the old auto behaviour did)
+//   return → logs "sent back"; store keeper handles the physical return manually
+async function decideOverIssue(jobId, decision) {
+  if (!(isAdmin() || isProductionManager())) {
+    notify('Only admin / production manager can decide over-issued sheets.');
+    return;
+  }
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  const p = overIssuePending(j);
+  if (!p) { notify('No pending over-issue on this job.'); return; }
+  const pkts = p.total_packets;
+  const pktsStr = (typeof pkts === 'number')
+    ? (Number.isInteger(pkts) ? pkts.toString() : pkts.toFixed(2))
+    : String(pkts || '');
+  const unit = p.unit || 'packets';
+  const labels = { use: 'Use in job', offcut: 'Add to Offcut', return: 'Send Back' };
+  const messages = {
+    use: `The extra ${pktsStr} ${unit} will be added to Job E-${jobId} as an approved packet top-up. No inventory movement — the sheets were already deducted at issuance.`,
+    offcut: `The extra ${pktsStr} ${unit} will be credited to the matching offcut item (same behaviour the app used to do automatically at issuance).`,
+    return: `The extra ${pktsStr} ${unit} will be marked as sent back to the store. Store keeper handles the physical return manually.`,
+  };
+  const ok = await confirmDialog({
+    title: `${labels[decision]} · ${pktsStr} ${unit}?`,
+    message: messages[decision],
+    confirmText: labels[decision],
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/over-issue/decide`, { decision });
+    const idx = jobs.findIndex(x => x.id === jobId); if (idx >= 0) jobs[idx] = updated;
+    if (decision === 'offcut') await loadInventory();
+    render();
+    notify(`Over-issue decision recorded — ${labels[decision]}`);
+  } catch (e) { notify('Error: ' + (e.message || String(e))); }
   showSaving(false);
 }
 
