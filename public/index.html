@@ -14080,36 +14080,11 @@ function jcalcRecalc() {
 }
 
 function specsSection(p, coatings, j) {
-  // Searchable paper combobox — brand-agnostic since v2026-07-18. The
-  // picker only shows paper GROUPS (paper_type + size + gsm + is_offcut);
-  // brand is chosen by the store keeper at Issue Stock time. Selection
-  // fills the hidden input that getFormData() reads. See paperSelect().
-  const currentItemId = j && j.inventory_item_id;
-  const currentItem   = currentItemId ? inventory.find(i => i.id === currentItemId) : null;
-  const currentLabel  = currentItem ? paperGroupLabel(currentItem) : '';
-  // Balance shown next to the picker is the POOLED total across every
-  // brand in the group — matches what updateStockHint() computes.
-  const currentBalance = currentItem
-    ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
-    : 0;
-  const papersRow = `
-    <tr class="jc-spec-row"><td colspan="5">
-      <div class="paper-pick">
-        <span class="jc-lbl" style="position:static;background:none;padding:0;">Paper:</span>
-        <div class="combo" id="paper-combo">
-          <input type="text" id="paper-search"
-            placeholder="Search paper type, size, brand…"
-            value="${esc(currentLabel)}"
-            autocomplete="off"
-            onfocus="paperOpen()"
-            oninput="paperFilter()"
-            onkeydown="paperKey(event)">
-          <input type="hidden" id="f-inventory-item" value="${currentItemId||''}" data-balance="${currentBalance}">
-          <div class="combo-list" id="paper-list" style="display:none;"></div>
-        </div>
-        <span class="stock-hint" id="stock-hint"></span>
-      </div>
-    </td></tr>`;
+  // Paper picker moved to Row 3 of jobForm — used to live here as its
+  // own full-width row but managers were confusing it with the Size /
+  // GSM field in Row 3, so both now sit side-by-side in one place.
+  // See jobForm() for the picker + hidden #f-inventory-item input.
+
   // Cut workflow: a single opt-in toggle. cut_size and offcut_size are NOT
   // separate inputs — they're derived live from "Cutting Size / GSM" (top
   // form) and "Size / GSM" respectively, so users don't enter the same
@@ -14146,7 +14121,6 @@ function specsSection(p, coatings, j) {
     </td></tr>`;
   return `
     <table class="jc-part jc-specs">
-      ${papersRow}
       ${cutRow}
       ${coatRow(PRINT_COATINGS_ROW1)}
       ${coatRow(PRINT_COATINGS_ROW2)}
@@ -14532,6 +14506,16 @@ function particularsTable(p, job) {
 function jobForm(j={}) {
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const v = x => esc(x||'');
+  // Paper picker inputs. Same shape specsSection used to compute; moved
+  // up here so the picker can live in Row 3 alongside Size / GSM (one
+  // paper-related control instead of the old two-spot split that
+  // confused managers).
+  const currentItemId = j && j.inventory_item_id;
+  const currentItem   = currentItemId ? inventory.find(i => i.id === currentItemId) : null;
+  const currentLabel  = currentItem ? paperGroupLabel(currentItem) : '';
+  const currentBalance = currentItem
+    ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
+    : 0;
   return `
     <img class="jc-watermark-screen" src="/logo.png" alt="">
     <input type="hidden" id="f-editing-id" value="${j.id ? esc(j.id) : ''}">
@@ -14584,8 +14568,23 @@ function jobForm(j={}) {
         <td colspan="2"><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
-        <td colspan="2"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
-        <td colspan="2"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
+        <td colspan="2">
+          <span class="jc-lbl">Paper</span>
+          <div class="combo" id="paper-combo" style="position:relative;">
+            <input type="text" id="paper-search"
+              placeholder="Search paper type, size, brand…"
+              value="${esc(currentLabel)}"
+              autocomplete="off"
+              onfocus="paperOpen()"
+              oninput="paperFilter()"
+              onkeydown="paperKey(event)">
+            <input type="hidden" id="f-inventory-item" value="${currentItemId||''}" data-balance="${currentBalance}">
+            <div class="combo-list" id="paper-list" style="display:none;"></div>
+          </div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px;min-height:14px;"><span class="stock-hint" id="stock-hint"></span></div>
+        </td>
+        <td colspan="1"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
+        <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
         <td colspan="1"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
         <td colspan="2">
           <span class="jc-lbl">Quantity of Packets</span>
