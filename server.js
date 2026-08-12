@@ -1790,8 +1790,14 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
 
     for (const job of jobs) {
       const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
-      if (!done.length) continue;
       const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      // Owner report: coatings that were saved-but-not-forwarded didn't
+      // appear in the Daily Production Report. Root cause was a
+      // "if (!done.length) continue;" early-skip here that dropped the
+      // job before its coating_sheets_qty.entries[] were credited. The
+      // legacy branch below (line "if (!qtyEntries && !wasteEntries &&
+      // sheetsN <= 0) continue;") already covers the truly-empty case,
+      // so removing the early skip is safe.
       // Sum pipe-separated values like "500 | 500" → 1000. coating_sheets_qty
       // and uv_waste_sheets both use this format because station submissions
       // append pass-by-pass.
@@ -4220,25 +4226,77 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
     }
 
     const removedSummary = [];
+    const goneEntries = []; // { key, entry } — for coatings_done cleanup below
     for (const key of keys) {
       const p = particulars[key];
       if (!p || !Array.isArray(p.entries) || idx >= p.entries.length) continue;
       const next = [...p.entries];
       const gone = next.splice(idx, 1)[0] || {};
-      const opsList = [...new Set(
-        next.map(e => String((e && e.operator) || '').trim()).filter(Boolean)
-      )];
-      const machinesList = [...new Set(
-        next.map(e => String((e && e.machine) || '').trim()).filter(Boolean)
-      )];
-      particulars[key] = {
-        ...p,
-        entries: next,
-        quantity: next.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | '),
-        name: machinesList.join(' | ') || p.name || '',
-        signature: opsList.join(' | '),
-      };
+      goneEntries.push({ key, entry: gone });
+      if (!next.length) {
+        // Fully empty entries[] → drop the whole particulars sub-object
+        // instead of leaving stub .quantity/.name/.signature/.details
+        // rows behind. Owner report: deleting an entry left the
+        // machine name, operator, and date visible until a new entry
+        // was recorded, and the row kept showing in Daily Production /
+        // Production reports too. A clean delete removes the key so
+        // report aggregators (which read from particulars) see nothing
+        // to credit.
+        delete particulars[key];
+      } else {
+        const opsList = [...new Set(
+          next.map(e => String((e && e.operator) || '').trim()).filter(Boolean)
+        )];
+        const machinesList = [...new Set(
+          next.map(e => String((e && e.machine) || '').trim()).filter(Boolean)
+        )];
+        particulars[key] = {
+          ...p,
+          entries: next,
+          quantity: next.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | '),
+          // Rebuild name from remaining entries only — never fall back
+          // to the stale p.name that carried the deleted machine.
+          name: machinesList.join(' | '),
+          signature: opsList.join(' | '),
+          // Recompute details from the earliest remaining entry's date
+          // so the row's timestamp column reflects what's actually there.
+          details: next.reduce((acc, e) => {
+            if (e && e.date && (!acc || String(e.date) < String(acc))) return String(e.date);
+            return acc;
+          }, ''),
+        };
+      }
       if (gone.qty) removedSummary.push(`${key}=${gone.qty}${gone.date ? '@' + gone.date : ''}`);
+    }
+    // If we just deleted coating-related entries, prune matching
+    // coatings_done badges. A badge is redundant once no more entries
+    // for that machine exist across any coating field for the same day,
+    // otherwise the finish name keeps showing on the tile + Daily
+    // Production Report ("Coatings did not get deleted totally").
+    const COATING_KEYS = new Set(['coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets']);
+    const coatingDeletes = goneEntries.filter(g => COATING_KEYS.has(g.key));
+    if (coatingDeletes.length && Array.isArray(particulars.coatings_done) && particulars.coatings_done.length) {
+      const stillHasEntry = (machine, date) => {
+        for (const ckey of COATING_KEYS) {
+          const cp = particulars[ckey];
+          const ents = cp && Array.isArray(cp.entries) ? cp.entries : [];
+          if (ents.some(e => e && e.machine === machine && (!date || e.date === date))) return true;
+        }
+        return false;
+      };
+      const doneNext = particulars.coatings_done.filter(d => {
+        if (!d) return false;
+        // Drop badge only if a delete targeted this badge's machine AND
+        // no remaining entry exists for that machine on the same day.
+        const dDate = (d.done_at || '').slice(0, 10);
+        const targeted = coatingDeletes.some(g => (g.entry.machine || '') === (d.machine || ''));
+        if (!targeted) return true;
+        return stillHasEntry(d.machine || '', dDate);
+      });
+      if (doneNext.length !== particulars.coatings_done.length) {
+        if (doneNext.length) particulars.coatings_done = doneNext;
+        else delete particulars.coatings_done;
+      }
     }
     const nowLog = Array.isArray(job.log) ? [...job.log] : [];
     nowLog.push({
