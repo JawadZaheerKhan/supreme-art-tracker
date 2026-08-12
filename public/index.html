@@ -2317,6 +2317,7 @@
     </select>
     <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
   </div>
+  <div id="client-view-summary" style="margin:0 0 16px;"></div>
   <div id="client-view-list">
     <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
   </div>
@@ -2328,6 +2329,7 @@
      /api/client/jobs — this shell is UX only. -->
 <div class="main" id="client-mode" style="display:none;">
   <div id="client-portal-hero" class="hero-card"></div>
+  <div id="client-portal-summary" style="margin-top:16px;"></div>
   <div id="client-portal-list" style="margin-top:16px;">
     <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
   </div>
@@ -3054,6 +3056,39 @@ function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || 
 // status of pending/approved/rejected. Original packets stay in
 // particulars.quantity_of_packets — approved top-ups add to it visually.
 function packetTopups(j)          { const arr = (j && j.particulars && j.particulars.packets_topups) || []; return Array.isArray(arr) ? arr : []; }
+// Over-issuance pending decision — set by the server when the store
+// keeper issues more sheets than the job needed. PM picks Use / Offcut
+// / Send Back from a banner on the job tile (see decideOverIssue).
+function overIssuePending(j)      { return j && j.particulars && j.particulars.over_issue_pending; }
+function hasOverIssuePending(j)   { return !!overIssuePending(j); }
+// Yellow warning banner shown on the job tile when a PM decision is
+// still owed on an over-issuance. Everyone in the app sees the banner
+// (CEO, store keeper, finance, operators, admin, PM) so it's clear a
+// decision is pending — but only admin / PM see the action buttons.
+// Everyone else sees a "waiting for PM" line. Never rendered on the
+// external client portal (leaked internal ledger detail).
+function overIssueBannerHtml(j) {
+  const p = overIssuePending(j);
+  if (!p) return '';
+  const pkts = p.total_packets;
+  const pktsStr = (typeof pkts === 'number')
+    ? (Number.isInteger(pkts) ? pkts.toString() : pkts.toFixed(2))
+    : String(pkts || '');
+  const unit = p.unit || 'packets';
+  const challan = p.challan_no ? ` · challan ${esc(p.challan_no)}` : '';
+  const canDecide = isAdmin() || isProductionManager();
+  const actions = canDecide
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'use')" title="Add these extras to the job's packet count (existing top-up system). No inventory movement — sheets were already deducted at issuance.">&#10003; Use in job</button>
+        <button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="decideOverIssue(${j.id}, 'offcut')" title="Credit the extras to the matching offcut item — the same automatic behaviour the app used to do at issuance.">&#128230; Add to Offcut</button>
+        <button class="btn btn-sm" style="background:#6b7280;border-color:#4b5563;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'return')" title="Mark the extras as sent back to the store. Store keeper handles the physical return manually.">&#8630; Send Back</button>
+      </div>`
+    : `<div style="font-size:11px;color:#78350f;font-style:italic;">Waiting for Admin / Production Manager to decide (Use in job · Add to Offcut · Send Back).</div>`;
+  return `<div class="over-issue-banner" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12px;color:#78350f;margin:6px 0;">
+    <div style="font-weight:700;margin-bottom:6px;">&#9888; Over-issued <b>${esc(pktsStr)} ${esc(unit)}</b>${challan} — pending decision:</div>
+    ${actions}
+  </div>`;
+}
 function packetTopupsPending(j)   { return packetTopups(j).filter(t => t.status === 'pending'); }
 function packetTopupsApproved(j)  { return packetTopups(j).filter(t => t.status === 'approved'); }
 function hasPendingPacketTopup(j) { return packetTopupsPending(j).length > 0; }
@@ -3925,6 +3960,7 @@ function renderJobRowCompact(j) {
           ${sidePanel}
         </div>
       </div>
+      ${overIssueBannerHtml(j)}
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
         ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
@@ -4353,6 +4389,7 @@ function renderJobCard(j, opts) {
       ? `<div class="pipeline" style="justify-content:center;">${clientPipeline}</div>`
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
+    ${clientPreview ? '' : overIssueBannerHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
@@ -16985,6 +17022,47 @@ async function approvePacketsTopup(jobId, topupId) {
   showSaving(false);
 }
 
+// PM / admin decides where over-issued sheets go. Server routes:
+//   use    → creates an approved packet top-up on the job (no inventory movement)
+//   offcut → credits the matching offcut item (what the old auto behaviour did)
+//   return → logs "sent back"; store keeper handles the physical return manually
+async function decideOverIssue(jobId, decision) {
+  if (!(isAdmin() || isProductionManager())) {
+    notify('Only admin / production manager can decide over-issued sheets.');
+    return;
+  }
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  const p = overIssuePending(j);
+  if (!p) { notify('No pending over-issue on this job.'); return; }
+  const pkts = p.total_packets;
+  const pktsStr = (typeof pkts === 'number')
+    ? (Number.isInteger(pkts) ? pkts.toString() : pkts.toFixed(2))
+    : String(pkts || '');
+  const unit = p.unit || 'packets';
+  const labels = { use: 'Use in job', offcut: 'Add to Offcut', return: 'Send Back' };
+  const messages = {
+    use: `The extra ${pktsStr} ${unit} will be added to Job E-${jobId} as an approved packet top-up. No inventory movement — the sheets were already deducted at issuance.`,
+    offcut: `The extra ${pktsStr} ${unit} will be credited to the matching offcut item (same behaviour the app used to do automatically at issuance).`,
+    return: `The extra ${pktsStr} ${unit} will be marked as sent back to the store. Store keeper handles the physical return manually.`,
+  };
+  const ok = await confirmDialog({
+    title: `${labels[decision]} · ${pktsStr} ${unit}?`,
+    message: messages[decision],
+    confirmText: labels[decision],
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/over-issue/decide`, { decision });
+    const idx = jobs.findIndex(x => x.id === jobId); if (idx >= 0) jobs[idx] = updated;
+    if (decision === 'offcut') await loadInventory();
+    render();
+    notify(`Over-issue decision recorded — ${labels[decision]}`);
+  } catch (e) { notify('Error: ' + (e.message || String(e))); }
+  showSaving(false);
+}
+
 async function rejectPacketsTopup(jobId, topupId) {
   if (!canIssueStock()) { notify('Only the store keeper can reject top-ups.'); return; }
   const j = jobs.find(x => x.id === jobId);
@@ -19270,6 +19348,20 @@ async function stationSubmit(advance, skipTo) {
     } else {
       notify(`Numbers saved${sentTxt}`);
       stationClosePad();
+      // Owner report: doing two same-day saves of 600 + 600 didn't add
+      // up in the reports. Root cause was a UX trap — after a save, the
+      // render still showed just the one pass row with the value that
+      // was just saved. Typing a new number in that row on the second
+      // save would OVERWRITE the previous entry (same slot, preserved
+      // date), so the day's total = last save only.
+      // Fix: after any save-only, bump the pass counter by 1 so the
+      // render opens a fresh empty pass row underneath the just-saved
+      // one. Bump is relative to the current in-view pass count
+      // (which already reflects the operator's own visible passes at
+      // coatings), NOT to the total entries[] length — using total
+      // would flood an Emboss operator's view with empty rows once
+      // hidden UV entries piled up.
+      stationPassCount = stationPassCount + 1;
       // Only refetch notes if the operator actually sent something — Save
       // without a note doesn't change the inbound list, so we save a round-
       // trip and re-render straight from local state.
@@ -19567,11 +19659,157 @@ async function loadClientJobs(showToast) {
 function renderClientJobs() {
   const rows = filterClientJobs(clientJobs, clientPortalFilter);
   const emptyForFilter = clientPortalFilter && clientJobs.length > 0;
+  renderClientSummary(rows, 'client-portal-summary');
   renderClientJobCardsInto('client-portal-list', rows, {
     emptyTitle: emptyForFilter ? 'No jobs match your search.' : 'No jobs are visible to your account yet.',
     emptyHint:  emptyForFilter ? 'Try a different word from the job name, PO No., Batch No., or paper type.' : 'When Supreme Art shares a job with your company, it will appear here.',
   });
 }
+// Two-table summary shown above the tiles in BOTH the client portal
+// (real client login) and the admin Client View preview. Job-by-job
+// numbers on top, shipment log below — same "reports"-style tabular
+// shape the owner asked for, scoped to the signed-in client's own
+// jobs. Uses the shared .report-scroll-wrap so column headers stick
+// and the horizontal scrollbar sits at a fixed spot on wide tables.
+function renderClientSummary(rows, containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!Array.isArray(rows) || rows.length === 0) { el.innerHTML = ''; return; }
+  const fmtN = n => (n || n === 0) ? Number(n).toLocaleString() : '';
+  const stageOf = j => {
+    if (isDone(j)) return 'Delivered';
+    if (isBlocked(j)) return 'Blocked';
+    if (isNewJob(j)) return 'New Job';
+    if (isCtpQueue(j)) return 'CTP';
+    if (j.issuance_status === 'pending') return 'Pending Stock';
+    return STAGES[j.stage_index || 0] || '—';
+  };
+  // Per-job summary rows. Ready = readyCartonsTotal (falls back to
+  // pasted for partial-ready jobs — same helper the tiles use).
+  const totals = { poQty: 0, ready: 0, shipped: 0, balance: 0 };
+  const jobRows = rows.map(j => {
+    const poQty  = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    let   ready  = readyCartonsTotal(j) || 0;
+    if (!ready && isPartialReady(j)) ready = pastedCartonsTotal(j) || 0;
+    const shipped = totalDeliveredCartons(j) || 0;
+    const bookedCartons = parseFloat(String(j.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    const balance = bookedCartons ? Math.max(0, bookedCartons - shipped) : Math.max(0, ready - shipped);
+    totals.poQty   += poQty;
+    totals.ready   += ready;
+    totals.shipped += shipped;
+    totals.balance += balance;
+    const deadCell = j.deadline
+      ? `<span style="color:#dc2626;">${esc(fmtDMY(j.deadline))}</span>`
+      : '<span style="color:var(--text3);">—</span>';
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:6px 8px;font-weight:600;">E-${j.id}</td>
+      <td style="padding:6px 8px;">${esc(j.name || '')}</td>
+      <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
+      <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
+      <td style="padding:6px 8px;">${esc(j.bno || '')}</td>
+      <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
+      <td style="padding:6px 8px;text-align:right;font-weight:600;color:#166534;">${fmtN(ready)}</td>
+      <td style="padding:6px 8px;text-align:right;">${fmtN(shipped)}</td>
+      <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtN(balance)}</td>
+      <td style="padding:6px 8px;white-space:nowrap;">${j.dateissued ? esc(fmtDMY(j.dateissued)) : ''}</td>
+      <td style="padding:6px 8px;white-space:nowrap;">${deadCell}</td>
+      <td style="padding:6px 8px;">${esc(stageOf(j))}</td>
+    </tr>`;
+  }).join('');
+  const th = 'style="text-align:left;padding:8px 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const jobsTable = `
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:max-content;">
+      <thead>
+        <tr style="background:var(--bg2);">
+          <th ${th}>Job ID</th>
+          <th ${th}>Product</th>
+          <th ${th}>Code</th>
+          <th ${th}>PO No.</th>
+          <th ${th}>Batch No.</th>
+          <th ${thR}>PO Qty</th>
+          <th ${thR}>Ready</th>
+          <th ${thR}>Shipped</th>
+          <th ${thR}>Balance</th>
+          <th ${th}>Job Date</th>
+          <th ${th}>Deadline</th>
+          <th ${th}>Status</th>
+        </tr>
+      </thead>
+      <tbody>${jobRows}</tbody>
+      <tfoot>
+        <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+          <td style="padding:8px;">${rows.length} job${rows.length===1?'':'s'}</td>
+          <td colspan="4" style="padding:8px;text-align:right;color:var(--text2);">Totals</td>
+          <td style="padding:8px;text-align:right;">${fmtN(totals.poQty)}</td>
+          <td style="padding:8px;text-align:right;color:#166534;">${fmtN(totals.ready)}</td>
+          <td style="padding:8px;text-align:right;">${fmtN(totals.shipped)}</td>
+          <td style="padding:8px;text-align:right;">${fmtN(totals.balance)}</td>
+          <td colspan="3"></td>
+        </tr>
+      </tfoot>
+    </table>`;
+  // Flatten every job's deliveries[] into a single log, newest first.
+  // Notes field holds the challan number in this app.
+  const ships = [];
+  for (const j of rows) {
+    const arr = Array.isArray(j.deliveries) ? j.deliveries : [];
+    for (const d of arr) {
+      if (!d) continue;
+      ships.push({ ...d, job: j });
+    }
+  }
+  ships.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  let shipsTable = '';
+  if (ships.length) {
+    const shipTotals = ships.reduce((s, d) => s + (parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, '')) || 0), 0);
+    const shipRows = ships.map(d => `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:6px 8px;white-space:nowrap;">${d.date ? esc(fmtDMY(d.date)) : ''}</td>
+      <td style="padding:6px 8px;font-weight:600;">E-${d.job.id}</td>
+      <td style="padding:6px 8px;">${esc(d.job.name || '')}</td>
+      <td style="padding:6px 8px;">${esc(d.po_no || '')}</td>
+      <td style="padding:6px 8px;">${esc(d.batch_no || '')}</td>
+      <td style="padding:6px 8px;">${esc(d.notes || '')}</td>
+      <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtN(parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, '')) || 0)}</td>
+    </tr>`).join('');
+    shipsTable = `
+      <div style="margin-top:14px;">
+        <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:6px;">Shipments · ${ships.length} record${ships.length===1?'':'s'}</div>
+        <div class="report-scroll-wrap" style="max-height:calc(100vh - 460px);min-height:180px;">
+          <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:max-content;">
+            <thead>
+              <tr style="background:var(--bg2);">
+                <th ${th}>Date</th>
+                <th ${th}>Job ID</th>
+                <th ${th}>Product</th>
+                <th ${th}>PO No.</th>
+                <th ${th}>Batch No.</th>
+                <th ${th}>Challan No.</th>
+                <th ${thR}>Cartons</th>
+              </tr>
+            </thead>
+            <tbody>${shipRows}</tbody>
+            <tfoot>
+              <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+                <td colspan="6" style="padding:8px;text-align:right;color:var(--text2);">Total cartons shipped</td>
+                <td style="padding:8px;text-align:right;">${fmtN(shipTotals)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>`;
+  }
+  el.innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px 16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:700;color:var(--text);">&#128203; Summary</div>
+        <div style="font-size:11px;color:var(--text2);">${rows.length} job${rows.length===1?'':'s'} · ${ships.length} shipment${ships.length===1?'':'s'}</div>
+      </div>
+      <div class="report-scroll-wrap" style="max-height:calc(100vh - 520px);min-height:180px;">${jobsTable}</div>
+      ${shipsTable}
+    </div>`;
+}
+
 // Shared renderer for BOTH the real client portal and the admin Client
 // View tab. Reuses renderJobCard so the tile look, machine SVG, ribbon
 // dots, and hover animations are identical to the Jobs Track view.
@@ -19621,6 +19859,7 @@ function renderClientViewList() {
   const company = clientViewCompany;
   const rows = filterClientJobs(clientViewJobs, clientViewFilter);
   const emptyForFilter = clientViewFilter && clientViewJobs.length > 0;
+  renderClientSummary(rows, 'client-view-summary');
   renderClientJobCardsInto('client-view-list', rows, {
     emptyTitle: emptyForFilter
       ? 'No jobs match your search.'

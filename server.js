@@ -1790,8 +1790,14 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
 
     for (const job of jobs) {
       const done = Array.isArray(job.coatings_done) ? job.coatings_done : [];
-      if (!done.length) continue;
       const part = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      // Owner report: coatings that were saved-but-not-forwarded didn't
+      // appear in the Daily Production Report. Root cause was a
+      // "if (!done.length) continue;" early-skip here that dropped the
+      // job before its coating_sheets_qty.entries[] were credited. The
+      // legacy branch below (line "if (!qtyEntries && !wasteEntries &&
+      // sheetsN <= 0) continue;") already covers the truly-empty case,
+      // so removing the early skip is safe.
       // Sum pipe-separated values like "500 | 500" → 1000. coating_sheets_qty
       // and uv_waste_sheets both use this format because station submissions
       // append pass-by-pass.
@@ -3310,23 +3316,33 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
           challanNo,
         });
       }
-      // Over-issuance offcut: whole extra packets returned to a
-      // same-size offcut bucket (paper_type + size + gsm + brand match,
-      // is_offcut=true). Separate from the cut-size offcut above so
-      // both can coexist on a job that has BOTH a cut AND an over-issue.
-      if (overThis > 0) {
-        const overOffcutItem = await findOrCreateOffcutItem(sql, it, it.size || '');
-        await applyInventoryChange(sql, {
-          itemId: overOffcutItem.id,
-          change: +overThis,
-          reason: 'job-offcut',
-          jobId: job.id,
-          notes: `Job E-${job.id}: ${fmtPack(overPacks)} ${unit} over-issued from ${it.brand || 'no brand'} added to offcut stock`,
-          user: req.user,
-          challanNo,
+      // Over-issuance handling — the auto-offcut credit that used to run
+      // here has moved to POST /api/jobs/:id/over-issue/decide. Instead
+      // we stash a per-split record and the PM chooses on the job tile:
+      //   • Use     → creates an approved packet top-up on the job
+      //                (no offcut credit)
+      //   • Offcut  → creates the offcut inventory credit that used to
+      //                run automatically
+      //   • Send Back → logs the return; store keeper does the physical
+      //                 return manually
+      // Source deduction stays unchanged (still the -s.sheets applied
+      // above), so the inventory report keeps recording the extra
+      // issuance exactly as before.
+      issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
+    }
+    // Build the pending decision record from every split that got extras.
+    const overIssueSplits = [];
+    if (overSheets > 0 && totalIssued > 0) {
+      for (let i = 0; i < splits.length; i++) {
+        if (perSplitOver[i] <= 0) continue;
+        const it = itemsById.get(splits[i].item_id);
+        overIssueSplits.push({
+          source_item_id: splits[i].item_id,
+          brand: (it && it.brand) || null,
+          sheets: perSplitOver[i],
+          packets: perSplitOver[i] / ps,
         });
       }
-      issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
     }
 
     // Update job. Partial issuance: use the existing partial marker so
@@ -3337,6 +3353,21 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const nextParticulars = { ...(job.particulars || {}) };
     if (fullyIssued) delete nextParticulars.partial_pending_sheets;
     else             nextParticulars.partial_pending_sheets = remaining;
+    // Over-issue decision pending — PM picks Use / Offcut / Send Back on
+    // the job tile. See POST /api/jobs/:id/over-issue/decide.
+    if (overIssueSplits.length > 0) {
+      nextParticulars.over_issue_pending = {
+        id: 'oi' + Date.now() + Math.floor(Math.random() * 1000),
+        total_sheets: overSheets,
+        total_packets: overSheets / ps,
+        unit,
+        ps,
+        splits: overIssueSplits,
+        challan_no: challanNo || null,
+        issued_by_email: req.user?.email || null,
+        issued_at: new Date().toISOString(),
+      };
+    }
     // Point inventory_item_id at whichever brand contributed the most —
     // downstream displays that still read from it get the dominant brand
     // rather than an arbitrary one. Any code that wants the full picture
@@ -3438,9 +3469,30 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
       });
     }
     // Clear the partial-issuance marker AND the split-issuance record so
-    // the job returns to a clean 'nothing issued' state.
+    // the job returns to a clean 'nothing issued' state. Also drop
+    // anything that was CREATED BY THIS SPECIFIC ISSUANCE:
+    //   • over_issue_pending — the store keeper's over-issue awaiting a
+    //     PM decision; that issuance is gone now, so the decision is
+    //     moot.
+    //   • over_issue_decisions — the archived PM decisions on this
+    //     issuance's over-issue.
+    //   • packet_topups where source==='over-issue-reconcile' — these
+    //     were auto-created by the PM's "Use" click on the pending
+    //     over-issue; without the underlying issuance they'd wrongly
+    //     inflate the job's packet count (owner report: "still saying
+    //     2 top up after reversal").
+    // Real manual top-ups (packet_topups without that source flag)
+    // stay intact — they were separate PM requests, not tied to this
+    // one issuance.
     const cleanParticulars = { ...(job.particulars || {}) };
     delete cleanParticulars.partial_pending_sheets;
+    delete cleanParticulars.over_issue_pending;
+    delete cleanParticulars.over_issue_decisions;
+    if (Array.isArray(cleanParticulars.packets_topups)) {
+      cleanParticulars.packets_topups = cleanParticulars.packets_topups
+        .filter(t => !t || t.source !== 'over-issue-reconcile');
+      if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
+    }
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'pending',
@@ -3580,6 +3632,108 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, 
       entityType: 'job',
       entityId: id,
       summary: `Rejected +${t.qty} extra packets request for Job E-${id}`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Over-issuance decision ───────────────────────────────────────
+// When the store keeper issues more sheets than the job needs, the
+// extras used to auto-credit an offcut item. Now the job flags an
+// over_issue_pending record and the PM (admin / production manager)
+// picks what happens to those extras on the job tile:
+//   • use     → creates an approved packet top-up on the job so the
+//                job's packet count effectively grows by that amount.
+//                No inventory movement (sheets were already deducted
+//                at issue-stock time).
+//   • offcut  → runs the offcut credit that used to happen automatically
+//                (per-split findOrCreateOffcutItem + applyInventoryChange).
+//   • return  → logs the decision only. Store keeper does the physical
+//                return through the normal manual inventory tools.
+// The source item's original deduction stays untouched, so the inventory
+// report keeps recording the extra issuance exactly as it did before.
+app.post('/api/jobs/:id/over-issue/decide', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const decision = String((req.body && req.body.decision) || '').trim();
+    if (!['use', 'offcut', 'return'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be use, offcut, or return' });
+    }
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const p = { ...(job.particulars || {}) };
+    const pending = p.over_issue_pending;
+    if (!pending || !Array.isArray(pending.splits)) {
+      return res.status(400).json({ error: 'No pending over-issue decision on this job' });
+    }
+    const unit = pending.unit || 'packets';
+    const totalPackets = Number(pending.total_packets) || 0;
+    let summary = '';
+    if (decision === 'use') {
+      const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
+      topups.push({
+        id: 't' + Date.now() + Math.floor(Math.random() * 1000),
+        qty: totalPackets,
+        status: 'approved',
+        source: 'over-issue-reconcile',
+        requested_at: pending.issued_at || new Date().toISOString(),
+        requested_by_email: pending.issued_by_email || null,
+        approved_at: new Date().toISOString(),
+        approved_by_id: req.user?.id || null,
+        approved_by_email: req.user?.email || null,
+        note: 'Auto-created from PM \"Use\" decision on over-issuance (sheets already deducted at issuance).',
+      });
+      p.packets_topups = topups;
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} added to job as approved packet top-up (PM: Use)`;
+    } else if (decision === 'offcut') {
+      for (const s of pending.splits) {
+        if (!s || !s.source_item_id || !(s.sheets > 0)) continue;
+        const invRows = await sql`SELECT * FROM inventory_items WHERE id=${s.source_item_id}`;
+        if (!invRows.length) continue;
+        const it = invRows[0];
+        const offcutItem = await findOrCreateOffcutItem(sql, it, it.size || '');
+        await applyInventoryChange(sql, {
+          itemId: offcutItem.id,
+          change: +s.sheets,
+          reason: 'job-offcut',
+          jobId: id,
+          notes: `Job E-${id}: ${s.packets} ${unit} over-issued from ${it.brand || 'no brand'} added to offcut stock (PM: Add to Offcut)`,
+          user: req.user,
+          challanNo: pending.challan_no || null,
+        });
+      }
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} credited to offcut (PM: Add to Offcut)`;
+    } else {
+      // return — no inventory transaction; ledger note comes from the
+      // audit log line below.
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} marked as returned to store — store keeper handles the physical return (PM: Send Back)`;
+    }
+    // Archive the decision on the job so the history is inspectable.
+    const decisions = Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions.slice() : [];
+    decisions.push({
+      id: pending.id,
+      decision,
+      total_sheets: pending.total_sheets,
+      total_packets: pending.total_packets,
+      unit: pending.unit,
+      challan_no: pending.challan_no || null,
+      issued_by_email: pending.issued_by_email || null,
+      issued_at: pending.issued_at,
+      decided_at: new Date().toISOString(),
+      decided_by_id: req.user?.id || null,
+      decided_by_email: req.user?.email || null,
+    });
+    p.over_issue_decisions = decisions;
+    delete p.over_issue_pending;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'job.over_issue.decide',
+      entityType: 'job',
+      entityId: id,
+      summary,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -4072,25 +4226,77 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
     }
 
     const removedSummary = [];
+    const goneEntries = []; // { key, entry } — for coatings_done cleanup below
     for (const key of keys) {
       const p = particulars[key];
       if (!p || !Array.isArray(p.entries) || idx >= p.entries.length) continue;
       const next = [...p.entries];
       const gone = next.splice(idx, 1)[0] || {};
-      const opsList = [...new Set(
-        next.map(e => String((e && e.operator) || '').trim()).filter(Boolean)
-      )];
-      const machinesList = [...new Set(
-        next.map(e => String((e && e.machine) || '').trim()).filter(Boolean)
-      )];
-      particulars[key] = {
-        ...p,
-        entries: next,
-        quantity: next.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | '),
-        name: machinesList.join(' | ') || p.name || '',
-        signature: opsList.join(' | '),
-      };
+      goneEntries.push({ key, entry: gone });
+      if (!next.length) {
+        // Fully empty entries[] → drop the whole particulars sub-object
+        // instead of leaving stub .quantity/.name/.signature/.details
+        // rows behind. Owner report: deleting an entry left the
+        // machine name, operator, and date visible until a new entry
+        // was recorded, and the row kept showing in Daily Production /
+        // Production reports too. A clean delete removes the key so
+        // report aggregators (which read from particulars) see nothing
+        // to credit.
+        delete particulars[key];
+      } else {
+        const opsList = [...new Set(
+          next.map(e => String((e && e.operator) || '').trim()).filter(Boolean)
+        )];
+        const machinesList = [...new Set(
+          next.map(e => String((e && e.machine) || '').trim()).filter(Boolean)
+        )];
+        particulars[key] = {
+          ...p,
+          entries: next,
+          quantity: next.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | '),
+          // Rebuild name from remaining entries only — never fall back
+          // to the stale p.name that carried the deleted machine.
+          name: machinesList.join(' | '),
+          signature: opsList.join(' | '),
+          // Recompute details from the earliest remaining entry's date
+          // so the row's timestamp column reflects what's actually there.
+          details: next.reduce((acc, e) => {
+            if (e && e.date && (!acc || String(e.date) < String(acc))) return String(e.date);
+            return acc;
+          }, ''),
+        };
+      }
       if (gone.qty) removedSummary.push(`${key}=${gone.qty}${gone.date ? '@' + gone.date : ''}`);
+    }
+    // If we just deleted coating-related entries, prune matching
+    // coatings_done badges. A badge is redundant once no more entries
+    // for that machine exist across any coating field for the same day,
+    // otherwise the finish name keeps showing on the tile + Daily
+    // Production Report ("Coatings did not get deleted totally").
+    const COATING_KEYS = new Set(['coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets']);
+    const coatingDeletes = goneEntries.filter(g => COATING_KEYS.has(g.key));
+    if (coatingDeletes.length && Array.isArray(particulars.coatings_done) && particulars.coatings_done.length) {
+      const stillHasEntry = (machine, date) => {
+        for (const ckey of COATING_KEYS) {
+          const cp = particulars[ckey];
+          const ents = cp && Array.isArray(cp.entries) ? cp.entries : [];
+          if (ents.some(e => e && e.machine === machine && (!date || e.date === date))) return true;
+        }
+        return false;
+      };
+      const doneNext = particulars.coatings_done.filter(d => {
+        if (!d) return false;
+        // Drop badge only if a delete targeted this badge's machine AND
+        // no remaining entry exists for that machine on the same day.
+        const dDate = (d.done_at || '').slice(0, 10);
+        const targeted = coatingDeletes.some(g => (g.entry.machine || '') === (d.machine || ''));
+        if (!targeted) return true;
+        return stillHasEntry(d.machine || '', dDate);
+      });
+      if (doneNext.length !== particulars.coatings_done.length) {
+        if (doneNext.length) particulars.coatings_done = doneNext;
+        else delete particulars.coatings_done;
+      }
     }
     const nowLog = Array.isArray(job.log) ? [...job.log] : [];
     nowLog.push({
@@ -4715,8 +4921,19 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
       if (job && job.issuance_status === 'issued') {
+        // Same cleanup as /reverse-issuance: drop anything created by
+        // the specific issuance we're undoing so the job doesn't keep
+        // ghost effects (owner report: reversal left a "+2 top-up" chip
+        // on a job whose over-issue had been "Use"-decided).
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.over_issue_pending;
+        delete cleanParticulars.over_issue_decisions;
+        if (Array.isArray(cleanParticulars.packets_topups)) {
+          cleanParticulars.packets_topups = cleanParticulars.packets_topups
+            .filter(t => !t || t.source !== 'over-issue-reconcile');
+          if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
+        }
         await sql`
           UPDATE jobs
              SET issuance_status = 'pending',
@@ -5470,17 +5687,34 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       } else if (wf && wf.quantity != null) {
         finishWaste = String(wf.quantity).trim();
       }
-      // Multi-day support: same finish kind can be recorded more than
-      // once for a job. The Daily Production aggregator filters by done_at
-      // so each pass lands on the correct day.
-      coatings_done.push({
-        kind: finishKind,
-        operator_id: operator.id,
-        operator_name: operator.name,
-        machine: finishMachine || null,
-        waste_sheets: finishWaste || null,
-        done_at: new Date().toISOString(),
-      });
+      // Owner report: doing save+advance twice for the same finish on
+      // the same day produced "UV ×2" (or "Emboss ×2") on the Daily
+      // Production coatings report — a duplicate badge for what was
+      // really one coating run. Dedup by {kind, machine, YYYY-MM-DD}
+      // before pushing. Multi-day passes still work: a second UV run
+      // TOMORROW gets a fresh badge (different date). Waste on the
+      // existing same-day badge is updated so multi-pass totals stay
+      // accurate.
+      const todayIsoDate = new Date().toISOString().slice(0, 10);
+      const dupIdx = coatings_done.findIndex(d =>
+        d && d.kind === finishKind &&
+        (d.machine || '') === (finishMachine || '') &&
+        String(d.done_at || '').slice(0, 10) === todayIsoDate
+      );
+      if (dupIdx >= 0) {
+        // Refresh the waste total on the existing badge so multi-pass
+        // totals reported today reflect the latest saved numbers.
+        if (finishWaste) coatings_done[dupIdx] = { ...coatings_done[dupIdx], waste_sheets: finishWaste };
+      } else {
+        coatings_done.push({
+          kind: finishKind,
+          operator_id: operator.id,
+          operator_name: operator.name,
+          machine: finishMachine || null,
+          waste_sheets: finishWaste || null,
+          done_at: new Date().toISOString(),
+        });
+      }
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `${finishKind} recorded by ${operator.name}${finishMachine ? ' on ' + finishMachine : ''}${finishWaste ? ' (waste ' + finishWaste + ')' : ''}`, by, time });
     }
 
