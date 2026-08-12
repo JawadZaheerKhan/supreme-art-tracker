@@ -19354,19 +19354,14 @@ async function stationSubmit(advance, skipTo) {
       // was just saved. Typing a new number in that row on the second
       // save would OVERWRITE the previous entry (same slot, preserved
       // date), so the day's total = last save only.
-      // Fix: after any save-only, bump the pass counter so the render
-      // opens a fresh empty pass row underneath the just-saved one. A
-      // second same-day 600 lands in the new row → server appends a
-      // new entry → daily report sums both.
-      const existingCount = Math.max(1, (function() {
-        const fields = STATION_STAGE_FIELDS[stationOperator.stage_index] || [];
-        return Math.max(0, ...fields.map(f => {
-          const p = (jobs.find(x => x.id === stationJobId) || {}).particulars || {};
-          const ents = p[f.key] && Array.isArray(p[f.key].entries) ? p[f.key].entries : [];
-          return ents.length;
-        }));
-      })());
-      stationPassCount = existingCount + 1;
+      // Fix: after any save-only, bump the pass counter by 1 so the
+      // render opens a fresh empty pass row underneath the just-saved
+      // one. Bump is relative to the current in-view pass count
+      // (which already reflects the operator's own visible passes at
+      // coatings), NOT to the total entries[] length — using total
+      // would flood an Emboss operator's view with empty rows once
+      // hidden UV entries piled up.
+      stationPassCount = stationPassCount + 1;
       // Only refetch notes if the operator actually sent something — Save
       // without a note doesn't change the inbound list, so we save a round-
       // trip and re-render straight from local state.

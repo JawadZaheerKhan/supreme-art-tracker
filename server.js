@@ -5687,17 +5687,34 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       } else if (wf && wf.quantity != null) {
         finishWaste = String(wf.quantity).trim();
       }
-      // Multi-day support: same finish kind can be recorded more than
-      // once for a job. The Daily Production aggregator filters by done_at
-      // so each pass lands on the correct day.
-      coatings_done.push({
-        kind: finishKind,
-        operator_id: operator.id,
-        operator_name: operator.name,
-        machine: finishMachine || null,
-        waste_sheets: finishWaste || null,
-        done_at: new Date().toISOString(),
-      });
+      // Owner report: doing save+advance twice for the same finish on
+      // the same day produced "UV ×2" (or "Emboss ×2") on the Daily
+      // Production coatings report — a duplicate badge for what was
+      // really one coating run. Dedup by {kind, machine, YYYY-MM-DD}
+      // before pushing. Multi-day passes still work: a second UV run
+      // TOMORROW gets a fresh badge (different date). Waste on the
+      // existing same-day badge is updated so multi-pass totals stay
+      // accurate.
+      const todayIsoDate = new Date().toISOString().slice(0, 10);
+      const dupIdx = coatings_done.findIndex(d =>
+        d && d.kind === finishKind &&
+        (d.machine || '') === (finishMachine || '') &&
+        String(d.done_at || '').slice(0, 10) === todayIsoDate
+      );
+      if (dupIdx >= 0) {
+        // Refresh the waste total on the existing badge so multi-pass
+        // totals reported today reflect the latest saved numbers.
+        if (finishWaste) coatings_done[dupIdx] = { ...coatings_done[dupIdx], waste_sheets: finishWaste };
+      } else {
+        coatings_done.push({
+          kind: finishKind,
+          operator_id: operator.id,
+          operator_name: operator.name,
+          machine: finishMachine || null,
+          waste_sheets: finishWaste || null,
+          done_at: new Date().toISOString(),
+        });
+      }
       log.push({ stage: STAGES[curStage], status: stages[curStage]?.status || 'active', notes: `${finishKind} recorded by ${operator.name}${finishMachine ? ' on ' + finishMachine : ''}${finishWaste ? ' (waste ' + finishWaste + ')' : ''}`, by, time });
     }
 
