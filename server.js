@@ -5571,6 +5571,14 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     //     to work without knowing about entries[].
     const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
     const todayISO = businessDateISO();
+    // Parse "dd/mm/yyyy hh:mm" business stamp -> ISO date (yyyy-mm-dd).
+    // Used to back-fill a real date onto a legacy scalar entry so the
+    // Daily Production report can credit it. Falls back to null when the
+    // stamp is missing or malformed.
+    const detailsToISODate = (s) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(s || ''));
+      return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+    };
     for (const [key, value] of Object.entries(particularsPatch)) {
       const prev = (particulars[key] && typeof particulars[key] === 'object') ? particulars[key] : {};
       if (Array.isArray(value)) {
@@ -5583,10 +5591,15 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         // which flipped them and left "MACHINENAME | person" in the
         // Signature column forever after. Swap so the seed matches the
         // rest of the pipeline.
+        // Seed date pulled from prev.details when possible — otherwise
+        // a same-day scalar save followed by a same-day array save lost
+        // the first pass's date and the Daily Production report dropped
+        // it (was crediting only the LAST entry instead of the sum).
+        const seedDate = detailsToISODate(prev.details);
         const seed = Array.isArray(prev.entries) && prev.entries.length
           ? prev.entries
           : (prev.quantity != null && String(prev.quantity).trim() !== ''
-              ? [{ qty: String(prev.quantity).trim(), date: null,
+              ? [{ qty: String(prev.quantity).trim(), date: seedDate,
                    operator: prev.signature || null,
                    machine:  prev.name      || null }]
               : []);
@@ -5626,7 +5639,24 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
           signature: opsList.join(' | '),
         };
       } else {
-        particulars[key] = { ...prev, details: prev.details || businessStamp(), quantity: String(value ?? '').trim(), name: operator.machine || '', signature: operator.name };
+        // Scalar single-value patch. Also write a one-item entries[] with
+        // today's date so a follow-up same-day save (which the client
+        // sends as an array once stationPassCount bumps) can merge on top
+        // WITHOUT losing the date on this first pass. Without the entries
+        // stamp, the seed back-fill runs with date:null and the Daily
+        // Production report skips the entry.
+        const qty = String(value ?? '').trim();
+        const nextEntries = qty
+          ? [{ qty, date: todayISO, operator: operator.name, machine: operator.machine || null }]
+          : [];
+        particulars[key] = {
+          ...prev,
+          entries: nextEntries,
+          details: prev.details || businessStamp(),
+          quantity: qty,
+          name: operator.machine || '',
+          signature: operator.name,
+        };
       }
     }
 
