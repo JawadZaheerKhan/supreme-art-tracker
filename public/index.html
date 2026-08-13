@@ -18410,10 +18410,19 @@ function stationQueueHtml() {
     // stage) would otherwise be orphaned — no coatings machine picks it
     // up because no coating is pending. Show those to every coatings
     // operator so someone can move them onward.
+    // Same treatment when planned coatings EXIST but every one has
+    // already been recorded (info.pending empty): the job is stuck at
+    // Coatings because nobody pressed "Done — send to Die Cutting",
+    // and hiding it from every machine leaves it invisible until an
+    // admin notices. Owner report: job E-130 had UV+Emboss both
+    // recorded but was never advanced, and no operator could see it
+    // in any queue to move it on.
     queue = queue.filter(j => {
       const plannedCount = Array.isArray(j.coatings) ? j.coatings.filter(Boolean).length : 0;
       if (plannedCount === 0) return true;
-      return jobCoatingsState(j, myFinishes).pendingForMe.length > 0;
+      const info = jobCoatingsState(j, myFinishes);
+      if (info.pending.length === 0) return true;   // all recorded, needs advancing
+      return info.pendingForMe.length > 0;
     });
   }
   queue = queue.reverse();
