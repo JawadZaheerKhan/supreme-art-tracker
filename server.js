@@ -161,7 +161,28 @@ app.get('/config.js', (req, res) => {
   })};`);
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+// Static assets. Every request currently routes through this function (see
+// vercel.json), so an uncached logo.png costs an invocation AND ~109 KB of
+// origin transfer on every single page load — origin transfer is our tightest
+// Vercel limit.
+//
+//   s-maxage  -> how long Vercel's CDN may serve it without invoking us at all
+//   max-age   -> how long the browser may reuse it without asking
+//
+// The logo effectively never changes, so the CDN caches it for a year; a
+// deploy purges Vercel's cache anyway, so a replaced asset still ships
+// immediately. Browsers re-check daily as a safety valve.
+// index.html is the exception: it must NEVER be cached, because that's what
+// guarantees everyone picks up the newest deploy right away.
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
+    }
+  },
+}));
 
 function getDb() {
   const url = process.env.DATABASE_URL;
@@ -7322,6 +7343,10 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
 });
 
 app.get('*', (req, res) => {
+  // Deep links (/jobs, /station, …) fall through to here and get the app
+  // shell. Same rule as above: never cache it, or users end up running an
+  // old build against the live API.
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
