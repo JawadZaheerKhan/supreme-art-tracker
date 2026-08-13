@@ -15705,6 +15705,21 @@ function getFormData() {
 
 function collectParticulars() {
   const out = {};
+  // Prior particulars for the job currently being edited — needed so an
+  // admin Save merges (rather than overwrites) each row. Without this
+  // the station-written entries[] (per-day per-machine sheet counts +
+  // waste stamps), coatings_done round-trip fields, and every non-
+  // display sub-field got silently wiped on every job-card Save,
+  // because the row payload below only carries {details, quantity,
+  // name, signature}. That's why deleted entries appeared to "come
+  // back" and why the reports drifted after an unrelated edit.
+  const editingIdCP = (() => {
+    const el = document.getElementById('f-editing-id');
+    return el ? parseInt(el.value, 10) : null;
+  })();
+  const priorParticularsCP = editingIdCP
+    ? ((jobs.find(x => x.id === editingIdCP) || {}).particulars || {})
+    : {};
   PARTICULARS_ROWS.forEach(r => {
     if (r.type) return;
     // CTP-setup fields (artworks_matter_approval / shade_card / plates /
@@ -15712,17 +15727,34 @@ function collectParticulars() {
     // in the compact Row-7 mirror above and are collected below.
     if (CTP_PARTICULARS_KEYS.has(r.key)) return;
     const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
-    const row = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
+    const rowPatch = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
     // Ready to Delivery Qty is a joined "cartons | packets" input. Split
     // it back into the two underlying particulars keys so the value the
     // station wrote (and any admin edit) round-trips cleanly.
-    if (r.key === 'delivered_cartons_qty' && row.quantity.includes('|')) {
-      const [cartonsPart, packetsPart] = row.quantity.split('|').map(s => s.trim());
-      row.quantity = cartonsPart || '';
+    if (r.key === 'delivered_cartons_qty' && rowPatch.quantity.includes('|')) {
+      const [cartonsPart, packetsPart] = rowPatch.quantity.split('|').map(s => s.trim());
+      rowPatch.quantity = cartonsPart || '';
       const pkt = (packetsPart || '').trim();
-      if (pkt) out.ready_packets_qty = { quantity: pkt };
+      if (pkt) {
+        const priorRP = (priorParticularsCP.ready_packets_qty && typeof priorParticularsCP.ready_packets_qty === 'object')
+          ? priorParticularsCP.ready_packets_qty : {};
+        out.ready_packets_qty = { ...priorRP, quantity: pkt };
+      }
     }
-    if (row.details || row.quantity || row.name || row.signature) out[r.key] = row;
+    const priorRow = (priorParticularsCP[r.key] && typeof priorParticularsCP[r.key] === 'object')
+      ? priorParticularsCP[r.key] : {};
+    // Admin-blanked ALL 4 display cells is the explicit "delete this
+    // row" gesture — don't send the key. Server PUT then detects the
+    // key is gone from particulars vs prior, drops entries[], and
+    // purges the log+badge remnants so the row (and its report rows)
+    // clear cleanly.
+    // Any single filled cell means "keep the row" — merged with prior
+    // so entries[] and coatings_done round-trip fields survive the
+    // admin's edit.
+    const anyInput = rowPatch.details || rowPatch.quantity || rowPatch.name || rowPatch.signature;
+    if (anyInput) {
+      out[r.key] = { ...priorRow, ...rowPatch };
+    }
   });
   // Row-7 (CTP setup) — writes back onto the same particulars keys so
   // reports + the print card stay compatible with legacy data. Prior

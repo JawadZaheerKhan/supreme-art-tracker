@@ -1583,6 +1583,13 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     // (e.g. operator resubmitted printed_sheets_qty via the tablet but
     // waste was only ever typed on the card). Each field picks its own
     // path so the legacy side never gets silently dropped.
+    // sheetPassesByMc / wastePassesByMc — per-machine count of valid
+    // entries per side. Final pass count is max(sheet, waste) per
+    // machine so a paired sheets+waste save (one station save) counts
+    // as one pass, AND a waste-only save (sheets blank, waste filled)
+    // still counts. Feeds the "E-135 ×N" suffix on the Jobs column.
+    const sheetPassesByMc = new Map();
+    const wastePassesByMc = new Map();
     if (hasSheetEntries) {
       for (const e of sheetsField.entries) {
         if (!e || e.date !== date) continue;
@@ -1592,10 +1599,14 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         if (!mc && isPrinting && job.machine) mc = job.machine;   // Printing-only safety fallback
         if (!mc) continue;
         bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
+        sheetPassesByMc.set(mc, (sheetPassesByMc.get(mc) || 0) + 1);
       }
     } else if (sheetsField && sheetsField.quantity && legacyMc) {
       const sN = sumPipeInts(sheetsField.quantity);
-      if (sN) bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
+      if (sN) {
+        bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
+        sheetPassesByMc.set(legacyMc, (sheetPassesByMc.get(legacyMc) || 0) + 1);
+      }
     }
     if (hasWasteEntries) {
       for (const e of wasteField.entries) {
@@ -1606,10 +1617,22 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         if (!mc && isPrinting && job.machine) mc = job.machine;
         if (!mc) continue;
         bumpCredit(mc, 'waste', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
+        wastePassesByMc.set(mc, (wastePassesByMc.get(mc) || 0) + 1);
       }
     } else if (wasteField && wasteField.quantity && legacyMc) {
       const wN = sumPipeInts(wasteField.quantity);
-      if (wN) bumpCredit(legacyMc, 'waste', wN, legacyOp, latestMs > 0 ? latestMs : 0);
+      if (wN) {
+        bumpCredit(legacyMc, 'waste', wN, legacyOp, latestMs > 0 ? latestMs : 0);
+        wastePassesByMc.set(legacyMc, (wastePassesByMc.get(legacyMc) || 0) + 1);
+      }
+    }
+    // Merge: passes = max(sheet count, waste count). A paired save (both
+    // sides present) → max is the pair count. A waste-only save (sheets
+    // blank) → waste count wins so the pass still shows in "E-135 ×N".
+    const passesByMc = new Map();
+    for (const [mc, n] of sheetPassesByMc) passesByMc.set(mc, n);
+    for (const [mc, n] of wastePassesByMc) {
+      passesByMc.set(mc, Math.max(passesByMc.get(mc) || 0, n));
     }
 
     if (!credits.size) continue;
@@ -1627,10 +1650,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       row.sheets += c.sheets;
       row.waste  += c.waste;
       for (const op of c.operators) row.operators.add(op);
+      const passesForMc = passesByMc.get(mc) || 1;
       if (!row.jobsMap.has(job.id)) {
         row.jobsMap.set(job.id, {
           colorsRaw, platesRaw: platesForJob,
           firstMs: Number.isFinite(c.firstMs) ? c.firstMs : 0,
+          passes: passesForMc,
         });
       } else {
         // Same job credited twice on the same machine (two entries in the
@@ -1638,6 +1663,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         // orders by when the job first appeared on that machine.
         const prev = row.jobsMap.get(job.id);
         if (Number.isFinite(c.firstMs) && c.firstMs < (prev.firstMs || Infinity)) prev.firstMs = c.firstMs;
+        prev.passes = (prev.passes || 1) + passesForMc;
       }
     }
   }
@@ -1654,8 +1680,15 @@ function jobsDisplayPair(jobsMap) {
   if (!jobsMap || !jobsMap.size) return { jobs: '', jobs_count: 0 };
   const ordered = [...jobsMap.entries()]
     .sort((a, b) => (a[1].firstMs || 0) - (b[1].firstMs || 0) || a[0] - b[0]);
+  // "E-135 ×2, E-136" when a job was worked on multiple passes at this
+  // machine that day. Matches the coatings "UV ×2" style so admin can
+  // spot repeat-pass jobs across every section (owner ask). Single-pass
+  // jobs render unchanged as "E-135".
   return {
-    jobs: ordered.map(([id]) => 'E-' + id).join(', '),
+    jobs: ordered.map(([id, v]) => {
+      const n = (v && v.passes) || 1;
+      return n > 1 ? `E-${id} ×${n}` : `E-${id}`;
+    }).join(', '),
     jobs_count: ordered.length,
   };
 }
@@ -1769,7 +1802,14 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
 
-    const jobs = await sql`SELECT id, particulars, coatings_done FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
+    // log is needed so a job's per-machine firstMs comes from the
+    // earliest Coatings station-save byline on the date — makes the
+    // Jobs column read in real work order (E-140 before E-135 when
+    // E-140 was saved first) instead of the arbitrary job-id sort the
+    // ms:0 default fell back to. coatings_done was previously the only
+    // source and it only exists once a coating is COMPLETED, so
+    // pending / saved-but-not-forwarded jobs had no time signal.
+    const jobs = await sql`SELECT id, particulars, coatings_done, log FROM jobs WHERE deleted_at IS NULL AND coatings_done IS NOT NULL`;
 
     const acc = new Map();
     const ensure = (m) => {
@@ -1779,13 +1819,25 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       });
       return acc.get(m);
     };
-    // Coatings has no station "byline" the same way Printing does — done_at
-    // on each coatings_done entry is our best per-job timestamp for that
-    // machine, so use it as the sort key when we build the per-machine
-    // Jobs display string.
+    // Parse "dd/mm/yyyy hh:mm" business-local log stamp → millis. Only
+    // hour+minute precision (station saves stamp the current minute),
+    // so ties beyond that fall back to jobId order.
+    const parseLogMs = t => {
+      const m = String(t || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+      return m ? new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime() : 0;
+    };
+    // noteFirstMs — record a per-(machine, job) earliest millis so the
+    // Jobs column can render in chronological order. bumpPass adds a
+    // pass to the entry — mirrors Printing / Die / Pasting so "E-135
+    // ×N" shows when the same job was saved multiple times at that
+    // machine.
     const noteFirstMs = (row, jobId, ms) => {
-      if (!row.jobsMap.has(jobId)) row.jobsMap.set(jobId, { firstMs: ms || 0 });
+      if (!row.jobsMap.has(jobId)) row.jobsMap.set(jobId, { firstMs: ms || 0, passes: 0 });
       else if (ms && ms < (row.jobsMap.get(jobId).firstMs || Infinity)) row.jobsMap.get(jobId).firstMs = ms;
+    };
+    const bumpPass = (row, jobId, n) => {
+      const entry = row.jobsMap.get(jobId);
+      if (entry) entry.passes = (entry.passes || 0) + (n || 1);
     };
 
     for (const job of jobs) {
@@ -1822,7 +1874,27 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         ? part.coating_sheets_qty.entries : null;
       const wasteEntries = part.uv_waste_sheets && Array.isArray(part.uv_waste_sheets.entries) && part.uv_waste_sheets.entries.length
         ? part.uv_waste_sheets.entries : null;
-      const creditEntries = (entries, field) => {
+      // Log-derived earliest Coatings-byline ms per machine on this
+      // date — used as firstMs so the Jobs column renders in the order
+      // the operators actually worked, not by jobId.
+      const logArr = Array.isArray(job.log) ? job.log : [];
+      const logFirstMsByMc = new Map();
+      for (const le of logArr) {
+        if (!le || !le.by) continue;
+        if (logTimeToISODate(le.time) !== date) continue;
+        if (parseByStage(le.by) !== 'Coatings') continue;
+        const mc = parseByMachine(le.by);
+        if (!mc) continue;
+        const ms = parseLogMs(le.time);
+        if (!logFirstMsByMc.has(mc) || ms < logFirstMsByMc.get(mc)) logFirstMsByMc.set(mc, ms);
+      }
+      // Per-machine counts of valid entries per side. Final pass count
+      // per machine is max(sheet, waste): a paired sheets+waste save
+      // (one station save) counts as one pass, AND a waste-only save
+      // (sheets blank, waste filled) still counts.
+      const sheetPassesByMc = new Map();
+      const wastePassesByMc = new Map();
+      const creditEntries = (entries, field, sideCounter) => {
         for (const e of entries) {
           if (!e || e.date !== date) continue;
           const mc = String(e.machine || '').trim();
@@ -1831,13 +1903,25 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
           if (!Number.isFinite(v) || v === 0) continue;
           const row = ensure(mc);
           row[field] += v;
-          noteFirstMs(row, job.id, 0);
+          noteFirstMs(row, job.id, logFirstMsByMc.get(mc) || 0);
+          if (sideCounter) sideCounter.set(mc, (sideCounter.get(mc) || 0) + 1);
           const op = String(e.operator || '').trim();
           if (op) row.operators.add(op);
         }
       };
-      if (qtyEntries) creditEntries(qtyEntries, 'sheets');
-      if (wasteEntries) creditEntries(wasteEntries, 'waste');
+      if (qtyEntries) creditEntries(qtyEntries, 'sheets', sheetPassesByMc);
+      if (wasteEntries) creditEntries(wasteEntries, 'waste', wastePassesByMc);
+      // Merge per-side counts → passes with max, then bump the jobsMap
+      // entry once. Skips machines with 0 passes so a coatings_done
+      // badge (below) doesn't get an inflated ×N suffix.
+      const mergedMcs = new Set([...sheetPassesByMc.keys(), ...wastePassesByMc.keys()]);
+      for (const mc of mergedMcs) {
+        const n = Math.max(sheetPassesByMc.get(mc) || 0, wastePassesByMc.get(mc) || 0);
+        if (n > 0) {
+          const row = ensure(mc);
+          bumpPass(row, job.id, n);
+        }
+      }
       // Legacy jobs (no entries at all) keep the old badge-day behavior.
       if (!qtyEntries && !wasteEntries && sheetsN <= 0) continue;
       // ✓ badges still drive the finishes column, operator list, and job
@@ -3073,7 +3157,113 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     const oldSheets = jobDeductionSheets({ paperType: oldPaperType, particulars: prior[0]?.particulars });
     const newSheets = jobDeductionSheets({ paperType: newPaperType, particulars });
 
-    const result = await sql`
+    // Detect particulars keys the admin edit removed (row blanked to
+    // all-empty on the job card). Same cleanup delete-entry runs when
+    // an entry is removed: purge log entries whose (stage, machine,
+    // date) no longer has any surviving entry, and prune coatings_done
+    // badges whose machine has no remaining coating entry on the
+    // badge's day. Without this the row falls back to the last log
+    // byline ("CD_102 / mumtaz / 13/08/2026") and the badge keeps the
+    // ghost waste count in the daily-production coatings report.
+    const priorParticulars = (prior[0]?.particulars && typeof prior[0].particulars === 'object')
+      ? prior[0].particulars : {};
+    const newParticulars = (particulars && typeof particulars === 'object') ? particulars : {};
+    const STAGE_BY_KEY_PUT = {
+      printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
+      coating_sheets_qty: 'Coatings', coating_waste_sheets: 'Coatings',
+      uv_waste_sheets:    'Coatings',
+      die_cutting_sheets: 'Die Cutting', die_cutting_waste: 'Die Cutting',
+      sorted_cartons_qty: 'Sorting', sorted_cartons_waste: 'Sorting',
+      pasted_cartons_qty: 'Pasting', pasting_waste_qty: 'Pasting',
+    };
+    // (stage, machine, date) triples the admin edit fully cleared.
+    // Only trigger for keys that had entries[] previously AND are now
+    // missing (or exist with empty entries[]) — a manual quantity blank
+    // that keeps a name/signature isn't a delete request.
+    const clearedTriples = [];
+    for (const [key, stage] of Object.entries(STAGE_BY_KEY_PUT)) {
+      const priorRow = priorParticulars[key];
+      const priorEnts = priorRow && Array.isArray(priorRow.entries) ? priorRow.entries : [];
+      if (!priorEnts.length) continue;
+      const newRow = newParticulars[key];
+      const newEnts = newRow && Array.isArray(newRow.entries) ? newRow.entries : [];
+      if (newEnts.length) continue;   // still populated → nothing to clear
+      for (const e of priorEnts) {
+        if (!e) continue;
+        const mc = String(e.machine || '').trim();
+        const dt = String(e.date    || '').trim();
+        if (!mc || !dt) continue;
+        clearedTriples.push({ stage, machine: mc, date: dt });
+      }
+    }
+    // De-duplicate triples so hasAnyEntryAt and the log filter don't
+    // re-scan the same combo multiple times.
+    const seenTriple = new Set();
+    const purgeTriplesPut = clearedTriples.filter(t => {
+      const k = `${t.stage}|${t.machine}|${t.date}`;
+      if (seenTriple.has(k)) return false;
+      seenTriple.add(k);
+      return true;
+    }).filter(t => {
+      // Skip if the incoming particulars still has an entry for this
+      // (stage, machine, date) at a sibling key (e.g. sheets deleted
+      // but waste survives) — the row is still active there.
+      for (const [k, s] of Object.entries(STAGE_BY_KEY_PUT)) {
+        if (s !== t.stage) continue;
+        const row = newParticulars[k];
+        const ents = row && Array.isArray(row.entries) ? row.entries : [];
+        if (ents.some(e => e && (e.machine || '') === t.machine && e.date === t.date)) return false;
+      }
+      return true;
+    });
+    // Apply purge to log + coatings_done in-place so both go up with
+    // the UPDATE. Log column isn't otherwise touched by this handler,
+    // so we only rewrite it when there IS something to purge.
+    let cleanParticulars = newParticulars;
+    let cleanedLog = null;
+    if (purgeTriplesPut.length) {
+      const priorLog = await sql`SELECT log FROM jobs WHERE id = ${id}`;
+      const priorLogArr = (priorLog[0] && Array.isArray(priorLog[0].log)) ? priorLog[0].log : [];
+      cleanedLog = priorLogArr.filter(le => {
+        if (!le || !le.by) return true;
+        const leStage = parseByStage(le.by);
+        const leMc    = parseByMachine(le.by);
+        const leDate  = logTimeToISODate(le.time);
+        return !purgeTriplesPut.some(t =>
+          t.stage === leStage && t.machine === leMc && t.date === leDate
+        );
+      });
+      // Prune coatings_done badges whose machine has no remaining
+      // coating entry on the badge's day (only meaningful when a
+      // coatings-stage triple was cleared).
+      const COATING_KEYS_PUT = ['coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets'];
+      const stillHasCoatEntry = (machine, date) => {
+        for (const ck of COATING_KEYS_PUT) {
+          const cp = newParticulars[ck];
+          const ents = cp && Array.isArray(cp.entries) ? cp.entries : [];
+          if (ents.some(e => e && (e.machine || '') === machine && (!date || e.date === date))) return true;
+        }
+        return false;
+      };
+      const clearedCoatMachines = new Set(
+        purgeTriplesPut.filter(t => t.stage === 'Coatings').map(t => t.machine)
+      );
+      if (clearedCoatMachines.size && Array.isArray(newParticulars.coatings_done) && newParticulars.coatings_done.length) {
+        const doneNext = newParticulars.coatings_done.filter(d => {
+          if (!d) return false;
+          if (!clearedCoatMachines.has(d.machine || '')) return true;
+          return stillHasCoatEntry(d.machine || '', isoTsToDate(d.done_at));
+        });
+        if (doneNext.length !== newParticulars.coatings_done.length) {
+          cleanParticulars = { ...newParticulars };
+          if (doneNext.length) cleanParticulars.coatings_done = doneNext;
+          else delete cleanParticulars.coatings_done;
+        }
+      }
+    }
+
+    const result = cleanedLog
+      ? await sql`
       UPDATE jobs SET
         name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
         dateissued=${dateissued||null}, deadline=${deadline||null}, size=${size||null},
@@ -3081,7 +3271,22 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Normal'},
         delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
         bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
-        particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId},
+        particulars=${JSON.stringify(cleanParticulars||{})}, inventory_item_id=${newItemId},
+        cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
+        is_shade_card=${!!is_shade_card},
+        client_visible=${!!client_visible},
+        log=${JSON.stringify(cleanedLog)}
+      WHERE id=${id} RETURNING *
+    `
+      : await sql`
+      UPDATE jobs SET
+        name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
+        dateissued=${dateissued||null}, deadline=${deadline||null}, size=${size||null},
+        ups=${ups||null}, sheets=${sheets||null}, qty=${qty||null}, paper=${paper||null},
+        machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Normal'},
+        delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
+        bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
+        particulars=${JSON.stringify(cleanParticulars||{})}, inventory_item_id=${newItemId},
         cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
         is_shade_card=${!!is_shade_card},
         client_visible=${!!client_visible}
