@@ -3073,7 +3073,113 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     const oldSheets = jobDeductionSheets({ paperType: oldPaperType, particulars: prior[0]?.particulars });
     const newSheets = jobDeductionSheets({ paperType: newPaperType, particulars });
 
-    const result = await sql`
+    // Detect particulars keys the admin edit removed (row blanked to
+    // all-empty on the job card). Same cleanup delete-entry runs when
+    // an entry is removed: purge log entries whose (stage, machine,
+    // date) no longer has any surviving entry, and prune coatings_done
+    // badges whose machine has no remaining coating entry on the
+    // badge's day. Without this the row falls back to the last log
+    // byline ("CD_102 / mumtaz / 13/08/2026") and the badge keeps the
+    // ghost waste count in the daily-production coatings report.
+    const priorParticulars = (prior[0]?.particulars && typeof prior[0].particulars === 'object')
+      ? prior[0].particulars : {};
+    const newParticulars = (particulars && typeof particulars === 'object') ? particulars : {};
+    const STAGE_BY_KEY_PUT = {
+      printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
+      coating_sheets_qty: 'Coatings', coating_waste_sheets: 'Coatings',
+      uv_waste_sheets:    'Coatings',
+      die_cutting_sheets: 'Die Cutting', die_cutting_waste: 'Die Cutting',
+      sorted_cartons_qty: 'Sorting', sorted_cartons_waste: 'Sorting',
+      pasted_cartons_qty: 'Pasting', pasting_waste_qty: 'Pasting',
+    };
+    // (stage, machine, date) triples the admin edit fully cleared.
+    // Only trigger for keys that had entries[] previously AND are now
+    // missing (or exist with empty entries[]) — a manual quantity blank
+    // that keeps a name/signature isn't a delete request.
+    const clearedTriples = [];
+    for (const [key, stage] of Object.entries(STAGE_BY_KEY_PUT)) {
+      const priorRow = priorParticulars[key];
+      const priorEnts = priorRow && Array.isArray(priorRow.entries) ? priorRow.entries : [];
+      if (!priorEnts.length) continue;
+      const newRow = newParticulars[key];
+      const newEnts = newRow && Array.isArray(newRow.entries) ? newRow.entries : [];
+      if (newEnts.length) continue;   // still populated → nothing to clear
+      for (const e of priorEnts) {
+        if (!e) continue;
+        const mc = String(e.machine || '').trim();
+        const dt = String(e.date    || '').trim();
+        if (!mc || !dt) continue;
+        clearedTriples.push({ stage, machine: mc, date: dt });
+      }
+    }
+    // De-duplicate triples so hasAnyEntryAt and the log filter don't
+    // re-scan the same combo multiple times.
+    const seenTriple = new Set();
+    const purgeTriplesPut = clearedTriples.filter(t => {
+      const k = `${t.stage}|${t.machine}|${t.date}`;
+      if (seenTriple.has(k)) return false;
+      seenTriple.add(k);
+      return true;
+    }).filter(t => {
+      // Skip if the incoming particulars still has an entry for this
+      // (stage, machine, date) at a sibling key (e.g. sheets deleted
+      // but waste survives) — the row is still active there.
+      for (const [k, s] of Object.entries(STAGE_BY_KEY_PUT)) {
+        if (s !== t.stage) continue;
+        const row = newParticulars[k];
+        const ents = row && Array.isArray(row.entries) ? row.entries : [];
+        if (ents.some(e => e && (e.machine || '') === t.machine && e.date === t.date)) return false;
+      }
+      return true;
+    });
+    // Apply purge to log + coatings_done in-place so both go up with
+    // the UPDATE. Log column isn't otherwise touched by this handler,
+    // so we only rewrite it when there IS something to purge.
+    let cleanParticulars = newParticulars;
+    let cleanedLog = null;
+    if (purgeTriplesPut.length) {
+      const priorLog = await sql`SELECT log FROM jobs WHERE id = ${id}`;
+      const priorLogArr = (priorLog[0] && Array.isArray(priorLog[0].log)) ? priorLog[0].log : [];
+      cleanedLog = priorLogArr.filter(le => {
+        if (!le || !le.by) return true;
+        const leStage = parseByStage(le.by);
+        const leMc    = parseByMachine(le.by);
+        const leDate  = logTimeToISODate(le.time);
+        return !purgeTriplesPut.some(t =>
+          t.stage === leStage && t.machine === leMc && t.date === leDate
+        );
+      });
+      // Prune coatings_done badges whose machine has no remaining
+      // coating entry on the badge's day (only meaningful when a
+      // coatings-stage triple was cleared).
+      const COATING_KEYS_PUT = ['coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets'];
+      const stillHasCoatEntry = (machine, date) => {
+        for (const ck of COATING_KEYS_PUT) {
+          const cp = newParticulars[ck];
+          const ents = cp && Array.isArray(cp.entries) ? cp.entries : [];
+          if (ents.some(e => e && (e.machine || '') === machine && (!date || e.date === date))) return true;
+        }
+        return false;
+      };
+      const clearedCoatMachines = new Set(
+        purgeTriplesPut.filter(t => t.stage === 'Coatings').map(t => t.machine)
+      );
+      if (clearedCoatMachines.size && Array.isArray(newParticulars.coatings_done) && newParticulars.coatings_done.length) {
+        const doneNext = newParticulars.coatings_done.filter(d => {
+          if (!d) return false;
+          if (!clearedCoatMachines.has(d.machine || '')) return true;
+          return stillHasCoatEntry(d.machine || '', isoTsToDate(d.done_at));
+        });
+        if (doneNext.length !== newParticulars.coatings_done.length) {
+          cleanParticulars = { ...newParticulars };
+          if (doneNext.length) cleanParticulars.coatings_done = doneNext;
+          else delete cleanParticulars.coatings_done;
+        }
+      }
+    }
+
+    const result = cleanedLog
+      ? await sql`
       UPDATE jobs SET
         name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
         dateissued=${dateissued||null}, deadline=${deadline||null}, size=${size||null},
@@ -3081,7 +3187,22 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Normal'},
         delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
         bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
-        particulars=${JSON.stringify(particulars||{})}, inventory_item_id=${newItemId},
+        particulars=${JSON.stringify(cleanParticulars||{})}, inventory_item_id=${newItemId},
+        cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
+        is_shade_card=${!!is_shade_card},
+        client_visible=${!!client_visible},
+        log=${JSON.stringify(cleanedLog)}
+      WHERE id=${id} RETURNING *
+    `
+      : await sql`
+      UPDATE jobs SET
+        name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
+        dateissued=${dateissued||null}, deadline=${deadline||null}, size=${size||null},
+        ups=${ups||null}, sheets=${sheets||null}, qty=${qty||null}, paper=${paper||null},
+        machine=${machine||null}, coatings=${coatings||[]}, priority=${priority||'Normal'},
+        delqty=${delqty||null}, cartonqty=${cartonqty||null}, notes=${notes||null},
+        bno=${bno||null}, mfgdate=${mfgdate||null}, expdate=${expdate||null}, mrp=${mrp||null},
+        particulars=${JSON.stringify(cleanParticulars||{})}, inventory_item_id=${newItemId},
         cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
         is_shade_card=${!!is_shade_card},
         client_visible=${!!client_visible}

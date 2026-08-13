@@ -15743,13 +15743,16 @@ function collectParticulars() {
     }
     const priorRow = (priorParticularsCP[r.key] && typeof priorParticularsCP[r.key] === 'object')
       ? priorParticularsCP[r.key] : {};
-    // If the row has ANY prior state (entries, coatings_done, etc.) OR
-    // the admin actually typed something, keep the key alive. Merge so
-    // entries[] and every station-only sub-field survive; the admin's
-    // 4 display fields overwrite the prior display strings.
-    const hasPriorEntries = Array.isArray(priorRow.entries) && priorRow.entries.length;
+    // Admin-blanked ALL 4 display cells is the explicit "delete this
+    // row" gesture — don't send the key. Server PUT then detects the
+    // key is gone from particulars vs prior, drops entries[], and
+    // purges the log+badge remnants so the row (and its report rows)
+    // clear cleanly.
+    // Any single filled cell means "keep the row" — merged with prior
+    // so entries[] and coatings_done round-trip fields survive the
+    // admin's edit.
     const anyInput = rowPatch.details || rowPatch.quantity || rowPatch.name || rowPatch.signature;
-    if (anyInput || hasPriorEntries) {
+    if (anyInput) {
       out[r.key] = { ...priorRow, ...rowPatch };
     }
   });
