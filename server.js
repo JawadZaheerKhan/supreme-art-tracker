@@ -1583,6 +1583,13 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     // (e.g. operator resubmitted printed_sheets_qty via the tablet but
     // waste was only ever typed on the card). Each field picks its own
     // path so the legacy side never gets silently dropped.
+    // passesByMc — per-machine count of valid sheet entries for this
+    // job on this date. Feeds the "E-135 ×2" suffix on the Jobs column
+    // so an admin knows a job was worked on multiple passes at that
+    // machine (owner ask: match the coatings "UV ×N" style across
+    // Printing / Die / Pasting). Counted from sheetsField only so a
+    // sheets-and-waste pair (one station save) counts as one pass.
+    const passesByMc = new Map();
     if (hasSheetEntries) {
       for (const e of sheetsField.entries) {
         if (!e || e.date !== date) continue;
@@ -1592,10 +1599,14 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         if (!mc && isPrinting && job.machine) mc = job.machine;   // Printing-only safety fallback
         if (!mc) continue;
         bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
+        passesByMc.set(mc, (passesByMc.get(mc) || 0) + 1);
       }
     } else if (sheetsField && sheetsField.quantity && legacyMc) {
       const sN = sumPipeInts(sheetsField.quantity);
-      if (sN) bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
+      if (sN) {
+        bumpCredit(legacyMc, 'sheets', sN, legacyOp, latestMs > 0 ? latestMs : 0);
+        passesByMc.set(legacyMc, (passesByMc.get(legacyMc) || 0) + 1);
+      }
     }
     if (hasWasteEntries) {
       for (const e of wasteField.entries) {
@@ -1627,10 +1638,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       row.sheets += c.sheets;
       row.waste  += c.waste;
       for (const op of c.operators) row.operators.add(op);
+      const passesForMc = passesByMc.get(mc) || 1;
       if (!row.jobsMap.has(job.id)) {
         row.jobsMap.set(job.id, {
           colorsRaw, platesRaw: platesForJob,
           firstMs: Number.isFinite(c.firstMs) ? c.firstMs : 0,
+          passes: passesForMc,
         });
       } else {
         // Same job credited twice on the same machine (two entries in the
@@ -1638,6 +1651,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         // orders by when the job first appeared on that machine.
         const prev = row.jobsMap.get(job.id);
         if (Number.isFinite(c.firstMs) && c.firstMs < (prev.firstMs || Infinity)) prev.firstMs = c.firstMs;
+        prev.passes = (prev.passes || 1) + passesForMc;
       }
     }
   }
@@ -1654,8 +1668,15 @@ function jobsDisplayPair(jobsMap) {
   if (!jobsMap || !jobsMap.size) return { jobs: '', jobs_count: 0 };
   const ordered = [...jobsMap.entries()]
     .sort((a, b) => (a[1].firstMs || 0) - (b[1].firstMs || 0) || a[0] - b[0]);
+  // "E-135 ×2, E-136" when a job was worked on multiple passes at this
+  // machine that day. Matches the coatings "UV ×2" style so admin can
+  // spot repeat-pass jobs across every section (owner ask). Single-pass
+  // jobs render unchanged as "E-135".
   return {
-    jobs: ordered.map(([id]) => 'E-' + id).join(', '),
+    jobs: ordered.map(([id, v]) => {
+      const n = (v && v.passes) || 1;
+      return n > 1 ? `E-${id} ×${n}` : `E-${id}`;
+    }).join(', '),
     jobs_count: ordered.length,
   };
 }
@@ -1782,10 +1803,17 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     // Coatings has no station "byline" the same way Printing does — done_at
     // on each coatings_done entry is our best per-job timestamp for that
     // machine, so use it as the sort key when we build the per-machine
-    // Jobs display string.
+    // Jobs display string. bumpPasses adds a pass to the (machine, job)
+    // entry — mirrors the Printing/Die/Pasting behavior so the Jobs
+    // column shows "E-135 ×N" when the same job was saved multiple
+    // times at that machine on the same day.
     const noteFirstMs = (row, jobId, ms) => {
-      if (!row.jobsMap.has(jobId)) row.jobsMap.set(jobId, { firstMs: ms || 0 });
+      if (!row.jobsMap.has(jobId)) row.jobsMap.set(jobId, { firstMs: ms || 0, passes: 0 });
       else if (ms && ms < (row.jobsMap.get(jobId).firstMs || Infinity)) row.jobsMap.get(jobId).firstMs = ms;
+    };
+    const bumpPass = (row, jobId) => {
+      const entry = row.jobsMap.get(jobId);
+      if (entry) entry.passes = (entry.passes || 0) + 1;
     };
 
     for (const job of jobs) {
@@ -1822,7 +1850,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         ? part.coating_sheets_qty.entries : null;
       const wasteEntries = part.uv_waste_sheets && Array.isArray(part.uv_waste_sheets.entries) && part.uv_waste_sheets.entries.length
         ? part.uv_waste_sheets.entries : null;
-      const creditEntries = (entries, field) => {
+      const creditEntries = (entries, field, countPasses) => {
         for (const e of entries) {
           if (!e || e.date !== date) continue;
           const mc = String(e.machine || '').trim();
@@ -1832,12 +1860,15 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
           const row = ensure(mc);
           row[field] += v;
           noteFirstMs(row, job.id, 0);
+          // Count passes only on the sheets pass so a paired
+          // sheets+waste save doesn't double the count.
+          if (countPasses) bumpPass(row, job.id);
           const op = String(e.operator || '').trim();
           if (op) row.operators.add(op);
         }
       };
-      if (qtyEntries) creditEntries(qtyEntries, 'sheets');
-      if (wasteEntries) creditEntries(wasteEntries, 'waste');
+      if (qtyEntries) creditEntries(qtyEntries, 'sheets', true);
+      if (wasteEntries) creditEntries(wasteEntries, 'waste', false);
       // Legacy jobs (no entries at all) keep the old badge-day behavior.
       if (!qtyEntries && !wasteEntries && sheetsN <= 0) continue;
       // ✓ badges still drive the finishes column, operator list, and job
