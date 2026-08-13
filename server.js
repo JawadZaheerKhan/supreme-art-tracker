@@ -4590,19 +4590,30 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
 // DELETE a job — admin only. SOFT delete: flips deleted_at so the row stays
 // recoverable from the Trash page for 30 days. Inventory ledger entries are
 // unaffected (their FK is ON DELETE SET NULL and we don't actually delete).
+// Also stamps a marker into job.log so the History modal's Stage Log shows
+// who moved it — audit_log INSERT is best-effort (errors swallowed), but the
+// stage log lives on the row itself and can never silently disappear.
 app.delete('/api/jobs/:id', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const by  = req.user?.email || 'unknown';
+    const priorRows = await sql`SELECT log FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!priorRows.length) return res.status(404).json({ error: 'Job not found' });
+    const priorLog = Array.isArray(priorRows[0].log) ? priorRows[0].log : [];
+    const nextLog = [...priorLog, {
+      stage: 'Archive', status: 'blocked',
+      notes: 'Moved to Archive (soft delete — restorable for 30 days).',
+      by, time: businessStamp(),
+    }];
     const updated = await sql`
-      UPDATE jobs SET deleted_at = NOW(), deleted_by = ${by}
+      UPDATE jobs SET deleted_at = NOW(), deleted_by = ${by}, log = ${JSON.stringify(nextLog)}
       WHERE id = ${id} AND deleted_at IS NULL
       RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Job not found' });
-    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Archive: ${updated[0].name}` });
+    await logAudit(sql, req, { action: 'job.delete', entityType: 'job', entityId: id, summary: `Moved Job E-${id} to Archive: ${updated[0].name} — by ${by}` });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -5509,9 +5520,28 @@ app.post('/api/trash/restore', requireAdmin, async (req, res) => {
     const rowId = parseInt(id, 10);
     if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
     if (type === 'job') {
-      const updated = await sql`UPDATE jobs SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
+      const by = req.user?.email || 'unknown';
+      // Preserve deleted_by so admin can always see who moved the job to
+      // Archive last — nulling it out was wiping the only permanent
+      // record when the audit_log INSERT had silently failed on delete.
+      // Also stamp a Restored marker onto job.log so the History modal's
+      // Stage Log carries the trail even when audit_log is unavailable.
+      const priorRows = await sql`SELECT log, deleted_by FROM jobs WHERE id = ${rowId} AND deleted_at IS NOT NULL`;
+      if (!priorRows.length) return res.status(404).json({ error: 'Job not in archive' });
+      const priorLog = Array.isArray(priorRows[0].log) ? priorRows[0].log : [];
+      const priorDeletedBy = priorRows[0].deleted_by || 'unknown';
+      const nextLog = [...priorLog, {
+        stage: 'Restored', status: 'moved',
+        notes: `Restored from Archive (deleted earlier by ${priorDeletedBy}).`,
+        by, time: businessStamp(),
+      }];
+      const updated = await sql`
+        UPDATE jobs SET deleted_at = NULL, log = ${JSON.stringify(nextLog)}
+        WHERE id = ${rowId} AND deleted_at IS NOT NULL
+        RETURNING id, name
+      `;
       if (!updated.length) return res.status(404).json({ error: 'Job not in archive' });
-      await logAudit(sql, req, { action: 'job.restore', entityType: 'job', entityId: rowId, summary: `Restored Job E-${rowId}: ${updated[0].name}` });
+      await logAudit(sql, req, { action: 'job.restore', entityType: 'job', entityId: rowId, summary: `Restored Job E-${rowId}: ${updated[0].name} — by ${by} (originally deleted by ${priorDeletedBy})` });
       return res.json({ ok: true });
     }
     if (type === 'import') {
