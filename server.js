@@ -4288,7 +4288,12 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
         if (!d) return false;
         // Drop badge only if a delete targeted this badge's machine AND
         // no remaining entry exists for that machine on the same day.
-        const dDate = (d.done_at || '').slice(0, 10);
+        // done_at is a UTC ISO instant — isoTsToDate converts to the
+        // business-local date so it lines up with entries[].date (also
+        // business-local). A naive .slice(0,10) mis-computed near the
+        // PKT/UTC midnight boundary and left badges alive that should
+        // have been pruned, keeping the daily report's ghost waste.
+        const dDate = isoTsToDate(d.done_at);
         const targeted = coatingDeletes.some(g => (g.entry.machine || '') === (d.machine || ''));
         if (!targeted) return true;
         return stillHasEntry(d.machine || '', dDate);
@@ -4298,7 +4303,61 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
         else delete particulars.coatings_done;
       }
     }
-    const nowLog = Array.isArray(job.log) ? [...job.log] : [];
+    // Purge log entries that referenced deleted (stage, machine, date)
+    // combos with no surviving entries. Without this, the job card row
+    // renderer falls back to logOperatorForStage() and keeps showing the
+    // deleted machine/operator/date even after a clean delete — the
+    // report aggregator's per-entry credits are already gone, but the
+    // row display was still "die cutting 1060 / inayat / 13/08/2026".
+    const STAGE_BY_KEY = {
+      printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
+      coating_sheets_qty: 'Coatings', coating_waste_sheets: 'Coatings',
+      uv_waste_sheets:    'Coatings',
+      die_cutting_sheets: 'Die Cutting', die_cutting_waste: 'Die Cutting',
+      sorted_cartons_qty: 'Sorting', sorted_cartons_waste: 'Sorting',
+      pasted_cartons_qty: 'Pasting', pasting_waste_qty: 'Pasting',
+    };
+    // Build (stage, machine, date) -> stillHasEntry map. We only purge
+    // a log row when every particulars key at its stage has no entry
+    // for that (machine, date) — otherwise we'd erase the byline of an
+    // entry the operator still sees on the card.
+    const stageKeys = new Map(); // stage -> [keys]
+    for (const [k, s] of Object.entries(STAGE_BY_KEY)) {
+      if (!stageKeys.has(s)) stageKeys.set(s, []);
+      stageKeys.get(s).push(k);
+    }
+    const hasAnyEntryAt = (stage, machine, date) => {
+      const keys = stageKeys.get(stage) || [];
+      for (const k of keys) {
+        const p2 = particulars[k];
+        const ents = p2 && Array.isArray(p2.entries) ? p2.entries : [];
+        if (ents.some(e => e && (e.machine || '') === machine && (!date || e.date === date))) return true;
+      }
+      return false;
+    };
+    // Collect (stage, machine, date) triples the delete touched.
+    const purgeTriples = [];
+    for (const g of goneEntries) {
+      const stage = STAGE_BY_KEY[g.key];
+      if (!stage) continue;
+      const mc = String((g.entry && g.entry.machine) || '').trim();
+      const dt = String((g.entry && g.entry.date) || '').trim();
+      if (!mc || !dt) continue;
+      if (hasAnyEntryAt(stage, mc, dt)) continue;   // still has other entries
+      purgeTriples.push({ stage, machine: mc, date: dt });
+    }
+    let nowLog = Array.isArray(job.log) ? [...job.log] : [];
+    if (purgeTriples.length) {
+      nowLog = nowLog.filter(le => {
+        if (!le || !le.by) return true;
+        const leStage = parseByStage(le.by);
+        const leMc    = parseByMachine(le.by);
+        const leDate  = logTimeToISODate(le.time);
+        return !purgeTriples.some(t =>
+          t.stage === leStage && t.machine === leMc && t.date === leDate
+        );
+      });
+    }
     nowLog.push({
       stage: STAGES[job.stage_index || 0] || '?',
       status: (job.stages && job.stages[job.stage_index || 0] && job.stages[job.stage_index || 0].status) || 'active',
