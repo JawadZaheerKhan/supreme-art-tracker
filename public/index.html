@@ -19236,9 +19236,25 @@ async function stationSubmit(advance, skipTo) {
         // indexes, replace visible ones with the inputs, append any
         // brand-new passes at the end. Sending just the visible values
         // would overwrite the Emboss operator's numbers with ours.
+        // visIdxs MUST mirror the render-side entryVisible() so an admin
+        // (or PM) viewing the form — which bypasses the machine filter
+        // and shows every entry — doesn't cause the reassembly to treat
+        // those rendered other-machine values as brand-new and PUSH them
+        // (which is what doubled UV entries when Emboss then saved).
         const myMachine = (stationOperator && stationOperator.machine) || '';
+        const adminBypass = isAdmin() || isProductionManager();
+        const myRoles = new Set(rolesOfOperator(stationOperator));
+        const entryVisibleForSubmit = (e) => {
+          if (adminBypass) return true;
+          if (!e || !e.machine) return true;
+          if (e.machine === myMachine) return true;
+          const entryOp = operatorsList.find(o => o.name === e.machine);
+          if (!entryOp) return true;
+          const entryRoles = rolesOfOperator(entryOp);
+          return entryRoles.some(r => myRoles.has(r));
+        };
         const visIdxs = [];
-        ent.forEach((e, i) => { if (!e || !e.machine || e.machine === myMachine) visIdxs.push(i); });
+        ent.forEach((e, i) => { if (entryVisibleForSubmit(e)) visIdxs.push(i); });
         const full = ent.map(e => String((e && e.qty) || ''));
         values.forEach((v, k) => {
           if (k < visIdxs.length) full[visIdxs[k]] = v;
