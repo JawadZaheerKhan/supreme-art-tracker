@@ -6161,7 +6161,7 @@ function openInvRemoveStock(id, opts) {
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stockout-notes" placeholder="Optional details"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
+      <button class="btn btn-primary" id="stockout-save-btn" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
     </div>
   </div>`);
   stockOutReasonChanged(id);
@@ -6176,17 +6176,26 @@ function stockOutRecomputeWarning(itemId) {
   const banner = document.getElementById('stockout-warn-banner');
   const msgEl = document.getElementById('stockout-warn-msg');
   const tallyEl = document.getElementById('stockout-warn-tally');
+  const saveBtn = document.getElementById('stockout-save-btn');
   if (!wrap || !banner) return;
   const reasonEl = document.getElementById('stockout-reason');
   const reason = reasonEl ? reasonEl.value : '';
   const chips = document.querySelectorAll('#stockout-chips .jobchip.is-sel');
   const sheetsEl = document.getElementById('stockout-qty');
   const sheets = parseInt(sheetsEl && sheetsEl.value, 10) || 0;
-  if (reason !== 'job-card' || !chips.length || sheets <= 0) { wrap.style.display = 'none'; return; }
+  if (reason !== 'job-card' || !chips.length || sheets <= 0) {
+    wrap.style.display = 'none';
+    if (saveBtn) saveBtn.disabled = false;
+    return;
+  }
   let needSheets = 0;
   chips.forEach(c => { needSheets += parseInt(c.dataset.need, 10) || 0; });
   const diff = sheets - needSheets;
-  if (diff === 0) { wrap.style.display = 'none'; return; }
+  if (diff === 0) {
+    wrap.style.display = 'none';
+    if (saveBtn) saveBtn.disabled = false;
+    return;
+  }
   const it = inventory.find(x => x.id === itemId);
   const ps = it ? packetSize(it.paper_type) : 100;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
@@ -6194,11 +6203,16 @@ function stockOutRecomputeWarning(itemId) {
   banner.classList.toggle('bulkout-warn-banner--over',    diff > 0);
   banner.classList.toggle('bulkout-warn-banner--partial', diff < 0);
   if (diff > 0) {
-    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra will be added to offcut stock.`;
-    if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · issuing ${fmt(sheets)} ${unit}`;
+    // Over-issuance is BLOCKED now (owner rule). Save button greys
+    // out with the red banner so the store keeper can't push it
+    // through; they must reduce the number first.
+    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra issuance is not allowed. Reduce to ${fmt(needSheets)} ${unit} to save.`;
+    if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · trying to issue ${fmt(sheets)} ${unit}`;
+    if (saveBtn) saveBtn.disabled = true;
   } else {
     if (msgEl)   msgEl.textContent   = `Issued: ${fmt(sheets)} / ${fmt(needSheets)} ${unit} · ${fmt(-diff)} ${unit} still pending`;
     if (tallyEl) tallyEl.textContent = `Short by ${fmt(-diff)} ${unit}`;
+    if (saveBtn) saveBtn.disabled = false;
   }
   wrap.style.display = '';
 }
@@ -16141,12 +16155,29 @@ function paperFilter2() {
     if (!groups.has(k)) { groups.set(k, []); order.push(k); }
     groups.get(k).push(it);
   }
+  // Match set for the 2nd picker — an offcut lights up lemon-yellow
+  // only when its size matches the primary paper's size OR the cutting
+  // size AND its paper_type + gsm match the primary. Same "reusable
+  // leftover of THIS paper" signal as the primary picker.
+  const primaryId2 = parseInt((document.getElementById('f-inventory-item')||{}).value, 10);
+  const primaryItem2 = Number.isFinite(primaryId2) ? inventory.find(x => x.id === primaryId2) : null;
+  const wantedSizes2 = (() => {
+    const s = new Set();
+    if (primaryItem2 && primaryItem2.size) s.add(primaryItem2.size);
+    const cutRaw = ((document.getElementById('f-cutting-size')||{}).value || '').split('/')[0];
+    if (cutRaw && cutRaw.trim()) s.add(cutRaw.trim());
+    return s;
+  })();
   list.innerHTML = order.map(k => {
     const items = groups.get(k);
     const rep = [...items].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0))[0];
     const totalSheets = items.reduce((a, x) => a + (x.current_balance || 0), 0);
     const cls = totalSheets <= 0 ? 'combo-item out' : 'combo-item';
-    const offcutBg = rep.is_offcut ? 'background:#fef3c7;' : '';
+    const paperMatches2 = primaryItem2
+      ? ((rep.paper_type || '') === (primaryItem2.paper_type || '') && String(rep.gsm || '') === String(primaryItem2.gsm || ''))
+      : true;   // no primary yet → just size
+    const isMatchingOffcut2 = rep.is_offcut && wantedSizes2.size > 0 && wantedSizes2.has(rep.size || '') && paperMatches2;
+    const offcutBg = isMatchingOffcut2 ? 'background:#fef08a;' : '';
     const offcutTag = rep.is_offcut ? '<span style="display:inline-block;background:#78350f;color:#fff;font-size:9px;padding:1px 5px;border-radius:6px;margin-left:6px;font-weight:700;">OFFCUT</span>' : '';
     return `<div class="${cls}" style="${offcutBg}" onclick="paperSelect2(${rep.id})">
       <span>${esc(paperGroupLabel(rep))}${offcutTag}</span>
@@ -16200,6 +16231,19 @@ function paperFilter() {
     if (!groups.has(k)) { groups.set(k, []); order.push(k); }
     groups.get(k).push(it);
   }
+  // Compute which sizes count as "matching" for this picker's context —
+  // an offcut whose size matches the job's cutting size OR the primary
+  // paper's size gets a lemon-yellow highlight. Anything else stays
+  // plain so the PM can spot the reusable leftover at a glance instead
+  // of trying to eyeball every OFFCUT pill on the list.
+  const wantedSizesPrimary = (() => {
+    const s = new Set();
+    const sizeRaw = ((document.getElementById('f-size')||{}).value || '').split('/')[0];
+    if (sizeRaw && sizeRaw.trim()) s.add(sizeRaw.trim());
+    const cutRaw = ((document.getElementById('f-cutting-size')||{}).value || '').split('/')[0];
+    if (cutRaw && cutRaw.trim()) s.add(cutRaw.trim());
+    return s;
+  })();
   list.innerHTML = order.map(k => {
     const items = groups.get(k);
     // Representative: the item with the highest balance in this group.
@@ -16211,10 +16255,12 @@ function paperFilter() {
     const brandNote = items.length > 1
       ? `<span class="combo-group-tag" style="margin-left:6px;">${items.length} brands · picked by store keeper</span>`
       : '';
-    // Offcut rows get a yellow shade + OFFCUT pill so PM can spot
-    // reusable leftovers at a glance while searching for paper. Same
-    // rule as the 2nd-paper picker below.
-    const offcutBg = rep.is_offcut ? 'background:#fef3c7;' : '';
+    // Offcut rows always get the OFFCUT pill. The lemon-yellow shade
+    // only lights up when the offcut's size matches the size or cutting
+    // size in the form — non-matching offcuts stay plain so highlight
+    // means "this is a reusable leftover of the paper you're setting up".
+    const isMatchingOffcut = rep.is_offcut && wantedSizesPrimary.size > 0 && wantedSizesPrimary.has(rep.size || '');
+    const offcutBg = isMatchingOffcut ? 'background:#fef08a;' : '';
     const offcutTag = rep.is_offcut ? '<span style="display:inline-block;background:#78350f;color:#fff;font-size:9px;padding:1px 5px;border-radius:6px;margin-left:6px;font-weight:700;">OFFCUT</span>' : '';
     return `<div class="${cls}" style="${offcutBg}" onclick="paperSelect(${rep.id})">
       <span>${esc(paperGroupLabel(rep))}${offcutTag}${brandNote}</span>
@@ -17206,12 +17252,13 @@ function recomputeSplitFooter() {
   const overTotal = total > needPackets + EPS;
   const equalTotal = Math.abs(total - needPackets) < EPS;
   const underTotal = total < needPackets - EPS;
-  // Over-total is no longer a hard error — the store keeper can
-  // intentionally pull extra packets and the server routes the excess
-  // to an offcut inventory bucket. anyRowOver / anyBadInput still block
-  // Save because they're real problems (can't pull more than a brand
-  // has on hand, and typos need fixing before submit).
-  const isError = anyBadInput || anyRowOver;
+  // Over-total is now a HARD error too (owner rule: extra issuance is
+  // no longer allowed — store keeper must reduce the numbers before
+  // Save can fire). Message stays "Over by N" so the store keeper
+  // sees exactly how much to shave off. Same three conditions block
+  // Save: bad input, over-any-row (can't pull more than a brand's
+  // balance), and over-total (exceeds the job's need).
+  const isError = anyBadInput || anyRowOver || overTotal;
   footer.classList.toggle('split-footer-full',    !isError && !overTotal && equalTotal && anyPositive);
   footer.classList.toggle('split-footer-partial', !isError && !overTotal && anyPositive && underTotal);
   footer.classList.toggle('split-footer-warn',    !isError && overTotal);
@@ -17223,7 +17270,7 @@ function recomputeSplitFooter() {
     msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter a positive number in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (overTotal) {
     const overAmt = +(total - needPackets).toFixed(2);
-    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${overAmt.toLocaleString()} ${unitLabel} — extra will be added to offcut stock. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${overAmt.toLocaleString()} ${unitLabel} — extra issuance is not allowed. Reduce the numbers to match the need before saving. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (equalTotal && anyPositive) {
     msg.textContent = `Issued: ${totalStr} · full`;
   } else if (anyPositive) {

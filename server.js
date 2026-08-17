@@ -3592,7 +3592,30 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
       ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
     const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
     if (needSheets <= 0) {
-      return res.status(400).json({ error: `Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets) — no fresh stock needed. Nothing to issue.` });
+      // Full coverage but the job somehow stayed in Pending Stock (edge
+      // case where the CTP-forward path didn't flip status — e.g. a job
+      // that got auto-consumed via a follow-up edit rather than the
+      // regular process-from-ctp handler). Auto-flip to 'issued' now
+      // instead of dead-ending the store keeper on an unactionable error.
+      const bumpedStage = Math.max(job.stage_index || 0, 1);
+      const cleanP = { ...(job.particulars || {}) };
+      delete cleanP.partial_pending_sheets;
+      const flipped = await sql`
+        UPDATE jobs
+           SET issuance_status = 'issued',
+               stage_index     = ${bumpedStage},
+               issued_at       = COALESCE(issued_at, NOW()),
+               issued_by_id    = COALESCE(issued_by_id, ${req.user.id || null}),
+               particulars     = ${JSON.stringify(cleanP)}
+         WHERE id = ${id}
+         RETURNING *
+      `;
+      await logAudit(sql, req, {
+        action: 'job.issue_stock_auto',
+        entityType: 'job', entityId: id,
+        summary: `Job E-${id}: auto-issued — fully covered by ${preConsumedSheets} sheets of offcut pre-consumed on CTP forward.`,
+      });
+      return res.json(flipped[0]);
     }
     // Parse & validate splits (or synthesize the single-brand fallback).
     const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : null;
@@ -3626,6 +3649,19 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
     const ps   = packetSize(paperType);
     const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+    // Over-issuance is no longer allowed (owner rule — replaces the
+    // earlier "extras go to offcut" flow). Reject cleanly before any
+    // ledger writes so the store keeper simply reduces their split
+    // numbers and retries. The client-side popup Save is already
+    // disabled in this state, so hitting this path implies a
+    // hand-crafted POST or a stale UI.
+    if (totalIssued > needSheets) {
+      const overSheetsN = totalIssued - needSheets;
+      const overPackets = ps ? +(overSheetsN / ps).toFixed(2) : overSheetsN;
+      return res.status(400).json({
+        error: `Over by ${overPackets} ${unit} — extra issuance is not allowed. Reduce the numbers to match the job's need (${ps ? +(needSheets / ps).toFixed(2) : needSheets} ${unit}) before saving.`,
+      });
+    }
 
     // Over-issuance is intentional (store keeper wants to pull 2 packets
     // for a job that only needs 1). The excess goes back to inventory as
