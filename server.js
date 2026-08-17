@@ -3446,23 +3446,21 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
       // Empty payload → old-style full issuance from the representative.
       splits = [{ item_id: job.inventory_item_id, sheets: needSheets }];
     }
-    // Load every source item at once; validate they all match the anchor
-    // on paper_type + size + gsm. is_offcut is INTENTIONALLY not required
-    // to match — a fresh-paper job can pull from a matching offcut item
-    // first, then fresh for the remainder (owner ask: offcuts of the same
-    // dimensions should be consumed before opening a new packet).
+    // Load every source item at once; validate they're all in the same
+    // paper group (paper_type + size + gsm + is_offcut) as the anchor.
     const itemIds = [...new Set(splits.map(s => s.item_id))];
     const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
     const itemsById = new Map(itemRows.map(r => [r.id, r]));
     for (const s of splits) {
       const it = itemsById.get(s.item_id);
       if (!it) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
-      const sameSpecs =
+      const sameGroup =
         (it.paper_type || '') === (anchor.paper_type || '') &&
         (it.size || '') === (anchor.size || '') &&
-        String(it.gsm || '') === String(anchor.gsm || '');
-      if (!sameSpecs) {
-        return res.status(400).json({ error: `Split item "${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}" does not match this job's paper (needs same paper type, size and gsm).` });
+        String(it.gsm || '') === String(anchor.gsm || '') &&
+        !!it.is_offcut === !!anchor.is_offcut;
+      if (!sameGroup) {
+        return res.status(400).json({ error: `Split item "${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}" is not in this job's paper group.` });
       }
     }
     const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
@@ -3511,11 +3509,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
         user: req.user,
         challanNo,
       });
-      // Auto-offcut credit runs only when the SOURCE is fresh — cutting
-      // fresh sheets produces the offcut. If we already pulled from an
-      // offcut item (mixed-source issuance), there's nothing to cut, so
-      // no fresh offcut lands back in inventory for this split.
-      if (job.cut_size && job.offcut_size && !it.is_offcut) {
+      if (job.cut_size && job.offcut_size) {
         const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
         await applyInventoryChange(sql, {
           itemId: offcutItem.id,
