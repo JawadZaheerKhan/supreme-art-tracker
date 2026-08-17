@@ -1369,16 +1369,33 @@
   /* Toast — theme red, big enough to actually read from across the floor.
      Slides in from the bottom so the eye catches the motion. */
   .notif {
-    position: fixed; bottom: 2rem; right: 2rem;
+    /* Bottom-center toast — was corner-anchored (right: 2rem), which
+       users on wider screens said was easy to miss. Center-aligned so
+       every notify() lands where the eye already is. */
+    position: fixed; bottom: 2.5rem; left: 50%;
+    transform: translateX(-50%) translateY(12px);
     background: var(--red-text); color: #fff;
-    padding: 14px 22px; border-radius: 12px;
+    padding: 14px 26px; border-radius: 12px;
     font-size: 17px; font-weight: 700; letter-spacing: 0.01em;
     box-shadow: 0 12px 28px rgba(121, 31, 31, 0.35), 0 2px 6px rgba(0,0,0,0.15);
-    z-index: 300; opacity: 0; transform: translateY(12px);
+    z-index: 300; opacity: 0;
     transition: opacity 0.2s, transform 0.2s; pointer-events: none;
     max-width: min(520px, calc(100vw - 4rem));
+    text-align: center;
   }
-  .notif.show { opacity: 1; transform: translateY(0); }
+  .notif.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* Saving indicator — was living in the topbar next to Client View,
+     easy to miss. Now a centered overlay pill at the top of the
+     viewport so the "in-flight save" state is unmissable. */
+  #save-indicator {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    z-index: 350; pointer-events: none;
+    padding: 8px 18px !important; font-size: 15px !important; font-weight: 700 !important;
+    background: var(--red-bg) !important; color: var(--red-text) !important;
+    border: 1px solid var(--red-border) !important; border-radius: 999px !important;
+    box-shadow: 0 8px 22px rgba(121, 31, 31, 0.28), 0 2px 6px rgba(0,0,0,0.12);
+    transition: opacity 0.15s;
+  }
   #loading-screen { display:flex; position:fixed; inset:0; background:var(--bg3); z-index:999; align-items:center; justify-content:center; flex-direction:column; gap:12px; }
   @media (max-width: 600px) {
     .form-row { grid-template-columns: 1fr; }
@@ -3001,7 +3018,7 @@ function canIssueStock() { return isAdmin() || hasRole('store_manager'); }
 // PM), not by the store keeper — the offcut ledger is thinner and
 // error-prone, so pending-stock issuance for those jobs is gated
 // separately here.
-function canIssueOffcutStock() { return isAdmin() || isProductionManager(); }
+function canIssueOffcutStock() { return isAdmin() || isProductionManager() || hasRole('store_manager'); }
 // A job counts as offcut-based when its linked inventory item is an
 // offcut row. Used to swap the Issue Stock button to yellow and hide
 // it from the store keeper on the Pending Stock queue.
@@ -3410,9 +3427,10 @@ function setMode(m) {
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
-    // Offcuts are managed by the ops side (admin / production manager),
-    // not by the store keeper who handles day-to-day stock movements.
-    if (offcutBtn) offcutBtn.style.display = (canWriteInventory() && !isStoreManager()) ? '' : 'none';
+    // Offcuts are visible to everyone with inventory write — admin, PM,
+    // AND store keeper. Owner change: store keeper handles day-to-day
+    // stock and now needs the offcut side too.
+    if (offcutBtn) offcutBtn.style.display = canWriteInventory() ? '' : 'none';
     renderInventory();
     loadDailyStats();   // fetch today's activity in the background
   } else if (m === 'reports') {
@@ -5811,8 +5829,8 @@ async function saveInvAdd() {
 // gsm / brand / supplier / opening) so the offcut ledger stays uniform
 // with the rest of inventory.
 function openInvAddOffcut() {
-  if (!canWriteInventory() || isStoreManager()) {
-    notify('Only admin / production manager can add offcuts.');
+  if (!canWriteInventory()) {
+    notify('Only admin / store keeper can add offcuts.');
     return;
   }
   const defaultPaperType = PAPER_TYPES[0] || '';
