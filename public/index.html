@@ -16247,6 +16247,13 @@ function paperFilter() {
     if (sizeRaw && sizeRaw.trim()) s.add(sizeRaw.trim().toLowerCase());
     const cutRaw = ((document.getElementById('f-cutting-size')||{}).value || '').split('/')[0];
     if (cutRaw && cutRaw.trim()) s.add(cutRaw.trim().toLowerCase());
+    // Also parse the search box itself — PM often types the size they
+    // want to find (e.g. "20x30 210") before touching the Size/Cutting
+    // fields. Any NNNxNNN token in the query counts as a wanted size,
+    // so a matching offcut lights up while the PM is still searching.
+    const q = (input.value || '').toLowerCase();
+    const sizeMatches = q.match(/\d+\s*x\s*\d+/g) || [];
+    sizeMatches.forEach(m => s.add(m.replace(/\s+/g, '')));
     return s;
   })();
   list.innerHTML = order.map(k => {
@@ -17082,7 +17089,17 @@ async function issueStock(id) {
     ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
   const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
   if (needSheets <= 0) {
-    notify(`Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets pre-consumed on CTP forward). Nothing to issue.`);
+    // Fully covered by offcut but the job is still sitting at 'pending'
+    // (edge case where CTP-forward didn't flip status). Fire an empty-
+    // splits issue-stock call so the server's auto-issue branch runs —
+    // job jumps to Printing and off the store keeper's queue instead
+    // of dead-ending on an unactionable notify.
+    if (!(await confirmDialog({
+      title: 'Auto-issue this job?',
+      message: `Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets already pre-consumed on CTP forward). Nothing left to issue from fresh — click Auto-issue to move it straight to Printing.`,
+      confirmText: 'Auto-issue',
+    }))) return;
+    await sendIssueStock(id, [], null);
     return;
   }
   // Group brands with any stock available. Zero-balance brands stay in
