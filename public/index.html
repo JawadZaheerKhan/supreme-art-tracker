@@ -4226,7 +4226,23 @@ function renderJobCard(j, opts) {
   // needs while a job is in flight. Everything else (PO, Size, Sheets,
   // Coatings, cut size) lives on the printed job card and the Edit form.
   const invItemT = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const paperLabelT = j.paper || (invItemT ? invItemT.paper_type : '');
+  const primaryLabel = j.paper || (invItemT ? invItemT.paper_type : '');
+  // Secondary paper (if the PM ticked "Add 2nd paper" on the job form)
+  // shows next to the primary as "primary | secondary". Offcut side is
+  // underlined yellow so it's obvious which side auto-deducted.
+  const secRef = (j.particulars || {}).secondary_paper || null;
+  const secItemT = (secRef && secRef.inventory_item_id) ? inventory.find(i => i.id === secRef.inventory_item_id) : null;
+  const primaryIsOffcut = !!(invItemT && invItemT.is_offcut);
+  const secondaryIsOffcut = !!(secItemT && secItemT.is_offcut);
+  const offcutUnderline = 'text-decoration:underline;text-decoration-color:#f59e0b;text-decoration-thickness:2px;text-underline-offset:2px;color:#78350f;font-weight:700;';
+  const primarySpan = primaryLabel
+    ? (primaryIsOffcut ? `<span style="${offcutUnderline}">${esc(primaryLabel)}</span>` : esc(primaryLabel))
+    : '';
+  const secondaryLabel = secItemT ? paperGroupLabel(secItemT) : '';
+  const secondarySpan = secondaryLabel
+    ? (secondaryIsOffcut ? ` &#124; <span style="${offcutUnderline}">${esc(secondaryLabel)}</span>` : ` &#124; ${esc(secondaryLabel)}`)
+    : '';
+  const paperLabelT = primarySpan + secondarySpan;
   // Client-facing facts row is a curated subset — clients see only the
   // job specs that concern their order (paper spec, coatings, PO
   // details, delivered qty, deadline). Internal fields like Machine,
@@ -4261,7 +4277,7 @@ function renderJobCard(j, opts) {
         j.deadline ? `<span style="color:#dc2626;"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('')
     : [
-        paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
+        paperLabelT ? `<span><b>Paper</b> ${paperLabelT}</span>` : '',
         j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
         j.deadline ? `<span style="color:#dc2626;"><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('');
@@ -5374,7 +5390,20 @@ function renderInvPendingList() {
       ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${brandList?' · '+esc(brandList):''}`
       : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
     const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
-    const pktStr = packetsDisplay(j) || (packetsIn ? String(packetsIn) : '');
+    // Pending Stock badge shows the REDUCED need — offcut pre-consumed
+    // at CTP forward is already gone from inventory, so the store keeper
+    // only needs to physically issue the fresh remainder. Old jobs
+    // (before this feature landed) have no offcut_pre_consumed and see
+    // the full number, same as before.
+    const preConsumedPkts = (() => {
+      const rec = (j.particulars || {}).offcut_pre_consumed;
+      return rec && Number.isFinite(+rec.total_packets) ? +rec.total_packets : 0;
+    })();
+    const reducedPackets = Math.max(0, packetsIn - preConsumedPkts);
+    const pktStr = packetsDisplay(j) || (reducedPackets > 0 ? String(reducedPackets) : '');
+    const offcutNote = preConsumedPkts > 0
+      ? ` <span style="background:#fef3c7;color:#78350f;font-weight:700;font-size:11px;padding:1px 6px;border-radius:6px;margin-left:6px;">${preConsumedPkts} from offcut</span>`
+      : '';
     const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
     // Partial issuance callout. When a store keeper has manually issued
     // some but not all of the required sheets, show a badge + a "Top up"
@@ -5412,7 +5441,7 @@ function renderInvPendingList() {
           <div class="inv-sub">
             ${j.client ? esc(j.client) + ' &middot; ' : ''}
             ${paperLabel}
-            ${pktStr ? ` &middot; <span style="color:#A32D2D;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(pktStr)} ${unit} needed</span>` : ''}
+            ${pktStr ? ` &middot; <span style="color:#A32D2D;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(pktStr)} ${unit} needed</span>${offcutNote}` : ''}
             ${j.deadline ? ` &middot; <span style="color:#dc2626;font-weight:600;">Due ${esc(fmtDMY(j.deadline))}</span>` : ''}
           </div>
         </div>
@@ -14619,6 +14648,14 @@ function jobForm(j={}) {
             <div class="combo-list" id="paper-list" style="display:none;"></div>
           </div>
           <div style="font-size:11px;color:var(--text2);margin-top:2px;min-height:14px;"><span class="stock-hint" id="stock-hint"></span></div>
+          <label style="display:inline-flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;font-size:11px;color:var(--text2);"
+                 title="Split the job across a 2nd paper source — usually offcut, but any inventory item works. Offcut portion auto-deducts on CTP forward.">
+            <input type="checkbox" id="f-use-second-paper"
+                   ${((j.particulars||{}).secondary_paper && (j.particulars||{}).secondary_paper.inventory_item_id) ? 'checked' : ''}
+                   onchange="toggleSecondPaper()"
+                   style="width:13px;height:13px;margin:0;cursor:pointer;">
+            <span>+ Add 2nd paper (offcut / additional)</span>
+          </label>
         </td>
         <td colspan="1"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
@@ -14645,6 +14682,49 @@ function jobForm(j={}) {
             ? `<div style="margin-top:4px;"><span style="display:inline-block;background:#F59E0B;color:#78350F;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
         </td>
       </tr>
+      ${(() => {
+        const sec = (j.particulars||{}).secondary_paper || null;
+        const secId = sec && sec.inventory_item_id;
+        const secItem = secId ? inventory.find(i => i.id === secId) : null;
+        const secLabel = secItem ? paperGroupLabel(secItem) : '';
+        const secPackets = sec ? (sec.packets != null ? String(sec.packets) : '') : '';
+        const showRow = !!secId;
+        return `
+      <tr id="second-paper-row" style="display:${showRow ? '' : 'none'}; background:#fffbeb;">
+        <td colspan="7" style="border-top:2px dashed #fcd34d;padding-top:10px;">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#78350f;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">
+              <span style="display:inline-block;background:#78350f;color:#fff;font-size:10px;padding:2px 8px;border-radius:8px;">2ND PAPER</span>
+              <span>offcut auto-deducts on CTP forward · fresh goes to store keeper</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;margin-top:8px;flex-wrap:wrap;">
+            <div style="flex:1 1 260px;min-width:240px;">
+              <span class="jc-lbl" style="color:#78350f;">2nd Paper</span>
+              <div class="combo" id="paper-combo-2" style="position:relative;">
+                <input type="text" id="paper-search-2"
+                  placeholder="Search offcut or fresh paper…"
+                  value="${esc(secLabel)}"
+                  autocomplete="off"
+                  onfocus="paperOpen2()"
+                  oninput="paperFilter2()"
+                  onkeydown="paperKey2(event)">
+                <input type="hidden" id="f-inventory-item-2" value="${secId||''}">
+                <div class="combo-list" id="paper-list-2" style="display:none;"></div>
+              </div>
+              <div id="second-paper-warning" style="font-size:11px;color:#7f1d1d;margin-top:3px;font-weight:700;min-height:14px;"></div>
+            </div>
+            <div style="width:160px;">
+              <span class="jc-lbl" style="color:#78350f;">2nd Packets Qty</span>
+              <input type="number" id="f-packets-2" min="0" step="any"
+                     value="${esc(secPackets)}" placeholder="e.g. 5"
+                     style="width:100%;box-sizing:border-box;">
+              <div style="font-size:11px;color:#78350f;margin-top:2px;">Part of total packets, not extra</div>
+            </div>
+          </div>
+        </td>
+      </tr>`;
+      })()}
       <tr>
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
         <td colspan="2"><span class="jc-lbl">Batch No.</span><input type="text" id="f-bno" value="${v(j.bno)}" placeholder="Batch"></td>
@@ -15786,6 +15866,20 @@ function collectParticulars() {
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
+  // Secondary paper block — set only when the checkbox is on AND a
+  // valid 2nd paper is picked AND packets > 0. Otherwise we clear the
+  // key so a job that had one but the PM turned it off doesn't keep
+  // ghost state. Server autoConsumeOffcut reads this on CTP forward.
+  const useSecond = !!(document.getElementById('f-use-second-paper')||{}).checked;
+  const secondId  = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
+  const secondPkts = parseFloat((document.getElementById('f-packets-2')||{}).value);
+  if (useSecond && Number.isFinite(secondId) && Number.isFinite(secondPkts) && secondPkts > 0) {
+    out.secondary_paper = { inventory_item_id: secondId, packets: secondPkts };
+  } else {
+    // Explicit null so the merge in the row-preservation code path doesn't
+    // silently keep an old secondary. (undefined would inherit from prior.)
+    out.secondary_paper = null;
+  }
   // Special-colors block — read from the DOM editor rendered by
   // renderSpecials(). Drop entirely-empty entries so a job never carries
   // a `[{name:"", mix:[]}]` ghost. Capped at MAX_SPECIALS to defend
@@ -15818,6 +15912,16 @@ function collectParticulars() {
     // split branch above doesn't fire, so preserve the prior value here
     // instead of wiping it on save.
     if (!out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
+    // offcut_pre_consumed is written by the server on CTP forward and
+    // read on Issue Stock. NOT surfaced in this form. Preserve so an
+    // admin edit after CTP doesn't wipe the record — losing it would
+    // make the store keeper's popup show the full need instead of the
+    // reduced fresh need, and drop the offcut consumption trace.
+    if (priorP.offcut_pre_consumed) out.offcut_pre_consumed = priorP.offcut_pre_consumed;
+    // Same story for over_issue_pending / over_issue_decisions — set by
+    // the extra-issuance workflow. Not touched by the form.
+    if (priorP.over_issue_pending)   out.over_issue_pending   = priorP.over_issue_pending;
+    if (priorP.over_issue_decisions) out.over_issue_decisions = priorP.over_issue_decisions;
   }
   return out;
 }
@@ -15922,6 +16026,109 @@ function paperGroupMembers(it) {
 function paperGroupLabel(it) {
   const prefix = it.is_offcut ? 'OFFCUT · ' : '';
   return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
+}
+// 2nd-paper picker: parallel of the primary picker. Only rendered when
+// the "+ Add 2nd paper" checkbox is on. Selection is stored in the
+// hidden #f-inventory-item-2 field and read on Save into
+// particulars.secondary_paper = { inventory_item_id, packets }.
+function toggleSecondPaper() {
+  const cb = document.getElementById('f-use-second-paper');
+  const row = document.getElementById('second-paper-row');
+  if (!cb || !row) return;
+  row.style.display = cb.checked ? '' : 'none';
+  if (!cb.checked) {
+    // Clear values so a hidden row can't accidentally leak stale state on
+    // save. Warning message clears too.
+    const search = document.getElementById('paper-search-2');
+    const hidden = document.getElementById('f-inventory-item-2');
+    const packets = document.getElementById('f-packets-2');
+    const warn = document.getElementById('second-paper-warning');
+    if (search) search.value = '';
+    if (hidden) hidden.value = '';
+    if (packets) packets.value = '';
+    if (warn) warn.textContent = '';
+  } else {
+    // Refresh mismatch warning for the currently-selected 2nd paper (if
+    // any) so opening the picker on an existing job shows the warning
+    // immediately.
+    refreshSecondPaperWarning();
+  }
+}
+function refreshSecondPaperWarning() {
+  const warn = document.getElementById('second-paper-warning');
+  if (!warn) return;
+  warn.textContent = '';
+  const primaryId = parseInt((document.getElementById('f-inventory-item')||{}).value, 10);
+  const secondaryId = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
+  if (!Number.isFinite(primaryId) || !Number.isFinite(secondaryId)) return;
+  if (primaryId === secondaryId) {
+    warn.innerHTML = '&#9888; 2nd paper is the SAME item as the primary — pick a different one.';
+    return;
+  }
+  const p = inventory.find(x => x.id === primaryId);
+  const s = inventory.find(x => x.id === secondaryId);
+  if (!p || !s) return;
+  const specsMatch =
+    (p.paper_type || '') === (s.paper_type || '') &&
+    (p.size || '') === (s.size || '') &&
+    String(p.gsm || '') === String(s.gsm || '');
+  if (!specsMatch) {
+    warn.innerHTML = `&#9888; 2ND PAPER SPECS DO NOT MATCH — primary is ${esc(p.paper_type)} ${esc(p.size||'')} ${p.gsm ? esc(p.gsm)+'gsm' : ''}, 2nd is ${esc(s.paper_type)} ${esc(s.size||'')} ${s.gsm ? esc(s.gsm)+'gsm' : ''}. This should match paper type + size + gsm.`;
+  }
+}
+function paperOpen2() {
+  const list = document.getElementById('paper-list-2');
+  if (!list) return;
+  list.style.display = 'block';
+  paperFilter2();
+}
+function paperClose2() {
+  const list = document.getElementById('paper-list-2');
+  if (list) list.style.display = 'none';
+}
+function paperFilter2() {
+  const input = document.getElementById('paper-search-2');
+  const list  = document.getElementById('paper-list-2');
+  if (!input || !list) return;
+  const q = (input.value || '').toLowerCase().trim();
+  const filtered = inventory.filter(it => {
+    if (!q) return true;
+    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
+    return hay.includes(q);
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
+    return;
+  }
+  const order  = [];
+  const groups = new Map();
+  for (const it of filtered) {
+    const k = paperGroupKey(it);
+    if (!groups.has(k)) { groups.set(k, []); order.push(k); }
+    groups.get(k).push(it);
+  }
+  list.innerHTML = order.map(k => {
+    const items = groups.get(k);
+    const rep = [...items].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0))[0];
+    const totalSheets = items.reduce((a, x) => a + (x.current_balance || 0), 0);
+    const cls = totalSheets <= 0 ? 'combo-item out' : 'combo-item';
+    const offcutTag = rep.is_offcut ? '<span style="display:inline-block;background:#78350f;color:#fff;font-size:9px;padding:1px 5px;border-radius:6px;margin-left:6px;font-weight:700;">OFFCUT</span>' : '';
+    return `<div class="${cls}" onclick="paperSelect2(${rep.id})">
+      <span>${esc(paperGroupLabel(rep))}${offcutTag}</span>
+      <span class="combo-bal">${totalSheets.toLocaleString()} sheets</span>
+    </div>`;
+  }).join('');
+}
+function paperKey2(ev) { if (ev.key === 'Escape') paperClose2(); }
+function paperSelect2(itemId) {
+  const it = inventory.find(x => x.id === itemId);
+  if (!it) return;
+  const search = document.getElementById('paper-search-2');
+  const hidden = document.getElementById('f-inventory-item-2');
+  if (search) search.value = paperGroupLabel(it);
+  if (hidden) hidden.value = String(itemId);
+  paperClose2();
+  refreshSecondPaperWarning();
 }
 function paperOpen() {
   const list = document.getElementById('paper-list');
@@ -16772,7 +16979,18 @@ async function issueStock(id) {
     notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
-  const needSheets = Math.round(packetsIn * ps);
+  const totalNeedSheets = Math.round(packetsIn * ps);
+  // Any offcut sheets already auto-consumed at CTP forward reduce the
+  // fresh need the store keeper sees here. Popup opens with the reduced
+  // number so the "Issued: X / Y" tally is the fresh portion only.
+  const preConsumed = (j.particulars || {}).offcut_pre_consumed || null;
+  const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
+    ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
+  const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
+  if (needSheets <= 0) {
+    notify(`Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets pre-consumed on CTP forward). Nothing to issue.`);
+    return;
+  }
   // Group brands with any stock available. Zero-balance brands stay in
   // the popup so the store keeper can see them (row disabled), but a
   // group where EVERY brand is out is still a hard error.
@@ -17165,6 +17383,47 @@ function buildPrintCard(j) {
   // brand pulled from the store (which may be split across brands when
   // the store keeper issued from multiple sources).
   const paperBrandCombined = String(paperType || '').trim();
+  // Secondary paper (if the PM ticked "Add 2nd paper" on the job form)
+  // shows on the print card next to the primary as "primary | secondary".
+  // Offcut side is underlined yellow so the operators know which portion
+  // was auto-consumed on CTP forward vs which came from the store.
+  const secRefPrint = p.secondary_paper || null;
+  const secItemPrint = (secRefPrint && secRefPrint.inventory_item_id)
+    ? inventory.find(i => i.id === secRefPrint.inventory_item_id) : null;
+  const primaryIsOffcutP = !!(invItem && invItem.is_offcut);
+  const secondaryIsOffcutP = !!(secItemPrint && secItemPrint.is_offcut);
+  const secondaryPaperLabel = secItemPrint ? paperGroupLabel(secItemPrint) : '';
+  const offcutStylePrint = 'text-decoration:underline;text-decoration-color:#f59e0b;text-decoration-thickness:2px;text-underline-offset:2px;';
+  const paperCellHtml = (() => {
+    const primaryHtml = primaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${v(paperBrandCombined)}</span>`
+      : v(paperBrandCombined);
+    if (!secondaryPaperLabel) return primaryHtml;
+    const secondaryHtml = secondaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${v(secondaryPaperLabel)}</span>`
+      : v(secondaryPaperLabel);
+    return `${primaryHtml} &#124; ${secondaryHtml}`;
+  })();
+  // Packets: "primary_pkts | secondary_pkts" when secondary is set. The
+  // secondary count is a slice of the total (5 offcut of a 10-packet job
+  // means "5 primary | 5 secondary", NOT "10 | 5"). Primary yellow-under
+  // when primary paper is offcut, secondary yellow-under when it is.
+  const packetsCellHtml = (() => {
+    const totalPkts = parseFloat(p.quantity_of_packets);
+    const secPkts   = secRefPrint ? (parseFloat(secRefPrint.packets) || 0) : 0;
+    const displayFallback = packetsDisplay(j) || v(p.quantity_of_packets);
+    if (!secondaryPaperLabel || !secPkts || !Number.isFinite(totalPkts) || totalPkts <= 0) {
+      return displayFallback + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+    }
+    const primaryPkts = Math.max(0, totalPkts - secPkts);
+    const primaryPart = primaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${primaryPkts}</span>`
+      : String(primaryPkts);
+    const secondaryPart = secondaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${secPkts}</span>`
+      : String(secPkts);
+    return `${primaryPart} &#124; ${secondaryPart}` + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+  })();
   const coatLabel = name => {
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
     return `<span class="pc-coat-box pc-coat-on">✓</span><span class="pc-coat-label-on">${label}</span>`;
@@ -17484,7 +17743,7 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
         <td colspan="2"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
         <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
-        <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${v(packetsDisplay(j) || p.quantity_of_packets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
+        <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${packetsCellHtml}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
@@ -17496,7 +17755,7 @@ function buildPrintCard(j) {
         <td colspan="1"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
         <td colspan="1"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
         <td colspan="2"><div class="pc-label">MRP</div><div class="pc-value">${v(j.mrp)}</div></td>
-        <td colspan="3"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${v(paperBrandCombined)}</div></td>
+        <td colspan="3"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${paperCellHtml}</div></td>
       </tr>
       ${coatingRow}
       ${ctpRow}
