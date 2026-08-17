@@ -16777,7 +16777,33 @@ async function issueStock(id) {
   // the popup so the store keeper can see them (row disabled), but a
   // group where EVERY brand is out is still a hard error.
   const members = paperGroupMembers(anchor);
-  const totalAvail = members.reduce((a, x) => a + (x.current_balance || 0), 0);
+  // Matching offcut items — same paper_type + size + gsm as the job's
+  // anchor but is_offcut = true. Only used when the anchor itself is
+  // fresh — a job whose anchor already IS an offcut doesn't need to
+  // look elsewhere for offcut. Consumed largest-balance-first up to
+  // the job's need, then the remaining need falls to fresh brands.
+  const autoOffcuts = [];
+  if (!anchor.is_offcut) {
+    const matches = inventory
+      .filter(x => x
+        && x.is_offcut
+        && (x.paper_type || '') === (anchor.paper_type || '')
+        && (x.size || '') === (anchor.size || '')
+        && String(x.gsm || '') === String(anchor.gsm || '')
+        && (x.current_balance || 0) > 0)
+      .sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
+    let remaining = needSheets;
+    for (const m of matches) {
+      if (remaining <= 0) break;
+      const take = Math.min(m.current_balance || 0, remaining);
+      if (take > 0) {
+        autoOffcuts.push({ item: m, sheets: take });
+        remaining -= take;
+      }
+    }
+  }
+  const autoOffcutTotal = autoOffcuts.reduce((a, x) => a + x.sheets, 0);
+  const totalAvail = members.reduce((a, x) => a + (x.current_balance || 0), 0) + autoOffcutTotal;
   if (totalAvail <= 0) {
     notify('Every brand in this paper group is out of stock.');
     return;
@@ -16786,7 +16812,7 @@ async function issueStock(id) {
   // the store keeper one canonical UI where they can over-issue (the
   // excess is routed to an offcut inventory bucket) or partial-issue
   // if needed. The one-row single-brand case is trivial to fill in.
-  openIssueSplitPopup(j, anchor, members, needSheets, unit);
+  openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts);
 }
 
 // Fire the /issue-stock POST with a splits payload and refresh state.
@@ -16821,7 +16847,7 @@ async function sendIssueStock(id, splits, challanNo) {
 //   * over-total   → total > need            (red banner, LOUD)
 // Save stays disabled while there's a validation problem so the store
 // keeper knows exactly what to fix.
-function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
+function openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts) {
   const paperType = anchor.paper_type || '';
   const ps = packetSize(paperType);
   const unitLabel = packetUnitLabel(paperType); // "Packets" | "Reams"
@@ -16830,17 +16856,53 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
   // "0 / N" footer tally. Round-tripped as float via parseFloat below.
   const needPacketsRaw = ps ? needSheets / ps : 0;
   const needPackets = Number.isInteger(needPacketsRaw) ? needPacketsRaw : +needPacketsRaw.toFixed(2);
+  // Auto-consumed offcut sheets (from matching offcut inventory items).
+  // Reduces the fresh need shown in the header + footer tally so the
+  // store keeper only distributes the REMAINING amount across fresh
+  // brand rows. The auto-consumed offcut rows still appear in the
+  // table (highlighted yellow, read-only) so it's clear what's being
+  // taken from where and the total in the POST still equals need.
+  const offcutSplits = Array.isArray(autoOffcuts) ? autoOffcuts : [];
+  const offcutSheets = offcutSplits.reduce((a, x) => a + (x.sheets || 0), 0);
+  const freshNeedSheets = Math.max(0, needSheets - offcutSheets);
+  const freshNeedPacketsRaw = ps ? freshNeedSheets / ps : 0;
+  const freshNeedPackets = Number.isInteger(freshNeedPacketsRaw) ? freshNeedPacketsRaw : +freshNeedPacketsRaw.toFixed(2);
   const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
   // Single-brand pre-fill: keeps the old fast-path UX. If the group has
-  // only one brand, pre-populate its Issue field with min(need, avail) so
-  // the store keeper can click Issue Stock immediately when they want
-  // the exact need — or adjust up for an intentional over-issue.
+  // only one brand, pre-populate its Issue field with min(freshNeed, avail).
+  // freshNeed (not full need) because offcut has already covered part of it.
   const singleRow = rows.length === 1 ? rows[0] : null;
   const singleBalSheets = singleRow ? (singleRow.current_balance || 0) : 0;
-  const singlePreSheets = singleRow ? Math.min(needSheets, singleBalSheets) : 0;
+  const singlePreSheets = singleRow ? Math.min(freshNeedSheets, singleBalSheets) : 0;
   const singlePrePkts = ps ? singlePreSheets / ps : 0;
   const singlePre = Number.isInteger(singlePrePkts) ? singlePrePkts : +singlePrePkts.toFixed(2);
-  const rowHtml = rows.map((it) => {
+  // Offcut rows — pre-filled + read-only. data-is-offcut="1" so the
+  // footer computation and Save both know they contribute to the total
+  // but shouldn't be validated as user input.
+  const offcutRowHtml = offcutSplits.map(o => {
+    const it = o.item;
+    const balSheets = it.current_balance || 0;
+    const balPacketsRaw = ps ? balSheets / ps : 0;
+    const balPackets = Number.isInteger(balPacketsRaw) ? balPacketsRaw : +balPacketsRaw.toFixed(2);
+    const takePacketsRaw = ps ? o.sheets / ps : 0;
+    const takePackets = Number.isInteger(takePacketsRaw) ? takePacketsRaw : +takePacketsRaw.toFixed(2);
+    const brandTxt = it.brand ? esc(it.brand) : '<span style="color:#78350f;font-style:italic;">no brand</span>';
+    return `
+      <tr class="split-row split-row-offcut" style="background:#fef3c7;">
+        <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;color:#78350f;">
+          <span style="display:inline-block;background:#78350f;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;margin-right:6px;font-weight:700;">OFFCUT</span>${brandTxt}
+        </td>
+        <td class="split-avail" style="color:#78350f;">${balPackets.toLocaleString()} <span style="color:#a16207;font-size:11px;">(${balSheets.toLocaleString()} sheets)</span></td>
+        <td>
+          <input type="number" class="split-qty" step="any" readonly
+                 data-item-id="${it.id}" data-is-offcut="1"
+                 data-avail-packets="${balPackets}" data-avail-sheets="${balSheets}"
+                 value="${takePackets}"
+                 style="background:#fef3c7;color:#78350f;font-weight:700;">
+        </td>
+      </tr>`;
+  }).join('');
+  const freshRowHtml = rows.map((it) => {
     const balSheets  = it.current_balance || 0;
     // Available packets: show the true fractional value so a partial
     // (e.g. 40 sheets on a 100-per-packet board) shows as 0.4, not 0.
@@ -16864,6 +16926,15 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
         </td>
       </tr>`;
   }).join('');
+  const offcutBannerHtml = offcutSheets > 0 ? (() => {
+    const oPkts = ps ? offcutSheets / ps : 0;
+    const oPktsFmt = Number.isInteger(oPkts) ? oPkts : +oPkts.toFixed(2);
+    return `
+      <div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:10px 12px;font-size:13px;color:#78350f;margin-bottom:12px;">
+        <b>&#9989; ${oPktsFmt.toLocaleString()} ${unitLabel.toLowerCase()}</b> auto-consumed from matching OFFCUT stock &middot;
+        store keeper only needs to issue <b>${freshNeedPackets.toLocaleString()} ${unitLabel.toLowerCase()}</b> from fresh.
+      </div>`;
+  })() : '';
   openModal(`
     <div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width: 640px;">
       <h2>Issue Stock · Job E-${j.id}</h2>
@@ -16872,12 +16943,15 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
         <span style="color:var(--text3);">(${needSheets.toLocaleString()} sheets)</span>
         &middot; ${esc(paperGroupLabel(anchor))}
       </div>
+      ${offcutBannerHtml}
       <div class="form-group" style="margin-bottom:12px;">
         <label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
         <input type="text" id="split-challan" placeholder="e.g. CH-2026-042" style="width:100%;box-sizing:border-box;">
       </div>
       <table class="split-table"
              data-need-packets="${needPackets}"
+             data-fresh-need-packets="${freshNeedPackets}"
+             data-offcut-packets="${ps ? (offcutSheets / ps) : 0}"
              data-packet-size="${ps}"
              data-unit-label="${esc(unitLabel)}">
         <thead>
@@ -16887,10 +16961,10 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
             <th style="width:140px;">Issue (${unitLabel.toLowerCase()})</th>
           </tr>
         </thead>
-        <tbody>${rowHtml}</tbody>
+        <tbody>${offcutRowHtml}${freshRowHtml}</tbody>
       </table>
       <div class="split-footer" id="split-footer">
-        <div class="split-footer-msg" id="split-footer-msg">Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</div>
+        <div class="split-footer-msg" id="split-footer-msg">Issued: 0 / ${freshNeedPackets.toLocaleString()} ${unitLabel.toLowerCase()}</div>
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="closeModal()">Cancel</button>
@@ -16910,9 +16984,18 @@ function recomputeSplitFooter() {
   // parseFloat, not parseInt — needPackets may be fractional (e.g. 2.5)
   // and parseInt would silently truncate to 2, breaking the "0.5 still
   // pending" tally and the full/partial banner colour.
-  const needPackets = parseFloat(table.dataset.needPackets) || 0;
+  // Footer tracks the FRESH side only — offcut is auto-consumed and
+  // silently included in the POST. The store keeper sees "10 / 10"
+  // against the fresh need, not "20 / 20" against the full need.
+  const freshNeedRaw = parseFloat(table.dataset.freshNeedPackets);
+  const needPackets = Number.isFinite(freshNeedRaw)
+    ? freshNeedRaw
+    : (parseFloat(table.dataset.needPackets) || 0);
   const unitLabel   = (table.dataset.unitLabel || 'Packets').toLowerCase();
-  const qtyInputs = [...table.querySelectorAll('.split-qty')];
+  // Only FRESH rows count toward the tally + Save validation. Offcut
+  // rows carry data-is-offcut="1" and are pre-filled read-only.
+  const qtyInputs = [...table.querySelectorAll('.split-qty')]
+    .filter(inp => inp.dataset.isOffcut !== '1');
   let total = 0;
   let anyPositive = false;
   let anyRowOver  = false;   // one or more rows exceeds its available cap
@@ -16974,7 +17057,11 @@ function recomputeSplitFooter() {
   } else {
     msg.textContent = `Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel}`;
   }
-  btn.disabled = isError || !anyPositive;
+  // Enable Save even with no fresh input when the offcut side already
+  // covers the whole need (freshNeed = 0) — nothing more to type; the
+  // store keeper just confirms and the offcut-only issuance goes through.
+  const freshNeedZero = needPackets <= 1e-9;
+  btn.disabled = isError || (!anyPositive && !freshNeedZero);
 }
 
 async function saveSplitIssue(jobId) {
