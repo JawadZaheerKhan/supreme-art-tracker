@@ -1369,16 +1369,33 @@
   /* Toast — theme red, big enough to actually read from across the floor.
      Slides in from the bottom so the eye catches the motion. */
   .notif {
-    position: fixed; bottom: 2rem; right: 2rem;
+    /* Bottom-center toast — was corner-anchored (right: 2rem), which
+       users on wider screens said was easy to miss. Center-aligned so
+       every notify() lands where the eye already is. */
+    position: fixed; bottom: 2.5rem; left: 50%;
+    transform: translateX(-50%) translateY(12px);
     background: var(--red-text); color: #fff;
-    padding: 14px 22px; border-radius: 12px;
+    padding: 14px 26px; border-radius: 12px;
     font-size: 17px; font-weight: 700; letter-spacing: 0.01em;
     box-shadow: 0 12px 28px rgba(121, 31, 31, 0.35), 0 2px 6px rgba(0,0,0,0.15);
-    z-index: 300; opacity: 0; transform: translateY(12px);
+    z-index: 300; opacity: 0;
     transition: opacity 0.2s, transform 0.2s; pointer-events: none;
     max-width: min(520px, calc(100vw - 4rem));
+    text-align: center;
   }
-  .notif.show { opacity: 1; transform: translateY(0); }
+  .notif.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* Saving indicator — was living in the topbar next to Client View,
+     easy to miss. Now a centered overlay pill at the top of the
+     viewport so the "in-flight save" state is unmissable. */
+  #save-indicator {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    z-index: 350; pointer-events: none;
+    padding: 8px 18px !important; font-size: 15px !important; font-weight: 700 !important;
+    background: var(--red-bg) !important; color: var(--red-text) !important;
+    border: 1px solid var(--red-border) !important; border-radius: 999px !important;
+    box-shadow: 0 8px 22px rgba(121, 31, 31, 0.28), 0 2px 6px rgba(0,0,0,0.12);
+    transition: opacity 0.15s;
+  }
   #loading-screen { display:flex; position:fixed; inset:0; background:var(--bg3); z-index:999; align-items:center; justify-content:center; flex-direction:column; gap:12px; }
   @media (max-width: 600px) {
     .form-row { grid-template-columns: 1fr; }
@@ -3001,7 +3018,7 @@ function canIssueStock() { return isAdmin() || hasRole('store_manager'); }
 // PM), not by the store keeper — the offcut ledger is thinner and
 // error-prone, so pending-stock issuance for those jobs is gated
 // separately here.
-function canIssueOffcutStock() { return isAdmin() || isProductionManager(); }
+function canIssueOffcutStock() { return isAdmin() || isProductionManager() || hasRole('store_manager'); }
 // A job counts as offcut-based when its linked inventory item is an
 // offcut row. Used to swap the Issue Stock button to yellow and hide
 // it from the store keeper on the Pending Stock queue.
@@ -3087,6 +3104,27 @@ function overIssueBannerHtml(j) {
   return `<div class="over-issue-banner" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12px;color:#78350f;margin:6px 0;">
     <div style="font-weight:700;margin-bottom:6px;">&#9888; Over-issued <b>${esc(pktsStr)} ${esc(unit)}</b>${challan} — pending decision:</div>
     ${actions}
+  </div>`;
+}
+// Yellow "low-issuance" banner shown on the job tile when the store
+// keeper issued less than the job needed (partial). Same visual style
+// as overIssueBannerHtml so the two related states — low or over —
+// share one banner language on the tile. Owner ask: make the leftover
+// count more prominent than the small "Requires More Stock" pill.
+function partialIssueBannerHtml(j) {
+  const remaining = (typeof partialPendingSheets === 'function') ? partialPendingSheets(j) : 0;
+  if (!remaining || remaining <= 0) return '';
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const ps    = invIt ? packetSize(invIt.paper_type) : 100;
+  const unit  = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
+  const pkts  = ps ? (remaining / ps) : 0;
+  const pktsStr = Number.isInteger(pkts) ? String(pkts) : (+pkts.toFixed(2)).toString();
+  // No Issue More button on the job tile — the action lives on the
+  // Pending Stock queue where the store keeper works. Owner ask: keep
+  // this banner informational only, redirecting the eye to Pending
+  // Stock instead of offering a duplicate action from Jobs.
+  return `<div class="partial-issue-banner" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12px;color:#78350f;margin:6px 0;">
+    <div style="font-weight:700;">&#9888; Low issuance &mdash; still needs <b>${pktsStr} ${unit}</b> (${remaining.toLocaleString()} sheets). Store keeper can Issue More from Pending Stock.</div>
   </div>`;
 }
 function packetTopupsPending(j)   { return packetTopups(j).filter(t => t.status === 'pending'); }
@@ -3389,9 +3427,10 @@ function setMode(m) {
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
     refreshBtn.style.display = '';
-    // Offcuts are managed by the ops side (admin / production manager),
-    // not by the store keeper who handles day-to-day stock movements.
-    if (offcutBtn) offcutBtn.style.display = (canWriteInventory() && !isStoreManager()) ? '' : 'none';
+    // Offcuts are visible to everyone with inventory write — admin, PM,
+    // AND store keeper. Owner change: store keeper handles day-to-day
+    // stock and now needs the offcut side too.
+    if (offcutBtn) offcutBtn.style.display = canWriteInventory() ? '' : 'none';
     renderInventory();
     loadDailyStats();   // fetch today's activity in the background
   } else if (m === 'reports') {
@@ -3961,6 +4000,7 @@ function renderJobRowCompact(j) {
         </div>
       </div>
       ${overIssueBannerHtml(j)}
+      ${partialIssueBannerHtml(j)}
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
         ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;">
@@ -4226,7 +4266,23 @@ function renderJobCard(j, opts) {
   // needs while a job is in flight. Everything else (PO, Size, Sheets,
   // Coatings, cut size) lives on the printed job card and the Edit form.
   const invItemT = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const paperLabelT = j.paper || (invItemT ? invItemT.paper_type : '');
+  const primaryLabel = j.paper || (invItemT ? invItemT.paper_type : '');
+  // Secondary paper (if the PM ticked "Add 2nd paper" on the job form)
+  // shows next to the primary as "primary | secondary". Offcut side is
+  // underlined yellow so it's obvious which side auto-deducted.
+  const secRef = (j.particulars || {}).secondary_paper || null;
+  const secItemT = (secRef && secRef.inventory_item_id) ? inventory.find(i => i.id === secRef.inventory_item_id) : null;
+  const primaryIsOffcut = !!(invItemT && invItemT.is_offcut);
+  const secondaryIsOffcut = !!(secItemT && secItemT.is_offcut);
+  const offcutUnderline = 'text-decoration:underline;text-decoration-color:#1d4ed8;text-decoration-thickness:2px;text-underline-offset:2px;color:#1e3a8a;font-weight:700;';
+  const primarySpan = primaryLabel
+    ? (primaryIsOffcut ? `<span style="${offcutUnderline}">${esc(primaryLabel)}</span>` : esc(primaryLabel))
+    : '';
+  const secondaryLabel = secItemT ? paperGroupLabel(secItemT) : '';
+  const secondarySpan = secondaryLabel
+    ? (secondaryIsOffcut ? ` &#124; <span style="${offcutUnderline}">${esc(secondaryLabel)}</span>` : ` &#124; ${esc(secondaryLabel)}`)
+    : '';
+  const paperLabelT = primarySpan + secondarySpan;
   // Client-facing facts row is a curated subset — clients see only the
   // job specs that concern their order (paper spec, coatings, PO
   // details, delivered qty, deadline). Internal fields like Machine,
@@ -4261,7 +4317,7 @@ function renderJobCard(j, opts) {
         j.deadline ? `<span style="color:#dc2626;"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('')
     : [
-        paperLabelT ? `<span><b>Paper</b> ${esc(paperLabelT)}</span>` : '',
+        paperLabelT ? `<span><b>Paper</b> ${paperLabelT}</span>` : '',
         j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
         j.deadline ? `<span style="color:#dc2626;"><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('');
@@ -4390,6 +4446,7 @@ function renderJobCard(j, opts) {
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
     ${clientPreview ? '' : overIssueBannerHtml(j)}
+    ${clientPreview ? '' : partialIssueBannerHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
@@ -5374,7 +5431,27 @@ function renderInvPendingList() {
       ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${brandList?' · '+esc(brandList):''}`
       : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
     const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
-    const pktStr = packetsDisplay(j) || (packetsIn ? String(packetsIn) : '');
+    // Pending Stock badge shows the REDUCED need — offcut pre-consumed
+    // at CTP forward is already gone from inventory, so the store keeper
+    // only needs to physically issue the fresh remainder. Old jobs
+    // (before this feature landed) have no offcut_pre_consumed and see
+    // the full number, same as before.
+    const preConsumedPkts = (() => {
+      const rec = (j.particulars || {}).offcut_pre_consumed;
+      return rec && Number.isFinite(+rec.total_packets) ? +rec.total_packets : 0;
+    })();
+    const reducedPackets = Math.max(0, packetsIn - preConsumedPkts);
+    // When offcut pre-consumed, show the FRESH remainder — packetsDisplay
+    // (which includes any admin top-ups) is bypassed because those top-ups
+    // are the pre-consumed portion themselves. Without this, the badge
+    // showed "50 packets needed · 10 from offcut" instead of the correct
+    // "40 packets needed · 10 from offcut".
+    const pktStr = preConsumedPkts > 0
+      ? (reducedPackets > 0 ? String(reducedPackets) : '')
+      : (packetsDisplay(j) || (packetsIn > 0 ? String(packetsIn) : ''));
+    const offcutNote = preConsumedPkts > 0
+      ? ` <span style="background:#dbeafe;color:#1e3a8a;font-weight:700;font-size:11px;padding:1px 6px;border-radius:6px;margin-left:6px;border:1px solid #93c5fd;">${preConsumedPkts} from offcut</span>`
+      : '';
     const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
     // Partial issuance callout. When a store keeper has manually issued
     // some but not all of the required sheets, show a badge + a "Top up"
@@ -5384,11 +5461,17 @@ function renderInvPendingList() {
     const invPs = invIt ? packetSize(invIt.paper_type) : 100;
     const partialPkts = partial ? (partial / invPs) : 0;
     const partialPktsStr = partialPkts ? (Number.isInteger(partialPkts) ? String(partialPkts) : (+partialPkts.toFixed(2)).toString()) : '';
+    // Bigger, louder partial-issued badge — owner ask: same yellow-banner
+    // energy the over-issue callout used to have, with the leftover count
+    // spelled out so nobody misses it. Kept as a badge (not a full-width
+    // banner) because this tile already sits inside the Pending Stock
+    // list which is dense; the top-up button next to it is now yellow to
+    // reinforce the alert.
     const partialBadge = partial
-      ? `<span class="badge" style="background:#FEF3C7;color:#92400E;margin-left:8px;">PARTIAL &middot; ${partialPktsStr} ${unit} still needed</span>`
+      ? `<span class="badge" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`
       : '';
     const topupBtn = (partial && canIssueStock())
-      ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Top up ${partialPktsStr} ${unit}</button>`
+      ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
       : '';
     // Offcut jobs: store keeper doesn't see the Issue Stock button (only
     // admin / PM can pull from offcut stock). When rendered, it's yellow
@@ -5412,7 +5495,7 @@ function renderInvPendingList() {
           <div class="inv-sub">
             ${j.client ? esc(j.client) + ' &middot; ' : ''}
             ${paperLabel}
-            ${pktStr ? ` &middot; <span style="color:#A32D2D;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(pktStr)} ${unit} needed</span>` : ''}
+            ${pktStr ? ` &middot; <span style="color:#A32D2D;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(pktStr)} ${unit} needed</span>${offcutNote}` : ''}
             ${j.deadline ? ` &middot; <span style="color:#dc2626;font-weight:600;">Due ${esc(fmtDMY(j.deadline))}</span>` : ''}
           </div>
         </div>
@@ -5746,14 +5829,14 @@ async function saveInvAdd() {
 // gsm / brand / supplier / opening) so the offcut ledger stays uniform
 // with the rest of inventory.
 function openInvAddOffcut() {
-  if (!canWriteInventory() || isStoreManager()) {
-    notify('Only admin / production manager can add offcuts.');
+  if (!canWriteInventory()) {
+    notify('Only admin / store keeper can add offcuts.');
     return;
   }
   const defaultPaperType = PAPER_TYPES[0] || '';
   openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2 style="color:#78350f;">Add Offcut Item</h2>
-    <div style="margin:-4px 0 12px;padding:8px 12px;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;font-size:12px;color:#78350f;">
+    <h2 style="color:#1e3a8a;">Add Offcut Item</h2>
+    <div style="margin:-4px 0 12px;padding:8px 12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:8px;font-size:12px;color:#1e3a8a;">
       Creates a manual offcut entry. Fresh-stock duplicate rules don&rsquo;t apply &mdash; offcut lines can share dimensions with existing paper.
     </div>
     ${invDatalistsHtml()}
@@ -6125,7 +6208,7 @@ function openInvRemoveStock(id, opts) {
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stockout-notes" placeholder="Optional details"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
+      <button class="btn btn-primary" id="stockout-save-btn" onclick="saveInvRemoveStock(${id})" style="background:#DC2626;border-color:#DC2626;">Remove</button>
     </div>
   </div>`);
   stockOutReasonChanged(id);
@@ -6140,17 +6223,26 @@ function stockOutRecomputeWarning(itemId) {
   const banner = document.getElementById('stockout-warn-banner');
   const msgEl = document.getElementById('stockout-warn-msg');
   const tallyEl = document.getElementById('stockout-warn-tally');
+  const saveBtn = document.getElementById('stockout-save-btn');
   if (!wrap || !banner) return;
   const reasonEl = document.getElementById('stockout-reason');
   const reason = reasonEl ? reasonEl.value : '';
   const chips = document.querySelectorAll('#stockout-chips .jobchip.is-sel');
   const sheetsEl = document.getElementById('stockout-qty');
   const sheets = parseInt(sheetsEl && sheetsEl.value, 10) || 0;
-  if (reason !== 'job-card' || !chips.length || sheets <= 0) { wrap.style.display = 'none'; return; }
+  if (reason !== 'job-card' || !chips.length || sheets <= 0) {
+    wrap.style.display = 'none';
+    if (saveBtn) saveBtn.disabled = false;
+    return;
+  }
   let needSheets = 0;
   chips.forEach(c => { needSheets += parseInt(c.dataset.need, 10) || 0; });
   const diff = sheets - needSheets;
-  if (diff === 0) { wrap.style.display = 'none'; return; }
+  if (diff === 0) {
+    wrap.style.display = 'none';
+    if (saveBtn) saveBtn.disabled = false;
+    return;
+  }
   const it = inventory.find(x => x.id === itemId);
   const ps = it ? packetSize(it.paper_type) : 100;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
@@ -6158,11 +6250,16 @@ function stockOutRecomputeWarning(itemId) {
   banner.classList.toggle('bulkout-warn-banner--over',    diff > 0);
   banner.classList.toggle('bulkout-warn-banner--partial', diff < 0);
   if (diff > 0) {
-    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra will be added to offcut stock.`;
-    if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · issuing ${fmt(sheets)} ${unit}`;
+    // Over-issuance is BLOCKED now (owner rule). Save button greys
+    // out with the red banner so the store keeper can't push it
+    // through; they must reduce the number first.
+    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra issuance is not allowed. Reduce to ${fmt(needSheets)} ${unit} to save.`;
+    if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · trying to issue ${fmt(sheets)} ${unit}`;
+    if (saveBtn) saveBtn.disabled = true;
   } else {
     if (msgEl)   msgEl.textContent   = `Issued: ${fmt(sheets)} / ${fmt(needSheets)} ${unit} · ${fmt(-diff)} ${unit} still pending`;
     if (tallyEl) tallyEl.textContent = `Short by ${fmt(-diff)} ${unit}`;
+    if (saveBtn) saveBtn.disabled = false;
   }
   wrap.style.display = '';
 }
@@ -14619,6 +14716,14 @@ function jobForm(j={}) {
             <div class="combo-list" id="paper-list" style="display:none;"></div>
           </div>
           <div style="font-size:11px;color:var(--text2);margin-top:2px;min-height:14px;"><span class="stock-hint" id="stock-hint"></span></div>
+          <label style="display:inline-flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;font-size:11px;color:var(--text2);"
+                 title="Split the job across a 2nd paper source — usually offcut, but any inventory item works. Offcut portion auto-deducts on CTP forward.">
+            <input type="checkbox" id="f-use-second-paper"
+                   ${((j.particulars||{}).secondary_paper && (j.particulars||{}).secondary_paper.inventory_item_id) ? 'checked' : ''}
+                   onchange="toggleSecondPaper()"
+                   style="width:13px;height:13px;margin:0;cursor:pointer;">
+            <span>+ Add 2nd paper (offcut / additional)</span>
+          </label>
         </td>
         <td colspan="1"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
@@ -14645,6 +14750,50 @@ function jobForm(j={}) {
             ? `<div style="margin-top:4px;"><span style="display:inline-block;background:#F59E0B;color:#78350F;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
         </td>
       </tr>
+      ${(() => {
+        const sec = (j.particulars||{}).secondary_paper || null;
+        const secId = sec && sec.inventory_item_id;
+        const secItem = secId ? inventory.find(i => i.id === secId) : null;
+        const secLabel = secItem ? paperGroupLabel(secItem) : '';
+        const secPackets = sec ? (sec.packets != null ? String(sec.packets) : '') : '';
+        const showRow = !!secId;
+        return `
+      <tr id="second-paper-row" style="display:${showRow ? '' : 'none'}; background:#eff6ff;">
+        <td colspan="7" style="border-top:2px dashed #93c5fd;padding-top:10px;">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#1e3a8a;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">
+              <span style="display:inline-block;background:#1e3a8a;color:#fff;font-size:10px;padding:2px 8px;border-radius:8px;">2ND PAPER</span>
+              <span>offcut auto-deducts on CTP forward · fresh goes to store keeper</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;margin-top:8px;flex-wrap:wrap;">
+            <div style="flex:1 1 260px;min-width:240px;">
+              <span class="jc-lbl" style="color:#1e3a8a;">2nd Paper</span>
+              <div class="combo" id="paper-combo-2" style="position:relative;">
+                <input type="text" id="paper-search-2"
+                  placeholder="Search offcut or fresh paper…"
+                  value="${esc(secLabel)}"
+                  autocomplete="off"
+                  onfocus="paperOpen2()"
+                  oninput="paperFilter2()"
+                  onkeydown="paperKey2(event)">
+                <input type="hidden" id="f-inventory-item-2" value="${secId||''}">
+                <div class="combo-list" id="paper-list-2" style="display:none;"></div>
+              </div>
+              <div id="stock-hint-2" style="font-size:11px;color:#1e3a8a;margin-top:2px;min-height:14px;"></div>
+              <div id="second-paper-warning" style="font-size:11px;color:#7f1d1d;margin-top:3px;font-weight:700;min-height:14px;"></div>
+            </div>
+            <div style="width:160px;">
+              <span class="jc-lbl" style="color:#1e3a8a;">2nd Packets Qty</span>
+              <input type="number" id="f-packets-2" min="0" step="any"
+                     value="${esc(secPackets)}" placeholder="e.g. 5"
+                     style="width:100%;box-sizing:border-box;">
+              <div style="font-size:11px;color:#1e3a8a;margin-top:2px;">Part of total packets, not extra</div>
+            </div>
+          </div>
+        </td>
+      </tr>`;
+      })()}
       <tr>
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
         <td colspan="2"><span class="jc-lbl">Batch No.</span><input type="text" id="f-bno" value="${v(j.bno)}" placeholder="Batch"></td>
@@ -15786,6 +15935,20 @@ function collectParticulars() {
   out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
+  // Secondary paper block — set only when the checkbox is on AND a
+  // valid 2nd paper is picked AND packets > 0. Otherwise we clear the
+  // key so a job that had one but the PM turned it off doesn't keep
+  // ghost state. Server autoConsumeOffcut reads this on CTP forward.
+  const useSecond = !!(document.getElementById('f-use-second-paper')||{}).checked;
+  const secondId  = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
+  const secondPkts = parseFloat((document.getElementById('f-packets-2')||{}).value);
+  if (useSecond && Number.isFinite(secondId) && Number.isFinite(secondPkts) && secondPkts > 0) {
+    out.secondary_paper = { inventory_item_id: secondId, packets: secondPkts };
+  } else {
+    // Explicit null so the merge in the row-preservation code path doesn't
+    // silently keep an old secondary. (undefined would inherit from prior.)
+    out.secondary_paper = null;
+  }
   // Special-colors block — read from the DOM editor rendered by
   // renderSpecials(). Drop entirely-empty entries so a job never carries
   // a `[{name:"", mix:[]}]` ghost. Capped at MAX_SPECIALS to defend
@@ -15818,6 +15981,16 @@ function collectParticulars() {
     // split branch above doesn't fire, so preserve the prior value here
     // instead of wiping it on save.
     if (!out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
+    // offcut_pre_consumed is written by the server on CTP forward and
+    // read on Issue Stock. NOT surfaced in this form. Preserve so an
+    // admin edit after CTP doesn't wipe the record — losing it would
+    // make the store keeper's popup show the full need instead of the
+    // reduced fresh need, and drop the offcut consumption trace.
+    if (priorP.offcut_pre_consumed) out.offcut_pre_consumed = priorP.offcut_pre_consumed;
+    // Same story for over_issue_pending / over_issue_decisions — set by
+    // the extra-issuance workflow. Not touched by the form.
+    if (priorP.over_issue_pending)   out.over_issue_pending   = priorP.over_issue_pending;
+    if (priorP.over_issue_decisions) out.over_issue_decisions = priorP.over_issue_decisions;
   }
   return out;
 }
@@ -15923,6 +16096,155 @@ function paperGroupLabel(it) {
   const prefix = it.is_offcut ? 'OFFCUT · ' : '';
   return `${prefix}${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
 }
+// 2nd-paper picker: parallel of the primary picker. Only rendered when
+// the "+ Add 2nd paper" checkbox is on. Selection is stored in the
+// hidden #f-inventory-item-2 field and read on Save into
+// particulars.secondary_paper = { inventory_item_id, packets }.
+function toggleSecondPaper() {
+  const cb = document.getElementById('f-use-second-paper');
+  const row = document.getElementById('second-paper-row');
+  if (!cb || !row) return;
+  row.style.display = cb.checked ? '' : 'none';
+  if (!cb.checked) {
+    // Clear values so a hidden row can't accidentally leak stale state on
+    // save. Warning message clears too.
+    const search = document.getElementById('paper-search-2');
+    const hidden = document.getElementById('f-inventory-item-2');
+    const packets = document.getElementById('f-packets-2');
+    const warn = document.getElementById('second-paper-warning');
+    if (search) search.value = '';
+    if (hidden) hidden.value = '';
+    if (packets) packets.value = '';
+    if (warn) warn.textContent = '';
+  } else {
+    // Refresh mismatch warning for the currently-selected 2nd paper (if
+    // any) so opening the picker on an existing job shows the warning
+    // immediately.
+    refreshSecondPaperWarning();
+  }
+}
+function refreshSecondPaperWarning() {
+  const warn = document.getElementById('second-paper-warning');
+  if (!warn) return;
+  warn.textContent = '';
+  updateStockHint2();
+  const primaryId = parseInt((document.getElementById('f-inventory-item')||{}).value, 10);
+  const secondaryId = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
+  if (!Number.isFinite(primaryId) || !Number.isFinite(secondaryId)) return;
+  if (primaryId === secondaryId) {
+    warn.innerHTML = '&#9888; 2nd paper is the SAME item as the primary — pick a different one.';
+    return;
+  }
+  const p = inventory.find(x => x.id === primaryId);
+  const s = inventory.find(x => x.id === secondaryId);
+  if (!p || !s) return;
+  // Cutting Size / GSM is the "working size" the primary paper is
+  // cut down TO — an offcut leftover from that cut is a valid 2nd
+  // paper source, so we accept the 2nd matching EITHER the primary
+  // size OR the cutting size (paper_type + gsm still required).
+  const cuttingRaw = (document.getElementById('f-cutting-size')||{}).value || '';
+  const cuttingSize = (cuttingRaw.split('/')[0] || '').trim();
+  const paperMatch = (p.paper_type || '') === (s.paper_type || '');
+  const gsmMatch   = String(p.gsm || '') === String(s.gsm || '');
+  const primarySizeMatch = (p.size || '') === (s.size || '');
+  const cuttingSizeMatch = cuttingSize && (s.size || '') === cuttingSize;
+  const specsMatch = paperMatch && gsmMatch && (primarySizeMatch || cuttingSizeMatch);
+  if (!specsMatch) {
+    const wantedSizes = [p.size || '', cuttingSize].filter(Boolean).join(' or ');
+    warn.innerHTML = `&#9888; 2ND PAPER SPECS DO NOT MATCH — primary is ${esc(p.paper_type)} ${esc(p.size||'')} ${p.gsm ? esc(p.gsm)+'gsm' : ''}${cuttingSize ? ` (cutting size ${esc(cuttingSize)})` : ''}, 2nd is ${esc(s.paper_type)} ${esc(s.size||'')} ${s.gsm ? esc(s.gsm)+'gsm' : ''}. Should be ${esc(p.paper_type)} ${p.gsm ? esc(p.gsm)+'gsm' : ''} at ${esc(wantedSizes)}.`;
+  }
+}
+// Availability hint below the 2nd paper picker — mirrors the primary
+// picker's stock-hint span so the store keeper (and PM) can see the
+// balance of the 2nd source at a glance without opening Inventory.
+function updateStockHint2() {
+  const hint = document.getElementById('stock-hint-2');
+  if (!hint) return;
+  const secondaryId = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
+  if (!Number.isFinite(secondaryId)) { hint.textContent = ''; return; }
+  const it = inventory.find(x => x.id === secondaryId);
+  if (!it) { hint.textContent = ''; return; }
+  const ps   = packetSize(it.paper_type);
+  const unit = packetUnitLabel(it.paper_type);
+  const balSheets  = it.current_balance || 0;
+  const balPackets = ps ? (balSheets / ps) : 0;
+  const pStr = Number.isInteger(balPackets) ? String(balPackets) : (+balPackets.toFixed(2)).toString();
+  hint.innerHTML = `Available: <b>${pStr} ${unit}</b> <span style="color:#1e40af;">(${balSheets.toLocaleString()} sheets)</span>`;
+}
+function paperOpen2() {
+  const list = document.getElementById('paper-list-2');
+  if (!list) return;
+  list.style.display = 'block';
+  paperFilter2();
+}
+function paperClose2() {
+  const list = document.getElementById('paper-list-2');
+  if (list) list.style.display = 'none';
+}
+function paperFilter2() {
+  const input = document.getElementById('paper-search-2');
+  const list  = document.getElementById('paper-list-2');
+  if (!input || !list) return;
+  const q = (input.value || '').toLowerCase().trim();
+  const filtered = inventory.filter(it => {
+    if (!q) return true;
+    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
+    return hay.includes(q);
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
+    return;
+  }
+  const order  = [];
+  const groups = new Map();
+  for (const it of filtered) {
+    const k = paperGroupKey(it);
+    if (!groups.has(k)) { groups.set(k, []); order.push(k); }
+    groups.get(k).push(it);
+  }
+  // Match set for the 2nd picker — an offcut lights up lemon-yellow
+  // only when its size matches the primary paper's size OR the cutting
+  // size AND its paper_type + gsm match the primary. Same "reusable
+  // leftover of THIS paper" signal as the primary picker.
+  const primaryId2 = parseInt((document.getElementById('f-inventory-item')||{}).value, 10);
+  const primaryItem2 = Number.isFinite(primaryId2) ? inventory.find(x => x.id === primaryId2) : null;
+  const wantedSizes2 = (() => {
+    const s = new Set();
+    // Case-insensitive — cutting size may be typed as "20X15" while
+    // inventory items are stored as "20x15".
+    if (primaryItem2 && primaryItem2.size) s.add(primaryItem2.size.toLowerCase());
+    const cutRaw = ((document.getElementById('f-cutting-size')||{}).value || '').split('/')[0];
+    if (cutRaw && cutRaw.trim()) s.add(cutRaw.trim().toLowerCase());
+    return s;
+  })();
+  list.innerHTML = order.map(k => {
+    const items = groups.get(k);
+    const rep = [...items].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0))[0];
+    const totalSheets = items.reduce((a, x) => a + (x.current_balance || 0), 0);
+    const cls = totalSheets <= 0 ? 'combo-item out' : 'combo-item';
+    const paperMatches2 = primaryItem2
+      ? ((rep.paper_type || '') === (primaryItem2.paper_type || '') && String(rep.gsm || '') === String(primaryItem2.gsm || ''))
+      : true;   // no primary yet → just size
+    const isMatchingOffcut2 = rep.is_offcut && wantedSizes2.size > 0 && wantedSizes2.has((rep.size || '').toLowerCase()) && paperMatches2;
+    const offcutBg = isMatchingOffcut2 ? 'background:#dbeafe;' : '';
+    const offcutTag = rep.is_offcut ? '<span style="display:inline-block;background:#1e3a8a;color:#fff;font-size:9px;padding:1px 5px;border-radius:6px;margin-left:6px;font-weight:700;">OFFCUT</span>' : '';
+    return `<div class="${cls}" style="${offcutBg}" onclick="paperSelect2(${rep.id})">
+      <span>${esc(paperGroupLabel(rep))}${offcutTag}</span>
+      <span class="combo-bal">${totalSheets.toLocaleString()} sheets</span>
+    </div>`;
+  }).join('');
+}
+function paperKey2(ev) { if (ev.key === 'Escape') paperClose2(); }
+function paperSelect2(itemId) {
+  const it = inventory.find(x => x.id === itemId);
+  if (!it) return;
+  const search = document.getElementById('paper-search-2');
+  const hidden = document.getElementById('f-inventory-item-2');
+  if (search) search.value = paperGroupLabel(it);
+  if (hidden) hidden.value = String(itemId);
+  paperClose2();
+  refreshSecondPaperWarning();
+}
 function paperOpen() {
   const list = document.getElementById('paper-list');
   if (!list) return;
@@ -15958,6 +16280,29 @@ function paperFilter() {
     if (!groups.has(k)) { groups.set(k, []); order.push(k); }
     groups.get(k).push(it);
   }
+  // Compute which sizes count as "matching" for this picker's context —
+  // an offcut whose size matches the job's cutting size OR the primary
+  // paper's size gets a lemon-yellow highlight. Anything else stays
+  // plain so the PM can spot the reusable leftover at a glance instead
+  // of trying to eyeball every OFFCUT pill on the list.
+  const wantedSizesPrimary = (() => {
+    const s = new Set();
+    // Normalize to lowercase — cutting size may be typed as "20X15"
+    // while inventory items are stored as "20x15" (case-insensitive
+    // comparison so a capital X match still highlights).
+    const sizeRaw = ((document.getElementById('f-size')||{}).value || '').split('/')[0];
+    if (sizeRaw && sizeRaw.trim()) s.add(sizeRaw.trim().toLowerCase());
+    const cutRaw = ((document.getElementById('f-cutting-size')||{}).value || '').split('/')[0];
+    if (cutRaw && cutRaw.trim()) s.add(cutRaw.trim().toLowerCase());
+    // Also parse the search box itself — PM often types the size they
+    // want to find (e.g. "20x30 210") before touching the Size/Cutting
+    // fields. Any NNNxNNN token in the query counts as a wanted size,
+    // so a matching offcut lights up while the PM is still searching.
+    const q = (input.value || '').toLowerCase();
+    const sizeMatches = q.match(/\d+\s*x\s*\d+/g) || [];
+    sizeMatches.forEach(m => s.add(m.replace(/\s+/g, '')));
+    return s;
+  })();
   list.innerHTML = order.map(k => {
     const items = groups.get(k);
     // Representative: the item with the highest balance in this group.
@@ -15969,8 +16314,15 @@ function paperFilter() {
     const brandNote = items.length > 1
       ? `<span class="combo-group-tag" style="margin-left:6px;">${items.length} brands · picked by store keeper</span>`
       : '';
-    return `<div class="${cls}" onclick="paperSelect(${rep.id})">
-      <span>${esc(paperGroupLabel(rep))}${brandNote}</span>
+    // Offcut rows always get the OFFCUT pill. The lemon-yellow shade
+    // only lights up when the offcut's size matches the size or cutting
+    // size in the form — non-matching offcuts stay plain so highlight
+    // means "this is a reusable leftover of the paper you're setting up".
+    const isMatchingOffcut = rep.is_offcut && wantedSizesPrimary.size > 0 && wantedSizesPrimary.has((rep.size || '').toLowerCase());
+    const offcutBg = isMatchingOffcut ? 'background:#dbeafe;' : '';
+    const offcutTag = rep.is_offcut ? '<span style="display:inline-block;background:#1e3a8a;color:#fff;font-size:9px;padding:1px 5px;border-radius:6px;margin-left:6px;font-weight:700;">OFFCUT</span>' : '';
+    return `<div class="${cls}" style="${offcutBg}" onclick="paperSelect(${rep.id})">
+      <span>${esc(paperGroupLabel(rep))}${offcutTag}${brandNote}</span>
       <span class="combo-bal">${totalSheets.toLocaleString()} sheets</span>
     </div>`;
   }).join('');
@@ -16152,6 +16504,7 @@ function openAdd() {
     </div>
   </div>`);
   updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
   renderCutPreview();
   initSpecialsEditor();
 }
@@ -16242,6 +16595,7 @@ function openDuplicateJob(id) {
     </div>
   </div>`);
   updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
   renderCutPreview();
 }
 
@@ -16360,6 +16714,7 @@ function openEdit(id) {
     </div>
   </div>`);
   updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
   renderCutPreview();
   initSpecialsEditor();
   // CEO gets the same modal so they can see EVERY spec, but nothing
@@ -16772,38 +17127,33 @@ async function issueStock(id) {
     notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
-  const needSheets = Math.round(packetsIn * ps);
+  const totalNeedSheets = Math.round(packetsIn * ps);
+  // Any offcut sheets already auto-consumed at CTP forward reduce the
+  // fresh need the store keeper sees here. Popup opens with the reduced
+  // number so the "Issued: X / Y" tally is the fresh portion only.
+  const preConsumed = (j.particulars || {}).offcut_pre_consumed || null;
+  const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
+    ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
+  const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
+  if (needSheets <= 0) {
+    // Fully covered by offcut but the job is still sitting at 'pending'
+    // (edge case where CTP-forward didn't flip status). Fire an empty-
+    // splits issue-stock call so the server's auto-issue branch runs —
+    // job jumps to Printing and off the store keeper's queue instead
+    // of dead-ending on an unactionable notify.
+    if (!(await confirmDialog({
+      title: 'Auto-issue this job?',
+      message: `Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets already pre-consumed on CTP forward). Nothing left to issue from fresh — click Auto-issue to move it straight to Printing.`,
+      confirmText: 'Auto-issue',
+    }))) return;
+    await sendIssueStock(id, [], null);
+    return;
+  }
   // Group brands with any stock available. Zero-balance brands stay in
   // the popup so the store keeper can see them (row disabled), but a
   // group where EVERY brand is out is still a hard error.
   const members = paperGroupMembers(anchor);
-  // Matching offcut items — same paper_type + size + gsm as the job's
-  // anchor but is_offcut = true. Only used when the anchor itself is
-  // fresh — a job whose anchor already IS an offcut doesn't need to
-  // look elsewhere for offcut. Consumed largest-balance-first up to
-  // the job's need, then the remaining need falls to fresh brands.
-  const autoOffcuts = [];
-  if (!anchor.is_offcut) {
-    const matches = inventory
-      .filter(x => x
-        && x.is_offcut
-        && (x.paper_type || '') === (anchor.paper_type || '')
-        && (x.size || '') === (anchor.size || '')
-        && String(x.gsm || '') === String(anchor.gsm || '')
-        && (x.current_balance || 0) > 0)
-      .sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
-    let remaining = needSheets;
-    for (const m of matches) {
-      if (remaining <= 0) break;
-      const take = Math.min(m.current_balance || 0, remaining);
-      if (take > 0) {
-        autoOffcuts.push({ item: m, sheets: take });
-        remaining -= take;
-      }
-    }
-  }
-  const autoOffcutTotal = autoOffcuts.reduce((a, x) => a + x.sheets, 0);
-  const totalAvail = members.reduce((a, x) => a + (x.current_balance || 0), 0) + autoOffcutTotal;
+  const totalAvail = members.reduce((a, x) => a + (x.current_balance || 0), 0);
   if (totalAvail <= 0) {
     notify('Every brand in this paper group is out of stock.');
     return;
@@ -16812,7 +17162,7 @@ async function issueStock(id) {
   // the store keeper one canonical UI where they can over-issue (the
   // excess is routed to an offcut inventory bucket) or partial-issue
   // if needed. The one-row single-brand case is trivial to fill in.
-  openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts);
+  openIssueSplitPopup(j, anchor, members, needSheets, unit);
 }
 
 // Fire the /issue-stock POST with a splits payload and refresh state.
@@ -16847,7 +17197,7 @@ async function sendIssueStock(id, splits, challanNo) {
 //   * over-total   → total > need            (red banner, LOUD)
 // Save stays disabled while there's a validation problem so the store
 // keeper knows exactly what to fix.
-function openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts) {
+function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
   const paperType = anchor.paper_type || '';
   const ps = packetSize(paperType);
   const unitLabel = packetUnitLabel(paperType); // "Packets" | "Reams"
@@ -16856,53 +17206,17 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts) 
   // "0 / N" footer tally. Round-tripped as float via parseFloat below.
   const needPacketsRaw = ps ? needSheets / ps : 0;
   const needPackets = Number.isInteger(needPacketsRaw) ? needPacketsRaw : +needPacketsRaw.toFixed(2);
-  // Auto-consumed offcut sheets (from matching offcut inventory items).
-  // Reduces the fresh need shown in the header + footer tally so the
-  // store keeper only distributes the REMAINING amount across fresh
-  // brand rows. The auto-consumed offcut rows still appear in the
-  // table (highlighted yellow, read-only) so it's clear what's being
-  // taken from where and the total in the POST still equals need.
-  const offcutSplits = Array.isArray(autoOffcuts) ? autoOffcuts : [];
-  const offcutSheets = offcutSplits.reduce((a, x) => a + (x.sheets || 0), 0);
-  const freshNeedSheets = Math.max(0, needSheets - offcutSheets);
-  const freshNeedPacketsRaw = ps ? freshNeedSheets / ps : 0;
-  const freshNeedPackets = Number.isInteger(freshNeedPacketsRaw) ? freshNeedPacketsRaw : +freshNeedPacketsRaw.toFixed(2);
   const rows = [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0));
   // Single-brand pre-fill: keeps the old fast-path UX. If the group has
-  // only one brand, pre-populate its Issue field with min(freshNeed, avail).
-  // freshNeed (not full need) because offcut has already covered part of it.
+  // only one brand, pre-populate its Issue field with min(need, avail) so
+  // the store keeper can click Issue Stock immediately when they want
+  // the exact need — or adjust up for an intentional over-issue.
   const singleRow = rows.length === 1 ? rows[0] : null;
   const singleBalSheets = singleRow ? (singleRow.current_balance || 0) : 0;
-  const singlePreSheets = singleRow ? Math.min(freshNeedSheets, singleBalSheets) : 0;
+  const singlePreSheets = singleRow ? Math.min(needSheets, singleBalSheets) : 0;
   const singlePrePkts = ps ? singlePreSheets / ps : 0;
   const singlePre = Number.isInteger(singlePrePkts) ? singlePrePkts : +singlePrePkts.toFixed(2);
-  // Offcut rows — pre-filled + read-only. data-is-offcut="1" so the
-  // footer computation and Save both know they contribute to the total
-  // but shouldn't be validated as user input.
-  const offcutRowHtml = offcutSplits.map(o => {
-    const it = o.item;
-    const balSheets = it.current_balance || 0;
-    const balPacketsRaw = ps ? balSheets / ps : 0;
-    const balPackets = Number.isInteger(balPacketsRaw) ? balPacketsRaw : +balPacketsRaw.toFixed(2);
-    const takePacketsRaw = ps ? o.sheets / ps : 0;
-    const takePackets = Number.isInteger(takePacketsRaw) ? takePacketsRaw : +takePacketsRaw.toFixed(2);
-    const brandTxt = it.brand ? esc(it.brand) : '<span style="color:#78350f;font-style:italic;">no brand</span>';
-    return `
-      <tr class="split-row split-row-offcut" style="background:#fef3c7;">
-        <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;color:#78350f;">
-          <span style="display:inline-block;background:#78350f;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;margin-right:6px;font-weight:700;">OFFCUT</span>${brandTxt}
-        </td>
-        <td class="split-avail" style="color:#78350f;">${balPackets.toLocaleString()} <span style="color:#a16207;font-size:11px;">(${balSheets.toLocaleString()} sheets)</span></td>
-        <td>
-          <input type="number" class="split-qty" step="any" readonly
-                 data-item-id="${it.id}" data-is-offcut="1"
-                 data-avail-packets="${balPackets}" data-avail-sheets="${balSheets}"
-                 value="${takePackets}"
-                 style="background:#fef3c7;color:#78350f;font-weight:700;">
-        </td>
-      </tr>`;
-  }).join('');
-  const freshRowHtml = rows.map((it) => {
+  const rowHtml = rows.map((it) => {
     const balSheets  = it.current_balance || 0;
     // Available packets: show the true fractional value so a partial
     // (e.g. 40 sheets on a 100-per-packet board) shows as 0.4, not 0.
@@ -16926,15 +17240,6 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts) 
         </td>
       </tr>`;
   }).join('');
-  const offcutBannerHtml = offcutSheets > 0 ? (() => {
-    const oPkts = ps ? offcutSheets / ps : 0;
-    const oPktsFmt = Number.isInteger(oPkts) ? oPkts : +oPkts.toFixed(2);
-    return `
-      <div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:10px 12px;font-size:13px;color:#78350f;margin-bottom:12px;">
-        <b>&#9989; ${oPktsFmt.toLocaleString()} ${unitLabel.toLowerCase()}</b> auto-consumed from matching OFFCUT stock &middot;
-        store keeper only needs to issue <b>${freshNeedPackets.toLocaleString()} ${unitLabel.toLowerCase()}</b> from fresh.
-      </div>`;
-  })() : '';
   openModal(`
     <div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width: 640px;">
       <h2>Issue Stock · Job E-${j.id}</h2>
@@ -16943,15 +17248,12 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts) 
         <span style="color:var(--text3);">(${needSheets.toLocaleString()} sheets)</span>
         &middot; ${esc(paperGroupLabel(anchor))}
       </div>
-      ${offcutBannerHtml}
       <div class="form-group" style="margin-bottom:12px;">
         <label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
         <input type="text" id="split-challan" placeholder="e.g. CH-2026-042" style="width:100%;box-sizing:border-box;">
       </div>
       <table class="split-table"
              data-need-packets="${needPackets}"
-             data-fresh-need-packets="${freshNeedPackets}"
-             data-offcut-packets="${ps ? (offcutSheets / ps) : 0}"
              data-packet-size="${ps}"
              data-unit-label="${esc(unitLabel)}">
         <thead>
@@ -16961,10 +17263,10 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, autoOffcuts) 
             <th style="width:140px;">Issue (${unitLabel.toLowerCase()})</th>
           </tr>
         </thead>
-        <tbody>${offcutRowHtml}${freshRowHtml}</tbody>
+        <tbody>${rowHtml}</tbody>
       </table>
       <div class="split-footer" id="split-footer">
-        <div class="split-footer-msg" id="split-footer-msg">Issued: 0 / ${freshNeedPackets.toLocaleString()} ${unitLabel.toLowerCase()}</div>
+        <div class="split-footer-msg" id="split-footer-msg">Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel.toLowerCase()}</div>
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="closeModal()">Cancel</button>
@@ -16984,18 +17286,9 @@ function recomputeSplitFooter() {
   // parseFloat, not parseInt — needPackets may be fractional (e.g. 2.5)
   // and parseInt would silently truncate to 2, breaking the "0.5 still
   // pending" tally and the full/partial banner colour.
-  // Footer tracks the FRESH side only — offcut is auto-consumed and
-  // silently included in the POST. The store keeper sees "10 / 10"
-  // against the fresh need, not "20 / 20" against the full need.
-  const freshNeedRaw = parseFloat(table.dataset.freshNeedPackets);
-  const needPackets = Number.isFinite(freshNeedRaw)
-    ? freshNeedRaw
-    : (parseFloat(table.dataset.needPackets) || 0);
+  const needPackets = parseFloat(table.dataset.needPackets) || 0;
   const unitLabel   = (table.dataset.unitLabel || 'Packets').toLowerCase();
-  // Only FRESH rows count toward the tally + Save validation. Offcut
-  // rows carry data-is-offcut="1" and are pre-filled read-only.
-  const qtyInputs = [...table.querySelectorAll('.split-qty')]
-    .filter(inp => inp.dataset.isOffcut !== '1');
+  const qtyInputs = [...table.querySelectorAll('.split-qty')];
   let total = 0;
   let anyPositive = false;
   let anyRowOver  = false;   // one or more rows exceeds its available cap
@@ -17028,12 +17321,13 @@ function recomputeSplitFooter() {
   const overTotal = total > needPackets + EPS;
   const equalTotal = Math.abs(total - needPackets) < EPS;
   const underTotal = total < needPackets - EPS;
-  // Over-total is no longer a hard error — the store keeper can
-  // intentionally pull extra packets and the server routes the excess
-  // to an offcut inventory bucket. anyRowOver / anyBadInput still block
-  // Save because they're real problems (can't pull more than a brand
-  // has on hand, and typos need fixing before submit).
-  const isError = anyBadInput || anyRowOver;
+  // Over-total is now a HARD error too (owner rule: extra issuance is
+  // no longer allowed — store keeper must reduce the numbers before
+  // Save can fire). Message stays "Over by N" so the store keeper
+  // sees exactly how much to shave off. Same three conditions block
+  // Save: bad input, over-any-row (can't pull more than a brand's
+  // balance), and over-total (exceeds the job's need).
+  const isError = anyBadInput || anyRowOver || overTotal;
   footer.classList.toggle('split-footer-full',    !isError && !overTotal && equalTotal && anyPositive);
   footer.classList.toggle('split-footer-partial', !isError && !overTotal && anyPositive && underTotal);
   footer.classList.toggle('split-footer-warn',    !isError && overTotal);
@@ -17045,7 +17339,7 @@ function recomputeSplitFooter() {
     msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Enter a positive number in each row. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (overTotal) {
     const overAmt = +(total - needPackets).toFixed(2);
-    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${overAmt.toLocaleString()} ${unitLabel} — extra will be added to offcut stock. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
+    msg.innerHTML  = `<span class="split-footer-icon">&#9888;</span> Over by ${overAmt.toLocaleString()} ${unitLabel} — extra issuance is not allowed. Reduce the numbers to match the need before saving. <span class="split-footer-tally">Issued: ${totalStr}</span>`;
   } else if (equalTotal && anyPositive) {
     msg.textContent = `Issued: ${totalStr} · full`;
   } else if (anyPositive) {
@@ -17057,11 +17351,7 @@ function recomputeSplitFooter() {
   } else {
     msg.textContent = `Issued: 0 / ${needPackets.toLocaleString()} ${unitLabel}`;
   }
-  // Enable Save even with no fresh input when the offcut side already
-  // covers the whole need (freshNeed = 0) — nothing more to type; the
-  // store keeper just confirms and the offcut-only issuance goes through.
-  const freshNeedZero = needPackets <= 1e-9;
-  btn.disabled = isError || (!anyPositive && !freshNeedZero);
+  btn.disabled = isError || !anyPositive;
 }
 
 async function saveSplitIssue(jobId) {
@@ -17252,6 +17542,47 @@ function buildPrintCard(j) {
   // brand pulled from the store (which may be split across brands when
   // the store keeper issued from multiple sources).
   const paperBrandCombined = String(paperType || '').trim();
+  // Secondary paper (if the PM ticked "Add 2nd paper" on the job form)
+  // shows on the print card next to the primary as "primary | secondary".
+  // Offcut side is underlined yellow so the operators know which portion
+  // was auto-consumed on CTP forward vs which came from the store.
+  const secRefPrint = p.secondary_paper || null;
+  const secItemPrint = (secRefPrint && secRefPrint.inventory_item_id)
+    ? inventory.find(i => i.id === secRefPrint.inventory_item_id) : null;
+  const primaryIsOffcutP = !!(invItem && invItem.is_offcut);
+  const secondaryIsOffcutP = !!(secItemPrint && secItemPrint.is_offcut);
+  const secondaryPaperLabel = secItemPrint ? paperGroupLabel(secItemPrint) : '';
+  const offcutStylePrint = 'text-decoration:underline;text-decoration-color:#1d4ed8;text-decoration-thickness:2px;text-underline-offset:2px;color:#1e3a8a;';
+  const paperCellHtml = (() => {
+    const primaryHtml = primaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${v(paperBrandCombined)}</span>`
+      : v(paperBrandCombined);
+    if (!secondaryPaperLabel) return primaryHtml;
+    const secondaryHtml = secondaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${v(secondaryPaperLabel)}</span>`
+      : v(secondaryPaperLabel);
+    return `${primaryHtml} &#124; ${secondaryHtml}`;
+  })();
+  // Packets: "primary_pkts | secondary_pkts" when secondary is set. The
+  // secondary count is a slice of the total (5 offcut of a 10-packet job
+  // means "5 primary | 5 secondary", NOT "10 | 5"). Primary yellow-under
+  // when primary paper is offcut, secondary yellow-under when it is.
+  const packetsCellHtml = (() => {
+    const totalPkts = parseFloat(p.quantity_of_packets);
+    const secPkts   = secRefPrint ? (parseFloat(secRefPrint.packets) || 0) : 0;
+    const displayFallback = packetsDisplay(j) || v(p.quantity_of_packets);
+    if (!secondaryPaperLabel || !secPkts || !Number.isFinite(totalPkts) || totalPkts <= 0) {
+      return displayFallback + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+    }
+    const primaryPkts = Math.max(0, totalPkts - secPkts);
+    const primaryPart = primaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${primaryPkts}</span>`
+      : String(primaryPkts);
+    const secondaryPart = secondaryIsOffcutP
+      ? `<span style="${offcutStylePrint}">${secPkts}</span>`
+      : String(secPkts);
+    return `${primaryPart} &#124; ${secondaryPart}` + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+  })();
   const coatLabel = name => {
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
     return `<span class="pc-coat-box pc-coat-on">✓</span><span class="pc-coat-label-on">${label}</span>`;
@@ -17571,7 +17902,7 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
         <td colspan="2"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
         <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
-        <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${v(packetsDisplay(j) || p.quantity_of_packets)}${p.sheet_cut ? ' &middot; <span class="pc-cut">'+esc(p.sheet_cut)+'</span>' : ''}</div></td>
+        <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${packetsCellHtml}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
@@ -17583,7 +17914,25 @@ function buildPrintCard(j) {
         <td colspan="1"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
         <td colspan="1"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
         <td colspan="2"><div class="pc-label">MRP</div><div class="pc-value">${v(j.mrp)}</div></td>
-        <td colspan="3"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${v(paperBrandCombined)}</div></td>
+        ${(() => {
+          // When a 2nd paper is set, split the Paper — Brand cell into
+          // TWO cells (primary + separate 2nd Paper column) so the
+          // offcut size is no longer crammed into the primary cell.
+          // No secondary → keep the full-width cell exactly as before.
+          const primaryOnlyHtml = primaryIsOffcutP
+            ? `<span style="${offcutStylePrint}">${v(paperBrandCombined)}</span>`
+            : v(paperBrandCombined);
+          if (!secondaryPaperLabel) {
+            return `<td colspan="3"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${primaryOnlyHtml}</div></td>`;
+          }
+          const secondaryHtml = secondaryIsOffcutP
+            ? `<span style="${offcutStylePrint}">${v(secondaryPaperLabel)}</span>`
+            : v(secondaryPaperLabel);
+          return `
+            <td colspan="2"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${primaryOnlyHtml}</div></td>
+            <td colspan="1"><div class="pc-label">2nd Paper</div><div class="pc-value pc-brand">${secondaryHtml}</div></td>
+          `;
+        })()}
       </tr>
       ${coatingRow}
       ${ctpRow}
