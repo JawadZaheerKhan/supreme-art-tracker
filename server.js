@@ -2837,6 +2837,98 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
 // create as cut_from_size so the inventory list can show provenance. Does
 // not update cut_from_size on subsequent matches — the original parent
 // stays as the canonical origin label.
+// Auto-consume offcut inventory when a job is forwarded out of CTP into
+// Pending Stock / Printing. Handles two cases:
+//   - PRIMARY paper is offcut: consume the job's full need from it.
+//   - SECONDARY paper is set + offcut: consume secondary.packets from it.
+// Store keeper never sees these deductions in Pending Stock — the offcut
+// is silently deducted here so their queue only shows the FRESH portion
+// they need to physically issue.
+// Idempotent: if particulars.offcut_pre_consumed already exists, skip
+// (won't double-deduct on retry / mistaken re-fire). Returns:
+//   { particulars, fullyIssuedFromOffcut, itemsConsumed }
+// Caller decides whether to flip issuance_status to 'issued' (pure
+// offcut) or leave as 'pending' (mixed / no offcut).
+async function autoConsumeOffcut(sql, job, user) {
+  const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+  if (particulars.offcut_pre_consumed && Array.isArray(particulars.offcut_pre_consumed.items) && particulars.offcut_pre_consumed.items.length) {
+    return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], already: true };
+  }
+  const anchorId = job.inventory_item_id;
+  if (!anchorId) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${anchorId}`;
+  const anchor = anchorRows[0];
+  if (!anchor) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  const paperType = anchor.paper_type || '';
+  const ps = packetSize(paperType);
+  const needSheets = jobDeductionSheets({ paperType, particulars });
+  if (needSheets <= 0) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  const secondary = (particulars.secondary_paper && typeof particulars.secondary_paper === 'object')
+    ? particulars.secondary_paper : null;
+  const secondaryPackets = secondary ? (parseFloat(secondary.packets) || 0) : 0;
+  const secondarySheets = Math.round(secondaryPackets * ps);
+  // Primary consumption: if the primary item itself is an offcut, the
+  // job's ENTIRE non-secondary portion comes from it.
+  const primarySheets = Math.max(0, needSheets - secondarySheets);
+  const itemsConsumed = [];
+  const totals = { sheets: 0, packets: 0 };
+  const consumeItem = async (itemId, sheets, note) => {
+    if (!itemId || sheets <= 0) return;
+    await applyInventoryChange(sql, {
+      itemId, change: -sheets,
+      reason: 'job-auto-offcut',
+      jobId: job.id,
+      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: auto-consumed ${sheets} sheets from offcut on CTP forward (${note}).`,
+      user,
+    });
+    itemsConsumed.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0 });
+    totals.sheets += sheets;
+    totals.packets += (ps ? sheets / ps : 0);
+  };
+  if (anchor.is_offcut && primarySheets > 0) {
+    await consumeItem(anchor.id, primarySheets, 'primary paper is offcut');
+  }
+  if (secondary && secondary.inventory_item_id && secondarySheets > 0) {
+    const secRows = await sql`SELECT * FROM inventory_items WHERE id = ${secondary.inventory_item_id}`;
+    const secItem = secRows[0];
+    if (secItem && secItem.is_offcut) {
+      await consumeItem(secItem.id, secondarySheets, 'secondary paper is offcut');
+    }
+  }
+  if (itemsConsumed.length) {
+    particulars.offcut_pre_consumed = {
+      items: itemsConsumed,
+      total_sheets: totals.sheets,
+      total_packets: totals.packets,
+      consumed_at: new Date().toISOString(),
+      consumed_by: (user && user.email) || null,
+    };
+  }
+  const fullyIssuedFromOffcut = totals.sheets >= needSheets && needSheets > 0;
+  return { particulars, fullyIssuedFromOffcut, itemsConsumed };
+}
+
+// Reverse a prior autoConsumeOffcut — refund each consumed item back
+// to inventory. Used when a job is moved back to CTP (undo) so the
+// offcut inventory returns to its pre-forward state.
+async function reverseAutoConsumeOffcut(sql, job, user) {
+  const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+  const rec = particulars.offcut_pre_consumed;
+  if (!rec || !Array.isArray(rec.items) || !rec.items.length) return particulars;
+  for (const it of rec.items) {
+    if (!it || !it.item_id || !(it.sheets > 0)) continue;
+    await applyInventoryChange(sql, {
+      itemId: it.item_id, change: +it.sheets,
+      reason: 'job-auto-offcut-refund',
+      jobId: job.id,
+      notes: `Job E-${job.id}: refunded ${it.sheets} sheets to offcut (job moved back to CTP).`,
+      user,
+    });
+  }
+  delete particulars.offcut_pre_consumed;
+  return particulars;
+}
+
 async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   const existing = await sql`
     SELECT * FROM inventory_items
@@ -2929,7 +3021,7 @@ app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) =
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
     if (job.issuance_status !== 'pending' || (job.stage_index || 0) > 1) {
@@ -2940,17 +3032,24 @@ app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) =
     const time = businessStamp();
     const nowIso = new Date().toISOString();
     const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
-    // Undo the process-from-ctp side-effects: clear the fresh Printing
-    // stage entry, mark CTP active again, log the reversal.
     delete stages[1];
     stages[0] = { ...(stages[0] || {}), status: 'active', by, time, at: nowIso, notes: 'Reopened for CTP work' };
     log.push({ stage: STAGES[0], status: 'active', notes: `Moved back to CTP by ${by}`, by, time });
+    // Refund any offcut sheets that were auto-consumed at process-from-ctp
+    // so the job returns to its exact pre-forward state. issued_items row
+    // for the offcut source is dropped in the same pass so the ledger's
+    // job summary agrees with what's actually in inventory.
+    const nextParticulars = await reverseAutoConsumeOffcut(sql, job, req.user);
+    const priorIssued = Array.isArray(job.issued_items) ? job.issued_items : [];
+    const nextIssued = priorIssued.filter(x => !x || x.source !== 'offcut');
     const updated = await sql`
       UPDATE jobs
          SET issuance_status='ctp',
              stage_index=0,
              stages=${JSON.stringify(stages)},
-             log=${JSON.stringify(log)}
+             log=${JSON.stringify(log)},
+             particulars=${JSON.stringify(nextParticulars)},
+             issued_items=${JSON.stringify(nextIssued)}
        WHERE id=${id}
        RETURNING *
     `;
@@ -2958,7 +3057,7 @@ app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) =
       action: 'job.move_back_to_ctp',
       entityType: 'job',
       entityId: id,
-      summary: `Moved Job E-${id}: ${job.name} back to CTP from Pending Stock`,
+      summary: `Moved Job E-${id}: ${job.name} back to CTP from Pending Stock${priorIssued.length !== nextIssued.length ? ` · offcut auto-refunded` : ''}`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -3084,7 +3183,7 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const rows = await sql`SELECT id, name, issuance_status, stage_index, stages, log FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
     if (job.issuance_status !== 'ctp') {
@@ -3096,25 +3195,74 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
     const nowIso = new Date().toISOString();
     const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
     stages[0] = { ...(stages[0] || {}), status: 'done', by, time, at: nowIso, notes: 'CTP plates finished (marked by manager)' };
-    // Advance to stage 1 (Printing) but leave that stage in a fresh
-    // "pending stock" state — the Printing operator can only start once
-    // the store keeper issues paper, same rule as before.
     stages[1] = { ...(stages[1] || {}), status: 'active', by, time, at: nowIso };
     log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to Pending Stock / Printing`, by, time });
-    const updated = await sql`
-      UPDATE jobs
-         SET issuance_status='pending',
-             stage_index=1,
-             stages=${JSON.stringify(stages)},
-             log=${JSON.stringify(log)}
-       WHERE id=${id}
-       RETURNING *
-    `;
+    // Auto-consume any offcut sources tied to this job (primary if
+    // offcut, and/or secondary_paper if offcut). Store keeper's Pending
+    // Stock only shows the FRESH portion afterwards. Pure-offcut jobs
+    // skip Pending Stock entirely — marked 'issued' below.
+    const { particulars: nextParticulars, fullyIssuedFromOffcut, itemsConsumed } =
+      await autoConsumeOffcut(sql, job, req.user);
+    const issuedItemsPatch = itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
+    const particularsJson = JSON.stringify(nextParticulars);
+    const stagesJson      = JSON.stringify(stages);
+    const logJson         = JSON.stringify(log);
+    let updated;
+    if (fullyIssuedFromOffcut) {
+      // Pure-offcut job — flip straight to 'issued' and stamp who / when.
+      // issued_items gets the offcut sources appended so the ledger has
+      // the same shape as a store-keeper issuance.
+      const patchJson = JSON.stringify(issuedItemsPatch);
+      updated = await sql`
+        UPDATE jobs
+           SET issuance_status = 'issued',
+               stage_index     = 1,
+               stages          = ${stagesJson},
+               log             = ${logJson},
+               particulars     = ${particularsJson},
+               issued_at       = COALESCE(issued_at, NOW()),
+               issued_by_id    = COALESCE(issued_by_id, ${req.user.id || null}),
+               issued_items    = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
+         WHERE id=${id}
+         RETURNING *
+      `;
+    } else if (issuedItemsPatch.length) {
+      // Mixed job — offcut portion recorded on issued_items now, but
+      // status stays 'pending' so the store keeper still issues the
+      // fresh portion via /issue-stock.
+      const patchJson = JSON.stringify(issuedItemsPatch);
+      updated = await sql`
+        UPDATE jobs
+           SET issuance_status = 'pending',
+               stage_index     = 1,
+               stages          = ${stagesJson},
+               log             = ${logJson},
+               particulars     = ${particularsJson},
+               issued_items    = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
+         WHERE id=${id}
+         RETURNING *
+      `;
+    } else {
+      // No offcut anywhere — same as before this feature landed.
+      updated = await sql`
+        UPDATE jobs
+           SET issuance_status = 'pending',
+               stage_index     = 1,
+               stages          = ${stagesJson},
+               log             = ${logJson},
+               particulars     = ${particularsJson}
+         WHERE id=${id}
+         RETURNING *
+      `;
+    }
+    const summarySuffix = itemsConsumed.length
+      ? ` · ${itemsConsumed.reduce((a, x) => a + x.sheets, 0)} sheets auto-consumed from offcut${fullyIssuedFromOffcut ? ' (pure offcut → job fully issued)' : ''}`
+      : '';
     await logAudit(sql, req, {
       action: 'job.process_from_ctp',
       entityType: 'job',
       entityId: id,
-      summary: `CTP done for Job E-${id}: ${job.name} — moved to Pending Stock / Printing`,
+      summary: `CTP done for Job E-${id}: ${job.name} — moved to ${fullyIssuedFromOffcut ? 'Printing (fully issued from offcut)' : 'Pending Stock / Printing'}${summarySuffix}`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -3430,9 +3578,21 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const anchor = anchorRows[0];
     if (!anchor) return res.status(400).json({ error: 'Assigned paper item no longer exists.' });
     const paperType = anchor.paper_type || '';
-    const needSheets = jobDeductionSheets({ paperType, particulars: job.particulars });
-    if (needSheets <= 0) {
+    const totalNeedSheets = jobDeductionSheets({ paperType, particulars: job.particulars });
+    if (totalNeedSheets <= 0) {
       return res.status(400).json({ error: 'Job has no Quantity of Packets — set the packets count on the job, then try again. (Inventory is deducted in raw packets/reams.)' });
+    }
+    // Subtract any offcut sheets already auto-consumed on CTP forward
+    // (see autoConsumeOffcut). The store keeper only issues the FRESH
+    // portion — validation, split checks, and over-issue math all run
+    // against needSheets (the reduced number). totalNeedSheets is still
+    // used in messages so the user sees the full picture.
+    const preConsumed = (job.particulars && job.particulars.offcut_pre_consumed) || null;
+    const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
+      ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
+    const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
+    if (needSheets <= 0) {
+      return res.status(400).json({ error: `Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets) — no fresh stock needed. Nothing to issue.` });
     }
     // Parse & validate splits (or synthesize the single-brand fallback).
     const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : null;
@@ -6112,20 +6272,74 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // off stage 0, flip issuance_status from 'ctp' to 'pending' so the job
     // pops into Pending Stock for the store keeper to issue paper. Every
     // other transition leaves issuance_status alone.
-    const nextStatus = (job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0)
-      ? 'pending'
-      : job.issuance_status;
-    const updated = await sql`
-      UPDATE jobs
-         SET particulars     = ${JSON.stringify(particulars)},
-             stage_index     = ${stage_index},
-             stages          = ${JSON.stringify(stages)},
-             log             = ${JSON.stringify(log)},
-             coatings_done   = ${JSON.stringify(coatings_done)},
-             issuance_status = ${nextStatus}
-       WHERE id = ${id}
-       RETURNING *
-    `;
+    // At the same transition, auto-consume any offcut sources tied to the
+    // job (mirrors process-from-ctp — the two paths must produce the same
+    // post-CTP state). Pure-offcut jobs skip Pending Stock and jump to
+    // 'issued' directly.
+    let nextStatus = job.issuance_status;
+    let particularsAfterOffcut = particulars;
+    let offcutIssuedPatch = [];
+    if (job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0) {
+      const {
+        particulars: pAfter,
+        fullyIssuedFromOffcut,
+        itemsConsumed,
+      } = await autoConsumeOffcut(sql, { ...job, particulars }, req.user);
+      particularsAfterOffcut = pAfter;
+      offcutIssuedPatch = itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
+      nextStatus = fullyIssuedFromOffcut ? 'issued' : 'pending';
+    }
+    const particularsJson = JSON.stringify(particularsAfterOffcut);
+    const stagesJson      = JSON.stringify(stages);
+    const logJson         = JSON.stringify(log);
+    const doneJson        = JSON.stringify(coatings_done);
+    let updated;
+    if (nextStatus === 'issued' && offcutIssuedPatch.length) {
+      // Pure-offcut auto-issue path — same shape as process-from-ctp's
+      // fully-issued branch so a job that took the operator path lands
+      // identical to one taking the PM path.
+      const patchJson = JSON.stringify(offcutIssuedPatch);
+      updated = await sql`
+        UPDATE jobs
+           SET particulars     = ${particularsJson},
+               stage_index     = ${stage_index},
+               stages          = ${stagesJson},
+               log             = ${logJson},
+               coatings_done   = ${doneJson},
+               issuance_status = 'issued',
+               issued_at       = COALESCE(issued_at, NOW()),
+               issued_by_id    = COALESCE(issued_by_id, ${req.user?.id || null}),
+               issued_items    = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
+         WHERE id = ${id}
+         RETURNING *
+      `;
+    } else if (offcutIssuedPatch.length) {
+      const patchJson = JSON.stringify(offcutIssuedPatch);
+      updated = await sql`
+        UPDATE jobs
+           SET particulars     = ${particularsJson},
+               stage_index     = ${stage_index},
+               stages          = ${stagesJson},
+               log             = ${logJson},
+               coatings_done   = ${doneJson},
+               issuance_status = ${nextStatus},
+               issued_items    = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
+         WHERE id = ${id}
+         RETURNING *
+      `;
+    } else {
+      updated = await sql`
+        UPDATE jobs
+           SET particulars     = ${particularsJson},
+               stage_index     = ${stage_index},
+               stages          = ${stagesJson},
+               log             = ${logJson},
+               coatings_done   = ${doneJson},
+               issuance_status = ${nextStatus}
+         WHERE id = ${id}
+         RETURNING *
+      `;
+    }
     const skippedCount = Math.max(0, stage_index - curStage - 1);
     await logAudit(sql, req, {
       action: 'job.station',
