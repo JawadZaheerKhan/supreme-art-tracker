@@ -16212,9 +16212,37 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
     <div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;"><span>Total shipped</span><span>${stats.delivered.toLocaleString()}${totalBooked ? ' / ' + totalBooked.toLocaleString() + ' cartons' : ' cartons'}</span></div>
   </div>` : '';
 
-  // Render repr WITHOUT adminControls — we build our own top row with
-  // the group toggle so it's independent from individual job toggles.
-  let html = renderJobCard(repr, { clientPreview: true });
+  // Build the display source. The tile must read as the GROUP's own
+  // identity (product / client / code / PO Qty / specs / coatings),
+  // NOT as the seed sub job's — that was the source of the "old
+  // values everywhere" complaint. Runtime state (stage_index / stages
+  // / log / deliveries / issuance_status / inventory_item_id) stays
+  // pulled from the representative sub job so the stage ribbon,
+  // machine SVG, and deliveries block continue to animate and
+  // aggregate correctly.
+  const groupIdForTileSource = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
+  const groupEntForSource = groupIdForTileSource ? stockGroupById(groupIdForTileSource) : null;
+  const tpl = (groupEntForSource && groupEntForSource.template && typeof groupEntForSource.template === 'object') ? groupEntForSource.template : {};
+  const displaySource = groupEntForSource ? {
+    ...repr,
+    name:    (groupEntForSource.product || tpl.name || repr.name),
+    client:  (groupEntForSource.client || tpl.client || repr.client),
+    jobcode: (groupEntForSource.jobcode || tpl.jobcode || repr.jobcode || ''),
+    qty:     (groupEntForSource.po_qty  || tpl.qty     || ''),
+    size:    (tpl.size || repr.size || ''),
+    paper:   (tpl.paper || repr.paper || ''),
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings : (Array.isArray(repr.coatings) ? repr.coatings : []),
+    // PO No. + Batch No. vary per sub job — blank at the group level
+    // so the tile doesn't misleadingly show one sub's ref / bno.
+    ref: '',
+    bno: '',
+    // Group has its own client_visible; independent of any sub's flag.
+    client_visible: !!groupEntForSource.client_visible,
+  } : repr;
+
+  // Render from the displaySource (group entity when available, else
+  // the sub job for legacy groups without an entity).
+  let html = renderJobCard(displaySource, { clientPreview: true });
 
   // 1. Replace the E-{id} + any surrounding clientTopRow with our group header.
   const groupTopRow = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
@@ -16231,21 +16259,9 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
 
   // 2. Replace the repr job's stage badge with group stat chips.
   html = html.replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${statChips}</div>`);
-
-  // 2b. Swap the PO Qty fact value from the representative sub job's
-  // qty to the GROUP entity's own po_qty (the standing quantity to
-  // hold). Owner rule: the tile's PO Qty must always read the
-  // group's own value, never a sub job's. Falls back to leaving the
-  // value alone for legacy groups without an entity yet.
-  const groupIdForTile = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
-  const groupEntForTile = groupIdForTile ? stockGroupById(groupIdForTile) : null;
-  if (groupEntForTile && groupEntForTile.po_qty != null && String(groupEntForTile.po_qty).trim() !== '') {
-    const groupPoQtyText = String(groupEntForTile.po_qty);
-    // Anchored replace on the exact fact span so nothing else can
-    // accidentally match (name / code / batch never render as bold
-    // "PO Qty").
-    html = html.replace(/(<span><b>PO Qty<\/b>\s*)[^<]*(<\/span>)/, `$1${esc(groupPoQtyText)}$2`);
-  }
+  // (PO Qty override is no longer done via regex — displaySource
+  // already carries the group's own po_qty via .qty, so
+  // renderJobCard emitted the right value the first time.)
 
   // 3. Replace the repr job's shipments block with the aggregate one.
   //    clientDeliveriesBreakdown emits a distinctive outer div; if it
@@ -20858,17 +20874,16 @@ function renderClientSummary(rows, containerId) {
     for (const [gName, gJobs] of groupedByName) {
       const stats = groupStats(gJobs);
       const repr  = groupRepresentative(gJobs);
-      // Prefer the group entity's OWN po_qty when available (it's the
-      // "standing quantity to hold" set on the group itself, never
-      // summed from sub jobs). Falls back to the SUM across members
-      // for jobs whose group hasn't been migrated to an entity yet.
+      // Owner rule: PO Qty on Mill Jobs is ALWAYS the group's own
+      // po_qty when a group entity exists. Never fall back to a
+      // sum-of-members even when po_qty is null/empty — falling back
+      // there gave the confusing "800,000" for cox-2 test (4 subs at
+      // 200,000 each) instead of the group's own 200,000. Legacy
+      // groups without an entity keep summing.
       const groupId  = (gJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
       const groupEnt = groupId ? stockGroupById(groupId) : null;
-      const groupPoQtyOwn = groupEnt && groupEnt.po_qty != null
-        ? (parseFloat(String(groupEnt.po_qty).replace(/[^0-9.\-]/g,'')) || 0)
-        : null;
-      const poQty = groupPoQtyOwn != null
-        ? groupPoQtyOwn
+      const poQty = groupEnt
+        ? (parseFloat(String(groupEnt.po_qty || '').replace(/[^0-9.\-]/g,'')) || 0)
         : gJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.\-]/g,''))||0), 0);
       const product = (groupEnt && groupEnt.product) || gName;
       const codeVal = (groupEnt && groupEnt.jobcode) || (repr && repr.jobcode) || '';
