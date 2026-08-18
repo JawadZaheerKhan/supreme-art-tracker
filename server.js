@@ -3072,12 +3072,30 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible } = req.body;
+    let { name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id } = req.body;
     // Case rule (v2026-07-13): name and client are stored lowercase so
     // "Fenbro" / "FENBRO" / "fenbro" all collapse to one canonical value
     // in searches, dropdowns, and reports.
     if (name)   name   = String(name).trim().toLowerCase();
     if (client) client = String(client).trim().toLowerCase();
+    // Group link — Duplicate from a group tile sends group_job_id so
+    // the new sub job attaches to that group and aggregates under
+    // its tile from day one. stock_group_name is derived from the
+    // group's product so every legacy grouper still finds the sub.
+    let groupIdInt = null;
+    let stockGroupName = null;
+    let stockGroupVisibleFromGroup = false;
+    if (group_job_id) {
+      const gid = parseInt(group_job_id, 10);
+      if (Number.isFinite(gid) && gid > 0) {
+        const gRows = await sql`SELECT product, client_visible FROM stock_groups WHERE id = ${gid} AND deleted_at IS NULL`;
+        if (gRows.length) {
+          groupIdInt = gid;
+          stockGroupName = gRows[0].product || null;
+          stockGroupVisibleFromGroup = !!gRows[0].client_visible;
+        }
+      }
+    }
     // Newly-created jobs land in issuance_status='new' — they show up
     // in the "New Jobs" tab for the Production Manager (or Admin) to
     // review, and are NOT visible to the store keeper yet. Clicking
@@ -3085,8 +3103,8 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
     // store keeper's Pending Stock queue picks them up. Stock is only
     // deducted after that, via POST /api/jobs/:id/issue-stock.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible}, 'new')
+      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id, stock_group_name, stock_group_visible, issuance_status)
+      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible || stockGroupVisibleFromGroup}, ${groupIdInt}, ${stockGroupName}, ${stockGroupVisibleFromGroup}, 'new')
       RETURNING *
     `;
     const job = result[0];

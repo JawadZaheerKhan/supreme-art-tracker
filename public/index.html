@@ -15440,7 +15440,7 @@ function groupActionsHtml(groupName, reprId, latestId, count, hasReady, containe
     ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openGroupEdit(${groupId})" title="Edit the group template (client / product / specs / PO qty)">Edit Group</button>`
     : `<button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>`;
   const dupBtn = groupId
-    ? `<button class="btn btn-sm ceo-hide" onclick="duplicateGroupIntoJob(${groupId})" title="Create a new sub job pre-filled from this group">&#128203; New Sub Job</button>`
+    ? `<button class="btn btn-sm ceo-hide" onclick="duplicateGroupIntoJob(${groupId})" title="Open a New Job Card pre-filled from this group — nothing is saved until Create &amp; Print">&#128203; Duplicate</button>`
     : `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${latestId})" title="Duplicate the latest job in this group — new job is auto-added to the same group">&#128203; Duplicate</button>`;
   return `<div class="${containerClass}">
     ${editBtn}
@@ -15673,26 +15673,75 @@ async function deleteStockGroup(groupId) {
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
-// Duplicate FROM group — creates a new sub job with group_job_id set
-// and particulars pre-filled from the group's own client / product /
-// specs / po_qty. The new job then opens in the normal Edit modal so
-// per-sub tweaks (job name variant, deadline, packets qty, etc.) are
-// applied before saving.
-async function duplicateGroupIntoJob(groupId) {
+// Duplicate FROM group — mirrors the normal "Duplicate" job flow.
+// Opens a NEW JOB CARD modal pre-filled from the group's template.
+// Nothing is saved until the user clicks Create & Print — cancelling
+// leaves no stray sub job behind (owner rule).
+function duplicateGroupIntoJob(groupId) {
   if (!canWriteJobs()) { notify('Only Admin / Production Manager can create sub jobs.'); return; }
   const g = stockGroupById(groupId);
   if (!g) return;
-  showSaving(true);
-  try {
-    const newJob = await api('POST', `/api/stock-groups/${groupId}/duplicate-into-job`);
-    jobs.push(newJob);
-    notify(`Sub job E-${newJob.id} created from group "${g.product}"`);
-    render();
-    // Open the new job's edit modal so admin can tweak per-sub fields
-    // (deadline, packets, size overrides, etc.) before hitting save.
-    setTimeout(() => { try { openEdit(newJob.id); } catch {} }, 60);
-  } catch (e) { notify('Error: ' + e.message); }
-  showSaving(false);
+  const tpl = (g.template && typeof g.template === 'object') ? g.template : {};
+  const specs = g.specs || {};
+  const today = localDateISO();
+  const seedParts = (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {};
+  const template = {
+    // No id → jobForm treats this as a brand-new job; save fires POST /api/jobs
+    id: undefined,
+    name: tpl.name || g.product || '',
+    client: tpl.client || g.client || '',
+    jobcode: tpl.jobcode || g.jobcode || '',
+    ref: '',                 // PO No. — different each order
+    bno: '',                 // Batch No. — different each order
+    dateissued: today,       // today, not the seed's date
+    deadline: '',            // fresh per sub job
+    qty: tpl.qty || g.po_qty || '',
+    size: tpl.size || specs.size || '',
+    ups: tpl.ups || '',
+    sheets: tpl.sheets || '',
+    paper: tpl.paper || specs.paper || '',
+    machine: tpl.machine || '',
+    cartonqty: tpl.cartonqty || '',
+    priority: tpl.priority || 'Normal',
+    mfgdate: tpl.mfgdate || '',
+    expdate: tpl.expdate || '',
+    mrp: tpl.mrp || '',
+    notes: '',               // per-sub notes only
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings.slice() : [],
+    inventory_item_id: tpl.inventory_item_id || null,
+    cut_size: tpl.cut_size || null,
+    offcut_size: tpl.offcut_size || null,
+    is_shade_card: !!tpl.is_shade_card,
+    // client_visible follows the group's visibility so the sub inherits.
+    client_visible: !!g.client_visible,
+    particulars: {
+      cutting_size_gsm: seedParts.cutting_size_gsm || '',
+      quantity_of_packets: seedParts.quantity_of_packets || '',
+      sheet_cut: seedParts.sheet_cut || '1/1',
+      artworks_matter_approval: seedParts.artworks_matter_approval || {},
+      shade_card: seedParts.shade_card || {},
+      plates: seedParts.plates || {},
+      no_of_colors: seedParts.no_of_colors || {},
+      special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
+      secondary_paper: seedParts.secondary_paper || null,
+    },
+    // Not read by jobForm — carried through so getFormData picks it up
+    // via the hidden #f-group-job-id input we render below.
+    group_job_id: groupId,
+  };
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+    <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">&middot; duplicating from group "${esc(g.product || '')}"</span></h2>
+    <input type="hidden" id="f-group-job-id" value="${groupId}">
+    ${jobForm(template)}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
+    </div>
+  </div>`);
+  updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
+  renderCutPreview();
+  if (typeof initSpecialsEditor === 'function') initSpecialsEditor();
 }
 // Open a fresh Create Group modal with empty fields.
 function openGroupCreate() {
@@ -16241,6 +16290,14 @@ function getFormData() {
     offcut_size: sendCut ? computedOffcut : null,
     is_shade_card: !!(document.getElementById('f-is-shade-card') || {}).checked,
     client_visible: !!(document.getElementById('f-client-visible') || {}).checked,
+    // Group link — populated by duplicateGroupIntoJob when opening the
+    // duplicate modal from a group tile. Server attaches the new sub
+    // job to that group + stamps stock_group_name from group.product.
+    group_job_id: (() => {
+      const el = document.getElementById('f-group-job-id');
+      const v = el ? parseInt(el.value, 10) : NaN;
+      return Number.isFinite(v) && v > 0 ? v : null;
+    })(),
   };
 }
 
