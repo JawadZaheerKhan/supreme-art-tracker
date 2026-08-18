@@ -1884,7 +1884,7 @@
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
-    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group is named after it">
+    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
       &#128230; Create Job Group
     </button>
     <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group">
@@ -2528,6 +2528,18 @@ const PARTICULARS_ROWS = [
 
 let jobs = [];
 let inventory = [];          // cached inventory items (refreshed on load + after mutations)
+let stockGroups = [];        // cached stock groups entity (client/product/po_qty template shared across sub jobs)
+// Helper: look up a group entity by id — returns undefined if not
+// loaded yet (safe to fall back to the sub job's own fields in that
+// case; loadStockGroups populates asynchronously on app boot).
+function stockGroupById(id) {
+  if (!id) return null;
+  return (stockGroups || []).find(g => g && g.id === id) || null;
+}
+async function loadStockGroups() {
+  try { stockGroups = await api('GET', '/api/stock-groups'); }
+  catch (e) { console.error('loadStockGroups failed:', e.message); stockGroups = []; }
+}
 let mode = 'jobs';           // 'jobs' or 'inventory' — drives top-level view
 let view = 'active';
 // Jobs view layout: 'cards' (animated grid, default) or 'compact' (dense list).
@@ -3348,7 +3360,14 @@ async function logout() {
 
 async function loadJobs() {
   try {
-    jobs = await api('GET', '/api/jobs');
+    // Fetch jobs and stock groups in parallel — group entity data
+    // (client / product / po_qty) drives group-tile rendering and is
+    // independent of any single member, so we always want both fresh.
+    const [jobsRes] = await Promise.all([
+      api('GET', '/api/jobs'),
+      loadStockGroups(),
+    ]);
+    jobs = jobsRes;
     render();
   } catch(e) {
     notify('Error loading jobs: ' + e.message);
@@ -15411,12 +15430,22 @@ function groupBadgesHtml(groupName, stats) {
 // containerClass matches what the underlying renderer uses:
 //   compact row  →  "job-actions"
 //   card / Track →  "tile-actions"
-function groupActionsHtml(groupName, reprId, latestId, count, hasReady, containerClass) {
+function groupActionsHtml(groupName, reprId, latestId, count, hasReady, containerClass, groupId) {
   const gName = jsStr(groupName);
+  // Prefer the group-entity Edit + Duplicate flow (per owner: dedicated
+  // group edit page, duplicate from group into new sub job). Fall back
+  // to the legacy per-member Edit / duplicate when the group hasn't
+  // been migrated to an entity yet (groupId undefined).
+  const editBtn = groupId
+    ? `<button class="btn btn-sm btn-primary ceo-hide" onclick="openGroupEdit(${groupId})" title="Edit the group template (client / product / specs / PO qty)">Edit Group</button>`
+    : `<button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>`;
+  const dupBtn = groupId
+    ? `<button class="btn btn-sm ceo-hide" onclick="duplicateGroupIntoJob(${groupId})" title="Open a New Job Card pre-filled from this group — nothing is saved until Create &amp; Print">&#128203; Duplicate</button>`
+    : `<button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${latestId})" title="Duplicate the latest job in this group — new job is auto-added to the same group">&#128203; Duplicate</button>`;
   return `<div class="${containerClass}">
-    <button class="btn btn-sm btn-primary" onclick="openEdit(${reprId})" title="Open the current representative job">Edit / View</button>
+    ${editBtn}
     <button class="btn btn-sm" onclick="openGroupJobsModal(${gName})" title="See every job in this group" style="background:#111;color:#fff;border-color:#111;">&#128194; View Jobs (${count})</button>
-    <button class="btn btn-sm ceo-hide" onclick="createNextJobInGroup(${gName},${latestId})" title="Duplicate the latest job in this group — new job is auto-added to the same group">&#128203; Duplicate</button>
+    ${dupBtn}
   </div>`;
 }
 
@@ -15443,7 +15472,11 @@ function renderGroupTile(groupName, groupJobs) {
   const repr = groupRepresentative(groupJobs);
   const badges = groupBadgesHtml(groupName, stats);
   const latestId = Math.max(...groupJobs.map(j => j.id));
-  const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'tile-actions');
+  // Look up the group entity via any member's group_job_id so the
+  // Edit / New-Sub-Job buttons route to the group-entity flow when
+  // available; falls back to legacy per-member Edit otherwise.
+  const groupId = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
+  const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'tile-actions', groupId);
   const recordDelivery = groupRecordDeliveryHtml(groupName);
   let html = renderJobCard(repr)
     // .tile-head content is a flat sequence of spans / small labels — no
@@ -15477,7 +15510,8 @@ function renderGroupTileCompact(groupName, groupJobs) {
   const repr = groupRepresentative(groupJobs);
   const badges = groupBadgesHtml(groupName, stats);
   const latestId = Math.max(...groupJobs.map(j => j.id));
-  const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'job-actions');
+  const groupId = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
+  const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'job-actions', groupId);
   const recordDelivery = groupRecordDeliveryHtml(groupName);
   let html = renderJobRowCompact(repr)
     // .job-id-row content is flat spans only.
@@ -15503,6 +15537,305 @@ function renderGroupTileCompact(groupName, groupJobs) {
     html = html.slice(0, pipelineRowEnd) + groupDelivBtn + html.slice(pipelineRowEnd);
   }
   return html;
+}
+
+// ── Group entity (stock_groups) — dedicated edit + duplicate flow ─────
+// The group is a first-class row with its OWN client / product / specs
+// / po_qty, independent of any sub job. Editing the group updates
+// only the group row — existing sub jobs keep whatever they have.
+// Duplicate-into-job seeds a new sub job pre-filled from the group.
+function openGroupEdit(groupId) {
+  if (!canWriteJobs()) { notify('Only Admin / Production Manager can edit groups.'); return; }
+  const g = stockGroupById(groupId);
+  if (!g) {
+    // Bug 5 fix — group is missing from the loaded list (deleted, or
+    // never fully loaded). Fall back to the legacy per-member Edit
+    // via the oldest sub job so the button still does something
+    // useful instead of dead-ending on a scary error toast.
+    const anySub = (jobs || []).find(j => j && j.group_job_id === groupId && !j.deleted_at);
+    if (anySub) {
+      notify('Group entity not available — opening a sub job instead.');
+      try { openEdit(anySub.id); } catch { notify('Could not open sub job.'); }
+      return;
+    }
+    notify('Group not loaded — refresh and try again.');
+    return;
+  }
+  // Build a synthetic job-shaped object from the group's template so
+  // jobForm renders the exact same layout the seed job had. The form
+  // hydrates from this — save reads back via getFormData() and posts
+  // the whole shape back into the group's template.
+  const tpl = (g.template && typeof g.template === 'object') ? g.template : {};
+  const specs = g.specs || {};
+  const synthetic = {
+    id: null,   // no job id → jobForm treats this as new, hides per-job runtime bits
+    name: tpl.name || g.product || '',
+    client: tpl.client || g.client || '',
+    jobcode: tpl.jobcode || g.jobcode || '',
+    ref: tpl.ref || '',
+    bno: tpl.bno || '',
+    qty: tpl.qty || g.po_qty || '',
+    size: tpl.size || specs.size || '',
+    ups: tpl.ups || '',
+    sheets: tpl.sheets || '',
+    paper: tpl.paper || specs.paper || '',
+    machine: tpl.machine || '',
+    cartonqty: tpl.cartonqty || '',
+    priority: tpl.priority || 'Normal',
+    mfgdate: tpl.mfgdate || '',
+    expdate: tpl.expdate || '',
+    mrp: tpl.mrp || '',
+    notes: tpl.notes || '',
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings : [],
+    inventory_item_id: tpl.inventory_item_id || null,
+    cut_size: tpl.cut_size || null,
+    offcut_size: tpl.offcut_size || null,
+    is_shade_card: !!tpl.is_shade_card,
+    client_visible: !!g.client_visible,
+    particulars: (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {},
+  };
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+    <h2 style="text-align:center;letter-spacing:1px;">GROUP JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">&middot; ${esc(g.product || '')}</span></h2>
+    <div style="text-align:center;font-size:12px;color:var(--text2);margin:-6px 0 10px;">Editing the group template only — existing sub jobs keep their current values.</div>
+    ${jobForm(synthetic)}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      ${isAdmin() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
+      <button class="btn btn-primary" onclick="saveGroupEdit(${groupId})">Save Group</button>
+    </div>
+  </div>`);
+  // Same post-open hooks the job Edit modal uses so the paper picker,
+  // cut preview, and specials editor all wire up correctly.
+  updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
+  renderCutPreview();
+  if (typeof initSpecialsEditor === 'function') initSpecialsEditor();
+}
+async function saveGroupEdit(groupId) {
+  const data = getFormData();
+  if (!data.name) { await alertDialog({ title: 'Product name is required', kind: 'warn' }); return; }
+  // Peel the shape jobForm returns into the group's canonical fields
+  // + a template mirror so duplicate-into-job can spread it verbatim
+  // into every new sub job.
+  const parts = (data.particulars && typeof data.particulars === 'object') ? data.particulars : {};
+  const body = {
+    product: data.name,
+    client: data.client,
+    jobcode: data.jobcode || null,
+    po_qty:  data.qty || null,
+    specs: {
+      size: data.size || null,
+      gsm:  parts.cutting_size_gsm || null,
+      paper: data.paper || null,
+    },
+    template: {
+      name: data.name, client: data.client, jobcode: data.jobcode || null,
+      ref: data.ref || null, bno: data.bno || null,
+      qty: data.qty || null, size: data.size || null, ups: data.ups || null,
+      sheets: data.sheets || null, paper: data.paper || null,
+      machine: data.machine || null, cartonqty: data.cartonqty || null,
+      priority: data.priority || 'Normal',
+      mfgdate: data.mfgdate || null, expdate: data.expdate || null,
+      mrp: data.mrp || null, notes: data.notes || null,
+      coatings: Array.isArray(data.coatings) ? data.coatings : [],
+      inventory_item_id: data.inventory_item_id || null,
+      cut_size: data.cut_size || null, offcut_size: data.offcut_size || null,
+      is_shade_card: !!data.is_shade_card,
+      particulars: {
+        cutting_size_gsm: parts.cutting_size_gsm || '',
+        quantity_of_packets: parts.quantity_of_packets || '',
+        sheet_cut: parts.sheet_cut || '1/1',
+        artworks_matter_approval: parts.artworks_matter_approval || {},
+        shade_card: parts.shade_card || {},
+        plates: parts.plates || {},
+        no_of_colors: parts.no_of_colors || {},
+        special_colors: Array.isArray(parts.special_colors) ? parts.special_colors : [],
+        secondary_paper: parts.secondary_paper || null,
+      },
+    },
+    client_visible: !!data.client_visible,
+  };
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/stock-groups/${groupId}`, body);
+    const idx = stockGroups.findIndex(g => g && g.id === updated.id);
+    if (idx >= 0) stockGroups[idx] = updated; else stockGroups.push(updated);
+    closeModal();
+    notify('Group saved');
+    render();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function deleteStockGroup(groupId) {
+  const g = stockGroupById(groupId);
+  if (!g) return;
+  // Owner rule: group only deletable when empty. Pre-flight the sub-
+  // job count locally so we can bail with a friendly message before
+  // hitting the server (which enforces the same rule).
+  const activeMembers = (jobs || []).filter(j => j && j.group_job_id === groupId && !j.deleted_at);
+  if (activeMembers.length > 0) {
+    await alertDialog({
+      title: `Can't delete group "${g.product}"`,
+      message: `It still has ${activeMembers.length} sub job${activeMembers.length === 1 ? '' : 's'}. Delete or unlink every sub job first, then try again.`,
+      kind: 'warn',
+    });
+    return;
+  }
+  const ok = await confirmDialog({
+    title: `Delete group "${g.product}"?`,
+    message: `This empty group will be permanently removed from the list.`,
+    danger: true,
+    confirmText: 'Delete Group',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/stock-groups/${groupId}`);
+    stockGroups = stockGroups.filter(g => g && g.id !== groupId);
+    closeModal();
+    notify('Group deleted');
+    render();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Duplicate FROM group — mirrors the normal "Duplicate" job flow.
+// Opens a NEW JOB CARD modal pre-filled from the group's template.
+// Nothing is saved until the user clicks Create & Print — cancelling
+// leaves no stray sub job behind (owner rule).
+function duplicateGroupIntoJob(groupId) {
+  if (!canWriteJobs()) { notify('Only Admin / Production Manager can create sub jobs.'); return; }
+  const g = stockGroupById(groupId);
+  if (!g) return;
+  const tpl = (g.template && typeof g.template === 'object') ? g.template : {};
+  const specs = g.specs || {};
+  const today = localDateISO();
+  const seedParts = (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {};
+  const template = {
+    // No id → jobForm treats this as a brand-new job; save fires POST /api/jobs
+    id: undefined,
+    name: tpl.name || g.product || '',
+    client: tpl.client || g.client || '',
+    jobcode: tpl.jobcode || g.jobcode || '',
+    ref: '',                 // PO No. — different each order
+    bno: '',                 // Batch No. — different each order
+    dateissued: today,       // today, not the seed's date
+    deadline: '',            // fresh per sub job
+    qty: tpl.qty || g.po_qty || '',
+    size: tpl.size || specs.size || '',
+    ups: tpl.ups || '',
+    sheets: tpl.sheets || '',
+    paper: tpl.paper || specs.paper || '',
+    machine: tpl.machine || '',
+    cartonqty: tpl.cartonqty || '',
+    priority: tpl.priority || 'Normal',
+    mfgdate: tpl.mfgdate || '',
+    expdate: tpl.expdate || '',
+    mrp: tpl.mrp || '',
+    notes: '',               // per-sub notes only
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings.slice() : [],
+    inventory_item_id: tpl.inventory_item_id || null,
+    cut_size: tpl.cut_size || null,
+    offcut_size: tpl.offcut_size || null,
+    is_shade_card: !!tpl.is_shade_card,
+    // client_visible follows the group's visibility so the sub inherits.
+    client_visible: !!g.client_visible,
+    particulars: {
+      cutting_size_gsm: seedParts.cutting_size_gsm || '',
+      quantity_of_packets: seedParts.quantity_of_packets || '',
+      sheet_cut: seedParts.sheet_cut || '1/1',
+      artworks_matter_approval: seedParts.artworks_matter_approval || {},
+      shade_card: seedParts.shade_card || {},
+      plates: seedParts.plates || {},
+      no_of_colors: seedParts.no_of_colors || {},
+      special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
+      secondary_paper: seedParts.secondary_paper || null,
+    },
+    // Not read by jobForm — carried through so getFormData picks it up
+    // via the hidden #f-group-job-id input we render below.
+    group_job_id: groupId,
+  };
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+    <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">&middot; duplicating from group "${esc(g.product || '')}"</span></h2>
+    <input type="hidden" id="f-group-job-id" value="${groupId}">
+    ${jobForm(template)}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
+    </div>
+  </div>`);
+  updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
+  renderCutPreview();
+  if (typeof initSpecialsEditor === 'function') initSpecialsEditor();
+}
+// Open a fresh Create Group modal with empty fields.
+function openGroupCreate() {
+  if (!canWriteJobs()) { notify('Only Admin / Production Manager can create groups.'); return; }
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>New Group</h2>
+    <div style="font-size:12px;color:var(--text2);margin:-4px 0 12px;">
+      A group is a shared template for repeat orders of the same product. Sub jobs are created by clicking Duplicate on the group tile.
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Product Name *</label>
+        <input type="text" id="g-product" placeholder="e.g. mobicam inj 20mg 5-s">
+      </div>
+      <div class="form-group"><label class="form-label">Client / Company</label>
+        <input type="text" id="g-client" placeholder="e.g. global pharma">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Code (jobcode)</label>
+        <input type="text" id="g-jobcode" placeholder="e.g. 0531-101">
+      </div>
+      <div class="form-group"><label class="form-label">PO Qty (standing quantity to hold)</label>
+        <input type="text" id="g-po-qty" placeholder="e.g. 20000">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Size</label>
+        <input type="text" id="g-size" placeholder="e.g. 20x30">
+      </div>
+      <div class="form-group"><label class="form-label">GSM</label>
+        <input type="text" id="g-gsm" placeholder="e.g. 210">
+      </div>
+      <div class="form-group"><label class="form-label">Paper Type</label>
+        <input type="text" id="g-paper" placeholder="e.g. bleach board">
+      </div>
+    </div>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;margin-top:4px;">
+      <input type="checkbox" id="g-client-visible" style="width:14px;height:14px;">
+      Show group to client
+    </label>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveGroupCreate()">Create Group</button>
+    </div>
+  </div>`);
+}
+async function saveGroupCreate() {
+  const body = {
+    product: (document.getElementById('g-product')||{}).value?.trim() || '',
+    client:  (document.getElementById('g-client')||{}).value?.trim() || '',
+    jobcode: (document.getElementById('g-jobcode')||{}).value?.trim() || '',
+    po_qty:  (document.getElementById('g-po-qty')||{}).value?.trim() || '',
+    specs: {
+      size:  (document.getElementById('g-size')||{}).value?.trim() || '',
+      gsm:   (document.getElementById('g-gsm')||{}).value?.trim() || '',
+      paper: (document.getElementById('g-paper')||{}).value?.trim() || '',
+    },
+    client_visible: !!(document.getElementById('g-client-visible')||{}).checked,
+  };
+  if (!body.product) { await alertDialog({ title: 'Product name is required', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    const created = await api('POST', '/api/stock-groups', body);
+    stockGroups.push(created);
+    closeModal();
+    notify(`Group "${created.product}" created`);
+    render();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 
 // ── View All Jobs modal ───────────────────────────────────────────────
@@ -15678,17 +16011,19 @@ async function confirmCreateGroupPicker() {
   if (!jobId) { notify('Pick a job to seed the group'); return; }
   const seed = jobs.find(x => x.id === jobId);
   if (!seed) { notify('Seed job not found'); return; }
-  // Auto-name after the seed job. Include the job code to disambiguate
-  // when two jobs share a product name but are different SKUs.
-  const baseName = String(seed.name || '').trim() || `Job E-${jobId}`;
-  const name = seed.jobcode ? `${baseName} (${seed.jobcode})` : baseName;
   showSaving(true);
   try {
-    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: name });
-    const ix = jobs.findIndex(x => x.id === jobId);
-    if (ix >= 0) jobs[ix] = updated;
-    closeModal(); render();
-    notify(`Group "${name}" created with E-${jobId}`);
+    // Server creates a stock_groups entity with client / product /
+    // po_qty / jobcode / specs / template all COPIED from the seed
+    // job, and links the seed job to the new group. Every job-card
+    // field lives on the group's template so Edit Group can render
+    // an identical form.
+    const created = await api('POST', '/api/stock-groups', { seed_job_id: jobId });
+    stockGroups.push(created);
+    // Reload the seed job (its group_job_id + stock_group_name are
+    // now set on the server) so the tile immediately reads as grouped.
+    await loadJobs();
+    closeModal(); notify(`Group "${created.product}" created from E-${jobId}`);
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -15980,6 +16315,14 @@ function getFormData() {
     offcut_size: sendCut ? computedOffcut : null,
     is_shade_card: !!(document.getElementById('f-is-shade-card') || {}).checked,
     client_visible: !!(document.getElementById('f-client-visible') || {}).checked,
+    // Group link — populated by duplicateGroupIntoJob when opening the
+    // duplicate modal from a group tile. Server attaches the new sub
+    // job to that group + stamps stock_group_name from group.product.
+    group_job_id: (() => {
+      const el = document.getElementById('f-group-job-id');
+      const v = el ? parseInt(el.value, 10) : NaN;
+      return Number.isFinite(v) && v > 0 ? v : null;
+    })(),
   };
 }
 
@@ -16731,8 +17074,17 @@ function openDuplicateJob(id) {
     coatings:       Array.isArray(source.coatings) ? [...source.coatings] : [],
   };
 
+  // Bug 6 fix — if the source sub job belongs to a group entity,
+  // carry group_job_id onto the new sub via a hidden input so
+  // getFormData() → POST /api/jobs stamps the same group link. Sub
+  // jobs duplicated from another sub of the same group now show up
+  // under the group tile automatically.
+  const groupJobIdInput = source.group_job_id
+    ? `<input type="hidden" id="f-group-job-id" value="${source.group_job_id}">`
+    : '';
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">· duplicating E-${source.id}${source.jobcode ? ' (' + esc(source.jobcode) + ')' : ''}</span></h2>
+    ${groupJobIdInput}
     ${jobForm(template)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -20459,7 +20811,20 @@ function renderClientSummary(rows, containerId) {
     for (const [gName, gJobs] of groupedByName) {
       const stats = groupStats(gJobs);
       const repr  = groupRepresentative(gJobs);
-      const poQty = gJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.\-]/g,''))||0), 0);
+      // Prefer the group entity's OWN po_qty when available (it's the
+      // "standing quantity to hold" set on the group itself, never
+      // summed from sub jobs). Falls back to the SUM across members
+      // for jobs whose group hasn't been migrated to an entity yet.
+      const groupId  = (gJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
+      const groupEnt = groupId ? stockGroupById(groupId) : null;
+      const groupPoQtyOwn = groupEnt && groupEnt.po_qty != null
+        ? (parseFloat(String(groupEnt.po_qty).replace(/[^0-9.\-]/g,'')) || 0)
+        : null;
+      const poQty = groupPoQtyOwn != null
+        ? groupPoQtyOwn
+        : gJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.\-]/g,''))||0), 0);
+      const product = (groupEnt && groupEnt.product) || gName;
+      const codeVal = (groupEnt && groupEnt.jobcode) || (repr && repr.jobcode) || '';
       // Ready: unshipped ready + partial-ready pasted, mirroring
       // groupStats' ready-in-hand logic so the number matches the tile.
       const shipped = gJobs.reduce((s, j) => s + (totalDeliveredCartons(j) || 0), 0);
@@ -20470,8 +20835,8 @@ function renderClientSummary(rows, containerId) {
       gTotals.shipped   += shipped;
       gTotals.shipCount += shipCount;
       groupHtmlRows.push(`<tr style="border-bottom:1px solid var(--border);">
-        <td style="padding:6px 8px;font-weight:700;">${esc(gName)}</td>
-        <td style="padding:6px 8px;">${esc((repr && repr.jobcode) || '')}</td>
+        <td style="padding:6px 8px;font-weight:700;">${esc(product)}</td>
+        <td style="padding:6px 8px;">${esc(codeVal)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
         <td style="padding:6px 8px;text-align:right;font-weight:600;color:#166534;">${fmtN(ready)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(shipped)}</td>
