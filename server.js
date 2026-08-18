@@ -3679,11 +3679,30 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const secondaryIssuedSheets = isSecondary
       ? (parseInt(secondaryRef.issued_sheets, 10) || 0)
       : 0;
+    // When a fresh (non-offcut) secondary paper is configured, its
+    // packets are part of the total but are issued via its own tile.
+    // Subtract them from the primary need so a 10-packet job with 5
+    // in secondary asks the store keeper for only 5 primary packets
+    // (owner rule: total = 10 = 5 primary + 5 secondary, not 15).
+    // Offcut secondary is already in preConsumedSheets, so exclude it
+    // here to avoid double-subtracting.
+    const secondaryForPrimary = (() => {
+      const sec = (job.particulars || {}).secondary_paper;
+      if (!sec || !sec.inventory_item_id) return 0;
+      const packets = parseFloat(sec.packets);
+      if (!Number.isFinite(packets) || packets <= 0) return 0;
+      // If secondary is already accounted for in offcut_pre_consumed,
+      // don't subtract again.
+      const inPreConsumed = preConsumed && Array.isArray(preConsumed.items)
+        && preConsumed.items.some(it => it && it.item_id === sec.inventory_item_id);
+      if (inPreConsumed) return 0;
+      return Math.round(packets * ps);
+    })();
     const needSheets = isSecondary
       ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
       : (partialPending > 0
           ? partialPending
-          : Math.max(0, totalNeedSheets - preConsumedSheets));
+          : Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary));
     if (needSheets <= 0) {
       // Full coverage but the job somehow stayed in Pending Stock (edge
       // case where the CTP-forward path didn't flip status — e.g. a job
