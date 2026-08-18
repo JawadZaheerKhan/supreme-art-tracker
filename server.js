@@ -3562,7 +3562,17 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    if (job.issuance_status === 'issued') {
+    // Allow further issuance on a partial-issued job (status is 'issued'
+    // but partial_pending_sheets > 0 means the store keeper still owes
+    // some sheets). Reject only when the job is fully issued (no
+    // partial marker). Without this exemption a Top-up via Remove
+    // Stock → Job Card kept failing with "Stock already issued".
+    const partialPendingRaw = parseInt(
+      (job.particulars || {}).partial_pending_sheets, 10
+    );
+    const partialPending = Number.isFinite(partialPendingRaw) && partialPendingRaw > 0
+      ? partialPendingRaw : 0;
+    if (job.issuance_status === 'issued' && partialPending <= 0) {
       return res.status(400).json({ error: 'Stock already issued for this job' });
     }
     if (!job.inventory_item_id) {
@@ -3590,7 +3600,16 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const preConsumed = (job.particulars && job.particulars.offcut_pre_consumed) || null;
     const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
       ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
-    const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
+    // A partial-issued job carries its remaining fresh need on
+    // partial_pending_sheets — that's the SOURCE OF TRUTH for how much
+    // is still owed (prior issue-stock calls already subtracted their
+    // share). Without this, a top-up would treat needSheets as the
+    // FULL need minus offcut, ignoring what was already issued, and
+    // over-issue math would fire on any top-up that alone exceeded the
+    // original need.
+    const needSheets = partialPending > 0
+      ? partialPending
+      : Math.max(0, totalNeedSheets - preConsumedSheets);
     if (needSheets <= 0) {
       // Full coverage but the job somehow stayed in Pending Stock (edge
       // case where the CTP-forward path didn't flip status — e.g. a job

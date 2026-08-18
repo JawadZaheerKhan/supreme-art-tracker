@@ -6324,7 +6324,12 @@ function stockOutLoadPendingChips(itemId) {
   wrap.innerHTML = '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px;">Select pending job(s):</div><div id="stockout-chips" style="display:flex;flex-wrap:wrap;gap:6px;">' +
     candidates.map(j => {
       const need = jobDeductionSheetsClient(j);
-      const needPkts = Math.ceil(need / ps);
+      // Fractional-preserving packet display — Math.ceil was rounding
+      // a 1.5-packet partial-issued remainder up to 2 in the chip and
+      // tooltip, which mismatched the "1.5 packets needed" callout on
+      // the tile. Now shows 1.5 as 1.5 and any integer as an integer.
+      const needPktsRaw = ps ? (need / ps) : 0;
+      const needPkts = Number.isInteger(needPktsRaw) ? needPktsRaw : +needPktsRaw.toFixed(2);
       return `<button type="button" class="jobchip" data-jobid="${j.id}" data-need="${need}"
         onclick="stockOutToggleChip(this, ${ps})"
         title="E-${j.id} · ${needPkts} ${unit} needed"
