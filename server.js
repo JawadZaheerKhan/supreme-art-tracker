@@ -2748,6 +2748,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
       // PO number, which is what the client actually recognises.
       linked_job_id: j.linked_job_id || null,
       stock_group_name: j.stock_group_name || null,
+      group_job_id: j.group_job_id || null,
       // Per-shipment breakdown for the client tile. Operator identity is
       // stripped (clients don't need to see who recorded it) but cartons,
       // date, and any notes ride through so the client sees the same
