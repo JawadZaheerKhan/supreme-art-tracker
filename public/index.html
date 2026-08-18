@@ -7972,7 +7972,7 @@ function buildSummaryBuckets(from, to, granularity) {
 //   both     — one row per (brand, supplier) combination — both columns visible
 //   ignore   — collapse to paper/size/gsm/fresh-offcut only, NO brand/supplier columns
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
-let invReportState = { groupBy: 'brand', paperType: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {} };
+let invReportState = { groupBy: 'brand', paperType: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
@@ -8038,6 +8038,20 @@ function openInventoryReport() {
     <div id="ir-content"></div>
   `;
   renderInventoryReport();
+  loadIRPendingImports();
+}
+// Pending imports so the report can flag "this item has stock on the way"
+// in its own Import column. Fetched once per report open, independent of
+// the low-stock consumption fetch.
+async function loadIRPendingImports() {
+  try {
+    const imports = await api('GET', '/api/imports?status=pending');
+    invReportState.pendingImports = imports || [];
+  } catch (e) {
+    console.error('IR pending imports fetch failed:', e);
+    invReportState.pendingImports = [];
+  }
+  renderInventoryReport();
 }
 function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
 function setIRPaperType(v)       { invReportState.paperType = v;      renderInventoryReport(); }
@@ -8086,7 +8100,7 @@ async function refreshIRActiveItemIds() {
 // implied by groupBy. is_offcut is always part of the key — fresh and
 // offcut of the same dimensions stay separate so users can see them apart.
 function buildInventoryReportRows() {
-  const { groupBy, paperType, includeOffcuts, _activeItemIds, stockLevel, consumption } = invReportState;
+  const { groupBy, paperType, includeOffcuts, _activeItemIds, stockLevel, consumption, pendingImports } = invReportState;
   let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
   if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
   // Date range narrows to items with at least one movement in [from, to].
@@ -8109,17 +8123,46 @@ function buildInventoryReportRows() {
   const groups = new Map();
   for (const i of items) {
     const k = keyOf(i);
-    if (!groups.has(k)) groups.set(k, { rep: i, totalSheets: 0, consumedSheets: 0, itemCount: 0, brands: new Set(), suppliers: new Set() });
+    if (!groups.has(k)) groups.set(k, { rep: i, totalSheets: 0, consumedSheets: 0, itemCount: 0, brands: new Set(), suppliers: new Set(), itemIds: [] });
     const g = groups.get(k);
     g.totalSheets += (i.current_balance || 0);
     g.consumedSheets += (consumption[i.id] || 0);
     g.itemCount++;
+    g.itemIds.push(i.id);
     if (i.brand)    g.brands.add(i.brand);
     if (i.supplier) g.suppliers.add(i.supplier);
   }
+  // Match each group against the pending-imports list so the report can
+  // flag "this item has stock on the way" without the user having to
+  // cross-check the Imports page separately. Prefer the server-stored
+  // inventory_item_id link; fall back to a normalized paper/size/gsm(/brand)
+  // match for legacy imports that predate that link.
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const claimedImportIds = new Set();
+  const matchImportsForGroup = (g) => {
+    return (pendingImports || []).filter(im => {
+      if (claimedImportIds.has(im.id)) return false;
+      let hit;
+      if (im.inventory_item_id != null) {
+        hit = g.itemIds.includes(im.inventory_item_id);
+      } else {
+        const brandOk = (groupBy === 'brand' || groupBy === 'both')
+          ? [...g.brands].some(b => norm(b) === norm(im.brand))
+          : true;
+        hit = norm(im.paper_type) === norm(g.rep.paper_type)
+           && norm(im.size)  === norm(g.rep.size)
+           && norm(im.gsm)   === norm(g.rep.gsm)
+           && brandOk;
+      }
+      if (hit) claimedImportIds.add(im.id);
+      return hit;
+    });
+  };
   const rows = [...groups.values()].map(g => {
     const ps = packetSize(g.rep.paper_type);
     const wPerPack = packWeightKg(g.rep.paper_type, g.rep.size, g.rep.gsm);
+    const matchedImports = matchImportsForGroup(g);
+    const importPkts = matchedImports.reduce((a, im) => a + (parseFloat(im.packets || 0) || 0), 0);
     // Items count == 1 per group (one logical paper). Multiple brand
     // variants of the same paper/size/gsm/fresh-offcut are not separate
     // items — they're a single item with several brands. The Brands
@@ -8140,6 +8183,7 @@ function buildInventoryReportRows() {
       weightKg:   wPerPack === null ? null : (g.totalSheets / ps) * wPerPack,
       unit:       packetUnitLabel(g.rep.paper_type),
       consumedPkts: g.consumedSheets / ps,
+      importPkts,
     };
   });
   // Sort: paper type → gsm (numeric) → size (numeric) → fresh-before-offcut → brand/supplier.
@@ -8192,9 +8236,15 @@ function renderInventoryReport() {
   const brandHead    = showBrand    ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand</th>'    : '';
   const supplierHead = showSupplier ? '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Supplier</th>' : '';
   const consumedHead = showConsumed ? `<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed (${esc(periodLabel)})</th>` : '';
+  const importHead   = `<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Import</th>`;
   const brandCell    = (r) => showBrand    ? `<td style="padding:6px 8px;">${esc(r.brand)    || '—'}</td>` : '';
   const supplierCell = (r) => showSupplier ? `<td style="padding:6px 8px;">${esc(r.supplier) || '—'}</td>` : '';
   const consumedCell = (r) => showConsumed ? `<td style="padding:6px 8px;text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(r.consumedPkts)}</td>` : '';
+  // On the way — pending imports matched to this item, so the store keeper
+  // sees "already ordered" without cross-checking the Imports page.
+  const importCell   = (r) => r.importPkts
+    ? `<td style="padding:6px 8px;text-align:right;color:#0C447C;font-weight:600;" title="Pending import — not yet received">${fmtPkts(r.importPkts)}</td>`
+    : `<td style="padding:6px 8px;text-align:right;color:var(--text3);">—</td>`;
   const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
   el.innerHTML = `
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">
@@ -8214,6 +8264,7 @@ function renderInventoryReport() {
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Sheets</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Weight (kg)</th>
           ${consumedHead}
+          ${importHead}
         </tr>
       </thead>
       <tbody>
@@ -8232,6 +8283,7 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
             <td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>
             ${consumedCell(r)}
+            ${importCell(r)}
           </tr>`;
         }).join('')}
       </tbody>
@@ -8243,6 +8295,7 @@ function renderInventoryReport() {
           <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
           <td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>
           ${showConsumed ? `<td style="padding:8px;text-align:right;color:#A32D2D;">${fmtPkts(rows.reduce((a,r) => a + r.consumedPkts, 0))}</td>` : ''}
+          <td style="padding:8px;text-align:right;color:#0C447C;">${fmtPkts(rows.reduce((a,r) => a + r.importPkts, 0))}</td>
         </tr>
       </tfoot>
     </table>`;
@@ -8255,12 +8308,15 @@ async function exportInventoryReport() {
   const { groupBy } = invReportState;
   const showBrand    = groupBy === 'brand'    || groupBy === 'both';
   const showSupplier = groupBy === 'supplier' || groupBy === 'both';
+  const showConsumed = invReportState.stockLevel === 'low' || invReportState.stockLevel === 'lowAll';
   // Build header matching the on-screen columns. Both / neither / one —
   // whatever the grouping surfaces on screen goes into the export too.
   const header = ['Paper Type', 'Size', 'GSM', 'Fresh / Offcut'];
   if (showBrand)    header.push('Brand');
   if (showSupplier) header.push('Supplier');
   header.push('Items', 'Packets / Reams', 'Sheets', 'Weight (kg)');
+  if (showConsumed) header.push('Consumed');
+  header.push('Import (pending)');
   const aoa = [header];
   for (const r of rows) {
     const row = [r.paperType, r.size, r.gsm, r.isOffcut ? 'Offcut' : 'Fresh'];
@@ -8268,6 +8324,8 @@ async function exportInventoryReport() {
     if (showSupplier) row.push(r.supplier || '');
     row.push(r.itemCount, +(r.packets.toFixed(2)), r.sheets,
              r.weightKg === null ? '' : +r.weightKg.toFixed(2));
+    if (showConsumed) row.push(+(r.consumedPkts.toFixed(2)));
+    row.push(+(r.importPkts.toFixed(2)));
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -8293,6 +8351,8 @@ function printInventoryReport() {
   const { groupBy, paperType, includeOffcuts } = invReportState;
   const showBrand    = groupBy === 'brand'    || groupBy === 'both';
   const showSupplier = groupBy === 'supplier' || groupBy === 'both';
+  const showConsumed = invReportState.stockLevel === 'low' || invReportState.stockLevel === 'lowAll';
+  const periodLabel  = { 7:'week', 30:'month', 90:'3 months', 180:'6 months', 365:'year' }[invReportState.lowPeriod] || 'period';
   const modeLabel = showBrand && showSupplier ? 'By Brand & Supplier'
                   : showBrand                 ? 'By Brand'
                   : showSupplier              ? 'By Supplier'
@@ -8303,16 +8363,29 @@ function printInventoryReport() {
   const tableRows = rows.map(r => {
     const brandTd    = showBrand    ? `<td ${tdL}>${esc(r.brand    || '—')}</td>` : '';
     const supplierTd = showSupplier ? `<td ${tdL}>${esc(r.supplier || '—')}</td>` : '';
-    return `<tr>
+    // Same shortfall flag as on-screen: consumption over the chosen period
+    // outpaces what's currently on hand. Printed with the identical red
+    // wash + red text so a paper copy carries the same warning.
+    const shortfall = showConsumed && r.consumedPkts > 0 && r.packets < r.consumedPkts;
+    const rowStyle = shortfall ? 'background:#fee2e2;' : '';
+    const consumedTd = showConsumed
+      ? `<td style="border:1px solid #000;padding:4px;text-align:right;color:#A32D2D;font-weight:bold;">${fmt(+r.consumedPkts.toFixed(2))}</td>`
+      : '';
+    const importTd = r.importPkts
+      ? `<td style="border:1px solid #000;padding:4px;text-align:right;color:#0C447C;font-weight:bold;">${fmt(+r.importPkts.toFixed(2))}</td>`
+      : `<td ${tdR}>—</td>`;
+    return `<tr style="${rowStyle}">
       <td ${tdL}>${esc(r.paperType)}</td>
       <td ${tdL}>${esc(r.size || '—')}</td>
       <td ${tdL}>${esc(r.gsm || '—')}</td>
-      <td ${tdL}>${r.isOffcut ? 'Offcut' : 'Fresh'}</td>
+      <td ${tdL}>${r.isOffcut ? '<span style="color:#A32D2D;font-weight:bold;">Offcut</span>' : 'Fresh'}</td>
       ${brandTd}${supplierTd}
       <td ${tdR}>${r.itemCount}</td>
       <td ${tdR}>${fmt(+r.packets.toFixed(2))}</td>
       <td ${tdR}>${r.sheets.toLocaleString()}</td>
       <td ${tdR}>${fmt(r.weightKg)}</td>
+      ${consumedTd}
+      ${importTd}
     </tr>`;
   }).join('');
   const html = `
@@ -8341,6 +8414,8 @@ function printInventoryReport() {
           <th ${tdR}>Packets / Reams</th>
           <th ${tdR}>Sheets</th>
           <th ${tdR}>Weight (kg)</th>
+          ${showConsumed ? `<th ${tdR}>Consumed (${esc(periodLabel)})</th>` : ''}
+          <th ${tdR}>Import</th>
         </tr>
         ${tableRows}
       </table>
@@ -8400,7 +8475,7 @@ function openStockSummary() {
         </select>
       </div>
     </div>
-    <div id="ss-content" style="font-size:12px;color:var(--text2);overflow-x:auto;">Loading…</div>
+    <div id="ss-content" style="font-size:12px;color:var(--text);overflow-x:auto;">Loading…</div>
   `;
   loadStockSummary();
 }
@@ -8702,8 +8777,8 @@ function renderStockSummary() {
     `<th>IN</th><th>OUT</th><th>Bal</th>`).join('');
   const tbody = rows.map(r => {
     const periodCells = r.periods.map(p =>
-      `<td style="text-align:right;color:#166534;">${fmtPkts(p.in)}</td>
-       <td style="text-align:right;color:#A32D2D;">${fmtPkts(p.out)}</td>
+      `<td style="text-align:right;color:#166534;font-weight:600;">${fmtPkts(p.in)}</td>
+       <td style="text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(p.out)}</td>
        <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
     return `<tr>
       <td>${esc(r.item.gsm || '—')}</td>
@@ -8714,7 +8789,7 @@ function renderStockSummary() {
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}${r.hasRecentCorr ? correctionDot(r.balDiffPkts) : ''}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
-      <td style="text-align:right;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
+      <td style="text-align:right;font-weight:600;color:#0C447C;">${fmtPkts(r.pendingImportPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.importKg)}</td>
       <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedPkts(r.requiredNextPkts)}</td>
@@ -8781,17 +8856,17 @@ function printStockSummary() {
   const tdR = 'style="border:1px solid #000;padding:3px;text-align:right;"';
   const body = rows.map(r => {
     const periodCells = r.periods.map(p =>
-      `<td ${tdR}>${fmtPkts(p.in)}</td><td ${tdR}>${fmtPkts(p.out)}</td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+      `<td style="border:1px solid #000;padding:3px;text-align:right;color:#166534;"><b>${fmtPkts(p.in)}</b></td><td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(p.out)}</b></td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
     return `<tr>
       <td ${tdL}>${esc(r.item.gsm || '—')}</td>
       <td ${tdL}>${esc(r.item.size || '—')}</td>
       <td ${tdL} style="border:1px solid #000;padding:3px;text-transform:uppercase;letter-spacing:0.03em;">${esc(r.item.brand || '—')}</td>
       <td ${tdR}>${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
-      <td ${tdR}><b>${fmtPkts(r.totalOutPkts)}</b></td>
+      <td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(r.totalOutPkts)}</b></td>
       <td ${tdR}><b>${fmtPkts(r.stockNowPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.weightKg)}</td>
-      <td ${tdR}>${fmtPkts(r.pendingImportPkts)}</td>
+      <td style="border:1px solid #000;padding:3px;text-align:right;color:#0C447C;"><b>${fmtPkts(r.pendingImportPkts)}</b></td>
       <td ${tdR}><b>${fmtPkts(r.afterImportPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
       <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};"><b>${fmtSignedPkts(r.requiredNextPkts)}</b></td>
@@ -11805,7 +11880,7 @@ function openStockMovementPane(direction) {
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetMovementFilters('${direction}')">Reset filters</button>
     </div>
     <div id="sm-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
-    <div id="sm-${direction}-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div id="sm-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
   `;
   loadStockMovement(direction);
 }
@@ -12151,7 +12226,7 @@ function openStockTotalPane(direction) {
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetTotalFilters('${direction}')">Reset filters</button>
     </div>
     <div id="st-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
-    <div id="st-${direction}-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div id="st-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
   `;
   loadStockTotal(direction);
 }
@@ -12291,7 +12366,6 @@ function renderStockTotal(direction) {
   refreshTotalFilterOptions(direction);
   const { itemRows, rawTxs, from, to, total, totalKg, totalCards, totalReams } = computeStockTotalRows(direction);
   const color = direction === 'in' ? '#166534' : '#A32D2D';
-  const sign  = direction === 'in' ? '+' : '−';
   const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
   const pktReamHead = (totalCards && totalReams)
     ? `${fmt(totalCards)} pkts + ${fmt(totalReams)} reams`
@@ -12305,7 +12379,7 @@ function renderStockTotal(direction) {
      </div>`;
   const summaryEl = document.getElementById(`st-${direction}-summary`);
   if (summaryEl) summaryEl.innerHTML =
-      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + pktReamHead, color, `${sign}${total.toLocaleString()} sheets · ${sign}${fmt(totalKg)} kg`)
+      tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, pktReamHead, color, `${total.toLocaleString()} sheets · ${fmt(totalKg)} kg`)
     + tile('Transactions', rawTxs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
   const grandTotalPkts   = itemRows.reduce((a, r) => a + r.totalPkts, 0);
@@ -12334,7 +12408,7 @@ function renderStockTotal(direction) {
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm || '—')}</td>
             <td style="padding:6px 8px;">${esc(r.brand || '—')}</td>
             <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.txCount}</td>
-            <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${sign}${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
             <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.balPkts, {keepZero:true})} ${r.unit}<br><span style="color:var(--text2);font-size:11px;">${r.balSheets.toLocaleString()} sheets</span></td>
           </tr>`).join('')}
         </tbody>
@@ -12342,7 +12416,7 @@ function renderStockTotal(direction) {
           <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
             <td colspan="4" style="padding:8px;">Total</td>
             <td style="padding:8px;text-align:right;">${itemRows.reduce((a,r)=>a+r.txCount,0)}</td>
-            <td style="padding:8px;text-align:right;color:${color};">${sign}${fmtPkts(grandTotalPkts, {keepZero:true})}<br><span style="font-weight:500;font-size:11px;color:var(--text2);">${sign}${grandTotalSheets.toLocaleString()} sheets</span></td>
+            <td style="padding:8px;text-align:right;color:${color};">${fmtPkts(grandTotalPkts, {keepZero:true})}<br><span style="font-weight:500;font-size:11px;color:var(--text2);">${grandTotalSheets.toLocaleString()} sheets</span></td>
             <td></td>
           </tr>
         </tfoot>
@@ -12375,7 +12449,6 @@ function printStockTotal(direction) {
   const { itemRows, from, to, total, totalKg } = computeStockTotalRows(direction);
   const state = stockTotalStates[direction];
   const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
-  const sign  = direction === 'in' ? '+' : '−';
   const color = direction === 'in' ? '#166534' : '#A32D2D';
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
@@ -12385,7 +12458,7 @@ function printStockTotal(direction) {
       <td ${tdR}>${esc(r.gsm || '—')}</td>
       <td ${tdL}>${esc(r.brand || '—')}</td>
       <td ${tdR}>${r.txCount}</td>
-      <td style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${color};">${sign}${fmtPkts(r.totalPkts,{keepZero:true})} ${r.unit}</td>
+      <td style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${color};">${fmtPkts(r.totalPkts,{keepZero:true})} ${r.unit}</td>
       <td ${tdR}>${fmtPkts(r.balPkts,{keepZero:true})} ${r.unit}</td>
     </tr>`).join('');
   const html = `
@@ -12403,7 +12476,7 @@ function printStockTotal(direction) {
           <td style="padding:2px 8px 2px 0;"><b>Period:</b> ${periodLabel}</td>
           <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
           <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>Total:</b> ${sign}${total.toLocaleString()} sheets · ${sign}${(+totalKg.toFixed(2)).toLocaleString()} kg</td>
+          <td style="padding:2px 8px;"><b>Total:</b> ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg</td>
         </tr>
       </table>
       ${itemRows.length ? `
