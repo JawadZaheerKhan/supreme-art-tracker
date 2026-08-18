@@ -15478,7 +15478,25 @@ function renderGroupTile(groupName, groupJobs) {
   const groupId = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
   const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'tile-actions', groupId);
   const recordDelivery = groupRecordDeliveryHtml(groupName);
-  let html = renderJobCard(repr)
+  // Tile identity (product / client / code / PO Qty / specs / coatings)
+  // must read from the GROUP entity, never from the seed sub job.
+  // Runtime state (stages / log / deliveries / inventory) still comes
+  // from repr so the stage ribbon and machine badge animate correctly.
+  const groupEntForSource = groupId ? stockGroupById(groupId) : null;
+  const tpl = (groupEntForSource && groupEntForSource.template && typeof groupEntForSource.template === 'object') ? groupEntForSource.template : {};
+  const displaySource = groupEntForSource ? {
+    ...repr,
+    name:    (groupEntForSource.product || tpl.name || repr.name),
+    client:  (groupEntForSource.client || tpl.client || repr.client),
+    jobcode: (groupEntForSource.jobcode || tpl.jobcode || repr.jobcode || ''),
+    qty:     (groupEntForSource.po_qty  || tpl.qty     || ''),
+    size:    (tpl.size || repr.size || ''),
+    paper:   (tpl.paper || repr.paper || ''),
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings : (Array.isArray(repr.coatings) ? repr.coatings : []),
+    ref: '',
+    bno: '',
+  } : repr;
+  let html = renderJobCard(displaySource)
     // .tile-head content is a flat sequence of spans / small labels — no
     // nested divs — so a lazy match to the first </div> is safe here.
     .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
@@ -15513,7 +15531,24 @@ function renderGroupTileCompact(groupName, groupJobs) {
   const groupId = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
   const actions = groupActionsHtml(groupName, repr.id, latestId, groupJobs.length, stats.ready > 0, 'job-actions', groupId);
   const recordDelivery = groupRecordDeliveryHtml(groupName);
-  let html = renderJobRowCompact(repr)
+  // Same displaySource pattern as renderGroupTile — read identity from
+  // the group entity so PO Qty / product / client / code match what
+  // the user set on the group, not on any sub job.
+  const groupEntForSource = groupId ? stockGroupById(groupId) : null;
+  const tpl = (groupEntForSource && groupEntForSource.template && typeof groupEntForSource.template === 'object') ? groupEntForSource.template : {};
+  const displaySource = groupEntForSource ? {
+    ...repr,
+    name:    (groupEntForSource.product || tpl.name || repr.name),
+    client:  (groupEntForSource.client || tpl.client || repr.client),
+    jobcode: (groupEntForSource.jobcode || tpl.jobcode || repr.jobcode || ''),
+    qty:     (groupEntForSource.po_qty  || tpl.qty     || ''),
+    size:    (tpl.size || repr.size || ''),
+    paper:   (tpl.paper || repr.paper || ''),
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings : (Array.isArray(repr.coatings) ? repr.coatings : []),
+    ref: '',
+    bno: '',
+  } : repr;
+  let html = renderJobRowCompact(displaySource)
     // .job-id-row content is flat spans only.
     .replace(/<div class="job-id-row">[\s\S]*?<\/div>/, `<div class="job-id-row">${badges}</div>`)
     // .job-actions contains only <button> children.
