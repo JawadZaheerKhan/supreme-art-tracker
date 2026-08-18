@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-10-finance-role-check';
+const SCHEMA_VERSION = 'v2026-08-18-stock-groups-entity';
 
 async function initDb() {
   try {
@@ -313,6 +313,69 @@ async function initDb() {
                   AND g.client_visible = true
              )
         `;
+      }
+    }
+    // Stock Groups entity — replaces the stock_group_name text tag with
+    // a first-class row so the group has its OWN client / product /
+    // specs / po_qty independent of any member. Sub jobs link back via
+    // jobs.group_job_id. Editing a group ONLY updates its own row —
+    // sub jobs are unaffected.
+    await sql`
+      CREATE TABLE IF NOT EXISTS stock_groups (
+        id             SERIAL PRIMARY KEY,
+        client         TEXT,
+        product        TEXT NOT NULL,
+        po_qty         TEXT,
+        jobcode        TEXT,
+        specs          JSONB DEFAULT '{}',
+        client_visible BOOLEAN NOT NULL DEFAULT false,
+        created_at     TIMESTAMPTZ DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at     TIMESTAMPTZ
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
+    await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
+    // One-time migration: for each unique stock_group_name, create a
+    // stock_groups row (product ← name, client ← first member's client,
+    // po_qty ← first member's qty, jobcode ← first member's jobcode,
+    // specs ← first member's size/gsm/paper). Then set group_job_id on
+    // every member so downstream code can query by id. Runs only once —
+    // guarded by "does jobs.group_job_id already have a value?" so a
+    // repeat boot won't re-create groups.
+    {
+      const anyLinked = await sql`SELECT 1 FROM jobs WHERE group_job_id IS NOT NULL LIMIT 1`;
+      if (!anyLinked.length) {
+        const groupNames = await sql`
+          SELECT DISTINCT stock_group_name FROM jobs
+           WHERE stock_group_name IS NOT NULL
+             AND stock_group_name <> ''
+             AND deleted_at IS NULL
+        `;
+        for (const row of groupNames) {
+          const name = row.stock_group_name;
+          const seedRows = await sql`
+            SELECT client, qty, jobcode, size, particulars, paper, stock_group_visible
+              FROM jobs
+             WHERE stock_group_name = ${name} AND deleted_at IS NULL
+             ORDER BY id ASC
+             LIMIT 1
+          `;
+          const seed = seedRows[0] || {};
+          const specs = {
+            size: seed.size || null,
+            paper: seed.paper || null,
+            gsm: seed.particulars && seed.particulars.cutting_size_gsm || null,
+          };
+          const created = await sql`
+            INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, client_visible)
+            VALUES (${seed.client || null}, ${name}, ${seed.qty || null}, ${seed.jobcode || null}, ${JSON.stringify(specs)}, ${!!seed.stock_group_visible})
+            RETURNING id
+          `;
+          const groupId = created[0].id;
+          await sql`UPDATE jobs SET group_job_id = ${groupId} WHERE stock_group_name = ${name} AND deleted_at IS NULL`;
+        }
       }
     }
     // Backfill: for any already-Delivered job (stage 7) that has a delqty
@@ -4569,6 +4632,166 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       summary: `FIFO delivery from group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
     });
     res.json({ ok: true, deliveries_made: deliveriesMade, unfulfilled: remaining });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Stock Groups entity (v2026-08-18) ──────────────────────────
+// First-class group record with its OWN client / product / specs /
+// po_qty independent of any member. Sub jobs link back via
+// jobs.group_job_id. Editing a group updates the group only —
+// existing sub jobs keep whatever they already have.
+
+// List all active groups + a lightweight aggregate of their sub jobs.
+app.get('/api/stock-groups', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const groups = await sql`
+      SELECT g.*, (
+        SELECT COUNT(*)::int FROM jobs j
+         WHERE j.group_job_id = g.id AND j.deleted_at IS NULL
+      ) AS sub_job_count
+      FROM stock_groups g
+      WHERE g.deleted_at IS NULL
+      ORDER BY g.product ASC
+    `;
+    res.json(groups);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Fetch one group (with member id list — the front-end already has
+// the full jobs in memory; we just need the ids to filter locally).
+app.get('/api/stock-groups/:id', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM stock_groups WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Group not found' });
+    const members = await sql`SELECT id FROM jobs WHERE group_job_id = ${id} AND deleted_at IS NULL ORDER BY id ASC`;
+    res.json({ ...rows[0], member_ids: members.map(m => m.id) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Create a new group. Body: { client, product, po_qty, jobcode, specs, client_visible }.
+app.post('/api/stock-groups', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const body = req.body || {};
+    const client = String(body.client || '').trim().toLowerCase() || null;
+    const product = String(body.product || '').trim().toLowerCase();
+    if (!product) return res.status(400).json({ error: 'product is required' });
+    const poQty = body.po_qty != null ? String(body.po_qty).trim() : null;
+    const jobcode = body.jobcode ? String(body.jobcode).trim() : null;
+    const specs = (body.specs && typeof body.specs === 'object') ? body.specs : {};
+    const clientVisible = !!body.client_visible;
+    const created = await sql`
+      INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, client_visible)
+      VALUES (${client}, ${product}, ${poQty}, ${jobcode}, ${JSON.stringify(specs)}, ${clientVisible})
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'group.create', entityType: 'group', entityId: created[0].id,
+      summary: `Created group "${product}"${client ? ` for ${client}` : ''}`,
+    });
+    res.json(created[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Update the group ONLY — never touches sub jobs (per owner rule).
+app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM stock_groups WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Group not found' });
+    const cur = rows[0];
+    const body = req.body || {};
+    const client        = 'client' in body ? (String(body.client || '').trim().toLowerCase() || null) : cur.client;
+    const product       = 'product' in body ? (String(body.product || '').trim().toLowerCase() || cur.product) : cur.product;
+    const poQty         = 'po_qty' in body ? (body.po_qty != null ? String(body.po_qty).trim() : null) : cur.po_qty;
+    const jobcode       = 'jobcode' in body ? (body.jobcode ? String(body.jobcode).trim() : null) : cur.jobcode;
+    const specs         = 'specs' in body && body.specs && typeof body.specs === 'object' ? body.specs : cur.specs;
+    const clientVisible = 'client_visible' in body ? !!body.client_visible : cur.client_visible;
+    const updated = await sql`
+      UPDATE stock_groups
+         SET client = ${client},
+             product = ${product},
+             po_qty = ${poQty},
+             jobcode = ${jobcode},
+             specs = ${JSON.stringify(specs || {})},
+             client_visible = ${clientVisible},
+             updated_at = NOW()
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'group.update', entityType: 'group', entityId: id,
+      summary: `Updated group "${product}"`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Soft-delete a group. Sub jobs are UNTOUCHED (their group_job_id
+// stays pointing at the deleted-flagged row, they just no longer
+// aggregate under a live group — admin can review from the trash).
+app.delete('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT product FROM stock_groups WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Group not found' });
+    await sql`UPDATE stock_groups SET deleted_at = NOW() WHERE id = ${id}`;
+    await logAudit(sql, req, {
+      action: 'group.delete', entityType: 'group', entityId: id,
+      summary: `Deleted group "${rows[0].product}" (sub jobs kept intact)`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Create a new sub job from a group. The new job pre-fills client /
+// jobcode / qty / size / paper / cutting size from the group and
+// stamps group_job_id = :id so it aggregates under the same tile.
+// After create, the client opens the returned job's edit modal for
+// any per-sub tweaks (job_name, deadline, packets, etc.).
+app.post('/api/stock-groups/:id/duplicate-into-job', requireJobsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM stock_groups WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Group not found' });
+    const g = rows[0];
+    const specs = (g.specs && typeof g.specs === 'object') ? g.specs : {};
+    const particulars = {};
+    if (specs.gsm) particulars.cutting_size_gsm = specs.gsm;
+    // stock_group_name is set to the group's product too so every
+    // client-side lookup that still groups by name continues to work
+    // without having to refactor every reader in one go.
+    const created = await sql`
+      INSERT INTO jobs (
+        name, client, jobcode, qty, size, paper,
+        particulars, group_job_id, stock_group_name,
+        stock_group_visible, client_visible, issuance_status
+      )
+      VALUES (
+        ${g.product}, ${g.client}, ${g.jobcode || null}, ${g.po_qty || null},
+        ${specs.size || null}, ${specs.paper || null},
+        ${JSON.stringify(particulars)}, ${id}, ${g.product},
+        ${!!g.client_visible}, ${!!g.client_visible}, 'new'
+      )
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'group.duplicate_into_job', entityType: 'job', entityId: created[0].id,
+      summary: `Created sub job E-${created[0].id} from group "${g.product}"`,
+    });
+    res.json(created[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
