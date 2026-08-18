@@ -2606,7 +2606,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.priority, j.stages, j.issuance_status, j.client_visible,
           j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
-          j.linked_job_id, j.deliveries, j.stock_group_name, j.particulars,
+          j.linked_job_id, j.deliveries, j.stock_group_name, j.group_job_id, j.particulars,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
@@ -2621,7 +2621,7 @@ async function buildClientJobsView(sql, companyRaw, opts) {
           j.priority, j.stages, j.issuance_status, j.client_visible,
           j.stock_group_visible,
           j.cut_size, j.offcut_size, j.is_shade_card, j.deleted_at,
-          j.linked_job_id, j.deliveries, j.stock_group_name, j.particulars,
+          j.linked_job_id, j.deliveries, j.stock_group_name, j.group_job_id, j.particulars,
           inv.paper_type AS inv_paper_type
         FROM jobs j
         LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
