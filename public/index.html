@@ -7936,14 +7936,6 @@ function buildSummaryBuckets(from, to, granularity) {
       buckets.push({ label: `${monthName} ${cur.getFullYear()}`, start: new Date(cur), end: next });
       cur = next;
     }
-  } else if (granularity === 'daily') {
-    let cur = new Date(fromD.getFullYear(), fromD.getMonth(), fromD.getDate());
-    const end = new Date(toD.getFullYear(), toD.getMonth(), toD.getDate());
-    while (cur <= end) {
-      const next = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() + 1);
-      buckets.push({ label: cur.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }), start: new Date(cur), end: next });
-      cur = next;
-    }
   } else { // weekly
     let cur = new Date(fromD);
     let n = 1;
@@ -11628,8 +11620,8 @@ function setReportsTab(name) {
 // paper type + period (today/week/month/custom). Each direction owns its own
 // state so flipping between tabs doesn't lose your filters.
 const stockMovementStates = {
-  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [], granularity: 'daily' },
-  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [], granularity: 'daily' },
+  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
+  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
 };
 
 // Per-direction bulk selection. Independent sets so flipping tabs keeps the
@@ -11789,14 +11781,6 @@ function openStockMovementPane(direction) {
         <select class="filter" id="sm-${direction}-period" onchange="setMovementPeriod('${direction}', this.value)">${periodOpts}</select>
       </div>
       <div>
-        <div class="dash-flbl">Group By</div>
-        <select class="filter" id="sm-${direction}-granularity" onchange="setMovementGranularity('${direction}', this.value)">
-          <option value="daily"${state.granularity==='daily'?' selected':''}>Daily</option>
-          <option value="weekly"${state.granularity==='weekly'?' selected':''}>Weekly</option>
-          <option value="monthly"${state.granularity==='monthly'?' selected':''}>Monthly</option>
-        </select>
-      </div>
-      <div>
         <div class="dash-flbl">Challan No.</div>
         <input class="filter" type="text" id="sm-${direction}-challan" value="${esc(state.challan || '')}"
                placeholder="Any challan"
@@ -11834,11 +11818,6 @@ function setMovementGsm(dir, v) {
   stockMovementStates[dir].gsm = v;
   stockMovementSel[dir].clear();
   const state = stockMovementStates[dir];
-  renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
-}
-function setMovementGranularity(dir, v) {
-  const state = stockMovementStates[dir];
-  state.granularity = v;
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
 }
 // Challan filter is server-side (URL param), so a change re-fetches
@@ -12025,35 +12004,28 @@ function renderStockMovement(direction, from, to) {
       tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, sign + pktReamHead, color, `${sign}${total.toLocaleString()} sheets · ${sign}${fmt(totalKg)} kg`)
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
-  // ── Tabular breakdown (pivot) — the primary view now. Rows = paper
-  // item (paper type / size / gsm / brand), columns = time buckets across
-  // the selected range, colored green for Stock In / red for Stock Out
-  // (same palette as the summary tiles above). Mirrors the Stock Summary
-  // report's grid look via .ledger-table + .report-scroll-wrap.
-  const buckets = (from && to) ? buildSummaryBuckets(from, to, state.granularity) : [];
-  const pivotGroups = new Map();
+  // ── Tabular summary — one row per paper item (Paper Type / GSM / Size /
+  // Brand(s)), same flat-grid look as the Inventory Report (ss-table,
+  // header row, tfoot totals). Total column colored green for Stock In /
+  // red for Stock Out, matching the tiles above.
+  const summaryGroups = new Map();
   for (const t of rawTxs) {
     const invItem = t.item_id ? inventory.find(i => i.id === t.item_id) : null;
     const isOffcut = !!(invItem && invItem.is_offcut);
     const key = [t.paper_type || '', t.item_size || '', String(t.item_gsm || ''), isOffcut ? '1' : '0'].join('||');
-    if (!pivotGroups.has(key)) {
-      pivotGroups.set(key, {
+    if (!summaryGroups.has(key)) {
+      summaryGroups.set(key, {
         paperType: t.paper_type || '', size: t.item_size || '', gsm: t.item_gsm || '',
-        brands: new Set(), itemIds: new Set(), bucketSheets: buckets.map(() => 0), totalSheets: 0,
+        brands: new Set(), itemIds: new Set(), totalSheets: 0, txCount: 0,
       });
     }
-    const g = pivotGroups.get(key);
+    const g = summaryGroups.get(key);
     if (t.item_brand) g.brands.add(t.item_brand);
     if (t.item_id) g.itemIds.add(t.item_id);
-    const amt = Math.abs(t.change);
-    g.totalSheets += amt;
-    if (buckets.length) {
-      const d = new Date(t.created_at);
-      const idx = buckets.findIndex(b => d >= b.start && d < b.end);
-      if (idx >= 0) g.bucketSheets[idx] += amt;
-    }
+    g.totalSheets += Math.abs(t.change);
+    g.txCount++;
   }
-  const pivotRows = [...pivotGroups.values()].map(g => {
+  const summaryRows = [...summaryGroups.values()].map(g => {
     const ps   = packetSize(g.paperType);
     const unit = packetUnitLabel(g.paperType).toLowerCase();
     const balSheets = [...g.itemIds].reduce((a, id) => {
@@ -12062,11 +12034,9 @@ function renderStockMovement(direction, from, to) {
     }, 0);
     return {
       paperType: g.paperType, size: g.size, gsm: g.gsm, brand: [...g.brands].join(' / '),
-      unit,
-      bucketPkts: g.bucketSheets.map(s => s / ps),
-      totalPkts: g.totalSheets / ps,
-      balPkts: balSheets / ps,
-      balSheets,
+      unit, txCount: g.txCount,
+      totalSheets: g.totalSheets, totalPkts: g.totalSheets / ps,
+      balSheets, balPkts: balSheets / ps,
     };
   }).sort((a, b) => {
     if (a.paperType !== b.paperType) return String(a.paperType).localeCompare(String(b.paperType));
@@ -12074,53 +12044,48 @@ function renderStockMovement(direction, from, to) {
     if (ag !== bg) return ag - bg;
     return String(a.size || '').localeCompare(String(b.size || ''));
   });
-  const bucketHeaders = buckets.map(b => `<th style="text-align:right;">${esc(b.label)}</th>`).join('');
-  const bucketTotals  = buckets.map(() => 0);
-  const pivotBody = pivotRows.map(r => {
-    const cells = r.bucketPkts.map((p, i) => {
-      bucketTotals[i] += p;
-      return `<td style="text-align:right;${p ? `color:${color};font-weight:600;` : ''}">${p ? sign + fmtPkts(p) : ''}</td>`;
-    }).join('');
-    return `<tr>
-      <td>${esc(r.paperType || '—')}</td>
-      <td>${esc(r.gsm || '—')}</td>
-      <td>${esc(r.size || '—')}</td>
-      <td class="brand-upper">${esc(r.brand || '—')}</td>
-      ${cells}
-      <td style="text-align:right;font-weight:700;color:${color};">${r.totalPkts ? sign + fmtPkts(r.totalPkts) : ''}</td>
-      <td style="text-align:right;font-weight:600;">${fmtPkts(r.balPkts, {keepZero:true})} ${r.unit}<br><span style="color:var(--text2);font-size:11px;">${r.balSheets.toLocaleString()} sheets</span></td>
-    </tr>`;
-  }).join('');
-  const bucketTotalCells = bucketTotals.map(t => `<td style="text-align:right;">${t ? sign + fmtPkts(t) : ''}</td>`).join('');
-  const grandTotalPkts = pivotRows.reduce((a, r) => a + r.totalPkts, 0);
-  const pivotHtml = !pivotRows.length
+  const grandTotalPkts   = summaryRows.reduce((a, r) => a + r.totalPkts, 0);
+  const grandTotalSheets = summaryRows.reduce((a, r) => a + r.totalSheets, 0);
+  const summaryHtml = !summaryRows.length
     ? `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`
-    : `<div class="report-scroll-wrap">
-        <table class="ledger-table" style="min-width:max-content;">
-          <thead>
-            <tr>
-              <th>Paper Type</th><th>GSM</th><th>Size (in)</th><th>Brand(s)</th>
-              ${bucketHeaders}
-              <th style="text-align:right;">Total</th>
-              <th style="text-align:right;">Current Balance</th>
-            </tr>
-          </thead>
-          <tbody>${pivotBody}</tbody>
-          <tfoot>
-            <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
-              <td colspan="4" style="text-align:right;color:var(--text2);">Totals</td>
-              ${bucketTotalCells}
-              <td style="text-align:right;color:${color};">${grandTotalPkts ? sign + fmtPkts(grandTotalPkts) : ''}</td>
-              <td></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>`;
+    : `<table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:var(--bg2);">
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Paper Type</th>
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Size</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">GSM</th>
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand(s)</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Transactions</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Total ${direction === 'in' ? 'In' : 'Out'}</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Current Balance</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${summaryRows.map(r => `
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:6px 8px;">${esc(r.paperType || '—')}</td>
+            <td style="padding:6px 8px;">${esc(r.size || '—')}</td>
+            <td style="padding:6px 8px;text-align:right;">${esc(r.gsm || '—')}</td>
+            <td style="padding:6px 8px;">${esc(r.brand || '—')}</td>
+            <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.txCount}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${sign}${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.balPkts, {keepZero:true})} ${r.unit}<br><span style="color:var(--text2);font-size:11px;">${r.balSheets.toLocaleString()} sheets</span></td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+            <td colspan="4" style="padding:8px;">Total</td>
+            <td style="padding:8px;text-align:right;">${summaryRows.reduce((a,r)=>a+r.txCount,0)}</td>
+            <td style="padding:8px;text-align:right;color:${color};">${sign}${fmtPkts(grandTotalPkts, {keepZero:true})}<br><span style="font-weight:500;font-size:11px;color:var(--text2);">${sign}${grandTotalSheets.toLocaleString()} sheets</span></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>`;
 
   // ── Detailed per-transaction ledger — collapsed by default. Keeps the
   // old row-level view (with bulk-select / Delete from History) available
   // for anyone who needs to audit or clean up individual entries, without
-  // it being the first thing the pivot's viewer sees.
+  // it being the first thing the summary's viewer sees.
   const rows = txs.map(t => {
     const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     const date = fmtDMYT(t.created_at);
@@ -12196,7 +12161,7 @@ function renderStockMovement(direction, from, to) {
          </div>
        </details>`
     : '';
-  document.getElementById(`sm-${direction}-content`).innerHTML = pivotHtml + detailsHtml;
+  document.getElementById(`sm-${direction}-content`).innerHTML = summaryHtml + detailsHtml;
   const headChk = document.getElementById(`sm-${direction}-bulk-all`);
   if (headChk) headChk.indeterminate = someVisSel;
   renderStockMovementBulkBar(direction);
