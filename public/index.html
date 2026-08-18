@@ -7080,6 +7080,9 @@ function bulkOutToggleChip(idx, jobId) {
 // sheets) instead of the full original — bulk stock-out chips need the
 // outstanding amount, not the total.
 function jobDeductionSheetsClient(j) {
+  // Partial marker is already reduced — it reflects prior deductions
+  // including any offcut pre-consumed / fresh 2nd paper carve-outs
+  // recorded when the last issue-stock ran.
   const partial = parseInt((j.particulars || {}).partial_pending_sheets, 10);
   if (Number.isFinite(partial) && partial > 0) return partial;
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -7087,7 +7090,26 @@ function jobDeductionSheetsClient(j) {
   const ps = packetSize(invIt.paper_type);
   const pkts = parseFloat((j.particulars || {}).quantity_of_packets);
   if (!Number.isFinite(pkts) || pkts <= 0) return 0;
-  return Math.round(pkts * ps);
+  const totalSheets = Math.round(pkts * ps);
+  // Subtract offcut sheets pre-consumed on CTP forward — those are
+  // already deducted from inventory, the store keeper doesn't need to
+  // re-issue them.
+  const rec = (j.particulars || {}).offcut_pre_consumed;
+  const preConsumed = rec && Number.isFinite(+rec.total_sheets)
+    ? Math.max(0, Math.round(+rec.total_sheets)) : 0;
+  // Subtract fresh 2nd-paper sheets — those go to the secondary tile /
+  // its own issue-stock request, not the primary paper's queue.
+  const secSheets = (() => {
+    const sec = (j.particulars || {}).secondary_paper;
+    if (!sec || !sec.inventory_item_id) return 0;
+    const secPackets = parseFloat(sec.packets);
+    if (!Number.isFinite(secPackets) || secPackets <= 0) return 0;
+    const secItem = (typeof inventory !== 'undefined' && Array.isArray(inventory))
+      ? inventory.find(x => x.id === sec.inventory_item_id) : null;
+    if (!secItem || secItem.is_offcut) return 0;
+    return Math.round(secPackets * ps);
+  })();
+  return Math.max(0, totalSheets - preConsumed - secSheets);
 }
 // When jobs multi-select changes, sum their needs into the packets +
 // sheets inputs so the store keeper sees the total and can override.
