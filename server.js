@@ -3476,6 +3476,47 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         summary: `Paper changed on Job E-${job.id} after issuance — sent back to Pending Stock for re-issuance. Old paper ledger left untouched; store keeper must enter any manual return.`,
       });
     }
+    // If the admin edit added an offcut secondary paper AFTER the job
+    // had already left CTP (issuance_status !== 'new' or 'ctp'), fire
+    // autoConsumeOffcut here so the offcut side auto-deducts and the
+    // store keeper's Pending Stock queue reflects the reduced fresh
+    // need immediately. autoConsumeOffcut is idempotent — a job that
+    // already had offcut_pre_consumed stamped is a no-op.
+    const eligibleForBackfill = job.issuance_status !== 'new' && job.issuance_status !== 'ctp';
+    const hasFreshOffcutSecondary = (() => {
+      const sec = (job.particulars || {}).secondary_paper;
+      if (!sec || !sec.inventory_item_id) return false;
+      // We only care about consuming here — if pre-consumed already
+      // exists autoConsumeOffcut will bail, so no-op.
+      return true;
+    })();
+    if (eligibleForBackfill && hasFreshOffcutSecondary && !(job.particulars || {}).offcut_pre_consumed) {
+      try {
+        const { particulars: pAfter, itemsConsumed } = await autoConsumeOffcut(sql, job, req.user);
+        if (itemsConsumed.length) {
+          const patchJson = JSON.stringify(itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' })));
+          const backfilled = await sql`
+            UPDATE jobs
+               SET particulars = ${JSON.stringify(pAfter)},
+                   issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
+             WHERE id = ${job.id}
+             RETURNING *
+          `;
+          Object.assign(job, backfilled[0]);
+          await logAudit(sql, req, {
+            action: 'job.offcut_backfill',
+            entityType: 'job',
+            entityId: job.id,
+            summary: `Job E-${job.id}: back-filled offcut consumption (${itemsConsumed.reduce((a, x) => a + x.sheets, 0)} sheets) after 2nd paper was added post-CTP.`,
+          });
+        }
+      } catch (e) {
+        // Non-fatal — the primary edit already succeeded; the store
+        // keeper will still see the 2nd paper listed even if the auto-
+        // consume happened to fail (they can pull manually).
+        console.error('Offcut backfill on PUT failed:', e.message);
+      }
+    }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
     res.json(job);
   } catch (err) {
