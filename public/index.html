@@ -1884,7 +1884,7 @@
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
-    <button id="create-group-btn" class="ceo-hide" onclick="openGroupCreate()" title="Create a new Job Group as a standalone template — sub jobs are then duplicated from the group tile.">
+    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
       &#128230; Create Job Group
     </button>
     <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group">
@@ -15548,65 +15548,100 @@ function openGroupEdit(groupId) {
   if (!canWriteJobs()) { notify('Only Admin / Production Manager can edit groups.'); return; }
   const g = stockGroupById(groupId);
   if (!g) { notify('Group not loaded — refresh and try again.'); return; }
+  // Build a synthetic job-shaped object from the group's template so
+  // jobForm renders the exact same layout the seed job had. The form
+  // hydrates from this — save reads back via getFormData() and posts
+  // the whole shape back into the group's template.
+  const tpl = (g.template && typeof g.template === 'object') ? g.template : {};
   const specs = g.specs || {};
-  const isNew = false;
-  openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2>Edit Group &middot; ${esc(g.product || '')}</h2>
-    <div style="font-size:12px;color:var(--text2);margin:-4px 0 12px;">
-      Only the group's own template is updated. Existing sub jobs keep their current values.
-    </div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Product Name *</label>
-        <input type="text" id="g-product" value="${esc(g.product || '')}" placeholder="e.g. mobicam inj 20mg 5-s">
-      </div>
-      <div class="form-group"><label class="form-label">Client / Company</label>
-        <input type="text" id="g-client" value="${esc(g.client || '')}" placeholder="e.g. global pharma">
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Code (jobcode)</label>
-        <input type="text" id="g-jobcode" value="${esc(g.jobcode || '')}" placeholder="e.g. 0531-101">
-      </div>
-      <div class="form-group"><label class="form-label">PO Qty (standing quantity to hold)</label>
-        <input type="text" id="g-po-qty" value="${esc(g.po_qty || '')}" placeholder="e.g. 20000">
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Size</label>
-        <input type="text" id="g-size" value="${esc(specs.size || '')}" placeholder="e.g. 20x30">
-      </div>
-      <div class="form-group"><label class="form-label">GSM</label>
-        <input type="text" id="g-gsm" value="${esc(specs.gsm || '')}" placeholder="e.g. 210">
-      </div>
-      <div class="form-group"><label class="form-label">Paper Type</label>
-        <input type="text" id="g-paper" value="${esc(specs.paper || '')}" placeholder="e.g. bleach board">
-      </div>
-    </div>
-    <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;margin-top:4px;">
-      <input type="checkbox" id="g-client-visible" ${g.client_visible ? 'checked' : ''} style="width:14px;height:14px;">
-      Show group to client
-    </label>
+  const synthetic = {
+    id: null,   // no job id → jobForm treats this as new, hides per-job runtime bits
+    name: tpl.name || g.product || '',
+    client: tpl.client || g.client || '',
+    jobcode: tpl.jobcode || g.jobcode || '',
+    ref: tpl.ref || '',
+    bno: tpl.bno || '',
+    qty: tpl.qty || g.po_qty || '',
+    size: tpl.size || specs.size || '',
+    ups: tpl.ups || '',
+    sheets: tpl.sheets || '',
+    paper: tpl.paper || specs.paper || '',
+    machine: tpl.machine || '',
+    cartonqty: tpl.cartonqty || '',
+    priority: tpl.priority || 'Normal',
+    mfgdate: tpl.mfgdate || '',
+    expdate: tpl.expdate || '',
+    mrp: tpl.mrp || '',
+    notes: tpl.notes || '',
+    coatings: Array.isArray(tpl.coatings) ? tpl.coatings : [],
+    inventory_item_id: tpl.inventory_item_id || null,
+    cut_size: tpl.cut_size || null,
+    offcut_size: tpl.offcut_size || null,
+    is_shade_card: !!tpl.is_shade_card,
+    client_visible: !!g.client_visible,
+    particulars: (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {},
+  };
+  openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
+    <h2 style="text-align:center;letter-spacing:1px;">GROUP JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">&middot; ${esc(g.product || '')}</span></h2>
+    <div style="text-align:center;font-size:12px;color:var(--text2);margin:-6px 0 10px;">Editing the group template only — existing sub jobs keep their current values.</div>
+    ${jobForm(synthetic)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       ${isAdmin() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
       <button class="btn btn-primary" onclick="saveGroupEdit(${groupId})">Save Group</button>
     </div>
   </div>`);
+  // Same post-open hooks the job Edit modal uses so the paper picker,
+  // cut preview, and specials editor all wire up correctly.
+  updateStockHint();
+  if (typeof updateStockHint2 === 'function') updateStockHint2();
+  renderCutPreview();
+  if (typeof initSpecialsEditor === 'function') initSpecialsEditor();
 }
 async function saveGroupEdit(groupId) {
+  const data = getFormData();
+  if (!data.name) { await alertDialog({ title: 'Product name is required', kind: 'warn' }); return; }
+  // Peel the shape jobForm returns into the group's canonical fields
+  // + a template mirror so duplicate-into-job can spread it verbatim
+  // into every new sub job.
+  const parts = (data.particulars && typeof data.particulars === 'object') ? data.particulars : {};
   const body = {
-    product: (document.getElementById('g-product')||{}).value?.trim() || '',
-    client:  (document.getElementById('g-client')||{}).value?.trim() || '',
-    jobcode: (document.getElementById('g-jobcode')||{}).value?.trim() || '',
-    po_qty:  (document.getElementById('g-po-qty')||{}).value?.trim() || '',
+    product: data.name,
+    client: data.client,
+    jobcode: data.jobcode || null,
+    po_qty:  data.qty || null,
     specs: {
-      size:  (document.getElementById('g-size')||{}).value?.trim() || '',
-      gsm:   (document.getElementById('g-gsm')||{}).value?.trim() || '',
-      paper: (document.getElementById('g-paper')||{}).value?.trim() || '',
+      size: data.size || null,
+      gsm:  parts.cutting_size_gsm || null,
+      paper: data.paper || null,
     },
-    client_visible: !!(document.getElementById('g-client-visible')||{}).checked,
+    template: {
+      name: data.name, client: data.client, jobcode: data.jobcode || null,
+      ref: data.ref || null, bno: data.bno || null,
+      qty: data.qty || null, size: data.size || null, ups: data.ups || null,
+      sheets: data.sheets || null, paper: data.paper || null,
+      machine: data.machine || null, cartonqty: data.cartonqty || null,
+      priority: data.priority || 'Normal',
+      mfgdate: data.mfgdate || null, expdate: data.expdate || null,
+      mrp: data.mrp || null, notes: data.notes || null,
+      coatings: Array.isArray(data.coatings) ? data.coatings : [],
+      inventory_item_id: data.inventory_item_id || null,
+      cut_size: data.cut_size || null, offcut_size: data.offcut_size || null,
+      is_shade_card: !!data.is_shade_card,
+      particulars: {
+        cutting_size_gsm: parts.cutting_size_gsm || '',
+        quantity_of_packets: parts.quantity_of_packets || '',
+        sheet_cut: parts.sheet_cut || '1/1',
+        artworks_matter_approval: parts.artworks_matter_approval || {},
+        shade_card: parts.shade_card || {},
+        plates: parts.plates || {},
+        no_of_colors: parts.no_of_colors || {},
+        special_colors: Array.isArray(parts.special_colors) ? parts.special_colors : [],
+        secondary_paper: parts.secondary_paper || null,
+      },
+    },
+    client_visible: !!data.client_visible,
   };
-  if (!body.product) { await alertDialog({ title: 'Product name is required', kind: 'warn' }); return; }
   showSaving(true);
   try {
     const updated = await api('PATCH', `/api/stock-groups/${groupId}`, body);
@@ -15902,17 +15937,19 @@ async function confirmCreateGroupPicker() {
   if (!jobId) { notify('Pick a job to seed the group'); return; }
   const seed = jobs.find(x => x.id === jobId);
   if (!seed) { notify('Seed job not found'); return; }
-  // Auto-name after the seed job. Include the job code to disambiguate
-  // when two jobs share a product name but are different SKUs.
-  const baseName = String(seed.name || '').trim() || `Job E-${jobId}`;
-  const name = seed.jobcode ? `${baseName} (${seed.jobcode})` : baseName;
   showSaving(true);
   try {
-    const updated = await api('PATCH', `/api/jobs/${jobId}/group`, { group_name: name });
-    const ix = jobs.findIndex(x => x.id === jobId);
-    if (ix >= 0) jobs[ix] = updated;
-    closeModal(); render();
-    notify(`Group "${name}" created with E-${jobId}`);
+    // Server creates a stock_groups entity with client / product /
+    // po_qty / jobcode / specs / template all COPIED from the seed
+    // job, and links the seed job to the new group. Every job-card
+    // field lives on the group's template so Edit Group can render
+    // an identical form.
+    const created = await api('POST', '/api/stock-groups', { seed_job_id: jobId });
+    stockGroups.push(created);
+    // Reload the seed job (its group_job_id + stock_group_name are
+    // now set on the server) so the tile immediately reads as grouped.
+    await loadJobs();
+    closeModal(); notify(`Group "${created.product}" created from E-${jobId}`);
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }

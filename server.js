@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-18-stock-groups-entity';
+const SCHEMA_VERSION = 'v2026-08-18-stock-groups-template';
 
 async function initDb() {
   try {
@@ -334,16 +334,61 @@ async function initDb() {
         deleted_at     TIMESTAMPTZ
       )
     `;
+    // Full job-card-shaped template — every field the group's Edit
+    // modal renders (name / client / dates / specs / coatings /
+    // priority / packets / MRP / etc.). Sub jobs created via
+    // duplicate-into-job spread this template into their own columns.
+    await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS template JSONB DEFAULT '{}'`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
     // One-time migration: for each unique stock_group_name, create a
     // stock_groups row (product ← name, client ← first member's client,
     // po_qty ← first member's qty, jobcode ← first member's jobcode,
-    // specs ← first member's size/gsm/paper). Then set group_job_id on
-    // every member so downstream code can query by id. Runs only once —
-    // guarded by "does jobs.group_job_id already have a value?" so a
-    // repeat boot won't re-create groups.
+    // specs ← first member's size/gsm/paper, template ← full job-card
+    // shape of the seed). Then set group_job_id on every member so
+    // downstream code can query by id. Runs only once — guarded by
+    // "does jobs.group_job_id already have a value?" so a repeat boot
+    // won't re-create groups.
+    // buildSeedTemplate is a helper reused by backfill below.
+    const buildSeedTemplate = (seed) => {
+      const seedParts = (seed.particulars && typeof seed.particulars === 'object') ? seed.particulars : {};
+      return {
+        name: seed.name || null,
+        client: seed.client || null,
+        jobcode: seed.jobcode || null,
+        ref: null,
+        bno: null,
+        qty: seed.qty || null,
+        size: seed.size || null,
+        ups: seed.ups || null,
+        sheets: seed.sheets || null,
+        paper: seed.paper || null,
+        machine: seed.machine || null,
+        cartonqty: seed.cartonqty || null,
+        priority: seed.priority || 'Normal',
+        mfgdate: seed.mfgdate || null,
+        expdate: seed.expdate || null,
+        mrp: seed.mrp || null,
+        notes: seed.notes || null,
+        coatings: Array.isArray(seed.coatings) ? seed.coatings.slice() : [],
+        inventory_item_id: seed.inventory_item_id || null,
+        cut_size: seed.cut_size || null,
+        offcut_size: seed.offcut_size || null,
+        is_shade_card: !!seed.is_shade_card,
+        particulars: {
+          cutting_size_gsm: seedParts.cutting_size_gsm || '',
+          quantity_of_packets: seedParts.quantity_of_packets || '',
+          sheet_cut: seedParts.sheet_cut || '1/1',
+          artworks_matter_approval: seedParts.artworks_matter_approval || {},
+          shade_card: seedParts.shade_card || {},
+          plates: seedParts.plates || {},
+          no_of_colors: seedParts.no_of_colors || {},
+          special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
+          secondary_paper: seedParts.secondary_paper || null,
+        },
+      };
+    };
     {
       const anyLinked = await sql`SELECT 1 FROM jobs WHERE group_job_id IS NOT NULL LIMIT 1`;
       if (!anyLinked.length) {
@@ -356,8 +401,7 @@ async function initDb() {
         for (const row of groupNames) {
           const name = row.stock_group_name;
           const seedRows = await sql`
-            SELECT client, qty, jobcode, size, particulars, paper, stock_group_visible
-              FROM jobs
+            SELECT * FROM jobs
              WHERE stock_group_name = ${name} AND deleted_at IS NULL
              ORDER BY id ASC
              LIMIT 1
@@ -368,13 +412,25 @@ async function initDb() {
             paper: seed.paper || null,
             gsm: seed.particulars && seed.particulars.cutting_size_gsm || null,
           };
+          const template = buildSeedTemplate(seed);
           const created = await sql`
-            INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, client_visible)
-            VALUES (${seed.client || null}, ${name}, ${seed.qty || null}, ${seed.jobcode || null}, ${JSON.stringify(specs)}, ${!!seed.stock_group_visible})
+            INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, template, client_visible)
+            VALUES (${seed.client || null}, ${name}, ${seed.qty || null}, ${seed.jobcode || null}, ${JSON.stringify(specs)}, ${JSON.stringify(template)}, ${!!seed.stock_group_visible})
             RETURNING id
           `;
           const groupId = created[0].id;
           await sql`UPDATE jobs SET group_job_id = ${groupId} WHERE stock_group_name = ${name} AND deleted_at IS NULL`;
+        }
+      } else {
+        // Backfill template on groups created before the template
+        // column existed. Uses the oldest member (same seed logic as
+        // the initial migration) so Edit Group shows a filled form.
+        const emptyTpl = await sql`SELECT id FROM stock_groups WHERE deleted_at IS NULL AND (template IS NULL OR template::text = '{}' OR template = '{}'::jsonb)`;
+        for (const g of emptyTpl) {
+          const seedRows = await sql`SELECT * FROM jobs WHERE group_job_id = ${g.id} AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`;
+          if (!seedRows.length) continue;
+          const template = buildSeedTemplate(seedRows[0]);
+          await sql`UPDATE stock_groups SET template = ${JSON.stringify(template)} WHERE id = ${g.id}`;
         }
       }
     }
@@ -4673,22 +4729,94 @@ app.get('/api/stock-groups/:id', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// Create a new group. Body: { client, product, po_qty, jobcode, specs, client_visible }.
+// Create a new group. Two shapes:
+//   1. From a seed job — pass { seed_job_id }. Group is created with
+//      client / product / jobcode / po_qty / specs COPIED from that
+//      job, and its template mirrors the job's own particulars +
+//      spec fields so Edit Group renders the same job-card layout.
+//      The seed job is added to the group (group_job_id set).
+//   2. Blank — pass explicit { client, product, po_qty, ... }.
 app.post('/api/stock-groups', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const body = req.body || {};
+    // Seed-job path — the "Create Job Group" toolbar picker uses this.
+    const seedJobId = parseInt(body.seed_job_id, 10);
+    if (Number.isFinite(seedJobId) && seedJobId > 0) {
+      const seedRows = await sql`SELECT * FROM jobs WHERE id = ${seedJobId} AND deleted_at IS NULL`;
+      if (!seedRows.length) return res.status(404).json({ error: 'Seed job not found' });
+      const seed = seedRows[0];
+      const seedParts = (seed.particulars && typeof seed.particulars === 'object') ? seed.particulars : {};
+      const specs = {
+        size: seed.size || null,
+        gsm: seedParts.cutting_size_gsm || null,
+        paper: seed.paper || null,
+      };
+      // Template mirrors every job-card field the group's Edit modal
+      // will render — spread it back into a new sub job on duplicate.
+      const template = {
+        name: seed.name || null,
+        client: seed.client || null,
+        jobcode: seed.jobcode || null,
+        ref: seed.ref || null,
+        bno: seed.bno || null,
+        qty: seed.qty || null,
+        size: seed.size || null,
+        ups: seed.ups || null,
+        sheets: seed.sheets || null,
+        paper: seed.paper || null,
+        machine: seed.machine || null,
+        cartonqty: seed.cartonqty || null,
+        priority: seed.priority || 'Normal',
+        mfgdate: seed.mfgdate || null,
+        expdate: seed.expdate || null,
+        mrp: seed.mrp || null,
+        notes: seed.notes || null,
+        coatings: Array.isArray(seed.coatings) ? seed.coatings.slice() : [],
+        inventory_item_id: seed.inventory_item_id || null,
+        cut_size: seed.cut_size || null,
+        offcut_size: seed.offcut_size || null,
+        is_shade_card: !!seed.is_shade_card,
+        particulars: {
+          cutting_size_gsm: seedParts.cutting_size_gsm || '',
+          quantity_of_packets: seedParts.quantity_of_packets || '',
+          sheet_cut: seedParts.sheet_cut || '1/1',
+          artworks_matter_approval: seedParts.artworks_matter_approval || {},
+          shade_card: seedParts.shade_card || {},
+          plates: seedParts.plates || {},
+          no_of_colors: seedParts.no_of_colors || {},
+          special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
+          secondary_paper: seedParts.secondary_paper || null,
+        },
+      };
+      const created = await sql`
+        INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, template, client_visible)
+        VALUES (${seed.client}, ${seed.name}, ${seed.qty || null}, ${seed.jobcode || null},
+                ${JSON.stringify(specs)}, ${JSON.stringify(template)}, ${!!seed.stock_group_visible || !!seed.client_visible})
+        RETURNING *
+      `;
+      const groupId = created[0].id;
+      // Add the seed job to the new group so it aggregates from day one.
+      await sql`UPDATE jobs SET group_job_id = ${groupId}, stock_group_name = ${seed.name}, stock_group_visible = ${!!created[0].client_visible} WHERE id = ${seed.id}`;
+      await logAudit(sql, req, {
+        action: 'group.create_from_seed', entityType: 'group', entityId: groupId,
+        summary: `Created group "${seed.name}" from seed job E-${seed.id}`,
+      });
+      return res.json(created[0]);
+    }
+    // Blank-create path — expects explicit product + fields.
     const client = String(body.client || '').trim().toLowerCase() || null;
     const product = String(body.product || '').trim().toLowerCase();
-    if (!product) return res.status(400).json({ error: 'product is required' });
+    if (!product) return res.status(400).json({ error: 'product or seed_job_id is required' });
     const poQty = body.po_qty != null ? String(body.po_qty).trim() : null;
     const jobcode = body.jobcode ? String(body.jobcode).trim() : null;
     const specs = (body.specs && typeof body.specs === 'object') ? body.specs : {};
+    const template = (body.template && typeof body.template === 'object') ? body.template : {};
     const clientVisible = !!body.client_visible;
     const created = await sql`
-      INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, client_visible)
-      VALUES (${client}, ${product}, ${poQty}, ${jobcode}, ${JSON.stringify(specs)}, ${clientVisible})
+      INSERT INTO stock_groups (client, product, po_qty, jobcode, specs, template, client_visible)
+      VALUES (${client}, ${product}, ${poQty}, ${jobcode}, ${JSON.stringify(specs)}, ${JSON.stringify(template)}, ${clientVisible})
       RETURNING *
     `;
     await logAudit(sql, req, {
@@ -4714,6 +4842,7 @@ app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
     const poQty         = 'po_qty' in body ? (body.po_qty != null ? String(body.po_qty).trim() : null) : cur.po_qty;
     const jobcode       = 'jobcode' in body ? (body.jobcode ? String(body.jobcode).trim() : null) : cur.jobcode;
     const specs         = 'specs' in body && body.specs && typeof body.specs === 'object' ? body.specs : cur.specs;
+    const template      = 'template' in body && body.template && typeof body.template === 'object' ? body.template : cur.template;
     const clientVisible = 'client_visible' in body ? !!body.client_visible : cur.client_visible;
     const updated = await sql`
       UPDATE stock_groups
@@ -4722,6 +4851,7 @@ app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
              po_qty = ${poQty},
              jobcode = ${jobcode},
              specs = ${JSON.stringify(specs || {})},
+             template = ${JSON.stringify(template || {})},
              client_visible = ${clientVisible},
              updated_at = NOW()
        WHERE id = ${id}
@@ -4768,22 +4898,53 @@ app.post('/api/stock-groups/:id/duplicate-into-job', requireJobsWriter, async (r
     if (!rows.length) return res.status(404).json({ error: 'Group not found' });
     const g = rows[0];
     const specs = (g.specs && typeof g.specs === 'object') ? g.specs : {};
-    const particulars = {};
-    if (specs.gsm) particulars.cutting_size_gsm = specs.gsm;
+    const tpl = (g.template && typeof g.template === 'object') ? g.template : {};
+    // Spread the group's template into the new sub job so EVERY field
+    // the seed job had (coatings, specials, priority, packets, mfg/exp,
+    // MRP, machine, ups, cut, etc.) lives on the sub job — mirroring
+    // the "duplicate" behaviour the owner wants.
+    const seedParts = (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {};
+    const particulars = JSON.parse(JSON.stringify(seedParts));
     // stock_group_name is set to the group's product too so every
     // client-side lookup that still groups by name continues to work
     // without having to refactor every reader in one go.
     const created = await sql`
       INSERT INTO jobs (
-        name, client, jobcode, qty, size, paper,
-        particulars, group_job_id, stock_group_name,
+        name, client, jobcode, ref, qty, size, ups, sheets, paper, machine,
+        cartonqty, priority, mfgdate, expdate, mrp, notes,
+        coatings, particulars,
+        inventory_item_id, cut_size, offcut_size, is_shade_card,
+        group_job_id, stock_group_name,
         stock_group_visible, client_visible, issuance_status
       )
       VALUES (
-        ${g.product}, ${g.client}, ${g.jobcode || null}, ${g.po_qty || null},
-        ${specs.size || null}, ${specs.paper || null},
-        ${JSON.stringify(particulars)}, ${id}, ${g.product},
-        ${!!g.client_visible}, ${!!g.client_visible}, 'new'
+        ${tpl.name || g.product},
+        ${tpl.client || g.client},
+        ${tpl.jobcode || g.jobcode || null},
+        ${null},
+        ${tpl.qty || g.po_qty || null},
+        ${tpl.size || specs.size || null},
+        ${tpl.ups || null},
+        ${tpl.sheets || null},
+        ${tpl.paper || specs.paper || null},
+        ${tpl.machine || null},
+        ${tpl.cartonqty || null},
+        ${tpl.priority || 'Normal'},
+        ${tpl.mfgdate || null},
+        ${tpl.expdate || null},
+        ${tpl.mrp || null},
+        ${tpl.notes || null},
+        ${Array.isArray(tpl.coatings) ? tpl.coatings : []},
+        ${JSON.stringify(particulars)},
+        ${tpl.inventory_item_id || null},
+        ${tpl.cut_size || null},
+        ${tpl.offcut_size || null},
+        ${!!tpl.is_shade_card},
+        ${id},
+        ${g.product},
+        ${!!g.client_visible},
+        ${!!g.client_visible},
+        'new'
       )
       RETURNING *
     `;
