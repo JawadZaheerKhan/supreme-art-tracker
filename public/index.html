@@ -16207,6 +16207,21 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
   // 2. Replace the repr job's stage badge with group stat chips.
   html = html.replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${statChips}</div>`);
 
+  // 2b. Swap the PO Qty fact value from the representative sub job's
+  // qty to the GROUP entity's own po_qty (the standing quantity to
+  // hold). Owner rule: the tile's PO Qty must always read the
+  // group's own value, never a sub job's. Falls back to leaving the
+  // value alone for legacy groups without an entity yet.
+  const groupIdForTile = (groupJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
+  const groupEntForTile = groupIdForTile ? stockGroupById(groupIdForTile) : null;
+  if (groupEntForTile && groupEntForTile.po_qty != null && String(groupEntForTile.po_qty).trim() !== '') {
+    const groupPoQtyText = String(groupEntForTile.po_qty);
+    // Anchored replace on the exact fact span so nothing else can
+    // accidentally match (name / code / batch never render as bold
+    // "PO Qty").
+    html = html.replace(/(<span><b>PO Qty<\/b>\s*)[^<]*(<\/span>)/, `$1${esc(groupPoQtyText)}$2`);
+  }
+
   // 3. Replace the repr job's shipments block with the aggregate one.
   //    clientDeliveriesBreakdown emits a distinctive outer div; if it
   //    ran, cut from its start to just before the tile-closing </div>
@@ -20687,7 +20702,14 @@ async function loadClientJobs(showToast) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
   }
   try {
-    clientJobs = await api('GET', '/api/client/jobs');
+    // Load stockGroups in parallel so the client's summary + group
+    // tiles read the group entity's own po_qty (never the sum of
+    // sub jobs). Endpoint is client-scoped server-side.
+    const [clientRes] = await Promise.all([
+      api('GET', '/api/client/jobs'),
+      loadStockGroups(),
+    ]);
+    clientJobs = clientRes;
     renderClientJobs();
     if (showToast) notify('Refreshed');
   } catch (e) {
@@ -21075,7 +21097,15 @@ async function loadClientViewJobs(showToast) {
   }
   listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
   try {
-    clientViewJobs = await api('GET', `/api/admin/client-view?company=${encodeURIComponent(company)}`);
+    // Refresh stockGroups alongside the client-view fetch so the
+    // Mill Jobs summary + group tile always read the group entity's
+    // own po_qty rather than a stale cache from the initial page
+    // load. Runs in parallel so Client View doesn't slow down.
+    const [clientRes] = await Promise.all([
+      api('GET', `/api/admin/client-view?company=${encodeURIComponent(company)}`),
+      loadStockGroups(),
+    ]);
+    clientViewJobs = clientRes;
     renderClientViewList();
     if (showToast) notify('Refreshed');
   } catch (e) {
