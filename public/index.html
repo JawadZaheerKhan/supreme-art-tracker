@@ -17278,7 +17278,27 @@ async function issueStock(id, source) {
     const preConsumed = (j.particulars || {}).offcut_pre_consumed || null;
     const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
       ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
-    needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
+    // Fresh 2nd-paper packets belong to the secondary tile — subtract
+    // them from the primary popup's need so the store keeper only issues
+    // (total − 2nd) here. Offcut 2nd paper is already covered via
+    // preConsumedSheets (skip it here to avoid double-subtracting).
+    const freshSecSheets = (() => {
+      const sec = (j.particulars || {}).secondary_paper;
+      if (!sec || !sec.inventory_item_id) return 0;
+      const secPackets = parseFloat(sec.packets);
+      if (!Number.isFinite(secPackets) || secPackets <= 0) return 0;
+      const secItem = inventory.find(x => x.id === sec.inventory_item_id);
+      if (!secItem || secItem.is_offcut) return 0;
+      return Math.round(secPackets * ps);
+    })();
+    // Partial-issued jobs carry their remaining need on
+    // partial_pending_sheets — that already accounts for prior
+    // subtractions, so trust it when present.
+    const partialRaw = parseInt((j.particulars || {}).partial_pending_sheets, 10);
+    const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
+    needSheets = partial > 0
+      ? partial
+      : Math.max(0, totalNeedSheets - preConsumedSheets - freshSecSheets);
     if (needSheets <= 0) {
       // Fully covered by offcut but the job is still sitting at 'pending'
       // (edge case where CTP-forward didn't flip status). Fire an empty-
