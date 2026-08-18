@@ -3070,11 +3070,28 @@ function partialPendingSheets(j) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
+// Fresh 2nd-paper pending — sheets still owed on the secondary source.
+// Offcut secondary auto-deducts on CTP forward so it never shows here.
+// Fresh secondary is treated like a separate request the store keeper
+// needs to fulfill from its own paper group.
+function secondaryFreshPendingSheets(j) {
+  const sec = j && j.particulars && j.particulars.secondary_paper;
+  if (!sec || !sec.inventory_item_id) return 0;
+  const packets = parseFloat(sec.packets);
+  if (!Number.isFinite(packets) || packets <= 0) return 0;
+  const item = inventory.find(x => x.id === sec.inventory_item_id);
+  if (!item || item.is_offcut) return 0;
+  const ps = packetSize(item.paper_type);
+  const needSheets = Math.round(packets * ps);
+  const issued = parseInt(sec.issued_sheets, 10) || 0;
+  return Math.max(0, needSheets - issued);
+}
+function hasFreshSecondaryPending(j) { return secondaryFreshPendingSheets(j) > 0; }
 // A job is "in the Pending Stock queue" if it either was never issued OR
 // only some of its needed sheets have been issued so far. Partial jobs
 // stay visible in the queue so the store keeper knows to keep topping up,
 // even though the shop floor can already start processing them.
-function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j)); }
+function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j) || hasFreshSecondaryPending(j)); }
 
 // Packets top-up helpers. An issued job may have extra packets requested
 // after issuance; each entry lives in particulars.packets_topups with a
@@ -5448,18 +5465,32 @@ function renderInvPendingList() {
       const rec = (j.particulars || {}).offcut_pre_consumed;
       return rec && Number.isFinite(+rec.total_packets) ? +rec.total_packets : 0;
     })();
-    const reducedPackets = Math.max(0, packetsIn - preConsumedPkts);
-    // When offcut pre-consumed, show the FRESH remainder — packetsDisplay
-    // (which includes any admin top-ups) is bypassed because those top-ups
-    // are the pre-consumed portion themselves. Without this, the badge
-    // showed "50 packets needed · 10 from offcut" instead of the correct
-    // "40 packets needed · 10 from offcut".
-    const pktStr = preConsumedPkts > 0
+    // Fresh 2nd-paper packets — subtracted from the primary display so
+    // "10 packets total, 5 in 2nd paper" reads as "5 primary + 5 2nd"
+    // on the two tiles instead of "10 + 5". Offcut secondary is already
+    // in preConsumedPkts, so exclude it here.
+    const freshSecPkts = (() => {
+      const sec = (j.particulars || {}).secondary_paper;
+      if (!sec || !sec.inventory_item_id) return 0;
+      const packets = parseFloat(sec.packets);
+      if (!Number.isFinite(packets) || packets <= 0) return 0;
+      const secItem = inventory.find(x => x.id === sec.inventory_item_id);
+      if (!secItem || secItem.is_offcut) return 0;
+      return packets;
+    })();
+    const reducedPackets = Math.max(0, packetsIn - preConsumedPkts - freshSecPkts);
+    // When offcut pre-consumed OR fresh 2nd paper is set, show the
+    // FRESH remainder on the primary side. Without this, the badge
+    // showed "50 packets needed · 10 from offcut" or "10 packets" (with
+    // secondary also 5), instead of the correct reduced number.
+    const pktStr = (preConsumedPkts > 0 || freshSecPkts > 0)
       ? (reducedPackets > 0 ? String(reducedPackets) : '')
       : (packetsDisplay(j) || (packetsIn > 0 ? String(packetsIn) : ''));
     const offcutNote = preConsumedPkts > 0
       ? ` <span style="background:#dbeafe;color:#1e3a8a;font-weight:700;font-size:11px;padding:1px 6px;border-radius:6px;margin-left:6px;border:1px solid #93c5fd;">${preConsumedPkts} from offcut</span>`
-      : '';
+      : (freshSecPkts > 0
+        ? ` <span style="background:#dbeafe;color:#1e3a8a;font-weight:700;font-size:11px;padding:1px 6px;border-radius:6px;margin-left:6px;border:1px solid #93c5fd;">${freshSecPkts} from 2nd paper</span>`
+        : '');
     const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
     // Partial issuance callout. When a store keeper has manually issued
     // some but not all of the required sheets, show a badge + a "Top up"
@@ -5492,7 +5523,12 @@ function renderInvPendingList() {
     const issueBtn = (!partial && canIssueStock() && offcutOk)
       ? `<button class="btn btn-sm ${offcut ? '' : cls} ceo-hide"${offcutStyle} onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
       : '';
-    return `
+    // Only render the primary tile when the primary side actually needs
+    // stock. When the job is in the pending queue solely because its
+    // fresh secondary is still owed, skip the primary tile — the
+    // secondary tile below carries the entire request.
+    const primaryStillNeeded = j.issuance_status === 'pending' || isPartialIssuance(j);
+    const primaryTile = primaryStillNeeded ? `
       <div class="inv-card inv-pending-row"${partial ? ' style="border-left:3px solid #F59E0B;"' : ''}>
         <div class="inv-main">
           <div class="inv-name">
@@ -5525,7 +5561,66 @@ function renderInvPendingList() {
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
         </div>
+      </div>` : '';
+    // Secondary-paper tile — emitted right below the primary when the
+    // job has a fresh (non-offcut) 2nd paper that still needs issuing.
+    // Rendered even when the primary is fully done so the store keeper
+    // can finish the secondary side independently.
+    const secondaryTile = (() => {
+      const remSecSheets = secondaryFreshPendingSheets(j);
+      if (remSecSheets <= 0) return '';
+      const secRef = j.particulars && j.particulars.secondary_paper;
+      const secIt = secRef && inventory.find(x => x.id === secRef.inventory_item_id);
+      if (!secIt) return '';
+      const secGroup = paperGroupMembers(secIt);
+      const secHave = secGroup.reduce((a, x) => a + (x.current_balance || 0), 0);
+      const secEnough = secHave >= remSecSheets;
+      const secOut = !secEnough && secHave <= 0;
+      const secCls = secEnough ? 'btn-success' : (secOut ? 'btn-waiting' : 'btn-low-stock');
+      const secIcon = secEnough ? '&#10003;' : '&#9888;';
+      const secLabel = secEnough ? 'Issue Stock' : (secOut ? 'Out of Stock' : 'Low Stock');
+      const secTip = secEnough
+        ? 'Issue 2nd paper stock and start this job\'s secondary side'
+        : `2nd paper stock short by ${(remSecSheets - secHave).toLocaleString()} sheets (have ${secHave.toLocaleString()}, need ${remSecSheets.toLocaleString()}).`;
+      const secBrands = [...new Set(secGroup.map(x => (x.brand || '').trim()).filter(Boolean))].join('/');
+      const secPaperLabel = `${esc(secIt.paper_type)}${secIt.size?' · '+esc(secIt.size):''}${secIt.gsm?' · '+esc(secIt.gsm)+'gsm':''}${secBrands?' · '+esc(secBrands):''}`;
+      const secPs = packetSize(secIt.paper_type);
+      const secUnit = packetUnitLabel(secIt.paper_type).toLowerCase();
+      const secRemPkts = secPs ? remSecSheets / secPs : 0;
+      const secRemStr = Number.isInteger(secRemPkts) ? String(secRemPkts) : (+secRemPkts.toFixed(2)).toString();
+      const secIssueBtn = canIssueStock()
+        ? `<button class="btn btn-sm ${secCls} ceo-hide" onclick="issueStock(${j.id}, 'secondary')" title="${esc(secTip)}">${secIcon} ${secLabel}</button>`
+        : '';
+      return `
+      <div class="inv-card inv-pending-row" style="border-left:3px solid #1e3a8a;background:#f8fafc;">
+        <div class="inv-main">
+          <div class="inv-name">
+            <b>#${j.id}</b> &middot; ${esc(j.name)}
+            <span class="badge" style="background:#1e3a8a;color:#fff;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:3px 8px;">2ND PAPER</span>
+          </div>
+          <div class="inv-sub">
+            ${j.client ? esc(j.client) + ' &middot; ' : ''}
+            ${secPaperLabel}
+            &middot; <span style="color:#1e3a8a;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(secRemStr)} ${secUnit} needed</span>
+          </div>
+        </div>
+        <div class="inv-balance">
+          ${(() => {
+            const pH = secPs ? secHave / secPs : 0;
+            const pStr = Number.isInteger(pH) ? String(pH) : (+pH.toFixed(2)).toString();
+            return `<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">On hand</div>
+                    <div style="font-size:16px;font-weight:700;color:${secEnough?'var(--green-text)':'#A32D2D'};">${pStr} ${secUnit}</div>
+                    <div style="font-size:11px;color:var(--text2);">${secHave.toLocaleString()} sheets</div>`;
+          })()}
+        </div>
+        <div class="inv-actions">
+          ${secIssueBtn}
+          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+          <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
+        </div>
       </div>`;
+    })();
+    return primaryTile + secondaryTile;
   }).join('') + topupHtml;
 }
 
@@ -14800,6 +14895,7 @@ function jobForm(j={}) {
               <span class="jc-lbl" style="color:#1e3a8a;">2nd Packets Qty</span>
               <input type="number" id="f-packets-2" min="0" step="any"
                      value="${esc(secPackets)}" placeholder="e.g. 5"
+                     oninput="updateStockHint()"
                      style="width:100%;box-sizing:border-box;">
               <div style="font-size:11px;color:#1e3a8a;margin-top:2px;">Part of total packets, not extra</div>
             </div>
@@ -16032,7 +16128,18 @@ function updateStockHint() {
   const fracPkts = n => Number.isInteger(n) ? n : +(+n).toFixed(2);
   const availPkts  = fracPkts(balance / ps);
   const rawNeed    = sheetsNeed / cutPieces;
-  const neededPkts = sheetsNeed > 0 ? fracPkts(rawNeed / ps) : 0;
+  const neededPktsGross = sheetsNeed > 0 ? (rawNeed / ps) : 0;
+  // Subtract any packets assigned to the 2nd paper picker — the primary
+  // side only needs (total − secondary). Live: reads from the DOM so
+  // typing in "2nd Packets Qty" updates the hint immediately without
+  // waiting for a save. Owner rule: "5 packets in 2nd paper means 5
+  // primary + 5 secondary, not 10 + 5".
+  const useSecondCb = document.getElementById('f-use-second-paper');
+  const secPktsField = document.getElementById('f-packets-2');
+  const secPktsLive = (useSecondCb && useSecondCb.checked)
+    ? (parseFloat(secPktsField && secPktsField.value) || 0)
+    : 0;
+  const neededPkts = fracPkts(Math.max(0, neededPktsGross - secPktsLive));
   // Other pending jobs on the same paper group.
   const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
   const key = it ? paperGroupKey(it) : null;
@@ -16135,6 +16242,9 @@ function toggleSecondPaper() {
     // immediately.
     refreshSecondPaperWarning();
   }
+  // Repaint the primary stock hint too — toggling the 2nd paper on/off
+  // changes the primary need shown there (total − 2nd packets).
+  if (typeof updateStockHint === 'function') updateStockHint();
 }
 function refreshSecondPaperWarning() {
   const warn = document.getElementById('second-paper-warning');
@@ -17126,41 +17236,63 @@ async function processJobFromCtp(id) {
   showSaving(false);
 }
 
-async function issueStock(id) {
+async function issueStock(id, source) {
   if (!canIssueStock()) { notify('Issuing stock is reserved for the store keeper (Admin or Store Manager).'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  if (!j.inventory_item_id) { notify('This job has no paper picked — cannot issue stock.'); return; }
-  const anchor = inventory.find(i => i.id === j.inventory_item_id);
+  // source='secondary' targets particulars.secondary_paper — used when
+  // the PM configured a 2nd (fresh) paper source and its Pending Stock
+  // tile is the one being clicked. Default 'primary' preserves every
+  // existing call site (issueStock(id) still routes to the main paper).
+  const src = source === 'secondary' ? 'secondary' : 'primary';
+  const secondaryRef = (j.particulars || {}).secondary_paper || null;
+  const anchorId = src === 'secondary'
+    ? (secondaryRef && secondaryRef.inventory_item_id)
+    : j.inventory_item_id;
+  if (!anchorId) { notify(src === 'secondary' ? 'This job has no 2nd paper set.' : 'This job has no paper picked — cannot issue stock.'); return; }
+  const anchor = inventory.find(i => i.id === anchorId);
   if (!anchor) { notify('Paper item missing from inventory.'); return; }
   const ps        = packetSize(anchor.paper_type);
   const unit      = packetUnitLabel(anchor.paper_type).toLowerCase();
-  const packetsIn = parseFloat((j.particulars || {}).quantity_of_packets);
+  const packetsIn = src === 'secondary'
+    ? parseFloat(secondaryRef && secondaryRef.packets)
+    : parseFloat((j.particulars || {}).quantity_of_packets);
   if (!Number.isFinite(packetsIn) || packetsIn <= 0) {
     notify('Enter Quantity of Packets on the job before issuing stock — inventory is deducted in raw ' + unit + '.');
     return;
   }
   const totalNeedSheets = Math.round(packetsIn * ps);
-  // Any offcut sheets already auto-consumed at CTP forward reduce the
-  // fresh need the store keeper sees here. Popup opens with the reduced
-  // number so the "Issued: X / Y" tally is the fresh portion only.
-  const preConsumed = (j.particulars || {}).offcut_pre_consumed || null;
-  const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
-    ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
-  const needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
-  if (needSheets <= 0) {
-    // Fully covered by offcut but the job is still sitting at 'pending'
-    // (edge case where CTP-forward didn't flip status). Fire an empty-
-    // splits issue-stock call so the server's auto-issue branch runs —
-    // job jumps to Printing and off the store keeper's queue instead
-    // of dead-ending on an unactionable notify.
-    if (!(await confirmDialog({
-      title: 'Auto-issue this job?',
-      message: `Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets already pre-consumed on CTP forward). Nothing left to issue from fresh — click Auto-issue to move it straight to Printing.`,
-      confirmText: 'Auto-issue',
-    }))) return;
-    await sendIssueStock(id, [], null);
-    return;
+  // Secondary side is independent of offcut_pre_consumed (offcut only
+  // applies to the primary paper — offcut-as-secondary auto-deducts on
+  // CTP forward and never reaches here). Subtract any already-issued
+  // sheets so a top-up popup shows the true remainder.
+  let needSheets;
+  if (src === 'secondary') {
+    const issued = parseInt(secondaryRef && secondaryRef.issued_sheets, 10) || 0;
+    needSheets = Math.max(0, totalNeedSheets - issued);
+    if (needSheets <= 0) { notify('2nd paper already fully issued.'); return; }
+  } else {
+    // Any offcut sheets already auto-consumed at CTP forward reduce the
+    // fresh need the store keeper sees here. Popup opens with the reduced
+    // number so the "Issued: X / Y" tally is the fresh portion only.
+    const preConsumed = (j.particulars || {}).offcut_pre_consumed || null;
+    const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
+      ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
+    needSheets = Math.max(0, totalNeedSheets - preConsumedSheets);
+    if (needSheets <= 0) {
+      // Fully covered by offcut but the job is still sitting at 'pending'
+      // (edge case where CTP-forward didn't flip status). Fire an empty-
+      // splits issue-stock call so the server's auto-issue branch runs —
+      // job jumps to Printing and off the store keeper's queue instead
+      // of dead-ending on an unactionable notify.
+      if (!(await confirmDialog({
+        title: 'Auto-issue this job?',
+        message: `Job E-${id} is fully covered by offcut (${preConsumedSheets} sheets already pre-consumed on CTP forward). Nothing left to issue from fresh — click Auto-issue to move it straight to Printing.`,
+        confirmText: 'Auto-issue',
+      }))) return;
+      await sendIssueStock(id, [], null, src);
+      return;
+    }
   }
   // Group brands with any stock available. Zero-balance brands stay in
   // the popup so the store keeper can see them (row disabled), but a
@@ -17175,15 +17307,17 @@ async function issueStock(id) {
   // the store keeper one canonical UI where they can over-issue (the
   // excess is routed to an offcut inventory bucket) or partial-issue
   // if needed. The one-row single-brand case is trivial to fill in.
-  openIssueSplitPopup(j, anchor, members, needSheets, unit);
+  openIssueSplitPopup(j, anchor, members, needSheets, unit, src);
 }
 
 // Fire the /issue-stock POST with a splits payload and refresh state.
 // Shared by the single-brand fast path and the split popup's Save button.
-async function sendIssueStock(id, splits, challanNo) {
+async function sendIssueStock(id, splits, challanNo, source) {
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, { splits, challan_no: challanNo || null });
+    const body = { splits, challan_no: challanNo || null };
+    if (source === 'secondary') body.source = 'secondary';
+    const updated = await api('POST', `/api/jobs/${id}/issue-stock`, body);
     const idx = jobs.findIndex(x => x.id === id);
     if (idx >= 0) jobs[idx] = updated;
     await loadInventory();
@@ -17210,7 +17344,10 @@ async function sendIssueStock(id, splits, challanNo) {
 //   * over-total   → total > need            (red banner, LOUD)
 // Save stays disabled while there's a validation problem so the store
 // keeper knows exactly what to fix.
-function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
+function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
+  // Persist source on the split table so saveSplitIssue can forward it
+  // to sendIssueStock. Undefined defaults to 'primary'.
+  const popupSource = source === 'secondary' ? 'secondary' : 'primary';
   const paperType = anchor.paper_type || '';
   const ps = packetSize(paperType);
   const unitLabel = packetUnitLabel(paperType); // "Packets" | "Reams"
@@ -17268,7 +17405,8 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit) {
       <table class="split-table"
              data-need-packets="${needPackets}"
              data-packet-size="${ps}"
-             data-unit-label="${esc(unitLabel)}">
+             data-unit-label="${esc(unitLabel)}"
+             data-source="${esc(popupSource)}">
         <thead>
           <tr>
             <th>Brand</th>
@@ -17384,8 +17522,9 @@ async function saveSplitIssue(jobId) {
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
   const chIn = document.getElementById('split-challan');
   const challanNo = chIn ? ((chIn.value || '').trim() || null) : null;
+  const source = table.dataset.source === 'secondary' ? 'secondary' : 'primary';
   closeModal();
-  await sendIssueStock(jobId, splits, challanNo);
+  await sendIssueStock(jobId, splits, challanNo, source);
 }
 
 // Request extra packets for an already-issued job. The job stays in its

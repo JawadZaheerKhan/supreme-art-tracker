@@ -3476,6 +3476,47 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         summary: `Paper changed on Job E-${job.id} after issuance — sent back to Pending Stock for re-issuance. Old paper ledger left untouched; store keeper must enter any manual return.`,
       });
     }
+    // If the admin edit added an offcut secondary paper AFTER the job
+    // had already left CTP (issuance_status !== 'new' or 'ctp'), fire
+    // autoConsumeOffcut here so the offcut side auto-deducts and the
+    // store keeper's Pending Stock queue reflects the reduced fresh
+    // need immediately. autoConsumeOffcut is idempotent — a job that
+    // already had offcut_pre_consumed stamped is a no-op.
+    const eligibleForBackfill = job.issuance_status !== 'new' && job.issuance_status !== 'ctp';
+    const hasFreshOffcutSecondary = (() => {
+      const sec = (job.particulars || {}).secondary_paper;
+      if (!sec || !sec.inventory_item_id) return false;
+      // We only care about consuming here — if pre-consumed already
+      // exists autoConsumeOffcut will bail, so no-op.
+      return true;
+    })();
+    if (eligibleForBackfill && hasFreshOffcutSecondary && !(job.particulars || {}).offcut_pre_consumed) {
+      try {
+        const { particulars: pAfter, itemsConsumed } = await autoConsumeOffcut(sql, job, req.user);
+        if (itemsConsumed.length) {
+          const patchJson = JSON.stringify(itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' })));
+          const backfilled = await sql`
+            UPDATE jobs
+               SET particulars = ${JSON.stringify(pAfter)},
+                   issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
+             WHERE id = ${job.id}
+             RETURNING *
+          `;
+          Object.assign(job, backfilled[0]);
+          await logAudit(sql, req, {
+            action: 'job.offcut_backfill',
+            entityType: 'job',
+            entityId: job.id,
+            summary: `Job E-${job.id}: back-filled offcut consumption (${itemsConsumed.reduce((a, x) => a + x.sheets, 0)} sheets) after 2nd paper was added post-CTP.`,
+          });
+        }
+      } catch (e) {
+        // Non-fatal — the primary edit already succeeded; the store
+        // keeper will still see the 2nd paper listed even if the auto-
+        // consume happened to fail (they can pull manually).
+        console.error('Offcut backfill on PUT failed:', e.message);
+      }
+    }
     await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
     res.json(job);
   } catch (err) {
@@ -3562,33 +3603,62 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
+    // source: 'primary' (default) issues against job.inventory_item_id.
+    // source: 'secondary' issues against particulars.secondary_paper —
+    // used when the PM configured a 2nd paper source on the job and it
+    // isn't offcut (offcut would auto-deduct on CTP forward instead).
+    // The store keeper sees the secondary as its own tile in Pending
+    // Stock and issues it independently of the primary.
+    const source = String((req.body && req.body.source) || 'primary').toLowerCase();
+    const isSecondary = source === 'secondary';
+    const secondaryRef = (job.particulars && job.particulars.secondary_paper) || null;
+    if (isSecondary) {
+      if (!secondaryRef || !secondaryRef.inventory_item_id) {
+        return res.status(400).json({ error: 'Job has no 2nd paper set — nothing secondary to issue.' });
+      }
+      if (!Number.isFinite(+secondaryRef.packets) || +secondaryRef.packets <= 0) {
+        return res.status(400).json({ error: '2nd paper has no packets set on the job.' });
+      }
+    }
     // Allow further issuance on a partial-issued job (status is 'issued'
     // but partial_pending_sheets > 0 means the store keeper still owes
     // some sheets). Reject only when the job is fully issued (no
     // partial marker). Without this exemption a Top-up via Remove
     // Stock → Job Card kept failing with "Stock already issued".
+    // Secondary issuance is always allowed as long as the secondary has
+    // sheets still owed — checked below on needSheets.
     const partialPendingRaw = parseInt(
       (job.particulars || {}).partial_pending_sheets, 10
     );
     const partialPending = Number.isFinite(partialPendingRaw) && partialPendingRaw > 0
       ? partialPendingRaw : 0;
-    if (job.issuance_status === 'issued' && partialPending <= 0) {
-      return res.status(400).json({ error: 'Stock already issued for this job' });
+    if (!isSecondary && job.issuance_status === 'issued' && partialPending <= 0) {
+      // Primary is fully done. If the job still has a fresh secondary
+      // pending, the caller should route source=secondary instead of
+      // hitting the primary path.
+      return res.status(400).json({ error: 'Stock already issued for this job (primary side).' });
     }
-    if (!job.inventory_item_id) {
+    if (!job.inventory_item_id && !isSecondary) {
       return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
     }
     const challanNo = (req.body && typeof req.body.challan_no === 'string')
       ? (req.body.challan_no.trim() || null)
       : null;
-    // Resolve the paper GROUP from the job's representative item. The
-    // group is (paper_type, size, gsm, is_offcut). Every accepted split
-    // must live in this group.
-    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
+    // Resolve the paper GROUP from either the primary or secondary
+    // inventory item, depending on source. Every accepted split must
+    // live in the resolved anchor's paper group.
+    const anchorItemId = isSecondary ? secondaryRef.inventory_item_id : job.inventory_item_id;
+    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${anchorItemId}`;
     const anchor = anchorRows[0];
     if (!anchor) return res.status(400).json({ error: 'Assigned paper item no longer exists.' });
     const paperType = anchor.paper_type || '';
-    const totalNeedSheets = jobDeductionSheets({ paperType, particulars: job.particulars });
+    // needSheets computation forks by source:
+    //   secondary → secondary.packets * ps  minus secondary.issued_sheets
+    //   primary   → totalNeed minus offcut pre-consumed OR partial marker
+    const psForNeed = packetSize(paperType || '');
+    const totalNeedSheets = isSecondary
+      ? Math.round((+secondaryRef.packets) * psForNeed)
+      : jobDeductionSheets({ paperType, particulars: job.particulars });
     if (totalNeedSheets <= 0) {
       return res.status(400).json({ error: 'Job has no Quantity of Packets — set the packets count on the job, then try again. (Inventory is deducted in raw packets/reams.)' });
     }
@@ -3603,13 +3673,36 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     // A partial-issued job carries its remaining fresh need on
     // partial_pending_sheets — that's the SOURCE OF TRUTH for how much
     // is still owed (prior issue-stock calls already subtracted their
-    // share). Without this, a top-up would treat needSheets as the
-    // FULL need minus offcut, ignoring what was already issued, and
-    // over-issue math would fire on any top-up that alone exceeded the
-    // original need.
-    const needSheets = partialPending > 0
-      ? partialPending
-      : Math.max(0, totalNeedSheets - preConsumedSheets);
+    // share). Secondary uses secondary_paper.issued_sheets for the
+    // same purpose. Without this, a top-up would treat needSheets as
+    // the FULL need minus offcut, ignoring what was already issued.
+    const secondaryIssuedSheets = isSecondary
+      ? (parseInt(secondaryRef.issued_sheets, 10) || 0)
+      : 0;
+    // When a fresh (non-offcut) secondary paper is configured, its
+    // packets are part of the total but are issued via its own tile.
+    // Subtract them from the primary need so a 10-packet job with 5
+    // in secondary asks the store keeper for only 5 primary packets
+    // (owner rule: total = 10 = 5 primary + 5 secondary, not 15).
+    // Offcut secondary is already in preConsumedSheets, so exclude it
+    // here to avoid double-subtracting.
+    const secondaryForPrimary = (() => {
+      const sec = (job.particulars || {}).secondary_paper;
+      if (!sec || !sec.inventory_item_id) return 0;
+      const packets = parseFloat(sec.packets);
+      if (!Number.isFinite(packets) || packets <= 0) return 0;
+      // If secondary is already accounted for in offcut_pre_consumed,
+      // don't subtract again.
+      const inPreConsumed = preConsumed && Array.isArray(preConsumed.items)
+        && preConsumed.items.some(it => it && it.item_id === sec.inventory_item_id);
+      if (inPreConsumed) return 0;
+      return Math.round(packets * ps);
+    })();
+    const needSheets = isSecondary
+      ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
+      : (partialPending > 0
+          ? partialPending
+          : Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary));
     if (needSheets <= 0) {
       // Full coverage but the job somehow stayed in Pending Stock (edge
       // case where the CTP-forward path didn't flip status — e.g. a job
@@ -3768,11 +3861,20 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     // Update job. Partial issuance: use the existing partial marker so
     // Pending Stock still shows the remaining need. Over-issue counts as
     // fully issued (need was met, extras went to offcut).
+    // Secondary source: track issued sheets on secondary_paper.issued_sheets
+    // instead of partial_pending_sheets (which is primary-only) so the
+    // secondary tile on Pending Stock knows how much is still owed.
     const fullyIssued = totalIssued >= needSheets;
     const remaining = Math.max(0, needSheets - totalIssued);
     const nextParticulars = { ...(job.particulars || {}) };
-    if (fullyIssued) delete nextParticulars.partial_pending_sheets;
-    else             nextParticulars.partial_pending_sheets = remaining;
+    if (isSecondary) {
+      const sec = { ...(nextParticulars.secondary_paper || {}) };
+      sec.issued_sheets = (parseInt(sec.issued_sheets, 10) || 0) + totalIssued;
+      nextParticulars.secondary_paper = sec;
+    } else {
+      if (fullyIssued) delete nextParticulars.partial_pending_sheets;
+      else             nextParticulars.partial_pending_sheets = remaining;
+    }
     // Over-issue decision pending — PM picks Use / Offcut / Send Back on
     // the job tile. See POST /api/jobs/:id/over-issue/decide.
     if (overIssueSplits.length > 0) {
@@ -3800,15 +3902,22 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
     // issued today/half tomorrow workflow, etc.) auto-corrects on the
     // next issuance instead of leaving the job stuck at CTP.
     const bumpedStage = Math.max(job.stage_index || 0, 1);
+    // For secondary source we leave inventory_item_id unchanged (that's
+    // the PRIMARY paper anchor). Otherwise the primary path may repoint
+    // it to the dominant brand split of the primary source.
+    const nextInvItemId = isSecondary ? job.inventory_item_id : primary.item_id;
+    // Also tag issued_items rows with source so the ledger + reports can
+    // tell primary and secondary apart later.
+    const issuedItemsTagged = issuedItems.map(x => ({ ...x, source: isSecondary ? 'secondary' : 'primary' }));
     const updated = await sql`
       UPDATE jobs
          SET issuance_status = 'issued',
              issued_at = COALESCE(issued_at, NOW()),
              issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
-             inventory_item_id = ${primary.item_id},
+             inventory_item_id = ${nextInvItemId},
              stage_index = ${bumpedStage},
              particulars = ${JSON.stringify(nextParticulars)},
-             issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItems)}::jsonb)
+             issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItemsTagged)}::jsonb)
        WHERE id = ${id}
        RETURNING *
     `;
