@@ -8241,9 +8241,12 @@ function renderInventoryReport() {
   const supplierCell = (r) => showSupplier ? `<td style="padding:6px 8px;">${esc(r.supplier) || '—'}</td>` : '';
   const consumedCell = (r) => showConsumed ? `<td style="padding:6px 8px;text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(r.consumedPkts)}</td>` : '';
   // On the way — pending imports matched to this item, so the store keeper
-  // sees "already ordered" without cross-checking the Imports page.
+  // sees "already ordered" without cross-checking the Imports page. Same
+  // lemon-yellow pill as the Record Delivery button, so "incoming stock"
+  // reads as one consistent color language across the app.
+  const importPill = (n) => `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:700;padding:2px 8px;border-radius:10px;">${fmtPkts(n, {keepZero:true})}</span>`;
   const importCell   = (r) => r.importPkts
-    ? `<td style="padding:6px 8px;text-align:right;color:#92400e;font-weight:600;" title="Pending import — not yet received">${fmtPkts(r.importPkts)}</td>`
+    ? `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received">${importPill(r.importPkts)}</td>`
     : `<td style="padding:6px 8px;text-align:right;color:var(--text3);">—</td>`;
   const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
   el.innerHTML = `
@@ -8251,6 +8254,7 @@ function renderInventoryReport() {
       ${rows.length} row${rows.length===1?'':'s'} &middot; ${total.items} item${total.items===1?'':'s'} &middot;
       ${total.sheets.toLocaleString()} sheets total &middot; ${fmtKg(total.weight)} kg total
     </div>
+    <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead>
         <tr style="background:var(--bg2);">
@@ -8295,10 +8299,11 @@ function renderInventoryReport() {
           <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
           <td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>
           ${showConsumed ? `<td style="padding:8px;text-align:right;color:#A32D2D;">${fmtPkts(rows.reduce((a,r) => a + r.consumedPkts, 0))}</td>` : ''}
-          <td style="padding:8px;text-align:right;color:#92400e;">${fmtPkts(rows.reduce((a,r) => a + r.importPkts, 0))}</td>
+          <td style="padding:8px;text-align:right;">${importPill(rows.reduce((a,r) => a + r.importPkts, 0))}</td>
         </tr>
       </tfoot>
-    </table>`;
+    </table>
+    </div>`;
 }
 
 async function exportInventoryReport() {
@@ -8372,7 +8377,7 @@ function printInventoryReport() {
       ? `<td style="border:1px solid #000;padding:4px;text-align:right;color:#A32D2D;font-weight:bold;">${fmt(+r.consumedPkts.toFixed(2))}</td>`
       : '';
     const importTd = r.importPkts
-      ? `<td style="border:1px solid #000;padding:4px;text-align:right;color:#92400e;font-weight:bold;">${fmt(+r.importPkts.toFixed(2))}</td>`
+      ? `<td style="border:1px solid #000;padding:4px;text-align:right;"><span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:bold;padding:1px 7px;border-radius:8px;">${fmt(+r.importPkts.toFixed(2))}</span></td>`
       : `<td ${tdR}>—</td>`;
     return `<tr style="${rowStyle}">
       <td ${tdL}>${esc(r.paperType)}</td>
@@ -8789,7 +8794,7 @@ function renderStockSummary() {
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}${r.hasRecentCorr ? correctionDot(r.balDiffPkts) : ''}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
-      <td style="text-align:right;font-weight:600;color:#92400e;">${fmtPkts(r.pendingImportPkts)}</td>
+      <td style="text-align:right;">${r.pendingImportPkts ? `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:700;padding:2px 8px;border-radius:10px;">${fmtPkts(r.pendingImportPkts)}</span>` : ''}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
       <td style="text-align:right;">${fmtKg(r.importKg)}</td>
       <td style="text-align:right;font-weight:600;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedPkts(r.requiredNextPkts)}</td>
@@ -8866,7 +8871,7 @@ function printStockSummary() {
       <td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(r.totalOutPkts)}</b></td>
       <td ${tdR}><b>${fmtPkts(r.stockNowPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.weightKg)}</td>
-      <td style="border:1px solid #000;padding:3px;text-align:right;color:#92400e;"><b>${fmtPkts(r.pendingImportPkts)}</b></td>
+      <td style="border:1px solid #000;padding:3px;text-align:right;">${r.pendingImportPkts ? `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:bold;padding:1px 7px;border-radius:8px;">${fmtPkts(r.pendingImportPkts)}</span>` : ''}</td>
       <td ${tdR}><b>${fmtPkts(r.afterImportPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
       <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};"><b>${fmtSignedPkts(r.requiredNextPkts)}</b></td>
@@ -9222,7 +9227,7 @@ function renderImportsTable() {
   const allVisSel = list.length && list.every(i => importsBulkSel.has(i.id));
   const someVisSel = !allVisSel && list.some(i => importsBulkSel.has(i.id));
   el.innerHTML = `<div id="imp-bulk-bar" class="bulk-actions" style="display:none;"></div>
-    <div style="overflow-x:auto;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+    <div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
     <thead>
       <tr style="background:var(--bg2);">
         <th class="bulk-th"><input type="checkbox" id="imp-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleImportAll(this.checked)" title="Select all visible"></th>
@@ -10045,7 +10050,7 @@ function renderProductionReport() {
     return `
       <div style="margin-top:18px;">
         <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">${esc(s.pick)} <span style="font-weight:400;color:var(--text2);">— day-by-day, ${rows.length} day${rows.length===1?'':'s'} with activity</span></div>
-        <div style="overflow-x:auto;">
+        <div class="report-scroll-wrap">
         <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="background:var(--bg2);">
             <th ${th}>Date</th>
@@ -10094,7 +10099,7 @@ function renderProductionReport() {
     return `
       <div style="margin-top:18px;">
         <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">By ${label.charAt(0).toUpperCase() + label.slice(1)} <span style="font-weight:400;color:var(--text2);">— ${rows.length} ${label}${rows.length===1?'':'s'} &middot; click a row to see day-by-day</span></div>
-        <div style="overflow-x:auto;">
+        <div class="report-scroll-wrap">
         <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="background:var(--bg2);">
             <th ${th}>${label.charAt(0).toUpperCase() + label.slice(1)}</th>
@@ -11503,7 +11508,7 @@ function renderTrashJobs() {
     </tr>`;
   }).join('');
   el.innerHTML = trashPaneHeader('Jobs', rows.length) + `
-    <div style="overflow-x:auto;">
+    <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead><tr style="background:var(--bg2);">
         <th ${thL}>Job ID</th>
@@ -11564,7 +11569,7 @@ function renderTrashImports() {
     </tr>`;
   }).join('');
   el.innerHTML = trashPaneHeader('Imports', rows.length) + `
-    <div style="overflow-x:auto;">
+    <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead><tr style="background:var(--bg2);">
         <th ${thL}>Status</th>
@@ -12148,6 +12153,7 @@ function renderStockMovement(direction, from, to) {
   const someVisSel = !allVisSel && txs.some(t => stockMovementSel[direction].has(t.id));
   document.getElementById(`sm-${direction}-content`).innerHTML = txs.length
     ? `<div id="sm-${direction}-bulk-bar" class="bulk-actions" style="display:none;"></div>
+       <div class="report-scroll-wrap">
        <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
          <thead>
            <tr style="background:var(--bg2);">
@@ -12156,7 +12162,8 @@ function renderStockMovement(direction, from, to) {
            </tr>
          </thead>
          <tbody>${rows}</tbody>
-       </table>`
+       </table>
+       </div>`
     : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`;
   const headChk = document.getElementById(`sm-${direction}-bulk-all`);
   if (headChk) headChk.indeterminate = someVisSel;
@@ -12386,7 +12393,8 @@ function renderStockTotal(direction) {
   if (!contentEl) return;
   contentEl.innerHTML = !itemRows.length
     ? `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`
-    : `<table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+    : `<div class="report-scroll-wrap">
+      <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead>
           <tr style="background:var(--bg2);">
             <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Paper Type</th>
@@ -12418,7 +12426,8 @@ function renderStockTotal(direction) {
             <td></td>
           </tr>
         </tfoot>
-      </table>`;
+      </table>
+      </div>`;
 }
 
 async function exportStockTotal(direction) {
