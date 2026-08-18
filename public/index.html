@@ -15547,7 +15547,20 @@ function renderGroupTileCompact(groupName, groupJobs) {
 function openGroupEdit(groupId) {
   if (!canWriteJobs()) { notify('Only Admin / Production Manager can edit groups.'); return; }
   const g = stockGroupById(groupId);
-  if (!g) { notify('Group not loaded — refresh and try again.'); return; }
+  if (!g) {
+    // Bug 5 fix — group is missing from the loaded list (deleted, or
+    // never fully loaded). Fall back to the legacy per-member Edit
+    // via the oldest sub job so the button still does something
+    // useful instead of dead-ending on a scary error toast.
+    const anySub = (jobs || []).find(j => j && j.group_job_id === groupId && !j.deleted_at);
+    if (anySub) {
+      notify('Group entity not available — opening a sub job instead.');
+      try { openEdit(anySub.id); } catch { notify('Could not open sub job.'); }
+      return;
+    }
+    notify('Group not loaded — refresh and try again.');
+    return;
+  }
   // Build a synthetic job-shaped object from the group's template so
   // jobForm renders the exact same layout the seed job had. The form
   // hydrates from this — save reads back via getFormData() and posts
@@ -15656,9 +15669,21 @@ async function saveGroupEdit(groupId) {
 async function deleteStockGroup(groupId) {
   const g = stockGroupById(groupId);
   if (!g) return;
+  // Owner rule: group only deletable when empty. Pre-flight the sub-
+  // job count locally so we can bail with a friendly message before
+  // hitting the server (which enforces the same rule).
+  const activeMembers = (jobs || []).filter(j => j && j.group_job_id === groupId && !j.deleted_at);
+  if (activeMembers.length > 0) {
+    await alertDialog({
+      title: `Can't delete group "${g.product}"`,
+      message: `It still has ${activeMembers.length} sub job${activeMembers.length === 1 ? '' : 's'}. Delete or unlink every sub job first, then try again.`,
+      kind: 'warn',
+    });
+    return;
+  }
   const ok = await confirmDialog({
     title: `Delete group "${g.product}"?`,
-    message: `The group entity will be soft-deleted. Existing sub jobs are kept intact — they'll just no longer aggregate under a live group tile.`,
+    message: `This empty group will be permanently removed from the list.`,
     danger: true,
     confirmText: 'Delete Group',
   });
@@ -17049,8 +17074,17 @@ function openDuplicateJob(id) {
     coatings:       Array.isArray(source.coatings) ? [...source.coatings] : [],
   };
 
+  // Bug 6 fix — if the source sub job belongs to a group entity,
+  // carry group_job_id onto the new sub via a hidden input so
+  // getFormData() → POST /api/jobs stamps the same group link. Sub
+  // jobs duplicated from another sub of the same group now show up
+  // under the group tile automatically.
+  const groupJobIdInput = source.group_job_id
+    ? `<input type="hidden" id="f-group-job-id" value="${source.group_job_id}">`
+    : '';
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">· duplicating E-${source.id}${source.jobcode ? ' (' + esc(source.jobcode) + ')' : ''}</span></h2>
+    ${groupJobIdInput}
     ${jobForm(template)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>

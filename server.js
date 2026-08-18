@@ -385,7 +385,13 @@ async function initDb() {
           plates: seedParts.plates || {},
           no_of_colors: seedParts.no_of_colors || {},
           special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
-          secondary_paper: seedParts.secondary_paper || null,
+          // Strip issued_sheets — that's per-sub-job runtime and must
+          // not leak into the group's template (a fresh sub duplicated
+          // from the group would otherwise start life thinking its
+          // secondary already had N sheets issued).
+          secondary_paper: seedParts.secondary_paper
+            ? (({ issued_sheets, ...rest }) => rest)(seedParts.secondary_paper)
+            : null,
         },
       };
     };
@@ -4629,6 +4635,19 @@ app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
     } else {
       await sql`UPDATE jobs SET stock_group_name = ${groupName}, stock_group_visible = ${inherit} WHERE id = ${id}`;
     }
+    // Bug 2 fix — also link to the group entity (stock_groups) when
+    // one exists for this name. Without this, jobs added via the
+    // legacy name-only flow ("+ Add Existing Job" on the group modal)
+    // showed under the tile (name matched) but weren't strictly
+    // linked, so Edit Group / Duplicate buttons could go missing.
+    if (groupName) {
+      const gRows = await sql`SELECT id FROM stock_groups WHERE product = ${groupName.toLowerCase()} AND deleted_at IS NULL LIMIT 1`;
+      if (gRows.length) {
+        await sql`UPDATE jobs SET group_job_id = ${gRows[0].id} WHERE id = ${id}`;
+      }
+    } else {
+      await sql`UPDATE jobs SET group_job_id = NULL WHERE id = ${id}`;
+    }
     await logAudit(sql, req, {
       action: groupName ? 'job.group_set' : 'job.group_clear',
       entityType: 'job', entityId: id,
@@ -4716,19 +4735,41 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
 // existing sub jobs keep whatever they already have.
 
 // List all active groups + a lightweight aggregate of their sub jobs.
+// Client role is scoped to their own company AND only groups flagged
+// client_visible — mirrors the client-view scoping applied to jobs so
+// the client portal can't leak other companies' groups.
 app.get('/api/stock-groups', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const groups = await sql`
-      SELECT g.*, (
-        SELECT COUNT(*)::int FROM jobs j
-         WHERE j.group_job_id = g.id AND j.deleted_at IS NULL
-      ) AS sub_job_count
-      FROM stock_groups g
-      WHERE g.deleted_at IS NULL
-      ORDER BY g.product ASC
-    `;
+    const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    const isClient = roles.includes('client');
+    const clientCompany = req.user?.client_company ? String(req.user.client_company).trim().toLowerCase() : '';
+    let groups;
+    if (isClient) {
+      if (!clientCompany) return res.json([]);
+      groups = await sql`
+        SELECT g.*, (
+          SELECT COUNT(*)::int FROM jobs j
+           WHERE j.group_job_id = g.id AND j.deleted_at IS NULL
+        ) AS sub_job_count
+        FROM stock_groups g
+        WHERE g.deleted_at IS NULL
+          AND g.client_visible = true
+          AND LOWER(COALESCE(g.client, '')) = ${clientCompany}
+        ORDER BY g.product ASC
+      `;
+    } else {
+      groups = await sql`
+        SELECT g.*, (
+          SELECT COUNT(*)::int FROM jobs j
+           WHERE j.group_job_id = g.id AND j.deleted_at IS NULL
+        ) AS sub_job_count
+        FROM stock_groups g
+        WHERE g.deleted_at IS NULL
+        ORDER BY g.product ASC
+      `;
+    }
     res.json(groups);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -4860,8 +4901,16 @@ app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
     const poQty         = 'po_qty' in body ? (body.po_qty != null ? String(body.po_qty).trim() : null) : cur.po_qty;
     const jobcode       = 'jobcode' in body ? (body.jobcode ? String(body.jobcode).trim() : null) : cur.jobcode;
     const specs         = 'specs' in body && body.specs && typeof body.specs === 'object' ? body.specs : cur.specs;
-    const template      = 'template' in body && body.template && typeof body.template === 'object' ? body.template : cur.template;
+    let template        = 'template' in body && body.template && typeof body.template === 'object' ? body.template : cur.template;
     const clientVisible = 'client_visible' in body ? !!body.client_visible : cur.client_visible;
+    // Sanitize secondary_paper on the template — issued_sheets is a
+    // per-sub-job runtime counter, must not live on the group's
+    // template (otherwise duplicating from group would leak stale
+    // "already issued" numbers into fresh sub jobs).
+    if (template && template.particulars && template.particulars.secondary_paper) {
+      const { issued_sheets, ...restSec } = template.particulars.secondary_paper;
+      template = { ...template, particulars: { ...template.particulars, secondary_paper: restSec } };
+    }
     const updated = await sql`
       UPDATE stock_groups
          SET client = ${client},
@@ -4875,6 +4924,20 @@ app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
        WHERE id = ${id}
        RETURNING *
     `;
+    // Cascade: if product name changed, retag every linked sub job so
+    // the group tile (which still groups by stock_group_name for now)
+    // finds them under the new name. Sub jobs' OTHER fields stay
+    // untouched — only the identifying group-name tag changes.
+    if (product && product !== cur.product) {
+      await sql`UPDATE jobs SET stock_group_name = ${product} WHERE group_job_id = ${id} AND deleted_at IS NULL`;
+    }
+    // Cascade: if group's client_visible flipped, mirror on every
+    // sub job's stock_group_visible + client_visible so the tile's
+    // visibility to the client stays consistent with the group's
+    // choice (single source of truth = the group entity).
+    if (clientVisible !== cur.client_visible) {
+      await sql`UPDATE jobs SET stock_group_visible = ${clientVisible}, client_visible = (client_visible OR ${clientVisible}) WHERE group_job_id = ${id} AND deleted_at IS NULL`;
+    }
     await logAudit(sql, req, {
       action: 'group.update', entityType: 'group', entityId: id,
       summary: `Updated group "${product}"`,
@@ -4883,9 +4946,12 @@ app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// Soft-delete a group. Sub jobs are UNTOUCHED (their group_job_id
-// stays pointing at the deleted-flagged row, they just no longer
-// aggregate under a live group — admin can review from the trash).
+// Soft-delete a group. Owner rule: a group may only be deleted when
+// it has NO sub jobs — the group is a container, and destroying it
+// while sub jobs still point at it would orphan them. If any active
+// sub jobs exist, the request is rejected with a count so the caller
+// can tell the user exactly how many need to be deleted or unlinked
+// first.
 app.delete('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
   try {
     await dbReady;
@@ -4893,10 +4959,17 @@ app.delete('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const rows = await sql`SELECT product FROM stock_groups WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Group not found' });
+    const memberRows = await sql`SELECT COUNT(*)::int AS n FROM jobs WHERE group_job_id = ${id} AND deleted_at IS NULL`;
+    const memberCount = (memberRows[0] && memberRows[0].n) || 0;
+    if (memberCount > 0) {
+      return res.status(400).json({
+        error: `Cannot delete group — it still has ${memberCount} sub job${memberCount === 1 ? '' : 's'}. Delete or unlink all sub jobs first.`,
+      });
+    }
     await sql`UPDATE stock_groups SET deleted_at = NOW() WHERE id = ${id}`;
     await logAudit(sql, req, {
       action: 'group.delete', entityType: 'group', entityId: id,
-      summary: `Deleted group "${rows[0].product}" (sub jobs kept intact)`,
+      summary: `Deleted empty group "${rows[0].product}"`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
