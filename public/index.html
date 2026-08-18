@@ -20465,15 +20465,6 @@ function renderClientSummary(rows, containerId) {
       const shipped = gJobs.reduce((s, j) => s + (totalDeliveredCartons(j) || 0), 0);
       const ready   = (stats.ready || 0) + shipped;   // ready produced total (in hand + already shipped)
       const shipCount = gJobs.reduce((s, j) => s + ((Array.isArray(j.deliveries) ? j.deliveries.length : 0)), 0);
-      const batches = [...new Set(gJobs.map(j => (j.bno || '').trim()).filter(Boolean))].join(', ');
-      // Status: derive at group level from the mix of sub-job stages
-      // so it reads like a single job's stage.
-      let status = 'In Progress';
-      if (gJobs.every(isDone)) status = 'Delivered';
-      else if (gJobs.every(j => isNewJob(j))) status = 'New Job';
-      else if (gJobs.every(j => isCtpQueue(j))) status = 'CTP';
-      else if (gJobs.every(j => j.issuance_status === 'pending')) status = 'Pending Stock';
-      else if (gJobs.some(j => !isDone(j) && (j.stage_index || 0) >= 6)) status = 'Ready to Deliver';
       gTotals.poQty     += poQty;
       gTotals.ready     += ready;
       gTotals.shipped   += shipped;
@@ -20481,12 +20472,10 @@ function renderClientSummary(rows, containerId) {
       groupHtmlRows.push(`<tr style="border-bottom:1px solid var(--border);">
         <td style="padding:6px 8px;font-weight:700;">${esc(gName)}</td>
         <td style="padding:6px 8px;">${esc((repr && repr.jobcode) || '')}</td>
-        <td style="padding:6px 8px;">${esc(batches)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
         <td style="padding:6px 8px;text-align:right;font-weight:600;color:#166534;">${fmtN(ready)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(shipped)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(shipCount)}</td>
-        <td style="padding:6px 8px;">${esc(status)}</td>
       </tr>`);
     }
     groupTable = `
@@ -20498,23 +20487,20 @@ function renderClientSummary(rows, containerId) {
               <tr style="background:var(--bg2);">
                 <th ${th}>Product</th>
                 <th ${th}>Code</th>
-                <th ${th}>Batch No.</th>
                 <th ${thR}>PO Qty</th>
                 <th ${thR}>Ready</th>
                 <th ${thR}>Shipped</th>
                 <th ${thR}>Shipments</th>
-                <th ${th}>Status</th>
               </tr>
             </thead>
             <tbody>${groupHtmlRows.join('')}</tbody>
             <tfoot>
               <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
-                <td colspan="3" style="padding:8px;text-align:right;color:var(--text2);">Totals</td>
+                <td colspan="2" style="padding:8px;text-align:right;color:var(--text2);">Totals</td>
                 <td style="padding:8px;text-align:right;">${fmtN(gTotals.poQty)}</td>
                 <td style="padding:8px;text-align:right;color:#166534;">${fmtN(gTotals.ready)}</td>
                 <td style="padding:8px;text-align:right;">${fmtN(gTotals.shipped)}</td>
                 <td style="padding:8px;text-align:right;">${fmtN(gTotals.shipCount)}</td>
-                <td></td>
               </tr>
             </tfoot>
           </table>
