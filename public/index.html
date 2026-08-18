@@ -20371,71 +20371,158 @@ function renderClientSummary(rows, containerId) {
     if (j.issuance_status === 'pending') return 'Pending Stock';
     return STAGES[j.stage_index || 0] || '—';
   };
-  // Per-job summary rows. Ready = readyCartonsTotal (falls back to
-  // pasted for partial-ready jobs — same helper the tiles use).
-  const totals = { poQty: 0, ready: 0, shipped: 0, balance: 0 };
-  const jobRows = rows.map(j => {
-    const poQty  = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
-    let   ready  = readyCartonsTotal(j) || 0;
-    if (!ready && isPartialReady(j)) ready = pastedCartonsTotal(j) || 0;
-    const shipped = totalDeliveredCartons(j) || 0;
-    const bookedCartons = parseFloat(String(j.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
-    const balance = bookedCartons ? Math.max(0, bookedCartons - shipped) : Math.max(0, ready - shipped);
-    totals.poQty   += poQty;
-    totals.ready   += ready;
-    totals.shipped += shipped;
-    totals.balance += balance;
-    const deadCell = j.deadline
-      ? `<span style="color:#dc2626;">${esc(fmtDMY(j.deadline))}</span>`
-      : '<span style="color:var(--text3);">—</span>';
-    return `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:6px 8px;font-weight:600;">E-${j.id}</td>
-      <td style="padding:6px 8px;">${esc(j.name || '')}</td>
-      <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
-      <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
-      <td style="padding:6px 8px;">${esc(j.bno || '')}</td>
-      <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
-      <td style="padding:6px 8px;text-align:right;font-weight:600;color:#166534;">${fmtN(ready)}</td>
-      <td style="padding:6px 8px;text-align:right;">${fmtN(shipped)}</td>
-      <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtN(balance)}</td>
-      <td style="padding:6px 8px;white-space:nowrap;">${j.dateissued ? esc(fmtDMY(j.dateissued)) : ''}</td>
-      <td style="padding:6px 8px;white-space:nowrap;">${deadCell}</td>
-      <td style="padding:6px 8px;">${esc(stageOf(j))}</td>
-    </tr>`;
-  }).join('');
+  // Two-table split — owner ask: normal jobs and Mill (group) jobs
+  // read differently, so they get their own tables with columns
+  // tailored to each context. Group rows AGGREGATE across sub-jobs
+  // (PO Qty / Ready / Shipped are sums), matching how the group tile
+  // works in the Client View.
+  const groupedByName = new Map();
+  const normalRows = [];
+  for (const j of rows) {
+    if (j && j.stock_group_name) {
+      if (!groupedByName.has(j.stock_group_name)) groupedByName.set(j.stock_group_name, []);
+      groupedByName.get(j.stock_group_name).push(j);
+    } else {
+      normalRows.push(j);
+    }
+  }
   const th = 'style="text-align:left;padding:8px 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
-  const jobsTable = `
-    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:max-content;">
-      <thead>
-        <tr style="background:var(--bg2);">
-          <th ${th}>Job ID</th>
-          <th ${th}>Product</th>
-          <th ${th}>Code</th>
-          <th ${th}>PO No.</th>
-          <th ${th}>Batch No.</th>
-          <th ${thR}>PO Qty</th>
-          <th ${thR}>Ready</th>
-          <th ${thR}>Shipped</th>
-          <th ${thR}>Balance</th>
-          <th ${th}>Job Date</th>
-          <th ${th}>Deadline</th>
-          <th ${th}>Status</th>
-        </tr>
-      </thead>
-      <tbody>${jobRows}</tbody>
-      <tfoot>
-        <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
-          <td style="padding:8px;">${rows.length} job${rows.length===1?'':'s'}</td>
-          <td colspan="4" style="padding:8px;text-align:right;color:var(--text2);">Totals</td>
-          <td style="padding:8px;text-align:right;">${fmtN(totals.poQty)}</td>
-          <td style="padding:8px;text-align:right;color:#166534;">${fmtN(totals.ready)}</td>
-          <td style="padding:8px;text-align:right;">${fmtN(totals.shipped)}</td>
-          <td style="padding:8px;text-align:right;">${fmtN(totals.balance)}</td>
-          <td colspan="3"></td>
-        </tr>
-      </tfoot>
-    </table>`;
+
+  // NORMAL JOBS TABLE — Product | Code | PO No. | Batch No. | PO Qty | Ready | Shipped | Unit Carton Qty | Status
+  let normalTable = '';
+  if (normalRows.length) {
+    const nTotals = { poQty: 0, ready: 0, shipped: 0, unitCarton: 0 };
+    const normalHtml = normalRows.map(j => {
+      const poQty      = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      let   ready      = readyCartonsTotal(j) || 0;
+      if (!ready && isPartialReady(j)) ready = pastedCartonsTotal(j) || 0;
+      const shipped    = totalDeliveredCartons(j) || 0;
+      const unitCarton = parseFloat(String(j.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      nTotals.poQty      += poQty;
+      nTotals.ready      += ready;
+      nTotals.shipped    += shipped;
+      nTotals.unitCarton += unitCarton;
+      return `<tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:6px 8px;">${esc(j.name || '')}</td>
+        <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
+        <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
+        <td style="padding:6px 8px;">${esc(j.bno || '')}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
+        <td style="padding:6px 8px;text-align:right;font-weight:600;color:#166534;">${fmtN(ready)}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmtN(shipped)}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmtN(unitCarton)}</td>
+        <td style="padding:6px 8px;">${esc(stageOf(j))}</td>
+      </tr>`;
+    }).join('');
+    normalTable = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:6px;">Jobs · ${normalRows.length} record${normalRows.length===1?'':'s'}</div>
+        <div class="report-scroll-wrap" style="max-height:calc(100vh - 520px);min-height:180px;">
+          <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:max-content;">
+            <thead>
+              <tr style="background:var(--bg2);">
+                <th ${th}>Product</th>
+                <th ${th}>Code</th>
+                <th ${th}>PO No.</th>
+                <th ${th}>Batch No.</th>
+                <th ${thR}>PO Qty</th>
+                <th ${thR}>Ready</th>
+                <th ${thR}>Shipped</th>
+                <th ${thR}>Unit Carton Qty</th>
+                <th ${th}>Status</th>
+              </tr>
+            </thead>
+            <tbody>${normalHtml}</tbody>
+            <tfoot>
+              <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+                <td colspan="4" style="padding:8px;text-align:right;color:var(--text2);">Totals</td>
+                <td style="padding:8px;text-align:right;">${fmtN(nTotals.poQty)}</td>
+                <td style="padding:8px;text-align:right;color:#166534;">${fmtN(nTotals.ready)}</td>
+                <td style="padding:8px;text-align:right;">${fmtN(nTotals.shipped)}</td>
+                <td style="padding:8px;text-align:right;">${fmtN(nTotals.unitCarton)}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // GROUP (MILL) JOBS TABLE — Product | Code | Batch No. | PO Qty | Ready | Shipped | Shipments | Status
+  // Every metric is summed across sub-jobs. Batch numbers are deduped
+  // and joined; Code comes from the group's oldest/representative job.
+  let groupTable = '';
+  if (groupedByName.size) {
+    const gTotals = { poQty: 0, ready: 0, shipped: 0, shipCount: 0 };
+    const groupHtmlRows = [];
+    for (const [gName, gJobs] of groupedByName) {
+      const stats = groupStats(gJobs);
+      const repr  = groupRepresentative(gJobs);
+      const poQty = gJobs.reduce((s, j) => s + (parseFloat(String(j.qty||'').replace(/[^0-9.\-]/g,''))||0), 0);
+      // Ready: unshipped ready + partial-ready pasted, mirroring
+      // groupStats' ready-in-hand logic so the number matches the tile.
+      const shipped = gJobs.reduce((s, j) => s + (totalDeliveredCartons(j) || 0), 0);
+      const ready   = (stats.ready || 0) + shipped;   // ready produced total (in hand + already shipped)
+      const shipCount = gJobs.reduce((s, j) => s + ((Array.isArray(j.deliveries) ? j.deliveries.length : 0)), 0);
+      const batches = [...new Set(gJobs.map(j => (j.bno || '').trim()).filter(Boolean))].join(', ');
+      // Status: derive at group level from the mix of sub-job stages
+      // so it reads like a single job's stage.
+      let status = 'In Progress';
+      if (gJobs.every(isDone)) status = 'Delivered';
+      else if (gJobs.every(j => isNewJob(j))) status = 'New Job';
+      else if (gJobs.every(j => isCtpQueue(j))) status = 'CTP';
+      else if (gJobs.every(j => j.issuance_status === 'pending')) status = 'Pending Stock';
+      else if (gJobs.some(j => !isDone(j) && (j.stage_index || 0) >= 6)) status = 'Ready to Deliver';
+      gTotals.poQty     += poQty;
+      gTotals.ready     += ready;
+      gTotals.shipped   += shipped;
+      gTotals.shipCount += shipCount;
+      groupHtmlRows.push(`<tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:6px 8px;font-weight:700;">${esc(gName)}</td>
+        <td style="padding:6px 8px;">${esc((repr && repr.jobcode) || '')}</td>
+        <td style="padding:6px 8px;">${esc(batches)}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
+        <td style="padding:6px 8px;text-align:right;font-weight:600;color:#166534;">${fmtN(ready)}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmtN(shipped)}</td>
+        <td style="padding:6px 8px;text-align:right;">${fmtN(shipCount)}</td>
+        <td style="padding:6px 8px;">${esc(status)}</td>
+      </tr>`);
+    }
+    groupTable = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:6px;">Mill Jobs (Groups) · ${groupedByName.size} record${groupedByName.size===1?'':'s'}</div>
+        <div class="report-scroll-wrap" style="max-height:calc(100vh - 520px);min-height:180px;">
+          <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:max-content;">
+            <thead>
+              <tr style="background:var(--bg2);">
+                <th ${th}>Product</th>
+                <th ${th}>Code</th>
+                <th ${th}>Batch No.</th>
+                <th ${thR}>PO Qty</th>
+                <th ${thR}>Ready</th>
+                <th ${thR}>Shipped</th>
+                <th ${thR}>Shipments</th>
+                <th ${th}>Status</th>
+              </tr>
+            </thead>
+            <tbody>${groupHtmlRows.join('')}</tbody>
+            <tfoot>
+              <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+                <td colspan="3" style="padding:8px;text-align:right;color:var(--text2);">Totals</td>
+                <td style="padding:8px;text-align:right;">${fmtN(gTotals.poQty)}</td>
+                <td style="padding:8px;text-align:right;color:#166534;">${fmtN(gTotals.ready)}</td>
+                <td style="padding:8px;text-align:right;">${fmtN(gTotals.shipped)}</td>
+                <td style="padding:8px;text-align:right;">${fmtN(gTotals.shipCount)}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  const jobsTable = normalTable + groupTable;
   // Flatten every job's deliveries[] into a single log, newest first.
   // Notes field holds the challan number in this app.
   const ships = [];
@@ -20486,13 +20573,15 @@ function renderClientSummary(rows, containerId) {
         </div>
       </div>`;
   }
+  const normalCount = normalRows.length;
+  const groupCount  = groupedByName.size;
   el.innerHTML = `
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px 16px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
         <div style="font-size:14px;font-weight:700;color:var(--text);">&#128203; Summary</div>
-        <div style="font-size:11px;color:var(--text2);">${rows.length} job${rows.length===1?'':'s'} · ${ships.length} shipment${ships.length===1?'':'s'}</div>
+        <div style="font-size:11px;color:var(--text2);">${normalCount} job${normalCount===1?'':'s'}${groupCount ? ` · ${groupCount} mill group${groupCount===1?'':'s'}` : ''} · ${ships.length} shipment${ships.length===1?'':'s'}</div>
       </div>
-      <div class="report-scroll-wrap" style="max-height:calc(100vh - 520px);min-height:180px;">${jobsTable}</div>
+      ${jobsTable}
       ${shipsTable}
     </div>`;
 }
