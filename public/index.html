@@ -15612,48 +15612,73 @@ function openGroupEdit(groupId) {
   if (typeof initSpecialsEditor === 'function') initSpecialsEditor();
 }
 async function saveGroupEdit(groupId) {
-  const data = getFormData();
-  if (!data.name) { await alertDialog({ title: 'Product name is required', kind: 'warn' }); return; }
-  // Peel the shape jobForm returns into the group's canonical fields
-  // + a template mirror so duplicate-into-job can spread it verbatim
-  // into every new sub job.
-  const parts = (data.particulars && typeof data.particulars === 'object') ? data.particulars : {};
+  // SCOPED reads — every field is looked up INSIDE the currently-open
+  // modal, not via a bare document.getElementById. Fixes a real bug
+  // where getElementById could grab a stale duplicate of #f-qty
+  // (etc.) lingering elsewhere in the DOM tree (browser back-forward
+  // cache, hidden template forms, race with a prior modal that
+  // hadn't fully torn down) and read the OLD value. Symptom: user
+  // typed 40000 in the group's PO QTY, hit Save, but the server
+  // received 34000 (the pre-existing value from the leftover input).
+  const modal = document.querySelector('#modal-root .modal-card');
+  if (!modal) { notify('Group edit modal not found — reopen and try again.'); return; }
+  const q  = id => { const el = modal.querySelector('#' + id); return el ? String(el.value || '').trim() : ''; };
+  const cb = id => { const el = modal.querySelector('#' + id); return !!(el && el.checked); };
+  const name = q('f-name');
+  if (!name) { await alertDialog({ title: 'Product name is required', kind: 'warn' }); return; }
+  const qtyVal = q('f-qty');
+  // Preserve rich particulars sub-blocks (special_colors, CTP setup
+  // fields, secondary_paper). Those are ALREADY collected correctly
+  // by collectParticulars regardless of which modal is showing —
+  // there's only one PARTICULARS_ROWS DOM structure per modal.
+  const collected = (typeof collectParticulars === 'function') ? collectParticulars() : {};
+  // Read coatings from the modal only.
+  const coatings = [...modal.querySelectorAll('input[name="f-coatings"]:checked')].map(c => c.value);
+  const invItemEl = modal.querySelector('#f-inventory-item');
+  const inventoryItemId = invItemEl && invItemEl.value ? parseInt(invItemEl.value, 10) : null;
+  const clientVal = q('f-client');
   const body = {
-    product: data.name,
-    client: data.client,
-    jobcode: data.jobcode || null,
-    po_qty:  data.qty || null,
+    product: name,
+    client: clientVal || null,
+    jobcode: q('f-jobcode') || null,
+    po_qty:  qtyVal || null,
     specs: {
-      size: data.size || null,
-      gsm:  parts.cutting_size_gsm || null,
-      paper: data.paper || null,
+      size:  q('f-size') || null,
+      gsm:   collected.cutting_size_gsm || null,
+      paper: (invItemEl && invItemEl.dataset.paperType) || null,
     },
     template: {
-      name: data.name, client: data.client, jobcode: data.jobcode || null,
-      ref: data.ref || null, bno: data.bno || null,
-      qty: data.qty || null, size: data.size || null, ups: data.ups || null,
-      sheets: data.sheets || null, paper: data.paper || null,
-      machine: data.machine || null, cartonqty: data.cartonqty || null,
-      priority: data.priority || 'Normal',
-      mfgdate: data.mfgdate || null, expdate: data.expdate || null,
-      mrp: data.mrp || null, notes: data.notes || null,
-      coatings: Array.isArray(data.coatings) ? data.coatings : [],
-      inventory_item_id: data.inventory_item_id || null,
-      cut_size: data.cut_size || null, offcut_size: data.offcut_size || null,
-      is_shade_card: !!data.is_shade_card,
+      name, client: clientVal,
+      jobcode: q('f-jobcode') || null,
+      ref: q('f-ref') || null,
+      bno: q('f-bno') || null,
+      qty: qtyVal,
+      size: q('f-size'),
+      ups: q('f-ups'),
+      sheets: q('f-sheets'),
+      machine: q('f-machine'),
+      cartonqty: q('f-cartonqty'),
+      priority: q('f-priority') || 'Normal',
+      mfgdate: q('f-mfgdate'),
+      expdate: q('f-expdate'),
+      mrp: q('f-mrp'),
+      notes: q('f-notes'),
+      coatings,
+      inventory_item_id: Number.isFinite(inventoryItemId) ? inventoryItemId : null,
+      is_shade_card: cb('f-is-shade-card'),
       particulars: {
-        cutting_size_gsm: parts.cutting_size_gsm || '',
-        quantity_of_packets: parts.quantity_of_packets || '',
-        sheet_cut: parts.sheet_cut || '1/1',
-        artworks_matter_approval: parts.artworks_matter_approval || {},
-        shade_card: parts.shade_card || {},
-        plates: parts.plates || {},
-        no_of_colors: parts.no_of_colors || {},
-        special_colors: Array.isArray(parts.special_colors) ? parts.special_colors : [],
-        secondary_paper: parts.secondary_paper || null,
+        cutting_size_gsm:    collected.cutting_size_gsm || '',
+        quantity_of_packets: collected.quantity_of_packets || '',
+        sheet_cut:           collected.sheet_cut || '1/1',
+        artworks_matter_approval: collected.artworks_matter_approval || {},
+        shade_card:               collected.shade_card               || {},
+        plates:                   collected.plates                   || {},
+        no_of_colors:             collected.no_of_colors             || {},
+        special_colors: Array.isArray(collected.special_colors) ? collected.special_colors : [],
+        secondary_paper: collected.secondary_paper || null,
       },
     },
-    client_visible: !!data.client_visible,
+    client_visible: cb('f-client-visible'),
   };
   showSaving(true);
   try {
