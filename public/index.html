@@ -3876,7 +3876,8 @@ function renderJobsCompact() {
 // Per-row template for the Jobs (compact) list — extracted so the
 // Stock Group "View Jobs" modal can render each member with the exact
 // same tile shape and no Track-view clock animation.
-function renderJobRowCompact(j) {
+function renderJobRowCompact(j, opts) {
+    const isGroupTile = !!(opts && opts.isGroupTile);
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
     const pending = j.issuance_status === 'pending';
@@ -4025,7 +4026,7 @@ function renderJobRowCompact(j) {
                facts row below so it groups with the production numbers. -->
           <div class="job-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' &middot; ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>
           <div class="job-facts">
-            ${j.qty?`<span><b>PO Qty:</b> ${esc(j.qty)} pcs</span>`:''}
+            ${j.qty?`<span><b>${isGroupTile?'Mil':'PO'} Qty:</b> ${esc(j.qty)} pcs</span>`:''}
             ${j.dateissued?`<span><b>Issued:</b> ${esc(fmtDMY(j.dateissued))}</span>`:''}
             ${j.size?`<span><b>Size/GSM:</b> ${esc(j.size)}</span>`:''}
             ${j.ups?`<span><b>Ups:</b> ${esc(j.ups)}</span>`:''}
@@ -4156,6 +4157,7 @@ function renderJobCard(j, opts) {
   // non-clickable. Used by the real client portal AND the admin's
   // Client View tab so the two never drift.
   const clientPreview = !!(opts && opts.clientPreview);
+  const isGroupTile   = !!(opts && opts.isGroupTile);
   // Client-view API projection may be running an older build that
   // omits particulars / deliveries. When the ADMIN is previewing (they
   // have the full jobs cache), backfill those fields from the admin
@@ -4358,7 +4360,7 @@ function renderJobCard(j, opts) {
         // in the facts row per user preference.
         j.jobcode ? `<span><b>Code</b> ${esc(j.jobcode)}</span>` : '',
         j.ref     ? `<span><b>PO No.</b> ${esc(j.ref)}</span>` : '',
-        j.qty     ? `<span><b>PO Qty</b> ${esc(j.qty)}</span>` : '',
+        j.qty     ? `<span><b>${isGroupTile ? 'Mil' : 'PO'} Qty</b> ${esc(j.qty)}</span>` : '',
         j.bno     ? `<span><b>Batch No.</b> ${esc(j.bno)}</span>` : '',
         coatingsStr ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
         (() => {
@@ -15944,7 +15946,7 @@ function renderGroupTile(groupName, groupJobs) {
     ref: '',
     bno: '',
   } : repr;
-  let html = renderJobCard(displaySource)
+  let html = renderJobCard(displaySource, { isGroupTile: true })
     // .tile-head content is a flat sequence of spans / small labels — no
     // nested divs — so a lazy match to the first </div> is safe here.
     .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
@@ -15996,7 +15998,7 @@ function renderGroupTileCompact(groupName, groupJobs) {
     ref: '',
     bno: '',
   } : repr;
-  let html = renderJobRowCompact(displaySource)
+  let html = renderJobRowCompact(displaySource, { isGroupTile: true })
     // .job-id-row content is flat spans only.
     .replace(/<div class="job-id-row">[\s\S]*?<\/div>/, `<div class="job-id-row">${badges}</div>`)
     // .job-actions contains only <button> children.
@@ -16725,7 +16727,7 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
 
   // Render from the displaySource (group entity when available, else
   // the sub job for legacy groups without an entity).
-  let html = renderJobCard(displaySource, { clientPreview: true });
+  let html = renderJobCard(displaySource, { clientPreview: true, isGroupTile: true });
 
   // 1. Replace the E-{id} + any surrounding clientTopRow with our group header.
   const groupTopRow = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
@@ -16770,7 +16772,7 @@ function renderClientGroupTile(groupName, groupJobs, opts) {
   // step 3's group-entity values with the seed sub job's values.
   const coatingsStr = Array.isArray(displaySource.coatings) ? displaySource.coatings.filter(Boolean).join(', ') : '';
   const groupFactsHtml = [
-    displaySource.qty     ? `<span><b>PO Qty</b> ${esc(displaySource.qty)}</span>` : '',
+    displaySource.qty     ? `<span><b>Mil Qty</b> ${esc(displaySource.qty)}</span>` : '',
     coatingsStr           ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
     displaySource.jobcode ? `<span><b>Code</b> ${esc(displaySource.jobcode)}</span>` : '',
   ].filter(Boolean).join('');
