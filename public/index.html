@@ -10050,7 +10050,7 @@ function printJobsReport() {
 // Data source: per-(date, machine) + per-(date, operator) totals from
 // the Daily Production register (sheets/waste/jobs from job logs +
 // coatings_done, hours from manager notes).
-const prodReportState = { from: '', to: '', view: 'machine', pick: '', data: null, loading: false };
+const prodReportState = { from: '', to: '', view: 'machine', pick: '', section: '', data: null, loading: false };
 
 function openProductionReport() {
   const pane = document.getElementById('rt-prod-report');
@@ -10076,6 +10076,17 @@ function setPrTo(v)   { prodReportState.to = v;   loadProductionReport(); }
 function setPrView(v) { prodReportState.view = v; prodReportState.pick = ''; renderProductionReport(); }
 // Pick a specific machine/operator to drill into. Empty = summary.
 function setPrPick(v) { prodReportState.pick = v; renderProductionReport(); }
+// Section filter — Printing / Coating / Die Cutting / Pasting, sourced
+// from each machine's (or operator's) roles on the Users → Operators
+// roster (server-tagged onto every row as `sections`). Empty = all
+// sections. Clears any in-flight drill-down since the picked entity may
+// not belong to the newly chosen section.
+function setPrSection(v) {
+  const s = prodReportState;
+  s.section = (s.section === v) ? '' : v;
+  s.pick = '';
+  renderProductionReport();
+}
 
 async function loadProductionReport() {
   const s = prodReportState;
@@ -10098,7 +10109,14 @@ function renderProductionReport() {
   const s = prodReportState;
   const data = s.data || { byMachineDaily: [], byOperatorDaily: [] };
   const isMachine = s.view === 'machine';
-  const dailyRows = isMachine ? data.byMachineDaily : data.byOperatorDaily;
+  const dailyRowsAll = isMachine ? data.byMachineDaily : data.byOperatorDaily;
+  // Section filter (Printing / Coating / Die Cutting / Pasting) — each
+  // row is tagged server-side with which section(s) its machine (or,
+  // for operators, the machine(s) that person is registered under)
+  // belongs to, per the Users -> Operators roles roster.
+  const dailyRows = s.section
+    ? dailyRowsAll.filter(r => Array.isArray(r.sections) && r.sections.includes(s.section))
+    : dailyRowsAll;
   const nameKey = isMachine ? 'machine' : 'operator';
   // Picker options: distinct entities present in the current view's
   // daily rows for the chosen date range.
@@ -10205,6 +10223,12 @@ function renderProductionReport() {
     const active = s.view === val;
     return `<button class="btn btn-sm${active ? ' btn-primary' : ''}" onclick="setPrView('${val}')">${label}</button>`;
   };
+  // Section filter buttons — click again to clear (act like a toggle
+  // filter, not a fixed picker). Same active-pill styling as View.
+  const sectionBtn = (val, label) => {
+    const active = s.section === val;
+    return `<button class="btn btn-sm${active ? ' btn-primary' : ''}" onclick="setPrSection('${val}')">${label}</button>`;
+  };
   const clearBtn = s.pick
     ? `<button class="btn btn-sm" onclick="setPrPick('')" style="margin-left:8px;">&larr; Back to summary</button>`
     : '';
@@ -10231,6 +10255,10 @@ function renderProductionReport() {
         <div style="display:flex;gap:6px;">${tabBtn('machine', 'By Machine')}${tabBtn('operator', 'By Operator')}</div>
       </div>
       <div>
+        <div class="dash-flbl">Section</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">${sectionBtn('printing', 'Printing')}${sectionBtn('coatings', 'Coating')}${sectionBtn('diecut', 'Die Cutting')}${sectionBtn('pasting', 'Pasting')}</div>
+      </div>
+      <div>
         <div class="dash-flbl">${isMachine ? 'Machine' : 'Operator'}</div>
         <select class="filter" id="pr-pick" onchange="setPrPick(this.value)">${pickOpts}</select>
       </div>
@@ -10245,9 +10273,13 @@ function printProductionReport() {
   const s = prodReportState;
   if (!s.data) { notify('Load the report first.'); return; }
   const isMachine = s.view === 'machine';
-  const dailyRows = isMachine ? s.data.byMachineDaily : s.data.byOperatorDaily;
+  const dailyRowsAll = isMachine ? s.data.byMachineDaily : s.data.byOperatorDaily;
+  const dailyRows = s.section
+    ? dailyRowsAll.filter(r => Array.isArray(r.sections) && r.sections.includes(s.section))
+    : dailyRowsAll;
   const nameKey = isMachine ? 'machine' : 'operator';
   const nameLabel = isMachine ? 'Machine' : 'Operator';
+  const sectionLabels = { printing: 'Printing', coatings: 'Coating', diecut: 'Die Cutting', pasting: 'Pasting' };
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
   let rows, headers, title;
@@ -10267,7 +10299,7 @@ function printProductionReport() {
     rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)))
       .map(r => [r.name, r.sheets, r.waste, Math.round(r.hours * 100) / 100, r.jobs]);
     headers = [nameLabel, 'Sheets', 'Wastage', 'Hours', 'Jobs'];
-    title = `Production Report — By ${nameLabel}`;
+    title = `Production Report — By ${nameLabel}${s.section ? ' · ' + (sectionLabels[s.section] || s.section) : ''}`;
   }
   const totals = rows.reduce((t, r) => ({
     sheets: t.sheets + (+r[1] || 0),
@@ -10330,7 +10362,10 @@ async function exportProductionReport() {
   if (!s.data) { notify('Load the report first.'); return; }
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const isMachine = s.view === 'machine';
-  const dailyRows = isMachine ? s.data.byMachineDaily : s.data.byOperatorDaily;
+  const dailyRowsAll = isMachine ? s.data.byMachineDaily : s.data.byOperatorDaily;
+  const dailyRows = s.section
+    ? dailyRowsAll.filter(r => Array.isArray(r.sections) && r.sections.includes(s.section))
+    : dailyRowsAll;
   const nameKey = isMachine ? 'machine' : 'operator';
   const nameLabel = isMachine ? 'Machine' : 'Operator';
   const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
