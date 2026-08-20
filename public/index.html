@@ -413,10 +413,15 @@
     background: var(--bg2);
     padding-bottom: 8px !important;
   }
-  /* Shared "row is clickable" style — a faint brand-red hover wash (low
-     opacity so the cell text underneath stays fully readable) plus a
-     pointer cursor. Used by Client View Summary rows (click jumps to a
-     job tile) and Jobs Report rows (click opens that job's card). */
+  /* Shared row hover — a faint brand-red wash (low opacity so the cell
+     text underneath stays fully readable), applied to every report
+     table's rows so hovering always shows exactly where you are.
+     .row-hover-red is the tint alone, for rows with no click action;
+     .cv-summary-row adds the pointer cursor on top for rows that
+     actually do something on click (Client View Summary jumps to a
+     job tile, Jobs Report opens the job card, Production Report's
+     By Machine/Operator table drills into day-by-day). */
+  .row-hover-red:hover { background: rgba(163, 45, 45, 0.08); }
   .cv-summary-row { cursor: pointer; }
   .cv-summary-row:hover { background: rgba(163, 45, 45, 0.08); }
   .cv-tile-jump-flash { animation: cvTileFlash 1.6s ease-out; }
@@ -8335,7 +8340,7 @@ function renderInventoryReport() {
           const shortfall = showConsumed && r.consumedPkts > 0 && r.packets < r.consumedPkts;
           const rowBg = shortfall ? 'background:rgba(220,38,38,0.08);' : '';
           return `
-          <tr style="border-bottom:1px solid var(--border);${rowBg}">
+          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);${rowBg}">
             <td style="padding:6px 8px;">${esc(r.paperType)}</td>
             <td style="padding:6px 8px;">${esc(r.size) || '—'}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm) || '—'}</td>
@@ -8844,7 +8849,7 @@ function renderStockSummary() {
       `<td style="text-align:right;color:#166534;font-weight:600;">${fmtPkts(p.in)}</td>
        <td style="text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(p.out)}</td>
        <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
-    return `<tr>
+    return `<tr class="row-hover-red">
       <td>${esc(r.item.gsm || '—')}</td>
       <td>${esc(r.item.size || '—')}</td>
       <td class="brand-upper">${esc(r.item.brand || '—')}</td>
@@ -9262,7 +9267,7 @@ function renderImportsTable() {
       ? `${received.toLocaleString()} / ${(+i.packets).toLocaleString()} ${unit} <span style="color:#1e40af;font-weight:600;">(${(+i.packets - received).toLocaleString()} remaining)</span>`
       : `${(+i.packets).toLocaleString()} ${unit}`;
     const isSel = importsBulkSel.has(i.id);
-    return `<tr data-imp-row="${i.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+    return `<tr data-imp-row="${i.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleImportRow(${i.id}, this.checked)"></td>
       <td style="padding:8px 10px;">${status}</td>
       <td style="padding:8px 10px;font-weight:500;">${esc(i.paper_type || '—')}</td>
@@ -10104,7 +10109,7 @@ function renderProductionReport() {
   const buildDailyTable = () => {
     const rows = dailyRows.filter(r => r[nameKey] === s.pick);
     const body = rows.map(r => `
-      <tr style="border-bottom:1px solid var(--border);">
+      <tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
         <td ${td}>${fmtDate(r.date)}</td>
         <td ${tdR}>${fmt(r.sheets)}</td>
         <td ${tdR}>${fmt(r.waste)}</td>
@@ -10152,7 +10157,7 @@ function renderProductionReport() {
     }
     const rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const body = rows.map(r => `
-      <tr style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="setPrPick('${esc(r.name).replace(/'/g, "\\'")}')">
+      <tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="setPrPick('${esc(r.name).replace(/'/g, "\\'")}')" title="Drill into ${esc(r.name)}'s day-by-day view">
         <td ${td}>${esc(r.name)}</td>
         <td ${tdR}>${fmt(r.sheets)}</td>
         <td ${tdR}>${fmt(r.waste)}</td>
@@ -11557,7 +11562,7 @@ function renderTrashJobs() {
   const body = rows.map(r => {
     const left = trashDaysLeft(r.deleted_at);
     const expiringSoon = left <= 3;
-    return `<tr style="border-bottom:1px solid var(--border);">
+    return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
       <td ${tdL} style="padding:8px 10px;font-weight:700;color:#1d4ed8;">E-${r.id}</td>
       <td ${tdL}>${esc(r.jobcode || '')}</td>
       <td ${tdL}>${esc(r.name || '')}</td>
@@ -11615,7 +11620,7 @@ function renderTrashImports() {
       : r.status === 'received'
       ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
       : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
-    return `<tr style="border-bottom:1px solid var(--border);">
+    return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
       <td ${tdL}>${statusBadge}</td>
       <td ${tdL}>${esc(r.paper_type || '—')}</td>
       <td ${tdL}>${esc(r.size || '—')}</td>
@@ -12196,7 +12201,7 @@ function renderStockMovement(direction, from, to) {
     const groupBadge = isGroup
       ? ` <span style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;letter-spacing:0.03em;margin-left:4px;">SPLIT · ${t.group_ids.length}</span>`
       : '';
-    return `<tr data-sm-row="${direction}-${t.id}" class="${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+    return `<tr data-sm-row="${direction}-${t.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="${clickHandler}"></td>
       <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
       <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
@@ -12473,7 +12478,7 @@ function renderStockTotal(direction) {
         </thead>
         <tbody>
           ${itemRows.map(r => `
-          <tr style="border-bottom:1px solid var(--border);">
+          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
             <td style="padding:6px 8px;">${esc(r.paperType || '—')}</td>
             <td style="padding:6px 8px;">${esc(r.size || '—')}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm || '—')}</td>
