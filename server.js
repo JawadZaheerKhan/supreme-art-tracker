@@ -2450,8 +2450,45 @@ async function aggregateProductionRange(sql, { from, to }) {
       }
     }
   }
-  const toMRow = r => ({ date: r.date, machine: r.machine, sheets: r.sheets, waste: r.waste, hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size });
-  const toORow = r => ({ date: r.date, operator: r.operator, sheets: r.sheets, waste: r.waste, hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size });
+  // Tag each row with which section(s) its machine (or, for operators,
+  // the machine(s) that person appears under) belongs to, sourced from
+  // the operators roster's roles — the same registry the Daily
+  // Production tabs and the Job Card's Machine dropdown already use.
+  // Lets the Production Report offer real Printing/Coating/Die
+  // Cutting/Pasting filter buttons instead of guessing from the name.
+  const ROLE_TO_SECTION = { print: 'printing', coatings: 'coatings', embellish: 'coatings', diecut: 'diecut', paste: 'pasting' };
+  const roster = await sql`SELECT name, roles, persons FROM operators WHERE active`;
+  const machineSections = new Map();   // machine name (lowercase) -> Set(section)
+  const personSections  = new Map();   // person name  (lowercase) -> Set(section)
+  for (const r of roster) {
+    const sections = new Set();
+    for (const role of (Array.isArray(r.roles) ? r.roles : [])) {
+      const s = ROLE_TO_SECTION[role];
+      if (s) sections.add(s);
+    }
+    if (!sections.size) continue;
+    const mName = String(r.name || '').trim().toLowerCase();
+    if (mName) {
+      if (!machineSections.has(mName)) machineSections.set(mName, new Set());
+      for (const s of sections) machineSections.get(mName).add(s);
+    }
+    for (const p of (Array.isArray(r.persons) ? r.persons : [])) {
+      const pName = String((p && p.name) || '').trim().toLowerCase();
+      if (!pName) continue;
+      if (!personSections.has(pName)) personSections.set(pName, new Set());
+      for (const s of sections) personSections.get(pName).add(s);
+    }
+  }
+  const toMRow = r => ({
+    date: r.date, machine: r.machine, sheets: r.sheets, waste: r.waste,
+    hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size,
+    sections: [...(machineSections.get(String(r.machine || '').trim().toLowerCase()) || [])],
+  });
+  const toORow = r => ({
+    date: r.date, operator: r.operator, sheets: r.sheets, waste: r.waste,
+    hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size,
+    sections: [...(personSections.get(String(r.operator || '').trim().toLowerCase()) || [])],
+  });
   const byMachineDailyArr = [...byMachineDaily.values()]
     .map(toMRow)
     .filter(r => r.sheets > 0 || r.waste > 0 || r.hours > 0 || r.jobs > 0)
