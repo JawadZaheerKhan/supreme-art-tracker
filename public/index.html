@@ -413,6 +413,15 @@
     background: var(--bg2);
     padding-bottom: 8px !important;
   }
+  /* Client View Summary rows — clicking one jumps to and briefly
+     highlights the matching job tile further down the page. */
+  .cv-summary-row { cursor: pointer; }
+  .cv-summary-row:hover { background: var(--bg2); }
+  .cv-tile-jump-flash { animation: cvTileFlash 1.6s ease-out; }
+  @keyframes cvTileFlash {
+    0%, 40%  { box-shadow: 0 0 0 3px var(--brand); }
+    100%     { box-shadow: 0 0 0 3px transparent; }
+  }
   .ledger-pos      { color: #166534; font-weight: 600; }
   .ledger-neg      { color: #A32D2D; font-weight: 600; }
   .ledger-reversal { color: #9a3412; font-weight: 600; }   /* orange — reversal/undo entry */
@@ -4489,7 +4498,7 @@ function renderJobCard(j, opts) {
         : (adminToggle ? `<div style="display:flex;justify-content:flex-end;margin-bottom:2px;">${adminToggle}</div>` : ''));
 
   return `
-  <div class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${clientTintStyle}>
+  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${clientTintStyle}>
     ${sideStats}
     ${clientTopRow}
     <div class="tile-head">
@@ -21261,6 +21270,20 @@ function renderClientJobs() {
 // shape the owner asked for, scoped to the signed-in client's own
 // jobs. Uses the shared .report-scroll-wrap so column headers stick
 // and the horizontal scrollbar sits at a fixed spot on wide tables.
+// Clicking a row in the Client View / client portal Summary jumps to and
+// briefly highlights that job's tile further down the page. jobId is the
+// tile's own id — for a Mil Products (group) row that's the representative
+// sub job's id, since the group tile is built from that job's DOM node.
+function scrollToClientTile(jobId) {
+  const el = document.getElementById('cv-tile-' + jobId);
+  if (!el) { notify("Couldn't find that job's tile — try Refresh."); return; }
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('cv-tile-jump-flash');
+  void el.offsetWidth; // restart the animation if the same tile was just flashed
+  el.classList.add('cv-tile-jump-flash');
+  setTimeout(() => el.classList.remove('cv-tile-jump-flash'), 1600);
+}
+
 function renderClientSummary(rows, containerId) {
   const el = document.getElementById(containerId);
   if (!el) return;
@@ -21304,7 +21327,7 @@ function renderClientSummary(rows, containerId) {
       nTotals.poQty      += poQty;
       nTotals.ready      += ready;
       nTotals.shipped    += shipped;
-      return `<tr style="border-bottom:1px solid var(--border);">
+      return `<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${j.id})" title="Jump to this job's tile below">
         <td style="padding:6px 8px;">${esc(j.name || '')}</td>
         <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
         <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
@@ -21379,7 +21402,7 @@ function renderClientSummary(rows, containerId) {
       gTotals.ready     += ready;
       gTotals.shipped   += shipped;
       gTotals.shipCount += shipCount;
-      groupHtmlRows.push(`<tr style="border-bottom:1px solid var(--border);">
+      groupHtmlRows.push(`<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${repr.id})" title="Jump to this group's tile below">
         <td style="padding:6px 8px;font-weight:700;">${esc(product)}</td>
         <td style="padding:6px 8px;">${esc(codeVal)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
@@ -21433,7 +21456,16 @@ function renderClientSummary(rows, containerId) {
   let shipsTable = '';
   if (ships.length) {
     const shipTotals = ships.reduce((s, d) => s + (parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, '')) || 0), 0);
-    const shipRows = ships.map(d => `<tr style="border-bottom:1px solid var(--border);">
+    // A shipment on a group's sub job doesn't have its own tile in the
+    // list below (sub jobs collapse into one group tile) — jump to the
+    // group's representative tile instead when that's the case.
+    const tileIdFor = j => {
+      if (j.stock_group_name && groupedByName.has(j.stock_group_name)) {
+        return groupRepresentative(groupedByName.get(j.stock_group_name)).id;
+      }
+      return j.id;
+    };
+    const shipRows = ships.map(d => `<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${tileIdFor(d.job)})" title="Jump to this job's tile below">
       <td style="padding:6px 8px;white-space:nowrap;">${d.date ? esc(fmtDMY(d.date)) : ''}</td>
       <td style="padding:6px 8px;font-weight:600;">E-${d.job.id}</td>
       <td style="padding:6px 8px;">${esc(d.job.name || '')}</td>
