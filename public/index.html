@@ -2050,12 +2050,17 @@
         <button class="rsb-item" data-rt="total-out" onclick="setReportsTab('total-out')">
           <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Total Out
         </button>
+        <div class="rsb-section">Manual</div>
+        <button class="rsb-item" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
+          <span class="rsb-icon" style="color:#A32D2D;">&#9997;</span> Manual Consumption
+        </button>
       </aside>
       <main class="reports-content">
         <div id="rt-stock-in"  class="rt-pane"></div>
         <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
         <div id="rt-total-in"  class="rt-pane" style="display:none;"></div>
         <div id="rt-total-out" class="rt-pane" style="display:none;"></div>
+        <div id="rt-manual-consumption" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -11757,7 +11762,7 @@ function exitReportsGroup() {
 // to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
-  const inlinePanes = ['stock-in', 'stock-out', 'total-in', 'total-out', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
+  const inlinePanes = ['stock-in', 'stock-out', 'total-in', 'total-out', 'manual-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -11766,6 +11771,7 @@ function setReportsTab(name) {
   if (name === 'stock-out')       openStockMovementPane('out');
   if (name === 'total-in')        openStockTotalPane('in');
   if (name === 'total-out')       openStockTotalPane('out');
+  if (name === 'manual-consumption') openManualConsumptionPane();
   if (name === 'summary')         openStockSummary();
   if (name === 'inventory-report') openInventoryReport();
   if (name === 'jobs-report')     openJobsReport();
@@ -12572,6 +12578,345 @@ function printStockTotal(direction) {
         </tr>
         ${bodyRows}
       </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No transactions in this period.</div>'}
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
+// ── Manual Consumption ───────────────────────────────────────
+// "Manual Job Card" is a Stock Out reason for paper issued against an
+// offline job reference that isn't a real job in the app (typed free-text
+// in Bulk/Single Stock Out). The server tags the ledger row's notes with
+// "Job Card: {value}" (bulk entry prefixes "Manual Job Card: {value}",
+// which still contains that same substring) so it survives even though
+// there's no job_id to join against. This report surfaces exactly those
+// rows, grouped by (job card no. + paper item), so the store keeper can
+// see how many packets went to off-system jobs without hunting through
+// the full Stock Out ledger.
+const manualConsumptionState = { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', search: '', rows: [] };
+
+function extractManualJobCardNo(notes) {
+  const m = String(notes || '').match(/Job Card:\s*([^·]+)/i);
+  return m ? m[1].trim() : '(no reference)';
+}
+
+function openManualConsumptionPane() {
+  const state = manualConsumptionState;
+  const pane  = document.getElementById('rt-manual-consumption');
+  if (!pane) return;
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Manual Consumption</h2>
+      <span style="color:var(--text2);font-size:12px;">Paper issued against a Manual Job Card No. (offline jobs, not tracked in the app) — one row per job card + paper item.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportManualConsumption()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printManualConsumption()">&#128424; Print Report</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="mc-paper-type" onchange="setMcPaperType(this.value)">
+          <option value="">All paper types</option>
+          ${paperOpts}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Size</div>
+        <select class="filter" id="mc-size" onchange="setMcSize(this.value)"><option value="">All sizes</option></select>
+      </div>
+      <div>
+        <div class="dash-flbl">GSM</div>
+        <select class="filter" id="mc-gsm" onchange="setMcGsm(this.value)"><option value="">All GSM</option></select>
+      </div>
+      <div>
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="mc-period" onchange="setMcPeriod(this.value)">${periodOpts}</select>
+      </div>
+      <div>
+        <div class="dash-flbl">Manual Job Card No.</div>
+        <input class="filter" type="text" id="mc-search" value="${esc(state.search || '')}" placeholder="e.g. 11729" oninput="setMcSearch(this.value)" style="min-width:160px;">
+      </div>
+      <div id="mc-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="mc-from" value="${state.from}" onchange="setMcCustom()"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="mc-to" value="${state.to}" onchange="setMcCustom()"></div>
+      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetMcFilters()">Reset filters</button>
+    </div>
+    <div id="mc-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    <div id="mc-content" style="font-size:13px;color:var(--text);">Loading…</div>
+  `;
+  loadManualConsumption();
+}
+
+function setMcPaperType(v) {
+  const state = manualConsumptionState;
+  state.paperType = v; state.size = ''; state.gsm = '';
+  renderManualConsumption();
+}
+function setMcSize(v) { manualConsumptionState.size = v; renderManualConsumption(); }
+function setMcGsm(v)  { manualConsumptionState.gsm  = v; renderManualConsumption(); }
+let _mcSearchTimer = null;
+function setMcSearch(v) {
+  manualConsumptionState.search = String(v || '').trim();
+  clearTimeout(_mcSearchTimer);
+  _mcSearchTimer = setTimeout(renderManualConsumption, 200);
+}
+function resetMcFilters() {
+  const state = manualConsumptionState;
+  state.paperType = ''; state.size = ''; state.gsm = ''; state.search = '';
+  const pt = document.getElementById('mc-paper-type'); if (pt) pt.value = '';
+  const se = document.getElementById('mc-search'); if (se) se.value = '';
+  renderManualConsumption();
+}
+function setMcPeriod(v) {
+  manualConsumptionState.period = v;
+  const custom = document.getElementById('mc-custom');
+  if (custom) custom.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') loadManualConsumption();
+}
+function setMcCustom() {
+  const state = manualConsumptionState;
+  state.from = document.getElementById('mc-from').value;
+  state.to   = document.getElementById('mc-to').value;
+  if (state.from && state.to) loadManualConsumption();
+}
+
+// Size + GSM dropdowns are scoped to manual-job-card rows only (not the
+// full Stock Out ledger), narrowed by the active paper-type filter.
+function refreshMcFilterOptions() {
+  const state = manualConsumptionState;
+  const manualRows = (state.rows || []).filter(t => t.reason === 'manual-job-card');
+  const subset = state.paperType ? manualRows.filter(t => t.paper_type === state.paperType) : manualRows;
+  const sizes = [...new Set(subset.map(t => t.item_size).filter(Boolean))].sort();
+  const gsms  = [...new Set(subset.map(t => t.item_gsm ).filter(Boolean))].sort((a,b) => (+a) - (+b));
+  const sizeEl = document.getElementById('mc-size');
+  const gsmEl  = document.getElementById('mc-gsm');
+  if (sizeEl) {
+    if (state.size && !sizes.includes(state.size)) state.size = '';
+    sizeEl.innerHTML = '<option value="">All sizes</option>' +
+      sizes.map(s => `<option value="${esc(s)}"${state.size===s?' selected':''}>${esc(s)}</option>`).join('');
+  }
+  if (gsmEl) {
+    if (state.gsm && !gsms.map(String).includes(String(state.gsm))) state.gsm = '';
+    gsmEl.innerHTML = '<option value="">All GSM</option>' +
+      gsms.map(g => `<option value="${esc(g)}"${String(state.gsm)===String(g)?' selected':''}>${esc(g)}</option>`).join('');
+  }
+}
+
+async function loadManualConsumption() {
+  const state = manualConsumptionState;
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to)   qs.set('to',   to);
+  qs.set('direction', 'out');
+  try {
+    const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
+    state.rows = txs;
+    renderManualConsumption();
+  } catch (e) {
+    const el = document.getElementById('mc-content');
+    if (el) el.innerHTML = 'Error: ' + esc(e.message);
+  }
+}
+
+// Groups filtered manual-job-card rows by (job card no. + paper type +
+// size + gsm) — brands merged, packet size varies per paper type so
+// different papers can't be summed into one physical unit anyway.
+function computeManualConsumptionRows() {
+  const state = manualConsumptionState;
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  const manualTxs = (state.rows || []).filter(t => t.reason === 'manual-job-card');
+  const searchL = state.search.toLowerCase();
+  const filtered = manualTxs.filter(t =>
+       (!state.paperType || t.paper_type === state.paperType)
+    && (!state.size      || (t.item_size || '') === state.size)
+    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+    && (!searchL          || extractManualJobCardNo(t.notes).toLowerCase().includes(searchL))
+  );
+  let total = 0, totalKg = 0;
+  const groups = new Map();
+  for (const t of filtered) {
+    const jobCardNo = extractManualJobCardNo(t.notes);
+    const amt = Math.abs(t.change);
+    total += amt;
+    const w  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
+    const ps = packetSize(t.paper_type || '');
+    if (w !== null) totalKg += w * (amt / ps);
+    const key = [jobCardNo, t.paper_type || '', t.item_size || '', String(t.item_gsm || '')].join('||');
+    if (!groups.has(key)) {
+      groups.set(key, {
+        jobCardNo, paperType: t.paper_type || '', size: t.item_size || '', gsm: t.item_gsm || '',
+        brands: new Set(), totalSheets: 0, txCount: 0, latestMs: null, latestRaw: null, enteredBy: new Set(),
+      });
+    }
+    const g = groups.get(key);
+    if (t.item_brand) g.brands.add(t.item_brand);
+    g.totalSheets += amt;
+    g.txCount++;
+    if (t.user_email) g.enteredBy.add(t.user_email);
+    const ms = t.created_at ? new Date(t.created_at).getTime() : null;
+    if (ms != null && (g.latestMs == null || ms > g.latestMs)) { g.latestMs = ms; g.latestRaw = t.created_at; }
+  }
+  const rows = [...groups.values()].map(g => {
+    const ps   = packetSize(g.paperType);
+    const unit = packetUnitLabel(g.paperType).toLowerCase();
+    return {
+      jobCardNo: g.jobCardNo, paperType: g.paperType, size: g.size, gsm: g.gsm,
+      brand: [...g.brands].join(' / '), unit, txCount: g.txCount,
+      totalSheets: g.totalSheets, totalPkts: g.totalSheets / ps,
+      latestAt: g.latestRaw, enteredBy: [...g.enteredBy].join(', '),
+    };
+  }).sort((a, b) => {
+    if (a.jobCardNo !== b.jobCardNo) return String(a.jobCardNo).localeCompare(String(b.jobCardNo), undefined, { numeric: true });
+    return String(a.paperType).localeCompare(String(b.paperType));
+  });
+  const distinctJobCards = new Set(filtered.map(t => extractManualJobCardNo(t.notes))).size;
+  return { rows, filtered, from, to, total, totalKg, distinctJobCards };
+}
+
+function renderManualConsumption() {
+  refreshMcFilterOptions();
+  const { rows, filtered, from, to, total, totalKg, distinctJobCards } = computeManualConsumptionRows();
+  const color = '#A32D2D';
+  const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const tile = (label, value, c, sub) =>
+    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
+       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
+       <div style="font-size:22px;font-weight:600;color:${c};margin-top:2px;line-height:1.1;">${value}</div>
+       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
+     </div>`;
+  const summaryEl = document.getElementById('mc-summary');
+  if (summaryEl) summaryEl.innerHTML =
+      tile('Total Manual Consumption', fmt(total) + ' sheets', color, `${fmt(totalKg)} kg`)
+    + tile('Manual Job Cards', distinctJobCards.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`)
+    + tile('Transactions', filtered.length.toLocaleString(), 'var(--text)');
+
+  const grandTotalPkts   = rows.reduce((a, r) => a + r.totalPkts, 0);
+  const grandTotalSheets = rows.reduce((a, r) => a + r.totalSheets, 0);
+  const contentEl = document.getElementById('mc-content');
+  if (!contentEl) return;
+  contentEl.innerHTML = !rows.length
+    ? `<div class="empty">No manual job card consumption in this period.</div>`
+    : `<div class="report-scroll-wrap">
+      <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:var(--bg2);">
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Manual Job Card No.</th>
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Paper Type</th>
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Size</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">GSM</th>
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand(s)</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Transactions</th>
+            <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed</th>
+            <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Latest Entry</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+            <td style="padding:6px 8px;font-weight:700;">${esc(r.jobCardNo)}</td>
+            <td style="padding:6px 8px;">${esc(r.paperType || '—')}</td>
+            <td style="padding:6px 8px;">${esc(r.size || '—')}</td>
+            <td style="padding:6px 8px;text-align:right;">${esc(r.gsm || '—')}</td>
+            <td style="padding:6px 8px;">${esc(r.brand || '—')}</td>
+            <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.txCount}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
+            <td style="padding:6px 8px;white-space:nowrap;">${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+            <td colspan="5" style="padding:8px;">Total</td>
+            <td style="padding:8px;text-align:right;">${rows.reduce((a,r)=>a+r.txCount,0)}</td>
+            <td style="padding:8px;text-align:right;color:${color};">${fmtPkts(grandTotalPkts, {keepZero:true})}<br><span style="font-weight:500;font-size:11px;color:var(--text2);">${grandTotalSheets.toLocaleString()} sheets</span></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>`;
+}
+
+async function exportManualConsumption() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const { rows } = computeManualConsumptionRows();
+  if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
+  const header = ['Manual Job Card No.', 'Paper Type', 'Size', 'GSM', 'Brand(s)', 'Transactions', 'Consumed (packets/reams)', 'Consumed (sheets)', 'Latest Entry', 'Entered By'];
+  const aoa = [header];
+  for (const r of rows) {
+    aoa.push([r.jobCardNo, r.paperType, r.size, r.gsm, r.brand, r.txCount,
+      +r.totalPkts.toFixed(2), r.totalSheets, r.latestAt ? fmtDMYT(r.latestAt) : '', r.enteredBy]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Manual Consumption');
+  const stamp = localDateISO();
+  XLSX.writeFile(wb, `supreme-art-manual-consumption-${stamp}.xlsx`);
+  notify('Exported!');
+}
+
+function printManualConsumption() {
+  const { rows, from, to, total, totalKg } = computeManualConsumptionRows();
+  const state = manualConsumptionState;
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
+  const color = '#A32D2D';
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+  const bodyRows = rows.map(r => `<tr>
+      <td ${tdL}>${esc(r.jobCardNo)}</td>
+      <td ${tdL}>${esc(r.paperType || '—')}</td>
+      <td ${tdL}>${esc(r.size || '—')}</td>
+      <td ${tdR}>${esc(r.gsm || '—')}</td>
+      <td ${tdL}>${esc(r.brand || '—')}</td>
+      <td ${tdR}>${r.txCount}</td>
+      <td style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${color};">${fmtPkts(r.totalPkts,{keepZero:true})} ${r.unit}</td>
+      <td ${tdL}>${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
+    </tr>`).join('');
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:11pt;">Manual Consumption Report</div>
+        </div>
+        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
+      </div>
+      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
+        <tr>
+          <td style="padding:2px 8px 2px 0;"><b>Period:</b> ${periodLabel}</td>
+          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
+          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
+          <td style="padding:2px 8px;"><b>Total:</b> ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg</td>
+        </tr>
+      </table>
+      ${rows.length ? `
+      <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th style="border:1px solid #000;padding:4px;">Manual Job Card No.</th>
+          <th style="border:1px solid #000;padding:4px;">Paper Type</th>
+          <th style="border:1px solid #000;padding:4px;">Size</th>
+          <th style="border:1px solid #000;padding:4px;">GSM</th>
+          <th style="border:1px solid #000;padding:4px;">Brand(s)</th>
+          <th style="border:1px solid #000;padding:4px;">Transactions</th>
+          <th style="border:1px solid #000;padding:4px;">Consumed</th>
+          <th style="border:1px solid #000;padding:4px;">Latest Entry</th>
+        </tr>
+        ${bodyRows}
+      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No manual job card consumption in this period.</div>'}
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
