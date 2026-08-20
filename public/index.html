@@ -21681,10 +21681,15 @@ function scrollToClientTile(jobId) {
   setTimeout(() => el.classList.remove('cv-tile-jump-flash'), 1600);
 }
 
+// Plain-value snapshot of the last renderClientSummary() call per
+// containerId, so exportClientSummary() can build an Excel workbook
+// without recomputing anything — same numbers as what's on screen.
+const clientSummaryCache = {};
+
 function renderClientSummary(rows, containerId) {
   const el = document.getElementById(containerId);
   if (!el) return;
-  if (!Array.isArray(rows) || rows.length === 0) { el.innerHTML = ''; return; }
+  if (!Array.isArray(rows) || rows.length === 0) { el.innerHTML = ''; clientSummaryCache[containerId] = null; return; }
   const fmtN = n => (n || n === 0) ? Number(n).toLocaleString() : '';
   const stageOf = j => {
     if (isDone(j)) return 'Delivered';
@@ -21713,7 +21718,11 @@ function renderClientSummary(rows, containerId) {
   const thR = 'style="text-align:right;padding:8px 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
 
   // NORMAL JOBS TABLE — Product | Code | PO No. | Batch No. | PO Qty | Ready | Shipped | Status
+  // exportJobsRows mirrors this table's plain values (not HTML) so
+  // exportClientSummary() can build an Excel sheet without recomputing
+  // anything — same numbers as what's on screen, guaranteed.
   let normalTable = '';
+  const exportJobsRows = [];
   if (normalRows.length) {
     const nTotals = { poQty: 0, ready: 0, shipped: 0 };
     const normalHtml = normalRows.map(j => {
@@ -21724,6 +21733,7 @@ function renderClientSummary(rows, containerId) {
       nTotals.poQty      += poQty;
       nTotals.ready      += ready;
       nTotals.shipped    += shipped;
+      exportJobsRows.push({ product: j.name || '', code: j.jobcode || '', poNo: j.ref || '', batchNo: j.bno || '', poQty, ready, shipped, status: stageOf(j) });
       return `<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${j.id})" title="Jump to this job's tile below">
         <td style="padding:6px 8px;">${esc(j.name || '')}</td>
         <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
@@ -21771,6 +21781,7 @@ function renderClientSummary(rows, containerId) {
   // Every metric is summed across sub-jobs. Batch numbers are deduped
   // and joined; Code comes from the group's oldest/representative job.
   let groupTable = '';
+  const exportGroupRows = [];
   if (groupedByName.size) {
     const gTotals = { poQty: 0, ready: 0, shipped: 0, shipCount: 0 };
     const groupHtmlRows = [];
@@ -21799,6 +21810,7 @@ function renderClientSummary(rows, containerId) {
       gTotals.ready     += ready;
       gTotals.shipped   += shipped;
       gTotals.shipCount += shipCount;
+      exportGroupRows.push({ product, code: codeVal, poQty, ready, shipped, shipCount });
       groupHtmlRows.push(`<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${repr.id})" title="Jump to this group's tile below">
         <td style="padding:6px 8px;font-weight:700;">${esc(product)}</td>
         <td style="padding:6px 8px;">${esc(codeVal)}</td>
@@ -21900,15 +21912,68 @@ function renderClientSummary(rows, containerId) {
   }
   const normalCount = normalRows.length;
   const groupCount  = groupedByName.size;
+  clientSummaryCache[containerId] = { exportJobsRows, exportGroupRows, ships };
   el.innerHTML = `
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px 16px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
         <div style="font-size:14px;font-weight:700;color:var(--text);">&#128203; Summary</div>
-        <div style="font-size:11px;color:var(--text2);">${normalCount} job${normalCount===1?'':'s'}${groupCount ? ` · ${groupCount} mil product${groupCount===1?'':'s'}` : ''} · ${ships.length} shipment${ships.length===1?'':'s'}</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div style="font-size:11px;color:var(--text2);">${normalCount} job${normalCount===1?'':'s'}${groupCount ? ` · ${groupCount} mil product${groupCount===1?'':'s'}` : ''} · ${ships.length} shipment${ships.length===1?'':'s'}</div>
+          <button class="btn btn-sm" onclick="exportClientSummary('${containerId}')">&#128202; Export to Excel</button>
+        </div>
       </div>
       ${jobsTable}
       ${shipsTable}
     </div>`;
+}
+
+// Three-sheet workbook — Jobs / Mil Products / Shipments — matching
+// exactly what's on screen for this Summary panel (real client portal
+// or the admin's Client View preview, whichever called render last).
+async function exportClientSummary(containerId) {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const cache = clientSummaryCache[containerId];
+  if (!cache || (!cache.exportJobsRows.length && !cache.exportGroupRows.length && !cache.ships.length)) {
+    notify('Nothing to export — empty summary.'); return;
+  }
+  const wb = XLSX.utils.book_new();
+  const autoWidth = (aoa) => aoa[0].map((h, i) => ({
+    wch: Math.max(String(h).length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  if (cache.exportJobsRows.length) {
+    const aoa = [['Product','Code','PO No.','Batch No.','PO Qty','Ready','Shipped','Status']];
+    for (const r of cache.exportJobsRows) aoa.push([r.product, r.code, r.poNo, r.batchNo, r.poQty, r.ready, r.shipped, r.status]);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = autoWidth(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, 'Jobs');
+  }
+  if (cache.exportGroupRows.length) {
+    const aoa = [['Product','Code','Mil Qty','Ready','Shipped','Shipments']];
+    for (const r of cache.exportGroupRows) aoa.push([r.product, r.code, r.poQty, r.ready, r.shipped, r.shipCount]);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = autoWidth(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, 'Mil Products');
+  }
+  if (cache.ships.length) {
+    const aoa = [['Date','Job ID','Product','PO No.','Batch No.','Challan No.','Cartons']];
+    for (const d of cache.ships) {
+      aoa.push([
+        d.date ? fmtDMY(d.date) : '',
+        'E-' + d.job.id,
+        d.job.name || '',
+        d.po_no || '',
+        d.batch_no || '',
+        d.notes || '',
+        parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, '')) || 0,
+      ]);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = autoWidth(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, 'Shipments');
+  }
+  const stamp = localDateISO();
+  XLSX.writeFile(wb, `supreme-art-client-summary-${stamp}.xlsx`);
+  notify('Exported!');
 }
 
 // Shared renderer for BOTH the real client portal and the admin Client
