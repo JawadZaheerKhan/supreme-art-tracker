@@ -21822,7 +21822,10 @@ function renderClientSummary(rows, containerId) {
     }
     groupTable = `
       <div style="margin-bottom:16px;">
-        <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;margin-bottom:6px;">Mil Products · ${groupedByName.size} record${groupedByName.size===1?'':'s'}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;font-weight:700;">Mil Products · ${groupedByName.size} record${groupedByName.size===1?'':'s'}</div>
+          <button class="btn btn-sm" onclick="exportClientMilProducts('${containerId}')">&#128202; Export to Excel</button>
+        </div>
         <div class="report-scroll-wrap" style="max-height:calc(100vh - 520px);min-height:180px;">
           <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;min-width:max-content;">
             <thead>
@@ -21973,6 +21976,25 @@ async function exportClientSummary(containerId) {
   }
   const stamp = localDateISO();
   XLSX.writeFile(wb, `supreme-art-client-summary-${stamp}.xlsx`);
+  notify('Exported!');
+}
+
+// Mil Products only — single-sheet export for whoever just wants the
+// group/MIL numbers without the Jobs and Shipments tables tagging along.
+async function exportClientMilProducts(containerId) {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const cache = clientSummaryCache[containerId];
+  if (!cache || !cache.exportGroupRows.length) { notify('Nothing to export — no Mil Products rows.'); return; }
+  const aoa = [['Product','Code','Mil Qty','Ready','Shipped','Shipments']];
+  for (const r of cache.exportGroupRows) aoa.push([r.product, r.code, r.poQty, r.ready, r.shipped, r.shipCount]);
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = aoa[0].map((h, i) => ({
+    wch: Math.max(String(h).length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Mil Products');
+  const stamp = localDateISO();
+  XLSX.writeFile(wb, `supreme-art-mil-products-${stamp}.xlsx`);
   notify('Exported!');
 }
 
