@@ -2662,6 +2662,19 @@ function jobDaysInProduction(j) {
   return String(days);
 }
 function isBlocked(j) { const si = j.stage_index||0; return j.stages && j.stages[si]?.status === 'blocked'; }
+// True once the job's deadline day has arrived (or passed) and the job
+// hasn't been delivered yet — drives the red "overdue" treatment on the
+// Deadline fact and the Day counter. Compared at local midnight so the
+// whole deadline day counts as "reached", not just the moment it passes.
+function isDeadlinePassed(j) {
+  if (!j || !j.deadline || isDone(j)) return false;
+  const m = String(j.deadline).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return false;
+  const dl = new Date(+m[1], +m[2]-1, +m[3]).getTime();
+  if (!isFinite(dl)) return false;
+  const today = new Date(); const todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  return todayMid >= dl;
+}
 // Ready to Deliver = at stage 6, not done, AND nothing has shipped yet.
 // The moment a partial delivery is recorded the job moves out of this
 // tab into "Partially Delivered" so the queue only shows work that hasn't
@@ -4047,7 +4060,7 @@ function renderJobRowCompact(j, opts) {
             ${coatings.length?`<span><b>Coatings:</b> ${coatings.map(esc).join(', ')}</span>`:''}
             ${j.cartonqty?`<span><b>Unit Carton:</b> ${esc(j.cartonqty)}</span>`:''}
             ${j.delqty?`<span><b>Delivered PO:</b> ${esc(j.delqty)}</span>`:''}
-            ${j.deadline?`<span style="color:#dc2626;"><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
+            ${j.deadline?`<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
           </div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
         </div>
@@ -4068,7 +4081,7 @@ function renderJobRowCompact(j, opts) {
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
-              ${d !== '—' ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Day</div><div style="font-size:15px;font-weight:700;color:var(--text);">${esc(d)}</div></div>` : ''}
+              ${d !== '—' ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Day</div><div style="font-size:15px;font-weight:700;color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};">${esc(d)}</div></div>` : ''}
               ${y ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Yield</div><div style="font-size:15px;font-weight:700;color:var(--text);">${esc(y.pct)}</div><div style="font-size:10px;font-weight:500;color:var(--text2);">${esc(y.formula)}</div></div>` : ''}
             </div>`; })()}
           ${sidePanel}
@@ -4390,12 +4403,12 @@ function renderJobCard(j, opts) {
           return readyQty ? `<span><b>Ready to Delivery Qty</b> ${esc(readyQty)}</span>` : '';
         })(),
         j.dateissued ? `<span><b>Job Date</b> ${esc(fmtDMY(j.dateissued))}</span>` : '',
-        j.deadline ? `<span style="color:#dc2626;"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
+        j.deadline ? `<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('')
     : [
         paperLabelT ? `<span><b>Paper</b> ${paperLabelT}</span>` : '',
         j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
-        j.deadline ? `<span style="color:#dc2626;"><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
+        j.deadline ? `<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('');
 
   // Right-side stats column on the tile: Day on top, Yield below. Hidden
@@ -4404,7 +4417,7 @@ function renderJobCard(j, opts) {
   const yieldP    = clientPreview ? null : jobYieldParts(j);
   const sideStats = (daysStr !== '—' || yieldP) ? `
     <div class="tile-side-stats">
-      ${daysStr !== '—' ? `<div class="tss-block"><div class="tss-lbl">Day</div><div class="tss-val">${esc(daysStr)}</div></div>` : ''}
+      ${daysStr !== '—' ? `<div class="tss-block"><div class="tss-lbl">Day</div><div class="tss-val"${isDeadlinePassed(j) ? ' style="color:#dc2626;"' : ''}>${esc(daysStr)}</div></div>` : ''}
       ${yieldP ? `<div class="tss-block"><div class="tss-lbl">Yield</div><div class="tss-val">${esc(yieldP.pct)}</div><div class="tss-formula">${esc(yieldP.formula)}</div></div>` : ''}
     </div>` : '';
 
