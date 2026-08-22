@@ -9505,7 +9505,7 @@ function openJobsReport() {
         <div class="dash-flbl">&nbsp;</div>
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding:8px 0;">
           <input type="checkbox" id="jr-mil-only" ${jobsReportState.milOnly ? 'checked' : ''} onchange="setJrMilOnly(this.checked)" style="width:15px;height:15px;">
-          MIL Products only
+          <span style="color:#dc2626;font-weight:800;letter-spacing:0.02em;">MIL Products only</span>
         </label>
       </div>
     </div>
@@ -9913,15 +9913,27 @@ function renderJobsReport() {
   // null on rows where it can't be computed (no carton/delivered qty); skip
   // those instead of treating them as 0.
   const milMode = !!jobsReportState.milOnly;
-  const totals = rows.reduce((a, r) => ({
-    poQty:        a.poQty        + (+r.poQty || 0),
-    milQty:       a.milQty       + (+r.milQty || 0),
-    cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
-    deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
-    wastage:      a.wastage      + (r.wastage == null ? 0 : (+r.wastage || 0)),
-    readyQty:     a.readyQty     + (+r.readyQty || 0),
-    packets:      a.packets      + (+r.packets || 0),
-  }), { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
+  // Mil Qty is a GROUP total repeated on every job-row that belongs to
+  // that group (same rule as the Mil Qty cell itself) — summing it per
+  // row like every other column would triple-count a group with 3 job
+  // rows. Count each distinct group's Mil Qty exactly once instead.
+  const seenMilGroups = new Set();
+  const totals = rows.reduce((a, r) => {
+    let milQtyAdd = 0;
+    if (r.milQty != null) {
+      const gk = r.stockGroupName || `row-${r.id}`;
+      if (!seenMilGroups.has(gk)) { seenMilGroups.add(gk); milQtyAdd = +r.milQty || 0; }
+    }
+    return {
+      poQty:        a.poQty        + (+r.poQty || 0),
+      milQty:       a.milQty       + milQtyAdd,
+      cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
+      deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
+      wastage:      a.wastage      + (r.wastage == null ? 0 : (+r.wastage || 0)),
+      readyQty:     a.readyQty     + (+r.readyQty || 0),
+      packets:      a.packets      + (+r.packets || 0),
+    };
+  }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
   const tbody = rows.map(r => {
     // Wastage (carton qty − delivered qty) is just a tracking number, not a
     // good/bad indicator — the gap between PO / produced / delivered can
@@ -9951,8 +9963,8 @@ function renderJobsReport() {
       <td ${td}>${esc(r.poNo)}</td>
       <td ${td}>${esc(r.batchNo)}</td>
       <td ${td}>${esc(r.challan)}</td>
-      <td ${tdR}>${esc(r.poQty)}</td>
       ${milQtyCell}
+      <td ${tdR}>${esc(r.poQty)}</td>
       <td ${tdR}>${esc(r.cartonQty)}</td>
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}</td>
       ${wastageCell}
@@ -9982,8 +9994,8 @@ function renderJobsReport() {
           <th ${th}>PO No.</th>
           <th ${th}>Batch No.</th>
           <th ${th}>Challan No.</th>
-          <th ${thR}>PO Qty</th>
           ${milMode ? `<th ${thR}>Mil Qty</th>` : ''}
+          <th ${thR}>PO Qty</th>
           <th ${thR}>Unit Carton Qty</th>
           <th ${thR}>Delivered Qty</th>
           <th ${thR}>${milMode ? 'Ready Qty' : 'Wastage'}</th>
@@ -9999,8 +10011,8 @@ function renderJobsReport() {
           <td></td>
           <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
           <td colspan="7" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
-          <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
           ${milMode ? `<td style="padding:8px 10px;text-align:right;">${fmt(totals.milQty)}</td>` : ''}
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(milMode ? totals.readyQty : totals.wastage)}</td>
@@ -10021,9 +10033,9 @@ async function exportJobsReport() {
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const milMode = !!jobsReportState.milOnly;
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Challan No.', 'PO Qty',
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Challan No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'Unit Carton Qty', 'Delivered Qty', milMode ? 'Ready Qty' : 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+    'PO Qty', 'Unit Carton Qty', 'Delivered Qty', milMode ? 'Ready Qty' : 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -10041,8 +10053,8 @@ async function exportJobsReport() {
       r.poNo,
       r.batchNo || '',
       r.challan || '',
-      r.poQty,
       ...(milMode ? [r.milQty ?? ''] : []),
+      r.poQty,
       r.cartonQty,
       deliveredCell,
       milMode ? r.readyQty : (r.wastage === null ? '' : r.wastage),
@@ -10085,8 +10097,8 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.poNo)}</td>
     <td ${tdL}>${esc(r.batchNo || '')}</td>
     <td ${tdL}>${esc(r.challan || '')}</td>
-    <td ${tdR}>${esc(r.poQty)}</td>
     ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
+    <td ${tdR}>${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}</td>
     <td ${tdR}>${milMode ? fmt(r.readyQty) : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
@@ -10121,8 +10133,8 @@ function printJobsReport() {
           <th ${tdL}>PO No.</th>
           <th ${tdL}>Batch No.</th>
           <th ${tdL}>Challan No.</th>
-          <th ${tdR}>PO Qty</th>
           ${milMode ? `<th ${tdR}>Mil Qty</th>` : ''}
+          <th ${tdR}>PO Qty</th>
           <th ${tdR}>Unit Carton Qty</th>
           <th ${tdR}>Delivered Qty</th>
           <th ${tdR}>${milMode ? 'Ready Qty' : 'Wastage'}</th>
