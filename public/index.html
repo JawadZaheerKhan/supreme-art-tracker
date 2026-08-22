@@ -2691,6 +2691,7 @@ function isDeadlinePassed(j) {
   const dl = new Date(+m[1], +m[2]-1, +m[3]).getTime();
   if (!isFinite(dl)) return false;
   let refTs = Date.now();
+  let refIsDeliveredStamp = false;
   if (isDone(j)) {
     const lastIdx = STAGES.length - 1;
     const t = j.stages && j.stages[lastIdx] && j.stages[lastIdx].time;
@@ -2700,16 +2701,20 @@ function isDeadlinePassed(j) {
       const tm = String(t).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
       if (tm) {
         const ts = new Date(+tm[3], +tm[2]-1, +tm[1], +(tm[4]||0), +(tm[5]||0)).getTime();
-        if (isFinite(ts)) refTs = ts;
+        if (isFinite(ts)) { refTs = ts; refIsDeliveredStamp = true; }
       } else {
         const ts = new Date(t).getTime();
-        if (isFinite(ts)) refTs = ts;
+        if (isFinite(ts)) { refTs = ts; refIsDeliveredStamp = true; }
       }
     }
   }
   const ref = new Date(refTs);
   const refMid = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate()).getTime();
-  return refMid >= dl;
+  // Delivered ON the deadline day is on time, not late — only days AFTER
+  // the deadline count as late for a shipped job. The in-progress case
+  // (refTs = now) still uses >= so the deadline day itself shows as
+  // "reached" while the job is still open.
+  return refIsDeliveredStamp ? (refMid > dl) : (refMid >= dl);
 }
 // Ready to Deliver = at stage 6, not done, AND nothing has shipped yet.
 // The moment a partial delivery is recorded the job moves out of this
