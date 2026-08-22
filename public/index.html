@@ -15690,6 +15690,17 @@ function particularsTable(p, job) {
       // that would double up on the print and misrepresent who did the work.
       const nameVal = get(r.key, 'name') || esc(op.machine);
       const sigVal  = get(r.key, 'signature') || esc(op.name);
+      // Details shows each entry's own DATE (no time — entries never
+      // carried a time component, and reports only ever read entries[]
+      // .date, never the old timestamp string). Same dedupe-or-pipe-join
+      // pattern as Name/Signature: one date shown once when every entry
+      // shares it, pipe-joined when they differ — and editable the same
+      // way (see the server's entries[] resync on save).
+      const entriesForRow = Array.isArray(p[r.key] && p[r.key].entries) ? p[r.key].entries : [];
+      const detailsFromEntries = entriesForRow.length
+        ? [...new Set(entriesForRow.map(e => e && e.date ? fmtDMY(e.date) : '').filter(Boolean))].join(' | ')
+        : '';
+      const detailsVal = detailsFromEntries ? esc(detailsFromEntries) : (get(r.key, 'details') || esc(op.time));
       // Ready to Delivery Qty row joins two station fields — cartons on
       // the left of the pipe, packets/cartons on the right — so a single
       // Quantity cell reads e.g. "20000 | 6" without cluttering the table
@@ -15716,7 +15727,7 @@ function particularsTable(p, job) {
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
-      <td><input type="text" id="p-${r.key}-details"   value="${get(r.key,'details') || esc(op.time)}"></td>
+      <td><input type="text" id="p-${r.key}-details"   value="${detailsVal}"></td>
       <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>

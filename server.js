@@ -3517,31 +3517,51 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         continue;
       }
       const entries = newRow.entries;
-      const derivedQty  = entries.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | ');
-      const derivedName = [...new Set(entries.map(e => String((e && e.machine)  || '').trim()).filter(Boolean))].join(' | ');
-      const derivedSig  = [...new Set(entries.map(e => String((e && e.operator) || '').trim()).filter(Boolean))].join(' | ');
-      const editedQty  = String(newRow.quantity  ?? '').trim();
-      const editedName = String(newRow.name      ?? '').trim();
-      const editedSig  = String(newRow.signature ?? '').trim();
-      const qtyChanged  = editedQty  !== derivedQty;
-      const nameChanged = editedName !== derivedName;
-      const sigChanged  = editedSig  !== derivedSig;
-      if (!qtyChanged && !nameChanged && !sigChanged) { newParticulars[key] = newRow; continue; }
+      // Details shows each entry's DATE only (dd/mm/yyyy) — entries never
+      // carried a time component, so there's nothing lost by dropping it.
+      const isoToDMY = (iso) => {
+        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+        return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+      };
+      const dmyToISO = (dmy) => {
+        const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(dmy || '').trim());
+        return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+      };
+      const derivedQty     = entries.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | ');
+      const derivedName    = [...new Set(entries.map(e => String((e && e.machine)  || '').trim()).filter(Boolean))].join(' | ');
+      const derivedSig     = [...new Set(entries.map(e => String((e && e.operator) || '').trim()).filter(Boolean))].join(' | ');
+      const derivedDetails = [...new Set(entries.map(e => isoToDMY(e && e.date)).filter(Boolean))].join(' | ');
+      const editedQty     = String(newRow.quantity  ?? '').trim();
+      const editedName    = String(newRow.name      ?? '').trim();
+      const editedSig     = String(newRow.signature ?? '').trim();
+      const editedDetails = String(newRow.details   ?? '').trim();
+      const qtyChanged     = editedQty     !== derivedQty;
+      const nameChanged    = editedName    !== derivedName;
+      const sigChanged     = editedSig     !== derivedSig;
+      // Only treat Details as a date edit when every pipe-segment actually
+      // parses as dd/mm/yyyy — a plain non-date note typed in there (or the
+      // old timestamp format) shouldn't be misread as a date correction.
+      const detailsParts = editedDetails === '' ? [] : editedDetails.split('|').map(s => s.trim());
+      const detailsLooksLikeDates = detailsParts.length > 0 && detailsParts.every(s => dmyToISO(s));
+      const detailsChanged = detailsLooksLikeDates && editedDetails !== derivedDetails;
+      if (!qtyChanged && !nameChanged && !sigChanged && !detailsChanged) { newParticulars[key] = newRow; continue; }
       let nextEntries = entries;
       // Positional remap when the edited (pipe-joined) value has exactly
       // one segment per existing entry — matches how multi-pass corrections
       // already work elsewhere in the app. Otherwise (a single value typed
       // over a multi-pass row) broadcast it to every entry rather than
       // guess which pass it was meant to correct.
-      const remap = (editedStr, field) => {
+      const remap = (editedStr, field, parseFn) => {
         const parts = editedStr === '' ? [] : editedStr.split('|').map(s => s.trim());
+        const val = (s) => (parseFn ? parseFn(s) : s);
         nextEntries = (parts.length === nextEntries.length)
-          ? nextEntries.map((e, i) => ({ ...e, [field]: parts[i] }))
-          : nextEntries.map(e => ({ ...e, [field]: editedStr }));
+          ? nextEntries.map((e, i) => ({ ...e, [field]: val(parts[i]) }))
+          : nextEntries.map(e => ({ ...e, [field]: val(editedStr) }));
       };
-      if (qtyChanged)  remap(editedQty,  'qty');
-      if (nameChanged) remap(editedName, 'machine');
-      if (sigChanged)  remap(editedSig,  'operator');
+      if (qtyChanged)     remap(editedQty,     'qty');
+      if (nameChanged)    remap(editedName,    'machine');
+      if (sigChanged)     remap(editedSig,     'operator');
+      if (detailsChanged) remap(editedDetails, 'date', dmyToISO);
       newParticulars[key] = { ...newRow, entries: nextEntries };
     }
     const STAGE_BY_KEY_PUT = {
