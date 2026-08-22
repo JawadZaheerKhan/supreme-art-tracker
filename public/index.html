@@ -9751,6 +9751,7 @@ function buildJobsReportRows() {
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
       linkPartner,
+      stockGroupName: j.stock_group_name || null,
     });
   }
   // Merge Linked-Jobs pairs into one combined row — only when BOTH rows
@@ -9795,21 +9796,76 @@ function buildJobsReportRows() {
         coatings: sameOrPipe(lo.coatings, hi.coatings),
         linkPartner: null,
         mergedPartnerId: hi.id,
+        stockGroupName: (lo.stockGroupName && lo.stockGroupName === hi.stockGroupName) ? lo.stockGroupName : null,
       });
     } else {
       merged.push(r);
     }
   }
+  // Merge Mill (stock group) rows that share the same delivery — same
+  // group, same PO No., same Challan No. means they were all paid out by
+  // one "Record Delivery" FIFO click on the group, so they're really one
+  // shipment split across jobs by however much ready stock each had.
+  // Unlike Linked Jobs (always exactly 2, paired up front), a group FIFO
+  // delivery can touch any number of jobs, so this buckets by key instead
+  // of pairing by id. Only buckets with a non-empty PO No. AND Challan No.
+  // are eligible — an empty value never merges rows together.
+  const dedupePipe = (vals) => [...new Set(vals.map(v => String(v || '').trim()).filter(Boolean))].join(' | ');
+  const milBuckets = new Map();
+  for (const r of merged) {
+    if (!r.stockGroupName || !r.poNo || !r.challan) continue;
+    const key = `${r.stockGroupName} ${r.poNo} ${r.challan}`;
+    if (!milBuckets.has(key)) milBuckets.set(key, []);
+    milBuckets.get(key).push(r);
+  }
+  const milConsumed = new Set();
+  const withMilMerge = [];
+  for (const r of merged) {
+    if (milConsumed.has(r)) continue;
+    const key = (r.stockGroupName && r.poNo && r.challan) ? `${r.stockGroupName} ${r.poNo} ${r.challan}` : null;
+    const bucket = key ? milBuckets.get(key) : null;
+    if (bucket && bucket.length > 1) {
+      bucket.forEach(b => milConsumed.add(b));
+      const sorted = [...bucket].sort((a, b) => a.id - b.id);
+      const latest = sorted.reduce((a, b) => (!a.createdAtRaw || (b.createdAtRaw && b.createdAtRaw > a.createdAtRaw)) ? b : a);
+      withMilMerge.push({
+        id: sorted[0].id,
+        idDisplay: dedupePipe(sorted.map(b => b.idDisplay)),
+        name: dedupePipe(sorted.map(b => b.name)),
+        createdAt: latest.createdAt,
+        createdAtRaw: latest.createdAtRaw,
+        deliveredAt: dedupePipe(sorted.map(b => b.deliveredAt)),
+        client: dedupePipe(sorted.map(b => b.client)),
+        poNo: sorted[0].poNo,
+        batchNo: dedupePipe(sorted.map(b => b.batchNo)),
+        poQty: sorted.map(b => b.poQty).filter(v => v !== '' && v != null).join(' | '),
+        cartonQty: sorted.reduce((s, b) => s + (+b.cartonQty || 0), 0),
+        deliveredQty: sorted.reduce((s, b) => s + (+b.deliveredQty || 0), 0),
+        challan: sorted[0].challan,
+        isPartial: sorted.some(b => b.isPartial),
+        isLate: sorted.some(b => b.isLate),
+        wastage: sorted.every(b => b.wastage == null) ? null : sorted.reduce((s, b) => s + (b.wastage || 0), 0),
+        packets: sorted.reduce((s, b) => s + (+b.packets || 0), 0),
+        paper: dedupePipe(sorted.map(b => b.paper)),
+        machine: dedupePipe(sorted.map(b => b.machine)),
+        coatings: dedupePipe(sorted.map(b => b.coatings)),
+        linkPartner: null,
+        stockGroupName: sorted[0].stockGroupName,
+      });
+    } else {
+      withMilMerge.push(r);
+    }
+  }
   // Oldest first, newest last (by created_at ish — using the parsed
   // timestamp). Rows with no parseable date sort to the very bottom
   // either way — there's no sensible "old" or "new" for those.
-  merged.sort((a, b) => {
+  withMilMerge.sort((a, b) => {
     if (!a.createdAtRaw && !b.createdAtRaw) return 0;
     if (!a.createdAtRaw) return 1;
     if (!b.createdAtRaw) return -1;
     return a.createdAtRaw - b.createdAtRaw;
   });
-  return merged;
+  return withMilMerge;
 }
 
 function renderJobsReport() {
