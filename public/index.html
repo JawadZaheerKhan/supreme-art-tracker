@@ -9685,6 +9685,23 @@ function buildJobsReportRows() {
     const wastage = (Number.isFinite(cartonQtyNum) && Number.isFinite(delQtyNum))
       ? (cartonQtyNum - delQtyNum)
       : null;
+    // Ready Qty — unshipped ready-to-deliver stock for this job, straight
+    // from the production entries[] (same source groupStats()/tiles use),
+    // not the legacy cartonqty field wastage relies on. Mill jobs don't
+    // really have a "wastage" figure — cartonqty−delqty on a group member
+    // is meaningless once FIFO delivery is pooling stock across jobs — so
+    // the Mil-only view shows this instead of Wastage.
+    const readyQty = Math.max(0, (readyCartonsTotal(j) || 0) - (totalDeliveredCartons(j) || 0));
+    // Mil Qty — the group's OWN po_qty (never a sum of members, same rule
+    // Client Summary's Mil Products table follows), only meaningful when
+    // this job belongs to a Mill group.
+    let milQty = null;
+    if (j.stock_group_name) {
+      const groupEnt = j.group_job_id ? stockGroupById(j.group_job_id) : null;
+      milQty = groupEnt
+        ? (parseFloat(String(groupEnt.po_qty || '').replace(/[^0-9.\-]/g, '')) || 0)
+        : (parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0);
+    }
     // Paper — modern jobs store the paper via the linked inventory item
     // (inventory_item_id), not the legacy free-text j.paper. Fall back to
     // the particulars paper_types checkboxes, then the legacy field.
@@ -9746,6 +9763,8 @@ function buildJobsReportRows() {
       // partial delivery, falls back to "has today reached the deadline".
       isLate: isDeadlinePassed(j),
       wastage,
+      readyQty,
+      milQty,
       packets,
       paper,
       machine: j.machine || '',
@@ -9790,6 +9809,8 @@ function buildJobsReportRows() {
         isPartial: !!(lo.isPartial || hi.isPartial),
         isLate: !!(lo.isLate || hi.isLate),
         wastage: (lo.wastage == null && hi.wastage == null) ? null : ((lo.wastage || 0) + (hi.wastage || 0)),
+        readyQty: (+lo.readyQty || 0) + (+hi.readyQty || 0),
+        milQty: (lo.milQty != null && lo.milQty === hi.milQty) ? lo.milQty : null,
         packets: (+lo.packets || 0) + (+hi.packets || 0),
         paper: sameOrPipe(lo.paper, hi.paper),
         machine: sameOrPipe(lo.machine, hi.machine),
@@ -9845,6 +9866,8 @@ function buildJobsReportRows() {
         isPartial: sorted.some(b => b.isPartial),
         isLate: sorted.some(b => b.isLate),
         wastage: sorted.every(b => b.wastage == null) ? null : sorted.reduce((s, b) => s + (b.wastage || 0), 0),
+        readyQty: sorted.reduce((s, b) => s + (+b.readyQty || 0), 0),
+        milQty: sorted[0].milQty,
         packets: sorted.reduce((s, b) => s + (+b.packets || 0), 0),
         paper: dedupePipe(sorted.map(b => b.paper)),
         machine: dedupePipe(sorted.map(b => b.machine)),
@@ -9889,28 +9912,35 @@ function renderJobsReport() {
   // summary row. Job ID column doubles as the count ("N jobs"). Wastage is
   // null on rows where it can't be computed (no carton/delivered qty); skip
   // those instead of treating them as 0.
+  const milMode = !!jobsReportState.milOnly;
   const totals = rows.reduce((a, r) => ({
     poQty:        a.poQty        + (+r.poQty || 0),
+    milQty:       a.milQty       + (+r.milQty || 0),
     cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
     deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
     wastage:      a.wastage      + (r.wastage == null ? 0 : (+r.wastage || 0)),
+    readyQty:     a.readyQty     + (+r.readyQty || 0),
     packets:      a.packets      + (+r.packets || 0),
-  }), { poQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, packets: 0 });
+  }), { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
   const tbody = rows.map(r => {
     // Wastage (carton qty − delivered qty) is just a tracking number, not a
     // good/bad indicator — the gap between PO / produced / delivered can
     // come from scrap, samples kept aside, partial deliveries, etc. So we
-    // render it plain bold without red/green coloring.
-    const wastageCell = r.wastage === null
-      ? '<td ' + tdR + '>—</td>'
-      : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`;
+    // render it plain bold without red/green coloring. Mill jobs don't
+    // really have a "wastage" — the Mil-only view shows Ready Qty instead
+    // (unshipped stock still sitting in that job), colored to match how
+    // "Ready" reads everywhere else in the app.
+    const wastageCell = milMode
+      ? `<td style="padding:8px 10px;text-align:right;font-weight:600;color:#166534;">${fmt(r.readyQty)}</td>`
+      : (r.wastage === null
+          ? '<td ' + tdR + '>—</td>'
+          : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`);
+    const milQtyCell = milMode ? `<td ${tdR}>${fmt(r.milQty)}</td>` : '';
     const isSel = jobsReportSel.has(r.id);
-    // Yellow dot next to Delivered Qty when the row is a partial shipment
-    // — quick visual for "delivered something, still owes more". Uses the
-    // amber palette that matches the PARTIAL badge on the job tile.
-    const partialDot = r.isPartial
-      ? `<span title="Partial delivery — still owes cartons" style="display:inline-block;width:9px;height:9px;border-radius:999px;background:#f59e0b;margin-left:6px;vertical-align:middle;box-shadow:0 0 0 1px #b45309;"></span>`
-      : '';
+    // Partial shipment — Delivered Qty text itself reads amber instead of
+    // a separate dot marker, so the flag reads at a glance without extra
+    // clutter next to the number.
+    const deliveredStyle = r.isPartial ? 'color:#b45309;font-weight:700;' : '';
     return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);" onclick="openEdit(${r.id})" title="Open this job's card">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>${esc(r.idDisplay || 'E-' + r.id)}</td>
@@ -9922,8 +9952,9 @@ function renderJobsReport() {
       <td ${td}>${esc(r.batchNo)}</td>
       <td ${td}>${esc(r.challan)}</td>
       <td ${tdR}>${esc(r.poQty)}</td>
+      ${milQtyCell}
       <td ${tdR}>${esc(r.cartonQty)}</td>
-      <td ${tdR}>${esc(r.deliveredQty)}${partialDot}</td>
+      <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}</td>
       ${wastageCell}
       <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
       <td ${td}>${esc(r.paper)}</td>
@@ -9952,9 +9983,10 @@ function renderJobsReport() {
           <th ${th}>Batch No.</th>
           <th ${th}>Challan No.</th>
           <th ${thR}>PO Qty</th>
+          ${milMode ? `<th ${thR}>Mil Qty</th>` : ''}
           <th ${thR}>Unit Carton Qty</th>
           <th ${thR}>Delivered Qty</th>
-          <th ${thR}>Wastage</th>
+          <th ${thR}>${milMode ? 'Ready Qty' : 'Wastage'}</th>
           <th ${thR}>Packets</th>
           <th ${th}>Paper</th>
           <th ${th}>Machine</th>
@@ -9968,9 +10000,10 @@ function renderJobsReport() {
           <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
           <td colspan="7" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
+          ${milMode ? `<td style="padding:8px 10px;text-align:right;">${fmt(totals.milQty)}</td>` : ''}
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
-          <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(milMode ? totals.readyQty : totals.wastage)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.packets)}</td>
           <td colspan="3"></td>
         </tr>
@@ -9987,7 +10020,10 @@ async function exportJobsReport() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Challan No.', 'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+  const milMode = !!jobsReportState.milOnly;
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Challan No.', 'PO Qty',
+    ...(milMode ? ['Mil Qty'] : []),
+    'Unit Carton Qty', 'Delivered Qty', milMode ? 'Ready Qty' : 'Wastage', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -10006,9 +10042,10 @@ async function exportJobsReport() {
       r.batchNo || '',
       r.challan || '',
       r.poQty,
+      ...(milMode ? [r.milQty ?? ''] : []),
       r.cartonQty,
       deliveredCell,
-      r.wastage === null ? '' : r.wastage,
+      milMode ? r.readyQty : (r.wastage === null ? '' : r.wastage),
       r.packets ? +r.packets.toFixed(2) : '',
       r.paper,
       r.machine,
@@ -10034,12 +10071,11 @@ function printJobsReport() {
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  const milMode = !!jobsReportState.milOnly;
   const tableRows = rows.map(r => {
-    // Partial rows get a solid amber marker before the delivered qty so
-    // the printout carries the same signal the on-screen dot does.
-    const partialMark = r.isPartial
-      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:#f59e0b;border:1px solid #b45309;margin-right:4px;vertical-align:middle;"></span>'
-      : '';
+    // Partial rows show the delivered qty in amber bold — same signal the
+    // on-screen text color gives, instead of a separate dot marker.
+    const deliveredStyle = r.isPartial ? 'color:#b45309;font-weight:bold;' : '';
     return `<tr>
     <td ${tdL}>${esc(r.idDisplay || 'E-' + r.id)}</td>
     <td ${tdL}>${esc(r.name)}</td>
@@ -10050,9 +10086,10 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.batchNo || '')}</td>
     <td ${tdL}>${esc(r.challan || '')}</td>
     <td ${tdR}>${esc(r.poQty)}</td>
+    ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
     <td ${tdR}>${esc(r.cartonQty)}</td>
-    <td ${tdR}>${partialMark}${esc(r.deliveredQty)}</td>
-    <td ${tdR}>${r.wastage === null ? '—' : fmt(r.wastage)}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}</td>
+    <td ${tdR}>${milMode ? fmt(r.readyQty) : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
@@ -10085,9 +10122,10 @@ function printJobsReport() {
           <th ${tdL}>Batch No.</th>
           <th ${tdL}>Challan No.</th>
           <th ${tdR}>PO Qty</th>
+          ${milMode ? `<th ${tdR}>Mil Qty</th>` : ''}
           <th ${tdR}>Unit Carton Qty</th>
           <th ${tdR}>Delivered Qty</th>
-          <th ${tdR}>Wastage</th>
+          <th ${tdR}>${milMode ? 'Ready Qty' : 'Wastage'}</th>
           <th ${tdR}>Packets</th>
           <th ${tdL}>Paper</th>
           <th ${tdL}>Machine</th>
