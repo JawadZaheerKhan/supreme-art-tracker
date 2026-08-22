@@ -3496,7 +3496,54 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // ghost waste count in the daily-production coatings report.
     const priorParticulars = (prior[0]?.particulars && typeof prior[0].particulars === 'object')
       ? prior[0].particulars : {};
-    const newParticulars = (particulars && typeof particulars === 'object') ? particulars : {};
+    const newParticularsRaw = (particulars && typeof particulars === 'object') ? particulars : {};
+    // Admin job-card edits to Quantity/Name/Signature only ever patch the
+    // flat display strings (see collectParticulars() on the client) — the
+    // underlying entries[] that every report/tile actually reads from was
+    // passed through untouched, so a corrected number on the job card
+    // silently never showed up anywhere else. Detect any row where the
+    // incoming quantity/name/signature text no longer matches what the
+    // PRIOR entries[] would render, and write the correction back into
+    // entries[] itself — preserving each entry's original date so a
+    // manual fix edits that day's number in place instead of being
+    // misattributed to today.
+    const newParticulars = {};
+    for (const [key, newRow] of Object.entries(newParticularsRaw)) {
+      const priorRow = priorParticulars[key];
+      const priorEntries = priorRow && Array.isArray(priorRow.entries) ? priorRow.entries : null;
+      if (!priorEntries || !priorEntries.length || !newRow || typeof newRow !== 'object' ||
+          !Array.isArray(newRow.entries) || !newRow.entries.length) {
+        newParticulars[key] = newRow;
+        continue;
+      }
+      const entries = newRow.entries;
+      const derivedQty  = entries.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | ');
+      const derivedName = [...new Set(entries.map(e => String((e && e.machine)  || '').trim()).filter(Boolean))].join(' | ');
+      const derivedSig  = [...new Set(entries.map(e => String((e && e.operator) || '').trim()).filter(Boolean))].join(' | ');
+      const editedQty  = String(newRow.quantity  ?? '').trim();
+      const editedName = String(newRow.name      ?? '').trim();
+      const editedSig  = String(newRow.signature ?? '').trim();
+      const qtyChanged  = editedQty  !== derivedQty;
+      const nameChanged = editedName !== derivedName;
+      const sigChanged  = editedSig  !== derivedSig;
+      if (!qtyChanged && !nameChanged && !sigChanged) { newParticulars[key] = newRow; continue; }
+      let nextEntries = entries;
+      // Positional remap when the edited (pipe-joined) value has exactly
+      // one segment per existing entry — matches how multi-pass corrections
+      // already work elsewhere in the app. Otherwise (a single value typed
+      // over a multi-pass row) broadcast it to every entry rather than
+      // guess which pass it was meant to correct.
+      const remap = (editedStr, field) => {
+        const parts = editedStr === '' ? [] : editedStr.split('|').map(s => s.trim());
+        nextEntries = (parts.length === nextEntries.length)
+          ? nextEntries.map((e, i) => ({ ...e, [field]: parts[i] }))
+          : nextEntries.map(e => ({ ...e, [field]: editedStr }));
+      };
+      if (qtyChanged)  remap(editedQty,  'qty');
+      if (nameChanged) remap(editedName, 'machine');
+      if (sigChanged)  remap(editedSig,  'operator');
+      newParticulars[key] = { ...newRow, entries: nextEntries };
+    }
     const STAGE_BY_KEY_PUT = {
       printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
       coating_sheets_qty: 'Coatings', coating_waste_sheets: 'Coatings',
