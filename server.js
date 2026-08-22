@@ -7342,6 +7342,16 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Some browsers and crawlers request /favicon.ico regardless of the <link>
+// tags in the page. Without this it falls through to the catch-all below and
+// serves the whole ~1.2 MB index.html as an "icon" — pure waste on every
+// page load. Answer with the real 32px PNG instead.
+app.get('/favicon.ico', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
+  res.type('image/png');
+  res.sendFile(path.join(__dirname, 'public', 'favicon-32.png'));
+});
+
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app
   // shell. Same rule as above: never cache it, or users end up running an
