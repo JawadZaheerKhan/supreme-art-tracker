@@ -3463,12 +3463,23 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // job is still 'pending' (stock never issued), edits don't touch inventory
     // at all. Once 'issued', edits auto-adjust the ledger using the same
     // packet-first formula as initial issuance.
-    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size, deliveries FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const newItemId  = inventory_item_id || null;
     const oldOffcutSize = prior[0]?.offcut_size || null;
     const newOffcutSize = offcut_size || null;
+    // delqty from the client is really "Ready to Delivery Qty" off the job
+    // card (see getFormData() on the client) — that's production output,
+    // not what actually shipped. Once real shipments exist in the
+    // deliveries[] ledger, THAT sum is the only true "delivered" figure;
+    // trusting the client's value here would silently overwrite it on
+    // every unrelated job-card save (confirmed happening on real jobs —
+    // delqty drifting to stale/garbled values while the ledger stayed
+    // correct). Once the ledger has anything in it, it wins outright.
+    const priorDeliveries = Array.isArray(prior[0]?.deliveries) ? prior[0].deliveries : [];
+    const priorLedgerSum = priorDeliveries.reduce((s, d) => s + (parseFloat(String((d && d.cartons) || '').replace(/[^0-9.\-]/g, '')) || 0), 0);
+    if (priorLedgerSum > 0) delqty = String(priorLedgerSum);
     // Look up paper types so the packet-multiplier matches what was actually
     // deducted at issuance time (and what the new state would deduct).
     let oldSourceItem = null;
