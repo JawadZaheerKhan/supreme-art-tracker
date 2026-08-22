@@ -627,12 +627,24 @@ async function initDb() {
     //      get blocked.
     //   2. UPDATE the old role names to the new ones.
     //   3. Re-narrow the CHECK to only the new role names.
-    await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator'))`;
-    await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
-    await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
-    await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client'))`;
+    // NOTE: the step-1 list below MUST be a superset of every role that can
+    // exist in the table — legacy names AND every current one. It previously
+    // omitted 'finance' and 'client', which broke badly: step 1 dropped the
+    // constraint, failed to re-add it (rows violated it), and the throw
+    // aborted the whole of initDb. Net effect was a users table with NO role
+    // constraint and every migration below this point silently skipped on
+    // each cold start. Own try/catch so a stale list can never do that again.
+    try {
+      await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client'))`;
+      await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
+      await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
+      await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client'))`;
+    } catch (roleErr) {
+      // Log loudly but keep going — the migrations below must still run.
+      console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
+    }
     // Multi-role support: a user can hold several roles at once (e.g. CEO +
     // Admin). `roles` is the source of truth; the legacy `role` column keeps
     // the highest-priority role for back-compat with old JWT cookies and any
