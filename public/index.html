@@ -9934,7 +9934,7 @@ function renderJobsReport() {
       milQty:       a.milQty       + milQtyAdd,
       cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
       deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
-      wastage:      a.wastage      + (r.wastage == null ? 0 : (+r.wastage || 0)),
+      wastage:      a.wastage      + ((r.wastage == null || r.stockGroupName) ? 0 : (+r.wastage || 0)),
       readyQty:     a.readyQty     + (+r.readyQty || 0),
       packets:      a.packets      + (+r.packets || 0),
     };
@@ -9946,12 +9946,16 @@ function renderJobsReport() {
     // render it plain bold without red/green coloring. Mill jobs don't
     // really have a "wastage" — the Mil-only view shows Ready Qty instead
     // (unshipped stock still sitting in that job), colored to match how
-    // "Ready" reads everywhere else in the app.
+    // "Ready" reads everywhere else in the app. In the MIXED (non-Mil-only)
+    // view, a Mill job's row can't show a real wastage number either, so
+    // it just reads "MIL" there instead of a misleading figure.
     const wastageCell = milMode
       ? `<td style="padding:8px 10px;text-align:right;font-weight:600;color:#166534;">${fmt(r.readyQty)}</td>`
-      : (r.wastage === null
-          ? '<td ' + tdR + '>—</td>'
-          : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`);
+      : (r.stockGroupName
+          ? `<td style="padding:8px 10px;text-align:right;font-weight:800;color:#dc2626;">MIL</td>`
+          : (r.wastage === null
+              ? '<td ' + tdR + '>—</td>'
+              : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`));
     const milQtyCell = milMode ? `<td ${tdR}>${fmt(r.milQty)}</td>` : '';
     const isSel = jobsReportSel.has(r.id);
     // Partial shipment — Delivered Qty text itself reads amber instead of
@@ -10062,7 +10066,7 @@ async function exportJobsReport() {
       r.poQty,
       r.cartonQty,
       deliveredCell,
-      milMode ? r.readyQty : (r.wastage === null ? '' : r.wastage),
+      milMode ? r.readyQty : (r.stockGroupName ? 'MIL' : (r.wastage === null ? '' : r.wastage)),
       r.packets ? +r.packets.toFixed(2) : '',
       r.paper,
       r.machine,
@@ -10106,7 +10110,7 @@ function printJobsReport() {
     <td ${tdR}>${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}</td>
-    <td ${tdR}>${milMode ? fmt(r.readyQty) : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
+    <td ${tdR}>${milMode ? fmt(r.readyQty) : (r.stockGroupName ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage)))}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
