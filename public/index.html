@@ -7505,6 +7505,17 @@ function txDisplayNotes(t) {
   return (t && t.reason === 'job-consumed') ? '' : ((t && t.notes) || '');
 }
 
+// A one-time schema-upgrade migration backfilled deliveries[] on legacy
+// jobs from their old flat delqty field, stamping this exact audit note
+// into .notes since there was no real challan on record — never a real
+// challan number. Every view that reads a delivery's .notes as "Challan
+// No." (job card Deliveries table, Jobs Report, Client Summary + its
+// Excel export) uses this so that note never masquerades as one.
+function deliveryChallanText(d) {
+  const n = (d && d.notes) || '';
+  return n === 'Backfilled from legacy delqty on schema upgrade' ? '' : n;
+}
+
 // Opens an item's History modal already scrolled to + flashed on one
 // specific transaction — used when a report row (Stock In/Out) is clicked
 // so the user lands on the exact entry they came from, not just the top
@@ -9722,15 +9733,9 @@ function buildJobsReportRows() {
       if (vals.length) return vals.join(' | ');
       return String(fallback || '').trim();
     };
-    // "Backfilled from legacy delqty on schema upgrade" is a migration
-    // audit note stamped into .notes on 21 legacy jobs' synthetic delivery
-    // entries — never a real challan number. Showing it in the Challan No.
-    // column reads as if that were the actual challan, so it's filtered
-    // out here the same way job-consumed's auto-note is blanked in the
-    // Stock In/Out ledger.
     const challans = deliveriesList
-      .map(d => (d && d.notes ? String(d.notes).trim() : ''))
-      .filter(n => n && n !== 'Backfilled from legacy delqty on schema upgrade')
+      .map(d => deliveryChallanText(d).trim())
+      .filter(Boolean)
       .join(' | ');
     const poNoJoined    = joinRefs('po_no',    j.ref);
     const batchNoJoined = joinRefs('batch_no', j.bno);
@@ -16031,7 +16036,7 @@ function deliveriesSection(j) {
         const dt   = d.date     || '';
         const po   = d.po_no    || '';
         const bat  = d.batch_no || '';
-        const nt   = d.notes    || '';
+        const nt   = deliveryChallanText(d);
         const by   = d.by       || '';
         // Linked-delivery tag — this shipment was recorded via "Deliver
         // Linked Jobs" alongside the partner job, sharing this same
@@ -22069,7 +22074,7 @@ function renderClientSummary(rows, containerId) {
       <td style="padding:6px 8px;">${esc(d.job.name || '')}</td>
       <td style="padding:6px 8px;">${esc(d.po_no || '')}</td>
       <td style="padding:6px 8px;">${esc(d.batch_no || '')}</td>
-      <td style="padding:6px 8px;">${esc(d.notes || '')}</td>
+      <td style="padding:6px 8px;">${esc(deliveryChallanText(d))}</td>
       <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtN(parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, '')) || 0)}</td>
     </tr>`).join('');
     shipsTable = `
@@ -22152,7 +22157,7 @@ async function exportClientSummary(containerId) {
         d.job.name || '',
         d.po_no || '',
         d.batch_no || '',
-        d.notes || '',
+        deliveryChallanText(d),
         parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, '')) || 0,
       ]);
     }
