@@ -2447,14 +2447,50 @@ async function aggregateProductionRange(sql, { from, to }) {
     const wfPart = part.uv_waste_sheets;
     const wasteEntries = wfPart && Array.isArray(wfPart.entries) && wfPart.entries.length ? wfPart.entries : null;
     if (wasteEntries) creditCoatingEntries(wasteEntries, 'waste');
+    // Sheets legacy fallback — mirrors what the Daily Coatings report
+    // already does (server's /api/reports/daily-production/coatings/:date):
+    // when there's no coating_sheets_qty.entries[] at all, derive a sheets
+    // figure from the admin-typed flat quantity, or failing that from
+    // printed − printed-waste, and credit it to whichever machine/operator
+    // the coatings_done badge(s) name for that date — same signal the
+    // waste fallback right below already uses. Without this, a Coatings
+    // row with only a flat quantity (no entries[]) contributed nothing to
+    // Production Report while the exact same row DID count in Daily
+    // Production — the two reports disagreeing on the same data.
+    let sheetsFallbackN = 0;
+    if (!coatSheetEntries) {
+      const sumPipe = (s) => String(s || '').split('|').reduce((acc, p) => {
+        const n = parseInt(p.replace(/[^0-9-]/g, ''), 10);
+        return acc + (Number.isFinite(n) ? n : 0);
+      }, 0);
+      const coatSheetsAdmin = sumPipe(csPart && csPart.quantity);
+      const printedN = sumPipe(part.printed_sheets_qty && part.printed_sheets_qty.quantity);
+      const printedWasteN = sumPipe(part.printed_waste_sheets && part.printed_waste_sheets.quantity);
+      sheetsFallbackN = coatSheetsAdmin > 0 ? coatSheetsAdmin : Math.max(0, printedN - printedWasteN);
+    }
     const coatings = Array.isArray(job.coatings_done) ? job.coatings_done : [];
+    // Credited once per (date, machine)/(date, operator) per job so 2
+    // badges on the same day/machine (e.g. UV + Emboss) don't double it.
+    const sheetsCreditedKeys = new Set();
     for (const c of coatings) {
       if (!c) continue;
       const cDate = isoTsToDate(c.done_at);
       if (!cDate || cDate < from || cDate > to) continue;
       const w = wasteEntries ? 0 : (parseInt(String(c.waste_sheets || '').replace(/[^0-9-]/g, ''), 10) || 0);
-      if (c.machine)       { const r = ensureMD(cDate, c.machine);       r.waste += w; r.jobs.add(job.id); }
-      if (c.operator_name) { const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id); }
+      if (c.machine) {
+        const r = ensureMD(cDate, c.machine); r.waste += w; r.jobs.add(job.id);
+        if (!coatSheetEntries && sheetsFallbackN > 0) {
+          const k = cDate + '|mc|' + c.machine;
+          if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; sheetsCreditedKeys.add(k); }
+        }
+      }
+      if (c.operator_name) {
+        const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id);
+        if (!coatSheetEntries && sheetsFallbackN > 0) {
+          const k = cDate + '|op|' + c.operator_name;
+          if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; sheetsCreditedKeys.add(k); }
+        }
+      }
     }
   }
   // Hours come from daily_production_notes only. Breaking's notes use
@@ -3552,25 +3588,63 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // manual fix edits that day's number in place instead of being
     // misattributed to today.
     const newParticulars = {};
+    // Details shows each entry's DATE only (dd/mm/yyyy) — entries never
+    // carried a time component, so there's nothing lost by dropping it.
+    const isoToDMY = (iso) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+      return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+    };
+    const dmyToISO = (dmy) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(dmy || '').trim());
+      return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+    };
+    const seedTodayISO = businessDateISO();
     for (const [key, newRow] of Object.entries(newParticularsRaw)) {
       const priorRow = priorParticulars[key];
       const priorEntries = priorRow && Array.isArray(priorRow.entries) ? priorRow.entries : null;
-      if (!priorEntries || !priorEntries.length || !newRow || typeof newRow !== 'object' ||
-          !Array.isArray(newRow.entries) || !newRow.entries.length) {
+      if (!priorEntries || !priorEntries.length) {
+        // No entries[] existed for this row at all — this is either a
+        // brand-new row (operator never submitted here) or a legacy row
+        // that predates entries[]. If the admin filled in the WHOLE row
+        // from scratch (Quantity + Name + Signature all present — Details/
+        // date is optional and defaults to today), synthesize a real
+        // entries[] so this reads to every report exactly like an actual
+        // station submission would, instead of leaving a flat quantity
+        // string that Production Report / Daily Production Report have
+        // nothing to attribute a machine+date to and silently drop.
+        if (newRow && typeof newRow === 'object' && !Array.isArray(newRow.entries)) {
+          const seedQty = String(newRow.quantity  ?? '').trim();
+          const seedName = String(newRow.name      ?? '').trim();
+          const seedSig  = String(newRow.signature ?? '').trim();
+          const seedDetails = String(newRow.details ?? '').trim();
+          if (seedQty && seedName && seedSig) {
+            const qtyParts = seedQty.split('|').map(s => s.trim());
+            const n = qtyParts.length;
+            const splitOrBroadcast = (str) => {
+              const parts = str === '' ? [] : str.split('|').map(s => s.trim());
+              return parts.length === n ? parts : Array(n).fill(str);
+            };
+            const nameParts    = splitOrBroadcast(seedName);
+            const sigParts     = splitOrBroadcast(seedSig);
+            const detailsParts = splitOrBroadcast(seedDetails);
+            const seededEntries = qtyParts.map((qty, i) => ({
+              qty,
+              date: dmyToISO(detailsParts[i]) || seedTodayISO,
+              operator: sigParts[i] || seedSig,
+              machine: nameParts[i] || seedName,
+            }));
+            newParticulars[key] = { ...newRow, entries: seededEntries };
+            continue;
+          }
+        }
+        newParticulars[key] = newRow;
+        continue;
+      }
+      if (!newRow || typeof newRow !== 'object' || !Array.isArray(newRow.entries) || !newRow.entries.length) {
         newParticulars[key] = newRow;
         continue;
       }
       const entries = newRow.entries;
-      // Details shows each entry's DATE only (dd/mm/yyyy) — entries never
-      // carried a time component, so there's nothing lost by dropping it.
-      const isoToDMY = (iso) => {
-        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
-        return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
-      };
-      const dmyToISO = (dmy) => {
-        const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(dmy || '').trim());
-        return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
-      };
       const derivedQty     = entries.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | ');
       const derivedName    = [...new Set(entries.map(e => String((e && e.machine)  || '').trim()).filter(Boolean))].join(' | ');
       const derivedSig     = [...new Set(entries.map(e => String((e && e.operator) || '').trim()).filter(Boolean))].join(' | ');
