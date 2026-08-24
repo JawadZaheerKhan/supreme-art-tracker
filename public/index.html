@@ -19818,7 +19818,15 @@ function printSelectedJobs() {
 async function exportCSV() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const header = ['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created'];
-  const rows = jobs.map(j => {
+  // Was exporting the raw `jobs` global — every job in the system,
+  // ignoring the search box, every dropdown filter, the date range, and
+  // even which tab (New/CTP/Pending/Active/Storage/Partial/Done/Blocked)
+  // was open. sortJobsForView(getFiltered()) is the exact same call the
+  // on-screen list itself renders from, so the export always matches
+  // what's actually visible.
+  const filtered = sortJobsForView(getFiltered());
+  if (!filtered.length) { notify('Nothing to export — empty filter result.'); return; }
+  const rows = filtered.map(j => {
     const coatings = Array.isArray(j.coatings) ? j.coatings.join('; ') : '';
     return [j.id, j.jobcode||'', j.name, j.client, j.dateissued||'', j.size||'', j.ups||'', j.sheets||'', j.qty||'', j.paper||'', j.machine||'', coatings, j.priority||'', j.ref||'', j.deadline||'', j.delqty||'', j.cartonqty||'', STAGES[j.stage_index||0]||'Delivered', isDone(j)?'Delivered':isBlocked(j)?'Blocked':'In Progress', j.created_at?new Date(j.created_at).toLocaleDateString('en-GB'):''];
   });
