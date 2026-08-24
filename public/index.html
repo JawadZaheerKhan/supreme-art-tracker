@@ -13051,12 +13051,29 @@ function printManualConsumption() {
   });
 }
 
+// Rows for Print/Export: if the user has checked specific rows via the bulk
+// checkboxes, that's an explicit "only these" choice — it wins outright over
+// whatever the Paper Type / Size / GSM filters currently say (checked rows
+// only ever come from what's already visible under the current filter, so
+// there's nothing to reconcile). Otherwise falls back to the same filter
+// chain renderStockMovement() uses, so Print/Export always mirror the screen.
+function stockMovementPrintRows(direction) {
+  const state = stockMovementStates[direction];
+  const sel = stockMovementSel[direction];
+  if (sel && sel.size) return state.rows.filter(t => sel.has(t.id));
+  return state.rows.filter(t =>
+       (!state.paperType || t.paper_type === state.paperType)
+    && (!state.size      || (t.item_size || '') === state.size)
+    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+  );
+}
+
 // Print using the same A4 portrait layout as the old Stock Report — direction
 // is implied by which pane invoked it.
 function printStockMovement(direction) {
   const state = stockMovementStates[direction];
   const { from, to } = periodToDateRange(state.period, state.from, state.to);
-  const rows = state.paperType ? state.rows.filter(t => t.paper_type === state.paperType) : state.rows;
+  const rows = stockMovementPrintRows(direction);
   const dirLabel = direction === 'in' ? 'Stock In (additions only)' : 'Stock Out (deductions only)';
   const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
   let total = 0;
@@ -13093,14 +13110,14 @@ function printStockMovement(direction) {
         <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
         <div>
           <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:11pt;">${direction === 'in' ? 'Stock In Report' : 'Stock Out Report'}</div>
+          <div style="font-size:11pt;">${direction === 'in' ? 'Stock In Report' : 'Stock Out Report'}${stockMovementSel[direction].size ? ' — Selected rows only' : ''}</div>
         </div>
         <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
       </div>
       <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
         <tr>
           <td style="padding:2px 8px 2px 0;"><b>Direction:</b> ${dirLabel}</td>
-          <td style="padding:2px 8px;"><b>Paper Type:</b> ${state.paperType || 'All'}</td>
+          <td style="padding:2px 8px;"><b>Paper Type:</b> ${stockMovementSel[direction].size ? `${stockMovementSel[direction].size} row(s) selected` : (state.paperType || 'All')}</td>
           <td style="padding:2px 8px;"><b>Period:</b> ${periodLabel}</td>
           <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
           <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
@@ -13137,19 +13154,14 @@ function printStockMovement(direction) {
 }
 
 // Export the Stock In / Stock Out pane (whichever direction is open) to an
-// .xlsx file. Same filter rules as the on-screen table — paper type / size /
-// gsm / date range — so the file mirrors what the user sees. One sheet per
-// direction; the filename includes the direction and a date stamp.
+// .xlsx file. Checked rows (if any) win outright, same as Print — otherwise
+// the same filter rules as the on-screen table (paper type / size / gsm /
+// date range) so the file mirrors what's visible. One sheet per direction;
+// the filename includes the direction and a date stamp.
 async function exportStockMovement(direction) {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const state = stockMovementStates[direction];
-  const { from, to } = periodToDateRange(state.period, state.from, state.to);
-  // Same filter chain as renderStockMovement()
-  const txs = state.rows.filter(t =>
-       (!state.paperType || t.paper_type === state.paperType)
-    && (!state.size      || (t.item_size || '') === state.size)
-    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
-  );
+  const txs = stockMovementPrintRows(direction);
   if (!txs.length) { notify('Nothing to export — empty filter result.'); return; }
   const header = ['When', 'Item', 'Change (Sheets)', 'Change (Packets/Reams)', 'Reason', 'Job', 'Entered by', 'Notes'];
   const aoa = [header];
