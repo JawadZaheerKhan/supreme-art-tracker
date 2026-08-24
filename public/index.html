@@ -1651,15 +1651,15 @@
   min-height: 320px; color: #000; font-family: Arial, sans-serif;
 }
 
-/* The actual sticker — used both in preview and in print. Sized to fit
-   the shop's 7.5in × 10in sticker paper (portrait) in a 2×3 grid = 6
-   per page. Sticker itself is 3.3in wide × 2.8in tall which leaves
-   ~10mm horizontal safety and ~18mm vertical safety per side — big
-   enough that neither the printer's non-printable margin nor Chrome's
-   default dialog margin clips the grid on any tested run. */
+/* The actual sticker — used both in preview and in print. Printer is a
+   Zebra ZT411 feeding die-cut 4in × 4in labels, one sticker per label
+   (not a multi-up grid on a sheet any more). Sticker box is 3.5in ×
+   3.5in — strictly smaller than the 4in × 4in label — centered on the
+   page, leaving a ~0.25in safety margin on every side so the printer's
+   own non-printable edge and any head/feed drift never clip content. */
 .sticker {
   border: 3px solid #000; box-sizing: border-box;
-  width: 3.3in; height: 2.8in;
+  width: 3.5in; height: 3.5in;
   font-family: Arial, sans-serif; color: #000; background: #fff;
   display: flex; flex-direction: column;
   overflow: hidden;
@@ -1694,31 +1694,24 @@
    stray glyph from spilling into the neighbour. */
 .sticker-row-label { width: 28%; padding: 6px 10px; font-size: 9pt; font-weight: 500; border-right: 2.5px solid #000; box-sizing: border-box; display: flex; align-items: center; text-transform: uppercase; letter-spacing: 0.1px; white-space: nowrap; overflow: hidden; }
 /* Font sizes are the BASE — they get shrunk per-sticker by fitStickerText()
-   so long values (Description, Despatch To) stay on one line instead of
-   truncating with an ellipsis or overflowing the cell. */
-.sticker-row-value { flex: 1; min-width: 0; padding: 6px 10px; font-size: 15pt; font-weight: 900; box-sizing: border-box; display: flex; align-items: center; letter-spacing: 0.2px; overflow: hidden; white-space: nowrap; }
+   so long values (Description, Despatch To) fit the row instead of
+   getting clipped. Values wrap onto a 2nd line first (the taller 3.5in
+   sticker has the headroom for it); only once wrapping still doesn't fit
+   does the font shrink down toward FLOOR_PT. text-transform: uppercase
+   so every value prints capitalized like the labels already did. */
+.sticker-row-value { flex: 1; min-width: 0; padding: 6px 10px; font-size: 15pt; font-weight: 900; box-sizing: border-box; display: flex; align-items: center; letter-spacing: 0.2px; overflow: hidden; white-space: normal; overflow-wrap: break-word; line-height: 1.15; text-transform: uppercase; }
 .sticker-row-value.big { font-size: 20pt; letter-spacing: 0.4px; }
 
 /* On-screen preview: gray backdrop helps users see the white sticker edge */
 .stk-preview .sticker { box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
 
-/* Print sheet — 7.5in wide × 10in tall (portrait) with a 2×3 grid of
-   stickers (6 per page).
-     Grid is 6.7in wide (2 × 3.3in + 0.1in gap) × 8.6in tall
-     (3 × 2.8in + 2 × 0.1in gaps).
-     Paper is 7.5in × 10in, so there's ~0.8in horizontal and ~1.4in
-     vertical of slack per page (~0.4in per side horizontally, ~0.7in
-     per side vertically = ~10mm × ~18mm safety zone).
-   That safety zone covers both scenarios that were clipping before:
-     - print dialog "None": printer's own 3–8mm non-printable area sits
-       well inside our 10mm horizontal safety.
-     - print dialog "Default": Chrome's ~10mm auto margin eats into the
-       vertical safety but the 18mm we now reserve keeps content off
-       the edge.
-   Pinning .stickers-sheet to exactly one page's worth of size and
-   centering the grid inside it also absorbs any per-page printer
-   drift as equal top/bottom whitespace, so every page's cutting
-   guides land in the same physical spot. */
+/* Print "sheet" — one 4in × 4in Zebra ZT411 label per page, one sticker
+   per label (no more multi-up grid). The 3.5in × 3.5in .sticker sits
+   centered inside via flex, leaving an even ~0.25in margin on all four
+   sides as safety against the printer's non-printable edge / feed
+   drift. Pinning .stickers-sheet to the exact label size (rather than
+   100vh, which drifts between browsers under @page margin:0) keeps
+   every label landing in the same physical spot. */
 .stickers-sheet {
   box-sizing: border-box;
   display: flex;
@@ -1733,22 +1726,21 @@
 }
 .stickers-sheet-grid {
   display: grid;
-  grid-template-columns: 3.3in 3.3in;
-  grid-template-rows: 2.8in 2.8in 2.8in;
-  gap: 0.1in;
+  grid-template-columns: 3.5in;
+  grid-template-rows: 3.5in;
   justify-content: center;
   align-content: center;
 }
 @media print {
   .stickers-sheet {
-    /* Explicit sheet size — 100vh drifts between browsers under
+    /* Explicit label size — 100vh drifts between browsers under
        @page margin:0, but a hard inch value stays put. */
-    width: 7.5in;
-    height: 10in;
+    width: 4in;
+    height: 4in;
     page-break-after: always;
     break-after: page;
     /* Prevent any accidental content overflow from forcing a phantom
-       second page (blank sheets between sticker sheets). */
+       second page (blank label between stickers). */
     overflow: hidden;
   }
   .stickers-sheet:last-child {
@@ -14098,14 +14090,18 @@ function fmtStickerDate(iso) {
 }
 
 // Walk every .sticker-row-value inside `root` and shrink the inner
-// .sticker-fit span's font-size until it fits the cell on a single
-// line. Measuring an inline <span>'s offsetWidth gives us the real
-// rendered text width even on flex containers (scrollWidth was
-// unreliable when display:flex collapsed the overflow into 0).
+// .sticker-fit span's font-size until its (now wrappable, see the
+// .sticker-row-value CSS) text fits the cell's fixed row height. The
+// taller 3.5in sticker gives long values like Despatch To / Description
+// room to wrap onto a 2nd line first — only once 2 lines still overflow
+// does the font actually shrink, so short values (PO#, Quantity, Case#)
+// never lose size at all.
 //
-// Cheap — half a dozen iterations on a worst-case
-// "ferozsons pharmaceuticals" line. Force a getBoundingClientRect()
-// read first to flush any pending layout before we measure.
+// Wrapping means width no longer predicts height linearly, so this
+// steps down in 0.5pt increments (bounded by FLOOR_PT) instead of the
+// one-shot scale math a single-line fit could use. Cells that already
+// fit on the first check (the common case) skip the loop entirely, so
+// a full run of short values stays cheap.
 function fitStickerText(root) {
   if (!root) return;
   const FLOOR_PT = 6;
@@ -14115,23 +14111,13 @@ function fitStickerText(root) {
     if (!span) return;
     // Reset to base size (set by stylesheet) before re-measuring in case
     // we're re-running on the same node (preview re-render).
-    span.style.fontSize = '';
     const basePt = cell.classList.contains('big') ? 17 : 13;
-    span.style.fontSize = basePt + 'pt';
-    const cs = getComputedStyle(cell);
-    const padL = parseFloat(cs.paddingLeft)  || 0;
-    const padR = parseFloat(cs.paddingRight) || 0;
-    const avail = Math.max(0, cell.clientWidth - padL - padR);
-    const actualWidth = span.offsetWidth;
-    // Skip cells whose text already fits (the common case). Cuts the work
-    // for full-sheet runs to almost nothing.
-    if (actualWidth <= avail) return;
-    // Text width scales roughly linearly with font-pt, so we can compute
-    // the target size in ONE shot instead of a layout-forcing while loop.
-    // Tiny safety factor (0.98) to prevent edge sub-pixel overflow.
-    const scale = (avail / actualWidth) * 0.98;
-    const targetPt = Math.max(FLOOR_PT, Math.floor(basePt * scale * 10) / 10);
-    span.style.fontSize = targetPt + 'pt';
+    let pt = basePt;
+    span.style.fontSize = pt + 'pt';
+    while (pt > FLOOR_PT && cell.scrollHeight > cell.clientHeight + 1) {
+      pt -= 0.5;
+      span.style.fontSize = pt + 'pt';
+    }
   });
 }
 
@@ -14232,7 +14218,9 @@ function printStickers() {
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
 
-  const STICKERS_PER_SHEET = 6;
+  // Zebra ZT411 feeds one die-cut 4in × 4in label at a time — one
+  // sticker per "sheet"/page now, not a 2×3 multi-up grid.
+  const STICKERS_PER_SHEET = 1;
   const all = [];
   for (let i = validFrom; i <= validTo; i++) {
     const qty = getStickerQtyForCase(i);
@@ -14263,20 +14251,20 @@ function printStickers() {
   document.querySelectorAll('#__jc-print-page, #__stk-print-page').forEach(el => el.remove());
   const stkPageStyle = document.createElement('style');
   stkPageStyle.id = '__stk-print-page';
-  // Shop sticker paper is 7.5in wide × 10in tall (portrait). Explicit
-  // in-inches @page keeps the printer from falling back to Letter/A4.
+  // Zebra ZT411 label is 4in × 4in. Explicit in-inches @page keeps the
+  // printer from falling back to Letter/A4.
   //
   // #print-area is styled for A4 (210mm wide, 8mm × 10mm padding) in the
-  // base stylesheet — that padding pushed the sticker sheet down on
-  // page 1 and, more importantly, some browsers re-apply the container's
-  // padding at each page break, so page 2+ progressively shifted lower
-  // and the bottom row clipped. Overriding #print-area's width + padding
-  // for THIS print run pins the sheet flush to the page origin so every
-  // page renders identically.
+  // base stylesheet — that padding pushed the sticker off-center on
+  // label 1 and, more importantly, some browsers re-apply the container's
+  // padding at each page break, so later labels progressively shifted and
+  // clipped. Overriding #print-area's width + padding for THIS print run
+  // pins each label flush to the page origin so every one prints
+  // identically.
   stkPageStyle.textContent =
     '@media print {' +
-    '  @page { size: 7.5in 10in; margin: 0; }' +
-    '  #print-area { width: 7.5in !important; padding: 0 !important; }' +
+    '  @page { size: 4in 4in; margin: 0; }' +
+    '  #print-area { width: 4in !important; padding: 0 !important; }' +
     '}';
   document.head.appendChild(stkPageStyle);
   // Same title-blank trick the job-card printer uses so the browser's
