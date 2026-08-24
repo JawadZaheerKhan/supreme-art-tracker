@@ -1666,30 +1666,35 @@
   -webkit-print-color-adjust: exact !important;
   print-color-adjust: exact !important;
 }
-.sticker-header { display: flex; align-items: stretch; border-bottom: 2.5px solid #000; padding: 6px 8px; gap: 10px; flex: 0 0 auto; }
+.sticker-header { display: flex; align-items: stretch; border-bottom: 2.5px solid #000; padding: 6px 6px; gap: 8px; flex: 0 0 auto; }
 .sticker-header-divider { width: 2px; background: #000; flex: 0 0 auto; }
-.sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 4px; }
+.sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 2px; overflow: hidden; }
 .sticker-logo {
-  height: 90px; width: 90px; flex: 0 0 auto;
-  /* Logo painted via background-image so 80+ stickers share ONE asset
-     instead of each rendering a fresh <img>. Cuts per-sticker DOM cost
-     and removes the load-wait barrier for large print runs. */
-  background: url('/logo.png') center/contain no-repeat;
-  /* Bump contrast + saturation so the (already small) printed logo
-     keeps its black/red punch instead of fading to gray. exact-color
-     stops browsers from stripping it for ink-saving. */
+  /* /logo-sticker.png is /logo.png with its built-in white margin
+     trimmed off (source is a short/wide 950x410 canvas — most of it is
+     empty space above/below the calligraphy). Box is sized to that
+     trimmed image's own ~2.05:1 ratio so background-size:contain fills
+     it edge to edge with no letterboxing, instead of a square box
+     wasting most of its height on blank margin. Height matches the
+     ORIGINAL 90px logo box exactly so the header's total height is
+     unchanged — only the width grows to fit the now-bigger visible mark. */
+  height: 90px; width: 184px; flex: 0 0 auto;
+  background: url('/logo-sticker.png') center/contain no-repeat;
   filter: contrast(1.5) saturate(1.6);
   -webkit-print-color-adjust: exact !important;
   print-color-adjust: exact !important;
 }
-/* Brand line reads "Supreme Art" bold + "Private Limited" smaller/lighter
-   on the same baseline — matches the reference design (was one uniform
-   "Supreme Art.pvt" string before). Date sits below, right-aligned. */
-.sticker-brand { line-height: 1.1; white-space: nowrap; overflow: hidden; }
-.sticker-brand-main { font-size: 14pt; font-weight: 900; letter-spacing: 0.2px; }
-.sticker-brand-sub  { font-size: 7.5pt; font-weight: 500; margin-left: 4px; }
-.sticker-date  { font-size: 7.5pt; font-weight: 500; white-space: nowrap; text-align: left; }
-.sticker-date b { font-size: 9pt; font-weight: 800; margin-left: 3px; }
+/* Brand stacks onto its own lines (Supreme Art / Private Limited / Date)
+   instead of sharing a line's width with anything else — the wider logo
+   above leaves much less horizontal room, and stacking sidesteps needing
+   to fit two runs of text side by side in that narrow space. Each line's
+   .sticker-fit span is still shrunk by fitStickerBrand() (mirrors
+   fitStickerText()) so it's never actually possible for this to clip,
+   whatever the exact text or column width turns out to be. */
+.sticker-brand-main { font-size: 13pt; font-weight: 900; letter-spacing: 0.2px; line-height: 1.15; white-space: nowrap; overflow: hidden; }
+.sticker-brand-sub  { font-size: 8.5pt; font-weight: 500; line-height: 1.1; white-space: nowrap; overflow: hidden; }
+.sticker-date  { font-size: 8pt; font-weight: 500; white-space: nowrap; overflow: hidden; text-align: left; }
+.sticker-date b { font-size: 9.5pt; font-weight: 800; margin-left: 3px; }
 .sticker-row { display: flex; border-bottom: 2.5px solid #000; flex: 1 1 0; min-height: 0; overflow: hidden; }
 .sticker-row:last-child { border-bottom: none; }
 /* Label column widened to fit a leading circular icon (matches the
@@ -1823,6 +1828,7 @@
      exactly the moment we CAN'T afford a network round trip. Preload
      here so the very first Print click has the asset already in cache. -->
 <link rel="preload" as="image" href="/logo.png">
+<link rel="preload" as="image" href="/logo-sticker.png">
 </head>
 <body>
 
@@ -14179,6 +14185,29 @@ function fitStickerText(root) {
   });
 }
 
+// Shrinks "Supreme Art" / "Private Limited" to fit the header-right
+// column's width — that column got a lot narrower once the logo box
+// widened to its trimmed 2.05:1 ratio, so this guarantees neither line
+// can ever clip regardless of exact text/column width. Single-line
+// (nowrap), so width-based shrink (not fitStickerText's wrap-then-
+// height-shrink) is the right check here.
+function fitStickerBrand(root) {
+  if (!root) return;
+  const FLOOR_PT = 6;
+  const lines = root.querySelectorAll('.sticker-brand-main, .sticker-brand-sub');
+  lines.forEach(line => {
+    const span = line.querySelector('.sticker-brand-fit');
+    if (!span) return;
+    const basePt = line.classList.contains('sticker-brand-main') ? 13 : 8.5;
+    let pt = basePt;
+    span.style.fontSize = pt + 'pt';
+    while (pt > FLOOR_PT && line.scrollWidth > line.clientWidth + 1) {
+      pt -= 0.5;
+      span.style.fontSize = pt + 'pt';
+    }
+  });
+}
+
 // Small line-art icons for each row label — plain stroke, no fill, so
 // they print cleanly in black and white at label size. Each sits inside
 // the same circle outline to match the reference design.
@@ -14204,7 +14233,8 @@ function buildStickerHTML(opts) {
         <div class="sticker-logo" role="img" aria-label="Supreme Art"></div>
         <div class="sticker-header-divider"></div>
         <div class="sticker-header-right">
-          <div class="sticker-brand"><span class="sticker-brand-main">Supreme Art</span><span class="sticker-brand-sub">Private Limited</span></div>
+          <div class="sticker-brand-main"><span class="sticker-brand-fit">Supreme Art</span></div>
+          <div class="sticker-brand-sub"><span class="sticker-brand-fit">Private Limited</span></div>
           <div class="sticker-date">Date: <b>${esc(fmtStickerDate(opts.date))}</b></div>
         </div>
       </div>
@@ -14266,6 +14296,7 @@ function renderStickerPreview() {
     caseTotal: total,
   });
   fitStickerText(previewBox);
+  fitStickerBrand(previewBox);
 }
 
 function printStickers() {
@@ -14371,6 +14402,7 @@ function printStickers() {
     area.style.cssText = 'display:block; position:absolute; left:-10000px; top:0; width:auto;';
     void area.offsetWidth;
     fitStickerText(area);
+    fitStickerBrand(area);
     area.setAttribute('style', prev);
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
