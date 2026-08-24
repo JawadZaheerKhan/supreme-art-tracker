@@ -7495,6 +7495,32 @@ async function saveBulkStockOut() {
   else notify(`${saved} saved · ${errored} failed (see console)`);
 }
 
+// job-consumed transactions get an auto-generated "Job E-x: ... issued by
+// ..." note stamped by the server for every stock issuance — never
+// anything a human actually typed. Showing it in a "Notes" column reads
+// as if someone wrote a comment, so this blanks it there; Notes then only
+// ever shows genuine free text (manual-job-card references, sold/damaged/
+// sample remarks, etc). Every transaction ledger view uses this.
+function txDisplayNotes(t) {
+  return (t && t.reason === 'job-consumed') ? '' : ((t && t.notes) || '');
+}
+
+// Opens an item's History modal already scrolled to + flashed on one
+// specific transaction — used when a report row (Stock In/Out) is clicked
+// so the user lands on the exact entry they came from, not just the top
+// of that item's whole ledger.
+async function openInvHistoryAt(itemId, txId) {
+  if (!itemId) return;
+  await openInvHistory(itemId);
+  const el = document.querySelector(`#ledger-content tr[data-tx-id="${txId}"]`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('cv-tile-jump-flash');
+  void el.offsetWidth; // restart the animation if it was just flashed
+  el.classList.add('cv-tile-jump-flash');
+  setTimeout(() => el.classList.remove('cv-tile-jump-flash'), 1600);
+}
+
 async function openInvHistory(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
@@ -7597,7 +7623,7 @@ async function renderInvHistory(id) {
         ? 'background:#fff7ed;opacity:0.7;'
         : (isReversal ? 'background:#fff7ed;' : '');
       const challan = t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>';
-      return `<tr style="${rowStyle}">
+      return `<tr data-tx-id="${t.id}" style="${rowStyle}">
         <td>${date}</td>
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
         <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
@@ -7605,7 +7631,7 @@ async function renderInvHistory(id) {
         <td>${challan}</td>
         <td>${job}</td>
         <td>${by}</td>
-        <td>${esc(t.notes||'')}</td>
+        <td>${esc(txDisplayNotes(t))}</td>
         <td>${reverseBtn}</td>
       </tr>`;
     }).join('');
@@ -7823,7 +7849,7 @@ function renderStockReport(from, to) {
       <td>${balCell}</td>
       <td>${esc(t.reason||'')}</td>
       <td>${job}</td>
-      <td>${esc(t.notes||'')}</td>
+      <td>${esc(txDisplayNotes(t))}</td>
     </tr>`;
   }).join('');
   document.getElementById('sr-content').innerHTML = txs.length
@@ -7876,7 +7902,7 @@ function printStockReport() {
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
       <td ${tdL}>${job}</td>
-      <td ${tdL}>${esc(t.notes||'')}</td>
+      <td ${tdL}>${esc(txDisplayNotes(t))}</td>
     </tr>`;
   }).join('');
 
@@ -12333,8 +12359,12 @@ function renderStockMovement(direction, from, to) {
     const groupBadge = isGroup
       ? ` <span style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;letter-spacing:0.03em;margin-left:4px;">SPLIT · ${t.group_ids.length}</span>`
       : '';
-    return `<tr data-sm-row="${direction}-${t.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
-      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="${clickHandler}"></td>
+    // Row click jumps to that item's History modal, scrolled + flashed to
+    // this exact transaction — split-issuance rows span 2+ items so there's
+    // no single item to jump to, and skip the click there.
+    const rowClick = (!isGroup && t.item_id) ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this item's History"` : '';
+    return `<tr data-sm-row="${direction}-${t.id}" class="row-hover-red ${!isGroup && t.item_id ? 'cv-summary-row' : ''} ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);"${rowClick}>
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); ${clickHandler}"></td>
       <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
       <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
       <td style="padding:8px 10px;font-weight:600;" class="${cls}">${fmt(Math.abs(pkts))} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
@@ -12343,7 +12373,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
       <td style="padding:8px 10px;">${job}</td>
       <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
-      <td style="padding:8px 10px;">${esc(t.notes||'')}</td>
+      <td style="padding:8px 10px;">${esc(txDisplayNotes(t))}</td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -13101,7 +13131,7 @@ function printStockMovement(direction) {
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
       <td ${tdL}>${job}</td>
-      <td ${tdL}>${esc(t.notes||'')}</td>
+      <td ${tdL}>${esc(txDisplayNotes(t))}</td>
     </tr>`;
   }).join('');
   const html = `
@@ -13178,7 +13208,7 @@ async function exportStockMovement(direction) {
       t.reason || '',
       job,
       t.user_email || '',
-      t.notes || '',
+      txDisplayNotes(t),
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
