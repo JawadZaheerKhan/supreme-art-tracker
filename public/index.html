@@ -7569,9 +7569,12 @@ async function openInvHistory(id) {
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History · ${esc(label)}</h2>
     <div id="ledger-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Audit Log</div>
+    <div id="inv-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
   </div>`);
   await renderInvHistory(id);
+  loadInvAuditContent(id);
 }
 
 // Render (or re-render after a reversal) the history table for one item.
@@ -7680,6 +7683,22 @@ async function renderInvHistory(id) {
   } catch(e) {
     const box = document.getElementById('ledger-content');
     if (box) box.innerHTML = 'Error: ' + e.message;
+  }
+}
+
+// Field-edit audit trail for the item's History modal (paper_type/size/
+// gsm/brand/threshold/supplier changes) — separate from the transaction
+// ledger above, which only covers stock in/out/correction quantities.
+async function loadInvAuditContent(id) {
+  const el = document.getElementById('inv-audit-content');
+  if (!el) return;
+  try {
+    const rows = await api('GET', `/api/audit?entity_type=inventory&entity_id=${id}`);
+    el.innerHTML = rows.length
+      ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
+      : '<div class="empty">No audit entries yet.</div>';
+  } catch(e) {
+    el.innerHTML = 'Error: ' + e.message;
   }
 }
 

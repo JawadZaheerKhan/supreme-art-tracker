@@ -1188,6 +1188,24 @@ async function logAudit(sql, req, { action, entityType, entityId, summary, metad
   }
 }
 
+// Compares two flat row snapshots and returns "Label: old -> new" lines for
+// every field that actually changed — so an edit's audit summary says WHAT
+// was changed, not just "user X edited job/item Y". Values are compared as
+// trimmed strings so type noise (60000 vs "60000") never false-positives.
+// fields is [[objectKey, displayLabel], ...].
+function diffFields(oldRow, newRow, fields) {
+  const changes = [];
+  for (const [key, label] of fields) {
+    const before = oldRow ? oldRow[key] : undefined;
+    const after  = newRow ? newRow[key] : undefined;
+    const beforeStr = (before === null || before === undefined) ? '' : String(before).trim();
+    const afterStr  = (after  === null || after  === undefined) ? '' : String(after).trim();
+    if (beforeStr === afterStr) continue;
+    changes.push(`${label}: ${beforeStr || '(blank)'} -> ${afterStr || '(blank)'}`);
+  }
+  return changes;
+}
+
 // ── Auth routes ──────────────────────────────────────────────
 
 // Exchange a Google ID token for a session cookie. The frontend collects
@@ -3706,6 +3724,32 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Field-level audit diff for a job edit. Booleans/arrays are pre-flattened
+// to comparable strings by the caller (coatings_str / is_shade_card_str /
+// client_visible_str) before being passed through diffFields.
+const JOB_DIFF_FIELDS = [
+  ['name', 'Job Name'], ['client', 'Company'], ['jobcode', 'Code'], ['ref', 'P.O. No.'],
+  ['dateissued', 'Date'], ['deadline', 'Deadline'], ['size', 'Size/GSM'], ['ups', 'Ups'],
+  ['sheets', 'Sheets Qty'], ['qty', 'P.O. Qty'], ['paper', 'Paper'], ['machine', 'Machine'],
+  ['priority', 'Priority'], ['cartonqty', 'Unit Carton Qty'], ['notes', 'Notes'],
+  ['bno', 'Batch No.'], ['mfgdate', 'Mfg Date'], ['expdate', 'Exp Date'], ['mrp', 'MRP'],
+  ['coatings_str', 'Coatings'], ['is_shade_card_str', 'Shade Card'], ['client_visible_str', 'Show to Client'],
+];
+// Mirrors the client's PARTICULARS_ROWS labels (public/index.html) for the
+// rows this diff can safely flatten to one comparable line. CTP-setup /
+// special-colors / internal keys are deliberately left out — their shape
+// doesn't reduce to quantity/name/signature/details without losing meaning.
+const PARTICULARS_LABELS = {
+  artworks_matter_approval: 'Artworks & Matter Approval',
+  shade_card: 'Shade Card', plates: 'Plates', no_of_colors: 'No. of Colors',
+  printed_sheets_qty: 'Printed Sheets Qty', printed_waste_sheets: 'Printed Waste Sheets',
+  coating_sheets_qty: 'Coating Sheets Qty', uv_waste_sheets: 'Coating Waste Sheets',
+  die_cutting_sheets: 'Die Cutting Sheets', die_cutting_waste: 'Die Cutting Waste',
+  sorted_cartons_qty: 'Sorted Cartons Qty', sorted_cartons_waste: 'Sorted Cartons Waste',
+  pasted_cartons_qty: 'Pasted Cartons Qty', pasting_waste_qty: 'Pasting Waste Qty',
+  delivered_cartons_qty: 'Ready to Delivery Qty',
+};
+
 // UPDATE job details
 app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
   try {
@@ -3720,7 +3764,9 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // job is still 'pending' (stock never issued), edits don't touch inventory
     // at all. Once 'issued', edits auto-adjust the ledger using the same
     // packet-first formula as initial issuance.
-    const prior = await sql`SELECT inventory_item_id, sheets, particulars, issuance_status, cut_size, offcut_size, deliveries FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    // SELECT * (not a narrow column list) so the field-level audit diff
+    // below can compare every editable column against its pre-edit value.
+    const prior = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     const wasIssued  = prior[0]?.issuance_status === 'issued';
     const oldItemId  = prior[0]?.inventory_item_id || null;
     const newItemId  = inventory_item_id || null;
@@ -3964,7 +4010,84 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
       }
     }
 
-    const result = cleanedLog
+    // Reconcile Delivered/Ready-to-Deliver status against a PO Qty edit.
+    // Recording or removing a delivery already keeps stage_index in sync
+    // with "delivered vs booked" (see computeDeliveryUpdate and the
+    // deliveries DELETE handler) — but editing the PO Qty directly on the
+    // job card is a third way "booked" can change, and nothing reconciled
+    // it: correcting a PO down to match what was already shipped left the
+    // job stuck showing "Ready to Deliver" instead of Delivered, and
+    // bumping a PO back up after a job was marked Delivered left it
+    // looking finished when more was still owed. Only fires when there's
+    // a REAL delivery ledger to compare against — delqty with an empty
+    // ledger is "Ready to Deliver Qty" off the card, not a shipment total
+    // (see the comment above priorLedgerSum), so it's not a valid signal here.
+    let stage_index = prior[0]?.stage_index || 0;
+    let stages = (prior[0]?.stages && typeof prior[0].stages === 'object') ? { ...prior[0].stages } : {};
+    const newBookedQty = parseFloat(String(qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    let qtyReconcileLog = null;
+    if (priorLedgerSum > 0) {
+      const nowIsoQty = new Date().toISOString();
+      const timeQty = businessStamp();
+      const byQty = req.user?.email || 'unknown';
+      if (newBookedQty > 0 && stage_index < 7 && priorLedgerSum >= newBookedQty) {
+        stages[6] = { ...(stages[6] || {}), status: 'done', by: byQty, time: timeQty, at: nowIsoQty };
+        stages[7] = { status: 'done', notes: '', by: byQty, time: timeQty, at: nowIsoQty };
+        stage_index = 7;
+        qtyReconcileLog = { stage: STAGES[7], status: 'done', notes: `PO Qty edited to ${newBookedQty.toLocaleString()} — already fully delivered (${priorLedgerSum.toLocaleString()})`, by: `${byQty} (${STAGES[7]})`, time: timeQty };
+      } else if (stage_index === 7 && newBookedQty && priorLedgerSum < newBookedQty) {
+        delete stages[7];
+        stages[6] = { ...(stages[6] || {}), status: 'active', by: byQty, time: timeQty, at: nowIsoQty };
+        stage_index = 6;
+        qtyReconcileLog = { stage: STAGES[6], status: 'active', notes: `PO Qty edited to ${newBookedQty.toLocaleString()} — ${priorLedgerSum.toLocaleString()} delivered so far, back to Ready to Deliver`, by: `${byQty} (${STAGES[6]})`, time: timeQty };
+      }
+    }
+    let finalLog = cleanedLog;
+    if (qtyReconcileLog) {
+      if (finalLog === null) {
+        const priorLogRows = await sql`SELECT log FROM jobs WHERE id = ${id}`;
+        finalLog = (priorLogRows[0] && Array.isArray(priorLogRows[0].log)) ? [...priorLogRows[0].log] : [];
+      }
+      finalLog.push(qtyReconcileLog);
+    }
+
+    // Field-level audit diff — built here (not after the UPDATE) so it's
+    // comparing the true pre-edit row (prior[0]) against exactly what's
+    // about to be saved, before either gets clobbered by the RETURNING row.
+    const priorFlat = {
+      ...prior[0],
+      coatings_str: Array.isArray(prior[0]?.coatings) ? prior[0].coatings.filter(Boolean).join(', ') : '',
+      is_shade_card_str: prior[0]?.is_shade_card ? 'Yes' : 'No',
+      client_visible_str: prior[0]?.client_visible ? 'Yes' : 'No',
+    };
+    const newFlat = {
+      name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine,
+      priority, cartonqty, notes, bno, mfgdate, expdate, mrp,
+      coatings_str: Array.isArray(coatings) ? coatings.filter(Boolean).join(', ') : '',
+      is_shade_card_str: is_shade_card ? 'Yes' : 'No',
+      client_visible_str: client_visible ? 'Yes' : 'No',
+    };
+    const fieldChanges = diffFields(priorFlat, newFlat, JOB_DIFF_FIELDS);
+    // Particulars: one coarse line per row (quantity|name|signature|details
+    // flattened together) rather than a full entries[] diff — that's what
+    // actually shows on the printed card, and entries[] itself is already
+    // preserved untouched whenever the admin didn't touch that row (see the
+    // sync loop above), so an untouched row never shows a false change here.
+    const particularsRowStr = (row) => (row && typeof row === 'object')
+      ? [row.quantity, row.name, row.signature, row.details].map(x => String(x || '').trim()).join(' | ')
+      : '';
+    const particularsKeys = new Set([...Object.keys(priorParticulars || {}), ...Object.keys(cleanParticulars || {})]);
+    const particularsChanges = [];
+    for (const k of particularsKeys) {
+      const label = PARTICULARS_LABELS[k];
+      if (!label) continue;
+      const before = particularsRowStr(priorParticulars[k]);
+      const after  = particularsRowStr((cleanParticulars || {})[k]);
+      if (before !== after) particularsChanges.push(`${label}: ${before || '(blank)'} -> ${after || '(blank)'}`);
+    }
+    const allChanges = [...fieldChanges, ...particularsChanges];
+
+    const result = finalLog
       ? await sql`
       UPDATE jobs SET
         name=${name}, client=${client}, jobcode=${jobcode||null}, ref=${ref||null},
@@ -3977,7 +4100,8 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
         is_shade_card=${!!is_shade_card},
         client_visible=${!!client_visible},
-        log=${JSON.stringify(cleanedLog)}
+        stage_index=${stage_index}, stages=${JSON.stringify(stages)},
+        log=${JSON.stringify(finalLog)}
       WHERE id=${id} RETURNING *
     `
       : await sql`
@@ -3991,7 +4115,8 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         particulars=${JSON.stringify(cleanParticulars||{})}, inventory_item_id=${newItemId},
         cut_size=${cut_size||null}, offcut_size=${newOffcutSize},
         is_shade_card=${!!is_shade_card},
-        client_visible=${!!client_visible}
+        client_visible=${!!client_visible},
+        stage_index=${stage_index}, stages=${JSON.stringify(stages)}
       WHERE id=${id} RETURNING *
     `;
     const job = result[0];
@@ -4071,7 +4196,11 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
         console.error('Offcut backfill on PUT failed:', e.message);
       }
     }
-    await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: job.id, summary: `Edited Job E-${job.id}: ${job.name}` });
+    await logAudit(sql, req, {
+      action: 'job.update', entityType: 'job', entityId: job.id,
+      summary: `Edited Job E-${job.id}: ${job.name}${allChanges.length ? ' — ' + allChanges.join('; ') : ''}`,
+      metadata: { changes: allChanges },
+    });
     res.json(job);
   } catch (err) {
     console.error(err);
@@ -5953,6 +6082,11 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
 });
 
 // UPDATE inventory item fields (not balance — balance is ledger-driven)
+const INVENTORY_DIFF_FIELDS = [
+  ['paper_type', 'Paper Type'], ['size', 'Size'], ['gsm', 'GSM'], ['brand', 'Brand'],
+  ['reorder_threshold', 'Reorder Threshold'], ['supplier', 'Supplier'],
+];
+
 app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
@@ -5968,9 +6102,11 @@ app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
     if (paper_type) paper_type = String(paper_type).trim().toLowerCase();
     if (supplier)   supplier   = String(supplier).trim().toLowerCase();
 
-    // Snapshot the pre-edit balance — needed so an admin-only balance
-    // correction below can compute the delta.
-    const before = await sql`SELECT current_balance FROM inventory_items WHERE id=${id}`;
+    // Snapshot the pre-edit row — the balance is needed so an admin-only
+    // balance correction below can compute the delta; the rest of the row
+    // (SELECT *, not just current_balance) feeds the field-level audit
+    // diff further down so the item's History can say WHAT was edited.
+    const before = await sql`SELECT * FROM inventory_items WHERE id=${id}`;
     if (!before[0]) return res.status(404).json({ error: 'Item not found' });
     const oldBalance = before[0].current_balance || 0;
 
@@ -6028,7 +6164,12 @@ app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
 
     if (item) {
       const label = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
-      await logAudit(sql, req, { action: 'inventory.update', entityType: 'inventory', entityId: item.id, summary: `Edited paper item: ${label}` });
+      const fieldChanges = diffFields(before[0], { paper_type, size, gsm, brand, reorder_threshold, supplier }, INVENTORY_DIFF_FIELDS);
+      await logAudit(sql, req, {
+        action: 'inventory.update', entityType: 'inventory', entityId: item.id,
+        summary: `Edited paper item: ${label}${fieldChanges.length ? ' — ' + fieldChanges.join('; ') : ''}`,
+        metadata: { changes: fieldChanges },
+      });
     }
     // Re-fetch so the returned row reflects any balance correction above.
     const refreshed = await sql`SELECT * FROM inventory_items WHERE id=${id}`;
