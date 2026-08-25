@@ -21686,12 +21686,14 @@ function renderUsersTab() {
   document.getElementById('users-list').innerHTML = usersList.map(u => {
     const last = u.last_login_at ? fmtDMYT(u.last_login_at) : 'never';
     const isMe = currentUser && u.id === currentUser.id;
+    const sessCount = u.active_sessions || 0;
+    const devicesLabel = sessCount ? `${sessCount} device${sessCount===1?'':'s'} signed in` : 'No devices signed in';
     return `
     <div class="inv-card">
       <img src="${esc(u.picture||'')}" alt="" style="width:36px;height:36px;border-radius:50%;${u.picture?'':'display:none;'}">
       <div class="inv-main">
-        <div class="inv-name">${esc(u.name || u.email)}${isMe?' <span class="inv-badge low" style="background:#dbeafe;color:#1e40af;">You</span>':''}</div>
-        <div class="inv-sub">${esc(u.email)} · Last login: ${last}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
+        <div class="inv-name">${esc(u.name || u.email)}${isMe?' <span class="inv-badge low" style="background:#dbeafe;color:#1e40af;">You</span>':''}${u.blocked_at?' <span class="badge badge-blocked">Blocked</span>':''}</div>
+        <div class="inv-sub">${esc(u.email)} · Last login: ${last} · ${devicesLabel}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
       </div>
       <div class="inv-balance">
         ${isCeo() || !isAdmin()
@@ -21714,6 +21716,10 @@ function renderUsersTab() {
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>
+        <button class="btn btn-sm" onclick="openUserSessions(${u.id})">Sessions${sessCount?' ('+sessCount+')':''}</button>
+        ${(isMe || isCeo()) ? '' : (u.blocked_at
+          ? `<button class="btn btn-sm btn-success" onclick="toggleUserBlock(${u.id}, false)">Unblock</button>`
+          : `<button class="btn btn-sm" style="background:#b45309;border-color:#b45309;color:#fff;" onclick="toggleUserBlock(${u.id}, true)">Block</button>`)}
         ${(isMe || isCeo()) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
       </div>
     </div>`;
@@ -21847,6 +21853,67 @@ async function openUserActivity(userId) {
   } catch(e) {
     document.getElementById('user-audit-content').innerHTML = 'Error: ' + e.message;
   }
+}
+
+// Which computer/phone is currently signed in under this account, so an
+// admin can log out one specific device without touching the others.
+async function openUserSessions(userId) {
+  const u = usersList.find(x => x.id === userId);
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>Sessions · ${esc(u ? (u.name || u.email) : 'User')}</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Signed in as ${esc(u ? u.email : '')}. "Log out" ends that device's session immediately — no need to wait for it to expire.</div>
+    <div id="user-sessions-content" style="font-size:13px;color:var(--text2);">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  await renderUserSessionsContent(userId);
+}
+async function renderUserSessionsContent(userId) {
+  const el = document.getElementById('user-sessions-content');
+  if (!el) return;
+  try {
+    const rows = await api('GET', `/api/users/${userId}/sessions`);
+    const active = rows.filter(r => !r.revoked_at);
+    el.innerHTML = active.length
+      ? `<table class="ledger-table"><tr><th>Device</th><th>Signed in</th><th>Last active</th><th></th></tr>${active.map(s => `
+          <tr>
+            <td>${esc(s.device)}${s.is_current?' <span class="inv-badge low" style="background:#dbeafe;color:#1e40af;">This device</span>':''}</td>
+            <td>${fmtDMYT(s.created_at)}</td>
+            <td>${fmtDMYT(s.last_seen_at)}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="revokeUserSession(${userId}, ${s.id})">Log out</button></td>
+          </tr>`).join('')}</table>`
+      : '<div class="empty">No devices currently signed in.</div>';
+  } catch(e) {
+    el.innerHTML = 'Error: ' + e.message;
+  }
+}
+async function revokeUserSession(userId, sessionId) {
+  showSaving(true);
+  try {
+    await api('POST', `/api/users/${userId}/sessions/${sessionId}/revoke`);
+    await renderUserSessionsContent(userId);
+    await loadUsersAndAudit();
+    notify('Device logged out');
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function toggleUserBlock(userId, blocking) {
+  const u = usersList.find(x => x.id === userId);
+  const ok = await confirmDialog({
+    title: blocking ? `Block ${u ? (u.name || u.email) : 'this user'}?` : `Unblock ${u ? (u.name || u.email) : 'this user'}?`,
+    message: blocking
+      ? 'They will be signed out of every device right now and cannot sign back in until unblocked.'
+      : 'They will be able to sign in again. Any devices they were logged out of will need to sign in fresh.',
+    danger: blocking,
+    confirmText: blocking ? 'Block' : 'Unblock',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('POST', `/api/users/${userId}/${blocking ? 'block' : 'unblock'}`);
+    await loadUsersAndAudit();
+    notify(blocking ? 'User blocked — all devices logged out' : 'User unblocked');
+  } catch(e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 
 // ── Client portal ────────────────────────────────────────────
