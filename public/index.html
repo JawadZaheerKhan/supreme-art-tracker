@@ -3873,20 +3873,20 @@ function renderShadeCardToggle() {
   btn.classList.toggle('sc-toggle-idle',   filterShadeCard !== 'only');
 }
 
-// Batch-print action bar for the New Jobs tab. Populates a container that
-// sits directly above the jobs list. Shows "Select All" / "Clear" plus a
-// primary "Print Selected (N)" button. Hidden entirely on any other tab or
-// when the user can't print. Kept lightweight — buttons re-read state each
-// render, no separate DOM subscription.
+// Batch-print action bar for the New Jobs tab and the CTP tab. Populates a
+// container that sits directly above the jobs list. Shows "Select All" /
+// "Clear" plus a primary "Print Selected (N)" button. Hidden entirely on
+// any other tab or when the user can't print. Kept lightweight — buttons
+// re-read state each render, no separate DOM subscription.
 function renderNewJobsBulkBar() {
   const bar = document.getElementById('new-jobs-bulk');
   if (!bar) return;
-  if (view !== 'new' || !canPrintJobCard()) {
+  if ((view !== 'new' && view !== 'ctp') || !canPrintJobCard()) {
     bar.style.display = 'none';
     bar.innerHTML = '';
     return;
   }
-  const filtered = sortJobsForView(getFiltered()).filter(isNewJob);
+  const filtered = sortJobsForView(getFiltered()).filter(view === 'ctp' ? isCtpQueue : isNewJob);
   const visibleIds = new Set(filtered.map(j => j.id));
   // Prune any selections that are no longer visible after a filter change.
   for (const id of [...selectedNewJobIds]) if (!visibleIds.has(id)) selectedNewJobIds.delete(id);
@@ -3914,7 +3914,7 @@ function toggleJobSelect(id, on) {
 }
 
 function selectAllNewJobs() {
-  const filtered = sortJobsForView(getFiltered()).filter(isNewJob);
+  const filtered = sortJobsForView(getFiltered()).filter(view === 'ctp' ? isCtpQueue : isNewJob);
   for (const j of filtered) selectedNewJobIds.add(j.id);
   render();
 }
@@ -4074,10 +4074,11 @@ function renderJobRowCompact(j, opts) {
     const sidePanel = j.cut_size
       ? `<div class="job-side"><div><div class="lbl">Cut to</div><div class="val">${esc(j.cut_size)}${j.offcut_size?` <span style="font-weight:500;">(offcut ${esc(j.offcut_size)})</span>`:''}</div></div></div>`
       : '';
-    // Selection checkbox — only shown on the New Jobs tab (view === 'new')
-    // and only for users who can print. Lets the PM pick several new jobs
-    // and batch-print them in one dialog. See printSelectedJobs().
-    const selBox = (isNew && view === 'new' && canPrintJobCard())
+    // Selection checkbox — shown on the New Jobs tab (view === 'new') and
+    // the CTP tab (view === 'ctp'), and only for users who can print. Lets
+    // the PM pick several jobs and batch-print them in one dialog. See
+    // printSelectedJobs().
+    const selBox = (((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
       ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
       : '';
     return `
@@ -4499,8 +4500,8 @@ function renderJobCard(j, opts) {
   const updateBtn = (!clientPreview && !pending) ? `<button class="btn btn-sm btn-primary" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the dots above.">Edit / View</button>` : '';
 
   // Batch-print select box — same logic as the compact view. Renders on
-  // the New Jobs tab only, and only for users who can print job cards.
-  const selBox = (!clientPreview && isNew && view === 'new' && canPrintJobCard())
+  // the New Jobs tab and the CTP tab, and only for users who can print job cards.
+  const selBox = (!clientPreview && ((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
     ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
     : '';
   // Blocked banner + red tint on the whole tile — clients need to see
@@ -5082,10 +5083,10 @@ function stageMachineSVG(stageIndex, { pending } = {}) {
 
 function render() { renderStats(); renderTabs(); renderJobs(); }
 function setView(v) {
-  // Batch-print selection is a New Jobs feature — drop any ticks when the
-  // user leaves that tab so an accidental Print Selected can't send stale
-  // ids that are no longer on screen.
-  if (v !== 'new' && selectedNewJobIds.size) selectedNewJobIds.clear();
+  // Batch-print selection is a New Jobs / CTP feature — drop any ticks
+  // when the user leaves both tabs so an accidental Print Selected can't
+  // send stale ids that are no longer on screen.
+  if (v !== 'new' && v !== 'ctp' && selectedNewJobIds.size) selectedNewJobIds.clear();
   view=v; render();
 }
 function setJobsViewMode(m) {
@@ -15200,6 +15201,21 @@ function jcalcReset() {
 // later, its record persists (no duplicate data). Reachable from any
 // screen via the floating calculator popover.
 let _jobDataClientFilter = '';
+let _jobDataProductFilter = '';
+// Product-type buckets for the Job Data filter. Detected from the job
+// name text (see detectJobProductType) rather than a stored field — every
+// existing job already encodes its type in the name (e.g. "...cap uc",
+// "...tab uc"), so this works retroactively with no data entry needed.
+const JOB_PRODUCT_TYPES = ['Tablet', 'Capsule', 'Leaflet', 'Label', 'Syrup'];
+function detectJobProductType(name) {
+  const s = String(name || '').toLowerCase();
+  if (/\bcap(s|sule|sules)?\b/.test(s)) return 'Capsule';
+  if (/\btab(s|let|lets)?\b/.test(s)) return 'Tablet';
+  if (/\bleaflet(s)?\b/.test(s)) return 'Leaflet';
+  if (/\blabel(s)?\b/.test(s)) return 'Label';
+  if (/\bsyr(up|ups)?\b/.test(s)) return 'Syrup';
+  return '';
+}
 function openCalculatorHistoryMode() {
   const pop = document.getElementById('calc-popover');
   if (!pop) return;
@@ -15223,15 +15239,22 @@ function openCalculatorHistoryMode() {
         </select>
       </div>
       <div style="flex:1;">
-        <label class="form-label" style="margin-bottom:3px;">Search</label>
-        <input type="text" id="jd-search" class="lc-input" placeholder="Name or code…" oninput="jdRender()" autocomplete="off">
+        <label class="form-label" style="margin-bottom:3px;">Product</label>
+        <select id="jd-product" onchange="_jobDataProductFilter=this.value; jdRender()" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:#fff;">
+          <option value="">All products</option>
+          ${JOB_PRODUCT_TYPES.map(t => `<option value="${esc(t)}"${_jobDataProductFilter===t?' selected':''}>${esc(t)}</option>`).join('')}
+        </select>
       </div>
+    </div>
+    <div style="margin-bottom:8px;">
+      <label class="form-label" style="margin-bottom:3px;">Search</label>
+      <input type="text" id="jd-search" class="lc-input" placeholder="Name or code…" oninput="jdRender()" autocomplete="off" style="width:100%;">
     </div>
 
     <div id="jd-out" style="max-height:340px;overflow-y:auto;font-size:12px;"></div>
 
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
-      <button class="btn btn-sm" onclick="_jobDataClientFilter='';document.getElementById('jd-search').value='';document.getElementById('jd-client').value='';jdRender();">Reset</button>
+      <button class="btn btn-sm" onclick="_jobDataClientFilter='';_jobDataProductFilter='';document.getElementById('jd-search').value='';document.getElementById('jd-client').value='';document.getElementById('jd-product').value='';jdRender();">Reset</button>
       <button class="btn btn-sm btn-primary" onclick="closeCalculator()">Close</button>
     </div>`;
   pop.style.display = 'block';
@@ -15247,8 +15270,10 @@ function jdRender() {
   if (!out) return;
   const q = (document.getElementById('jd-search')||{}).value.trim().toLowerCase();
   const client = _jobDataClientFilter;
+  const product = _jobDataProductFilter;
   const matches = jobs.filter(j => {
     if (client && j.client !== client) return false;
+    if (product && detectJobProductType(j.name) !== product) return false;
     if (!q) return true;
     const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
     return hay.includes(q);
@@ -19647,9 +19672,12 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
       </tr>
       <tr>
-        <td colspan="1"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
-        <td colspan="1"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
-        <td colspan="2"><div class="pc-label">MRP</div><div class="pc-value">${v(j.mrp)}</div></td>
+        <td colspan="2"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
+        <td colspan="2"><div class="pc-label">Exp Date</div><div class="pc-value">${fmt(j.expdate)}</div></td>
+        ${/* MRP is entered on the job card but deliberately not printed
+             — owner doesn't want it shop-floor visible. Mfg/Exp Date
+             widened from colspan 1 to 2 each to absorb the freed
+             columns and keep the 7-column grid balanced. */''}
         ${(() => {
           // When a 2nd paper is set, split the Paper — Brand cell into
           // TWO cells (primary + separate 2nd Paper column) so the
