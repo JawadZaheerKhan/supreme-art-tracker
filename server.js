@@ -4073,9 +4073,27 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     // actually shows on the printed card, and entries[] itself is already
     // preserved untouched whenever the admin didn't touch that row (see the
     // sync loop above), so an untouched row never shows a false change here.
-    const particularsRowStr = (row) => (row && typeof row === 'object')
-      ? [row.quantity, row.name, row.signature, row.details].map(x => String(x || '').trim()).join(' | ')
-      : '';
+    // IMPORTANT: derive the comparable string from entries[] the same way
+    // on BOTH sides (same formula as derivedQty/derivedName/derivedSig/
+    // derivedDetails above) instead of comparing the stored flat
+    // quantity/name/signature/details strings directly — the client
+    // recomputes those flat strings fresh from entries[] on every save
+    // (no time suffix), while some rows still carry a legacy stored
+    // `details` value with a time suffix from before that format changed.
+    // Comparing raw-stored vs freshly-recomputed flagged every untouched
+    // row as "changed" purely from that formatting drift. Falls back to
+    // the flat strings only for legacy rows with no entries[] at all.
+    const particularsRowStr = (row) => {
+      if (!row || typeof row !== 'object') return '';
+      if (Array.isArray(row.entries) && row.entries.length) {
+        const qty  = row.entries.map(e => (e && e.qty) || '').filter(q => q !== '').join(' | ');
+        const name = [...new Set(row.entries.map(e => String((e && e.machine)  || '').trim()).filter(Boolean))].join(' | ');
+        const sig  = [...new Set(row.entries.map(e => String((e && e.operator) || '').trim()).filter(Boolean))].join(' | ');
+        const det  = [...new Set(row.entries.map(e => isoToDMY(e && e.date)).filter(Boolean))].join(' | ');
+        return [qty, name, sig, det].join(' | ');
+      }
+      return [row.quantity, row.name, row.signature, row.details].map(x => String(x || '').trim()).join(' | ');
+    };
     const particularsKeys = new Set([...Object.keys(priorParticulars || {}), ...Object.keys(cleanParticulars || {})]);
     const particularsChanges = [];
     for (const k of particularsKeys) {
