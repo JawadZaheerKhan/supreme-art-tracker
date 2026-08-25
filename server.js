@@ -174,7 +174,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-18-stock-groups-template';
+const SCHEMA_VERSION = 'v2026-08-25-sessions';
 
 async function initDb() {
   try {
@@ -606,8 +606,13 @@ async function initDb() {
     //      get blocked.
     //   2. UPDATE the old role names to the new ones.
     //   3. Re-narrow the CHECK to only the new role names.
+    // Intermediate CHECK must include every role ever in live use ('finance'
+    // and 'client' were added after this migration first shipped) — a row
+    // already carrying one of those roles makes the ADD CONSTRAINT below
+    // fail immediately on replay otherwise (learned the hard way: this
+    // migration re-runs on every SCHEMA_VERSION bump, not just once).
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator'))`;
+    await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client'))`;
     await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
     await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
     await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
@@ -624,6 +629,31 @@ async function initDb() {
     // role. Case-insensitive matching is done at query time so the admin
     // doesn't have to worry about exact casing when picking from the dropdown.
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS client_company TEXT`;
+
+    // Block/suspend: an admin can lock an account out without deleting it
+    // (keeps audit_log/invited_by references intact). Checked at login AND
+    // on every authenticated request (see authMiddleware) so a block takes
+    // effect immediately, not just on the user's next sign-in.
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`;
+
+    // Sessions: one row per signed-in device. The JWT cookie carries the
+    // session id (sid); authMiddleware checks it's still un-revoked (and
+    // the owning user isn't blocked) on every request, so "log out this
+    // device" / "block this user" take effect immediately instead of
+    // waiting up to 30 days for the token to naturally expire. Lets the
+    // Users tab show which computer/phone is logged in under which email.
+    await sql`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id           SERIAL PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        user_agent   TEXT,
+        ip           TEXT,
+        created_at   TIMESTAMPTZ DEFAULT NOW(),
+        last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+        revoked_at   TIMESTAMPTZ
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)`;
 
     // Audit log: action-level history of every mutation. user_email is
     // denormalized so log rows survive even if their user row is deleted.
@@ -902,7 +932,7 @@ const dbReady = initDb();
 // request is treated as an admin user. This lets developers run the app
 // against a real DB without setting up Google OAuth locally. The env var
 // is never set on Vercel, so production remains fully protected.
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   if (process.env.DEV_BYPASS_AUTH === '1') {
     req.user = { id: 0, email: 'dev@local', role: 'admin', roles: ['admin'], name: 'Local Dev', picture: '' };
     return next();
@@ -911,19 +941,76 @@ function authMiddleware(req, res, next) {
   if (token) {
     try {
       const payload = jwt.verify(token, JWT_SECRET);
-      req.user = {
+      const candidate = {
         id: payload.id, email: payload.email, name: payload.name, picture: payload.picture,
         role: payload.role,
         // Multi-role: newer tokens carry the full list; tokens issued before
         // the feature only have the single role — wrap it.
         roles: Array.isArray(payload.roles) && payload.roles.length ? payload.roles : [payload.role],
         client_company: payload.client_company || null,
+        sid: payload.sid || null,
       };
+      if (!candidate.sid) {
+        // Token predates session tracking (issued before the Users-tab
+        // "log out this device" feature shipped) — force a fresh sign-in
+        // so this device gets a governed session row instead of being an
+        // ungoverned token nobody can revoke for up to 30 days.
+        res.clearCookie(SESSION_COOKIE, { path: '/' });
+      } else {
+        try {
+          await dbReady;
+          const sql = getDb();
+          const rows = await sql`
+            SELECT s.revoked_at, u.blocked_at
+            FROM sessions s JOIN users u ON u.id = s.user_id
+            WHERE s.id = ${candidate.sid}
+          `;
+          const row = rows[0];
+          if (!row || row.revoked_at || row.blocked_at) {
+            // Session was logged out by an admin, or the account is
+            // blocked — kill the cookie so the client re-prompts login.
+            res.clearCookie(SESSION_COOKIE, { path: '/' });
+          } else {
+            req.user = candidate;
+            // Heartbeat so the Users tab's "last seen" stays fresh. Fire
+            // and forget, throttled, so it never adds latency to the
+            // request or writes on literally every click.
+            sql`UPDATE sessions SET last_seen_at = NOW() WHERE id = ${candidate.sid} AND last_seen_at < NOW() - INTERVAL '2 minutes'`.catch(() => {});
+          }
+        } catch (e) {
+          // DB hiccup — fail OPEN (trust the JWT) rather than locking
+          // everyone out over a transient Neon blip, matching the
+          // fallback in /api/auth/me.
+          req.user = candidate;
+        }
+      }
     } catch (e) {
       // Invalid/expired token — leave req.user undefined.
     }
   }
   next();
+}
+// Best-effort User-Agent → short human label for the Users tab's session
+// list ("Chrome on Windows", "Safari on iPhone"). Not a real UA parser —
+// just enough to tell devices apart at a glance.
+function describeUserAgent(ua) {
+  const s = String(ua || '');
+  if (!s) return 'Unknown device';
+  let os = 'Unknown OS';
+  if (/iPhone/i.test(s)) os = 'iPhone';
+  else if (/iPad/i.test(s)) os = 'iPad';
+  else if (/Android/i.test(s)) os = 'Android';
+  else if (/Windows/i.test(s)) os = 'Windows';
+  else if (/Macintosh|Mac OS X/i.test(s)) os = 'Mac';
+  else if (/Linux/i.test(s)) os = 'Linux';
+  let browser = 'Unknown browser';
+  if (/Edg\//i.test(s)) browser = 'Edge';
+  else if (/OPR\/|Opera/i.test(s)) browser = 'Opera';
+  else if (/CriOS/i.test(s)) browser = 'Chrome';
+  else if (/Chrome\//i.test(s) && !/Edg\//i.test(s)) browser = 'Chrome';
+  else if (/Firefox\//i.test(s)) browser = 'Firefox';
+  else if (/Safari\//i.test(s) && !/Chrome\//i.test(s)) browser = 'Safari';
+  return `${browser} on ${os}`;
 }
 function requireAuth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
@@ -1116,6 +1203,9 @@ app.post('/api/auth/google', async (req, res) => {
     if (!user) {
       return res.status(403).json({ error: 'Not authorized — contact your administrator to be invited.' });
     }
+    if (user.blocked_at) {
+      return res.status(403).json({ error: 'Your account has been blocked by an administrator.' });
+    }
 
     // Refresh profile + login timestamp on every sign-in.
     const updated = await sql`
@@ -1124,12 +1214,22 @@ app.post('/api/auth/google', async (req, res) => {
     `;
     user = updated[0];
 
+    // One row per device sign-in — the JWT below carries its id (sid) so
+    // an admin can revoke this specific device later from the Users tab.
+    const ua = req.headers['user-agent'] || '';
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || '';
+    const sessionRows = await sql`
+      INSERT INTO sessions (user_id, user_agent, ip) VALUES (${user.id}, ${ua}, ${ip}) RETURNING id
+    `;
+    const sid = sessionRows[0].id;
+
     const sessionToken = jwt.sign(
       {
         id: user.id, email: user.email, name: user.name, picture: user.picture,
         role: user.role,
         roles: normalizeUserRoles(Array.isArray(user.roles) && user.roles.length ? user.roles : user.role),
         client_company: user.client_company || null,
+        sid,
       },
       JWT_SECRET,
       { expiresIn: '30d' }
@@ -1148,9 +1248,20 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-// Logout — clears the cookie. Safe to call when already signed out.
-app.post('/api/auth/logout', (req, res) => {
+// Logout — clears the cookie and revokes the session row so it stops
+// showing as "active" in the Users tab immediately. Safe to call when
+// already signed out.
+app.post('/api/auth/logout', async (req, res) => {
   res.clearCookie(SESSION_COOKIE, { path: '/' });
+  if (req.user && req.user.sid) {
+    try {
+      await dbReady;
+      const sql = getDb();
+      await sql`UPDATE sessions SET revoked_at = NOW() WHERE id = ${req.user.sid} AND revoked_at IS NULL`;
+    } catch (e) {
+      console.error('logout session revoke failed:', e.message);
+    }
+  }
   res.json({ ok: true });
 });
 
@@ -1181,7 +1292,7 @@ app.get('/api/auth/me', async (req, res) => {
       if (rolesChanged || companyChanged) {
         req.user = { ...req.user, role: dbUser.role, roles: freshRoles, client_company: freshCompany };
         const sessionToken = jwt.sign(
-          { id: dbUser.id, email: dbUser.email, name: req.user.name, picture: req.user.picture, role: dbUser.role, roles: freshRoles, client_company: freshCompany },
+          { id: dbUser.id, email: dbUser.email, name: req.user.name, picture: req.user.picture, role: dbUser.role, roles: freshRoles, client_company: freshCompany, sid: req.user.sid },
           JWT_SECRET,
           { expiresIn: '30d' }
         );
@@ -1205,6 +1316,7 @@ function publicUser(u) {
     roles: normalizeUserRoles(Array.isArray(u.roles) && u.roles.length ? u.roles : u.role),
     client_company: u.client_company || null,
     created_at: u.created_at, last_login_at: u.last_login_at, invited_by: u.invited_by,
+    blocked_at: u.blocked_at || null,
   };
 }
 
@@ -1238,12 +1350,13 @@ app.get('/api/users', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const rows = await sql`
-      SELECT u.*, inv.email AS invited_by_email
+      SELECT u.*, inv.email AS invited_by_email,
+             (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS active_sessions
       FROM users u
       LEFT JOIN users inv ON inv.id = u.invited_by
       ORDER BY u.created_at ASC
     `;
-    res.json(rows.map(r => ({ ...publicUser(r), invited_by_email: r.invited_by_email })));
+    res.json(rows.map(r => ({ ...publicUser(r), invited_by_email: r.invited_by_email, active_sessions: Number(r.active_sessions) || 0 })));
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
@@ -1322,6 +1435,86 @@ app.delete('/api/users/:id', requireAdmin, async (req, res) => {
     if (!deleted.length) return res.status(404).json({ error: 'User not found' });
     await logAudit(sql, req, { action: 'user.delete', entityType: 'user', entityId: id, summary: `Removed ${deleted[0].email}` });
     res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Sessions (device sign-ins) ─────────────────────────────────
+// Lets an admin see which computers/phones are signed in under an
+// account, log out one specific device, or block the whole account
+// (which also force-logs-out every device it's currently signed in on).
+// See authMiddleware for how a revoked session / blocked user gets
+// rejected in real time on their very next request.
+
+app.get('/api/users/:id/sessions', requireAuth, async (req, res) => {
+  if (!userHasRole(req.user, 'admin', 'ceo')) {
+    return res.status(403).json({ error: 'Admin or CEO only' });
+  }
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM sessions WHERE user_id = ${id} ORDER BY last_seen_at DESC`;
+    res.json(rows.map(r => ({
+      id: r.id,
+      device: describeUserAgent(r.user_agent),
+      ip: r.ip,
+      created_at: r.created_at,
+      last_seen_at: r.last_seen_at,
+      revoked_at: r.revoked_at,
+      is_current: req.user.sid === r.id,
+    })));
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/users/:id/sessions/:sid/revoke', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const sid = parseInt(req.params.sid, 10);
+    const updated = await sql`
+      UPDATE sessions SET revoked_at = NOW()
+      WHERE id = ${sid} AND user_id = ${id} AND revoked_at IS NULL
+      RETURNING *
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Session not found or already logged out' });
+    const target = await sql`SELECT email FROM users WHERE id = ${id}`;
+    await logAudit(sql, req, { action: 'user.session-revoke', entityType: 'user', entityId: id, summary: `Logged out a device for ${target[0]?.email || 'user #' + id}` });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/users/:id/block', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (id === req.user.id) return res.status(400).json({ error: "You can't block yourself." });
+    const updated = await sql`UPDATE users SET blocked_at = NOW() WHERE id = ${id} RETURNING *`;
+    if (!updated.length) return res.status(404).json({ error: 'User not found' });
+    await sql`UPDATE sessions SET revoked_at = NOW() WHERE user_id = ${id} AND revoked_at IS NULL`;
+    await logAudit(sql, req, { action: 'user.block', entityType: 'user', entityId: id, summary: `Blocked ${updated[0].email} — all devices logged out` });
+    res.json(publicUser(updated[0]));
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/users/:id/unblock', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const updated = await sql`UPDATE users SET blocked_at = NULL WHERE id = ${id} RETURNING *`;
+    if (!updated.length) return res.status(404).json({ error: 'User not found' });
+    await logAudit(sql, req, { action: 'user.unblock', entityType: 'user', entityId: id, summary: `Unblocked ${updated[0].email}` });
+    res.json(publicUser(updated[0]));
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
