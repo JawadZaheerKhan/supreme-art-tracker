@@ -4010,6 +4010,23 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
       }
     }
 
+    // If the admin removed the 2nd/offcut paper from the job (it had one
+    // before this save, gone now), any offcut_pre_consumed stamp left over
+    // from an earlier CTP-forward auto-consume no longer reflects reality
+    // — it would keep silently reducing the Pending Stock "packets needed"
+    // figure for offcut coverage that isn't backing this job anymore.
+    // Clear the stamp only; never touch inventory here — if sheets need
+    // refunding back to the offcut item, that's a manual correction the
+    // admin makes themselves (as already happened for this case).
+    const priorSecondaryPaper = priorParticulars.secondary_paper && typeof priorParticulars.secondary_paper === 'object'
+      ? priorParticulars.secondary_paper : null;
+    const newSecondaryPaper = cleanParticulars.secondary_paper && typeof cleanParticulars.secondary_paper === 'object'
+      ? cleanParticulars.secondary_paper : null;
+    if (priorSecondaryPaper && priorSecondaryPaper.inventory_item_id && !newSecondaryPaper && cleanParticulars.offcut_pre_consumed) {
+      if (cleanParticulars === newParticulars) cleanParticulars = { ...newParticulars };
+      delete cleanParticulars.offcut_pre_consumed;
+    }
+
     // Reconcile Delivered/Ready-to-Deliver status against a PO Qty edit.
     // Recording or removing a delivery already keeps stage_index in sync
     // with "delivered vs booked" (see computeDeliveryUpdate and the
