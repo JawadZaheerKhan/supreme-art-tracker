@@ -4219,7 +4219,13 @@ function jobStockBadge(j) {
     return '<span class="badge badge-low-stock">&#9888; Requires More Stock</span>';
   }
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const have  = invIt ? (invIt.current_balance || 0) : 0;
+  // Store keeper can issue from ANY brand in the paper group (see
+  // issueStock's split popup) — pool the whole group's balance, not just
+  // the linked "representative" item, matching the Pending Stock tab's
+  // Issue Stock button and updateStockHint's "Available:" figure. Using
+  // just the one item's balance here made a job read "Low Stock" whenever
+  // ITS brand happened to be short, even with plenty in another brand.
+  const have = invIt ? paperGroupMembers(invIt).reduce((a, x) => a + (x.current_balance || 0), 0) : 0;
   const need  = parseFloat(j.sheets) || 0;
   if (!invIt || !need || have >= need) {
     return '<span class="badge badge-pending">&#9201; Pending Stock</span>';
@@ -4232,7 +4238,8 @@ function jobStockBadge(j) {
 
 function cardIssueStockBtn(j) {
   const invIt   = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const have    = invIt ? (invIt.current_balance || 0) : 0;
+  // Pooled across the paper group — see the matching comment in jobStockBadge.
+  const have    = invIt ? paperGroupMembers(invIt).reduce((a, x) => a + (x.current_balance || 0), 0) : 0;
   const need    = parseFloat(j.sheets) || 0;
   const enough  = !need || (invIt && have >= need);
   // Three states once stock isn't 'enough':
