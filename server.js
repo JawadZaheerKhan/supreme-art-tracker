@@ -6519,8 +6519,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
       'job-issuance-reversed',
       // Manual stock-out reasons — added so the store keeper can undo
-      // a wrong Sold/Damaged/Sample entry from the item History.
-      'sold', 'damaged', 'sample', 'job-card', 'manual-job-card',
+      // a wrong Sold/Damaged/Offcut entry from the item History.
+      // 'sample' kept reversible for old rows even though it's no longer
+      // a selectable reason going forward.
+      'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
     ]);
     // Admin can reverse ANY reason (including bookkeeping rows like
     // 'correction' or 'opening-balance'). Non-admins are still bound
