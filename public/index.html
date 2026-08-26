@@ -22575,13 +22575,28 @@ const introMinTime = new Promise(resolve => {
 (function () {
   const el = document.getElementById('loading-screen');
   if (el) el.addEventListener('click', () => introSkip(), { once: true });
+  // Lock page scroll for the intro's duration. Without this, the real app
+  // (jobs list etc.) loads and renders UNDERNEATH the overlay while it
+  // plays — if that content is taller than the viewport, a scrollbar
+  // appears mid-intro and eats a few px off the viewport width. Since the
+  // intro is centered via position:fixed on the viewport, that shows up
+  // as a visible nudge to the left right as the overlay fades away.
+  // Locking scroll now (before any of that content loads) and restoring
+  // it only once the fade-out is fully done keeps the viewport width
+  // constant for the intro's entire lifetime, so it never happens.
+  document.documentElement.style.overflow = 'hidden';
+  document.body.style.overflow = 'hidden';
 })();
 function hideLoadingScreen() {
   introMinTime.then(() => {
     const el = document.getElementById('loading-screen');
     if (!el) return;
     el.classList.add('intro-fade-out');
-    setTimeout(() => { el.style.display = 'none'; }, 400);
+    setTimeout(() => {
+      el.style.display = 'none';
+      document.documentElement.style.overflow = '';
+      document.body.style.overflow = '';
+    }, 400);
   });
 }
 
