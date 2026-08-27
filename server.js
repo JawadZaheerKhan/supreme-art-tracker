@@ -4432,7 +4432,10 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
       const inPreConsumed = preConsumed && Array.isArray(preConsumed.items)
         && preConsumed.items.some(it => it && it.item_id === sec.inventory_item_id);
       if (inPreConsumed) return 0;
-      return Math.round(packets * ps);
+      // Use psForNeed (declared above), NOT ps — ps is declared further
+      // down, so referencing it here throws "Cannot access 'ps' before
+      // initialization" (temporal dead zone). Both equal packetSize(paperType).
+      return Math.round(packets * psForNeed);
     })();
     const needSheets = isSecondary
       ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
