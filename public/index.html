@@ -15937,20 +15937,32 @@ function refreshRowPersonsList(key) {
 // Opens a native date picker for a particulars-row's Details field, so a
 // PM entering a manual correction picks the date instead of typing it —
 // enforcing the app's dd/mm/yyyy format and eliminating typos.
-// The Details TEXT input itself is completely untouched (still shows the
-// value); this creates a temporary INVISIBLE-but-visibly-anchored native
-// date input directly over the calendar-icon button and calls
-// showPicker() on it — browsers block that call on off-screen elements,
-// which is what silently broke earlier attempts. Cleans up on change/blur.
+//   • Single-date row: opens the OS calendar picker directly (temporary
+//     invisible date input anchored over the button — browsers block
+//     showPicker() on off-screen elements, so it must be visibly anchored).
+//   • Multi-date row (pipe-joined, N entries on different days): opens a
+//     small popover with N labeled date inputs, so each pass's date can be
+//     re-picked independently. On Save the joined value is written back
+//     as "dd/mm/yyyy | dd/mm/yyyy | …" and the server's entries[] resync
+//     (which requires every segment to parse as a valid dd/mm/yyyy) picks
+//     it up in one go.
+// The Details TEXT input itself is untouched in every case — the value
+// stays visible as the primary display, this just writes back to it.
 function pickDetailsDate(btn, targetId) {
   const targetEl = document.getElementById(targetId);
   if (!targetEl || !btn) return;
+  const cur = (targetEl.value || '').trim();
+  const segments = cur ? cur.split('|').map(s => s.trim()) : [''];
+  if (segments.length >= 2) {
+    openMultiDatePickerPopover(btn, targetEl, segments);
+    return;
+  }
+  // Single-date fast path — native OS picker, no popover UI at all.
   const rect = btn.getBoundingClientRect();
   const picker = document.createElement('input');
   picker.type = 'date';
   picker.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;opacity:0;border:0;padding:0;margin:0;z-index:9999;`;
   document.body.appendChild(picker);
-  const cur = (targetEl.value || '').trim();
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(cur);
   if (m) picker.value = `${m[3]}-${m[2]}-${m[1]}`;
   const cleanup = () => { if (picker.parentNode) picker.parentNode.removeChild(picker); };
@@ -15968,6 +15980,58 @@ function pickDetailsDate(btn, targetId) {
     if (typeof picker.showPicker === 'function') picker.showPicker();
     else picker.click();
   } catch (_) { picker.click(); }
+}
+// Popover for a multi-pass Details value — one date input per segment.
+// Save writes the pipe-joined dd/mm/yyyy string back to the text field.
+function openMultiDatePickerPopover(btn, targetEl, segments) {
+  document.querySelectorAll('.jc-details-popover').forEach(p => p.remove());
+  const isoOf = (dmy) => {
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(dmy || '').trim());
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
+  };
+  const btnRect = btn.getBoundingClientRect();
+  const pop = document.createElement('div');
+  pop.className = 'jc-details-popover';
+  pop.style.cssText = `position:fixed;top:${btnRect.bottom + 4}px;left:${Math.max(8, btnRect.right - 260)}px;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.15);padding:12px;z-index:9999;width:260px;`;
+  pop.innerHTML = `
+    <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px;">Pick date for each pass</div>
+    ${segments.map((s, i) => `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-size:12px;color:var(--text2);width:52px;">Pass ${i+1}</span>
+        <input type="date" data-idx="${i}" value="${isoOf(s)}" style="flex:1;padding:5px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px;">
+      </div>`).join('')}
+    <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:10px;">
+      <button type="button" class="btn btn-sm" data-cancel>Cancel</button>
+      <button type="button" class="btn btn-sm btn-primary" data-save>Save</button>
+    </div>`;
+  document.body.appendChild(pop);
+  const close = () => {
+    pop.remove();
+    document.removeEventListener('mousedown', outsideHandler, true);
+  };
+  const outsideHandler = (e) => {
+    if (!pop.contains(e.target) && e.target !== btn) close();
+  };
+  setTimeout(() => document.addEventListener('mousedown', outsideHandler, true), 0);
+  pop.querySelector('[data-cancel]').addEventListener('click', close);
+  pop.querySelector('[data-save]').addEventListener('click', () => {
+    const dmyOf = (iso) => {
+      const [y, mo, d] = String(iso || '').split('-');
+      return (y && mo && d) ? `${d}/${mo}/${y}` : '';
+    };
+    const parts = [...pop.querySelectorAll('input[type="date"]')].map(el => dmyOf(el.value));
+    // Server requires EVERY segment to parse as a valid date — otherwise
+    // the whole entries[].date resync is silently skipped. So refuse to
+    // save if any pass was left blank; better to nag than to silently
+    // ignore a well-meant edit.
+    if (parts.some(p => !p)) {
+      notify('Fill in a date for every pass before saving.');
+      return;
+    }
+    targetEl.value = parts.join(' | ');
+    targetEl.dispatchEvent(new Event('input', { bubbles: true }));
+    close();
+  });
 }
 
 function particularsTable(p, job) {
