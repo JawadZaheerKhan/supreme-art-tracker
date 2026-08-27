@@ -6428,8 +6428,8 @@ function openInvRemoveStock(id, opts) {
       <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Reason</label>
         <select id="stockout-reason" onchange="stockOutReasonChanged(${id})">
-          ${['job-card','manual-job-card','sold','damaged','sample','adjustment'].map(r => {
-            const labels = {sold:'Sold / Delivered to customer',damaged:'Damaged',sample:'Sample',adjustment:'Manual adjustment','job-card':'Job Card (pending)','manual-job-card':'Manual Job Card'};
+          ${['job-card','manual-job-card','sold','damaged','offcut','adjustment'].map(r => {
+            const labels = {sold:'Sold / Delivered to customer',damaged:'Damaged',offcut:'Offcut',adjustment:'Manual adjustment','job-card':'Job Card (pending)','manual-job-card':'Manual Job Card'};
             const sel = r === 'job-card' ? ' selected' : '';
             return `<option value="${r}"${sel}>${labels[r]}</option>`;
           }).join('')}
@@ -6671,7 +6671,7 @@ async function saveInvRemoveStock(id) {
     return;
   }
 
-  // Manual Job Card / Sold / Damaged / Sample / Adjustment — plain
+  // Manual Job Card / Sold / Damaged / Offcut / Adjustment — plain
   // inventory transaction. Manual mode stores the typed reference in
   // job_card so the server records it in the ledger notes; server
   // doesn't attempt to resolve it to an app job.
@@ -7001,7 +7001,7 @@ function bulkOutRowHtml(idx) {
           <option value="manual-job-card">Manual Job Card</option>
           <option value="sold">Sold</option>
           <option value="damaged">Damaged</option>
-          <option value="sample">Sample</option>
+          <option value="offcut">Offcut</option>
           <option value="adjustment">Adjustment</option>
         </select>
       </td>
@@ -7139,7 +7139,7 @@ function bulkOutBrandSplitChanged(idx) {
 }
 // Called when the row's Reason dropdown changes. Job-card reason shows
 // the multi-select of matching pending jobs; every other reason (manual
-// job card, sold, damaged, sample, adjustment) shows the free-text
+// job card, sold, damaged, offcut, adjustment) shows the free-text
 // input so the user can type an ad-hoc reference or leave it blank.
 function bulkOutReasonChanged(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
@@ -7323,7 +7323,7 @@ function openBulkStockOut() {
     <div style="margin-top:8px;">
       <button class="btn btn-sm" onclick="bulkOutAddRow()">+ Add Row</button>
     </div>
-    <div class="bulk-summary">Reason <b>Job Card (pending)</b> — pick paper, tick one or more pending-stock jobs waiting on that paper group; packets auto-fill from the sum of their needs (editable — partial issuance still works). Reason <b>Manual Job Card</b> — type any offline job card number (not linked to an app job). Other reasons (Sold / Damaged / Sample / Adjustment) are plain ledger entries.</div>
+    <div class="bulk-summary">Reason <b>Job Card (pending)</b> — pick paper, tick one or more pending-stock jobs waiting on that paper group; packets auto-fill from the sum of their needs (editable — partial issuance still works). Reason <b>Manual Job Card</b> — type any offline job card number (not linked to an app job). Other reasons (Sold / Damaged / Offcut / Adjustment) are plain ledger entries.</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveBulkStockOut()" style="background:#DC2626;border-color:#DC2626;">Remove All</button>
@@ -7675,8 +7675,9 @@ async function renderInvHistory(id) {
         'delivery', 'adjustment', 'opening',
         'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
         'job-issuance-reversed',
-        // Manual stock-out reasons.
-        'sold', 'damaged', 'sample', 'job-card', 'manual-job-card',
+        // Manual stock-out reasons. 'sample' kept reversible for old rows
+        // even though it's no longer a selectable reason going forward.
+        'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
       ]);
       // Rolling 7-day window — reversible while the tx is at most a week
       // old. Simpler and more forgiving than the previous same-calendar-day
@@ -12971,6 +12972,10 @@ async function loadManualConsumption() {
   if (from) qs.set('from', from);
   if (to)   qs.set('to',   to);
   qs.set('direction', 'out');
+  // Manual Consumption is the one report that still wants offcut items'
+  // manual-job-card rows — every other report (Stock In/Out, Total
+  // In/Out, Stock Summary) keeps excluding offcut movement entirely.
+  qs.set('include_offcut_manual', '1');
   try {
     const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     state.rows = txs;

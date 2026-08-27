@@ -6519,8 +6519,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
       'job-issuance-reversed',
       // Manual stock-out reasons — added so the store keeper can undo
-      // a wrong Sold/Damaged/Sample entry from the item History.
-      'sold', 'damaged', 'sample', 'job-card', 'manual-job-card',
+      // a wrong Sold/Damaged/Offcut entry from the item History.
+      // 'sample' kept reversible for old rows even though it's no longer
+      // a selectable reason going forward.
+      'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
     ]);
     // Admin can reverse ANY reason (including bookkeeping rows like
     // 'correction' or 'opening-balance'). Non-admins are still bound
@@ -6662,6 +6664,13 @@ app.get('/api/inventory/transactions', async (req, res) => {
     const dir = req.query.direction === 'in' ? 'in'
               : req.query.direction === 'out' ? 'out'
               : 'all';
+    // Manual Consumption report only: an offcut item stocked out under
+    // reason='manual-job-card' should still show up there (it's a real
+    // ad-hoc job-card consumption, just sourced from offcut instead of
+    // fresh stock) even though offcut movement is excluded from every
+    // other report below. No other caller of this endpoint sends this
+    // flag, so their results are unaffected.
+    const includeOffcutManual = req.query.include_offcut_manual === '1';
     // Challan filter — matches a substring anywhere in the challan_no.
     // Empty / missing = no filter (all rows).
     const challanQ = req.query.challan ? String(req.query.challan).trim() : '';
@@ -6704,7 +6713,12 @@ app.get('/api/inventory/transactions', async (req, res) => {
         -- Offcut items are a side ledger managed by admin / PM; their
         -- ins and outs don't belong in the movement report so drop them
         -- server-side. Per-item History still shows the row unchanged.
-        AND COALESCE(i.is_offcut, false) = false
+        -- Exception: Manual Consumption's include_offcut_manual=1 call
+        -- still wants its own manual-job-card rows even off an offcut item.
+        AND (
+          COALESCE(i.is_offcut, false) = false
+          OR (${includeOffcutManual} AND t.reason = 'manual-job-card')
+        )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
