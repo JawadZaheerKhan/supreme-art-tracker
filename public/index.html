@@ -1571,6 +1571,18 @@
 .jc-part input[type="text"], .jc-part textarea { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; padding: 1px 0; color: var(--text); resize: vertical; }
 .jc-part input[type="text"]:focus, .jc-part textarea:focus { background: #fff7d6; }
 .jc-part textarea { min-height: 38px; }
+/* Details column: free-text field (still needed for the rare multi-pass
+   pipe-joined date case) plus a small calendar-icon button that pops a
+   real native date picker — see openDetailsDatePicker(). Picking a date
+   writes it in the same dd/mm/yyyy format the rest of the app uses, so a
+   manual correction can't drift into a different format by typo. */
+.jc-details-cell { display: flex; align-items: center; gap: 3px; padding: 4px 4px 4px 6px !important; }
+.jc-details-cell input[type="text"] { flex: 1; min-width: 0; }
+.jc-details-pick-btn {
+  flex: 0 0 auto; border: none; background: transparent; cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 2px 3px; border-radius: 3px; opacity: 0.65;
+}
+.jc-details-pick-btn:hover { background: #ece7d8; opacity: 1; }
 .jc-part .jc-spec-row td { padding: 6px 8px; }
 .jc-part .jc-spec-row label { display: inline-flex; align-items: center; gap: 4px; margin: 2px 10px 2px 0; font-size: 12px; cursor: pointer; }
 .jc-part .jc-spec-row .jc-brand { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; }
@@ -15894,6 +15906,38 @@ function refreshRowPersonsList(key) {
     .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
 }
 
+// Small calendar-icon picker next to a particulars row's Details field.
+// The field itself stays plain text (it can hold pipe-joined multiple
+// dates for a multi-pass row — a native date input can't represent that),
+// but picking a date here writes it in the app's dd/mm/yyyy format so a
+// manual correction can't come out mis-formatted. Replaces the field's
+// value outright — this is for CORRECTING the date shown, not appending
+// a second one; multi-date rows still edit fine as plain text as before.
+function openDetailsDatePicker(targetId) {
+  const targetEl = document.getElementById(targetId);
+  if (!targetEl) return;
+  let picker = document.getElementById('jc-details-date-picker');
+  if (!picker) {
+    picker = document.createElement('input');
+    picker.type = 'date';
+    picker.id = 'jc-details-date-picker';
+    picker.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+    document.body.appendChild(picker);
+  }
+  const cur = (targetEl.value || '').trim();
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(cur);
+  picker.value = m ? `${m[3]}-${m[2]}-${m[1]}` : '';
+  picker.onchange = () => {
+    if (!picker.value) return;
+    const [y, mo, d] = picker.value.split('-');
+    targetEl.value = `${d}/${mo}/${y}`;
+    targetEl.dispatchEvent(new Event('input', { bubbles: true }));
+    targetEl.focus();
+  };
+  if (typeof picker.showPicker === 'function') picker.showPicker();
+  else picker.click();
+}
+
 function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
   const raw = (k, sub) => (p[k] && p[k][sub]) || '';
@@ -15961,7 +16005,10 @@ function particularsTable(p, job) {
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
-      <td><input type="text" id="p-${r.key}-details"   value="${detailsVal}"></td>
+      <td class="jc-details-cell">
+        <input type="text" id="p-${r.key}-details" value="${detailsVal}">
+        <button type="button" class="jc-details-pick-btn" onclick="openDetailsDatePicker('p-${r.key}-details')" title="Pick a date">&#128197;</button>
+      </td>
       <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>
@@ -16189,6 +16236,13 @@ function deliveriesSection(j) {
   // even though the job's still officially at Pasting.
   const canAddDelivery = (stageIdx >= 6 || (stageIdx === 5 && isPartialReady(j))) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
+  // Cartons Qty minus what's already been delivered) — same idea as PO
+  // No. / Batch No. pre-filling from the job card, still fully editable
+  // for a genuinely partial shipment. Blank (not 0) when there's nothing
+  // useful to suggest, so the placeholder shows instead.
+  const readyNotYetShipped = Math.max(0, (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(j) : 0) - shipped);
+  const cartonsPrefill = readyNotYetShipped > 0 ? readyNotYetShipped : '';
 
   const rows = list.length
     ? list.map((d, i) => {
@@ -16233,7 +16287,7 @@ function deliveriesSection(j) {
     ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1fr auto;gap:8px;align-items:end;">
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Unit Cartons *</label>
-          <input type="number" id="deliv-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
@@ -20364,7 +20418,18 @@ const STATION_STAGE_FIELDS = {
   2: [{ key: 'coating_sheets_qty', label: 'Coating Sheets Qty' }, { key: 'uv_waste_sheets', label: 'Waste Sheets' }],
   3: [{ key: 'die_cutting_sheets', label: 'Die Cutting Sheets' }, { key: 'die_cutting_waste', label: 'Die Cutting Waste' }],
   4: [{ key: 'sorted_cartons_qty', label: 'Sorted Cartons Qty' }, { key: 'sorted_cartons_waste', label: 'Sorted Cartons Waste' }],
-  5: [{ key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' }],
+  // Pasting also gets the SAME Ready Cartons Qty / Packets fields Ready to
+  // Deliver (QC) uses, writing straight into delivered_cartons_qty /
+  // ready_packets_qty — not into pasted_cartons_qty. Pasting already knows
+  // how many cartons are actually ready to ship (some pasted cartons can
+  // be rejected/held back), so letting them enter it here means QC just
+  // confirms instead of re-typing it. If left blank, the existing
+  // Pasting -> Ready auto-copy (server-side, on advance) still fills
+  // delivered_cartons_qty from pasted_cartons_qty as a fallback.
+  5: [
+    { key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' }, { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' },
+    { key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' }, { key: 'ready_packets_qty', label: 'Packets / Cartons' },
+  ],
   // Ready to Deliver has TWO inputs — Ready Cartons Qty AND
   // Packets/Cartons. Both are saved to particulars separately; the
   // job card joins them for display as "<cartons> | <packets>" on
