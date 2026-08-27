@@ -16297,23 +16297,65 @@ function jobForm(j={}) {
         </td>
         <td colspan="1"><span class="jc-lbl">Size / GSM</span><input type="text" id="f-size" value="${v(j.size)}" placeholder="12x18 / 300gsm" oninput="renderCutPreview()"></td>
         <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
-        <td colspan="1"><span class="jc-lbl">Sheets Qty</span><input type="text" id="f-sheets" value="${v(j.sheets)}" placeholder="12500" oninput="jobCartonQtySync(); jobPacketsSync(); updateStockHint();"></td>
+        ${(() => {
+          // Sheets Qty + Quantity of Packets both render as "primary + secondary"
+          // when a 2nd paper is set. STORED values stay the TOTAL (sheets,
+          // quantity_of_packets) — the server issue math is unchanged — we only
+          // SPLIT for display and recombine on save. f-sheets / f-packets hold
+          // the PRIMARY when split (total − secondary) and the full TOTAL when
+          // not. f-sheets-2 / f-packets-2 hold the secondary. The "+ sec" spans
+          // are hidden until the 2nd-paper checkbox turns them on
+          // (toggleSecondPaper), so no re-render is needed on toggle.
+          const partsP  = j.particulars || {};
+          const sec      = partsP.secondary_paper || null;
+          const hasSecond = !!(sec && sec.inventory_item_id);
+          // pending job → 2nd paper is part of the total (subtractive);
+          // already-issued → 2nd paper is extra on top (additive). Drives only
+          // the live recompute when editing the secondary box.
+          const packetsMode = (j.issuance_status === 'issued') ? 'issued' : 'pending';
+          const primItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+          const psForm   = primItem ? packetSize(primItem.paper_type) : 100;
+          const secPkts  = sec ? (parseFloat(sec.packets) || 0) : 0;
+          const totalPk  = parseFloat(partsP.quantity_of_packets) || 0;
+          const primPk   = Math.max(0, totalPk - secPkts);
+          const secSh    = Math.round(secPkts * psForm);
+          const totalSh  = parseFloat(j.sheets) || 0;
+          const primSh   = Math.max(0, totalSh - secSh);
+          const sheetsPrimVal  = hasSecond ? (primSh || '') : (j.sheets != null ? j.sheets : '');
+          const packetsPrimVal = hasSecond ? (primPk || '') : (partsP.quantity_of_packets || '');
+          const cutOptions = ['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
+            const sel = (partsP.sheet_cut || '1/1') === c ? ' selected' : '';
+            return `<option value="${c}"${sel}>${c}</option>`;
+          }).join('');
+          const topupBtn = (j.id && j.issuance_status === 'issued' && canWriteJobs())
+            ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id})" title="Request extra packets for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;">+</button>`
+            : '';
+          return `
+        <td colspan="1"><span class="jc-lbl">Sheets Qty</span>
+          <div id="f-sheets-wrap" data-mode="${packetsMode}" data-lock-total="${totalSh || 0}" style="display:flex;gap:3px;align-items:center;">
+            <input type="text" id="f-sheets" value="${esc(String(sheetsPrimVal))}" placeholder="12500" oninput="jobSheetsPrimaryEdited(); jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="${hasSecond ? 'width:4.2em;text-align:center;flex:0 0 auto;' : 'flex:1;min-width:0;'}">
+            <span id="sheets-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:3px;align-items:center;flex:0 0 auto;">
+              <span style="font-weight:700;color:var(--text2);">+</span>
+              <input type="text" id="f-sheets-2" value="${esc(hasSecond ? String(secSh || '') : '')}" placeholder="0" oninput="jobSecondarySheetsEdited();" style="width:4.2em;text-align:center;">
+            </span>
+          </div>
+        </td>
         <td colspan="2">
           <span class="jc-lbl">Quantity of Packets</span>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <input type="text" id="f-packets" value="${esc((j.particulars||{}).quantity_of_packets||'')}" placeholder="e.g. 50" style="flex:1;min-width:0;">
+          <div id="f-packets-wrap" data-mode="${packetsMode}" data-lock-total="${totalPk || 0}" style="display:flex;gap:5px;align-items:center;">
+            <input type="text" id="f-packets" value="${esc(String(packetsPrimVal))}" placeholder="e.g. 50" oninput="jobPrimaryPacketsEdited()" style="${hasSecond ? 'width:4.2em;text-align:center;flex:0 0 auto;' : 'flex:1;min-width:0;'}">
+            <span id="packets-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:5px;align-items:center;flex:0 0 auto;">
+              <span style="font-weight:700;color:var(--text2);">+</span>
+              <input type="number" id="f-packets-2" min="0" step="any" value="${esc(hasSecond ? String(secPkts || '') : '')}" placeholder="e.g. 5" oninput="jobSecondaryPacketsEdited()" style="width:4.2em;text-align:center;">
+            </span>
             <select id="f-sheet-cut" title="Cut — pieces per sheet; affects Packets auto-fill"
                     onchange="jobPacketsSync(); updateStockHint();"
-                    style="width:64px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;">
-              ${['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
-                const sel = ((j.particulars||{}).sheet_cut || '1/1') === c ? ' selected' : '';
-                return `<option value="${c}"${sel}>${c}</option>`;
-              }).join('')}
+                    style="width:56px;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:13px;flex:0 0 auto;">
+              ${cutOptions}
             </select>
-            ${j.id && j.issuance_status === 'issued' && canWriteJobs()
-              ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id})" title="Request extra packets for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;">+</button>`
-              : ''}
-          </div>
+            ${topupBtn}
+          </div>`;
+        })()}
           ${packetTopupsApproved(j).length
             ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
           ${hasPendingPacketTopup(j)
@@ -16353,13 +16395,8 @@ function jobForm(j={}) {
               <div id="stock-hint-2" style="font-size:11px;color:#1e3a8a;margin-top:2px;min-height:14px;"></div>
               <div id="second-paper-warning" style="font-size:11px;color:#7f1d1d;margin-top:3px;font-weight:700;min-height:14px;"></div>
             </div>
-            <div style="width:160px;">
-              <span class="jc-lbl" style="color:#1e3a8a;">2nd Packets Qty</span>
-              <input type="number" id="f-packets-2" min="0" step="any"
-                     value="${esc(secPackets)}" placeholder="e.g. 5"
-                     oninput="updateStockHint()"
-                     style="width:100%;box-sizing:border-box;">
-              <div style="font-size:11px;color:#1e3a8a;margin-top:2px;">Part of total packets, not extra</div>
+            <div style="width:200px;font-size:11px;color:#1e3a8a;padding-top:18px;">
+              Enter the 2nd paper's packets in the <b>Quantity of Packets</b> box above (the <b>+</b> field). Pending job → it's part of the total; already-issued job → it's added on top.
             </div>
           </div>
         </td>
@@ -17118,7 +17155,7 @@ async function saveGroupEdit(groupId) {
       qty: qtyVal,
       size: q('f-size'),
       ups: q('f-ups'),
-      sheets: q('f-sheets'),
+      sheets: jobSecondPaperActive() ? String(jobFormTotalSheets()) : q('f-sheets'),
       machine: q('f-machine'),
       cartonqty: q('f-cartonqty'),
       priority: q('f-priority') || 'Normal',
@@ -17819,7 +17856,7 @@ function getFormData() {
     deadline: document.getElementById('f-deadline').value,
     size: document.getElementById('f-size').value.trim(),
     ups: document.getElementById('f-ups').value.trim(),
-    sheets: document.getElementById('f-sheets').value.trim(),
+    sheets: jobSecondPaperActive() ? String(jobFormTotalSheets()) : document.getElementById('f-sheets').value.trim(),
     qty: document.getElementById('f-qty').value.trim(),
     machine: document.getElementById('f-machine').value,
     coatings: [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c=>c.value),
@@ -17928,7 +17965,12 @@ function collectParticulars() {
   if (Object.values(platesMerged).some(v => v !== '' && v != null)) out.plates                   = platesMerged;
   if (Object.values(colorsMerged).some(v => v !== '' && v != null)) out.no_of_colors             = colorsMerged;
   out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
-  out.quantity_of_packets = (document.getElementById('f-packets')||{}).value?.trim() || '';
+  // quantity_of_packets is the TOTAL. When a 2nd paper split is active the
+  // f-packets box holds only the PRIMARY, so recombine primary + secondary;
+  // otherwise f-packets already holds the full total.
+  out.quantity_of_packets = jobSecondPaperActive()
+    ? String(jobFormTotalPackets())
+    : ((document.getElementById('f-packets')||{}).value?.trim() || '');
   out.sheet_cut = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
   out.comments = (document.getElementById('p-comments')||{}).value?.trim() || '';
   // Secondary paper block — set only when the checkbox is on AND a
@@ -18015,18 +18057,12 @@ function updateStockHint() {
   const fracPkts = n => Number.isInteger(n) ? n : +(+n).toFixed(2);
   const availPkts  = fracPkts(balance / ps);
   const rawNeed    = sheetsNeed / cutPieces;
-  const neededPktsGross = sheetsNeed > 0 ? (rawNeed / ps) : 0;
-  // Subtract any packets assigned to the 2nd paper picker — the primary
-  // side only needs (total − secondary). Live: reads from the DOM so
-  // typing in "2nd Packets Qty" updates the hint immediately without
-  // waiting for a save. Owner rule: "5 packets in 2nd paper means 5
-  // primary + 5 secondary, not 10 + 5".
-  const useSecondCb = document.getElementById('f-use-second-paper');
-  const secPktsField = document.getElementById('f-packets-2');
-  const secPktsLive = (useSecondCb && useSecondCb.checked)
-    ? (parseFloat(secPktsField && secPktsField.value) || 0)
-    : 0;
-  const neededPkts = fracPkts(Math.max(0, neededPktsGross - secPktsLive));
+  // f-sheets already holds the PRIMARY-only sheets when a 2nd paper split
+  // is active (the secondary lives in f-sheets-2), so neededPktsGross is
+  // already the primary need — no separate secondary subtraction here
+  // (doing so would double-subtract). When there's no 2nd paper, f-sheets
+  // is the full total and this is just the plain need.
+  const neededPkts = fracPkts(Math.max(0, neededPktsGross));
   // Other pending jobs on the same paper group.
   const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
   const key = it ? paperGroupKey(it) : null;
@@ -18112,22 +18148,45 @@ function toggleSecondPaper() {
   const row = document.getElementById('second-paper-row');
   if (!cb || !row) return;
   row.style.display = cb.checked ? '' : 'none';
-  if (!cb.checked) {
-    // Clear values so a hidden row can't accidentally leak stale state on
-    // save. Warning message clears too.
+  // Show/hide the "+ secondary" boxes in the Sheets & Packets cells, and
+  // shrink/grow the primary boxes so the layout matches.
+  const pktPlus   = document.getElementById('packets-plus-sec');
+  const shtPlus   = document.getElementById('sheets-plus-sec');
+  const primPkEl  = document.getElementById('f-packets');
+  const primShEl  = document.getElementById('f-sheets');
+  const secPkEl   = document.getElementById('f-packets-2');
+  const secShEl   = document.getElementById('f-sheets-2');
+  const pwrap     = document.getElementById('f-packets-wrap');
+  const swrap     = document.getElementById('f-sheets-wrap');
+  const splitStyle  = 'width:4.2em;text-align:center;flex:0 0 auto;';
+  const singleStyle = 'flex:1;min-width:0;';
+  if (cb.checked) {
+    if (pktPlus) pktPlus.style.display = 'inline-flex';
+    if (shtPlus) shtPlus.style.display = 'inline-flex';
+    if (primPkEl) primPkEl.style.cssText = splitStyle;
+    if (primShEl) primShEl.style.cssText = splitStyle;
+    // Lock the current totals — a fresh 2nd paper starts at 0 secondary,
+    // so primary stays = the total until the user types a secondary qty.
+    if (pwrap) pwrap.dataset.lockTotal = String(jobFormTotalPackets());
+    if (swrap) swrap.dataset.lockTotal = String(jobFormTotalSheets());
+    refreshSecondPaperWarning();
+  } else {
+    // Collapse back to a single total box: fold the secondary back into
+    // the primary so nothing is lost, then clear the 2nd-paper inputs.
+    if (primPkEl) primPkEl.value = String(jobFormTotalPackets() || '');
+    if (primShEl) primShEl.value = String(jobFormTotalSheets() || '');
+    if (pktPlus) pktPlus.style.display = 'none';
+    if (shtPlus) shtPlus.style.display = 'none';
+    if (primPkEl) primPkEl.style.cssText = singleStyle;
+    if (primShEl) primShEl.style.cssText = singleStyle;
     const search = document.getElementById('paper-search-2');
     const hidden = document.getElementById('f-inventory-item-2');
-    const packets = document.getElementById('f-packets-2');
     const warn = document.getElementById('second-paper-warning');
     if (search) search.value = '';
     if (hidden) hidden.value = '';
-    if (packets) packets.value = '';
+    if (secPkEl) secPkEl.value = '';
+    if (secShEl) secShEl.value = '';
     if (warn) warn.textContent = '';
-  } else {
-    // Refresh mismatch warning for the currently-selected 2nd paper (if
-    // any) so opening the picker on an existing job shows the warning
-    // immediately.
-    refreshSecondPaperWarning();
   }
   // Repaint the primary stock hint too — toggling the 2nd paper on/off
   // changes the primary need shown there (total − 2nd packets).
@@ -18371,13 +18430,85 @@ function paperSelect(itemId) {
 // Sheets Qty is the WORKING/post-cut sheet count (already accounts for the
 // cut multiplier), so we don't multiply by pieces here. UPS = units per
 // working sheet. Triggered whenever UPS or Sheets Qty changes.
+// ── 2nd-paper packets/sheets split (Job Card form) ───────────────
+// When a 2nd paper is set, Sheets Qty and Quantity of Packets each show
+// as "primary + secondary". f-sheets / f-packets hold the PRIMARY; the
+// f-sheets-2 / f-packets-2 boxes hold the secondary; the stored TOTAL is
+// their sum. These helpers keep the two sides consistent and apply the
+// pending-vs-issued rule when the secondary is edited.
+function jobSecondPaperActive() {
+  const span = document.getElementById('packets-plus-sec');
+  return !!(span && span.style.display !== 'none');
+}
+function jobFormPs() {
+  const itemEl = document.getElementById('f-inventory-item');
+  const it = itemEl ? inventory.find(x => x.id === parseInt(itemEl.value, 10)) : null;
+  return it ? packetSize(it.paper_type) : 100;
+}
+function jobFormTotalSheets() {
+  const p = parseFloat((document.getElementById('f-sheets')||{}).value) || 0;
+  const s = jobSecondPaperActive() ? (parseFloat((document.getElementById('f-sheets-2')||{}).value) || 0) : 0;
+  return p + s;
+}
+function jobFormTotalPackets() {
+  const p = parseFloat((document.getElementById('f-packets')||{}).value) || 0;
+  const s = jobSecondPaperActive() ? (parseFloat((document.getElementById('f-packets-2')||{}).value) || 0) : 0;
+  return p + s;
+}
+// Primary packets edited by hand — in pending mode, re-lock the total so a
+// later secondary edit subtracts from the NEW total the user just set.
+function jobPrimaryPacketsEdited() {
+  const wrap = document.getElementById('f-packets-wrap');
+  if (wrap && wrap.dataset.mode === 'pending' && jobSecondPaperActive()) {
+    wrap.dataset.lockTotal = String(jobFormTotalPackets());
+  }
+  updateStockHint();
+}
+// Primary sheets edited by hand — re-lock the sheets total (pending mode).
+function jobSheetsPrimaryEdited() {
+  const wrap = document.getElementById('f-sheets-wrap');
+  if (wrap && wrap.dataset.mode === 'pending' && jobSecondPaperActive()) {
+    wrap.dataset.lockTotal = String(jobFormTotalSheets());
+  }
+}
+// Secondary PACKETS edited — mirror to secondary sheets, and apply the mode:
+//   pending  → hold the total fixed, so primary shrinks (10 → 5+5).
+//   issued   → primary stays locked, total grows (10 → 10+5).
+function jobSecondaryPacketsEdited() {
+  const ps = jobFormPs();
+  const secPk = parseFloat((document.getElementById('f-packets-2')||{}).value) || 0;
+  const secSh = secPk > 0 ? Math.round(secPk * ps) : 0;
+  const sh2 = document.getElementById('f-sheets-2');
+  if (sh2) sh2.value = secSh > 0 ? String(secSh) : '';
+  const pwrap = document.getElementById('f-packets-wrap');
+  const swrap = document.getElementById('f-sheets-wrap');
+  if (pwrap && pwrap.dataset.mode === 'pending') {
+    const lockPk = parseFloat(pwrap.dataset.lockTotal);
+    const primPkEl = document.getElementById('f-packets');
+    if (primPkEl && Number.isFinite(lockPk)) primPkEl.value = String(Math.max(0, +(lockPk - secPk).toFixed(2)));
+    const lockSh = swrap ? parseFloat(swrap.dataset.lockTotal) : NaN;
+    const primShEl = document.getElementById('f-sheets');
+    if (primShEl && Number.isFinite(lockSh)) primShEl.value = String(Math.max(0, lockSh - secSh));
+  }
+  jobCartonQtySync();
+  updateStockHint();
+}
+// Secondary SHEETS edited — back-compute secondary packets, then run the
+// same mode logic via the packets handler.
+function jobSecondarySheetsEdited() {
+  const ps = jobFormPs();
+  const secSh = parseFloat((document.getElementById('f-sheets-2')||{}).value) || 0;
+  const pk2 = document.getElementById('f-packets-2');
+  if (pk2) pk2.value = (secSh > 0 && ps > 0) ? String(+(secSh / ps).toFixed(2)) : '';
+  jobSecondaryPacketsEdited();
+}
 function jobCartonQtySync() {
   const upsEl     = document.getElementById('f-ups');
-  const sheetsEl  = document.getElementById('f-sheets');
   const ctnEl     = document.getElementById('f-cartonqty');
-  if (!upsEl || !sheetsEl || !ctnEl) return;
+  if (!upsEl || !ctnEl) return;
   const ups    = parseFloat(upsEl.value);
-  const sheets = parseFloat(sheetsEl.value);
+  // Unit carton uses the TOTAL working sheets (primary + secondary).
+  const sheets = jobFormTotalSheets();
   if (!Number.isFinite(ups) || ups <= 0)       return;
   if (!Number.isFinite(sheets) || sheets <= 0) return;
   ctnEl.value = String(Math.round(sheets * ups));
@@ -19649,7 +19780,7 @@ function buildPrintCard(j) {
     const secondaryPart = secondaryIsOffcutP
       ? `<span style="${offcutStylePrint}">${secPkts}</span>`
       : String(secPkts);
-    return `${primaryPart} &#124; ${secondaryPart}` + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+    return `${primaryPart} + ${secondaryPart}` + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
   })();
   const coatLabel = name => {
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
