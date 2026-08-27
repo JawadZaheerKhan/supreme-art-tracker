@@ -6700,6 +6700,15 @@ app.get('/api/inventory/transactions', async (req, res) => {
     // other report below. No other caller of this endpoint sends this
     // flag, so their results are unaffected.
     const includeOffcutManual = req.query.include_offcut_manual === '1';
+    // raw=1: return the TRUE ledger with NO exclusions — corrections,
+    // reversals, and offcut rows all included. The Stock Summary needs
+    // this to compute an accurate balance: 'correction' rows are real
+    // balance changes (admin balance edits) but are hidden from the
+    // movement reports below, which made the summary's opening balance
+    // wrong (it double-counted an opening + a later adjustment while
+    // dropping the correction that cancelled the opening). Callers that
+    // want movement-only data (Stock In/Out, Totals) just omit this.
+    const raw = req.query.raw === '1';
     // Challan filter — matches a substring anywhere in the challan_no.
     // Empty / missing = no filter (all rows).
     const challanQ = req.query.challan ? String(req.query.challan).trim() : '';
@@ -6731,21 +6740,27 @@ app.get('/api/inventory/transactions', async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
         AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
-        AND t.reason NOT IN ('correction', 'job-edit-revert', 'job-edit-apply')
+        -- Every exclusion below is bypassed when raw=1, so the Stock
+        -- Summary gets the true ledger (corrections + reversals + offcut
+        -- included) to compute an accurate running balance.
+        AND (${raw} OR t.reason NOT IN ('correction', 'job-edit-revert', 'job-edit-apply'))
         -- Hide reversal rows and the original tx they undo. A mistake that
         -- was reversed shouldn't inflate Stock In/Out totals — the pair
         -- nets to zero, so both sides drop out of the movement report.
-        AND t.reverses_tx_id IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
-        )
+        AND (${raw} OR (
+          t.reverses_tx_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
+          )
+        ))
         -- Offcut items are a side ledger managed by admin / PM; their
         -- ins and outs don't belong in the movement report so drop them
         -- server-side. Per-item History still shows the row unchanged.
         -- Exception: Manual Consumption's include_offcut_manual=1 call
         -- still wants its own manual-job-card rows even off an offcut item.
         AND (
-          COALESCE(i.is_offcut, false) = false
+          ${raw}
+          OR COALESCE(i.is_offcut, false) = false
           OR (${includeOffcutManual} AND t.reason = 'manual-job-card')
         )
         AND (${dir} = 'all'

@@ -8752,7 +8752,10 @@ async function loadStockSummary() {
     // inventory sizes and avoids a custom aggregation endpoint. Also pull
     // pending imports so the Required-After-Import column has data.
     const [allTxs, imports] = await Promise.all([
-      api('GET', '/api/inventory/transactions'),
+      // raw=1: true ledger incl. corrections + reversals so the running
+      // balance is accurate. In/out bucket sums below still filter these
+      // out (movement-only) — see isMovementTx.
+      api('GET', '/api/inventory/transactions?raw=1'),
       api('GET', '/api/imports?status=pending'),
     ]);
     stockSummaryState.txs     = allTxs.filter(t => t.paper_type === stockSummaryState.paperType);
@@ -8777,22 +8780,42 @@ function computeSummaryRows() {
   // any orphans (e.g. an import booked with blank/mismatched size/gsm/brand
   // that doesn't link to any item). Surfaced under the table as a warning.
   const claimedImportIds = new Set();
+  // txs now comes from raw=1 (true ledger). BALANCE must reflect every
+  // change (incl. corrections + reversals). The in/out COLUMNS should show
+  // real material movement only, so we skip correction/edit rows and both
+  // sides of a reversal pair when summing in/out — but still let them move
+  // the running balance. reversedIds = originals that a reversal row undid.
+  const reversedIds = new Set();
+  txs.forEach(t => { if (t.reverses_tx_id) reversedIds.add(t.reverses_tx_id); });
+  const isMovementTx = (t) => {
+    if (t.reason === 'correction' || t.reason === 'job-edit-revert' || t.reason === 'job-edit-apply') return false;
+    if (t.reverses_tx_id) return false;      // this row IS a reversal
+    if (reversedIds.has(t.id)) return false; // this row WAS reversed
+    return true;
+  };
   const rows  = items.map(it => {
     const itemTxs = txs.filter(t => t.item_id === it.id);
-    // Opening balance (in sheets) = sum of every change recorded BEFORE the from date.
+    // Opening balance (in sheets) = sum of EVERY change (movement +
+    // corrections + reversals) recorded BEFORE the from date — the true
+    // balance at period start. Previously this excluded corrections
+    // (the endpoint filtered them out), which overstated the opening
+    // when a correction had cancelled an earlier opening/adjustment.
     let openingSheets = 0;
     for (const t of itemTxs) if (new Date(t.created_at) < fromD) openingSheets += t.change;
     // Per-bucket in/out (in sheets) + running balance.
     let runningSheets = openingSheets;
     const periods = buckets.map(b => {
-      let inSh = 0, outSh = 0;
+      let inSh = 0, outSh = 0, balDelta = 0;
       for (const t of itemTxs) {
         const d = new Date(t.created_at);
         if (d >= b.start && d < b.end) {
-          if (t.change > 0) inSh += t.change; else outSh += -t.change;
+          balDelta += t.change;              // balance reflects everything
+          if (isMovementTx(t)) {             // in/out columns are movement-only
+            if (t.change > 0) inSh += t.change; else outSh += -t.change;
+          }
         }
       }
-      runningSheets += (inSh - outSh);
+      runningSheets += balDelta;
       return { in: inSh, out: outSh, balance: runningSheets };
     });
     // Total Consumption — sum of OUT across buckets.
