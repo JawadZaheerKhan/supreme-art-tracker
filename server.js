@@ -58,6 +58,24 @@ function businessWallClockToMs(y, mo, d, h, mi) {
   const offset = asUTC - utcGuess;          // BUSINESS_TZ offset at that instant
   return utcGuess - offset;                 // corrected epoch for the wall clock
 }
+// Combines a plain YYYY-MM-DD business date (e.g. a delivery date the
+// store keeper picked, possibly backdated) with the CURRENT business-local
+// time-of-day, so a backdated delivery's stage/log timestamps land on the
+// day it actually shipped instead of today, while still reading as a real
+// clock time rather than an artificial midnight/noon stamp. Falls back to
+// the real current instant if the string doesn't parse.
+function businessInstantForDate(dateStr) {
+  const now = new Date();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  if (!m) return now;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: BUSINESS_TZ, hour12: false, hour: '2-digit', minute: '2-digit',
+  }).formatToParts(now);
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  let hh = map.hour; if (hh === '24') hh = '00';
+  return new Date(businessWallClockToMs(+m[1], +m[2], +m[3], +hh, +map.minute));
+}
 
 // Production stages — must mirror STAGES in public/index.html. Used by the
 // station-update endpoint to build stage names + detect the final stage.
@@ -5048,8 +5066,16 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, link
     linked_job_id: linkedJobId || null,
   };
   const deliveries = [...(Array.isArray(job.deliveries) ? job.deliveries : []), entry];
-  const nowIso = new Date().toISOString();
-  const time   = businessStamp();
+  // Stage/log timestamps reflect the delivery's OWN date (what the store
+  // keeper picked, possibly backdated) rather than the instant this API
+  // call happens to run — so Job History, "Day in production", and any
+  // report scanning log[] show the backdated delivery under the day it
+  // actually shipped, not under today. entry.at above stays true real-time
+  // audit metadata (when the record was entered), which is intentionally
+  // different from when the shipment happened.
+  const deliveryInstant = businessInstantForDate(date);
+  const nowIso = deliveryInstant.toISOString();
+  const time   = businessStamp(deliveryInstant);
   const by     = byEmail || 'unknown';
   let stage_index = job.stage_index || 0;
   let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
