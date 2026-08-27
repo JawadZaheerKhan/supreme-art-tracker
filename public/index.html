@@ -126,6 +126,8 @@
      live. Used for the Jobs Report card in the Reports landing — SM's
      focus is paper movement, not job-by-job production logs. */
   body.role-store-manager .sm-hide { display: none !important; }
+  /* Manual Consumption report — admin only. */
+  body.role-not-admin .admin-only-report { display: none !important; }
   body.role-lock-inventory #inventory-mode .ceo-hide,
   body.role-lock-inventory #imports-mode .ceo-hide { display: none !important; }
   /* Production Manager: in the Users tab they only see the Floor Operators
@@ -2108,8 +2110,8 @@
         <button class="rsb-item" data-rt="total-out" onclick="setReportsTab('total-out')">
           <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Total Out
         </button>
-        <div class="rsb-section">Manual</div>
-        <button class="rsb-item" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
+        <div class="rsb-section admin-only-report">Manual</div>
+        <button class="rsb-item admin-only-report" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
           <span class="rsb-icon" style="color:#A32D2D;">&#9997;</span> Manual Consumption
         </button>
       </aside>
@@ -3442,6 +3444,9 @@ function renderUserChip() {
   const lockInventory = !isCeo() && !op && !canWriteInventory();
   document.body.classList.toggle('role-lock-jobs', lockJobs);
   document.body.classList.toggle('role-lock-inventory', lockInventory);
+  // Manual Consumption report — admin only, everyone else (incl. CEO,
+  // production/store manager, finance) never sees the sidebar entry.
+  document.body.classList.toggle('role-not-admin', !isAdmin());
   renderAppDate();
 }
 
@@ -12871,6 +12876,17 @@ function openManualConsumptionPane() {
   const state = manualConsumptionState;
   const pane  = document.getElementById('rt-manual-consumption');
   if (!pane) return;
+  // Admin-only report. If a non-admin somehow reaches here (browser back
+  // button, stale URL state, or setReportsTab called from the console),
+  // paint a "not allowed" placeholder INSTEAD of the real content -- the
+  // sidebar button that would normally open this is already hidden via
+  // body.role-not-admin + .admin-only-report CSS, but this handles every
+  // other path into the pane. Also skips loading the data (loadManualConsumption)
+  // and the export/print buttons, so those can't leak the data either.
+  if (typeof isAdmin === 'function' && !isAdmin()) {
+    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Consumption report is admin-only.</div></div>`;
+    return;
+  }
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
