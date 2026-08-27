@@ -2988,7 +2988,24 @@ function parseLocalDate(s) {
 }
 function inDateRange(j) {
   if (!filterDateRange) return true;
-  const issued = parseLocalDate(j.dateissued);
+  // When a stage filter is also active, the date range refers to WHEN THE
+  // JOB REACHED THAT STAGE (stages[i].at), not when the job card was
+  // originally issued. So "This week + Printing" reads as "jobs that
+  // moved to Printing this week and are still at Printing" -- which is
+  // what a PM actually wants when filtering "what's currently in this
+  // stage from this period". Falls back to dateissued if the stage's
+  // timestamp is missing (older jobs before per-stage timestamps
+  // shipped, or a stage that was skipped without stamping).
+  let anchor = null;
+  if (filterStage) {
+    const stIdx = STAGES.indexOf(filterStage);
+    const stAt = stIdx >= 0 && j.stages && j.stages[stIdx] ? j.stages[stIdx].at : null;
+    if (stAt) {
+      const d = new Date(stAt);
+      if (!isNaN(d)) anchor = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+  }
+  const issued = anchor || parseLocalDate(j.dateissued);
   if (!issued) return false;
   if (filterDateRange === 'custom') {
     const from = parseLocalDate(filterDateFrom);
