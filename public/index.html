@@ -1588,19 +1588,6 @@
 .jc-part input[type="text"], .jc-part textarea { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; padding: 1px 0; color: var(--text); resize: vertical; }
 .jc-part input[type="text"]:focus, .jc-part textarea:focus { background: #fff7d6; }
 .jc-part textarea { min-height: 38px; }
-/* Ready to Delivery Qty row's Quantity cell: TWO inputs side by side
-   (unit cartons | packets) with a "|" separator. Packets-only yellow
-   highlight -- CSS can't tint half of a single input's value, so we
-   split into two inputs to color just the packets side. Unit cartons
-   input on the left stays neutral like every other quantity cell. */
-/* Each input sized to its content, not stretched via flex: 1 — otherwise
-   the pair pushed the whole Quantity column wider than the other rows
-   (each input, growing greedily, made the browser widen the td). */
-.jc-delv-qty-wrap { display: inline-flex; align-items: center; gap: 6px; width: auto; }
-.jc-part .jc-delv-qty-wrap > input { width: 5.5em; min-width: 0; text-align: center; padding: 1px 4px; }
-.jc-delv-qty-sep { flex: 0 0 auto; color: var(--text2); font-weight: 600; user-select: none; }
-.jc-part input.jc-packets-input { background: #fef9c3 !important; color: #713f12; font-weight: 700; text-align: center; }
-.jc-part input.jc-packets-input:focus { background: #fef08a !important; }
 /* Details column: the plain text input stays exactly as it was so the
    date VALUE is fully visible; a small calendar-icon button sits
    absolute-positioned over the input's right edge (with a matching
@@ -16111,18 +16098,18 @@ function particularsTable(p, job) {
         ? [...new Set(entriesForRow.map(e => e && e.date ? fmtDMY(e.date) : '').filter(Boolean))].join(' | ')
         : '';
       const detailsVal = detailsFromEntries ? esc(detailsFromEntries) : (get(r.key, 'details') || esc(op.time));
-      // Ready to Delivery Qty holds two independent station values --
-      // unit cartons produced (delivered_cartons_qty, left) and the
-      // packets/cartons shipping unit (ready_packets_qty, right).
-      // Rendered below as TWO separate inputs so the packets side can be
-      // yellow-highlighted on its own -- CSS can't tint half of a single
-      // input's value. Row-template branch further down handles the
-      // delivered_cartons_qty case specially; qtyDisplay is only used
-      // for every OTHER row.
-      const qtyDisplay = get(r.key, 'quantity');
-      const isDelvRow = r.key === 'delivered_cartons_qty';
-      const delvCartons = isDelvRow ? esc(String(raw(r.key, 'quantity') || '').trim()) : '';
-      const delvPackets = isDelvRow ? esc(String(raw('ready_packets_qty', 'quantity') || '').trim()) : '';
+      // Ready to Delivery Qty row joins two station fields — cartons on
+      // the left of the pipe, packets/cartons on the right — so a single
+      // Quantity cell reads e.g. "20000 | 6" without cluttering the table
+      // with a second row. Admin edits the joined string directly; the
+      // station form still writes the two keys separately (used by
+      // reports and by the delivery-cap check).
+      let qtyDisplay = get(r.key, 'quantity');
+      if (r.key === 'delivered_cartons_qty') {
+        const cartons = String(raw(r.key, 'quantity') || '').trim();
+        const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
+        qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
+      }
       // Wire the Name input to the stage's shared machines datalist,
       // and the Signature input to a per-row persons datalist that
       // gets rebuilt whenever Name changes (via refreshRowPersonsList).
@@ -16141,13 +16128,7 @@ function particularsTable(p, job) {
         <input type="text" id="p-${r.key}-details" value="${detailsVal}">
         <button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>
       </td>
-      <td>${isDelvRow
-        ? `<div class="jc-delv-qty-wrap">
-            <input type="text" id="p-delivered_cartons_qty-quantity" value="${delvCartons}" title="Unit Cartons Qty" placeholder="unit cartons">
-            <span class="jc-delv-qty-sep">|</span>
-            <input type="text" id="p-ready_packets_qty-quantity" class="jc-packets-input" value="${delvPackets}" title="Packets / Cartons" placeholder="packets">
-          </div>`
-        : `<input type="text" id="p-${r.key}-quantity" value="${qtyDisplay}">`}</td>
+      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>
     </tr>`;
@@ -17836,35 +17817,17 @@ function collectParticulars() {
     if (CTP_PARTICULARS_KEYS.has(r.key)) return;
     const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
     const rowPatch = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
-    // Ready to Delivery Qty now renders TWO separate inputs (unit
-    // cartons + packets). Read from the standalone packets input
-    // directly. Fallback path handles the (rare) legacy case where the
-    // Quantity cell still contains a joined "cartons | packets" string
-    // -- e.g. an admin's cached page open from before the split shipped
-    // POSTing back the joined value, or paste-in of an old export --
-    // so we still round-trip cleanly instead of dropping the packets.
-    if (r.key === 'delivered_cartons_qty') {
-      const priorRP = (priorParticularsCP.ready_packets_qty && typeof priorParticularsCP.ready_packets_qty === 'object')
-        ? priorParticularsCP.ready_packets_qty : {};
-      const pktEl = document.getElementById('p-ready_packets_qty-quantity');
-      if (pktEl) {
-        const pkt = (pktEl.value || '').trim();
-        const priorPkt = String((priorRP && priorRP.quantity) || '').trim();
-        // Only emit when the user actually changed the value. Skipping
-        // no-op saves means the server-side preserve-prior fallback
-        // (see the "if (!out.ready_packets_qty && priorP.ready_packets_qty)"
-        // branch further down) keeps the existing row and its entries[]
-        // intact. Emitting {quantity: ''} on every save would slowly
-        // overwrite priors -- the wrong default.
-        if (pkt !== priorPkt) out.ready_packets_qty = { ...priorRP, quantity: pkt };
-      } else if (rowPatch.quantity.includes('|')) {
-        // Legacy fallback: cached page open from before the split shipped
-        // (or an old export replay) still submits the joined "cartons |
-        // packets" string. Parse it out so we don't drop the packets.
-        const [cartonsPart, packetsPart] = rowPatch.quantity.split('|').map(s => s.trim());
-        rowPatch.quantity = cartonsPart || '';
-        const pkt = (packetsPart || '').trim();
-        if (pkt) out.ready_packets_qty = { ...priorRP, quantity: pkt };
+    // Ready to Delivery Qty is a joined "cartons | packets" input. Split
+    // it back into the two underlying particulars keys so the value the
+    // station wrote (and any admin edit) round-trips cleanly.
+    if (r.key === 'delivered_cartons_qty' && rowPatch.quantity.includes('|')) {
+      const [cartonsPart, packetsPart] = rowPatch.quantity.split('|').map(s => s.trim());
+      rowPatch.quantity = cartonsPart || '';
+      const pkt = (packetsPart || '').trim();
+      if (pkt) {
+        const priorRP = (priorParticularsCP.ready_packets_qty && typeof priorParticularsCP.ready_packets_qty === 'object')
+          ? priorParticularsCP.ready_packets_qty : {};
+        out.ready_packets_qty = { ...priorRP, quantity: pkt };
       }
     }
     const priorRow = (priorParticularsCP[r.key] && typeof priorParticularsCP[r.key] === 'object')
