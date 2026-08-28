@@ -1813,6 +1813,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   align-content: center;
 }
 .stickers-sheet.size-4x3 .stickers-sheet-grid { grid-template-rows: 2.5in; }
+.stickers-sheet.size-a4-6 .stickers-sheet-grid {
+  grid-template-columns: 3.5in 3.5in;
+  grid-template-rows: 2.5in 2.5in 2.5in;
+}
 @media print {
   .stickers-sheet {
     /* Explicit label size — 100vh drifts between browsers under
@@ -1830,6 +1834,11 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     break-after: auto;
   }
   .stickers-sheet.size-4x3 { height: 3in; }
+  .stickers-sheet.size-a4-6 {
+    width: 7in;
+    height: 7.5in;
+    justify-content: flex-start;
+  }
 }
 .pc-watermark {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -2380,6 +2389,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
           <select id="stk-size" class="stk-input" onchange="renderStickerPreview()">
             <option value="4x4">4 × 4 inches</option>
             <option value="4x3">4 × 3 inches</option>
+            <option value="a4-6">A4 sheet — 6 stickers (2 × 3)</option>
           </select>
         </div>
       </div>
@@ -14436,7 +14446,7 @@ const STICKER_ICONS = {
 
 function buildStickerHTML(opts) {
   // opts: { despatch, po, desc, qty, caseNo, caseTotal, date }
-  const sizeClass = opts.size === '4x3' ? ' sticker-4x3' : '';
+  const sizeClass = (opts.size === '4x3' || opts.size === 'a4-6') ? ' sticker-4x3' : '';
   return `
     <div class="sticker${sizeClass}">
       <div class="sticker-header">
@@ -14537,9 +14547,9 @@ function printStickers() {
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
 
-  // Zebra ZT411 feeds one die-cut 4in × 4in label at a time — one
-  // sticker per "sheet"/page now, not a 2×3 multi-up grid.
-  const STICKERS_PER_SHEET = 1;
+  // Die-cut labels print one per page; the restored A4 option prints the
+  // original six stickers in a 2-column × 3-row grid.
+  const STICKERS_PER_SHEET = size === 'a4-6' ? 6 : 1;
   const all = [];
   for (let i = validFrom; i <= validTo; i++) {
     const qty = getStickerQtyForCase(i);
@@ -14551,7 +14561,7 @@ function printStickers() {
   const sheets = [];
   for (let i = 0; i < all.length; i += STICKERS_PER_SHEET) {
     sheets.push(
-      `<div class="stickers-sheet${size === '4x3' ? ' size-4x3' : ''}">` +
+      `<div class="stickers-sheet${size === '4x3' ? ' size-4x3' : (size === 'a4-6' ? ' size-a4-6' : '')}">` +
         `<div class="stickers-sheet-spacer-top"></div>` +
         `<div class="stickers-sheet-grid">${all.slice(i, i + STICKERS_PER_SHEET).join('')}</div>` +
         `<div class="stickers-sheet-spacer-bottom"></div>` +
@@ -14580,12 +14590,17 @@ function printStickers() {
   // clipped. Overriding #print-area's width + padding for THIS print run
   // pins each label flush to the page origin so every one prints
   // identically.
+  const isA4Six = size === 'a4-6';
   const pageHeight = size === '4x3' ? '3in' : '4in';
-  stkPageStyle.textContent =
-    '@media print {' +
-    '  @page { size: 4in ' + pageHeight + '; margin: 0; }' +
-    '  #print-area { width: 4in !important; padding: 0 !important; }' +
-    '}';
+  stkPageStyle.textContent = isA4Six
+    ? '@media print {' +
+      '  @page { size: A4 portrait; margin: 0; }' +
+      '  #print-area { width: 210mm !important; padding: 8mm 10mm !important; }' +
+      '}'
+    : '@media print {' +
+      '  @page { size: 4in ' + pageHeight + '; margin: 0; }' +
+      '  #print-area { width: 4in !important; padding: 0 !important; }' +
+      '}';
   document.head.appendChild(stkPageStyle);
   // Same title-blank trick the job-card printer uses so the browser's
   // default page header ("Job Tracker Supreme Art") doesn't print on
