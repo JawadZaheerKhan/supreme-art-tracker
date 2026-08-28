@@ -1733,6 +1733,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   -webkit-print-color-adjust: exact !important;
   print-color-adjust: exact !important;
 }
+.sticker.sticker-4x3 { height: 2.5in; }
+.sticker.sticker-sheet-6 { width: 3.3in; height: 2.8in; }
 .sticker-header { display: flex; align-items: stretch; border-bottom: 2.5px solid #000; padding: 6px 6px; gap: 8px; flex: 0 0 auto; }
 .sticker-header-divider { width: 2px; background: #000; flex: 0 0 auto; }
 .sticker-header-right { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; gap: 2px; overflow: hidden; }
@@ -1751,6 +1753,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   -webkit-print-color-adjust: exact !important;
   print-color-adjust: exact !important;
 }
+.sticker.sticker-4x3 .sticker-header { padding: 3px 6px; flex: 0 0 50px; height: 50px; box-sizing: border-box; }
+.sticker.sticker-4x3 .sticker-header-right { gap: 0; }
+.sticker.sticker-4x3 .sticker-logo { height: 40px; }
 /* Brand stacks onto its own lines (Supreme Art / Private Limited / Date)
    instead of sharing a line's width with anything else — the wider logo
    above leaves much less horizontal room, and stacking sidesteps needing
@@ -1808,6 +1813,12 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   justify-content: center;
   align-content: center;
 }
+.stickers-sheet.size-4x3 .stickers-sheet-grid { grid-template-rows: 2.5in; }
+.stickers-sheet.size-sheet-6 .stickers-sheet-grid {
+  grid-template-columns: 3.3in 3.3in;
+  grid-template-rows: 2.8in 2.8in 2.8in;
+  gap: 0.1in;
+}
 @media print {
   .stickers-sheet {
     /* Explicit label size — 100vh drifts between browsers under
@@ -1823,6 +1834,11 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   .stickers-sheet:last-child {
     page-break-after: auto;
     break-after: auto;
+  }
+  .stickers-sheet.size-4x3 { height: 3in; }
+  .stickers-sheet.size-sheet-6 {
+    width: 7.5in;
+    height: 10in;
   }
 }
 .pc-watermark {
@@ -2364,9 +2380,19 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <input type="text" id="stk-desc" class="stk-input stk-readonly" readonly placeholder="Auto-filled from job" oninput="renderStickerPreview()">
       </div>
 
-      <div class="stk-row">
-        <label class="stk-label">Date</label>
-        <input type="date" id="stk-date" class="stk-input" style="max-width:240px;" oninput="renderStickerPreview()">
+      <div class="stk-grid2">
+        <div class="stk-row">
+          <label class="stk-label">Date</label>
+          <input type="date" id="stk-date" class="stk-input" oninput="renderStickerPreview()">
+        </div>
+        <div class="stk-row">
+          <label class="stk-label">Sticker Size</label>
+          <select id="stk-size" class="stk-input" onchange="renderStickerPreview()">
+            <option value="4x4">4 × 4 inches</option>
+            <option value="4x3">4 × 3 inches</option>
+            <option value="sheet-6">7.5 × 10-inch sheet — 6 stickers (2 × 3)</option>
+          </select>
+        </div>
       </div>
 
       <!-- Variants — one row per (qty-per-carton + total-cases) pair.
@@ -14421,8 +14447,11 @@ const STICKER_ICONS = {
 
 function buildStickerHTML(opts) {
   // opts: { despatch, po, desc, qty, caseNo, caseTotal, date }
+  const sizeClass = opts.size === '4x3'
+    ? ' sticker-4x3'
+    : (opts.size === 'sheet-6' ? ' sticker-sheet-6' : '');
   return `
-    <div class="sticker">
+    <div class="sticker${sizeClass}">
       <div class="sticker-header">
         <div class="sticker-logo" role="img" aria-label="Supreme Art"></div>
         <div class="sticker-header-divider"></div>
@@ -14460,6 +14489,7 @@ function renderStickerPreview() {
   const po       = document.getElementById('stk-po').value.trim();
   const desc     = document.getElementById('stk-desc').value.trim();
   const date     = document.getElementById('stk-date').value;
+  const size     = document.getElementById('stk-size')?.value || '4x4';
   const total    = getStickerTotalCases();
   const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
   const to       = +document.getElementById('stk-to').value || total;
@@ -14485,7 +14515,7 @@ function renderStickerPreview() {
   }
 
   previewBox.innerHTML = buildStickerHTML({
-    despatch, po, desc, qty: previewQty, date,
+    despatch, po, desc, qty: previewQty, date, size,
     caseNo: validFrom,
     caseTotal: total,
   });
@@ -14498,6 +14528,7 @@ function printStickers() {
   const po       = document.getElementById('stk-po').value.trim();
   const desc     = document.getElementById('stk-desc').value.trim();
   const date     = document.getElementById('stk-date').value;
+  const size     = document.getElementById('stk-size')?.value || '4x4';
   const total    = getStickerTotalCases();
   const from     = Math.max(1, +document.getElementById('stk-from').value || 1);
   const to       = +document.getElementById('stk-to').value || total;
@@ -14519,21 +14550,21 @@ function printStickers() {
   const validFrom = Math.min(Math.max(1, from), total);
   const validTo   = Math.min(Math.max(validFrom, to), total);
 
-  // Zebra ZT411 feeds one die-cut 4in × 4in label at a time — one
-  // sticker per "sheet"/page now, not a 2×3 multi-up grid.
-  const STICKERS_PER_SHEET = 1;
+  // Die-cut labels print one per page; the restored 7.5in × 10in sheet
+  // prints the original six stickers in a 2-column × 3-row grid.
+  const STICKERS_PER_SHEET = size === 'sheet-6' ? 6 : 1;
   const all = [];
   for (let i = validFrom; i <= validTo; i++) {
     const qty = getStickerQtyForCase(i);
     all.push(buildStickerHTML({
-      despatch, po, desc, qty, date,
+      despatch, po, desc, qty, date, size,
       caseNo: i, caseTotal: total,
     }));
   }
   const sheets = [];
   for (let i = 0; i < all.length; i += STICKERS_PER_SHEET) {
     sheets.push(
-      `<div class="stickers-sheet">` +
+      `<div class="stickers-sheet${size === '4x3' ? ' size-4x3' : (size === 'sheet-6' ? ' size-sheet-6' : '')}">` +
         `<div class="stickers-sheet-spacer-top"></div>` +
         `<div class="stickers-sheet-grid">${all.slice(i, i + STICKERS_PER_SHEET).join('')}</div>` +
         `<div class="stickers-sheet-spacer-bottom"></div>` +
@@ -14552,7 +14583,7 @@ function printStickers() {
   document.querySelectorAll('#__jc-print-page, #__stk-print-page').forEach(el => el.remove());
   const stkPageStyle = document.createElement('style');
   stkPageStyle.id = '__stk-print-page';
-  // Zebra ZT411 label is 4in × 4in. Explicit in-inches @page keeps the
+  // Explicit inch-based page size keeps the Zebra from falling back to
   // printer from falling back to Letter/A4.
   //
   // #print-area is styled for A4 (210mm wide, 8mm × 10mm padding) in the
@@ -14562,11 +14593,17 @@ function printStickers() {
   // clipped. Overriding #print-area's width + padding for THIS print run
   // pins each label flush to the page origin so every one prints
   // identically.
-  stkPageStyle.textContent =
-    '@media print {' +
-    '  @page { size: 4in 4in; margin: 0; }' +
-    '  #print-area { width: 4in !important; padding: 0 !important; }' +
-    '}';
+  const isSixSheet = size === 'sheet-6';
+  const pageHeight = size === '4x3' ? '3in' : '4in';
+  stkPageStyle.textContent = isSixSheet
+    ? '@media print {' +
+      '  @page { size: 7.5in 10in; margin: 0; }' +
+      '  #print-area { width: 7.5in !important; padding: 0 !important; }' +
+      '}'
+    : '@media print {' +
+      '  @page { size: 4in ' + pageHeight + '; margin: 0; }' +
+      '  #print-area { width: 4in !important; padding: 0 !important; }' +
+      '}';
   document.head.appendChild(stkPageStyle);
   // Same title-blank trick the job-card printer uses so the browser's
   // default page header ("Job Tracker Supreme Art") doesn't print on
