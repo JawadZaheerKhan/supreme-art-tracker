@@ -4186,7 +4186,16 @@ function renderJobRowCompact(j, opts) {
     // (Low / Medium / High / Most Urgent) is mapped by normalizePriority.
     const priNorm = normalizePriority(j.priority);
     const pc = priNorm === 'Urgent' ? 'p-urgent' : 'p-normal';
-    const readyQtyForTile = readyCartonsTotal(j) || (isPartialReady(j) ? pastedCartonsTotal(j) : 0);
+    // Mirror the job card's joined Ready to Delivery Qty exactly:
+    // ready unit cartons on the left, packets/cartons on the right.
+    const tileParts = j.particulars || {};
+    const readyCartonsRaw = String((tileParts.delivered_cartons_qty || {}).quantity || '').trim();
+    const readyPacketsRaw = String((tileParts.ready_packets_qty || {}).quantity || '').trim();
+    const readyFallback = readyCartonsTotal(j) || (isPartialReady(j) ? pastedCartonsTotal(j) : 0);
+    const readyCartonsText = readyCartonsRaw || (readyFallback ? String(readyFallback) : '');
+    const readyQtyForTile = readyPacketsRaw
+      ? `${readyCartonsText} | ${readyPacketsRaw}`
+      : readyCartonsText;
     // Right-side panel holds only the Cut-to / offcut information.
     const sidePanel = j.cut_size
       ? `<div class="job-side"><div><div class="lbl">Cut to</div><div class="val">${esc(j.cut_size)}${j.offcut_size?` <span style="font-weight:500;">(offcut ${esc(j.offcut_size)})</span>`:''}</div></div></div>`
@@ -4216,7 +4225,7 @@ function renderJobRowCompact(j, opts) {
           <div class="job-facts">
             ${j.qty?`<span><b>${isGroupTile?'Mil':'PO'} Qty:</b> ${esc(j.qty)} pcs</span>`:''}
             ${j.ref?`<span><b>PO No.:</b> ${esc(j.ref)}</span>`:''}
-            ${readyQtyForTile?`<span><b>Ready to Deliver Qty:</b> ${readyQtyForTile.toLocaleString()}</span>`:''}
+            ${readyQtyForTile?`<span><b>Ready to Deliver Qty:</b> ${esc(readyQtyForTile)}</span>`:''}
             ${j.deadline?`<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
           </div>
           ${note?`<div class="job-notes">${esc(note)}</div>`:''}
