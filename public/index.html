@@ -3009,18 +3009,17 @@ function resolveJobForClient(id) {
 function linkedJobBadgeHtml(j, clientPreview) {
   if (!j || !j.linked_job_id) return '';
   const lid = j.linked_job_id;
-  // Always clickable now. Admin/PM view opens the linked job's edit modal;
-  // client (or admin's Client-View preview) opens the linked partner in a
-  // floating "compare" side-panel so both linked tiles are visible at once
-  // (they were printed together to share cost — usually looked at together).
-  // openLinkedJobCompare falls back to a scroll+toast if the partner isn't
-  // rendered in this filtered view.
-  const click = clientPreview
-    ? ` onclick="event.stopPropagation();openLinkedJobCompare(${lid})"`
-    : ` onclick="event.stopPropagation();openEdit(${lid})"`;
+  // Always clickable now. Both admin (Jobs tab) and client (Client View)
+  // open the linked partner in a floating "compare" side-panel so both
+  // linked tiles are visible at once (they were printed together to
+  // share cost — usually looked at together). From the side panel the
+  // admin can still click Edit/View on the linked tile to open its full
+  // modal. openLinkedJobCompare falls back to a scroll+toast if the
+  // partner isn't rendered in the current filtered view.
+  const click = ` onclick="event.stopPropagation();openLinkedJobCompare(${lid})"`;
   const title = clientPreview
     ? `Linked with Job E-${lid} — click to open side-by-side compare (click again to close)`
-    : `Linked with Job E-${lid} — printed together to share cost`;
+    : `Linked with Job E-${lid} — click to open side-by-side compare (click again to close). Click Edit/View inside the side panel to open its full modal.`;
   return `<span class="badge" title="${title}"${click} style="background:#ede9fe;color:#5b21b6;font-weight:700;letter-spacing:0.02em;cursor:pointer;">&#128279; E-${lid}</span>`;
 }
 // Break down a partial-delivery job into three visible buckets:
@@ -4752,8 +4751,20 @@ function renderJobCard(j, opts) {
         ? `<div style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span class="job-id" title="Job Card No.">E-${j.id}</span>${linkChipClient}</div>`
         : (adminToggle ? `<div style="display:flex;justify-content:flex-end;margin-bottom:2px;">${adminToggle}</div>` : ''));
 
+  // Admin (non-clientPreview, non-group) tiles: clicking anywhere in the
+  // tile body opens the Edit/View modal — same as clicking the Edit
+  // button. Clicks on interactive controls (buttons, inputs, labels,
+  // stage dots, the linked badge, ⋯ menu, checkboxes) are ignored via
+  // onJobTileClick so they keep doing their own thing. clientPreview
+  // tiles never get this — clients don't have openEdit, and their linked
+  // badge already opens the side-compare panel via its own onclick.
+  // clientTintStyle and tileAttr are mutually exclusive (tint fires only
+  // under clientPreview; tileAttr only when !clientPreview).
+  const tileAttr = (!clientPreview && !isGroupTile)
+    ? ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;" title="Click to open Job Card"`
+    : clientTintStyle;
   return `
-  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${clientTintStyle}>
+  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${tileAttr}>
     ${sideStats}
     ${clientTopRow}
     <div class="tile-head">
@@ -22577,6 +22588,35 @@ function renderClientJobs() {
 // briefly highlights that job's tile further down the page. jobId is the
 // tile's own id — for a Mil Products (group) row that's the representative
 // sub job's id, since the group tile is built from that job's DOM node.
+// Whole-tile click handler for the admin Jobs tab. Opens the job's edit
+// modal, but only when the click didn't originate from an interactive
+// control inside the tile — buttons, inputs, labels, selects, textareas,
+// details/summary and any element carrying its own onclick (stage dots,
+// the linked-compare badge, the ⋯ menu, the paper-issue button, etc.)
+// keep doing their own thing. Also ignores clicks whose target is the
+// tile's own writable inner areas (checkbox for bulk-select).
+function onJobTileClick(e, jobId) {
+  const t = e.target;
+  if (!t || t === null) return;
+  // .job-tile itself carries the onclick — closest('[onclick]') would
+  // match the tile itself and swallow every click. Only bail when the
+  // interactive element is INSIDE the tile, not the tile itself.
+  const tile = t.closest('.job-tile');
+  const interactive = t.closest('button, a, input, label, select, textarea, details, summary, [contenteditable="true"]');
+  if (interactive && interactive !== tile) return;
+  // Anything else with its own onclick strictly INSIDE the tile — e.g.
+  // the linked-badge <span onclick="..."> and stage badges — has already
+  // called stopPropagation, so this handler wouldn't fire for them. Belt
+  // and braces: if an inner element with its own onclick somehow forgot
+  // to stop, still respect it.
+  let n = t;
+  while (n && n !== tile) {
+    if (n.hasAttribute && n.hasAttribute('onclick')) return;
+    n = n.parentElement;
+  }
+  openEdit(jobId);
+}
+
 function scrollToClientTile(jobId) {
   const el = document.getElementById('cv-tile-' + jobId);
   if (!el) { notify("Couldn't find that job's tile — try Refresh."); return; }
