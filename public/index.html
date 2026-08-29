@@ -498,11 +498,12 @@
     background: #f8fafc;
     flex: 1 1 auto;
   }
-  /* The cloned tile inside the panel already carries its own styling; just
-     make sure it fills the panel width and can't spill horizontally. */
-  .cv-compare-body > * { width: 100%; max-width: 100%; box-sizing: border-box; }
+  /* The cloned tile keeps its natural width (matched to the live tile in
+     JS); no width override here — forcing 100% stretched it visibly. */
+  .cv-compare-body > * { box-sizing: border-box; margin: 0 auto; }
   @media (max-width: 640px) {
     .cv-compare-panel { top: 12px; right: 12px; left: 12px; width: auto; max-height: calc(100vh - 24px); }
+    .cv-compare-body > * { max-width: 100%; }
   }
   .ledger-pos      { color: #166534; font-weight: 600; }
   .ledger-neg      { color: #A32D2D; font-weight: 600; }
@@ -22608,11 +22609,26 @@ function openLinkedJobCompare(jobId) {
     // Second click on the same linked badge closes the panel.
     if (String(showing) === String(jobId)) return;
   }
+  // Match the live tile's natural rendered width so the clone in the
+  // panel looks identical to a normal tile, not stretched to fit the
+  // panel. Fall back to a sensible desktop tile width if measurement
+  // fails (element hidden, zero-width, etc.).
+  const srcRect = src.getBoundingClientRect();
+  const tileW = Math.max(240, Math.round(srcRect.width) || 340);
   const panel = document.createElement('div');
   panel.id = 'cv-compare-panel';
   panel.className = 'cv-compare-panel';
   panel.setAttribute('data-job-id', String(jobId));
+  // Panel width = tile width + horizontal padding of the body (12px * 2).
+  // Cap at viewport width - 24px so it can't overflow on narrow desktops.
+  const panelW = Math.min(tileW + 24, Math.max(240, window.innerWidth - 24));
+  panel.style.width = panelW + 'px';
   const clone = src.cloneNode(true);
+  // Lock the clone to the source tile's natural width; do NOT let it
+  // stretch to fill the panel body.
+  clone.style.width = tileW + 'px';
+  clone.style.maxWidth = tileW + 'px';
+  clone.style.flex = '0 0 auto';
   // Strip ids in the clone so no id collides with the live tile still
   // rendered on the page (querySelector('#cv-tile-<id>') must keep
   // resolving to the original).
