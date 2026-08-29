@@ -448,6 +448,62 @@
     0%, 40%  { box-shadow: 0 0 0 3px var(--brand); }
     100%     { box-shadow: 0 0 0 3px transparent; }
   }
+  /* Floating side panel for the linked-job "compare" view. Fixed to the
+     right of the viewport so the original tile stays visible on the left.
+     On narrow screens it becomes a near-full-width overlay near the top
+     (side-by-side isn't meaningful there — the toggle still lets the
+     user flip back). Panel body scrolls inside itself. */
+  .cv-compare-panel {
+    position: fixed;
+    top: 64px;
+    right: 12px;
+    width: min(480px, calc(100vw - 24px));
+    max-height: calc(100vh - 88px);
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: 0 24px 48px -12px rgba(15, 23, 42, 0.28), 0 12px 24px -8px rgba(15, 23, 42, 0.20);
+    z-index: 9500;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: cvCompareSlide 0.22s ease-out;
+  }
+  @keyframes cvCompareSlide {
+    from { transform: translateX(24px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+  .cv-compare-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+    border-bottom: 1px solid #e5e7eb;
+    font-weight: 700; color: #334155; font-size: 13px; letter-spacing: 0.02em;
+  }
+  .cv-compare-head .cv-compare-title { display: flex; align-items: center; gap: 8px; }
+  .cv-compare-head .cv-compare-title .badge {
+    background: #ede9fe; color: #5b21b6; font-weight: 700; letter-spacing: 0.02em;
+    padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  }
+  .cv-compare-close {
+    background: transparent; border: 0; cursor: pointer;
+    width: 28px; height: 28px; border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #64748b; font-size: 18px; line-height: 1;
+  }
+  .cv-compare-close:hover { background: rgba(163, 45, 45, 0.08); color: #A32D2D; }
+  .cv-compare-body {
+    padding: 12px;
+    overflow-y: auto;
+    background: #f8fafc;
+    flex: 1 1 auto;
+  }
+  /* The cloned tile inside the panel already carries its own styling; just
+     make sure it fills the panel width and can't spill horizontally. */
+  .cv-compare-body > * { width: 100%; max-width: 100%; box-sizing: border-box; }
+  @media (max-width: 640px) {
+    .cv-compare-panel { top: 12px; right: 12px; left: 12px; width: auto; max-height: calc(100vh - 24px); }
+  }
   .ledger-pos      { color: #166534; font-weight: 600; }
   .ledger-neg      { color: #A32D2D; font-weight: 600; }
   .ledger-reversal { color: #9a3412; font-weight: 600; }   /* orange — reversal/undo entry */
@@ -2953,14 +3009,16 @@ function linkedJobBadgeHtml(j, clientPreview) {
   if (!j || !j.linked_job_id) return '';
   const lid = j.linked_job_id;
   // Always clickable now. Admin/PM view opens the linked job's edit modal;
-  // client (or admin's Client-View preview) scrolls to the linked partner's
-  // tile in the same client view via scrollToClientTile (falls back to a
-  // toast if the partner isn't visible in this client's filtered view).
+  // client (or admin's Client-View preview) opens the linked partner in a
+  // floating "compare" side-panel so both linked tiles are visible at once
+  // (they were printed together to share cost — usually looked at together).
+  // openLinkedJobCompare falls back to a scroll+toast if the partner isn't
+  // rendered in this filtered view.
   const click = clientPreview
-    ? ` onclick="event.stopPropagation();scrollToClientTile(${lid})"`
+    ? ` onclick="event.stopPropagation();openLinkedJobCompare(${lid})"`
     : ` onclick="event.stopPropagation();openEdit(${lid})"`;
   const title = clientPreview
-    ? `Linked with Job E-${lid} — click to jump to that job's tile`
+    ? `Linked with Job E-${lid} — click to open side-by-side compare (click again to close)`
     : `Linked with Job E-${lid} — printed together to share cost`;
   return `<span class="badge" title="${title}"${click} style="background:#ede9fe;color:#5b21b6;font-weight:700;letter-spacing:0.02em;cursor:pointer;">&#128279; E-${lid}</span>`;
 }
@@ -22526,6 +22584,76 @@ function scrollToClientTile(jobId) {
   void el.offsetWidth; // restart the animation if the same tile was just flashed
   el.classList.add('cv-tile-jump-flash');
   setTimeout(() => el.classList.remove('cv-tile-jump-flash'), 1600);
+}
+
+// Compare-side-panel for the linked-job badge in Client View. The client
+// wants to see BOTH linked jobs at once (they share cost / printed
+// together), so instead of scrolling the page we clone the partner's
+// tile into a fixed panel on the right side of the viewport. Clicking
+// the same linked badge again closes the panel (toggle). Falls back to
+// a scroll-and-flash if the partner tile isn't rendered in this
+// filtered view (different client, hidden by a filter, etc.).
+function openLinkedJobCompare(jobId) {
+  const src = document.getElementById('cv-tile-' + jobId);
+  if (!src) {
+    // Nothing to clone — behave like the old scroll helper so the user at
+    // least gets the "not visible" toast rather than a silent no-op.
+    scrollToClientTile(jobId);
+    return;
+  }
+  const existing = document.getElementById('cv-compare-panel');
+  if (existing) {
+    const showing = existing.getAttribute('data-job-id');
+    existing.remove();
+    // Second click on the same linked badge closes the panel.
+    if (String(showing) === String(jobId)) return;
+  }
+  const panel = document.createElement('div');
+  panel.id = 'cv-compare-panel';
+  panel.className = 'cv-compare-panel';
+  panel.setAttribute('data-job-id', String(jobId));
+  const clone = src.cloneNode(true);
+  // Strip ids in the clone so no id collides with the live tile still
+  // rendered on the page (querySelector('#cv-tile-<id>') must keep
+  // resolving to the original).
+  clone.removeAttribute('id');
+  clone.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
+  // Also drop any linked-badge inside the clone so it can't recursively
+  // open another panel targeting the original job.
+  clone.querySelectorAll('span.badge[onclick*="openLinkedJobCompare"], span.badge[onclick*="scrollToClientTile"]').forEach(n => {
+    n.removeAttribute('onclick');
+    n.style.cursor = 'default';
+  });
+  const head = document.createElement('div');
+  head.className = 'cv-compare-head';
+  head.innerHTML = `
+    <span class="cv-compare-title">
+      <span>Compare with</span>
+      <span class="badge">&#128279; E-${jobId}</span>
+    </span>
+    <button type="button" class="cv-compare-close" title="Close (Esc)" aria-label="Close compare panel">&times;</button>
+  `;
+  head.querySelector('.cv-compare-close').addEventListener('click', () => panel.remove());
+  const body = document.createElement('div');
+  body.className = 'cv-compare-body';
+  body.appendChild(clone);
+  panel.appendChild(head);
+  panel.appendChild(body);
+  document.body.appendChild(panel);
+  // Esc closes.
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      panel.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+  document.addEventListener('keydown', onKey);
+  // Briefly flash the ORIGINAL tile on the page too, so the eye can find
+  // it once the panel is open — same visual cue as the old scroll jump.
+  src.classList.remove('cv-tile-jump-flash');
+  void src.offsetWidth;
+  src.classList.add('cv-tile-jump-flash');
+  setTimeout(() => src.classList.remove('cv-tile-jump-flash'), 1600);
 }
 
 // Plain-value snapshot of the last renderClientSummary() call per
