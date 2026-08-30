@@ -926,6 +926,8 @@
   .job-tile.is-client-preview .sm-coating-svg .sm { animation-play-state: running; }
   .sm-ctp-svg { height: 108px; }
   .job-tile.is-client-preview .sm-ctp-svg .sm { animation-play-state: running; }
+  .sm-pasting-svg { height: 108px; }
+  .job-tile.is-client-preview .sm-pasting-svg .sm { animation-play-state: running; }
   .sm-delivery-lottie {
     width: 100%; height: 140px; display: block; object-fit: contain;
     position: relative; z-index: 1;
@@ -1111,6 +1113,25 @@
     75% { opacity: 0.8; }
     100% { transform: translateX(42px); opacity: 0; }
   }
+  .sm-paste-blank-in { animation: smPasteBlankIn 3s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+  @keyframes smPasteBlankIn {
+    0% { transform: translateX(0); opacity: 0; }
+    7% { opacity: 1; }
+    52%,100% { transform: translateX(58px); opacity: 0; }
+  }
+  .sm-paste-fold-stage { animation: smPasteFoldStage 3s ease-in-out infinite; }
+  @keyframes smPasteFoldStage { 0%,25%,88%,100% { opacity: 0; } 34%,78% { opacity: 1; } }
+  .sm-paste-flap-l { transform-box: fill-box; transform-origin: right center; animation: smPasteFlap 3s ease-in-out infinite; }
+  .sm-paste-flap-r { transform-box: fill-box; transform-origin: left center; animation: smPasteFlap 3s ease-in-out infinite; }
+  @keyframes smPasteFlap { 0%,38% { transform: scaleX(1); } 63%,100% { transform: scaleX(0.16); } }
+  .sm-paste-box-out { animation: smPasteBoxOut 3s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+  @keyframes smPasteBoxOut {
+    0%,64% { transform: translateX(0); opacity: 0; }
+    71% { opacity: 1; }
+    100% { transform: translateX(33px); opacity: 1; }
+  }
+  .sm-paste-belt { animation: smPasteBelt 0.7s linear infinite; }
+  @keyframes smPasteBelt { to { stroke-dashoffset: -8; } }
   .sm-ink-pulse { transform-box: fill-box; transform-origin: center; animation: smInkPulse 1.4s ease-in-out infinite; }
   @keyframes smInkPulse { 0%,100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.18); opacity: 1; } }
   .sm-gloss   { transform-box: fill-box; transform-origin: left center; animation: smGloss 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
@@ -5413,66 +5434,70 @@ function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked } 
           </g>
         </g>
       ` + close;
-    case 5: // Pasting — flat printed carton on the left folds into a 3D box on the right
-      // ── Visual story ─────────────────────────────────────────
-      // LEFT  : flat unfolded medicine-style carton with the main panel,
-      //         top + bottom dust flaps, and a side-glue panel. The side
-      //         panel uses sm-fold so it visibly folds inward (the gluing
-      //         step).
-      // MIDDLE: an arrow pointing right + an amber glue dab pulsing
-      //         (sm-glue) so the "paste" step is obvious.
-      // RIGHT : the same carton, now folded into a 3-face isometric box,
-      //         popping in with sm-carton's overshoot easing. The blue
-      //         curve + text bars from the flat panel wrap onto the
-      //         folded face so the SAME printed design is recognisable
-      //         in both states.
-      // ───────────────────────────────────────────────────────────
-      return open + `
-        <!-- LEFT: flat unfolded carton template -->
-        <g>
-          <!-- Main panel (this becomes the front face when folded) -->
-          <rect x="14" y="22" width="20" height="24" fill="#cfe2f6" stroke="${blue}" stroke-width="0.5"/>
-          <!-- Top dust flap -->
-          <rect x="14" y="15" width="20" height="7"  fill="#e8f1fa" stroke="${blue}" stroke-width="0.5"/>
-          <!-- Bottom dust flap -->
-          <rect x="14" y="46" width="20" height="7"  fill="#e8f1fa" stroke="${blue}" stroke-width="0.5"/>
-          <!-- Side glue panel — animates folding inward (the paste step) -->
-          <rect class="sm sm-fold" x="34" y="22" width="8" height="24" fill="#e8f1fa" stroke="${blue}" stroke-width="0.5" style="transform-origin:34px 34px"/>
-          <!-- Printed design on the main panel: blue curve + text bars -->
-          <path d="M16 28 Q24 24 32 28 L32 33 Q24 30 16 33 Z" fill="${blue}" opacity="0.7"/>
-          <rect x="17" y="35"   width="14" height="1.2" fill="${blue}"/>
-          <rect x="17" y="37.6" width="10" height="0.7" fill="${blue}" opacity="0.65"/>
-          <rect x="17" y="39.6" width="12" height="0.7" fill="${blue}" opacity="0.65"/>
-          <!-- Dashed fold lines so the score creases are visible -->
-          <g stroke="${blue}" stroke-width="0.3" stroke-dasharray="1.4 1" opacity="0.55">
-            <line x1="14" y1="22" x2="34" y2="22"/>
-            <line x1="14" y1="46" x2="34" y2="46"/>
-            <line x1="34" y1="22" x2="34" y2="46"/>
-          </g>
+    case 5: { // Automatic folder-gluer: flat blank in, glued carton out
+      const pastingOpen = `<svg class="sm-svg sm-pasting-svg" viewBox="0 0 160 70" xmlns="http://www.w3.org/2000/svg">`;
+      return pastingOpen + `
+        <!-- Long folder-gluer chassis and moving conveyor -->
+        <ellipse cx="82" cy="65" rx="72" ry="3" fill="#20282d" opacity="0.16"/>
+        <rect x="15" y="49" width="132" height="11" rx="2" fill="#65737b" stroke="#344149" stroke-width="0.7"/>
+        <line class="sm sm-paste-belt" x1="18" y1="52" x2="144" y2="52" stroke="#d8e1e5" stroke-width="2" stroke-dasharray="5 3"/>
+        <rect x="24" y="59" width="7" height="7" fill="#3d484e"/>
+        <rect x="130" y="59" width="7" height="7" fill="#3d484e"/>
+        <g fill="#3a464d" stroke="#1e282d" stroke-width="0.5">
+          <circle class="sm sm-spin" cx="28" cy="54" r="3"/><circle class="sm sm-spin-ccw" cx="52" cy="54" r="3"/>
+          <circle class="sm sm-spin" cx="108" cy="54" r="3"/><circle class="sm sm-spin-ccw" cx="134" cy="54" r="3"/>
         </g>
 
-        <!-- MIDDLE: arrow + pulsing glue dab -->
-        <g>
-          <path d="M48 34 L64 34" stroke="#5a5a55" stroke-width="1.1" stroke-linecap="round"/>
-          <path d="M61 30 L65 34 L61 38" stroke="#5a5a55" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-          <circle class="sm sm-glue" cx="56" cy="44" r="2.2" fill="${amber}"/>
+        <!-- Enclosed folding section with pressure belts -->
+        <path d="M45 18 L53 10 H113 L124 20 V50 H45 Z" fill="#ece8e2" stroke="#77736e" stroke-width="0.8"/>
+        <path d="M53 10 H113 L119 16 H49 Z" fill="#397dad" stroke="#245a7c" stroke-width="0.65"/>
+        <rect x="52" y="23" width="63" height="22" rx="2" fill="#303b41"/>
+        <path d="M55 27 L78 42 M112 27 L89 42" stroke="#82a8bd" stroke-width="3.5" stroke-linecap="round"/>
+        <path d="M55 29 L78 44 M112 29 L89 44" stroke="#dce6eb" stroke-width="0.8" stroke-dasharray="3 2"/>
+
+        <!-- Glue reservoir, hose and nozzle over the glue flap -->
+        <rect x="63" y="5" width="22" height="10" rx="2" fill="#f0b842" stroke="#8d5b14" stroke-width="0.65"/>
+        <path d="M74 15 C74 21 68 21 68 30" fill="none" stroke="#9a671d" stroke-width="1.6"/>
+        <path d="M65 29 H71 L69 34 H67 Z" fill="#a66b17"/>
+        <circle class="sm sm-glue" cx="68" cy="36" r="1.8" fill="#f0b842"/>
+
+        <!-- Control screen and status lights -->
+        <rect x="117" y="25" width="10" height="16" rx="1.5" fill="#3c474d"/>
+        <rect x="119" y="27" width="6" height="6" fill="#72d1f1"/>
+        <circle cx="120" cy="37" r="0.9" fill="#22a35a"/>
+        <circle cx="124" cy="37" r="0.9" fill="#e34b42"/>
+
+        <!-- FLAT DIE-CUT CARTON BLANK enters from the left -->
+        <g class="sm sm-paste-blank-in">
+          <path d="M3 38 H10 V34 H19 V38 H28 V34 H37 V38 H44 V48 H37 V52 H28 V48 H19 V52 H10 V48 H3 Z"
+                fill="#cfe2f6" stroke="#0C447C" stroke-width="0.7" stroke-linejoin="round"/>
+          <path d="M10 38 V48 M19 38 V48 M28 38 V48 M37 38 V48" stroke="#0C447C" stroke-width="0.45" stroke-dasharray="1.5 1"/>
+          <rect x="21" y="40" width="9" height="1.1" fill="#0C447C"/>
+          <rect x="21" y="42.5" width="13" height="0.8" fill="#d62593"/>
         </g>
 
-        <!-- RIGHT: folded 3D box — same printed design wraps onto it -->
-        <g class="sm sm-carton" style="transform-origin:90px 38px">
-          <!-- Front face -->
-          <path d="M74 26 L96 26 L96 56 L74 56 Z" fill="#cfe2f6" stroke="${blue}" stroke-width="0.6"/>
-          <!-- Top face (perspective) -->
-          <path d="M74 26 L80 20 L102 20 L96 26 Z" fill="#e8f1fa" stroke="${blue}" stroke-width="0.6"/>
-          <!-- Right side face (perspective) -->
-          <path d="M96 26 L102 20 L102 50 L96 56 Z" fill="${blueLt}" stroke="${blue}" stroke-width="0.6"/>
-          <!-- Printed design carried onto the front face -->
-          <path d="M76 32 Q85 28 94 32 L94 37 Q85 34 76 37 Z" fill="${blue}" opacity="0.7"/>
-          <rect x="77" y="39"   width="16" height="1.2" fill="${blue}"/>
-          <rect x="77" y="41.6" width="12" height="0.7" fill="${blue}" opacity="0.65"/>
-          <rect x="77" y="43.6" width="14" height="0.7" fill="${blue}" opacity="0.65"/>
+        <!-- Inside the machine, side panels fold inward over the glue seam -->
+        <g class="sm sm-paste-fold-stage">
+          <rect x="73" y="37" width="15" height="10" fill="#cfe2f6" stroke="#0C447C" stroke-width="0.6"/>
+          <rect class="sm sm-paste-flap-l" x="61" y="37" width="12" height="10" fill="#e6f0fa" stroke="#0C447C" stroke-width="0.6"/>
+          <rect class="sm sm-paste-flap-r" x="88" y="37" width="12" height="10" fill="#e6f0fa" stroke="#0C447C" stroke-width="0.6"/>
+          <rect x="74.5" y="39" width="8" height="1" fill="#0C447C"/>
+          <path d="M87 36 C88 38 88 43 87 46" stroke="#f0b842" stroke-width="1.4" fill="none"/>
+        </g>
+
+        <!-- FINISHED GLUED MEDICINE CARTON exits on the right -->
+        <g class="sm sm-paste-box-out">
+          <path d="M116 34 L137 34 L137 50 L116 50 Z" fill="#cfe2f6" stroke="#0C447C" stroke-width="0.7"/>
+          <path d="M116 34 L121 29 L142 29 L137 34 Z" fill="#edf5fb" stroke="#0C447C" stroke-width="0.7"/>
+          <path d="M137 34 L142 29 L142 45 L137 50 Z" fill="#85B7EB" stroke="#0C447C" stroke-width="0.7"/>
+          <path d="M118 38 Q126 35 135 38 L135 41 Q126 39 118 41 Z" fill="#0C447C" opacity="0.8"/>
+          <rect x="119" y="43" width="13" height="1" fill="#0C447C"/>
+          <rect x="119" y="45.5" width="9" height="0.7" fill="#d62593"/>
+          <!-- Amber seam confirms that the carton has been glued -->
+          <line x1="137" y1="35" x2="137" y2="49" stroke="#f0b842" stroke-width="1.1"/>
         </g>
       ` + close;
+    }
     case 6: // Finished — sheets stack from the bottom up with overshoot bounce
       // Client View loops only the opening operator-loading scene from
       // prakash sharma's free Logistics animation (Lottie Simple License).
