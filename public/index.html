@@ -953,7 +953,7 @@
     position: relative; z-index: 1; transform: scale(1.45);
     mix-blend-mode: multiply;
   }
-  .job-tile.is-client-preview .stage-machine img[class^="sm-"][class$="-lottie"] {
+  .job-tile .stage-machine img[class^="sm-"][class$="-lottie"] {
     --sm-rest-scale: 1;
     --sm-zoom-scale: 1.14;
     transform: scale(var(--sm-rest-scale));
@@ -978,22 +978,22 @@
     touch-action: manipulation;
     will-change: transform;
   }
-  .job-tile.is-client-preview .stage-machine .sm-new-job-lottie {
+  .job-tile .stage-machine .sm-new-job-lottie {
     --sm-rest-scale: 1.45;
     --sm-zoom-scale: 1.62;
   }
-  .job-tile.is-client-preview .stage-machine .sm-ready-lottie {
+  .job-tile .stage-machine .sm-ready-lottie {
     --sm-rest-scale: 1.2;
     --sm-zoom-scale: 1.36;
   }
   @media (hover: hover) and (pointer: fine) {
-    .job-tile.is-client-preview .stage-machine:hover img[class^="sm-"][class$="-lottie"],
+    .job-tile .stage-machine:hover img[class^="sm-"][class$="-lottie"],
     .job-tile .stage-machine:hover .sm-svg {
       transform: scale(var(--sm-zoom-scale));
     }
   }
   @media (hover: none), (pointer: coarse) {
-    .job-tile.is-client-preview .stage-machine:active img[class^="sm-"][class$="-lottie"],
+    .job-tile .stage-machine:active img[class^="sm-"][class$="-lottie"],
     .job-tile .stage-machine:active .sm-svg {
       transform: scale(var(--sm-zoom-scale));
       transition-duration: 90ms;
@@ -4749,12 +4749,12 @@ function renderJobCard(j, opts) {
   // The machine vignette reflects the current stage (or the pending pre-state).
   // If the job is mid-partial-delivery the label switches to "Partial
   // Delivery" so the icon area agrees with the amber PARTIAL badge above.
-  const stageLabel = (clientPreview && blocked) ? 'Blocked'
-    : (clientPreview && isNew) ? 'New Job' : pending ? 'Awaiting Stock'
+  const stageLabel = blocked ? 'Blocked'
+    : isNew ? 'New Job' : pending ? 'Awaiting Stock'
     : (partialDelv ? 'Partial Delivery' : STAGES[si]);
   const machine = `
     <div class="stage-machine">
-      ${stageMachineSVG(si, { pending, clientPreview, isNew, blocked })}
+      ${stageMachineSVG(si, { pending, clientPreview, isNew, blocked, enhancedAnimations: true })}
       <div class="sm-label">${esc(stageLabel)}</div>
     </div>`;
 
@@ -4975,20 +4975,21 @@ function closeJobMore(elInsideMenu) {
 // Build the inline SVG "machine" for a given stage index. When `pending`, a
 // clock pre-state is shown instead. Animated classes (.sm) are paused by CSS
 // until the tile is hovered. viewBox is a shared 120x70 canvas.
-function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked } = {}) {
+function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked, enhancedAnimations } = {}) {
   const open  = `<svg class="sm-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">`;
   const close = `</svg>`;
-  if (clientPreview && blocked) {
+  const richAnimations = !!(clientPreview || enhancedAnimations);
+  if (richAnimations && blocked) {
     return `<img class="sm-blocked-lottie" src="/blocked-rejected.gif" alt="Blocked job animation">`;
   }
-  if (clientPreview && isNew) {
+  if (richAnimations && isNew) {
     return `<img class="sm-new-job-lottie" src="/new-job-cv.gif" alt="New job animation">`;
   }
   if (pending) {
     // Client View uses the requested Waiting animation by Rahul Chauhan
     // (LottieFiles, Lottie Simple License). Its chroma background is
     // removed in the local asset; internal Jobs tiles keep the clock SVG.
-    if (clientPreview) {
+    if (richAnimations) {
       return `<img class="sm-pending-lottie" src="/pending-stock-waiting-transparent.gif" alt="Pending stock waiting animation">`;
     }
     return open + `
@@ -5325,7 +5326,7 @@ function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked } 
       ` + close;
     }
     case 4: // Breaking — worker strikes a pallet of die-cut sheets; waste flies off
-      if (clientPreview) {
+      if (richAnimations) {
         return `<img class="sm-sorting-lottie" src="/sorting-medicine-magnified-v3.webp" alt="Medicine carton magnifying animation">`;
       }
       // ── Visual story ─────────────────────────────────────────
@@ -5516,7 +5517,7 @@ function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked } 
     case 6: // Finished — sheets stack from the bottom up with overshoot bounce
       // Client View loops only the opening operator-loading scene from
       // prakash sharma's free Logistics animation (Lottie Simple License).
-      if (clientPreview) {
+      if (richAnimations) {
         return `<img class="sm-ready-lottie" src="/ready-operators-loading-styled-v3.webp" alt="Ready to deliver loading animation">`;
       }
       return open + `
@@ -5533,7 +5534,7 @@ function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked } 
       // Client View uses Matthew Vargas's free Warehouse Delivery animation
       // (Lottie Simple License), restyled with yellow trucks and a red/cream
       // warehouse and stored locally for reliable playback.
-      if (clientPreview) {
+      if (richAnimations) {
         return `<img class="sm-delivery-lottie" src="/delivered-warehouse-precise-v3.webp" alt="Delivered warehouse and trucks animation">`;
       }
       return open + `
