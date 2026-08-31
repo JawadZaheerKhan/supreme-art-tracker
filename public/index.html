@@ -16904,6 +16904,25 @@ function artlineWasteOverlay(job) {
   return overlay;
 }
 
+// A particulars Quantity value can be a plain number or several pipe-
+// joined entries (e.g. "15 | 19") — the last segment is the current/most
+// recent recorded figure, which is what the wastage overlay adds on top of.
+function lastNumFromPipe(str) {
+  const parts = String(str || '').split('|').map(s => s.trim()).filter(Boolean);
+  const n = parseFloat(parts[parts.length - 1]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Short "Wastage Adjustment Applied" banner for the particulars table (and
+// print card) — same wording on both, colored on-screen and plain in print.
+function artlineJobCardBanner(job, color) {
+  const adj = job ? _adjustments[job.id] : null;
+  if (!adj) return '';
+  const refs = _adjJobManualRefs[job.id];
+  const refText = refs && refs.size ? ` from manual job card${refs.size > 1 ? 's' : ''} ${[...refs].join(', ')}` : '';
+  return `<div style="${color ? `color:${color};` : ''}font-weight:700;font-size:11px;margin-bottom:6px;">&#9881; Wastage Adjustment Applied — ${adj.manual_packets} manual packets${refText}</div>`;
+}
+
 function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
   const raw = (k, sub) => (p[k] && p[k][sub]) || '';
@@ -16976,7 +16995,7 @@ function particularsTable(p, job) {
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
       const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
       const wasteExtraHtml = (wasteExtra !== undefined && wasteExtra > 0)
-        ? `<div style="color:#7c3aed;font-weight:700;font-size:11px;margin-top:2px;" title="Extra wastage from this job's ${_adjustments[job.id].manual_packets}-packet manual consumption adjustment">&#9881; +${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} (adjustment)</div>`
+        ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="${lastNumFromPipe(raw(r.key, 'quantity')).toLocaleString()} original + ${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} from the wastage adjustment">${(lastNumFromPipe(raw(r.key, 'quantity')) + wasteExtra).toLocaleString()}</div>`
         : '';
       return `
     <tr>
@@ -16991,6 +17010,7 @@ function particularsTable(p, job) {
     </tr>`;
     }).join('');
   return `
+    ${wasteOverlay ? artlineJobCardBanner(job, '#7c3aed') : ''}
     ${machineDatalists}
     <table class="jc-part">
       <tr>
@@ -20562,6 +20582,11 @@ function buildPrintCard(j) {
   const fmt = d => d ? fmtDMY(d) : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const p = j.particulars || {};
+  // Same rule as the on-screen job card: the wastage adjustment overlay
+  // only prints when printing from the Finalized tab, so the Delivered
+  // tab (and any other context) always prints the untouched original card.
+  const wasteOverlay = (isAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
+    ? artlineWasteOverlay(j) : null;
   // Paper source: prefer the live inventory item; fall back to the legacy
   // particulars fields for pre-inventory jobs.
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -20630,14 +20655,20 @@ function buildPrintCard(j) {
     return `<td><div class="pc-label">${label}</div><div class="pc-value ${cls}">${v(norm)}</div></td>`;
   };
 
-  const dataRow = r => `
+  const dataRow = r => {
+    const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
+    const qtyOut = (wasteExtra !== undefined && wasteExtra > 0)
+      ? v(lastNumFromPipe(p[r.key]?.quantity) + wasteExtra)
+      : v(p[r.key]?.quantity);
+    return `
     <tr class="pp-data-row">
       <td class="pp-row-label">${r.label}</td>
       <td>${v(p[r.key]?.details)}</td>
-      <td>${v(p[r.key]?.quantity)}</td>
+      <td>${qtyOut}</td>
       <td>${v(p[r.key]?.name)}</td>
       <td>${v(p[r.key]?.signature)}</td>
     </tr>`;
+  };
   // Row 6 (coatings) now lives inline in the pc-table showing ONLY the
   // coatings the user actually ticked. Row 5's last cell already holds
   // the combined "PAPER - BRAND" text, so the papers checkbox strip and
@@ -20980,6 +21011,7 @@ function buildPrintCard(j) {
       </tr>
       ${partRows}
     </table>
+    ${wasteOverlay ? `<div style="margin-top:6px;font-size:9pt;">${artlineJobCardBanner(j)}</div>` : ''}
     ${j.notes ? `<div style="margin-top:10px;font-size:9pt;"><b>Notes:</b> ${v(j.notes)}</div>` : ''}
     <div class="pc-sig">Signature: ____________________________</div>
     </div>
