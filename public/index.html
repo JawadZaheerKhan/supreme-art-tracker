@@ -4472,15 +4472,15 @@ function renderJobRowCompact(j, opts) {
             ${partialDelv && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
-            <button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>
-            ${canWriteJobs() ? (j.linked_job_id
+            ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
+            ${(!_finalizedJobIds.has(j.id) && canWriteJobs()) ? (j.linked_job_id
               ? `<button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Remove the link with Job E-${j.linked_job_id}">&#128279; Unlink</button>`
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
             ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
-            ${(_finalizedJobIds.has(j.id) && isAdmin()) ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
+            ${(_finalizedJobIds.has(j.id) && isAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
@@ -4852,8 +4852,8 @@ function renderJobCard(j, opts) {
       <div class="job-more-menu">
         <button onclick="closeJobMore(this); openEdit(${j.id})">Edit / View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
-        <button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>
-        ${canWriteJobs() ? (j.linked_job_id
+        ${!_finalizedJobIds.has(j.id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>` : ''}
+        ${(!_finalizedJobIds.has(j.id) && canWriteJobs()) ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
         ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
@@ -4971,7 +4971,7 @@ function renderJobCard(j, opts) {
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j))) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
       ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
-      ${(_finalizedJobIds.has(j.id) && isAdmin()) ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
+      ${(_finalizedJobIds.has(j.id) && isAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -19852,9 +19852,24 @@ async function openHistory(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   const log = [...(j.log||[])].reverse();
+  // Artline adjustment section — admin-only, shown only for finalized jobs.
+  // Surfaces exactly what was applied at adjustment time (which can differ
+  // from the current default settings if those were changed afterward).
+  const adj = (isAdmin() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
+  const adjRefs = adj ? _adjJobManualRefs[id] : null;
+  const artlineSection = adj ? `
+    <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Artline Adjustment</div>
+    <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 14px;font-size:13px;color:#5b21b6;">
+      <div><b>${adj.manual_packets}</b> packets adjusted (${(adj.manual_sheets || 0).toLocaleString()} sheets)${adj.manual_packets !== _artlineSettings.max_packets_per_job ? ` <span style="color:var(--text2);font-weight:500;">(current default limit: ${_artlineSettings.max_packets_per_job})</span>` : ''}</div>
+      <div style="margin-top:4px;">Wastage split: Printing ${adj.printing_pct}% &middot; Die ${adj.die_pct}% &middot; Coating ${adj.coating_pct}% &middot; Pasting ${adj.pasting_pct}% &middot; Sorting ${adj.sorting_pct}%</div>
+      ${adjRefs && adjRefs.size ? `<div style="margin-top:4px;">From manual job card${adjRefs.size>1?'s':''}: <b>${[...adjRefs].map(r=>esc(r)).join(', ')}</b></div>` : ''}
+      ${adj.notes ? `<div style="margin-top:4px;font-style:italic;">"${esc(adj.notes)}"</div>` : ''}
+      <div style="margin-top:4px;color:var(--text2);">By ${esc(adj.adjusted_by || 'unknown')} &middot; ${adj.adjusted_at ? fmtDMYT(adj.adjusted_at) : ''}${adj.posted ? ' &middot; <span style="color:#166534;font-weight:700;">&#10004; Posted</span>' : ''}</div>
+    </div>` : '';
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History — #${j.id}</h2>
     <div style="font-size:13px;color:#6b6960;margin-bottom:1rem;">${esc(j.name)} &middot; ${esc(j.client)}</div>
+    ${artlineSection}
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Stage Log</div>
     ${log.length===0?'<div style="text-align:center;padding:1.5rem;color:#9e9c94">No stage updates yet.</div>':log.map(l=>`
     <div class="history-item">

@@ -1652,6 +1652,9 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     } else {
       rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
     }
+    // Artline is an admin-only feature — its audit trail (adjust/post/remove)
+    // must never leak to non-admins viewing a job's shared history/audit log.
+    if (!userHasRole(req.user, 'admin')) rows = rows.filter(r => !String(r.action || '').startsWith('artline.'));
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
