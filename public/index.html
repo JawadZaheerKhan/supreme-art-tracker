@@ -16874,10 +16874,45 @@ function openMultiDatePickerPopover(btn, targetEl, segments) {
   });
 }
 
+// Which wastage particulars row each Artline stage percentage feeds, and
+// whether that row's Quantity is in sheets or finished cartons/units.
+// Printing/Coating/Die waste is recorded in sheets — the adjustment's
+// manual_sheets split by percentage applies directly. Sorting/Pasting
+// waste is recorded in cartons — the sheet-share converts via the job's
+// Ups (units printed per sheet) before it's added.
+const ARTLINE_WASTE_ROW_MAP = {
+  printing_pct: { key: 'printed_waste_sheets', unit: 'sheets' },
+  coating_pct:  { key: 'uv_waste_sheets',      unit: 'sheets' },
+  die_pct:      { key: 'die_cutting_waste',    unit: 'sheets' },
+  sorting_pct:  { key: 'sorted_cartons_waste', unit: 'cartons' },
+  pasting_pct:  { key: 'pasting_waste_qty',    unit: 'cartons' },
+};
+
+// Builds { particularsRowKey: extraWasteQty } for a finalized job's Artline
+// adjustment — only called when actually viewing from the Finalized tab.
+function artlineWasteOverlay(job) {
+  const adj = job ? _adjustments[job.id] : null;
+  if (!adj) return null;
+  const sheets = adj.manual_sheets || 0;
+  const ups = parseFloat(job.ups) || 0;
+  const overlay = {};
+  for (const [pctKey, row] of Object.entries(ARTLINE_WASTE_ROW_MAP)) {
+    const stageSheets = Math.round(sheets * (adj[pctKey] || 0) / 100);
+    overlay[row.key] = row.unit === 'cartons' ? Math.round(stageSheets * ups) : stageSheets;
+  }
+  return overlay;
+}
+
 function particularsTable(p, job) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
   const raw = (k, sub) => (p[k] && p[k][sub]) || '';
   const log = job && Array.isArray(job.log) ? job.log : [];
+  // Artline overlay only shows when actually viewing the job from the
+  // Finalized tab — the Delivered tab (and everywhere else) keeps showing
+  // the untouched original numbers, per the user's explicit request to
+  // keep both versions available.
+  const wasteOverlay = (job && isAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id))
+    ? artlineWasteOverlay(job) : null;
   // Build one machines datalist per relevant stage (dedup) so multiple
   // rows for the same stage (e.g. Printed Sheets + Printed Waste both
   // point at Printing) share a single option list.
@@ -16938,6 +16973,10 @@ function particularsTable(p, job) {
       const personsListId = `p-${r.key}-persons-list`;
       const personsOpts = personsForMachineName(nameVal)
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
+      const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
+      const wasteExtraHtml = (wasteExtra !== undefined && wasteExtra > 0)
+        ? `<div style="color:#7c3aed;font-weight:700;font-size:11px;margin-top:2px;" title="Extra wastage attributed to this job's Artline adjustment (${_adjustments[job.id].manual_packets} manual packets)">&#9881; +${wasteExtra.toLocaleString()} (Artline)</div>`
+        : '';
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
@@ -16945,7 +16984,7 @@ function particularsTable(p, job) {
         <input type="text" id="p-${r.key}-details" value="${detailsVal}">
         <button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>
       </td>
-      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"></td>
+      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}">${wasteExtraHtml}</td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>
     </tr>`;
