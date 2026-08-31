@@ -13495,6 +13495,9 @@ async function openAdjustModal(jobId) {
       const exactMatch = paperMatchKey(t.paper_type, t.item_size, t.item_gsm) === jobKey;
       matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm, exactMatch });
     }
+    // Exact paper+size+gsm matches (pre-checked) float to the top so it's
+    // obvious at a glance which sources are actually being used.
+    matches.sort((a, b) => (b.exactMatch ? 1 : 0) - (a.exactMatch ? 1 : 0));
     _adjModalTxMatches = matches;
     if (matches.length) {
       matchHtml = matches.map((m, i) => `
@@ -17064,6 +17067,14 @@ function particularsTable(p, job, opts) {
         const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
         qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
       }
+      const isWasteRow = ARTLINE_WASTE_ROW_UNIT[r.key] !== undefined;
+      // A wastage row with nothing recorded yet still needs a visible base
+      // so the purple total below reads as "original → new" rather than a
+      // bare number with no context. Uses a placeholder (not the actual
+      // input value) so an accidental "Save Changes" click can never
+      // persist a false "0" into a field nobody has actually recorded yet.
+      const qtyPlaceholder = (isWasteRow && !qtyDisplay && (opts.preview || (wasteOverlay && wasteOverlay[r.key] > 0)))
+        ? '0' : '';
       // Wire the Name input to the stage's shared machines datalist,
       // and the Signature input to a per-row persons datalist that
       // gets rebuilt whenever Name changes (via refreshRowPersonsList).
@@ -17076,7 +17087,6 @@ function particularsTable(p, job, opts) {
       const personsOpts = personsForMachineName(nameVal)
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
       const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
-      const isWasteRow = ARTLINE_WASTE_ROW_UNIT[r.key] !== undefined;
       const wasteExtraHtml = (opts.preview && isWasteRow)
         // Preview mode always renders the element (even empty/hidden) so
         // updateAdjustPreview() can find it by id and refresh it live as
@@ -17092,7 +17102,7 @@ function particularsTable(p, job, opts) {
         <input type="text" id="p-${r.key}-details" value="${detailsVal}">
         <button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>
       </td>
-      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}">${wasteExtraHtml}</td>
+      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"${qtyPlaceholder ? ` placeholder="${qtyPlaceholder}"` : ''}>${wasteExtraHtml}</td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>
     </tr>`;
