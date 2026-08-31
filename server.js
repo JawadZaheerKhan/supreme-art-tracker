@@ -6799,24 +6799,47 @@ app.get('/api/inventory/consumption', requireAuth, async (req, res) => {
   }
 });
 
-// LEDGER for one item — full transaction history, newest first.
+// LEDGER for one item (or its whole brand group) — newest first.
 app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { id } = req.params;
+    const id = parseInt(req.params.id, 10);
+    const grouped = String(req.query.group || '') === '1';
     // has_been_reversed: a later tx pointing back at this one. Used by the
     // History UI to hide the Reverse button on rows that have already been
     // undone (prevents accidental double-reversals).
+    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
+    if (!anchorRows.length) return res.status(404).json({ error: 'Inventory item not found' });
+    const anchor = anchorRows[0];
+    const members = grouped ? await sql`
+      SELECT id, brand, current_balance
+        FROM inventory_items
+       WHERE COALESCE(paper_type, '') = ${anchor.paper_type || ''}
+         AND COALESCE(size, '') = ${anchor.size || ''}
+         AND COALESCE(gsm::text, '') = ${String(anchor.gsm || '')}
+         AND COALESCE(is_offcut, false) = ${!!anchor.is_offcut}
+       ORDER BY id
+    ` : [{ id: anchor.id, brand: anchor.brand, current_balance: anchor.current_balance }];
+    const memberIds = members.map(x => x.id);
     const txs = await sql`
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+        i.brand AS item_brand,
         EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed
       FROM inventory_transactions t
+      JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN jobs j ON j.id = t.job_id
-      WHERE t.item_id = ${id}
+      WHERE t.item_id = ANY(${memberIds})
       ORDER BY t.id DESC
     `;
-    res.json(txs);
+    if (!grouped) return res.json(txs);
+    const currentBalance = members.reduce((sum, x) => sum + (parseFloat(x.current_balance) || 0), 0);
+    res.json({
+      transactions: txs,
+      current_balance: currentBalance,
+      item_ids: memberIds,
+      brands: members.map(x => x.brand).filter(Boolean),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

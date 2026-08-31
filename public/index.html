@@ -7775,7 +7775,8 @@ function deliveryChallanText(d) {
 async function openInvHistoryAt(itemId, txId) {
   if (!itemId) return;
   await openInvHistory(itemId);
-  const el = document.querySelector(`#ledger-content tr[data-tx-id="${txId}"]`);
+  const el = [...document.querySelectorAll('#ledger-content tr[data-tx-ids]')]
+    .find(row => (row.dataset.txIds || '').split(',').includes(String(txId)));
   if (!el) return;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   el.classList.remove('cv-tile-jump-flash');
@@ -7786,7 +7787,9 @@ async function openInvHistoryAt(itemId, txId) {
 
 async function openInvHistory(id) {
   const it = inventory.find(x => x.id === id); if (!it) return;
-  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
+  const groupItems = paperGroupMembers(it);
+  const brands = groupItems.map(x => x.brand).filter(Boolean);
+  const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
   // Inventory is stored as raw sheets, but the user thinks in packets/reams.
   // Display the change as packets (big) with the raw sheet count as a small
   // sub-line so it stays auditable.
@@ -7800,6 +7803,7 @@ async function openInvHistory(id) {
   };
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History · ${esc(label)}</h2>
+    <div style="font-size:12px;color:var(--text2);margin:-7px 0 12px;">Combined history for ${brands.length ? esc(brands.join(', ')) : 'all brands'}</div>
     <div id="ledger-content" style="font-size:13px;color:var(--text2);">Loading…</div>
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Audit Log</div>
     <div id="inv-audit-content" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -7821,7 +7825,29 @@ async function renderInvHistory(id) {
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
   };
   try {
-    const txs = await api('GET', `/api/inventory/${id}/transactions`);
+    const payload = await api('GET', `/api/inventory/${id}/transactions?group=1`);
+    const rawTxs = Array.isArray(payload) ? payload : (payload.transactions || []);
+    // One job can be issued from several brands in a single Save. Those
+    // ledger rows are written milliseconds apart; combine adjacent parts
+    // into one visible event while retaining every underlying TX id.
+    const txs = [];
+    for (const t of rawTxs) {
+      const prev = txs[txs.length - 1];
+      const sameSplitIssue = prev && t.reason === 'job-consumed' && prev.reason === 'job-consumed'
+        && t.job_id && String(t.job_id) === String(prev.job_id)
+        && !t.reverses_tx_id && !prev.reverses_tx_id
+        && (t.challan_no || '') === (prev.challan_no || '')
+        && (t.user_email || '') === (prev.user_email || '')
+        && Math.abs(new Date(prev.created_at) - new Date(t.created_at)) <= 5000;
+      if (sameSplitIssue) {
+        prev.change += t.change;
+        prev._tx_ids.push(t.id);
+        prev._parts.push(t);
+        prev.has_been_reversed = prev.has_been_reversed || t.has_been_reversed;
+      } else {
+        txs.push({ ...t, _tx_ids: [t.id], _parts: [t] });
+      }
+    }
     const TWENTY_FOUR_HRS = 24 * 60 * 60 * 1000;
     // Server returns transactions newest-first. To show "balance after this
     // transaction" we walk newest → oldest, starting from the live
@@ -7829,7 +7855,9 @@ async function renderInvHistory(id) {
     // subtract each row's change to get the balance the next-older row left
     // behind. Works correctly with reversals because t.change is the actual
     // signed delta (reversals are separate rows with opposite signs).
-    let runningAfter = it ? (it.current_balance || 0) : 0;
+    let runningAfter = Array.isArray(payload)
+      ? paperGroupMembers(it).reduce((sum, x) => sum + (+x.current_balance || 0), 0)
+      : (+payload.current_balance || 0);
     const rows = txs.map(t => {
       const balanceAfterSheets = runningAfter;
       runningAfter -= t.change;     // becomes "after" of the next older row
@@ -7878,7 +7906,7 @@ async function renderInvHistory(id) {
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
         : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
       const reverseBtn = canReverse
-        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTx(${t.id}, ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
+        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTxGroup([${t._tx_ids.join(',')}], ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
         : (hasBeenReversed
             ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
             : '');
@@ -7890,7 +7918,11 @@ async function renderInvHistory(id) {
         ? 'background:#fff7ed;opacity:0.7;'
         : (isReversal ? 'background:#fff7ed;' : '');
       const challan = t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>';
-      return `<tr data-tx-id="${t.id}" class="row-hover-red" style="${rowStyle}">
+      const splitSources = t._parts.length > 1
+        ? t._parts.map(p => `${p.item_brand || 'no brand'} ${fmtPackets(Math.abs(p.change))}`).join(' + ')
+        : '';
+      const notes = splitSources || txDisplayNotes(t);
+      return `<tr data-tx-ids="${t._tx_ids.join(',')}" class="row-hover-red" style="${rowStyle}">
         <td>${date}</td>
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
         <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
@@ -7898,7 +7930,7 @@ async function renderInvHistory(id) {
         <td>${challan}</td>
         <td>${job}</td>
         <td>${by}</td>
-        <td>${esc(txDisplayNotes(t))}</td>
+        <td>${esc(notes)}</td>
         <td>${reverseBtn}</td>
       </tr>`;
     }).join('');
@@ -7926,7 +7958,12 @@ async function loadInvAuditContent(id) {
   const el = document.getElementById('inv-audit-content');
   if (!el) return;
   try {
-    const rows = await api('GET', `/api/audit?entity_type=inventory&entity_id=${id}`);
+    const anchor = inventory.find(x => x.id === id);
+    const ids = anchor ? paperGroupMembers(anchor).map(x => x.id) : [id];
+    const batches = await Promise.all(ids.map(itemId =>
+      api('GET', `/api/audit?entity_type=inventory&entity_id=${itemId}`)
+    ));
+    const rows = batches.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     el.innerHTML = rows.length
       ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
       : '<div class="empty">No audit entries yet.</div>';
@@ -7963,6 +8000,32 @@ async function reverseStockTx(txId, itemId) {
       console.error('Post-reverse UI refresh failed (reversal itself succeeded):', uiErr);
     }
     notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock' : 'Entry reversed');
+  } catch (e) {
+    notify('Reverse failed: ' + e.message);
+  }
+  showSaving(false);
+}
+
+// Reverse every source-brand row belonging to one combined split issue.
+async function reverseStockTxGroup(txIds, itemId) {
+  if (!Array.isArray(txIds) || txIds.length <= 1) return reverseStockTx(txIds && txIds[0], itemId);
+  const ok = await confirmDialog({
+    title: 'Reverse this combined entry?',
+    message: `This issuance used ${txIds.length} brands. All parts will be refunded together and remain visible in the audit trail.`,
+    confirmText: 'Reverse All',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    let jobReverted = false;
+    for (const txId of txIds) {
+      const result = await api('POST', `/api/inventory/transactions/${txId}/reverse`);
+      if (result && result.job_reverted) jobReverted = true;
+    }
+    await loadInventory();
+    if (jobReverted) await loadJobs();
+    if (document.getElementById('ledger-content')) await renderInvHistory(itemId);
+    notify(jobReverted ? 'Combined entry reversed · job moved to Pending Stock' : 'Combined entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
   }
