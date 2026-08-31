@@ -953,6 +953,44 @@ async function initDb() {
     await sql`UPDATE jobs SET name   = LOWER(TRIM(name))   WHERE name   IS NOT NULL AND name   <> LOWER(TRIM(name))`;
     await sql`UPDATE jobs SET client = LOWER(TRIM(client)) WHERE client IS NOT NULL AND client <> LOWER(TRIM(client))`;
 
+    // ── Artline: manual-consumption adjustment into E-jobs ──────
+    // Each row represents a delivered E-job that has been "adjusted" —
+    // manual (offline) paper consumption allocated as wastage. The
+    // original job row in `jobs` is NEVER modified; this is a parallel
+    // ledger that the Finalized tab reads from.
+    await sql`
+      CREATE TABLE IF NOT EXISTS job_adjustments (
+        id              SERIAL PRIMARY KEY,
+        job_id          INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        manual_packets  NUMERIC NOT NULL DEFAULT 0,
+        manual_sheets   INTEGER NOT NULL DEFAULT 0,
+        printing_pct    NUMERIC NOT NULL DEFAULT 0,
+        die_pct         NUMERIC NOT NULL DEFAULT 0,
+        coating_pct     NUMERIC NOT NULL DEFAULT 0,
+        pasting_pct     NUMERIC NOT NULL DEFAULT 0,
+        sorting_pct     NUMERIC NOT NULL DEFAULT 0,
+        notes           TEXT,
+        adjusted_by     TEXT,
+        adjusted_at     TIMESTAMPTZ DEFAULT NOW(),
+        posted          BOOLEAN NOT NULL DEFAULT false,
+        posted_at       TIMESTAMPTZ,
+        UNIQUE(job_id)
+      )
+    `;
+    // Global default wastage split percentages (must sum to 100).
+    await sql`
+      CREATE TABLE IF NOT EXISTS artline_settings (
+        key   TEXT PRIMARY KEY,
+        value JSONB NOT NULL
+      )
+    `;
+    // Seed defaults if not present.
+    await sql`
+      INSERT INTO artline_settings (key, value)
+      VALUES ('wastage_defaults', '{"printing_pct":40,"die_pct":20,"coating_pct":15,"pasting_pct":15,"sorting_pct":10,"max_packets_per_job":2}'::jsonb)
+      ON CONFLICT (key) DO NOTHING
+    `;
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -7845,6 +7883,147 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
       entityId: rows[0].id,
       summary: `Transfer Note ${rows[0].transfer_note_no} deleted`,
       metadata: { transfer_note_no: rows[0].transfer_note_no },
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Artline: adjustment + finalized-jobs endpoints ──────────
+// Settings — read/write the global wastage defaults.
+app.get('/api/artline/settings', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT value FROM artline_settings WHERE key = 'wastage_defaults'`;
+    res.json(rows[0]?.value || { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/artline/settings', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = req.body;
+    const pcts = (v.printing_pct || 0) + (v.die_pct || 0) + (v.coating_pct || 0) + (v.pasting_pct || 0) + (v.sorting_pct || 0);
+    if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
+    if ((v.max_packets_per_job || 0) < 1) return res.status(400).json({ error: 'Max packets per job must be at least 1' });
+    await sql`
+      INSERT INTO artline_settings (key, value) VALUES ('wastage_defaults', ${JSON.stringify(v)})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    `;
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Unallocated manual consumption — manual-job-card stock-out rows that
+// haven't been absorbed into any job_adjustments yet. Grouped by paper
+// type + size so the frontend can match against delivered E-jobs.
+app.get('/api/artline/unallocated', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const from = req.query.from || null;
+    const to   = req.query.to   || null;
+    const rows = await sql`
+      SELECT t.id, t.item_id, ABS(t.change) AS sheets, t.notes, t.created_at,
+             i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
+        FROM inventory_transactions t
+        JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.reason = 'manual-job-card'
+         AND t.change < 0
+         AND (${from}::date IS NULL OR t.created_at >= ${from}::date)
+         AND (${to}::date   IS NULL OR t.created_at <  (${to}::date + INTERVAL '1 day'))
+       ORDER BY t.created_at DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Adjust a delivered E-job — allocate manual packets as wastage.
+app.post('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.jobId, 10);
+    const job = (await sql`SELECT id, stage_index, issuance_status, inventory_item_id FROM jobs WHERE id = ${jobId} AND deleted_at IS NULL`)[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.stage_index !== 7) return res.status(400).json({ error: 'Job must be Delivered before adjusting' });
+    const existing = (await sql`SELECT id FROM job_adjustments WHERE job_id = ${jobId}`)[0];
+    if (existing) return res.status(400).json({ error: 'Job already adjusted' });
+    const b = req.body;
+    const pcts = (b.printing_pct || 0) + (b.die_pct || 0) + (b.coating_pct || 0) + (b.pasting_pct || 0) + (b.sorting_pct || 0);
+    if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
+    if (!b.manual_packets || b.manual_packets <= 0) return res.status(400).json({ error: 'manual_packets must be > 0' });
+    const row = (await sql`
+      INSERT INTO job_adjustments (job_id, manual_packets, manual_sheets, printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes, adjusted_by)
+      VALUES (${jobId}, ${b.manual_packets}, ${b.manual_sheets || 0}, ${b.printing_pct}, ${b.die_pct}, ${b.coating_pct}, ${b.pasting_pct}, ${b.sorting_pct}, ${b.notes || ''}, ${req.user?.email || ''})
+      RETURNING *
+    `)[0];
+    await logAudit(sql, req, {
+      action: 'artline.adjust',
+      entityType: 'job',
+      entityId: jobId,
+      summary: `Artline: adjusted Job E-${jobId} with ${b.manual_packets} manual packets`,
+      metadata: { manual_packets: b.manual_packets, printing_pct: b.printing_pct, die_pct: b.die_pct, coating_pct: b.coating_pct, pasting_pct: b.pasting_pct, sorting_pct: b.sorting_pct },
+    });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Remove an adjustment (un-finalize). Admin only.
+app.delete('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.jobId, 10);
+    const existing = (await sql`SELECT id, posted FROM job_adjustments WHERE job_id = ${jobId}`)[0];
+    if (!existing) return res.status(404).json({ error: 'No adjustment found for this job' });
+    if (existing.posted) return res.status(400).json({ error: 'Cannot remove a posted adjustment' });
+    await sql`DELETE FROM job_adjustments WHERE job_id = ${jobId}`;
+    await logAudit(sql, req, {
+      action: 'artline.unadjust',
+      entityType: 'job',
+      entityId: jobId,
+      summary: `Artline: removed adjustment from Job E-${jobId}`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// List all finalized (adjusted) jobs with their adjustment data.
+app.get('/api/artline/finalized', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT j.*, a.manual_packets, a.manual_sheets,
+             a.printing_pct, a.die_pct, a.coating_pct, a.pasting_pct, a.sorting_pct,
+             a.notes AS adjustment_notes, a.adjusted_by, a.adjusted_at,
+             a.posted, a.posted_at
+        FROM job_adjustments a
+        JOIN jobs j ON j.id = a.job_id
+       WHERE j.deleted_at IS NULL
+       ORDER BY a.adjusted_at DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Mark an adjusted job as "posted" (ready for the public app).
+app.post('/api/artline/post/:jobId', requireAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.jobId, 10);
+    const existing = (await sql`SELECT id, posted FROM job_adjustments WHERE job_id = ${jobId}`)[0];
+    if (!existing) return res.status(404).json({ error: 'No adjustment found' });
+    if (existing.posted) return res.status(400).json({ error: 'Already posted' });
+    await sql`UPDATE job_adjustments SET posted = true, posted_at = NOW() WHERE job_id = ${jobId}`;
+    await logAudit(sql, req, {
+      action: 'artline.post',
+      entityType: 'job',
+      entityId: jobId,
+      summary: `Artline: posted Job E-${jobId} for public app`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }

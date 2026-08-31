@@ -3785,6 +3785,7 @@ async function onGoogleCredential(response) {
     // lands on Station; everyone else stays on Jobs (default).
     const loaders = [loadJobs()];
     if (!isOperator()) loaders.push(loadInventory());
+    if (isAdmin()) loaders.push(loadArtlineData());
     await Promise.all(loaders);
     if (isOperator())            setMode('station');
     else if (isStoreManager())   setMode('inventory');
@@ -4009,8 +4010,9 @@ function getFiltered() {
     if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelvPostReady;
     if (view === 'storage') return isStorage(j);
     if (view === 'partial') return isPartialDelvPostReady;
-    if (view === 'done')    return isDone(j);
+    if (view === 'done')    return isDone(j) && !_finalizedJobIds.has(j.id);
     if (view === 'blocked') return isBlocked(j);
+    if (view === 'finalized') return _finalizedJobIds.has(j.id);
     // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
     // the main list; both have their own tab.
     return !isNewJob(j) && !isCtpQueue(j);
@@ -4181,7 +4183,7 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
+  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered'],['finalized','Finalized']];
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -4211,6 +4213,7 @@ function renderJobs() {
     b.classList.toggle('active', b.dataset.jv === jobsViewMode));
   renderNewJobsBulkBar();
   renderShadeCardToggle();
+  renderArtlineBar();
   if (jobsViewMode === 'cards') renderJobsCards();
   else renderJobsCompact();
 }
@@ -4476,6 +4479,8 @@ function renderJobRowCompact(j, opts) {
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+            ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="Allocate manual consumption wastage and move to Finalized">&#9881; Adjust</button>` : ''}
+            ${(_finalizedJobIds.has(j.id) && isAdmin()) ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
@@ -4958,12 +4963,15 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : overIssueBannerHtml(j)}
     ${clientPreview ? '' : partialIssueBannerHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
+    ${clientPreview ? '' : artlineAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
       ${more}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j))) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
+      ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="Allocate manual consumption wastage and move to Finalized">&#9881; Adjust</button>` : ''}
+      ${(_finalizedJobIds.has(j.id) && isAdmin()) ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -13329,6 +13337,205 @@ function printStockTotal(direction) {
     window.print();
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
+}
+
+// ── Artline: adjustment + finalized jobs ─────────────────────
+// Set of job ids that have been adjusted (finalized). Populated on load
+// so the Delivered tab hides them and the Finalized tab shows them.
+const _finalizedJobIds = new Set();
+let _artlineSettings = { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 };
+let _adjustments = {};
+
+async function loadArtlineData() {
+  try {
+    const [settings, finalized] = await Promise.all([
+      api('GET', '/api/artline/settings'),
+      api('GET', '/api/artline/finalized'),
+    ]);
+    _artlineSettings = settings;
+    _finalizedJobIds.clear();
+    _adjustments = {};
+    for (const row of finalized) {
+      _finalizedJobIds.add(row.id);
+      _adjustments[row.id] = row;
+    }
+  } catch (e) { console.warn('Artline load failed:', e.message); }
+}
+
+function artlineAdjustmentForJob(jobId) {
+  return _adjustments[jobId] || null;
+}
+
+function artlineAdjBanner(jobId) {
+  const a = _adjustments[jobId];
+  if (!a) return '';
+  return `<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:6px 10px;font-size:11px;color:#5b21b6;margin-top:4px;">
+    <span style="font-weight:700;">&#9881; Adjusted:</span> +${a.manual_packets} pkts (${(a.manual_sheets || 0).toLocaleString()} sheets)
+    &middot; P:${a.printing_pct}% D:${a.die_pct}% C:${a.coating_pct}% Pa:${a.pasting_pct}% S:${a.sorting_pct}%
+    ${a.posted ? '<span style="color:#166534;font-weight:700;"> &#10004; Posted</span>' : ''}
+  </div>`;
+}
+
+function renderArtlineBar() {
+  const bar = document.getElementById('new-jobs-bulk');
+  if (view !== 'finalized' || !isAdmin()) return;
+  if (!bar) return;
+  const count = _finalizedJobIds.size;
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
+      <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Artline — Finalized Jobs (${count})</span>
+      <button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;" onclick="openArtlineSettingsModal()">&#9881; Wastage Settings</button>
+      <span style="font-size:12px;color:var(--text2);margin-left:auto;">
+        Default: Printing ${_artlineSettings.printing_pct}% · Die ${_artlineSettings.die_pct}% · Coating ${_artlineSettings.coating_pct}% · Pasting ${_artlineSettings.pasting_pct}% · Sorting ${_artlineSettings.sorting_pct}% · Max ${_artlineSettings.max_packets_per_job} pkts/job
+      </span>
+    </div>
+  `;
+}
+
+async function openAdjustModal(jobId) {
+  const j = jobs.find(x => x.id === jobId);
+  if (!j) return;
+  if (_finalizedJobIds.has(jobId)) {
+    notify('This job is already adjusted/finalized.');
+    return;
+  }
+  const s = _artlineSettings;
+  const ps = j.inventory_item_id ? packetSize(j.paper || '') : 1000;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
+    <h2 style="text-align:center;letter-spacing:1px;">ADJUST JOB E-${j.id}</h2>
+    <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:12px;">
+      Allocate manual consumption packets as wastage for this delivered job.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+      <div><div class="dash-flbl">Job Name</div><div style="font-weight:600;">${esc(j.name)}</div></div>
+      <div><div class="dash-flbl">Client</div><div style="font-weight:600;">${esc(j.client || '')}</div></div>
+      <div><div class="dash-flbl">Paper</div><div style="font-weight:600;">${esc(j.paper || 'N/A')}</div></div>
+      <div><div class="dash-flbl">PO Qty</div><div style="font-weight:600;">${esc(j.qty || 'N/A')}</div></div>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
+      <div class="dash-flbl" style="margin-bottom:8px;">Manual Packets to Adjust</div>
+      <input type="number" id="adj-packets" min="0.5" max="${s.max_packets_per_job}" step="0.5" value="${Math.min(s.max_packets_per_job, 2)}" class="filter" style="width:100%;margin-bottom:4px;">
+      <div style="font-size:11px;color:var(--text2);">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets.</div>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
+      <div class="dash-flbl" style="margin-bottom:8px;">Wastage Breakdown (%)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div><label style="font-size:12px;font-weight:600;">Printing %</label><input type="number" id="adj-printing" min="0" max="100" value="${s.printing_pct}" class="filter" style="width:100%;"></div>
+        <div><label style="font-size:12px;font-weight:600;">Die Cutting %</label><input type="number" id="adj-die" min="0" max="100" value="${s.die_pct}" class="filter" style="width:100%;"></div>
+        <div><label style="font-size:12px;font-weight:600;">Coating %</label><input type="number" id="adj-coating" min="0" max="100" value="${s.coating_pct}" class="filter" style="width:100%;"></div>
+        <div><label style="font-size:12px;font-weight:600;">Pasting %</label><input type="number" id="adj-pasting" min="0" max="100" value="${s.pasting_pct}" class="filter" style="width:100%;"></div>
+        <div><label style="font-size:12px;font-weight:600;">Sorting %</label><input type="number" id="adj-sorting" min="0" max="100" value="${s.sorting_pct}" class="filter" style="width:100%;"></div>
+      </div>
+      <div id="adj-pct-warn" style="font-size:11px;color:#dc2626;margin-top:4px;display:none;">Percentages must sum to 100%</div>
+    </div>
+    <div style="margin-bottom:14px;">
+      <div class="dash-flbl">Notes (optional)</div>
+      <input type="text" id="adj-notes" class="filter" style="width:100%;" placeholder="e.g. Weekly manual adjustment batch #5">
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitAdjustment(${j.id})">Adjust &amp; Finalize</button>
+    </div>
+  </div>`);
+}
+
+async function submitAdjustment(jobId) {
+  const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
+  const printing_pct = parseFloat(document.getElementById('adj-printing').value) || 0;
+  const die_pct      = parseFloat(document.getElementById('adj-die').value) || 0;
+  const coating_pct  = parseFloat(document.getElementById('adj-coating').value) || 0;
+  const pasting_pct  = parseFloat(document.getElementById('adj-pasting').value) || 0;
+  const sorting_pct  = parseFloat(document.getElementById('adj-sorting').value) || 0;
+  const notes = (document.getElementById('adj-notes').value || '').trim();
+  const total = printing_pct + die_pct + coating_pct + pasting_pct + sorting_pct;
+  if (Math.round(total) !== 100) {
+    const w = document.getElementById('adj-pct-warn');
+    if (w) { w.style.display = 'block'; w.textContent = `Percentages sum to ${total}%, must be 100%.`; }
+    return;
+  }
+  if (packets <= 0) { notify('Enter a valid number of packets.'); return; }
+  if (packets > _artlineSettings.max_packets_per_job) {
+    notify(`Max ${_artlineSettings.max_packets_per_job} packets per job.`);
+    return;
+  }
+  const j = jobs.find(x => x.id === jobId);
+  const ps = j && j.paper ? packetSize(j.paper) : 1000;
+  const manual_sheets = Math.round(packets * ps);
+  const ok = await confirmDialog({
+    title: 'Confirm Adjustment',
+    message: `Adjust Job E-${jobId} with ${packets} manual packets (${manual_sheets} sheets)?\\nThis moves the job to the Finalized tab.`,
+  });
+  if (!ok) return;
+  try {
+    await api('POST', `/api/artline/adjust/${jobId}`, {
+      manual_packets: packets, manual_sheets,
+      printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes,
+    });
+    closeModal();
+    notify(`Job E-${jobId} adjusted and finalized.`);
+    await loadArtlineData();
+    renderJobs();
+  } catch (e) { notify('Error: ' + e.message); }
+}
+
+async function removeAdjustment(jobId) {
+  const ok = await confirmDialog({
+    title: 'Remove Adjustment',
+    message: `Remove the adjustment from Job E-${jobId}?\\nIt will move back to the Delivered tab.`,
+    danger: true, confirmText: 'Remove',
+  });
+  if (!ok) return;
+  try {
+    await api('DELETE', `/api/artline/adjust/${jobId}`);
+    notify(`Adjustment removed from Job E-${jobId}.`);
+    await loadArtlineData();
+    renderJobs();
+  } catch (e) { notify('Error: ' + e.message); }
+}
+
+async function openArtlineSettingsModal() {
+  const s = _artlineSettings;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
+    <h2 style="text-align:center;letter-spacing:1px;">ARTLINE SETTINGS</h2>
+    <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:14px;">
+      Default wastage percentages for new adjustments. Must sum to 100%.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+      <div><label style="font-size:12px;font-weight:600;">Printing %</label><input type="number" id="as-printing" min="0" max="100" value="${s.printing_pct}" class="filter" style="width:100%;"></div>
+      <div><label style="font-size:12px;font-weight:600;">Die Cutting %</label><input type="number" id="as-die" min="0" max="100" value="${s.die_pct}" class="filter" style="width:100%;"></div>
+      <div><label style="font-size:12px;font-weight:600;">Coating %</label><input type="number" id="as-coating" min="0" max="100" value="${s.coating_pct}" class="filter" style="width:100%;"></div>
+      <div><label style="font-size:12px;font-weight:600;">Pasting %</label><input type="number" id="as-pasting" min="0" max="100" value="${s.pasting_pct}" class="filter" style="width:100%;"></div>
+      <div><label style="font-size:12px;font-weight:600;">Sorting %</label><input type="number" id="as-sorting" min="0" max="100" value="${s.sorting_pct}" class="filter" style="width:100%;"></div>
+      <div><label style="font-size:12px;font-weight:600;">Max Packets / Job</label><input type="number" id="as-max" min="1" max="50" value="${s.max_packets_per_job}" class="filter" style="width:100%;"></div>
+    </div>
+    <div id="as-warn" style="font-size:11px;color:#dc2626;margin-bottom:8px;display:none;"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveArtlineSettings()">Save Settings</button>
+    </div>
+  </div>`);
+}
+
+async function saveArtlineSettings() {
+  const printing_pct = parseFloat(document.getElementById('as-printing').value) || 0;
+  const die_pct      = parseFloat(document.getElementById('as-die').value) || 0;
+  const coating_pct  = parseFloat(document.getElementById('as-coating').value) || 0;
+  const pasting_pct  = parseFloat(document.getElementById('as-pasting').value) || 0;
+  const sorting_pct  = parseFloat(document.getElementById('as-sorting').value) || 0;
+  const max_packets_per_job = parseInt(document.getElementById('as-max').value) || 2;
+  const total = printing_pct + die_pct + coating_pct + pasting_pct + sorting_pct;
+  if (Math.round(total) !== 100) {
+    const w = document.getElementById('as-warn');
+    if (w) { w.style.display = 'block'; w.textContent = `Percentages sum to ${total}%, must be 100%.`; }
+    return;
+  }
+  try {
+    await api('PUT', '/api/artline/settings', { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job });
+    _artlineSettings = { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job };
+    closeModal();
+    notify('Artline settings saved.');
+  } catch (e) { notify('Error: ' + e.message); }
 }
 
 // ── Manual Consumption ───────────────────────────────────────
