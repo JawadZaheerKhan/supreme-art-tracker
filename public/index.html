@@ -16905,12 +16905,25 @@ function artlineWasteOverlay(job) {
 }
 
 // A particulars Quantity value can be a plain number or several pipe-
-// joined entries (e.g. "15 | 19") — the last segment is the current/most
-// recent recorded figure, which is what the wastage overlay adds on top of.
-function lastNumFromPipe(str) {
+// joined entries (e.g. "15 | 19", one per production run/entry). The
+// wastage overlay's total extra for that row is split back across each
+// entry proportionally to its share of the original sum — the last entry
+// absorbs any rounding remainder so the pieces always add up exactly to
+// wasteExtra, then each entry's own new total is returned pipe-joined in
+// the original order.
+function applyOverlayToPipeEntries(str, wasteExtra) {
   const parts = String(str || '').split('|').map(s => s.trim()).filter(Boolean);
-  const n = parseFloat(parts[parts.length - 1]);
-  return Number.isFinite(n) ? n : 0;
+  const nums = parts.map(p => { const n = parseFloat(p); return Number.isFinite(n) ? n : 0; });
+  if (!nums.length) return String(wasteExtra);
+  const sum = nums.reduce((a, b) => a + b, 0);
+  let allocated = 0;
+  const newNums = nums.map((n, i) => {
+    if (i === nums.length - 1) return n + (wasteExtra - allocated);
+    const share = sum > 0 ? Math.round(wasteExtra * (n / sum)) : Math.round(wasteExtra / nums.length);
+    allocated += share;
+    return n + share;
+  });
+  return newNums.map(n => n.toLocaleString()).join(' | ');
 }
 
 // Short "Wastage Adjustment Applied" banner for the particulars table (and
@@ -16995,7 +17008,7 @@ function particularsTable(p, job) {
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
       const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
       const wasteExtraHtml = (wasteExtra !== undefined && wasteExtra > 0)
-        ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="${lastNumFromPipe(raw(r.key, 'quantity')).toLocaleString()} original + ${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} from the wastage adjustment">${(lastNumFromPipe(raw(r.key, 'quantity')) + wasteExtra).toLocaleString()}</div>`
+        ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="+${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} from the wastage adjustment, split across each entry by its share of the original total">${applyOverlayToPipeEntries(raw(r.key, 'quantity'), wasteExtra)}</div>`
         : '';
       return `
     <tr>
@@ -20658,7 +20671,7 @@ function buildPrintCard(j) {
   const dataRow = r => {
     const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
     const qtyOut = (wasteExtra !== undefined && wasteExtra > 0)
-      ? v(lastNumFromPipe(p[r.key]?.quantity) + wasteExtra)
+      ? v(applyOverlayToPipeEntries(p[r.key]?.quantity, wasteExtra))
       : v(p[r.key]?.quantity);
     return `
     <tr class="pp-data-row">
