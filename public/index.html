@@ -13635,10 +13635,36 @@ function renderOffcutConsumption() {
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const color = '#A32D2D';
   const sum = document.getElementById('oc-summary');
-  if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:180px;"><div class="dash-flbl">Total Offcut Consumed</div><div style="font-size:22px;font-weight:700;color:#1D4ED8;">${fmt(totalUnits)} packets/reams</div><div style="font-size:11px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:140px;"><div class="dash-flbl">E-Job Issues</div><div style="font-size:22px;font-weight:700;">${rows.length}</div></div>`;
+  if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:180px;"><div class="dash-flbl">Total Offcut Consumption</div><div style="font-size:22px;font-weight:600;color:${color};">${fmt(totalUnits)} packets / reams</div><div style="font-size:11px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:140px;"><div class="dash-flbl">Transactions</div><div style="font-size:22px;font-weight:600;">${rows.length}</div></div>`;
   const el = document.getElementById('oc-content'); if (!el) return;
-  el.innerHTML = rows.length ? `<div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:var(--bg2);"><th>When</th><th>Job</th><th>Paper</th><th>Size</th><th>GSM</th><th>Brand</th><th style="text-align:right;">Consumed</th><th>Issued By</th></tr></thead><tbody>${rows.map(t=>{const ps=packetSize(t.paper_type||'');const unit=packetUnitLabel(t.paper_type||'').toLowerCase();return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);"><td>${esc(fmtDMYT(t.created_at))}</td><td style="font-weight:700;">E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}</td><td>${esc(t.paper_type||'—')}</td><td>${esc(t.item_size||'—')}</td><td>${esc(t.item_gsm||'—')}</td><td>${esc(t.item_brand||'—')}</td><td style="text-align:right;font-weight:700;color:#1D4ED8;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td><td>${esc(t.user_email||'—')}</td></tr>`}).join('')}</tbody></table></div>` : '<div class="empty">No automatic offcut issuance in this period.</div>';
+  if (!rows.length) { el.innerHTML = '<div class="empty">No automatic offcut consumption in this period.</div>'; return; }
+  const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
+  el.innerHTML = `<div class="report-scroll-wrap">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);">
+        <th ${th}>When</th><th ${th}>E-Job No.</th><th ${th}>Paper Type</th>
+        <th ${th}>Size</th><th ${th}>GSM</th><th ${th}>Brand</th>
+        <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed</th>
+        <th ${th}>Issued By</th>
+      </tr></thead>
+      <tbody>${rows.map(t => {
+        const ps = packetSize(t.paper_type || '');
+        const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
+        return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+          <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT(t.created_at))}</td>
+          <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}</td>
+          <td style="padding:6px 8px;">${esc(t.paper_type || '—')}</td>
+          <td style="padding:6px 8px;">${esc(t.item_size || '—')}</td>
+          <td style="padding:6px 8px;">${esc(t.item_gsm || '—')}</td>
+          <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
+          <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
+          <td style="padding:6px 8px;white-space:nowrap;">${esc(t.user_email || '—')}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>
+  </div>`;
 }
 async function exportOffcutConsumption() {
   try { await ensureXlsx(); } catch(e) { notify(e.message); return; }
@@ -13651,7 +13677,13 @@ async function exportOffcutConsumption() {
 function printOffcutConsumption() {
   const rows=offcutConsumptionRows(); const td='style="border:1px solid #000;padding:4px;"';
   const body=rows.map(t=>`<tr><td ${td}>${esc(fmtDMYT(t.created_at))}</td><td ${td}>E-${t.job_id}</td><td ${td}>${esc(t.paper_type||'')}</td><td ${td}>${esc(t.item_size||'')}</td><td ${td}>${esc(t.item_gsm||'')}</td><td ${td}>${esc(t.item_brand||'')}</td><td ${td}>${Math.abs(t.change).toLocaleString()} sheets</td></tr>`).join('');
-  const area=document.getElementById('print-area');area.innerHTML=`<div style="font-family:Arial;color:#000;"><h2>Offcut Consumption Report</h2><div style="margin-bottom:8px;">Generated: ${fmtDMYT(new Date())}</div>${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr><th ${td}>When</th><th ${td}>Job</th><th ${td}>Paper</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div>No automatic offcut issuance in this period.</div>'}</div>`;window.print();setTimeout(()=>area.innerHTML='',500);
+  const area=document.getElementById('print-area');area.innerHTML=`<div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
+      <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+      <div><div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div><div style="font-size:11pt;">Offcut Consumption Report</div></div>
+      <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
+    </div>
+    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#eee;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No automatic offcut consumption in this period.</div>'}</div>`;window.print();setTimeout(()=>area.innerHTML='',500);
 }
 
 // Rows for Print/Export: if the user has checked specific rows via the bulk
