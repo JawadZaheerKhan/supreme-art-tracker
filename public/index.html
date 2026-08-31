@@ -2218,27 +2218,24 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <input type="text" id="search-input" placeholder="Search job, client, or ID..." oninput="setFilter(this.value)">
       <span class="search-icon">&#128269;</span>
     </div>
-    <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)">
-      <option value="">All stages</option>
-    </select>
     <select class="filter" id="client-filter" onchange="setClientFilter(this.value)">
       <option value="">All companies</option>
     </select>
     <select class="filter" id="machine-filter" onchange="setMachineFilter(this.value)">
       <option value="">All machines</option>
     </select>
-    <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilter(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
+    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
+      &#128230; Create Mil Job
+    </button>
     <!-- Shade Cards toggle: same visual pattern as the Pending Stock
          button in inventory. Click once to see only shade-card jobs;
          click again to clear. -->
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
       &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
-    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
-      &#128230; Create Mil Job
-    </button>
-    <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group">
-      <option value="">All groups</option>
+    <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilter(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
+    <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)">
+      <option value="">All stages</option>
     </select>
     <select class="filter" id="date-filter" onchange="setDateRange(this.value)">
       <option value="">All time</option>
@@ -2251,6 +2248,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <option value="this-year">This year</option>
       <option value="last-year">Last year</option>
       <option value="custom">Custom range…</option>
+    </select>
+    <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group">
+      <option value="">All groups</option>
     </select>
     <span id="date-custom" style="display:none;gap:6px;align-items:center;">
       <input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;">
@@ -4479,7 +4479,7 @@ function renderJobRowCompact(j, opts) {
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
-            ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+            ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(124,58,237,0.10);border-color:rgba(124,58,237,0.35);color:#7c3aed;font-weight:700;box-shadow:0 0 8px rgba(124,58,237,0.25);${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
             ${(_finalizedJobIds.has(j.id) && isAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
@@ -4970,7 +4970,7 @@ function renderJobCard(j, opts) {
       ${more}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j))) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
-      ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+      ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(124,58,237,0.10);border-color:rgba(124,58,237,0.35);color:#7c3aed;font-weight:700;margin-left:auto;box-shadow:0 0 8px rgba(124,58,237,0.25);${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
       ${(_finalizedJobIds.has(j.id) && isAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
@@ -13455,7 +13455,7 @@ function renderArtlineBar() {
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
       <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Finalized Jobs (${count})</span>
-      <button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;" onclick="openArtlineSettingsModal()">&#9881; Wastage Settings</button>
+      <button class="btn btn-sm" style="background:rgba(124,58,237,0.10);border-color:rgba(124,58,237,0.35);color:#7c3aed;font-weight:700;box-shadow:0 0 8px rgba(124,58,237,0.25);" onclick="openArtlineSettingsModal()">&#9881; Wastage Settings</button>
       <span style="font-size:12px;color:var(--text2);margin-left:auto;">
         Default: Printing ${_artlineSettings.printing_pct}% · Die ${_artlineSettings.die_pct}% · Coating ${_artlineSettings.coating_pct}% · Pasting ${_artlineSettings.pasting_pct}% · Sorting ${_artlineSettings.sorting_pct}% · Max ${_artlineSettings.max_packets_per_job} pkts/job
       </span>
