@@ -13510,10 +13510,17 @@ async function openAdjustModal(jobId) {
     matchHtml = '<div style="font-size:12px;color:var(--text2);">Could not load manual consumption data.</div>';
   }
 
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
+  const ups = parseFloat(j.ups) || 0;
+  const initialPackets = Math.min(s.max_packets_per_job, 2);
+  const initialSheets = Math.round(initialPackets * ps);
+  const initialOverlay = computeArtlineWasteSplit(initialSheets, s, ups);
+
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">ADJUST JOB E-${j.id}</h2>
     <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:12px;">
-      Allocate manual consumption packets as wastage for this delivered job.
+      Allocate manual consumption packets as wastage for this delivered job — the job card preview below updates live.
+      Wastage split uses the defaults from <a href="#" onclick="event.preventDefault();openArtlineSettingsModal()">Wastage Settings</a>:
+      Printing ${s.printing_pct}% &middot; Die ${s.die_pct}% &middot; Coating ${s.coating_pct}% &middot; Pasting ${s.pasting_pct}% &middot; Sorting ${s.sorting_pct}%.
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
       <div><div class="dash-flbl">Job Name</div><div style="font-weight:600;">${esc(j.name)}</div></div>
@@ -13522,59 +13529,96 @@ async function openAdjustModal(jobId) {
       <div><div class="dash-flbl">PO Qty</div><div style="font-weight:600;">${esc(j.qty || 'N/A')}</div></div>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
-      <div class="dash-flbl" style="margin-bottom:8px;">Manual Packets to Adjust</div>
-      <input type="number" id="adj-packets" min="0.5" max="${s.max_packets_per_job}" step="0.5" value="${Math.min(s.max_packets_per_job, 2)}" class="filter" style="width:100%;margin-bottom:4px;">
-      <div style="font-size:11px;color:var(--text2);">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets.</div>
+      <div class="dash-flbl" style="margin-bottom:8px;">Manual Packets / Sheets to Adjust</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div>
+          <label style="font-size:11px;color:var(--text2);">Packets</label>
+          <input type="number" id="adj-packets" min="0.5" max="${s.max_packets_per_job}" step="0.5" value="${initialPackets}" class="filter" style="width:100%;" oninput="adjPacketsChanged(${j.id})">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text2);">Sheets</label>
+          <input type="number" id="adj-sheets" min="1" step="1" value="${initialSheets}" class="filter" style="width:100%;" oninput="adjSheetsChanged(${j.id})">
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px;">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets. Edit either field — they stay in sync.</div>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
       <div class="dash-flbl" style="margin-bottom:8px;">Manual Consumption Sources</div>
       <div id="adj-alloc-list" style="max-height:140px;overflow-y:auto;">${matchHtml}</div>
     </div>
-    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
-      <div class="dash-flbl" style="margin-bottom:8px;">Wastage Breakdown (%)</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <div><label style="font-size:12px;font-weight:600;">Printing %</label><input type="number" id="adj-printing" min="0" max="100" value="${s.printing_pct}" class="filter" style="width:100%;"></div>
-        <div><label style="font-size:12px;font-weight:600;">Die Cutting %</label><input type="number" id="adj-die" min="0" max="100" value="${s.die_pct}" class="filter" style="width:100%;"></div>
-        <div><label style="font-size:12px;font-weight:600;">Coating %</label><input type="number" id="adj-coating" min="0" max="100" value="${s.coating_pct}" class="filter" style="width:100%;"></div>
-        <div><label style="font-size:12px;font-weight:600;">Pasting %</label><input type="number" id="adj-pasting" min="0" max="100" value="${s.pasting_pct}" class="filter" style="width:100%;"></div>
-        <div><label style="font-size:12px;font-weight:600;">Sorting %</label><input type="number" id="adj-sorting" min="0" max="100" value="${s.sorting_pct}" class="filter" style="width:100%;"></div>
-      </div>
-      <div id="adj-pct-warn" style="font-size:11px;color:#dc2626;margin-top:4px;display:none;">Percentages must sum to 100%</div>
-    </div>
     <div style="margin-bottom:14px;">
       <div class="dash-flbl">Notes (optional)</div>
       <input type="text" id="adj-notes" class="filter" style="width:100%;" placeholder="e.g. Weekly manual adjustment batch #5">
     </div>
+    <div class="dash-flbl" style="margin:14px 0 6px;">Job Card Preview — wastage fields (purple) update live as you edit packets/sheets above</div>
+    <div id="adj-particulars-preview">${particularsTable(j.particulars || {}, j, { preview: true, previewOverlay: initialOverlay })}</div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitAdjustment(${j.id})">Adjust &amp; Finalize</button>
+      <button class="btn btn-primary" onclick="submitAdjustment(${j.id})">Save Adjustment</button>
     </div>
   </div>`);
 }
 
+// Recomputes the wastage split from the current packets/sheets inputs and
+// updates each affected particulars row's preview element in place — no
+// full re-render, so cursor focus / scroll position in the modal survive.
+function updateAdjustPreview(jobId) {
+  const j = jobs.find(x => x.id === jobId);
+  const sheetsEl = document.getElementById('adj-sheets');
+  if (!j || !sheetsEl) return;
+  const sheets = parseFloat(sheetsEl.value) || 0;
+  const overlay = computeArtlineWasteSplit(sheets, _artlineSettings, parseFloat(j.ups) || 0);
+  for (const row of Object.values(ARTLINE_WASTE_ROW_MAP)) {
+    const el = document.getElementById('wp-' + row.key);
+    if (!el) continue;
+    const extra = overlay[row.key];
+    if (extra > 0) {
+      const rawQty = (j.particulars && j.particulars[row.key] && j.particulars[row.key].quantity) || '';
+      el.textContent = applyOverlayToPipeEntries(rawQty, extra);
+      el.style.display = '';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+  }
+}
+
+function adjPacketsChanged(jobId) {
+  const j = jobs.find(x => x.id === jobId);
+  const packetsEl = document.getElementById('adj-packets');
+  const sheetsEl = document.getElementById('adj-sheets');
+  if (!j || !packetsEl || !sheetsEl) return;
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '');
+  const packets = parseFloat(packetsEl.value) || 0;
+  sheetsEl.value = Math.round(packets * ps);
+  updateAdjustPreview(jobId);
+}
+
+function adjSheetsChanged(jobId) {
+  const j = jobs.find(x => x.id === jobId);
+  const packetsEl = document.getElementById('adj-packets');
+  const sheetsEl = document.getElementById('adj-sheets');
+  if (!j || !packetsEl || !sheetsEl) return;
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '');
+  const sheets = parseFloat(sheetsEl.value) || 0;
+  packetsEl.value = ps ? +(sheets / ps).toFixed(2) : 0;
+  updateAdjustPreview(jobId);
+}
+
 async function submitAdjustment(jobId) {
   const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
-  const printing_pct = parseFloat(document.getElementById('adj-printing').value) || 0;
-  const die_pct      = parseFloat(document.getElementById('adj-die').value) || 0;
-  const coating_pct  = parseFloat(document.getElementById('adj-coating').value) || 0;
-  const pasting_pct  = parseFloat(document.getElementById('adj-pasting').value) || 0;
-  const sorting_pct  = parseFloat(document.getElementById('adj-sorting').value) || 0;
+  const manual_sheets = Math.round(parseFloat(document.getElementById('adj-sheets').value) || 0);
   const notes = (document.getElementById('adj-notes').value || '').trim();
-  const total = printing_pct + die_pct + coating_pct + pasting_pct + sorting_pct;
-  if (Math.round(total) !== 100) {
-    const w = document.getElementById('adj-pct-warn');
-    if (w) { w.style.display = 'block'; w.textContent = `Percentages sum to ${total}%, must be 100%.`; }
+  const s = _artlineSettings;
+  const printing_pct = s.printing_pct, die_pct = s.die_pct, coating_pct = s.coating_pct,
+        pasting_pct = s.pasting_pct, sorting_pct = s.sorting_pct;
+  if (packets <= 0 || manual_sheets <= 0) { notify('Enter a valid number of packets/sheets.'); return; }
+  if (packets > s.max_packets_per_job) {
+    notify(`Max ${s.max_packets_per_job} packets per job.`);
     return;
   }
-  if (packets <= 0) { notify('Enter a valid number of packets.'); return; }
-  if (packets > _artlineSettings.max_packets_per_job) {
-    notify(`Max ${_artlineSettings.max_packets_per_job} packets per job.`);
-    return;
-  }
-  const j = jobs.find(x => x.id === jobId);
-  const invIt = j && j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const ps = packetSize(invIt ? invIt.paper_type : (j && j.paper) || '');
-  const manual_sheets = Math.round(packets * ps);
 
   const allocations = [];
   const cbs = document.querySelectorAll('.adj-alloc-cb:checked');
@@ -16889,19 +16933,25 @@ const ARTLINE_WASTE_ROW_MAP = {
 };
 const ARTLINE_WASTE_ROW_UNIT = Object.fromEntries(Object.values(ARTLINE_WASTE_ROW_MAP).map(r => [r.key, r.unit]));
 
+// Core math shared by the saved-adjustment overlay and the live Adjust-
+// modal preview: splits `sheets` across each wastage row by `pcts` (an
+// object with printing_pct/die_pct/coating_pct/pasting_pct/sorting_pct),
+// converting to cartons via `ups` for the two carton-based rows.
+function computeArtlineWasteSplit(sheets, pcts, ups) {
+  const overlay = {};
+  for (const [pctKey, row] of Object.entries(ARTLINE_WASTE_ROW_MAP)) {
+    const stageSheets = Math.round((sheets || 0) * ((pcts && pcts[pctKey]) || 0) / 100);
+    overlay[row.key] = row.unit === 'cartons' ? Math.round(stageSheets * (ups || 0)) : stageSheets;
+  }
+  return overlay;
+}
+
 // Builds { particularsRowKey: extraWasteQty } for a finalized job's Artline
 // adjustment — only called when actually viewing from the Finalized tab.
 function artlineWasteOverlay(job) {
   const adj = job ? _adjustments[job.id] : null;
   if (!adj) return null;
-  const sheets = adj.manual_sheets || 0;
-  const ups = parseFloat(job.ups) || 0;
-  const overlay = {};
-  for (const [pctKey, row] of Object.entries(ARTLINE_WASTE_ROW_MAP)) {
-    const stageSheets = Math.round(sheets * (adj[pctKey] || 0) / 100);
-    overlay[row.key] = row.unit === 'cartons' ? Math.round(stageSheets * ups) : stageSheets;
-  }
-  return overlay;
+  return computeArtlineWasteSplit(adj.manual_sheets || 0, adj, parseFloat(job.ups) || 0);
 }
 
 // A particulars Quantity value can be a plain number or several pipe-
@@ -16936,16 +16986,19 @@ function artlineJobCardBanner(job, color) {
   return `<div style="${color ? `color:${color};` : ''}font-weight:700;font-size:11px;margin-bottom:6px;">&#9881; Wastage Adjustment Applied — ${adj.manual_packets} manual packets${refText}</div>`;
 }
 
-function particularsTable(p, job) {
+function particularsTable(p, job, opts) {
+  opts = opts || {};
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
   const raw = (k, sub) => (p[k] && p[k][sub]) || '';
   const log = job && Array.isArray(job.log) ? job.log : [];
   // Artline overlay only shows when actually viewing the job from the
   // Finalized tab — the Delivered tab (and everywhere else) keeps showing
   // the untouched original numbers, per the user's explicit request to
-  // keep both versions available.
-  const wasteOverlay = (job && isAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id))
-    ? artlineWasteOverlay(job) : null;
+  // keep both versions available. In preview mode (the Adjust flow, before
+  // saving) the caller supplies opts.previewOverlay directly instead.
+  const wasteOverlay = opts.preview
+    ? (opts.previewOverlay || null)
+    : ((job && isAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? artlineWasteOverlay(job) : null);
   // Build one machines datalist per relevant stage (dedup) so multiple
   // rows for the same stage (e.g. Printed Sheets + Printed Waste both
   // point at Printing) share a single option list.
@@ -17007,9 +17060,15 @@ function particularsTable(p, job) {
       const personsOpts = personsForMachineName(nameVal)
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
       const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
-      const wasteExtraHtml = (wasteExtra !== undefined && wasteExtra > 0)
-        ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="+${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} from the wastage adjustment, split across each entry by its share of the original total">${applyOverlayToPipeEntries(raw(r.key, 'quantity'), wasteExtra)}</div>`
-        : '';
+      const isWasteRow = ARTLINE_WASTE_ROW_UNIT[r.key] !== undefined;
+      const wasteExtraHtml = (opts.preview && isWasteRow)
+        // Preview mode always renders the element (even empty/hidden) so
+        // updateAdjustPreview() can find it by id and refresh it live as
+        // the admin edits the packet count — no full re-render needed.
+        ? `<div id="wp-${r.key}" style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;${(wasteExtra !== undefined && wasteExtra > 0) ? '' : 'display:none;'}">${(wasteExtra !== undefined && wasteExtra > 0) ? applyOverlayToPipeEntries(raw(r.key, 'quantity'), wasteExtra) : ''}</div>`
+        : (wasteExtra !== undefined && wasteExtra > 0)
+          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="+${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} from the wastage adjustment, split across each entry by its share of the original total">${applyOverlayToPipeEntries(raw(r.key, 'quantity'), wasteExtra)}</div>`
+          : '';
       return `
     <tr>
       <td class="jc-row-label">${r.label}</td>
@@ -17041,7 +17100,8 @@ function particularsTable(p, job) {
     </table>`;
 }
 
-function jobForm(j={}) {
+function jobForm(j={}, opts) {
+  opts = opts || {};
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const v = x => esc(x||'');
   // Paper picker inputs. Same shape specsSection used to compute; moved
@@ -17268,7 +17328,7 @@ function jobForm(j={}) {
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
-    ${particularsTable(j.particulars||{}, j)}
+    ${particularsTable(j.particulars||{}, j, opts.particularsOpts)}
     ${deliveriesSection(j)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
