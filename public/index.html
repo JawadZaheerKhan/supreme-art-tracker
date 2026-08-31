@@ -13425,8 +13425,9 @@ async function openAdjustModal(jobId) {
   try {
     const txs = await api('GET', '/api/artline/unallocated');
     const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
-    const jobPaper = (j.paper || '').toLowerCase();
-    const jobSize  = (j.size  || '').toLowerCase();
+    const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const jobPaper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
+    const jobSize  = (invIt ? invIt.size : j.size || '').toLowerCase();
     const matches = [];
     for (const t of txs) {
       if (t.reason !== 'manual-job-card') continue;
@@ -13435,7 +13436,7 @@ async function openAdjustModal(jobId) {
       if (tPaper && jobPaper && tPaper !== jobPaper) continue;
       if (tSize && jobSize && tSize !== jobSize) continue;
       const allocated = allocMap[t.id] ? allocMap[t.id].total : 0;
-      const remaining = Math.abs(t.change) - allocated;
+      const remaining = (t.sheets || Math.abs(t.change || 0)) - allocated;
       if (remaining <= 0) continue;
       const mcNo = extractManualJobCardNo(t.notes);
       matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm });
