@@ -4840,29 +4840,57 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requireInventoryWriter,
     if (!job.inventory_item_id) return res.status(400).json({ error: 'Job has no paper linked — cannot approve' });
     const inv = await sql`SELECT * FROM inventory_items WHERE id=${job.inventory_item_id}`;
     const sourceItem = inv[0];
+    if (!sourceItem) return res.status(400).json({ error: 'Job paper no longer exists in inventory.' });
     const paperType = sourceItem?.paper_type || '';
     const ps = packetSize(paperType);
     const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
     const sheets = Math.round(parseFloat(t.qty) * ps);
     if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
-    await applyInventoryChange(sql, {
-      itemId: job.inventory_item_id,
-      change: -sheets,
-      reason: 'job-consumed',
-      jobId: job.id,
-      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${t.qty} ${unit} (${sheets} sheets) top-up issued by ${req.user.email}`,
-      user: req.user,
-    });
+    const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : [];
+    const splits = rawSplits.length
+      ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10) }))
+          .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0)
+      : [{ item_id: job.inventory_item_id, sheets }];
+    if (splits.reduce((sum, s) => sum + s.sheets, 0) !== sheets) {
+      return res.status(400).json({ error: `Top-up must issue exactly ${t.qty} ${unit} (${sheets} sheets).` });
+    }
+    const itemIds = [...new Set(splits.map(s => s.item_id))];
+    const splitItems = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
+    const byId = new Map(splitItems.map(x => [x.id, x]));
+    const challanNo = req.body && req.body.challan_no ? String(req.body.challan_no).trim() || null : null;
+    for (const s of splits) {
+      const splitItem = byId.get(s.item_id);
+      if (!splitItem) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
+      const sameGroup =
+        (splitItem.paper_type || '') === (sourceItem.paper_type || '') &&
+        (splitItem.size || '') === (sourceItem.size || '') &&
+        String(splitItem.gsm || '') === String(sourceItem.gsm || '') &&
+        !!splitItem.is_offcut === !!sourceItem.is_offcut;
+      if (!sameGroup) return res.status(400).json({ error: 'A selected brand is not in this job’s paper group.' });
+      await applyInventoryChange(sql, {
+        itemId: s.item_id,
+        change: -s.sheets,
+        reason: 'job-consumed',
+        jobId: job.id,
+        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${s.sheets / ps} ${unit} (${s.sheets} sheets) top-up from ${splitItem.brand || 'no brand'} issued by ${req.user.email}`,
+        user: req.user,
+        challanNo,
+      });
+    }
     if (job.cut_size && job.offcut_size && sourceItem) {
-      const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+      for (const s of splits) {
+        const splitItem = byId.get(s.item_id);
+        const offcutItem = await findOrCreateOffcutItem(sql, splitItem, job.offcut_size);
       await applyInventoryChange(sql, {
         itemId: offcutItem.id,
-        change: +sheets,
+          change: +s.sheets,
         reason: 'job-offcut',
         jobId: job.id,
-        notes: `Job E-${job.id}: ${sheets} sheets of ${job.offcut_size} offcut returned to stock (top-up)`,
+          notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${splitItem.brand || 'no brand'}) returned to stock (top-up)`,
         user: req.user,
+          challanNo,
       });
+      }
     }
     topups[idx] = { ...t, status: 'approved', approved_at: new Date().toISOString(), approved_by_id: req.user?.id || null, approved_by_email: req.user?.email || null };
     p.packets_topups = topups;

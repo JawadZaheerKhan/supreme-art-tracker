@@ -7339,6 +7339,22 @@ function pendingJobChipsForGroup(key) {
         if (primaryPending) {
           out.push({ job: j, jobId: j.id, source: 'primary', needSheets: jobDeductionSheetsClient(j), label: `E-${j.id}` });
         }
+        // Extra-packet requests belong to already-issued jobs, so they do
+        // not satisfy primaryPending above. Surface each pending request as
+        // its own chip and route Save through the top-up approval endpoint.
+        const ps = packetSize(pIt.paper_type);
+        packetTopupsPending(j).forEach(t => {
+          const qty = parseFloat(t.qty);
+          if (!Number.isFinite(qty) || qty <= 0) return;
+          out.push({
+            job: j,
+            jobId: j.id,
+            source: 'topup',
+            topupId: String(t.id),
+            needSheets: Math.round(qty * ps),
+            label: `E-${j.id} · TOP-UP +${qty}`,
+          });
+        });
       }
     }
     // Secondary (2nd) paper side — fresh 2nd paper still owed.
@@ -7375,7 +7391,7 @@ function bulkOutRefreshJobsForRow(idx) {
     return;
   }
   chips.innerHTML = candidates.map(c => {
-    return `<button type="button" class="jobchip" data-jobid="${c.jobId}" data-need="${c.needSheets}" data-source="${c.source}"
+    return `<button type="button" class="jobchip" data-jobid="${c.jobId}" data-need="${c.needSheets}" data-source="${c.source}" data-topupid="${esc(c.topupId || '')}"
              onclick="bulkOutToggleChip(this, ${idx})"
              title="Toggle ${esc(c.label)} for this row${c.source === 'secondary' ? ' (2nd paper)' : ''}"
              style="padding:5px 10px;border:1.5px solid var(--border);border-radius:999px;background:#fff;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">${esc(c.label)}</button>`;
@@ -7579,6 +7595,7 @@ async function saveBulkStockOut() {
           jobId: parseInt(c.dataset.jobid, 10),
           needSheets: parseInt(c.dataset.need, 10) || 0,
           source: c.dataset.source || 'primary',
+          topupId: c.dataset.topupid || null,
         })).filter(j => Number.isFinite(j.jobId))
       : [];
     // Per-brand splits (if the paper group has >1 brand). Each brand
@@ -7666,7 +7683,7 @@ async function saveBulkStockOut() {
   }
 
   showSaving(true);
-  let saved = 0, errored = 0, flipped = 0, partials = 0;
+  let saved = 0, errored = 0, flipped = 0, partials = 0, topupsApproved = 0;
   for (const p of plan) {
     try {
       if (p.reason === 'job-card' && p.selectedJobs.length) {
@@ -7697,10 +7714,13 @@ async function saveBulkStockOut() {
           } else {
             jobSplits = [{ item_id: p.match.id, sheets: jobShare }];
           }
-          const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits, challan_no: ref || null, source: j.source || 'primary' });
+          const result = j.source === 'topup'
+            ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, { splits: jobSplits, challan_no: ref || null })
+            : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits, challan_no: ref || null, source: j.source || 'primary' });
           remainingRow -= jobShare;
           if (result) {
-            if (result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
+            if (j.source === 'topup') topupsApproved++;
+            else if (result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
             else if (result.particulars && result.particulars.partial_pending_sheets) partials++;
           }
         }
@@ -7743,6 +7763,7 @@ async function saveBulkStockOut() {
   const tailBits = [];
   if (flipped)  tailBits.push(`${flipped} job(s) fully issued`);
   if (partials) tailBits.push(`${partials} partial job(s) still pending top-up`);
+  if (topupsApproved) tailBits.push(`${topupsApproved} extra-packet request(s) approved`);
   const tail = tailBits.length ? ' · ' + tailBits.join(' · ') : '';
   if (errored === 0) notify(`Stock out saved · ${saved} row${saved===1?'':'s'}${tail}`);
   else notify(`${saved} saved · ${errored} failed (see console)`);
