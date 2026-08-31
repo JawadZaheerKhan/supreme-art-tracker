@@ -13574,7 +13574,7 @@ function printManualConsumption() {
 // ── Offcut Consumption ───────────────────────────────────────
 // Automatic offcut issues to tracked E-jobs. Kept separate from Manual
 // Consumption (offline job cards) and from normal fresh-stock movement.
-const offcutConsumptionState = { period: 'month', from: '', to: '', paperType: '', rows: [] };
+const offcutConsumptionState = { period: 'month', from: '', to: '', paperType: '', rows: [], selected: new Set() };
 
 function openOffcutConsumptionPane() {
   const state = offcutConsumptionState;
@@ -13588,6 +13588,7 @@ function openOffcutConsumptionPane() {
       <h2 style="margin:0;font-size:20px;">Offcut Consumption</h2>
       <span style="color:var(--text2);font-size:12px;">Offcut paper automatically issued to tracked E-jobs.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
+        ${isAdmin() ? '<button class="btn btn-sm btn-danger" id="oc-delete-selected" style="display:none;" onclick="deleteSelectedOffcutConsumption()">Delete Selected</button>' : ''}
         <button class="btn btn-sm" onclick="exportOffcutConsumption()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printOffcutConsumption()">&#128424; Print Report</button>
       </div>
@@ -13622,6 +13623,8 @@ async function loadOffcutConsumption() {
   try {
     const rows = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     s.rows = rows.filter(t => t.item_is_offcut && t.reason === 'job-consumed' && t.job_id);
+    const liveIds = new Set(s.rows.map(t => t.id));
+    for (const id of [...s.selected]) if (!liveIds.has(id)) s.selected.delete(id);
     renderOffcutConsumption();
   } catch (e) { const el=document.getElementById('oc-content'); if(el) el.textContent='Error: '+e.message; }
 }
@@ -13632,6 +13635,7 @@ function offcutConsumptionRows() {
 }
 function renderOffcutConsumption() {
   const rows = offcutConsumptionRows();
+  const canDelete = isAdmin();
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
@@ -13639,20 +13643,31 @@ function renderOffcutConsumption() {
   const sum = document.getElementById('oc-summary');
   if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:180px;"><div class="dash-flbl">Total Offcut Consumption</div><div style="font-size:22px;font-weight:600;color:${color};">${fmt(totalUnits)} packets / reams</div><div style="font-size:11px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:140px;"><div class="dash-flbl">Transactions</div><div style="font-size:22px;font-weight:600;">${rows.length}</div></div>`;
   const el = document.getElementById('oc-content'); if (!el) return;
+  const visibleIds = rows.map(t => t.id);
+  const allSelected = visibleIds.length > 0 && visibleIds.every(id => offcutConsumptionState.selected.has(id));
+  const someSelected = visibleIds.some(id => offcutConsumptionState.selected.has(id));
+  const deleteBtn = document.getElementById('oc-delete-selected');
+  if (deleteBtn) {
+    deleteBtn.style.display = offcutConsumptionState.selected.size ? '' : 'none';
+    deleteBtn.textContent = `Delete Selected (${offcutConsumptionState.selected.size})`;
+  }
   if (!rows.length) { el.innerHTML = '<div class="empty">No automatic offcut consumption in this period.</div>'; return; }
   const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
   el.innerHTML = `<div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead><tr style="background:var(--bg2);">
+        ${canDelete ? `<th style="width:34px;padding:8px;text-align:center;"><input type="checkbox" ${allSelected?'checked':''} ${someSelected&&!allSelected?'data-indeterminate="1"':''} onchange="toggleAllOffcutConsumption(this.checked)"></th>` : ''}
         <th ${th}>When</th><th ${th}>E-Job No.</th><th ${th}>Paper Type</th>
         <th ${th}>Size</th><th ${th}>GSM</th><th ${th}>Brand</th>
         <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed</th>
         <th ${th}>Issued By</th>
+        ${canDelete ? '<th style="width:70px;padding:8px;"></th>' : ''}
       </tr></thead>
       <tbody>${rows.map(t => {
         const ps = packetSize(t.paper_type || '');
         const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
         return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+          ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
           <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT(t.created_at))}</td>
           <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">E-${t.job_id}</td>
           <td style="padding:6px 8px;">${esc(t.paper_type || '—')}</td>
@@ -13661,10 +13676,54 @@ function renderOffcutConsumption() {
           <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
           <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
           <td style="padding:6px 8px;white-space:nowrap;">${esc(t.user_email || '—')}</td>
+          ${canDelete ? `<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="deleteOffcutConsumptionRows([${t.id}])">Delete</button></td>` : ''}
         </tr>`;
       }).join('')}</tbody>
     </table>
   </div>`;
+  const headCheck = el.querySelector('thead input[data-indeterminate="1"]');
+  if (headCheck) headCheck.indeterminate = true;
+}
+function toggleOffcutConsumptionRow(id, checked) {
+  checked ? offcutConsumptionState.selected.add(id) : offcutConsumptionState.selected.delete(id);
+  renderOffcutConsumption();
+}
+function toggleAllOffcutConsumption(checked) {
+  offcutConsumptionRows().forEach(t => checked ? offcutConsumptionState.selected.add(t.id) : offcutConsumptionState.selected.delete(t.id));
+  renderOffcutConsumption();
+}
+async function deleteOffcutConsumptionRows(ids, skipConfirm = false) {
+  if (!isAdmin()) { notify('Admin only.'); return; }
+  const cleanIds = [...new Set((ids || []).filter(Number.isFinite))];
+  if (!cleanIds.length) return;
+  if (!skipConfirm) {
+    const ok = await confirmDialog({
+      title: 'Delete this Offcut Consumption row?',
+      message: 'This removes the transaction from the report/history. The current physical stock balance will not change.',
+      confirmText: 'Delete', danger: true,
+    });
+    if (!ok) return;
+  }
+  showSaving(true);
+  let deleted=0, failed=0;
+  for (const id of cleanIds) {
+    try { await api('DELETE', `/api/inventory/transactions/${id}`); deleted++; offcutConsumptionState.selected.delete(id); }
+    catch(e) { failed++; console.error('Offcut Consumption delete failed', id, e); }
+  }
+  showSaving(false);
+  await loadOffcutConsumption();
+  notify(`Deleted ${deleted} transaction${deleted===1?'':'s'}${failed?` · ${failed} failed`:''}`);
+}
+async function deleteSelectedOffcutConsumption() {
+  const ids = [...offcutConsumptionState.selected];
+  if (!ids.length) return;
+  const ok = await confirmDialog({
+    title: `Delete ${ids.length} selected transaction${ids.length===1?'':'s'}?`,
+    message: 'They will be removed from Offcut Consumption and inventory history. Current physical stock balances will not change.',
+    confirmText: 'Delete Selected', danger: true,
+  });
+  if (!ok) return;
+  await deleteOffcutConsumptionRows(ids, true);
 }
 async function exportOffcutConsumption() {
   try { await ensureXlsx(); } catch(e) { notify(e.message); return; }
