@@ -4010,7 +4010,7 @@ function getFiltered() {
     if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelvPostReady;
     if (view === 'storage') return isStorage(j);
     if (view === 'partial') return isPartialDelvPostReady;
-    if (view === 'done')    return isDone(j) && !_finalizedJobIds.has(j.id);
+    if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
     if (view === 'finalized') return _finalizedJobIds.has(j.id);
     // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
@@ -4443,7 +4443,7 @@ function renderJobRowCompact(j, opts) {
       ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
       : '';
     return `
-    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;" title="Click to open Job Card"`}>
+    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
       <div class="job-top">
         <div class="job-meta">
           <div class="job-id-row">
@@ -4936,7 +4936,7 @@ function renderJobCard(j, opts) {
   // clientTintStyle and tileAttr are mutually exclusive (tint fires only
   // under clientPreview; tileAttr only when !clientPreview).
   const tileAttr = (!clientPreview && !isGroupTile)
-    ? ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;" title="Click to open Job Card"`
+    ? ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`
     : clientTintStyle;
   return `
   <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${tileAttr}>
@@ -13533,9 +13533,14 @@ async function submitAdjustment(jobId) {
     sheetsLeft -= take;
   }
 
+  if (!allocations.length) {
+    notify('Cannot adjust — no matching manual consumption sources found for this job\'s paper type/size.');
+    return;
+  }
+
   const ok = await confirmDialog({
     title: 'Confirm Adjustment',
-    message: `Adjust Job E-${jobId} with ${packets} manual packets (${manual_sheets} sheets)?\nThis moves the job to the Finalized tab.${allocations.length ? '\n' + allocations.length + ' manual consumption source(s) will be linked.' : ''}`,
+    message: `Adjust Job E-${jobId} with ${packets} manual packets (${manual_sheets} sheets)?\n${allocations.length} manual consumption source(s) will be linked.`,
   });
   if (!ok) return;
   try {
