@@ -1548,7 +1548,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { roles, primary } = parseRolesInput(req.body, req.user);
+    let { roles, primary } = parseRolesInput(req.body, req.user);
     // Guardrail: don't allow removing admin from yourself — locks you out
     // of the admin tools. Adding EXTRA roles to yourself is fine.
     if (parseInt(id, 10) === req.user.id && !roles.includes('admin')) {
@@ -1559,6 +1559,31 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     // demote themselves out of Artline/Manual Consumption access.
     if (parseInt(id, 10) === req.user.id && userHasRole(req.user, 'super_admin') && !roles.includes('super_admin')) {
       return res.status(400).json({ error: "You can't remove the Super Admin role from your own account." });
+    }
+    // A regular Admin editing someone else's roles never sees a Super Admin
+    // checkbox at all — the client-side form can't submit a roles list that
+    // includes it. Without this, saving ANY unrelated change to a Super
+    // Admin's row (e.g. ticking Finance) would silently strip super_admin,
+    // since it's simply absent from what got submitted. Preserve it here.
+    if (!userHasRole(req.user, 'super_admin')) {
+      const current = await sql`SELECT role, roles FROM users WHERE id = ${id}`;
+      const currentRoles = current.length
+        ? normalizeUserRoles(Array.isArray(current[0].roles) && current[0].roles.length ? current[0].roles : current[0].role)
+        : [];
+      if (currentRoles.includes('super_admin')) {
+        // Also keep 'admin' — Super Admin is meant to always imply Admin,
+        // and the acting admin can't have knowingly unchecked either box
+        // for a role they never saw in the first place.
+        const preserve = ['super_admin', 'admin'].filter(r => !roles.includes(r));
+        if (preserve.length) {
+          roles = [...preserve, ...roles];
+          // Re-adding internal roles can only ever un-violate the client
+          // exclusivity rule, never re-trigger it in the other direction —
+          // but guard anyway: an internal role always wins over 'client'.
+          if (roles.includes('client')) roles = roles.filter(r => r !== 'client');
+          primary = ROLE_PRIORITY.find(r => roles.includes(r)) || primary;
+        }
+      }
     }
     // client_company is only meaningful when the role IS client; drop it
     // otherwise so switching a user away from 'client' also clears the
