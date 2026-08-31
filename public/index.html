@@ -13375,7 +13375,10 @@ async function loadArtlineData() {
     const alloc = (allocMap || {})[t.id] ? allocMap[t.id].total : 0;
     const remaining = (t.sheets || Math.abs(t.change || 0)) - alloc;
     if (remaining > 0) {
-      _manualPaperKeys.add((t.paper_type || '').toLowerCase());
+      const paper = (t.paper_type || '').toLowerCase();
+      const size  = (t.item_size || '').toLowerCase();
+      const gsm   = String(t.item_gsm || '').toLowerCase();
+      _manualPaperKeys.add(paper + '||' + size + '||' + gsm);
     }
   }
 }
@@ -13383,7 +13386,9 @@ async function loadArtlineData() {
 function jobHasManualMatch(j) {
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
-  return _manualPaperKeys.has(paper);
+  const size  = (invIt ? invIt.size : j.size || '').toLowerCase();
+  const gsm   = String(invIt ? invIt.gsm : j.gsm || '').toLowerCase();
+  return _manualPaperKeys.has(paper + '||' + size + '||' + gsm);
 }
 
 function artlineAdjustmentForJob(jobId) {
@@ -13436,12 +13441,13 @@ async function openAdjustModal(jobId) {
 
   let matchHtml = '<div style="font-size:12px;color:var(--text2);">Loading matching manual consumption...</div>';
   _adjModalTxMatches = [];
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   try {
     const txs = await api('GET', '/api/artline/unallocated');
     const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
-    const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
     const jobPaper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
     const jobSize  = (invIt ? invIt.size : j.size || '').toLowerCase();
+    const jobGsm   = String(invIt ? invIt.gsm : j.gsm || '').toLowerCase();
     const matches = [];
     for (const t of txs) {
       const tPaper = (t.paper_type || '').toLowerCase();
@@ -13451,14 +13457,16 @@ async function openAdjustModal(jobId) {
       if (remaining <= 0) continue;
       const mcNo = extractManualJobCardNo(t.notes);
       const tSize = (t.item_size || '').toLowerCase();
+      const tGsm  = String(t.item_gsm || '').toLowerCase();
       const sizeMatch = !tSize || !jobSize || tSize === jobSize;
-      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm, sizeMatch });
+      const gsmMatch  = !tGsm  || !jobGsm  || tGsm  === jobGsm;
+      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm, exactMatch: sizeMatch && gsmMatch });
     }
     _adjModalTxMatches = matches;
     if (matches.length) {
       matchHtml = matches.map((m, i) => `
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;cursor:pointer;">
-          <input type="checkbox" class="adj-alloc-cb" data-idx="${i}" ${m.sizeMatch ? 'checked' : ''}>
+          <input type="checkbox" class="adj-alloc-cb" data-idx="${i}" ${m.exactMatch ? 'checked' : ''}>
           <span style="font-weight:600;">${esc(m.mcNo)}</span>
           <span style="color:var(--text2);">${esc(m.paperType||'')} ${esc(m.size||'')} ${m.gsm||''} — ${m.remaining} sheets avail</span>
         </label>`).join('');
