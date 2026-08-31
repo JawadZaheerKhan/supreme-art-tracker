@@ -2922,6 +2922,9 @@ let jobsViewMode = localStorage.getItem('sa_jobs_view') || 'cards';
 // Batch print — job IDs the user has ticked on the New Jobs tab. Only
 // active while view === 'new'; auto-cleared when the tab changes.
 const selectedNewJobIds = new Set();
+// Bulk delete — job IDs ticked on the Finalized tab. Only active while
+// view === 'finalized'; auto-cleared when the tab changes.
+const selectedFinalizedJobIds = new Set();
 let filterText = '';
 let filterStage = '';
 let filterClient = '';
@@ -4441,9 +4444,11 @@ function renderJobRowCompact(j, opts) {
     // printSelectedJobs().
     const selBox = (((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
       ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
-      : '';
+      : (view === 'finalized' && _finalizedJobIds.has(j.id) && isAdmin())
+        ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
+        : '';
     return `
-    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
+    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
       <div class="job-top">
         <div class="job-meta">
           <div class="job-id-row">
@@ -4870,7 +4875,9 @@ function renderJobCard(j, opts) {
   // the New Jobs tab and the CTP tab, and only for users who can print job cards.
   const selBox = (!clientPreview && ((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
     ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
-    : '';
+    : (!clientPreview && view === 'finalized' && _finalizedJobIds.has(j.id) && isAdmin())
+      ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
+      : '';
   // Blocked banner + red tint on the whole tile — clients need to see
   // that a job is blocked AND why. Reason comes from stages[si].notes,
   // which the server kept on the currently-blocked stage entry only.
@@ -4939,7 +4946,7 @@ function renderJobCard(j, opts) {
     ? ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`
     : clientTintStyle;
   return `
-  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${selectedNewJobIds.has(j.id)?'is-selected':''}"${tileAttr}>
+  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${tileAttr}>
     ${sideStats}
     ${clientTopRow}
     <div class="tile-head">
@@ -5583,6 +5590,7 @@ function setView(v) {
   // when the user leaves both tabs so an accidental Print Selected can't
   // send stale ids that are no longer on screen.
   if (v !== 'new' && v !== 'ctp' && selectedNewJobIds.size) selectedNewJobIds.clear();
+  if (v !== 'finalized' && selectedFinalizedJobIds.size) selectedFinalizedJobIds.clear();
   view=v; render();
   // _manualPaperKeys (drives the Adjust button's bright/dim state) only
   // updates when loadArtlineData() runs — refresh it on entry to Delivered
@@ -13450,17 +13458,67 @@ function renderArtlineBar() {
   const bar = document.getElementById('new-jobs-bulk');
   if (view !== 'finalized' || !isAdmin()) return;
   if (!bar) return;
-  const count = _finalizedJobIds.size;
+  // Prune any ticked jobs that are no longer finalized (un-adjusted from
+  // elsewhere, or archived out from under the selection).
+  for (const id of [...selectedFinalizedJobIds]) if (!_finalizedJobIds.has(id)) selectedFinalizedJobIds.delete(id);
+  const n = selectedFinalizedJobIds.size;
   bar.style.display = 'flex';
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
-      <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Finalized Jobs (${count})</span>
+      <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Finalized Jobs</span>
       <button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;" onclick="openArtlineSettingsModal()">&#9881; Wastage Settings</button>
+      ${n ? `<span class="njb-count">${n} selected</span>
+        <button class="btn btn-sm btn-danger" onclick="bulkDeleteSelectedFinalizedJobs()" title="Permanently move the selected finalized jobs to Archive">&#128465; Delete Selected (${n})</button>` : ''}
       <span style="font-size:12px;color:var(--text2);margin-left:auto;">
         Default: Printing ${_artlineSettings.printing_pct}% · Die ${_artlineSettings.die_pct}% · Coating ${_artlineSettings.coating_pct}% · Pasting ${_artlineSettings.pasting_pct}% · Sorting ${_artlineSettings.sorting_pct}% · Max ${_artlineSettings.max_packets_per_job} pkts/job
       </span>
     </div>
   `;
+}
+
+function toggleFinalizedJobSelect(id, on) {
+  if (on) selectedFinalizedJobIds.add(id); else selectedFinalizedJobIds.delete(id);
+  // Cheap update — just refresh the bar + the affected tile's highlight,
+  // same pattern as toggleJobSelect. Avoids a full render so scroll
+  // position and any open dropdowns survive.
+  renderArtlineBar();
+  document.querySelectorAll(`.job-card, .job-tile`).forEach(el => {
+    const idAttr = el.querySelector(`input[type="checkbox"][onchange*="toggleFinalizedJobSelect(${id},"]`);
+    if (idAttr) el.classList.toggle('is-selected', on);
+  });
+}
+
+// Bulk-archives every ticked finalized job in one confirm — same soft
+// delete (30-day Archive, restorable) as the single-job Delete button.
+// The adjustment mirror (job_adjustments row) isn't touched directly;
+// /api/artline/finalized already excludes jobs with deleted_at set, so
+// an archived job simply drops out of the Finalized tab.
+async function bulkDeleteSelectedFinalizedJobs() {
+  const ids = [...selectedFinalizedJobIds];
+  if (!ids.length) return;
+  const names = ids.map(id => { const j = jobs.find(x => x.id === id); return j ? `E-${id} (${j.name})` : `E-${id}`; });
+  const ok = await confirmDialog({
+    title: `Move ${ids.length} finalized job${ids.length === 1 ? '' : 's'} to Archive?`,
+    message: `${names.join('\n')}\n\nEach stays in the Archive for 30 days where it can be restored, then auto-purges. Inventory ledger entries are preserved.`,
+    danger: true,
+    confirmText: 'Move to Archive',
+  });
+  if (!ok) return;
+  showSaving(true);
+  let deleted = 0, errored = 0;
+  for (const id of ids) {
+    try {
+      await api('DELETE', `/api/jobs/${id}`);
+      jobs = jobs.filter(x => x.id !== id);
+      deleted++;
+    } catch (e) { console.error('Delete for E-' + id + ' failed:', e); errored++; }
+  }
+  selectedFinalizedJobIds.clear();
+  await loadInventory();
+  await loadArtlineData();
+  render();
+  showSaving(false);
+  notify(`${deleted} job${deleted === 1 ? '' : 's'} moved to Archive${errored ? ` · ${errored} failed` : ''}`);
 }
 
 let _adjModalTxMatches = [];
