@@ -990,6 +990,20 @@ async function initDb() {
       VALUES ('wastage_defaults', '{"printing_pct":40,"die_pct":20,"coating_pct":15,"pasting_pct":15,"sorting_pct":10,"max_packets_per_job":2}'::jsonb)
       ON CONFLICT (key) DO NOTHING
     `;
+    // Links each adjustment to the specific manual-job-card inventory
+    // transactions it absorbed. Supports partial allocation — one manual
+    // stock-out can be split across multiple E-jobs, and one E-job can
+    // absorb sheets from multiple manual transactions.
+    await sql`
+      CREATE TABLE IF NOT EXISTS adjustment_allocations (
+        id              SERIAL PRIMARY KEY,
+        adjustment_id   INTEGER NOT NULL REFERENCES job_adjustments(id) ON DELETE CASCADE,
+        transaction_id  INTEGER NOT NULL REFERENCES inventory_transactions(id) ON DELETE CASCADE,
+        sheets_allocated INTEGER NOT NULL,
+        UNIQUE(adjustment_id, transaction_id)
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS adj_alloc_tx_idx ON adjustment_allocations(transaction_id)`;
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -7906,7 +7920,7 @@ app.put('/api/artline/settings', requireAdmin, async (req, res) => {
     const v = req.body;
     const pcts = (v.printing_pct || 0) + (v.die_pct || 0) + (v.coating_pct || 0) + (v.pasting_pct || 0) + (v.sorting_pct || 0);
     if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
-    if ((v.max_packets_per_job || 0) < 1) return res.status(400).json({ error: 'Max packets per job must be at least 1' });
+    if ((v.max_packets_per_job || 0) < 0.5) return res.status(400).json({ error: 'Max packets per job must be at least 0.5' });
     await sql`
       INSERT INTO artline_settings (key, value) VALUES ('wastage_defaults', ${JSON.stringify(v)})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
@@ -7959,6 +7973,18 @@ app.post('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
       VALUES (${jobId}, ${b.manual_packets}, ${b.manual_sheets || 0}, ${b.printing_pct}, ${b.die_pct}, ${b.coating_pct}, ${b.pasting_pct}, ${b.sorting_pct}, ${b.notes || ''}, ${req.user?.email || ''})
       RETURNING *
     `)[0];
+    // Link to specific manual-job-card transactions being absorbed.
+    // allocations: [{ transaction_id, sheets_allocated }]
+    if (Array.isArray(b.allocations) && b.allocations.length) {
+      for (const alloc of b.allocations) {
+        if (!alloc.transaction_id || !alloc.sheets_allocated) continue;
+        await sql`
+          INSERT INTO adjustment_allocations (adjustment_id, transaction_id, sheets_allocated)
+          VALUES (${row.id}, ${alloc.transaction_id}, ${alloc.sheets_allocated})
+          ON CONFLICT (adjustment_id, transaction_id) DO UPDATE SET sheets_allocated = EXCLUDED.sheets_allocated
+        `;
+      }
+    }
     await logAudit(sql, req, {
       action: 'artline.adjust',
       entityType: 'job',
@@ -8026,6 +8052,32 @@ app.post('/api/artline/post/:jobId', requireAdmin, async (req, res) => {
       summary: `Artline: posted Job E-${jobId} for public app`,
     });
     res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Allocation totals per inventory transaction — used by Manual Consumption report
+// to render green fill bars showing how much of each stock-out has been absorbed.
+app.get('/api/artline/allocations', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT aa.transaction_id,
+             it.notes AS tx_notes,
+             SUM(aa.sheets_allocated) AS total_allocated,
+             json_agg(json_build_object(
+               'adjustment_id', aa.adjustment_id,
+               'job_id', ja.job_id,
+               'sheets', aa.sheets_allocated
+             )) AS jobs
+      FROM adjustment_allocations aa
+      JOIN job_adjustments ja ON ja.id = aa.adjustment_id
+      JOIN inventory_transactions it ON it.id = aa.transaction_id
+      GROUP BY aa.transaction_id, it.notes
+    `;
+    const map = {};
+    for (const r of rows) map[r.transaction_id] = { total: Number(r.total_allocated), jobs: r.jobs, notes: r.tx_notes || '' };
+    res.json(map);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

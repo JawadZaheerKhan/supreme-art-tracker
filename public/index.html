@@ -13345,12 +13345,14 @@ function printStockTotal(direction) {
 const _finalizedJobIds = new Set();
 let _artlineSettings = { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 };
 let _adjustments = {};
+let _adjJobManualRefs = {};
 
 async function loadArtlineData() {
   try {
-    const [settings, finalized] = await Promise.all([
+    const [settings, finalized, allocMap] = await Promise.all([
       api('GET', '/api/artline/settings'),
       api('GET', '/api/artline/finalized'),
+      api('GET', '/api/artline/allocations').catch(() => ({})),
     ]);
     _artlineSettings = settings;
     _finalizedJobIds.clear();
@@ -13358,6 +13360,14 @@ async function loadArtlineData() {
     for (const row of finalized) {
       _finalizedJobIds.add(row.id);
       _adjustments[row.id] = row;
+    }
+    _adjJobManualRefs = {};
+    for (const [, info] of Object.entries(allocMap)) {
+      const mcNo = extractManualJobCardNo(info.notes);
+      for (const j of (info.jobs || [])) {
+        if (!_adjJobManualRefs[j.job_id]) _adjJobManualRefs[j.job_id] = new Set();
+        _adjJobManualRefs[j.job_id].add(mcNo);
+      }
     }
   } catch (e) { console.warn('Artline load failed:', e.message); }
 }
@@ -13369,10 +13379,15 @@ function artlineAdjustmentForJob(jobId) {
 function artlineAdjBanner(jobId) {
   const a = _adjustments[jobId];
   if (!a) return '';
+  const refs = _adjJobManualRefs[jobId];
+  const refLine = refs && refs.size
+    ? `<div style="margin-top:2px;font-size:10px;color:#7c3aed;">Manual: ${[...refs].map(r => esc(r)).join(', ')}</div>`
+    : '';
   return `<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:6px 10px;font-size:11px;color:#5b21b6;margin-top:4px;">
     <span style="font-weight:700;">&#9881; Adjusted:</span> +${a.manual_packets} pkts (${(a.manual_sheets || 0).toLocaleString()} sheets)
     &middot; P:${a.printing_pct}% D:${a.die_pct}% C:${a.coating_pct}% Pa:${a.pasting_pct}% S:${a.sorting_pct}%
     ${a.posted ? '<span style="color:#166534;font-weight:700;"> &#10004; Posted</span>' : ''}
+    ${refLine}
   </div>`;
 }
 
@@ -13393,6 +13408,8 @@ function renderArtlineBar() {
   `;
 }
 
+let _adjModalTxMatches = [];
+
 async function openAdjustModal(jobId) {
   const j = jobs.find(x => x.id === jobId);
   if (!j) return;
@@ -13402,6 +13419,42 @@ async function openAdjustModal(jobId) {
   }
   const s = _artlineSettings;
   const ps = j.inventory_item_id ? packetSize(j.paper || '') : 1000;
+
+  let matchHtml = '<div style="font-size:12px;color:var(--text2);">Loading matching manual consumption...</div>';
+  _adjModalTxMatches = [];
+  try {
+    const txs = await api('GET', '/api/artline/unallocated');
+    const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
+    const jobPaper = (j.paper || '').toLowerCase();
+    const jobSize  = (j.size  || '').toLowerCase();
+    const matches = [];
+    for (const t of txs) {
+      if (t.reason !== 'manual-job-card') continue;
+      const tPaper = (t.paper_type || '').toLowerCase();
+      const tSize  = (t.item_size  || '').toLowerCase();
+      if (tPaper && jobPaper && tPaper !== jobPaper) continue;
+      if (tSize && jobSize && tSize !== jobSize) continue;
+      const allocated = allocMap[t.id] ? allocMap[t.id].total : 0;
+      const remaining = Math.abs(t.change) - allocated;
+      if (remaining <= 0) continue;
+      const mcNo = extractManualJobCardNo(t.notes);
+      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm });
+    }
+    _adjModalTxMatches = matches;
+    if (matches.length) {
+      matchHtml = matches.map((m, i) => `
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;cursor:pointer;">
+          <input type="checkbox" class="adj-alloc-cb" data-idx="${i}" checked>
+          <span style="font-weight:600;">${esc(m.mcNo)}</span>
+          <span style="color:var(--text2);">${esc(m.paperType||'')} ${esc(m.size||'')} ${m.gsm||''} — ${m.remaining} sheets avail</span>
+        </label>`).join('');
+    } else {
+      matchHtml = '<div style="font-size:12px;color:var(--text2);">No matching unallocated manual consumption found for this paper type/size.</div>';
+    }
+  } catch (e) {
+    matchHtml = '<div style="font-size:12px;color:var(--text2);">Could not load manual consumption data.</div>';
+  }
+
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
     <h2 style="text-align:center;letter-spacing:1px;">ADJUST JOB E-${j.id}</h2>
     <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:12px;">
@@ -13417,6 +13470,10 @@ async function openAdjustModal(jobId) {
       <div class="dash-flbl" style="margin-bottom:8px;">Manual Packets to Adjust</div>
       <input type="number" id="adj-packets" min="0.5" max="${s.max_packets_per_job}" step="0.5" value="${Math.min(s.max_packets_per_job, 2)}" class="filter" style="width:100%;margin-bottom:4px;">
       <div style="font-size:11px;color:var(--text2);">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets.</div>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
+      <div class="dash-flbl" style="margin-bottom:8px;">Manual Consumption Sources</div>
+      <div id="adj-alloc-list" style="max-height:140px;overflow-y:auto;">${matchHtml}</div>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
       <div class="dash-flbl" style="margin-bottom:8px;">Wastage Breakdown (%)</div>
@@ -13462,15 +13519,28 @@ async function submitAdjustment(jobId) {
   const j = jobs.find(x => x.id === jobId);
   const ps = j && j.paper ? packetSize(j.paper) : 1000;
   const manual_sheets = Math.round(packets * ps);
+
+  const allocations = [];
+  const cbs = document.querySelectorAll('.adj-alloc-cb:checked');
+  let sheetsLeft = manual_sheets;
+  for (const cb of cbs) {
+    const idx = parseInt(cb.dataset.idx);
+    const m = _adjModalTxMatches[idx];
+    if (!m || sheetsLeft <= 0) continue;
+    const take = Math.min(m.remaining, sheetsLeft);
+    allocations.push({ transaction_id: m.id, sheets_allocated: take });
+    sheetsLeft -= take;
+  }
+
   const ok = await confirmDialog({
     title: 'Confirm Adjustment',
-    message: `Adjust Job E-${jobId} with ${packets} manual packets (${manual_sheets} sheets)?\\nThis moves the job to the Finalized tab.`,
+    message: `Adjust Job E-${jobId} with ${packets} manual packets (${manual_sheets} sheets)?\nThis moves the job to the Finalized tab.${allocations.length ? '\n' + allocations.length + ' manual consumption source(s) will be linked.' : ''}`,
   });
   if (!ok) return;
   try {
     await api('POST', `/api/artline/adjust/${jobId}`, {
       manual_packets: packets, manual_sheets,
-      printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes,
+      printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes, allocations,
     });
     closeModal();
     notify(`Job E-${jobId} adjusted and finalized.`);
@@ -13482,7 +13552,7 @@ async function submitAdjustment(jobId) {
 async function removeAdjustment(jobId) {
   const ok = await confirmDialog({
     title: 'Remove Adjustment',
-    message: `Remove the adjustment from Job E-${jobId}?\\nIt will move back to the Delivered tab.`,
+    message: `Remove the adjustment from Job E-${jobId}?\nIt will move back to the Delivered tab.`,
     danger: true, confirmText: 'Remove',
   });
   if (!ok) return;
@@ -13507,7 +13577,7 @@ async function openArtlineSettingsModal() {
       <div><label style="font-size:12px;font-weight:600;">Coating %</label><input type="number" id="as-coating" min="0" max="100" value="${s.coating_pct}" class="filter" style="width:100%;"></div>
       <div><label style="font-size:12px;font-weight:600;">Pasting %</label><input type="number" id="as-pasting" min="0" max="100" value="${s.pasting_pct}" class="filter" style="width:100%;"></div>
       <div><label style="font-size:12px;font-weight:600;">Sorting %</label><input type="number" id="as-sorting" min="0" max="100" value="${s.sorting_pct}" class="filter" style="width:100%;"></div>
-      <div><label style="font-size:12px;font-weight:600;">Max Packets / Job</label><input type="number" id="as-max" min="1" max="50" value="${s.max_packets_per_job}" class="filter" style="width:100%;"></div>
+      <div><label style="font-size:12px;font-weight:600;">Max Packets / Job</label><input type="number" id="as-max" min="0.5" max="50" step="0.5" value="${s.max_packets_per_job}" class="filter" style="width:100%;"></div>
     </div>
     <div id="as-warn" style="font-size:11px;color:#dc2626;margin-bottom:8px;display:none;"></div>
     <div class="modal-actions">
@@ -13523,7 +13593,7 @@ async function saveArtlineSettings() {
   const coating_pct  = parseFloat(document.getElementById('as-coating').value) || 0;
   const pasting_pct  = parseFloat(document.getElementById('as-pasting').value) || 0;
   const sorting_pct  = parseFloat(document.getElementById('as-sorting').value) || 0;
-  const max_packets_per_job = parseInt(document.getElementById('as-max').value) || 2;
+  const max_packets_per_job = parseFloat(document.getElementById('as-max').value) || 2;
   const total = printing_pct + die_pct + coating_pct + pasting_pct + sorting_pct;
   if (Math.round(total) !== 100) {
     const w = document.getElementById('as-warn');
@@ -13685,8 +13755,12 @@ async function loadManualConsumption() {
   // In/Out, Stock Summary) keeps excluding offcut movement entirely.
   qs.set('include_offcut_manual', '1');
   try {
-    const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
+    const [txs, allocs] = await Promise.all([
+      api('GET', `/api/inventory/transactions?${qs.toString()}`),
+      api('GET', '/api/artline/allocations').catch(() => ({})),
+    ]);
     state.rows = txs;
+    state.allocations = allocs;
     renderManualConsumption();
   } catch (e) {
     const el = document.getElementById('mc-content');
@@ -13722,9 +13796,11 @@ function computeManualConsumptionRows() {
       groups.set(key, {
         jobCardNo, paperType: t.paper_type || '', size: t.item_size || '', gsm: t.item_gsm || '',
         brands: new Set(), totalSheets: 0, txCount: 0, latestMs: null, latestRaw: null, enteredBy: new Set(),
+        txIds: [],
       });
     }
     const g = groups.get(key);
+    if (t.id) g.txIds.push(t.id);
     if (t.item_brand) g.brands.add(t.item_brand);
     g.totalSheets += amt;
     g.txCount++;
@@ -13732,14 +13808,26 @@ function computeManualConsumptionRows() {
     const ms = t.created_at ? new Date(t.created_at).getTime() : null;
     if (ms != null && (g.latestMs == null || ms > g.latestMs)) { g.latestMs = ms; g.latestRaw = t.created_at; }
   }
+  const allocs = state.allocations || {};
   const rows = [...groups.values()].map(g => {
     const ps   = packetSize(g.paperType);
     const unit = packetUnitLabel(g.paperType).toLowerCase();
+    let allocatedSheets = 0;
+    const linkedJobs = new Set();
+    for (const tid of g.txIds) {
+      const a = allocs[tid];
+      if (a) {
+        allocatedSheets += a.total;
+        for (const j of a.jobs) linkedJobs.add(j.job_id);
+      }
+    }
+    const allocPct = g.totalSheets > 0 ? Math.min(100, Math.round(allocatedSheets / g.totalSheets * 100)) : 0;
     return {
       jobCardNo: g.jobCardNo, paperType: g.paperType, size: g.size, gsm: g.gsm,
       brand: [...g.brands].join(' / '), unit, txCount: g.txCount,
       totalSheets: g.totalSheets, totalPkts: g.totalSheets / ps,
       latestAt: g.latestRaw, enteredBy: [...g.enteredBy].join(', '),
+      allocatedSheets, allocPct, linkedJobIds: [...linkedJobs],
     };
   }).sort((a, b) => {
     if (a.jobCardNo !== b.jobCardNo) return String(a.jobCardNo).localeCompare(String(b.jobCardNo), undefined, { numeric: true });
@@ -13787,9 +13875,20 @@ function renderManualConsumption() {
           </tr>
         </thead>
         <tbody>
-          ${rows.map(r => `
-          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
-            <td style="padding:6px 8px;font-weight:700;">${esc(r.jobCardNo)}</td>
+          ${rows.map(r => {
+            const pct = r.allocPct || 0;
+            const fillBg = pct > 0
+              ? `background:linear-gradient(90deg, rgba(34,197,94,0.18) ${pct}%, transparent ${pct}%);`
+              : '';
+            const allocBadge = pct > 0
+              ? `<span style="display:inline-block;margin-left:6px;font-size:10px;font-weight:600;color:${pct>=100?'#16a34a':'#d97706'};vertical-align:middle;" title="${r.allocatedSheets} of ${r.totalSheets} sheets allocated">${pct}%</span>`
+              : '';
+            const jobRefs = r.linkedJobIds && r.linkedJobIds.length
+              ? `<div style="font-size:10px;color:var(--text2);margin-top:1px;">→ E-${r.linkedJobIds.join(', E-')}</div>`
+              : '';
+            return `
+          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);${fillBg}">
+            <td style="padding:6px 8px;font-weight:700;">${esc(r.jobCardNo)}${allocBadge}${jobRefs}</td>
             <td style="padding:6px 8px;">${esc(r.paperType || '—')}</td>
             <td style="padding:6px 8px;">${esc(r.size || '—')}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm || '—')}</td>
@@ -13797,7 +13896,8 @@ function renderManualConsumption() {
             <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.txCount}</td>
             <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
             <td style="padding:6px 8px;white-space:nowrap;">${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
-          </tr>`).join('')}
+          </tr>`;
+          }).join('')}
         </tbody>
         <tfoot>
           <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
