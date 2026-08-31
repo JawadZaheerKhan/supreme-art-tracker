@@ -19767,8 +19767,50 @@ function openEditWithDelivery(id) {
   setTimeout(() => grab(), 120);
 }
 
+// Adjust flow: lock every field on the job card modal except the ones
+// relevant to entering a wastage adjustment — Paper (incl. 2nd paper),
+// Cutting Size, Packets/Sheets, and the Particulars table. Locks first
+// (mirroring the CEO view-only pattern), then re-opens exactly the
+// allowed fields, so nothing needs an exhaustive "everything except..."
+// selector.
+function lockJobCardExceptAdjustFields() {
+  const root = document.querySelector('.job-edit-modal');
+  if (!root) return;
+  root.querySelectorAll('input, textarea').forEach(el => {
+    if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+    else el.readOnly = true;
+  });
+  root.querySelectorAll('select').forEach(el => { el.disabled = true; });
+  root.querySelectorAll('button').forEach(btn => {
+    if (!btn.closest('.modal-actions')) btn.disabled = true;
+  });
+  const unlock = el => { el.disabled = false; el.readOnly = false; };
+  root.querySelectorAll(
+    '.jc-part input, .jc-part textarea, ' +           // Particulars table
+    '#paper-search, #f-inventory-item, ' +             // Paper picker
+    '#f-use-second-paper, ' +                          // 2nd paper toggle
+    '#f-cutting-size, ' +                              // Cutting Size / GSM
+    '#f-sheets, #f-sheets-2, ' +                       // Sheets Qty (+ 2nd)
+    '#f-packets, #f-packets-2, #f-sheet-cut'           // Packets (+ 2nd, cut)
+  ).forEach(unlock);
+  root.querySelectorAll('.jc-part button').forEach(btn => { btn.disabled = false; });
+  const secondPaperRow = root.querySelector('#second-paper-row');
+  if (secondPaperRow) secondPaperRow.querySelectorAll('input, select, button').forEach(unlock);
+  // "+ Request extra packets" — opens its own approval flow, unrelated to
+  // saving this job card, so it stays clickable.
+  const topupBtn = root.querySelector('button[onclick*="openPacketsTopup"]');
+  if (topupBtn) topupBtn.disabled = false;
+}
+
 function openEdit(id, opts) {
   opts = opts || {};
+  // The Adjust flow reuses this exact modal for its live wastage preview,
+  // but must never write back to the real job — Save Changes and the
+  // stage-Process buttons both mutate the real jobs row, so both are
+  // dropped entirely rather than merely disabled. Only the side panel's
+  // "Save Adjustment" (a separate POST to the adjustment mirror) can save
+  // anything while this flag is set.
+  const adjustMode = !!(opts.particularsOpts && opts.particularsOpts.preview);
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   // Lazy-load the machines/operators roster so the particulars-table
@@ -19779,23 +19821,28 @@ function openEdit(id, opts) {
   // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
   // both offered from inside the Edit modal so the PM can flip status
   // right after tweaking specs, without closing back to the list.
-  const processBtn = (isNewJob(j) && canWriteJobs())
+  const processBtn = adjustMode ? '' : (isNewJob(j) && canWriteJobs())
     ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
     : (isCtpQueue(j) && canWriteJobs())
       ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
       : (isPartialDelivery(j) && canWriteJobs())
         ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
         : '';
+  const adjustBanner = adjustMode
+    ? `<div style="margin:-4px 0 12px;padding:10px 14px;background:#f5f3ff;color:#5b21b6;border:1px solid #ddd6fe;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
+        &#128274; Adjust mode — only Paper, Cutting Size, Packets/Sheets and the Particulars table below are editable, and nothing here saves to the real job card. Use the side panel to save the wastage adjustment.
+      </div>` : '';
   openModal(`<div class="modal modal-card job-edit-modal" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
     <div class="ceo-only-block" style="margin:-4px 0 12px;padding:10px 14px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
       &#128065; View-only — your role can review this job card but can&rsquo;t edit or save changes.
     </div>
+    ${adjustBanner}
     ${jobForm(j, opts)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       ${processBtn}
-      <button class="btn btn-primary ceo-hide" onclick="saveEdit(${j.id})">Save Changes</button>
+      ${adjustMode ? '' : '<button class="btn btn-primary ceo-hide" onclick="saveEdit(' + j.id + ')">Save Changes</button>'}
     </div>
   </div>`);
   updateStockHint();
@@ -19820,6 +19867,12 @@ function openEdit(id, opts) {
       });
     }
   }
+  // Adjust mode: lock every field EXCEPT the ones relevant to entering a
+  // wastage adjustment (Paper incl. 2nd paper, Cutting Size, Packets/
+  // Sheets, and the Particulars table). Nothing here can be saved anyway
+  // (Save Changes is gone above), but locking makes it visually obvious
+  // which parts of the card are just for reference right now.
+  if (adjustMode) lockJobCardExceptAdjustFields();
 }
 
 async function saveEdit(id) {
