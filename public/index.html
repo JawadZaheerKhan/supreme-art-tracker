@@ -15775,6 +15775,7 @@ function closeModal() {
   // (Cancel, Save, overlay click, Esc).
   const adjPanel = document.getElementById('adj-side-panel');
   if (adjPanel) adjPanel.remove();
+  if (typeof _adjLockObserver !== 'undefined' && _adjLockObserver) { _adjLockObserver.disconnect(); _adjLockObserver = null; }
   // Any modal close drops the pending "auto-join group after save" intent.
   // saveAdd/saveEdit have already read + cleared it before their closeModal
   // call, so this only matters when the user cancels a Duplicate modal
@@ -19769,37 +19770,48 @@ function openEditWithDelivery(id) {
 
 // Adjust flow: lock every field on the job card modal except the ones
 // relevant to entering a wastage adjustment — Paper (incl. 2nd paper),
-// Cutting Size, Packets/Sheets, and the Particulars table. Locks first
-// (mirroring the CEO view-only pattern), then re-opens exactly the
-// allowed fields, so nothing needs an exhaustive "everything except..."
-// selector.
+// Cutting Size, Packets/Sheets, and the Particulars table. A plain one-time
+// pass isn't enough: sections like Special Colors render their rows
+// on-demand ("+ Add Special Color" injects a brand new, unlocked row into
+// the DOM well after the modal opens) — so this also watches the modal
+// with a MutationObserver and locks anything added later, the same way.
+// The observer is stopped from closeModal() when the modal (and this
+// adjust flow) closes.
+let _adjLockObserver = null;
 function lockJobCardExceptAdjustFields() {
   const root = document.querySelector('.job-edit-modal');
   if (!root) return;
-  root.querySelectorAll('input, textarea').forEach(el => {
-    if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
-    else el.readOnly = true;
+  const isAllowedField = el => {
+    if (el.closest('.jc-part')) return true;                 // Particulars table
+    if (el.closest('#second-paper-row')) return true;          // 2nd paper section
+    if (['paper-search', 'f-inventory-item', 'f-use-second-paper',
+         'f-cutting-size', 'f-sheets', 'f-sheets-2',
+         'f-packets', 'f-packets-2', 'f-sheet-cut'].includes(el.id)) return true;
+    // "+ Request extra packets" — its own approval flow, unrelated to
+    // saving this job card, so it stays clickable.
+    if (el.tagName === 'BUTTON' && (el.getAttribute('onclick') || '').includes('openPacketsTopup')) return true;
+    return false;
+  };
+  const lockOne = el => {
+    if (isAllowedField(el)) return;
+    if (el.closest('.modal-actions')) return;
+    if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') { el.disabled = true; return; }
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+      else el.readOnly = true;
+    }
+  };
+  const lockSubtree = node => {
+    if (node.nodeType !== 1) return;
+    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(node.tagName)) lockOne(node);
+    node.querySelectorAll && node.querySelectorAll('input, textarea, select, button').forEach(lockOne);
+  };
+  lockSubtree(root);
+  if (_adjLockObserver) _adjLockObserver.disconnect();
+  _adjLockObserver = new MutationObserver(mutations => {
+    for (const m of mutations) m.addedNodes.forEach(lockSubtree);
   });
-  root.querySelectorAll('select').forEach(el => { el.disabled = true; });
-  root.querySelectorAll('button').forEach(btn => {
-    if (!btn.closest('.modal-actions')) btn.disabled = true;
-  });
-  const unlock = el => { el.disabled = false; el.readOnly = false; };
-  root.querySelectorAll(
-    '.jc-part input, .jc-part textarea, ' +           // Particulars table
-    '#paper-search, #f-inventory-item, ' +             // Paper picker
-    '#f-use-second-paper, ' +                          // 2nd paper toggle
-    '#f-cutting-size, ' +                              // Cutting Size / GSM
-    '#f-sheets, #f-sheets-2, ' +                       // Sheets Qty (+ 2nd)
-    '#f-packets, #f-packets-2, #f-sheet-cut'           // Packets (+ 2nd, cut)
-  ).forEach(unlock);
-  root.querySelectorAll('.jc-part button').forEach(btn => { btn.disabled = false; });
-  const secondPaperRow = root.querySelector('#second-paper-row');
-  if (secondPaperRow) secondPaperRow.querySelectorAll('input, select, button').forEach(unlock);
-  // "+ Request extra packets" — opens its own approval flow, unrelated to
-  // saving this job card, so it stays clickable.
-  const topupBtn = root.querySelector('button[onclick*="openPacketsTopup"]');
-  if (topupBtn) topupBtn.disabled = false;
+  _adjLockObserver.observe(root, { childList: true, subtree: true });
 }
 
 function openEdit(id, opts) {
