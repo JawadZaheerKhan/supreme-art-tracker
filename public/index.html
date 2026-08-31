@@ -13375,20 +13375,28 @@ async function loadArtlineData() {
     const alloc = (allocMap || {})[t.id] ? allocMap[t.id].total : 0;
     const remaining = (t.sheets || Math.abs(t.change || 0)) - alloc;
     if (remaining > 0) {
-      const paper = (t.paper_type || '').toLowerCase();
-      const size  = (t.item_size || '').toLowerCase();
-      const gsm   = String(t.item_gsm || '').toLowerCase();
-      _manualPaperKeys.add(paper + '||' + size + '||' + gsm);
+      _manualPaperKeys.add(paperMatchKey(t.paper_type, t.item_size, t.item_gsm));
     }
   }
 }
 
+// Normalizes paper type/size/gsm for matching — strips internal whitespace
+// and case so "25 x 32" / "25x32" and similar formatting differences still
+// match. GSM is parsed as a number where possible so "270" === "270.0".
+function paperMatchKey(paperType, size, gsm) {
+  const p = String(paperType || '').trim().toLowerCase();
+  const s = String(size || '').replace(/\s+/g, '').toLowerCase();
+  const gNum = parseFloat(gsm);
+  const g = Number.isFinite(gNum) ? String(gNum) : String(gsm || '').replace(/\s+/g, '').toLowerCase();
+  return p + '||' + s + '||' + g;
+}
+
 function jobHasManualMatch(j) {
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const paper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
-  const size  = (invIt ? invIt.size : j.size || '').toLowerCase();
-  const gsm   = String(invIt ? invIt.gsm : j.gsm || '').toLowerCase();
-  return _manualPaperKeys.has(paper + '||' + size + '||' + gsm);
+  const paper = invIt ? invIt.paper_type : j.paper;
+  const size  = invIt ? invIt.size : j.size;
+  const gsm   = invIt ? invIt.gsm : j.gsm;
+  return _manualPaperKeys.has(paperMatchKey(paper, size, gsm));
 }
 
 function artlineAdjustmentForJob(jobId) {
@@ -13445,22 +13453,19 @@ async function openAdjustModal(jobId) {
   try {
     const txs = await api('GET', '/api/artline/unallocated');
     const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
-    const jobPaper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
-    const jobSize  = (invIt ? invIt.size : j.size || '').toLowerCase();
-    const jobGsm   = String(invIt ? invIt.gsm : j.gsm || '').toLowerCase();
+    const jobPaper = invIt ? invIt.paper_type : j.paper;
+    const jobKey = paperMatchKey(jobPaper, invIt ? invIt.size : j.size, invIt ? invIt.gsm : j.gsm);
+    const jobPaperL = String(jobPaper || '').trim().toLowerCase();
     const matches = [];
     for (const t of txs) {
-      const tPaper = (t.paper_type || '').toLowerCase();
-      if (tPaper && jobPaper && tPaper !== jobPaper) continue;
+      const tPaperL = String(t.paper_type || '').trim().toLowerCase();
+      if (tPaperL && jobPaperL && tPaperL !== jobPaperL) continue;
       const allocated = allocMap[t.id] ? allocMap[t.id].total : 0;
       const remaining = (t.sheets || Math.abs(t.change || 0)) - allocated;
       if (remaining <= 0) continue;
       const mcNo = extractManualJobCardNo(t.notes);
-      const tSize = (t.item_size || '').toLowerCase();
-      const tGsm  = String(t.item_gsm || '').toLowerCase();
-      const sizeMatch = !tSize || !jobSize || tSize === jobSize;
-      const gsmMatch  = !tGsm  || !jobGsm  || tGsm  === jobGsm;
-      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm, exactMatch: sizeMatch && gsmMatch });
+      const exactMatch = paperMatchKey(t.paper_type, t.item_size, t.item_gsm) === jobKey;
+      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm, exactMatch });
     }
     _adjModalTxMatches = matches;
     if (matches.length) {
