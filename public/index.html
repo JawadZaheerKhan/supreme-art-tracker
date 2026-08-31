@@ -13349,37 +13349,35 @@ let _adjJobManualRefs = {};
 let _manualPaperKeys = new Set();
 
 async function loadArtlineData() {
-  try {
-    const [settings, finalized, allocMap, unallocTxs] = await Promise.all([
-      api('GET', '/api/artline/settings'),
-      api('GET', '/api/artline/finalized'),
-      api('GET', '/api/artline/allocations').catch(() => ({})),
-      api('GET', '/api/artline/unallocated').catch(() => []),
-    ]);
-    _artlineSettings = settings;
-    _finalizedJobIds.clear();
-    _adjustments = {};
-    for (const row of finalized) {
-      _finalizedJobIds.add(row.id);
-      _adjustments[row.id] = row;
+  const [settings, finalized, allocMap, unallocTxs] = await Promise.all([
+    api('GET', '/api/artline/settings').catch(() => _artlineSettings),
+    api('GET', '/api/artline/finalized').catch(() => []),
+    api('GET', '/api/artline/allocations').catch(() => ({})),
+    api('GET', '/api/artline/unallocated').catch(() => []),
+  ]);
+  try { _artlineSettings = settings; } catch(e) {}
+  _finalizedJobIds.clear();
+  _adjustments = {};
+  for (const row of (finalized || [])) {
+    _finalizedJobIds.add(row.id);
+    _adjustments[row.id] = row;
+  }
+  _adjJobManualRefs = {};
+  for (const [, info] of Object.entries(allocMap || {})) {
+    const mcNo = extractManualJobCardNo(info.notes);
+    for (const j of (info.jobs || [])) {
+      if (!_adjJobManualRefs[j.job_id]) _adjJobManualRefs[j.job_id] = new Set();
+      _adjJobManualRefs[j.job_id].add(mcNo);
     }
-    _adjJobManualRefs = {};
-    for (const [, info] of Object.entries(allocMap)) {
-      const mcNo = extractManualJobCardNo(info.notes);
-      for (const j of (info.jobs || [])) {
-        if (!_adjJobManualRefs[j.job_id]) _adjJobManualRefs[j.job_id] = new Set();
-        _adjJobManualRefs[j.job_id].add(mcNo);
-      }
+  }
+  _manualPaperKeys = new Set();
+  for (const t of (unallocTxs || [])) {
+    const alloc = (allocMap || {})[t.id] ? allocMap[t.id].total : 0;
+    const remaining = (t.sheets || Math.abs(t.change || 0)) - alloc;
+    if (remaining > 0) {
+      _manualPaperKeys.add((t.paper_type || '').toLowerCase());
     }
-    _manualPaperKeys = new Set();
-    for (const t of unallocTxs) {
-      const alloc = allocMap[t.id] ? allocMap[t.id].total : 0;
-      const remaining = (t.sheets || Math.abs(t.change || 0)) - alloc;
-      if (remaining > 0) {
-        _manualPaperKeys.add((t.paper_type || '').toLowerCase());
-      }
-    }
-  } catch (e) { console.warn('Artline load failed:', e.message); }
+  }
 }
 
 function jobHasManualMatch(j) {
@@ -13443,6 +13441,7 @@ async function openAdjustModal(jobId) {
     const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
     const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
     const jobPaper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
+    const jobSize  = (invIt ? invIt.size : j.size || '').toLowerCase();
     const matches = [];
     for (const t of txs) {
       const tPaper = (t.paper_type || '').toLowerCase();
@@ -13451,13 +13450,15 @@ async function openAdjustModal(jobId) {
       const remaining = (t.sheets || Math.abs(t.change || 0)) - allocated;
       if (remaining <= 0) continue;
       const mcNo = extractManualJobCardNo(t.notes);
-      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm });
+      const tSize = (t.item_size || '').toLowerCase();
+      const sizeMatch = !tSize || !jobSize || tSize === jobSize;
+      matches.push({ id: t.id, mcNo, remaining, paperType: t.paper_type, size: t.item_size, gsm: t.item_gsm, sizeMatch });
     }
     _adjModalTxMatches = matches;
     if (matches.length) {
       matchHtml = matches.map((m, i) => `
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;cursor:pointer;">
-          <input type="checkbox" class="adj-alloc-cb" data-idx="${i}" checked>
+          <input type="checkbox" class="adj-alloc-cb" data-idx="${i}" ${m.sizeMatch ? 'checked' : ''}>
           <span style="font-weight:600;">${esc(m.mcNo)}</span>
           <span style="color:var(--text2);">${esc(m.paperType||'')} ${esc(m.size||'')} ${m.gsm||''} — ${m.remaining} sheets avail</span>
         </label>`).join('');
@@ -13476,7 +13477,7 @@ async function openAdjustModal(jobId) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
       <div><div class="dash-flbl">Job Name</div><div style="font-weight:600;">${esc(j.name)}</div></div>
       <div><div class="dash-flbl">Client</div><div style="font-weight:600;">${esc(j.client || '')}</div></div>
-      <div><div class="dash-flbl">Paper</div><div style="font-weight:600;">${esc(j.paper || 'N/A')}</div></div>
+      <div><div class="dash-flbl">Paper</div><div style="font-weight:600;">${esc(invIt ? `${invIt.paper_type} ${invIt.size} ${invIt.gsm}gsm` : j.paper || 'N/A')}</div></div>
       <div><div class="dash-flbl">PO Qty</div><div style="font-weight:600;">${esc(j.qty || 'N/A')}</div></div>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
