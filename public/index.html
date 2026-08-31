@@ -4479,7 +4479,7 @@ function renderJobRowCompact(j, opts) {
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
-            ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="Allocate manual consumption wastage and move to Finalized">&#9881; Adjust</button>` : ''}
+            ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
             ${(_finalizedJobIds.has(j.id) && isAdmin()) ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
@@ -4970,7 +4970,7 @@ function renderJobCard(j, opts) {
       ${more}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j))) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
-      ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="Allocate manual consumption wastage and move to Finalized">&#9881; Adjust</button>` : ''}
+      ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
       ${(_finalizedJobIds.has(j.id) && isAdmin()) ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
@@ -13346,13 +13346,15 @@ const _finalizedJobIds = new Set();
 let _artlineSettings = { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 };
 let _adjustments = {};
 let _adjJobManualRefs = {};
+let _manualPaperKeys = new Set();
 
 async function loadArtlineData() {
   try {
-    const [settings, finalized, allocMap] = await Promise.all([
+    const [settings, finalized, allocMap, unallocTxs] = await Promise.all([
       api('GET', '/api/artline/settings'),
       api('GET', '/api/artline/finalized'),
       api('GET', '/api/artline/allocations').catch(() => ({})),
+      api('GET', '/api/artline/unallocated').catch(() => []),
     ]);
     _artlineSettings = settings;
     _finalizedJobIds.clear();
@@ -13369,7 +13371,23 @@ async function loadArtlineData() {
         _adjJobManualRefs[j.job_id].add(mcNo);
       }
     }
+    _manualPaperKeys = new Set();
+    for (const t of unallocTxs) {
+      if (t.reason !== 'manual-job-card') continue;
+      const alloc = allocMap[t.id] ? allocMap[t.id].total : 0;
+      const remaining = (t.sheets || Math.abs(t.change || 0)) - alloc;
+      if (remaining > 0) {
+        _manualPaperKeys.add(((t.paper_type || '') + '||' + (t.item_size || '')).toLowerCase());
+      }
+    }
   } catch (e) { console.warn('Artline load failed:', e.message); }
+}
+
+function jobHasManualMatch(j) {
+  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const paper = (invIt ? invIt.paper_type : j.paper || '').toLowerCase();
+  const size  = (invIt ? invIt.size : j.size || '').toLowerCase();
+  return _manualPaperKeys.has(paper + '||' + size);
 }
 
 function artlineAdjustmentForJob(jobId) {
