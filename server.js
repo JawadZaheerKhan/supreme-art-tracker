@@ -3397,8 +3397,8 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   `;
   if (existing[0]) return existing[0];
   const inserted = await sql`
-    INSERT INTO inventory_items (paper_type, size, gsm, brand, is_offcut, cut_from_size, reorder_threshold)
-    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, true, ${sourceItem.size||null}, 0)
+    INSERT INTO inventory_items (paper_type, size, gsm, brand, unit, supplier, is_offcut, cut_from_size, reorder_threshold)
+    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, ${sourceItem.unit||'sheets'}, ${sourceItem.supplier||null}, true, ${sourceItem.size||null}, 0)
     RETURNING *
   `;
   return inserted[0];
@@ -6401,6 +6401,17 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
     const itemId = parseInt(id, 10);
+    const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
+    const sourceItem = itemRows[0];
+    if (!sourceItem) return res.status(404).json({ error: 'Inventory item not found' });
+
+    // An Offcut stock-out is a reclassification, not physical consumption:
+    // move the exact same paper (type, size, GSM, brand, supplier and unit)
+    // from fresh stock into its matching offcut line.
+    const isOffcutTransfer = delta < 0 && String(reason || '').trim().toLowerCase() === 'offcut';
+    if (isOffcutTransfer && sourceItem.is_offcut) {
+      return res.status(400).json({ error: 'This stock is already classified as offcut. Choose another reason.' });
+    }
 
     // Optional Job Card No. resolution: accepts "E-85" or "85".
     let jobId = null;
@@ -6484,7 +6495,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       finalNotes = [finalNotes, `Job Card: ${String(job_card).trim()}`].filter(Boolean).join(' · ');
     }
 
-    await applyInventoryChange(sql, {
+    const sourceTxId = await applyInventoryChange(sql, {
       itemId,
       change: delta,
       reason: finalReason,
@@ -6493,6 +6504,23 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       user: req.user,
       challanNo: challan_no,
     });
+
+    let offcutItem = null;
+    if (isOffcutTransfer) {
+      offcutItem = await findOrCreateOffcutItem(sql, sourceItem, sourceItem.size || '');
+      const transferNotes = [
+        `Reclassified from fresh stock TX #${sourceTxId}`,
+        finalNotes,
+      ].filter(Boolean).join(' · ');
+      await applyInventoryChange(sql, {
+        itemId: offcutItem.id,
+        change: Math.abs(delta),
+        reason: 'offcut-transfer-in',
+        notes: transferNotes,
+        user: req.user,
+        challanNo: challan_no,
+      });
+    }
 
     // Job state after a manual issuance:
     //   fully issued  → status='issued', clear partial marker
@@ -6534,6 +6562,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       linked_job_id: jobId,
       job_partial_remaining: isJobIssuance && !jobFullyIssued ? partialRemaining : 0,
       job_fully_issued: isJobIssuance && jobFullyIssued,
+      offcut_item_id: offcutItem?.id || null,
     });
   } catch (err) {
     console.error(err);
