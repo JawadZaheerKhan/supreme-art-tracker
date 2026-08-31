@@ -7907,7 +7907,7 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
 
 // ── Artline: adjustment + finalized-jobs endpoints ──────────
 // Settings — read/write the global wastage defaults.
-app.get('/api/artline/settings', requireAuth, async (req, res) => {
+app.get('/api/artline/settings', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7935,7 +7935,7 @@ app.put('/api/artline/settings', requireAdmin, async (req, res) => {
 // Unallocated manual consumption — manual-job-card stock-out rows that
 // haven't been absorbed into any job_adjustments yet. Grouped by paper
 // type + size so the frontend can match against delivered E-jobs.
-app.get('/api/artline/unallocated', requireAuth, async (req, res) => {
+app.get('/api/artline/unallocated', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8020,7 +8020,7 @@ app.delete('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
 });
 
 // List all finalized (adjusted) jobs with their adjustment data.
-app.get('/api/artline/finalized', requireAuth, async (req, res) => {
+app.get('/api/artline/finalized', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8060,7 +8060,7 @@ app.post('/api/artline/post/:jobId', requireAdmin, async (req, res) => {
 
 // Allocation totals per inventory transaction — used by Manual Consumption report
 // to render green fill bars showing how much of each stock-out has been absorbed.
-app.get('/api/artline/allocations', requireAuth, async (req, res) => {
+app.get('/api/artline/allocations', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();

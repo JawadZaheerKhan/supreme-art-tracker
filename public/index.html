@@ -4186,7 +4186,10 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered'],['finalized','Finalized']];
+  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
+  // Finalized (wastage adjustment) is an admin-only feature end to end —
+  // the tab itself stays hidden from every other role, not just the data.
+  if (isAdmin()) views.push(['finalized','Finalized']);
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -13440,6 +13443,10 @@ function artlineAdjustmentForJob(jobId) {
 }
 
 function artlineAdjBanner(jobId) {
+  // Admin-only feature, checked explicitly rather than relying on
+  // _adjustments simply staying empty for other roles (it only ever
+  // loads for admin, but this keeps the banner safe even if that changes).
+  if (!isAdmin()) return '';
   const a = _adjustments[jobId];
   if (!a) return '';
   const refs = _adjJobManualRefs[jobId];
@@ -13494,6 +13501,7 @@ function toggleFinalizedJobSelect(id, on) {
 // /api/artline/finalized already excludes jobs with deleted_at set, so
 // an archived job simply drops out of the Finalized tab.
 async function bulkDeleteSelectedFinalizedJobs() {
+  if (!isAdmin()) return;
   const ids = [...selectedFinalizedJobIds];
   if (!ids.length) return;
   const names = ids.map(id => { const j = jobs.find(x => x.id === id); return j ? `E-${id} (${j.name})` : `E-${id}`; });
@@ -13524,6 +13532,7 @@ async function bulkDeleteSelectedFinalizedJobs() {
 let _adjModalTxMatches = [];
 
 async function openAdjustModal(jobId) {
+  if (!isAdmin()) return;
   const j = jobs.find(x => x.id === jobId);
   if (!j) return;
   if (_finalizedJobIds.has(jobId)) {
@@ -13679,6 +13688,7 @@ function adjSheetsChanged(jobId) {
 }
 
 async function submitAdjustment(jobId) {
+  if (!isAdmin()) return;
   const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
   const manual_sheets = Math.round(parseFloat(document.getElementById('adj-sheets').value) || 0);
   const notes = '';
@@ -13726,6 +13736,7 @@ async function submitAdjustment(jobId) {
 }
 
 async function removeAdjustment(jobId) {
+  if (!isAdmin()) return;
   const ok = await confirmDialog({
     title: 'Remove Adjustment',
     message: `Remove the adjustment from Job E-${jobId}?\nIt will move back to the Delivered tab.`,
@@ -13741,6 +13752,7 @@ async function removeAdjustment(jobId) {
 }
 
 async function openArtlineSettingsModal() {
+  if (!isAdmin()) return;
   const s = _artlineSettings;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
     <h2 style="text-align:center;letter-spacing:1px;">WASTAGE SETTINGS</h2>
@@ -13764,6 +13776,7 @@ async function openArtlineSettingsModal() {
 }
 
 async function saveArtlineSettings() {
+  if (!isAdmin()) return;
   const printing_pct = parseFloat(document.getElementById('as-printing').value) || 0;
   const die_pct      = parseFloat(document.getElementById('as-die').value) || 0;
   const coating_pct  = parseFloat(document.getElementById('as-coating').value) || 0;
