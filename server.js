@@ -574,6 +574,9 @@ async function initDb() {
     // it cancels. Used to (a) hide the Reverse button on already-reversed
     // entries and (b) highlight both rows in the History UI.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS reverses_tx_id INTEGER REFERENCES inventory_transactions(id) ON DELETE SET NULL`;
+    // Link the credit side of a fresh-to-offcut reclassification to its
+    // source stock-out so a History reversal can unwind both rows.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS paired_tx_id INTEGER REFERENCES inventory_transactions(id) ON DELETE SET NULL`;
     // Track WHO entered each transaction so the stock-keeper-within-24h rule
     // can authorize reversals and the History UI can show the entrant. No FK
     // on user_id because the users table is created further down — plain int
@@ -3265,7 +3268,7 @@ function jobDeductionSheets({ paperType, particulars }) {
 // in the same UPDATE so balance always matches the sum of ledger changes.
 // user / reversesTxId are optional metadata used by the History UI to show
 // who entered the row and to link reversals to their originals.
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, challanNo }) {
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo }) {
   if (!itemId || !change) return null;
   if (change < 0) {
     const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
@@ -3276,8 +3279,8 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   const userEmail = user && user.email ? user.email : null;
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, challan_no)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${challan})
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan})
     RETURNING id
   `;
   await sql`
@@ -6518,6 +6521,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         reason: 'offcut-transfer-in',
         notes: transferNotes,
         user: req.user,
+        pairedTxId: sourceTxId,
         challanNo: challan_no,
       });
     }
@@ -6619,6 +6623,9 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     if (tx.reverses_tx_id) {
       return res.status(400).json({ error: 'This row is itself a reversal — cannot reverse a reversal.' });
     }
+    if (tx.reason === 'offcut-transfer-in' && tx.paired_tx_id) {
+      return res.status(400).json({ error: `Reverse the original Offcut stock-out TX #${tx.paired_tx_id}; its matching offcut credit will reverse automatically.` });
+    }
     // Is the original already reversed?
     const existingReversal = await sql`SELECT id FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`;
     if (existingReversal[0]) {
@@ -6648,6 +6655,24 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     const _stamp    = isNaN(_d) ? String(tx.created_at) : businessStamp(_d);
     const note     = `Reversal of TX #${tx.id}${origBy} on ${_stamp}${origNote}`;
 
+    let pairedOffcutRows = [];
+    if (tx.reason === 'offcut') {
+      pairedOffcutRows = await sql`
+        SELECT t.*, i.current_balance FROM inventory_transactions t
+        JOIN inventory_items i ON i.id = t.item_id
+        WHERE t.paired_tx_id = ${tx.id}
+          AND t.reason = 'offcut-transfer-in'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+        ORDER BY t.id ASC
+      `;
+      for (const paired of pairedOffcutRows) {
+        if ((parseFloat(paired.current_balance) || 0) < paired.change) {
+          return res.status(400).json({ error: `Cannot reverse yet — only ${paired.current_balance || 0} sheets remain in the matching offcut stock, but ${paired.change} sheets must be removed.` });
+        }
+      }
+    }
+
     const newTxId = await applyInventoryChange(sql, {
       itemId: tx.item_id,
       change: -tx.change,            // exact opposite of original
@@ -6666,6 +6691,20 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     // "Pending Stock" badge on the job until the store keeper acts.
     let jobReverted = false;
     let offcutRefundedSheets = 0;
+    if (tx.reason === 'offcut') {
+      for (const paired of pairedOffcutRows) {
+        await applyInventoryChange(sql, {
+          itemId: paired.item_id,
+          change: -paired.change,
+          reason: 'correction',
+          jobId: null,
+          notes: `Auto-reversal of paired offcut credit TX #${paired.id} (source Offcut stock-out TX #${tx.id} was reversed)`,
+          user: req.user,
+          reversesTxId: paired.id,
+        });
+        offcutRefundedSheets += Math.abs(paired.change);
+      }
+    }
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
