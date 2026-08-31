@@ -5584,6 +5584,13 @@ function setView(v) {
   // send stale ids that are no longer on screen.
   if (v !== 'new' && v !== 'ctp' && selectedNewJobIds.size) selectedNewJobIds.clear();
   view=v; render();
+  // _manualPaperKeys (drives the Adjust button's bright/dim state) only
+  // updates when loadArtlineData() runs — refresh it on entry to Delivered
+  // /Finalized so newly-issued manual consumption is reflected without
+  // requiring a full page reload.
+  if ((v === 'done' || v === 'finalized') && isAdmin()) {
+    loadArtlineData().then(() => { if (view === v) renderJobs(); });
+  }
 }
 function setJobsViewMode(m) {
   jobsViewMode = m;
@@ -7134,6 +7141,10 @@ async function saveInvRemoveStock(id) {
     if (result && (result.job_flipped || result.job_fully_issued || result.job_partial_remaining || result.linked_job_id)) {
       await loadJobs();
     }
+    // A new manual-job-card stock-out changes which jobs can be Artline-
+    // adjusted — refresh the match data so Adjust buttons light up without
+    // needing a page reload.
+    if (reason === 'manual-job-card' && isAdmin()) await loadArtlineData();
     closeModal();
     render();
     let tail = '';
@@ -8023,6 +8034,7 @@ async function saveBulkStockOut() {
   }
   await loadInventory();
   if (flipped || partials || plan.some(p => p.reason === 'job-card')) await loadJobs();
+  if (plan.some(p => p.reason === 'manual-job-card') && isAdmin()) await loadArtlineData();
   const stockOutPane = document.getElementById('rt-stock-out');
   if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
     loadStockMovement('out');
