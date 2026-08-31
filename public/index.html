@@ -13454,7 +13454,7 @@ function renderArtlineBar() {
   bar.style.display = 'flex';
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
-      <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Artline — Finalized Jobs (${count})</span>
+      <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Finalized Jobs (${count})</span>
       <button class="btn btn-sm" style="background:#7c3aed;border-color:#6d28d9;color:#fff;font-weight:700;" onclick="openArtlineSettingsModal()">&#9881; Wastage Settings</button>
       <span style="font-size:12px;color:var(--text2);margin-left:auto;">
         Default: Printing ${_artlineSettings.printing_pct}% · Die ${_artlineSettings.die_pct}% · Coating ${_artlineSettings.coating_pct}% · Pasting ${_artlineSettings.pasting_pct}% · Sorting ${_artlineSettings.sorting_pct}% · Max ${_artlineSettings.max_packets_per_job} pkts/job
@@ -13628,7 +13628,7 @@ async function removeAdjustment(jobId) {
 async function openArtlineSettingsModal() {
   const s = _artlineSettings;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
-    <h2 style="text-align:center;letter-spacing:1px;">ARTLINE SETTINGS</h2>
+    <h2 style="text-align:center;letter-spacing:1px;">WASTAGE SETTINGS</h2>
     <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:14px;">
       Default wastage percentages for new adjustments. Must sum to 100%.
     </div>
@@ -13665,7 +13665,7 @@ async function saveArtlineSettings() {
     await api('PUT', '/api/artline/settings', { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job });
     _artlineSettings = { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job };
     closeModal();
-    notify('Artline settings saved.');
+    notify('Wastage settings saved.');
   } catch (e) { notify('Error: ' + e.message); }
 }
 
@@ -16887,6 +16887,7 @@ const ARTLINE_WASTE_ROW_MAP = {
   sorting_pct:  { key: 'sorted_cartons_waste', unit: 'cartons' },
   pasting_pct:  { key: 'pasting_waste_qty',    unit: 'cartons' },
 };
+const ARTLINE_WASTE_ROW_UNIT = Object.fromEntries(Object.values(ARTLINE_WASTE_ROW_MAP).map(r => [r.key, r.unit]));
 
 // Builds { particularsRowKey: extraWasteQty } for a finalized job's Artline
 // adjustment — only called when actually viewing from the Finalized tab.
@@ -16975,7 +16976,7 @@ function particularsTable(p, job) {
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
       const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
       const wasteExtraHtml = (wasteExtra !== undefined && wasteExtra > 0)
-        ? `<div style="color:#7c3aed;font-weight:700;font-size:11px;margin-top:2px;" title="Extra wastage attributed to this job's Artline adjustment (${_adjustments[job.id].manual_packets} manual packets)">&#9881; +${wasteExtra.toLocaleString()} (Artline)</div>`
+        ? `<div style="color:#7c3aed;font-weight:700;font-size:11px;margin-top:2px;" title="Extra wastage from this job's ${_adjustments[job.id].manual_packets}-packet manual consumption adjustment">&#9881; +${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} (adjustment)</div>`
         : '';
       return `
     <tr>
@@ -19931,7 +19932,7 @@ async function openHistory(id) {
   const adj = (isAdmin() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
   const adjRefs = adj ? _adjJobManualRefs[id] : null;
   const artlineSection = adj ? `
-    <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Artline Adjustment</div>
+    <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Wastage Adjustment</div>
     <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 14px;font-size:13px;color:#5b21b6;">
       <div><b>${adj.manual_packets}</b> packets adjusted (${(adj.manual_sheets || 0).toLocaleString()} sheets)${adj.manual_packets !== _artlineSettings.max_packets_per_job ? ` <span style="color:var(--text2);font-weight:500;">(current default limit: ${_artlineSettings.max_packets_per_job})</span>` : ''}</div>
       <div style="margin-top:4px;">Wastage split: Printing ${adj.printing_pct}% &middot; Die ${adj.die_pct}% &middot; Coating ${adj.coating_pct}% &middot; Pasting ${adj.pasting_pct}% &middot; Sorting ${adj.sorting_pct}%</div>

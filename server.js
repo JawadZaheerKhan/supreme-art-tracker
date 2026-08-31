@@ -7992,7 +7992,7 @@ app.post('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
       action: 'artline.adjust',
       entityType: 'job',
       entityId: jobId,
-      summary: `Artline: adjusted Job E-${jobId} with ${b.manual_packets} manual packets`,
+      summary: `Wastage adjustment: Job E-${jobId} with ${b.manual_packets} manual packets`,
       metadata: { manual_packets: b.manual_packets, printing_pct: b.printing_pct, die_pct: b.die_pct, coating_pct: b.coating_pct, pasting_pct: b.pasting_pct, sorting_pct: b.sorting_pct },
     });
     res.json(row);
@@ -8013,7 +8013,7 @@ app.delete('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
       action: 'artline.unadjust',
       entityType: 'job',
       entityId: jobId,
-      summary: `Artline: removed adjustment from Job E-${jobId}`,
+      summary: `Wastage adjustment removed from Job E-${jobId}`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -8052,7 +8052,7 @@ app.post('/api/artline/post/:jobId', requireAdmin, async (req, res) => {
       action: 'artline.post',
       entityType: 'job',
       entityId: jobId,
-      summary: `Artline: posted Job E-${jobId} for public app`,
+      summary: `Job E-${jobId} posted for public app`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
