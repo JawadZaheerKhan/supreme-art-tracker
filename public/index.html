@@ -126,8 +126,8 @@
      live. Used for the Jobs Report card in the Reports landing — SM's
      focus is paper movement, not job-by-job production logs. */
   body.role-store-manager .sm-hide { display: none !important; }
-  /* Manual Consumption report — admin only. */
-  body.role-not-admin .admin-only-report { display: none !important; }
+  /* Manual Consumption report — Super Admin only (regular Admins excluded). */
+  body.role-not-superadmin .superadmin-only-report { display: none !important; }
   body.role-lock-inventory #inventory-mode .ceo-hide,
   body.role-lock-inventory #imports-mode .ceo-hide { display: none !important; }
   /* Production Manager: in the Users tab they only see the Floor Operators
@@ -2371,8 +2371,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rt="total-out" onclick="setReportsTab('total-out')">
           <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Total Out
         </button>
-        <div class="rsb-section admin-only-report">Manual</div>
-        <button class="rsb-item admin-only-report" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
+        <div class="rsb-section superadmin-only-report">Manual</div>
+        <button class="rsb-item superadmin-only-report" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
           <span class="rsb-icon" style="color:#A32D2D;">&#9997;</span> Manual Consumption
         </button>
       </aside>
@@ -3435,6 +3435,11 @@ function myRoles() {
 }
 function hasRole(r) { return myRoles().includes(r); }
 function isAdmin()             { return hasRole('admin'); }
+// Super Admin — above Admin, exclusively for Artline (wastage adjustments)
+// and the Manual Consumption report. Regular Admins are deliberately
+// excluded from both, so every gate for those two features must check
+// isSuperAdmin(), never isAdmin().
+function isSuperAdmin()        { return hasRole('super_admin'); }
 function isProductionManager() { return hasRole('production_manager'); }
 // Persona: store manager WITHOUT a higher jobs-side role — drives the
 // landing tab and the "not for store manager" blocks.
@@ -3497,6 +3502,7 @@ function canPrintJobCard() { return isAdmin() || isProductionManager() || hasRol
 // forward-compatibility.
 function roleLabel(role) {
   return ({
+    super_admin: 'Super Admin',
     admin: 'Admin',
     ceo: 'CEO',
     production_manager: 'Production Manager',
@@ -3743,9 +3749,10 @@ function renderUserChip() {
   const lockInventory = !isCeo() && !op && !canWriteInventory();
   document.body.classList.toggle('role-lock-jobs', lockJobs);
   document.body.classList.toggle('role-lock-inventory', lockInventory);
-  // Manual Consumption report — admin only, everyone else (incl. CEO,
-  // production/store manager, finance) never sees the sidebar entry.
-  document.body.classList.toggle('role-not-admin', !isAdmin());
+  // Manual Consumption report — Super Admin only. Regular Admins and
+  // everyone else (CEO, production/store manager, finance) never see the
+  // sidebar entry.
+  document.body.classList.toggle('role-not-superadmin', !isSuperAdmin());
   renderAppDate();
 }
 
@@ -3788,7 +3795,7 @@ async function onGoogleCredential(response) {
     // lands on Station; everyone else stays on Jobs (default).
     const loaders = [loadJobs()];
     if (!isOperator()) loaders.push(loadInventory());
-    if (isAdmin()) loaders.push(loadArtlineData());
+    if (isSuperAdmin()) loaders.push(loadArtlineData());
     await Promise.all(loaders);
     if (isOperator())            setMode('station');
     else if (isStoreManager())   setMode('inventory');
@@ -4187,9 +4194,10 @@ function renderStats() {
 
 function renderTabs() {
   const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
-  // Finalized (wastage adjustment) is an admin-only feature end to end —
-  // the tab itself stays hidden from every other role, not just the data.
-  if (isAdmin()) views.push(['finalized','Finalized']);
+  // Finalized (wastage adjustment) is a Super Admin-only feature end to
+  // end — the tab itself stays hidden from every other role, not just the
+  // data, and regular Admins are deliberately excluded too.
+  if (isSuperAdmin()) views.push(['finalized','Finalized']);
   document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
@@ -4447,7 +4455,7 @@ function renderJobRowCompact(j, opts) {
     // printSelectedJobs().
     const selBox = (((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
       ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
-      : (view === 'finalized' && _finalizedJobIds.has(j.id) && isAdmin())
+      : (view === 'finalized' && _finalizedJobIds.has(j.id) && isSuperAdmin())
         ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
         : '';
     return `
@@ -4487,8 +4495,8 @@ function renderJobRowCompact(j, opts) {
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
-            ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
-            ${(_finalizedJobIds.has(j.id) && isAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
+            ${(done && isSuperAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+            ${(_finalizedJobIds.has(j.id) && isSuperAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
@@ -4878,7 +4886,7 @@ function renderJobCard(j, opts) {
   // the New Jobs tab and the CTP tab, and only for users who can print job cards.
   const selBox = (!clientPreview && ((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
     ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
-    : (!clientPreview && view === 'finalized' && _finalizedJobIds.has(j.id) && isAdmin())
+    : (!clientPreview && view === 'finalized' && _finalizedJobIds.has(j.id) && isSuperAdmin())
       ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
       : '';
   // Blocked banner + red tint on the whole tile — clients need to see
@@ -4980,8 +4988,8 @@ function renderJobCard(j, opts) {
       ${more}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j))) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
       ${(canRecordDelivery() && !done && (si >= 6 || (si === 5 && isPartialReady(j)))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
-      ${(done && isAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
-      ${(_finalizedJobIds.has(j.id) && isAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
+      ${(done && isSuperAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+      ${(_finalizedJobIds.has(j.id) && isSuperAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -5599,7 +5607,7 @@ function setView(v) {
   // updates when loadArtlineData() runs — refresh it on entry to Delivered
   // /Finalized so newly-issued manual consumption is reflected without
   // requiring a full page reload.
-  if ((v === 'done' || v === 'finalized') && isAdmin()) {
+  if ((v === 'done' || v === 'finalized') && isSuperAdmin()) {
     loadArtlineData().then(() => { if (view === v) renderJobs(); });
   }
 }
@@ -7155,7 +7163,7 @@ async function saveInvRemoveStock(id) {
     // A new manual-job-card stock-out changes which jobs can be Artline-
     // adjusted — refresh the match data so Adjust buttons light up without
     // needing a page reload.
-    if (reason === 'manual-job-card' && isAdmin()) await loadArtlineData();
+    if (reason === 'manual-job-card' && isSuperAdmin()) await loadArtlineData();
     closeModal();
     render();
     let tail = '';
@@ -8045,7 +8053,7 @@ async function saveBulkStockOut() {
   }
   await loadInventory();
   if (flipped || partials || plan.some(p => p.reason === 'job-card')) await loadJobs();
-  if (plan.some(p => p.reason === 'manual-job-card') && isAdmin()) await loadArtlineData();
+  if (plan.some(p => p.reason === 'manual-job-card') && isSuperAdmin()) await loadArtlineData();
   const stockOutPane = document.getElementById('rt-stock-out');
   if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
     loadStockMovement('out');
@@ -13443,10 +13451,10 @@ function artlineAdjustmentForJob(jobId) {
 }
 
 function artlineAdjBanner(jobId) {
-  // Admin-only feature, checked explicitly rather than relying on
-  // _adjustments simply staying empty for other roles (it only ever
-  // loads for admin, but this keeps the banner safe even if that changes).
-  if (!isAdmin()) return '';
+  // Super Admin-only feature, checked explicitly rather than relying on
+  // _adjustments simply staying empty for other roles (it only ever loads
+  // for super_admin, but this keeps the banner safe even if that changes).
+  if (!isSuperAdmin()) return '';
   const a = _adjustments[jobId];
   if (!a) return '';
   const refs = _adjJobManualRefs[jobId];
@@ -13463,7 +13471,7 @@ function artlineAdjBanner(jobId) {
 
 function renderArtlineBar() {
   const bar = document.getElementById('new-jobs-bulk');
-  if (view !== 'finalized' || !isAdmin()) return;
+  if (view !== 'finalized' || !isSuperAdmin()) return;
   if (!bar) return;
   // Prune any ticked jobs that are no longer finalized (un-adjusted from
   // elsewhere, or archived out from under the selection).
@@ -13484,6 +13492,7 @@ function renderArtlineBar() {
 }
 
 function toggleFinalizedJobSelect(id, on) {
+  if (!isSuperAdmin()) return;
   if (on) selectedFinalizedJobIds.add(id); else selectedFinalizedJobIds.delete(id);
   // Cheap update — just refresh the bar + the affected tile's highlight,
   // same pattern as toggleJobSelect. Avoids a full render so scroll
@@ -13501,7 +13510,7 @@ function toggleFinalizedJobSelect(id, on) {
 // /api/artline/finalized already excludes jobs with deleted_at set, so
 // an archived job simply drops out of the Finalized tab.
 async function bulkDeleteSelectedFinalizedJobs() {
-  if (!isAdmin()) return;
+  if (!isSuperAdmin()) return;
   const ids = [...selectedFinalizedJobIds];
   if (!ids.length) return;
   const names = ids.map(id => { const j = jobs.find(x => x.id === id); return j ? `E-${id} (${j.name})` : `E-${id}`; });
@@ -13532,7 +13541,7 @@ async function bulkDeleteSelectedFinalizedJobs() {
 let _adjModalTxMatches = [];
 
 async function openAdjustModal(jobId) {
-  if (!isAdmin()) return;
+  if (!isSuperAdmin()) return;
   const j = jobs.find(x => x.id === jobId);
   if (!j) return;
   if (_finalizedJobIds.has(jobId)) {
@@ -13688,7 +13697,7 @@ function adjSheetsChanged(jobId) {
 }
 
 async function submitAdjustment(jobId) {
-  if (!isAdmin()) return;
+  if (!isSuperAdmin()) return;
   const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
   const manual_sheets = Math.round(parseFloat(document.getElementById('adj-sheets').value) || 0);
   const notes = '';
@@ -13736,7 +13745,7 @@ async function submitAdjustment(jobId) {
 }
 
 async function removeAdjustment(jobId) {
-  if (!isAdmin()) return;
+  if (!isSuperAdmin()) return;
   const ok = await confirmDialog({
     title: 'Remove Adjustment',
     message: `Remove the adjustment from Job E-${jobId}?\nIt will move back to the Delivered tab.`,
@@ -13752,7 +13761,7 @@ async function removeAdjustment(jobId) {
 }
 
 async function openArtlineSettingsModal() {
-  if (!isAdmin()) return;
+  if (!isSuperAdmin()) return;
   const s = _artlineSettings;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
     <h2 style="text-align:center;letter-spacing:1px;">WASTAGE SETTINGS</h2>
@@ -13776,7 +13785,7 @@ async function openArtlineSettingsModal() {
 }
 
 async function saveArtlineSettings() {
-  if (!isAdmin()) return;
+  if (!isSuperAdmin()) return;
   const printing_pct = parseFloat(document.getElementById('as-printing').value) || 0;
   const die_pct      = parseFloat(document.getElementById('as-die').value) || 0;
   const coating_pct  = parseFloat(document.getElementById('as-coating').value) || 0;
@@ -13818,15 +13827,16 @@ function openManualConsumptionPane() {
   const state = manualConsumptionState;
   const pane  = document.getElementById('rt-manual-consumption');
   if (!pane) return;
-  // Admin-only report. If a non-admin somehow reaches here (browser back
-  // button, stale URL state, or setReportsTab called from the console),
-  // paint a "not allowed" placeholder INSTEAD of the real content -- the
-  // sidebar button that would normally open this is already hidden via
-  // body.role-not-admin + .admin-only-report CSS, but this handles every
-  // other path into the pane. Also skips loading the data (loadManualConsumption)
-  // and the export/print buttons, so those can't leak the data either.
-  if (typeof isAdmin === 'function' && !isAdmin()) {
-    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Consumption report is admin-only.</div></div>`;
+  // Super Admin-only report (regular Admins are excluded too). If someone
+  // else somehow reaches here (browser back button, stale URL state, or
+  // setReportsTab called from the console), paint a "not allowed"
+  // placeholder INSTEAD of the real content -- the sidebar button that
+  // would normally open this is already hidden via body.role-not-superadmin
+  // + .superadmin-only-report CSS, but this handles every other path into
+  // the pane. Also skips loading the data (loadManualConsumption) and the
+  // export/print buttons, so those can't leak the data either.
+  if (typeof isSuperAdmin === 'function' && !isSuperAdmin()) {
+    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Consumption report is Super Admin-only.</div></div>`;
     return;
   }
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
@@ -17089,7 +17099,7 @@ function particularsTable(p, job, opts) {
   // saving) the caller supplies opts.previewOverlay directly instead.
   const wasteOverlay = opts.preview
     ? (opts.previewOverlay || null)
-    : ((job && isAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? artlineWasteOverlay(job) : null);
+    : ((job && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? artlineWasteOverlay(job) : null);
   // Build one machines datalist per relevant stage (dedup) so multiple
   // rows for the same stage (e.g. Printed Sheets + Printed Waste both
   // point at Printing) share a single option list.
@@ -20187,10 +20197,10 @@ async function openHistory(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   const log = [...(j.log||[])].reverse();
-  // Artline adjustment section — admin-only, shown only for finalized jobs.
-  // Surfaces exactly what was applied at adjustment time (which can differ
-  // from the current default settings if those were changed afterward).
-  const adj = (isAdmin() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
+  // Artline adjustment section — Super Admin-only, shown only for finalized
+  // jobs. Surfaces exactly what was applied at adjustment time (which can
+  // differ from the current default settings if those were changed after).
+  const adj = (isSuperAdmin() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
   const adjRefs = adj ? _adjJobManualRefs[id] : null;
   const artlineSection = adj ? `
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Wastage Adjustment</div>
@@ -20826,7 +20836,7 @@ function buildPrintCard(j) {
   // Same rule as the on-screen job card: the wastage adjustment overlay
   // only prints when printing from the Finalized tab, so the Delivered
   // tab (and any other context) always prints the untouched original card.
-  const wasteOverlay = (isAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
+  const wasteOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
     ? artlineWasteOverlay(j) : null;
   // Paper source: prefer the live inventory item; fall back to the legacy
   // particulars fields for pre-inventory jobs.
@@ -23198,6 +23208,14 @@ function userRolesOf(u) {
   const alias = { user: 'production_manager', stock: 'store_manager' };
   return raw.map(r => alias[r] || r);
 }
+// Super Admin should only be seen by Super Admins — everywhere else in the
+// Users tab (CEO's read-only badge, any other role display) it's filtered
+// out even for accounts that actually hold it, so the role stays invisible
+// to anyone who isn't one themselves.
+function visibleRolesOf(u) {
+  const roles = userRolesOf(u);
+  return isSuperAdmin() ? roles : roles.filter(r => r !== 'super_admin');
+}
 // Distinct client-company names from every job in memory. Used by the
 // Users tab's inline company dropdown for client-role users, and by the
 // invite dialog. Trimmed + case-preserving distinct-by-lowercase so
@@ -23244,13 +23262,13 @@ function renderUsersTab() {
       </div>
       <div class="inv-balance">
         ${isCeo() || !isAdmin()
-          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(userRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
+          ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(visibleRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
-                ${[['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['operator','Operator'],['client','Client']].map(([r,lbl]) => `
+                ${(isSuperAdmin() ? [['super_admin','Super Admin']] : []).concat([['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['operator','Operator'],['client','Client']]).map(([r,lbl]) => `
                   <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
                     <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
-                           ${isMe && r==='admin' ? 'disabled' : ''}
+                           ${isMe && (r==='admin' || r==='super_admin') ? 'disabled' : ''}
                            onchange="changeUserRoles(${u.id})"> ${lbl}
                   </label>`).join('')}
               </div>
@@ -23291,7 +23309,7 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
       <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
-        ${[['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]].map(([r,lbl,def]) => `
+        ${(isSuperAdmin() ? [['super_admin','Super Admin',false]] : []).concat([['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]]).map(([r,lbl,def]) => `
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
             <input type="checkbox" value="${r}" ${def?'checked':''} onchange="onInviteRolesChanged()"> ${lbl}
           </label>`).join('')}

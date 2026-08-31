@@ -14,6 +14,13 @@ app.use(cookieParser());
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const JWT_SECRET       = process.env.JWT_SECRET || 'dev-only-change-me';
 const BOOTSTRAP_ADMIN  = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase();
+// Super Admin: a role above Admin, exclusively gated to a small set of
+// sensitive features (Artline wastage adjustments, Manual Consumption
+// report) that regular Admins no longer see at all. Bootstrapped the same
+// way the very first Admin account is — by email, on every cold start, so
+// it's idempotent and doesn't require a one-off DB script. Defaults to the
+// owner's account; override via env var if the login email ever changes.
+const BOOTSTRAP_SUPER_ADMIN = (process.env.BOOTSTRAP_SUPER_ADMIN_EMAIL || 'hamxakhan.mk@gmail.com').toLowerCase();
 const SESSION_COOKIE   = 'sa_session';
 const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -213,7 +220,7 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-31-artline';
+const SCHEMA_VERSION = 'v2026-08-31-superadmin';
 
 async function initDb() {
   try {
@@ -654,11 +661,11 @@ async function initDb() {
     // each cold start. Own try/catch so a stale list can never do that again.
     try {
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin'))`;
       await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
       await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin'))`;
     } catch (roleErr) {
       // Log loudly but keep going — the migrations below must still run.
       console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
@@ -669,6 +676,19 @@ async function initDb() {
     // code that still reads the single value. Backfill from `role`.
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[]`;
     await sql`UPDATE users SET roles = ARRAY[role] WHERE roles IS NULL OR array_length(roles, 1) IS NULL`;
+    // Super Admin bootstrap: if the configured owner account already exists,
+    // make sure it carries 'super_admin' (kept alongside 'admin', never
+    // replacing it, so every existing admin-gated feature keeps working for
+    // this account too). Idempotent — a no-op once already applied.
+    if (BOOTSTRAP_SUPER_ADMIN) {
+      await sql`
+        UPDATE users
+           SET roles = (SELECT ARRAY(SELECT DISTINCT unnest(roles || ARRAY['super_admin','admin']))),
+               role  = 'super_admin'
+         WHERE lower(email) = ${BOOTSTRAP_SUPER_ADMIN}
+           AND NOT ('super_admin' = ANY(roles))
+      `;
+    }
     // Client portal: bind a client-role user to a single company name (must
     // match a value in jobs.client for the portal to surface anything). Only
     // used when the user's roles include 'client'; null for every internal
@@ -1150,6 +1170,15 @@ function requireAdmin(req, res, next) {
   if (!userHasRole(req.user, 'admin')) return res.status(403).json({ error: 'Admin only' });
   next();
 }
+// Super Admin — a role above Admin, exclusively for Artline (wastage
+// adjustments) and the Manual Consumption report. Regular Admins are
+// deliberately excluded from both, so this checks 'super_admin' only,
+// never 'admin'.
+function requireSuperAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasRole(req.user, 'super_admin')) return res.status(403).json({ error: 'Super Admin only' });
+  next();
+}
 function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
 function canWriteInventory(user) { return userHasRole(user, 'admin', 'store_manager'); }
 function canRunStation(user)     { return userHasRole(user, 'admin', 'production_manager', 'operator', 'ceo'); }
@@ -1440,11 +1469,18 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
-function parseRolesInput(body) {
+const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
+// actingUser: only a Super Admin can grant or keep the super_admin role on
+// anyone (including themselves) — a plain Admin submitting 'super_admin' in
+// the payload (by tampering with the request, since the checkbox is hidden
+// from them client-side) has it silently stripped here, server-side.
+function parseRolesInput(body, actingUser) {
   const ALLOWED = new Set(ROLE_PRIORITY);
   let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
     .filter(r => ALLOWED.has(r));
+  if (roles.includes('super_admin') && !userHasRole(actingUser, 'super_admin')) {
+    roles = roles.filter(r => r !== 'super_admin');
+  }
   if (!roles.length) roles = ['production_manager'];
   // Client is external. If it appears alongside any internal role we drop
   // the internal ones — an outside client account must never also carry
@@ -1483,7 +1519,7 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
-    const { roles, primary } = parseRolesInput(req.body);
+    const { roles, primary } = parseRolesInput(req.body, req.user);
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     // Client-role invites need a company binding up front — a client
     // without a bound company would sign in and see nothing.
@@ -1512,11 +1548,17 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { roles, primary } = parseRolesInput(req.body);
+    const { roles, primary } = parseRolesInput(req.body, req.user);
     // Guardrail: don't allow removing admin from yourself — locks you out
     // of the admin tools. Adding EXTRA roles to yourself is fine.
     if (parseInt(id, 10) === req.user.id && !roles.includes('admin')) {
       return res.status(400).json({ error: "You can't remove the Admin role from your own account." });
+    }
+    // Same guardrail for super_admin — otherwise a Super Admin editing their
+    // own row without re-checking the (hidden-to-others) box would silently
+    // demote themselves out of Artline/Manual Consumption access.
+    if (parseInt(id, 10) === req.user.id && userHasRole(req.user, 'super_admin') && !roles.includes('super_admin')) {
+      return res.status(400).json({ error: "You can't remove the Super Admin role from your own account." });
     }
     // client_company is only meaningful when the role IS client; drop it
     // otherwise so switching a user away from 'client' also clears the
@@ -1652,9 +1694,10 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     } else {
       rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
     }
-    // Artline is an admin-only feature — its audit trail (adjust/post/remove)
-    // must never leak to non-admins viewing a job's shared history/audit log.
-    if (!userHasRole(req.user, 'admin')) rows = rows.filter(r => !String(r.action || '').startsWith('artline.'));
+    // Artline is a Super Admin-only feature (regular Admins no longer have
+    // access either) — its audit trail (adjust/post/remove) must never leak
+    // to anyone else viewing a job's shared history/audit log.
+    if (!userHasRole(req.user, 'super_admin')) rows = rows.filter(r => !String(r.action || '').startsWith('artline.'));
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -7907,7 +7950,7 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
 
 // ── Artline: adjustment + finalized-jobs endpoints ──────────
 // Settings — read/write the global wastage defaults.
-app.get('/api/artline/settings', requireAdmin, async (req, res) => {
+app.get('/api/artline/settings', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7916,7 +7959,7 @@ app.get('/api/artline/settings', requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/artline/settings', requireAdmin, async (req, res) => {
+app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7935,7 +7978,7 @@ app.put('/api/artline/settings', requireAdmin, async (req, res) => {
 // Unallocated manual consumption — manual-job-card stock-out rows that
 // haven't been absorbed into any job_adjustments yet. Grouped by paper
 // type + size so the frontend can match against delivered E-jobs.
-app.get('/api/artline/unallocated', requireAdmin, async (req, res) => {
+app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7957,7 +8000,7 @@ app.get('/api/artline/unallocated', requireAdmin, async (req, res) => {
 });
 
 // Adjust a delivered E-job — allocate manual packets as wastage.
-app.post('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
+app.post('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8000,7 +8043,7 @@ app.post('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
 });
 
 // Remove an adjustment (un-finalize). Admin only.
-app.delete('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
+app.delete('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8020,7 +8063,7 @@ app.delete('/api/artline/adjust/:jobId', requireAdmin, async (req, res) => {
 });
 
 // List all finalized (adjusted) jobs with their adjustment data.
-app.get('/api/artline/finalized', requireAdmin, async (req, res) => {
+app.get('/api/artline/finalized', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8039,7 +8082,7 @@ app.get('/api/artline/finalized', requireAdmin, async (req, res) => {
 });
 
 // Mark an adjusted job as "posted" (ready for the public app).
-app.post('/api/artline/post/:jobId', requireAdmin, async (req, res) => {
+app.post('/api/artline/post/:jobId', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8060,7 +8103,7 @@ app.post('/api/artline/post/:jobId', requireAdmin, async (req, res) => {
 
 // Allocation totals per inventory transaction — used by Manual Consumption report
 // to render green fill bars showing how much of each stock-out has been absorbed.
-app.get('/api/artline/allocations', requireAdmin, async (req, res) => {
+app.get('/api/artline/allocations', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
