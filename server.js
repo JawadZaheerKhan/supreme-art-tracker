@@ -6728,6 +6728,9 @@ app.get('/api/inventory/transactions', async (req, res) => {
     // other report below. No other caller of this endpoint sends this
     // flag, so their results are unaffected.
     const includeOffcutManual = req.query.include_offcut_manual === '1';
+    // Offcut Consumption report only: include automatic E-job deductions
+    // from offcut inventory while all other movement reports stay unchanged.
+    const includeOffcutAuto = req.query.include_offcut_auto === '1';
     // raw=1: return the TRUE ledger with NO exclusions — corrections,
     // reversals, and offcut rows all included. The Stock Summary needs
     // this to compute an accurate balance: 'correction' rows are real
@@ -6790,6 +6793,7 @@ app.get('/api/inventory/transactions', async (req, res) => {
           ${raw}
           OR COALESCE(i.is_offcut, false) = false
           OR (${includeOffcutManual} AND t.reason = 'manual-job-card')
+          OR (${includeOffcutAuto} AND t.reason = 'job-consumed' AND t.job_id IS NOT NULL)
         )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
