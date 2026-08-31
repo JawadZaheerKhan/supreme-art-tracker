@@ -7873,9 +7873,12 @@ async function renderInvHistory(id) {
       const packets = fmtPackets(t.change);
 
       // Reason cell — show a "REVERSAL" badge when this row undoes another.
+      const historySplitBadge = t._parts.length > 1
+        ? ` <span style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;letter-spacing:0.03em;margin-left:4px;">SPLIT · ${t._parts.length}</span>`
+        : '';
       const reasonHtml = isReversal
         ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
-        : esc(t.reason || '');
+        : esc(t.reason || '') + historySplitBadge;
 
       // Reverse button — admin can reverse anytime; store keeper and
       // production manager can reverse within 7 days of the entry.
@@ -7920,7 +7923,7 @@ async function renderInvHistory(id) {
         : (isReversal ? 'background:#fff7ed;' : '');
       const challan = t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>';
       const splitSources = t._parts.length > 1
-        ? t._parts.map(p => `${p.item_brand || 'no brand'} ${fmtPackets(Math.abs(p.change))}`).join(' + ')
+        ? [...t._parts].sort((a, b) => a.id - b.id).map(p => `${p.item_brand || 'no brand'} ${fmtPackets(Math.abs(p.change))}`).join(' + ')
         : '';
       const notes = splitSources || txDisplayNotes(t);
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" class="row-hover-red" style="${rowStyle}">
@@ -12624,6 +12627,15 @@ function collapseSplitIssuances(rows) {
       .map(low => brands.find(b => b.toLowerCase() === low));
     const summedChange = arr.reduce((a, x) => a + (x.change || 0), 0);
     const first = arr[0];
+    const splitNote = [...arr]
+      .sort((a, b) => a.id - b.id)
+      .map(x => {
+        const ps = packetSize(x.paper_type || '');
+        const amount = Math.abs(x.change || 0) / ps;
+        const amountText = Number.isInteger(amount) ? String(amount) : String(+amount.toFixed(2));
+        return `${x.item_brand || 'no brand'} ${amountText}`;
+      })
+      .join(' + ');
     OUT.push({
       ...first,
       id: first.id,
@@ -12632,6 +12644,7 @@ function collapseSplitIssuances(rows) {
       item_brand: uniqBrands.join('/'),
       item_id: null,           // multiple items — balance can't be shown
       notes: first.notes,
+      split_note: splitNote,
     });
   }
   // Preserve original ordering by created_at descending (matches the
@@ -12743,7 +12756,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
       <td style="padding:8px 10px;">${job}</td>
       <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
-      <td style="padding:8px 10px;">${esc(txDisplayNotes(t))}</td>
+      <td style="padding:8px 10px;">${esc(t.split_note || txDisplayNotes(t))}</td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -13475,12 +13488,12 @@ function printManualConsumption() {
 function stockMovementPrintRows(direction) {
   const state = stockMovementStates[direction];
   const sel = stockMovementSel[direction];
-  if (sel && sel.size) return state.rows.filter(t => sel.has(t.id));
-  return state.rows.filter(t =>
+  const filtered = sel && sel.size ? state.rows.filter(t => sel.has(t.id)) : state.rows.filter(t =>
        (!state.paperType || t.paper_type === state.paperType)
     && (!state.size      || (t.item_size || '') === state.size)
     && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
   );
+  return collapseSplitIssuances(filtered);
 }
 
 // Print using the same A4 portrait layout as the old Stock Report — direction
@@ -13516,7 +13529,7 @@ function printStockMovement(direction) {
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
       <td ${tdL}>${job}</td>
-      <td ${tdL}>${esc(txDisplayNotes(t))}</td>
+      <td ${tdL}>${esc(t.split_note || txDisplayNotes(t))}</td>
     </tr>`;
   }).join('');
   const html = `
@@ -13593,7 +13606,7 @@ async function exportStockMovement(direction) {
       t.reason || '',
       job,
       t.user_email || '',
-      txDisplayNotes(t),
+      t.split_note || txDisplayNotes(t),
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
