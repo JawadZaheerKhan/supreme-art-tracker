@@ -13515,48 +13515,58 @@ async function openAdjustModal(jobId) {
   const initialSheets = Math.round(initialPackets * ps);
   const initialOverlay = computeArtlineWasteSplit(initialSheets, s, ups);
 
-  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
-    <h2 style="text-align:center;letter-spacing:1px;">ADJUST JOB E-${j.id}</h2>
-    <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:12px;">
-      Allocate manual consumption packets as wastage for this delivered job — the job card preview below updates live.
-      Wastage split uses the defaults from <a href="#" onclick="event.preventDefault();openArtlineSettingsModal()">Wastage Settings</a>:
-      Printing ${s.printing_pct}% &middot; Die ${s.die_pct}% &middot; Coating ${s.coating_pct}% &middot; Pasting ${s.pasting_pct}% &middot; Sorting ${s.sorting_pct}%.
+  // Same job card modal used everywhere (Edit/View) — the particulars
+  // table's wastage rows get preview placeholders so the side panel can
+  // update them live as packets/sheets change, without altering anything
+  // else about how the card looks or behaves.
+  openEdit(jobId, { particularsOpts: { preview: true, previewOverlay: initialOverlay } });
+  buildAdjustSidePanel(j, s, ps, matchHtml);
+}
+
+// Floating side panel (same fixed-position pattern as the linked-job
+// compare panel) carrying the Adjust-specific controls — kept separate
+// from the job card modal so the real Edit/View card renders unmodified.
+function buildAdjustSidePanel(j, s, ps, matchHtml) {
+  const existing = document.getElementById('adj-side-panel');
+  if (existing) existing.remove();
+  const initialPackets = Math.min(s.max_packets_per_job, 2);
+  const initialSheets = Math.round(initialPackets * ps);
+  const panel = document.createElement('div');
+  panel.id = 'adj-side-panel';
+  panel.className = 'cv-compare-panel';
+  panel.innerHTML = `
+    <div class="cv-compare-head">
+      <span class="cv-compare-title"><span>Adjust</span><span class="badge">E-${j.id}</span></span>
+      <button type="button" class="cv-compare-close" title="Close" aria-label="Close">&times;</button>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
-      <div><div class="dash-flbl">Job Name</div><div style="font-weight:600;">${esc(j.name)}</div></div>
-      <div><div class="dash-flbl">Client</div><div style="font-weight:600;">${esc(j.client || '')}</div></div>
-      <div><div class="dash-flbl">Paper</div><div style="font-weight:600;">${esc(invIt ? `${invIt.paper_type} ${invIt.size} ${invIt.gsm}gsm` : j.paper || 'N/A')}</div></div>
-      <div><div class="dash-flbl">PO Qty</div><div style="font-weight:600;">${esc(j.qty || 'N/A')}</div></div>
-    </div>
-    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
-      <div class="dash-flbl" style="margin-bottom:8px;">Manual Packets / Sheets to Adjust</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-        <div>
-          <label style="font-size:11px;color:var(--text2);">Packets</label>
-          <input type="number" id="adj-packets" min="0.5" max="${s.max_packets_per_job}" step="0.5" value="${initialPackets}" class="filter" style="width:100%;" oninput="adjPacketsChanged(${j.id})">
-        </div>
-        <div>
-          <label style="font-size:11px;color:var(--text2);">Sheets</label>
-          <input type="number" id="adj-sheets" min="1" step="1" value="${initialSheets}" class="filter" style="width:100%;" oninput="adjSheetsChanged(${j.id})">
-        </div>
+    <div class="cv-compare-body">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">
+        Wastage split uses the defaults from <a href="#" onclick="event.preventDefault();openArtlineSettingsModal()">Wastage Settings</a>:
+        Printing ${s.printing_pct}% &middot; Die ${s.die_pct}% &middot; Coating ${s.coating_pct}% &middot; Pasting ${s.pasting_pct}% &middot; Sorting ${s.sorting_pct}%.
       </div>
-      <div style="font-size:11px;color:var(--text2);margin-top:4px;">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets. Edit either field — they stay in sync.</div>
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;background:#fff;margin-bottom:12px;">
+        <div class="dash-flbl" style="margin-bottom:8px;">Manual Packets / Sheets to Adjust</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div>
+            <label style="font-size:11px;color:var(--text2);">Packets</label>
+            <input type="number" id="adj-packets" min="0.5" max="${s.max_packets_per_job}" step="0.5" value="${initialPackets}" class="filter" style="width:100%;" oninput="adjPacketsChanged(${j.id})">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text2);">Sheets</label>
+            <input type="number" id="adj-sheets" min="1" step="1" value="${initialSheets}" class="filter" style="width:100%;" oninput="adjSheetsChanged(${j.id})">
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px;">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets.</div>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;background:#fff;margin-bottom:12px;">
+        <div class="dash-flbl" style="margin-bottom:8px;">Manual Consumption Sources</div>
+        <div id="adj-alloc-list" style="max-height:180px;overflow-y:auto;">${matchHtml}</div>
+      </div>
+      <button class="btn btn-primary" style="width:100%;" onclick="submitAdjustment(${j.id})">Save Adjustment</button>
     </div>
-    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;background:var(--bg);margin-bottom:14px;">
-      <div class="dash-flbl" style="margin-bottom:8px;">Manual Consumption Sources</div>
-      <div id="adj-alloc-list" style="max-height:140px;overflow-y:auto;">${matchHtml}</div>
-    </div>
-    <div style="margin-bottom:14px;">
-      <div class="dash-flbl">Notes (optional)</div>
-      <input type="text" id="adj-notes" class="filter" style="width:100%;" placeholder="e.g. Weekly manual adjustment batch #5">
-    </div>
-    <div class="dash-flbl" style="margin:14px 0 6px;">Job Card Preview — wastage fields (purple) update live as you edit packets/sheets above</div>
-    <div id="adj-particulars-preview">${particularsTable(j.particulars || {}, j, { preview: true, previewOverlay: initialOverlay })}</div>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitAdjustment(${j.id})">Save Adjustment</button>
-    </div>
-  </div>`);
+  `;
+  panel.querySelector('.cv-compare-close').addEventListener('click', () => { panel.remove(); closeModal(); });
+  document.body.appendChild(panel);
 }
 
 // Recomputes the wastage split from the current packets/sheets inputs and
@@ -13610,7 +13620,7 @@ function adjSheetsChanged(jobId) {
 async function submitAdjustment(jobId) {
   const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
   const manual_sheets = Math.round(parseFloat(document.getElementById('adj-sheets').value) || 0);
-  const notes = (document.getElementById('adj-notes').value || '').trim();
+  const notes = '';
   const s = _artlineSettings;
   const printing_pct = s.printing_pct, die_pct = s.die_pct, coating_pct = s.coating_pct,
         pasting_pct = s.pasting_pct, sorting_pct = s.sorting_pct;
@@ -15756,6 +15766,12 @@ function openModal(html) { document.getElementById('modal-root').innerHTML=`<div
 function closeModal() {
   document.getElementById('modal-root').innerHTML='';
   selSection=null;
+  // The Adjust flow's side panel (packets/sheets + manual consumption
+  // sources) is paired 1:1 with the job-card modal it floats beside —
+  // always dismiss it together with the modal, however the modal closed
+  // (Cancel, Save, overlay click, Esc).
+  const adjPanel = document.getElementById('adj-side-panel');
+  if (adjPanel) adjPanel.remove();
   // Any modal close drops the pending "auto-join group after save" intent.
   // saveAdd/saveEdit have already read + cleared it before their closeModal
   // call, so this only matters when the user cancels a Duplicate modal
@@ -19741,7 +19757,8 @@ function openEditWithDelivery(id) {
   setTimeout(() => grab(), 120);
 }
 
-function openEdit(id) {
+function openEdit(id, opts) {
+  opts = opts || {};
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   // Lazy-load the machines/operators roster so the particulars-table
@@ -19764,7 +19781,7 @@ function openEdit(id) {
     <div class="ceo-only-block" style="margin:-4px 0 12px;padding:10px 14px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
       &#128065; View-only — your role can review this job card but can&rsquo;t edit or save changes.
     </div>
-    ${jobForm(j)}
+    ${jobForm(j, opts)}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       ${processBtn}
