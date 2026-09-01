@@ -13261,10 +13261,10 @@ async function bulkDeleteStockMovement(dir) {
   const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
   if (!rows.length) { notify('Nothing selected.'); return; }
   const ok = await confirmDialog({
-    title: `Move ${rows.length} row${rows.length===1?'':'s'} to Archive?`,
-    message: 'These rows are removed from the report/history and kept in Archive for 30 days (restorable), then auto-purged. Current balances stay the same — to undo a row’s effect on stock, use Reverse on the inventory History modal instead.',
+    title: `Delete ${rows.length} row${rows.length===1?'':'s'} from history?`,
+    message: 'These rows are wiped from the audit log. Current balances stay the same — to undo a row’s effect on stock, use Reverse on the inventory History modal instead. This cannot be undone.',
     danger: true,
-    confirmText: 'Move to Archive',
+    confirmText: 'Delete from history',
   });
   if (!ok) return;
   let good = 0, failed = 0;
@@ -14311,7 +14311,7 @@ async function deleteManualConsumptionRows(ids, skipConfirm = false) {
   if (!skipConfirm) {
     const ok = await confirmDialog({
       title: `Move this Manual Consumption row to Archive?`,
-      message: `${cleanIds.length} transaction record${cleanIds.length===1?'':'s'} will be removed from the report/history and kept in Archive for 30 days (restorable), then auto-purged. The current physical stock balance will not change.`,
+      message: `${cleanIds.length} transaction record${cleanIds.length===1?'':'s'} will be removed from Manual Consumption and kept in Archive for 30 days (restorable), then auto-purged. It'll keep showing in Stock In/Out and Total In/Out — this only affects the Manual Consumption report. The current physical stock balance will not change.`,
       confirmText: 'Move to Archive', danger: true,
     });
     if (!ok) return;
@@ -14319,7 +14319,7 @@ async function deleteManualConsumptionRows(ids, skipConfirm = false) {
   showSaving(true);
   let deleted = 0, failed = 0;
   for (const id of cleanIds) {
-    try { await api('DELETE', `/api/inventory/transactions/${id}`); deleted++; manualConsumptionState.selected.delete(id); }
+    try { await api('DELETE', `/api/inventory/transactions/${id}?scope=manual`); deleted++; manualConsumptionState.selected.delete(id); }
     catch (e) { failed++; console.error('Manual Consumption delete failed', id, e); }
   }
   showSaving(false);

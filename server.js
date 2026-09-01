@@ -6907,12 +6907,14 @@ app.get('/api/inventory/transactions', async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
         AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
-        -- Archived (soft-deleted) rows drop out of every movement report —
-        -- EXCEPT raw=1 (Stock Summary), which still needs them: the row's
-        -- effect on current_balance already happened, archiving only hides
-        -- it from display, so excluding it there would throw off the
-        -- opening-balance reconciliation math.
-        AND (${raw} OR t.deleted_at IS NULL)
+        -- Archived (soft-deleted) rows drop out ONLY of Manual Consumption
+        -- (the one caller that sends include_offcut_manual=1) — Stock
+        -- In/Out/Totals deliberately keep showing them. Deleting a row from
+        -- Manual Consumption must not make it vanish from Stock Out too;
+        -- deleted_at is only ever set by Manual Consumption's own delete
+        -- (see DELETE /api/inventory/transactions/:id?scope=manual below),
+        -- so every other caller (and raw=1) simply ignores it.
+        AND (${raw} OR NOT ${includeOffcutManual} OR t.deleted_at IS NULL)
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.
@@ -7259,34 +7261,52 @@ app.post('/api/trash/empty', requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE an inventory transaction row from history (admin only). Soft
-// delete — moves it to Archive (30-day retention, restorable), same
-// pattern as jobs/imports. Never touches current_balance, since the row
-// already happened and its effect is baked into the running balance;
-// archiving only hides it from Manual Consumption / Stock In-Out /
-// Total In-Out. To actually undo a row's effect on stock, use the
-// per-row Reverse on the inventory History modal instead (which posts a
-// proper correction entry).
+// DELETE an inventory transaction row from history (admin only).
+// ?scope=manual (sent only by Manual Consumption's own Delete button) soft-
+// deletes — moves it to Archive (30-day retention, restorable), and is
+// scoped to Manual Consumption only: the row keeps showing in Stock In/Out
+// and Total In/Out exactly as before, since deleting a manual-consumption
+// entry is not the same thing as saying the stock movement never happened.
+// Every other caller (Stock In/Out's own bulk delete) hard-deletes, same as
+// always — no archive for those. Neither path touches current_balance; the
+// row already happened and its effect is baked into the running balance.
+// To actually undo a row's effect on stock, use the per-row Reverse on the
+// inventory History modal instead (which posts a proper correction entry).
 app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    const by = req.user?.email || 'unknown';
-    const updated = await sql`
-      UPDATE inventory_transactions
-         SET deleted_at = NOW(), deleted_by = ${by}
-       WHERE id = ${id} AND deleted_at IS NULL
-       RETURNING id, item_id, change, reason
-    `;
-    if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
-    const tx = updated[0];
+    if (req.query.scope === 'manual') {
+      const by = req.user?.email || 'unknown';
+      const updated = await sql`
+        UPDATE inventory_transactions
+           SET deleted_at = NOW(), deleted_by = ${by}
+         WHERE id = ${id} AND deleted_at IS NULL
+         RETURNING id, item_id, change, reason
+      `;
+      if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
+      const tx = updated[0];
+      await logAudit(sql, req, {
+        action: 'inventory.tx.delete',
+        entityType: 'inventory_item',
+        entityId: tx.item_id,
+        summary: `Moved tx #${id} to Archive from Manual Consumption (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — still shows in Stock In/Out, balance unchanged`,
+      });
+      return res.json({ ok: true });
+    }
+    const tx = (await sql`SELECT id, item_id, change, reason FROM inventory_transactions WHERE id=${id}`)[0];
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    // reverses_tx_id has ON DELETE SET NULL so reversal rows pointing at this
+    // one (if any) survive — they just lose their back-link. Acceptable for
+    // archival purposes.
+    await sql`DELETE FROM inventory_transactions WHERE id=${id}`;
     await logAudit(sql, req, {
       action: 'inventory.tx.delete',
       entityType: 'inventory_item',
       entityId: tx.item_id,
-      summary: `Moved tx #${id} to Archive (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
+      summary: `Deleted tx #${id} from history (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
