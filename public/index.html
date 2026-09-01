@@ -310,6 +310,33 @@
     #topbar-refresh::after, #topbar-add-offcut::after, #topbar-add::after,
     .rsb-item::after { animation: none !important; opacity: .18; }
   }
+
+  /* Delivery actions use the same continuous flow in their own palettes. */
+  #jobs-mode button[onclick*="openEditWithDelivery"],
+  #jobs-mode button[onclick*="openDeliverGroupModal"],
+  #jobs-mode button[onclick*="openDeliverLinkedModal"] {
+    position:relative; overflow:hidden; isolation:isolate; transform:translateZ(0);
+  }
+  #jobs-mode button[onclick*="openEditWithDelivery"]::after,
+  #jobs-mode button[onclick*="openDeliverGroupModal"]::after,
+  #jobs-mode button[onclick*="openDeliverLinkedModal"]::after {
+    content:""; position:absolute; z-index:0;
+    top:-70%; bottom:-70%; left:-75%; width:82%; border-radius:50%;
+    pointer-events:none; opacity:.72; filter:blur(6px);
+    animation:colourful-button-flow 3.2s ease-in-out infinite;
+  }
+  #jobs-mode button[onclick*="openEditWithDelivery"]::after,
+  #jobs-mode button[onclick*="openDeliverGroupModal"]::after {
+    background:linear-gradient(100deg, transparent 4%, rgba(255,255,255,.62) 28%, rgba(250,204,21,.64) 52%, rgba(245,158,11,.48) 74%, transparent 96%);
+  }
+  #jobs-mode button[onclick*="openDeliverLinkedModal"]::after {
+    background:linear-gradient(100deg, transparent 4%, rgba(221,214,254,.55) 25%, rgba(167,139,250,.70) 50%, rgba(124,58,237,.62) 75%, transparent 96%);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #jobs-mode button[onclick*="openEditWithDelivery"]::after,
+    #jobs-mode button[onclick*="openDeliverGroupModal"]::after,
+    #jobs-mode button[onclick*="openDeliverLinkedModal"]::after { animation:none !important; opacity:.18; }
+  }
   .rsb-back { background: transparent; border: 1px solid var(--border); padding: 7px 10px; border-radius: 6px; text-align: left; font-family: var(--font); font-size: 12px; color: var(--text2); cursor: pointer; margin-bottom: 6px; transition: all 0.12s; }
   .rsb-back:hover { background: var(--bg2); color: var(--text); border-color: var(--text2); }
   .rsb-icon { font-size: 15px; width: 18px; text-align: center; }
@@ -774,6 +801,54 @@
   .tab:hover:not(.active) {
     background: var(--bg2); color: var(--text);
     box-shadow: 0 0 0 1px rgba(163,45,45,0.25), 0 2px 12px rgba(163,45,45,0.35);
+  }
+  /* Connected liquid selector shared by the main modes and Jobs sub-tabs.
+     One maroon shape glides between buttons; the selected label zooms. */
+  #mode-switch.flow-connected,
+  #tabs-wrap.flow-connected {
+    position: relative;
+    isolation: isolate;
+  }
+  .flowing-tab-indicator {
+    position:absolute; z-index:0; pointer-events:none;
+    left:0; top:3px; bottom:3px;
+    width:var(--flow-w, 0px);
+    transform:translateX(var(--flow-x, 0px));
+    border-radius:999px;
+    background:linear-gradient(110deg, #7f1d1d, var(--brand), #b73737);
+    box-shadow:0 4px 14px rgba(121,31,31,.42);
+    transition:transform .52s cubic-bezier(.22,.9,.3,1.12), width .46s cubic-bezier(.22,.9,.3,1.08);
+  }
+  #tabs-wrap > .flowing-tab-indicator { top:0; bottom:0; }
+  .flowing-tab-indicator::after {
+    content:""; position:absolute; inset:2px -8px; z-index:-1;
+    border-radius:999px; background:rgba(163,45,45,.24);
+    filter:blur(8px); opacity:.72;
+  }
+  .flow-connected.is-flowing > .flowing-tab-indicator {
+    animation:liquid-tab-morph .52s ease;
+  }
+  @keyframes liquid-tab-morph {
+    0%,100% { border-radius:999px; filter:saturate(1); }
+    48% { border-radius:48% 62% 54% 46% / 58% 44% 62% 42%; filter:saturate(1.18); }
+  }
+  #mode-switch.flow-connected > .mode-btn,
+  #tabs-wrap.flow-connected > .tab {
+    position:relative; z-index:1;
+    transition:transform .36s cubic-bezier(.22,.9,.3,1.12), color .28s ease, background .2s ease, box-shadow .2s ease;
+  }
+  #mode-switch.flow-connected > .mode-btn.active,
+  #tabs-wrap.flow-connected > .tab.active {
+    background:transparent !important;
+    border-color:transparent;
+    color:#fff;
+    box-shadow:none;
+    transform:scale(1.08);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .flowing-tab-indicator,
+    #mode-switch.flow-connected > .mode-btn,
+    #tabs-wrap.flow-connected > .tab { transition:none !important; animation:none !important; }
   }
   .search-wrap { flex: 1; min-width: 160px; position: relative; }
   .search-wrap input { width: 100%; padding: 7px 30px 7px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
@@ -4084,6 +4159,46 @@ async function loadInventory() {
   }
 }
 
+// Keep one shared selection shape physically moving between sibling tabs.
+// Reusable for both the top app modes and the Jobs status tabs.
+function syncFlowingTabIndicator(containerOrId) {
+  const box = typeof containerOrId === 'string'
+    ? document.getElementById(containerOrId)
+    : containerOrId;
+  if (!box) return;
+  box.classList.add('flow-connected');
+  let indicator = box.querySelector(':scope > .flowing-tab-indicator');
+  if (!indicator) {
+    indicator = document.createElement('span');
+    indicator.className = 'flowing-tab-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    box.appendChild(indicator);
+  }
+  const active = box.querySelector(':scope > button.active');
+  if (!active || active.offsetParent === null) return;
+  const x = active.offsetLeft;
+  const w = active.offsetWidth;
+  const previousX = Number(box.dataset.flowX);
+  const moved = Number.isFinite(previousX) && Math.abs(previousX - x) > 1;
+  box.style.setProperty('--flow-x', `${x}px`);
+  box.style.setProperty('--flow-w', `${w}px`);
+  box.dataset.flowX = String(x);
+  if (moved) {
+    box.classList.remove('is-flowing');
+    void box.offsetWidth;
+    box.classList.add('is-flowing');
+    clearTimeout(box._flowTimer);
+    box._flowTimer = setTimeout(() => box.classList.remove('is-flowing'), 540);
+  }
+  if (!syncFlowingTabIndicator.resizeBound) {
+    syncFlowingTabIndicator.resizeBound = true;
+    window.addEventListener('resize', () => {
+      syncFlowingTabIndicator('mode-switch');
+      syncFlowingTabIndicator('tabs-wrap');
+    });
+  }
+}
+
 // Mode (top-level page) switching — toggles between Jobs / Inventory / Users
 // and swaps the topbar's primary action button accordingly.
 function setMode(m) {
@@ -4111,6 +4226,7 @@ function setMode(m) {
   if (m === 'station' && !canRunStation() && !isFinance()) m = 'jobs';
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
@@ -4412,7 +4528,17 @@ function renderTabs() {
   // end — the tab itself stays hidden from every other role, not just the
   // data, and regular Admins are deliberately excluded too.
   if (isSuperAdmin()) views.push(['finalized','Finalized']);
-  document.getElementById('tabs-wrap').innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" onclick="setView('${v}')">${l}</button>`).join('');
+  const tabsWrap = document.getElementById('tabs-wrap');
+  const viewsKey = views.map(([v]) => v).join('|');
+  // Preserve the existing buttons between renders so the shared selector can
+  // visibly travel from its old position to the new one instead of jumping.
+  if (tabsWrap.dataset.viewsKey !== viewsKey) {
+    tabsWrap.innerHTML = views.map(([v,l])=>`<button class="tab ${view===v?'active':''}" data-view="${v}" onclick="setView('${v}')">${l}</button>`).join('');
+    tabsWrap.dataset.viewsKey = viewsKey;
+  } else {
+    tabsWrap.querySelectorAll(':scope > .tab').forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
+  }
+  requestAnimationFrame(() => syncFlowingTabIndicator(tabsWrap));
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
   const cf = document.getElementById('client-filter');
