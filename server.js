@@ -14,6 +14,13 @@ app.use(cookieParser());
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const JWT_SECRET       = process.env.JWT_SECRET || 'dev-only-change-me';
 const BOOTSTRAP_ADMIN  = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase();
+// Super Admin: a role above Admin, exclusively gated to a small set of
+// sensitive features (Artline wastage adjustments, Manual Consumption
+// report) that regular Admins no longer see at all. Bootstrapped the same
+// way the very first Admin account is — by email, on every cold start, so
+// it's idempotent and doesn't require a one-off DB script. Defaults to the
+// owner's account; override via env var if the login email ever changes.
+const BOOTSTRAP_SUPER_ADMIN = (process.env.BOOTSTRAP_SUPER_ADMIN_EMAIL || 'hamxakhan.mk@gmail.com').toLowerCase();
 const SESSION_COOKIE   = 'sa_session';
 const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -213,10 +220,10 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-// Bumped for inventory_transactions.paired_tx_id. Without this bump,
-// databases already stamped with the sessions version take the fast path
-// above and skip the ALTER TABLE that creates the offcut-pair link column.
-const SCHEMA_VERSION = 'v2026-09-01-offcut-pairs';
+// Bumped for inventory_transactions.paired_tx_id AND the super_admin role
+// migration (both landed on separate branches and need to run on any DB
+// still stamped with either predecessor version).
+const SCHEMA_VERSION = 'v2026-09-01-offcut-pairs-superadmin';
 
 async function initDb() {
   try {
@@ -660,11 +667,11 @@ async function initDb() {
     // each cold start. Own try/catch so a stale list can never do that again.
     try {
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin'))`;
       await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
       await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin'))`;
     } catch (roleErr) {
       // Log loudly but keep going — the migrations below must still run.
       console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
@@ -675,6 +682,19 @@ async function initDb() {
     // code that still reads the single value. Backfill from `role`.
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[]`;
     await sql`UPDATE users SET roles = ARRAY[role] WHERE roles IS NULL OR array_length(roles, 1) IS NULL`;
+    // Super Admin bootstrap: if the configured owner account already exists,
+    // make sure it carries 'super_admin' (kept alongside 'admin', never
+    // replacing it, so every existing admin-gated feature keeps working for
+    // this account too). Idempotent — a no-op once already applied.
+    if (BOOTSTRAP_SUPER_ADMIN) {
+      await sql`
+        UPDATE users
+           SET roles = (SELECT ARRAY(SELECT DISTINCT unnest(roles || ARRAY['super_admin','admin']))),
+               role  = 'super_admin'
+         WHERE lower(email) = ${BOOTSTRAP_SUPER_ADMIN}
+           AND NOT ('super_admin' = ANY(roles))
+      `;
+    }
     // Client portal: bind a client-role user to a single company name (must
     // match a value in jobs.client for the portal to surface anything). Only
     // used when the user's roles include 'client'; null for every internal
@@ -959,6 +979,58 @@ async function initDb() {
     await sql`UPDATE jobs SET name   = LOWER(TRIM(name))   WHERE name   IS NOT NULL AND name   <> LOWER(TRIM(name))`;
     await sql`UPDATE jobs SET client = LOWER(TRIM(client)) WHERE client IS NOT NULL AND client <> LOWER(TRIM(client))`;
 
+    // ── Artline: manual-consumption adjustment into E-jobs ──────
+    // Each row represents a delivered E-job that has been "adjusted" —
+    // manual (offline) paper consumption allocated as wastage. The
+    // original job row in `jobs` is NEVER modified; this is a parallel
+    // ledger that the Finalized tab reads from.
+    await sql`
+      CREATE TABLE IF NOT EXISTS job_adjustments (
+        id              SERIAL PRIMARY KEY,
+        job_id          INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        manual_packets  NUMERIC NOT NULL DEFAULT 0,
+        manual_sheets   INTEGER NOT NULL DEFAULT 0,
+        printing_pct    NUMERIC NOT NULL DEFAULT 0,
+        die_pct         NUMERIC NOT NULL DEFAULT 0,
+        coating_pct     NUMERIC NOT NULL DEFAULT 0,
+        pasting_pct     NUMERIC NOT NULL DEFAULT 0,
+        sorting_pct     NUMERIC NOT NULL DEFAULT 0,
+        notes           TEXT,
+        adjusted_by     TEXT,
+        adjusted_at     TIMESTAMPTZ DEFAULT NOW(),
+        posted          BOOLEAN NOT NULL DEFAULT false,
+        posted_at       TIMESTAMPTZ,
+        UNIQUE(job_id)
+      )
+    `;
+    // Global default wastage split percentages (must sum to 100).
+    await sql`
+      CREATE TABLE IF NOT EXISTS artline_settings (
+        key   TEXT PRIMARY KEY,
+        value JSONB NOT NULL
+      )
+    `;
+    // Seed defaults if not present.
+    await sql`
+      INSERT INTO artline_settings (key, value)
+      VALUES ('wastage_defaults', '{"printing_pct":40,"die_pct":20,"coating_pct":15,"pasting_pct":15,"sorting_pct":10,"max_packets_per_job":2}'::jsonb)
+      ON CONFLICT (key) DO NOTHING
+    `;
+    // Links each adjustment to the specific manual-job-card inventory
+    // transactions it absorbed. Supports partial allocation — one manual
+    // stock-out can be split across multiple E-jobs, and one E-job can
+    // absorb sheets from multiple manual transactions.
+    await sql`
+      CREATE TABLE IF NOT EXISTS adjustment_allocations (
+        id              SERIAL PRIMARY KEY,
+        adjustment_id   INTEGER NOT NULL REFERENCES job_adjustments(id) ON DELETE CASCADE,
+        transaction_id  INTEGER NOT NULL REFERENCES inventory_transactions(id) ON DELETE CASCADE,
+        sheets_allocated INTEGER NOT NULL,
+        UNIQUE(adjustment_id, transaction_id)
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS adj_alloc_tx_idx ON adjustment_allocations(transaction_id)`;
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -1102,6 +1174,15 @@ function userHasRole(user, ...want) {
 function requireAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (!userHasRole(req.user, 'admin')) return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+// Super Admin — a role above Admin, exclusively for Artline (wastage
+// adjustments) and the Manual Consumption report. Regular Admins are
+// deliberately excluded from both, so this checks 'super_admin' only,
+// never 'admin'.
+function requireSuperAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasRole(req.user, 'super_admin')) return res.status(403).json({ error: 'Super Admin only' });
   next();
 }
 function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
@@ -1394,11 +1475,18 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
-function parseRolesInput(body) {
+const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
+// actingUser: only a Super Admin can grant or keep the super_admin role on
+// anyone (including themselves) — a plain Admin submitting 'super_admin' in
+// the payload (by tampering with the request, since the checkbox is hidden
+// from them client-side) has it silently stripped here, server-side.
+function parseRolesInput(body, actingUser) {
   const ALLOWED = new Set(ROLE_PRIORITY);
   let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
     .filter(r => ALLOWED.has(r));
+  if (roles.includes('super_admin') && !userHasRole(actingUser, 'super_admin')) {
+    roles = roles.filter(r => r !== 'super_admin');
+  }
   if (!roles.length) roles = ['production_manager'];
   // Client is external. If it appears alongside any internal role we drop
   // the internal ones — an outside client account must never also carry
@@ -1437,7 +1525,7 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const email = (req.body.email || '').trim().toLowerCase();
-    const { roles, primary } = parseRolesInput(req.body);
+    const { roles, primary } = parseRolesInput(req.body, req.user);
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
     // Client-role invites need a company binding up front — a client
     // without a bound company would sign in and see nothing.
@@ -1466,11 +1554,42 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { roles, primary } = parseRolesInput(req.body);
+    let { roles, primary } = parseRolesInput(req.body, req.user);
     // Guardrail: don't allow removing admin from yourself — locks you out
     // of the admin tools. Adding EXTRA roles to yourself is fine.
     if (parseInt(id, 10) === req.user.id && !roles.includes('admin')) {
       return res.status(400).json({ error: "You can't remove the Admin role from your own account." });
+    }
+    // Same guardrail for super_admin — otherwise a Super Admin editing their
+    // own row without re-checking the (hidden-to-others) box would silently
+    // demote themselves out of Artline/Manual Consumption access.
+    if (parseInt(id, 10) === req.user.id && userHasRole(req.user, 'super_admin') && !roles.includes('super_admin')) {
+      return res.status(400).json({ error: "You can't remove the Super Admin role from your own account." });
+    }
+    // A regular Admin editing someone else's roles never sees a Super Admin
+    // checkbox at all — the client-side form can't submit a roles list that
+    // includes it. Without this, saving ANY unrelated change to a Super
+    // Admin's row (e.g. ticking Finance) would silently strip super_admin,
+    // since it's simply absent from what got submitted. Preserve it here.
+    if (!userHasRole(req.user, 'super_admin')) {
+      const current = await sql`SELECT role, roles FROM users WHERE id = ${id}`;
+      const currentRoles = current.length
+        ? normalizeUserRoles(Array.isArray(current[0].roles) && current[0].roles.length ? current[0].roles : current[0].role)
+        : [];
+      if (currentRoles.includes('super_admin')) {
+        // Also keep 'admin' — Super Admin is meant to always imply Admin,
+        // and the acting admin can't have knowingly unchecked either box
+        // for a role they never saw in the first place.
+        const preserve = ['super_admin', 'admin'].filter(r => !roles.includes(r));
+        if (preserve.length) {
+          roles = [...preserve, ...roles];
+          // Re-adding internal roles can only ever un-violate the client
+          // exclusivity rule, never re-trigger it in the other direction —
+          // but guard anyway: an internal role always wins over 'client'.
+          if (roles.includes('client')) roles = roles.filter(r => r !== 'client');
+          primary = ROLE_PRIORITY.find(r => roles.includes(r)) || primary;
+        }
+      }
     }
     // client_company is only meaningful when the role IS client; drop it
     // otherwise so switching a user away from 'client' also clears the
@@ -1606,6 +1725,10 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     } else {
       rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
     }
+    // Artline is a Super Admin-only feature (regular Admins no longer have
+    // access either) — its audit trail (adjust/post/remove) must never leak
+    // to anyone else viewing a job's shared history/audit log.
+    if (!userHasRole(req.user, 'super_admin')) rows = rows.filter(r => !String(r.action || '').startsWith('artline.'));
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -8031,6 +8154,185 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
       metadata: { transfer_note_no: rows[0].transfer_note_no },
     });
     res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Artline: adjustment + finalized-jobs endpoints ──────────
+// Settings — read/write the global wastage defaults.
+app.get('/api/artline/settings', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT value FROM artline_settings WHERE key = 'wastage_defaults'`;
+    res.json(rows[0]?.value || { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = req.body;
+    const pcts = (v.printing_pct || 0) + (v.die_pct || 0) + (v.coating_pct || 0) + (v.pasting_pct || 0) + (v.sorting_pct || 0);
+    if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
+    if ((v.max_packets_per_job || 0) < 0.5) return res.status(400).json({ error: 'Max packets per job must be at least 0.5' });
+    await sql`
+      INSERT INTO artline_settings (key, value) VALUES ('wastage_defaults', ${JSON.stringify(v)})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    `;
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Unallocated manual consumption — manual-job-card stock-out rows that
+// haven't been absorbed into any job_adjustments yet. Grouped by paper
+// type + size so the frontend can match against delivered E-jobs.
+app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const from = req.query.from || null;
+    const to   = req.query.to   || null;
+    const rows = await sql`
+      SELECT t.id, t.item_id, ABS(t.change) AS sheets, t.notes, t.created_at,
+             i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
+        FROM inventory_transactions t
+        JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.reason = 'manual-job-card'
+         AND t.change < 0
+         AND (${from}::date IS NULL OR t.created_at >= ${from}::date)
+         AND (${to}::date   IS NULL OR t.created_at <  (${to}::date + INTERVAL '1 day'))
+       ORDER BY t.created_at DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Adjust a delivered E-job — allocate manual packets as wastage.
+app.post('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.jobId, 10);
+    const job = (await sql`SELECT id, stage_index, issuance_status, inventory_item_id FROM jobs WHERE id = ${jobId} AND deleted_at IS NULL`)[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.stage_index !== 7) return res.status(400).json({ error: 'Job must be Delivered before adjusting' });
+    const existing = (await sql`SELECT id FROM job_adjustments WHERE job_id = ${jobId}`)[0];
+    if (existing) return res.status(400).json({ error: 'Job already adjusted' });
+    const b = req.body;
+    const pcts = (b.printing_pct || 0) + (b.die_pct || 0) + (b.coating_pct || 0) + (b.pasting_pct || 0) + (b.sorting_pct || 0);
+    if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
+    if (!b.manual_packets || b.manual_packets <= 0) return res.status(400).json({ error: 'manual_packets must be > 0' });
+    const row = (await sql`
+      INSERT INTO job_adjustments (job_id, manual_packets, manual_sheets, printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes, adjusted_by)
+      VALUES (${jobId}, ${b.manual_packets}, ${b.manual_sheets || 0}, ${b.printing_pct}, ${b.die_pct}, ${b.coating_pct}, ${b.pasting_pct}, ${b.sorting_pct}, ${b.notes || ''}, ${req.user?.email || ''})
+      RETURNING *
+    `)[0];
+    // Link to specific manual-job-card transactions being absorbed.
+    // allocations: [{ transaction_id, sheets_allocated }]
+    if (Array.isArray(b.allocations) && b.allocations.length) {
+      for (const alloc of b.allocations) {
+        if (!alloc.transaction_id || !alloc.sheets_allocated) continue;
+        await sql`
+          INSERT INTO adjustment_allocations (adjustment_id, transaction_id, sheets_allocated)
+          VALUES (${row.id}, ${alloc.transaction_id}, ${alloc.sheets_allocated})
+          ON CONFLICT (adjustment_id, transaction_id) DO UPDATE SET sheets_allocated = EXCLUDED.sheets_allocated
+        `;
+      }
+    }
+    await logAudit(sql, req, {
+      action: 'artline.adjust',
+      entityType: 'job',
+      entityId: jobId,
+      summary: `Wastage adjustment: Job E-${jobId} with ${b.manual_packets} manual packets`,
+      metadata: { manual_packets: b.manual_packets, printing_pct: b.printing_pct, die_pct: b.die_pct, coating_pct: b.coating_pct, pasting_pct: b.pasting_pct, sorting_pct: b.sorting_pct },
+    });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Remove an adjustment (un-finalize). Admin only.
+app.delete('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.jobId, 10);
+    const existing = (await sql`SELECT id, posted FROM job_adjustments WHERE job_id = ${jobId}`)[0];
+    if (!existing) return res.status(404).json({ error: 'No adjustment found for this job' });
+    if (existing.posted) return res.status(400).json({ error: 'Cannot remove a posted adjustment' });
+    await sql`DELETE FROM job_adjustments WHERE job_id = ${jobId}`;
+    await logAudit(sql, req, {
+      action: 'artline.unadjust',
+      entityType: 'job',
+      entityId: jobId,
+      summary: `Wastage adjustment removed from Job E-${jobId}`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// List all finalized (adjusted) jobs with their adjustment data.
+app.get('/api/artline/finalized', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT j.*, a.manual_packets, a.manual_sheets,
+             a.printing_pct, a.die_pct, a.coating_pct, a.pasting_pct, a.sorting_pct,
+             a.notes AS adjustment_notes, a.adjusted_by, a.adjusted_at,
+             a.posted, a.posted_at
+        FROM job_adjustments a
+        JOIN jobs j ON j.id = a.job_id
+       WHERE j.deleted_at IS NULL
+       ORDER BY a.adjusted_at DESC
+    `;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Mark an adjusted job as "posted" (ready for the public app).
+app.post('/api/artline/post/:jobId', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.jobId, 10);
+    const existing = (await sql`SELECT id, posted FROM job_adjustments WHERE job_id = ${jobId}`)[0];
+    if (!existing) return res.status(404).json({ error: 'No adjustment found' });
+    if (existing.posted) return res.status(400).json({ error: 'Already posted' });
+    await sql`UPDATE job_adjustments SET posted = true, posted_at = NOW() WHERE job_id = ${jobId}`;
+    await logAudit(sql, req, {
+      action: 'artline.post',
+      entityType: 'job',
+      entityId: jobId,
+      summary: `Job E-${jobId} posted for public app`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Allocation totals per inventory transaction — used by Manual Consumption report
+// to render green fill bars showing how much of each stock-out has been absorbed.
+app.get('/api/artline/allocations', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT aa.transaction_id,
+             it.notes AS tx_notes,
+             SUM(aa.sheets_allocated) AS total_allocated,
+             json_agg(json_build_object(
+               'adjustment_id', aa.adjustment_id,
+               'job_id', ja.job_id,
+               'sheets', aa.sheets_allocated
+             )) AS jobs
+      FROM adjustment_allocations aa
+      JOIN job_adjustments ja ON ja.id = aa.adjustment_id
+      JOIN inventory_transactions it ON it.id = aa.transaction_id
+      GROUP BY aa.transaction_id, it.notes
+    `;
+    const map = {};
+    for (const r of rows) map[r.transaction_id] = { total: Number(r.total_allocated), jobs: r.jobs, notes: r.tx_notes || '' };
+    res.json(map);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
