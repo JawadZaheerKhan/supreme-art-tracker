@@ -14,13 +14,6 @@ app.use(cookieParser());
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const JWT_SECRET       = process.env.JWT_SECRET || 'dev-only-change-me';
 const BOOTSTRAP_ADMIN  = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase();
-// Super Admin: a role above Admin, exclusively gated to a small set of
-// sensitive features (Artline wastage adjustments, Manual Consumption
-// report) that regular Admins no longer see at all. Bootstrapped the same
-// way the very first Admin account is — by email, on every cold start, so
-// it's idempotent and doesn't require a one-off DB script. Defaults to the
-// owner's account; override via env var if the login email ever changes.
-const BOOTSTRAP_SUPER_ADMIN = (process.env.BOOTSTRAP_SUPER_ADMIN_EMAIL || 'hamxakhan.mk@gmail.com').toLowerCase();
 const SESSION_COOKIE   = 'sa_session';
 const SESSION_MAX_AGE  = 30 * 24 * 60 * 60 * 1000; // 30 days
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -220,7 +213,10 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-31-superadmin';
+// Bumped for inventory_transactions.deleted_at/deleted_by (Manual
+// Consumption + Stock movement deletes now go to Archive instead of
+// hard-deleting outright).
+const SCHEMA_VERSION = 'v2026-09-01-tx-archive';
 
 async function initDb() {
   try {
@@ -581,6 +577,9 @@ async function initDb() {
     // it cancels. Used to (a) hide the Reverse button on already-reversed
     // entries and (b) highlight both rows in the History UI.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS reverses_tx_id INTEGER REFERENCES inventory_transactions(id) ON DELETE SET NULL`;
+    // Link the credit side of a fresh-to-offcut reclassification to its
+    // source stock-out so a History reversal can unwind both rows.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS paired_tx_id INTEGER REFERENCES inventory_transactions(id) ON DELETE SET NULL`;
     // Track WHO entered each transaction so the stock-keeper-within-24h rule
     // can authorize reversals and the History UI can show the entrant. No FK
     // on user_id because the users table is created further down — plain int
@@ -593,6 +592,14 @@ async function initDb() {
     // and pre-existing rows leave it blank.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS challan_no TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_challan_idx ON inventory_transactions(challan_no) WHERE challan_no IS NOT NULL`;
+    // Soft delete: "Delete from history" (Manual Consumption, Stock In/Out
+    // bulk delete) moves a row to the Archive instead of wiping it outright,
+    // same 30-day-retention pattern as jobs/imports. Never touches
+    // current_balance — the deduction already happened; archiving only
+    // hides the row from movement reports.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS inventory_tx_deleted_at_idx ON inventory_transactions(deleted_at) WHERE deleted_at IS NOT NULL`;
 
     // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
     // pending → received (creates a stock-in transaction) or pending → cancelled.
@@ -676,19 +683,6 @@ async function initDb() {
     // code that still reads the single value. Backfill from `role`.
     await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[]`;
     await sql`UPDATE users SET roles = ARRAY[role] WHERE roles IS NULL OR array_length(roles, 1) IS NULL`;
-    // Super Admin bootstrap: if the configured owner account already exists,
-    // make sure it carries 'super_admin' (kept alongside 'admin', never
-    // replacing it, so every existing admin-gated feature keeps working for
-    // this account too). Idempotent — a no-op once already applied.
-    if (BOOTSTRAP_SUPER_ADMIN) {
-      await sql`
-        UPDATE users
-           SET roles = (SELECT ARRAY(SELECT DISTINCT unnest(roles || ARRAY['super_admin','admin']))),
-               role  = 'super_admin'
-         WHERE lower(email) = ${BOOTSTRAP_SUPER_ADMIN}
-           AND NOT ('super_admin' = ANY(roles))
-      `;
-    }
     // Client portal: bind a client-role user to a single company name (must
     // match a value in jobs.client for the portal to surface anything). Only
     // used when the user's roles include 'client'; null for every internal
@@ -973,58 +967,6 @@ async function initDb() {
     await sql`UPDATE jobs SET name   = LOWER(TRIM(name))   WHERE name   IS NOT NULL AND name   <> LOWER(TRIM(name))`;
     await sql`UPDATE jobs SET client = LOWER(TRIM(client)) WHERE client IS NOT NULL AND client <> LOWER(TRIM(client))`;
 
-    // ── Artline: manual-consumption adjustment into E-jobs ──────
-    // Each row represents a delivered E-job that has been "adjusted" —
-    // manual (offline) paper consumption allocated as wastage. The
-    // original job row in `jobs` is NEVER modified; this is a parallel
-    // ledger that the Finalized tab reads from.
-    await sql`
-      CREATE TABLE IF NOT EXISTS job_adjustments (
-        id              SERIAL PRIMARY KEY,
-        job_id          INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-        manual_packets  NUMERIC NOT NULL DEFAULT 0,
-        manual_sheets   INTEGER NOT NULL DEFAULT 0,
-        printing_pct    NUMERIC NOT NULL DEFAULT 0,
-        die_pct         NUMERIC NOT NULL DEFAULT 0,
-        coating_pct     NUMERIC NOT NULL DEFAULT 0,
-        pasting_pct     NUMERIC NOT NULL DEFAULT 0,
-        sorting_pct     NUMERIC NOT NULL DEFAULT 0,
-        notes           TEXT,
-        adjusted_by     TEXT,
-        adjusted_at     TIMESTAMPTZ DEFAULT NOW(),
-        posted          BOOLEAN NOT NULL DEFAULT false,
-        posted_at       TIMESTAMPTZ,
-        UNIQUE(job_id)
-      )
-    `;
-    // Global default wastage split percentages (must sum to 100).
-    await sql`
-      CREATE TABLE IF NOT EXISTS artline_settings (
-        key   TEXT PRIMARY KEY,
-        value JSONB NOT NULL
-      )
-    `;
-    // Seed defaults if not present.
-    await sql`
-      INSERT INTO artline_settings (key, value)
-      VALUES ('wastage_defaults', '{"printing_pct":40,"die_pct":20,"coating_pct":15,"pasting_pct":15,"sorting_pct":10,"max_packets_per_job":2}'::jsonb)
-      ON CONFLICT (key) DO NOTHING
-    `;
-    // Links each adjustment to the specific manual-job-card inventory
-    // transactions it absorbed. Supports partial allocation — one manual
-    // stock-out can be split across multiple E-jobs, and one E-job can
-    // absorb sheets from multiple manual transactions.
-    await sql`
-      CREATE TABLE IF NOT EXISTS adjustment_allocations (
-        id              SERIAL PRIMARY KEY,
-        adjustment_id   INTEGER NOT NULL REFERENCES job_adjustments(id) ON DELETE CASCADE,
-        transaction_id  INTEGER NOT NULL REFERENCES inventory_transactions(id) ON DELETE CASCADE,
-        sheets_allocated INTEGER NOT NULL,
-        UNIQUE(adjustment_id, transaction_id)
-      )
-    `;
-    await sql`CREATE INDEX IF NOT EXISTS adj_alloc_tx_idx ON adjustment_allocations(transaction_id)`;
-
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -1168,15 +1110,6 @@ function userHasRole(user, ...want) {
 function requireAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (!userHasRole(req.user, 'admin')) return res.status(403).json({ error: 'Admin only' });
-  next();
-}
-// Super Admin — a role above Admin, exclusively for Artline (wastage
-// adjustments) and the Manual Consumption report. Regular Admins are
-// deliberately excluded from both, so this checks 'super_admin' only,
-// never 'admin'.
-function requireSuperAdmin(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  if (!userHasRole(req.user, 'super_admin')) return res.status(403).json({ error: 'Super Admin only' });
   next();
 }
 function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
@@ -1469,18 +1402,11 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
-// actingUser: only a Super Admin can grant or keep the super_admin role on
-// anyone (including themselves) — a plain Admin submitting 'super_admin' in
-// the payload (by tampering with the request, since the checkbox is hidden
-// from them client-side) has it silently stripped here, server-side.
+const ROLE_PRIORITY = ['admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
 function parseRolesInput(body, actingUser) {
   const ALLOWED = new Set(ROLE_PRIORITY);
   let roles = normalizeUserRoles(Array.isArray(body.roles) && body.roles.length ? body.roles : body.role)
     .filter(r => ALLOWED.has(r));
-  if (roles.includes('super_admin') && !userHasRole(actingUser, 'super_admin')) {
-    roles = roles.filter(r => r !== 'super_admin');
-  }
   if (!roles.length) roles = ['production_manager'];
   // Client is external. If it appears alongside any internal role we drop
   // the internal ones — an outside client account must never also carry
@@ -1553,37 +1479,6 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     // of the admin tools. Adding EXTRA roles to yourself is fine.
     if (parseInt(id, 10) === req.user.id && !roles.includes('admin')) {
       return res.status(400).json({ error: "You can't remove the Admin role from your own account." });
-    }
-    // Same guardrail for super_admin — otherwise a Super Admin editing their
-    // own row without re-checking the (hidden-to-others) box would silently
-    // demote themselves out of Artline/Manual Consumption access.
-    if (parseInt(id, 10) === req.user.id && userHasRole(req.user, 'super_admin') && !roles.includes('super_admin')) {
-      return res.status(400).json({ error: "You can't remove the Super Admin role from your own account." });
-    }
-    // A regular Admin editing someone else's roles never sees a Super Admin
-    // checkbox at all — the client-side form can't submit a roles list that
-    // includes it. Without this, saving ANY unrelated change to a Super
-    // Admin's row (e.g. ticking Finance) would silently strip super_admin,
-    // since it's simply absent from what got submitted. Preserve it here.
-    if (!userHasRole(req.user, 'super_admin')) {
-      const current = await sql`SELECT role, roles FROM users WHERE id = ${id}`;
-      const currentRoles = current.length
-        ? normalizeUserRoles(Array.isArray(current[0].roles) && current[0].roles.length ? current[0].roles : current[0].role)
-        : [];
-      if (currentRoles.includes('super_admin')) {
-        // Also keep 'admin' — Super Admin is meant to always imply Admin,
-        // and the acting admin can't have knowingly unchecked either box
-        // for a role they never saw in the first place.
-        const preserve = ['super_admin', 'admin'].filter(r => !roles.includes(r));
-        if (preserve.length) {
-          roles = [...preserve, ...roles];
-          // Re-adding internal roles can only ever un-violate the client
-          // exclusivity rule, never re-trigger it in the other direction —
-          // but guard anyway: an internal role always wins over 'client'.
-          if (roles.includes('client')) roles = roles.filter(r => r !== 'client');
-          primary = ROLE_PRIORITY.find(r => roles.includes(r)) || primary;
-        }
-      }
     }
     // client_company is only meaningful when the role IS client; drop it
     // otherwise so switching a user away from 'client' also clears the
@@ -1719,10 +1614,6 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     } else {
       rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
     }
-    // Artline is a Super Admin-only feature (regular Admins no longer have
-    // access either) — its audit trail (adjust/post/remove) must never leak
-    // to anyone else viewing a job's shared history/audit log.
-    if (!userHasRole(req.user, 'super_admin')) rows = rows.filter(r => !String(r.action || '').startsWith('artline.'));
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -3388,7 +3279,7 @@ function jobDeductionSheets({ paperType, particulars }) {
 // in the same UPDATE so balance always matches the sum of ledger changes.
 // user / reversesTxId are optional metadata used by the History UI to show
 // who entered the row and to link reversals to their originals.
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, challanNo }) {
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo }) {
   if (!itemId || !change) return null;
   if (change < 0) {
     const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
@@ -3399,8 +3290,8 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   const userEmail = user && user.email ? user.email : null;
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, challan_no)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${challan})
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan})
     RETURNING id
   `;
   await sql`
@@ -3423,25 +3314,66 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
 // Store keeper never sees these deductions in Pending Stock — the offcut
 // is silently deducted here so their queue only shows the FRESH portion
 // they need to physically issue.
-// Idempotent: if particulars.offcut_pre_consumed already exists, skip
-// (won't double-deduct on retry / mistaken re-fire). Returns:
-//   { particulars, fullyIssuedFromOffcut, itemsConsumed }
+// Idempotent: an existing offcut_pre_consumed marker is verified against
+// the latest ledger row for each item. Active rows are reused without a
+// second deduction; reversed rows make the marker stale and are consumed
+// again. Returns:
+//   { particulars, fullyIssuedFromOffcut, itemsConsumed, itemsAccounted }
 // Caller decides whether to flip issuance_status to 'issued' (pure
 // offcut) or leave as 'pending' (mixed / no offcut).
 async function autoConsumeOffcut(sql, job, user) {
   const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
-  if (particulars.offcut_pre_consumed && Array.isArray(particulars.offcut_pre_consumed.items) && particulars.offcut_pre_consumed.items.length) {
-    return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], already: true };
-  }
   const anchorId = job.inventory_item_id;
-  if (!anchorId) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  if (!anchorId) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], itemsAccounted: [] };
   const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${anchorId}`;
   const anchor = anchorRows[0];
-  if (!anchor) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  if (!anchor) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], itemsAccounted: [] };
   const paperType = anchor.paper_type || '';
   const ps = packetSize(paperType);
   const needSheets = jobDeductionSheets({ paperType, particulars });
-  if (needSheets <= 0) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  if (needSheets <= 0) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], itemsAccounted: [] };
+  const prior = particulars.offcut_pre_consumed;
+  const activePriorItems = [];
+  if (prior && Array.isArray(prior.items) && prior.items.length) {
+    for (const it of prior.items) {
+      if (!it || !it.item_id || !(it.sheets > 0)) continue;
+      const latest = it.tx_id
+        ? await sql`
+            SELECT t.id, EXISTS(
+              SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
+            ) AS reversed
+            FROM inventory_transactions t
+            WHERE t.id = ${it.tx_id} AND t.job_id = ${job.id} AND t.reason = 'job-auto-offcut'
+            LIMIT 1
+          `
+        : await sql`
+            SELECT t.id, EXISTS(
+              SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
+            ) AS reversed
+            FROM inventory_transactions t
+            WHERE t.job_id = ${job.id} AND t.item_id = ${it.item_id}
+              AND t.reason = 'job-auto-offcut'
+            ORDER BY t.id DESC
+            LIMIT 1
+          `;
+      if (!latest[0] || latest[0].reversed) continue;
+      activePriorItems.push({ ...it, tx_id: it.tx_id || latest[0].id });
+    }
+    if (activePriorItems.length === prior.items.length) {
+      const priorSheets = activePriorItems.reduce((sum, it) => sum + (parseFloat(it && it.sheets) || 0), 0);
+      particulars.offcut_pre_consumed = { ...prior, items: activePriorItems };
+      return {
+        particulars,
+        fullyIssuedFromOffcut: priorSheets >= needSheets,
+        itemsConsumed: [],
+        itemsAccounted: activePriorItems,
+        already: true,
+      };
+    }
+    // At least one marked deduction was reversed. Keep any still-active
+    // source accounted for, but only re-deduct the reversed source(s).
+    delete particulars.offcut_pre_consumed;
+  }
   const secondary = (particulars.secondary_paper && typeof particulars.secondary_paper === 'object')
     ? particulars.secondary_paper : null;
   const secondaryPackets = secondary ? (parseFloat(secondary.packets) || 0) : 0;
@@ -3450,17 +3382,30 @@ async function autoConsumeOffcut(sql, job, user) {
   // job's ENTIRE non-secondary portion comes from it.
   const primarySheets = Math.max(0, needSheets - secondarySheets);
   const itemsConsumed = [];
-  const totals = { sheets: 0, packets: 0 };
+  const itemsAccounted = [...activePriorItems];
+  const totals = activePriorItems.reduce((acc, it) => {
+    const sheets = parseFloat(it.sheets) || 0;
+    acc.sheets += sheets;
+    acc.packets += ps ? sheets / ps : 0;
+    return acc;
+  }, { sheets: 0, packets: 0 });
+  const reusablePriorKeys = new Set(activePriorItems.map(it => `${it.item_id}:${parseFloat(it.sheets) || 0}`));
   const consumeItem = async (itemId, sheets, note) => {
     if (!itemId || sheets <= 0) return;
-    await applyInventoryChange(sql, {
+    const priorKey = `${itemId}:${sheets}`;
+    if (reusablePriorKeys.has(priorKey)) {
+      reusablePriorKeys.delete(priorKey);
+      return;
+    }
+    const txId = await applyInventoryChange(sql, {
       itemId, change: -sheets,
       reason: 'job-auto-offcut',
       jobId: job.id,
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: auto-consumed ${sheets} sheets from offcut on CTP forward (${note}).`,
       user,
     });
-    itemsConsumed.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0 });
+    itemsConsumed.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0, tx_id: txId });
+    itemsAccounted.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0, tx_id: txId });
     totals.sheets += sheets;
     totals.packets += (ps ? sheets / ps : 0);
   };
@@ -3474,9 +3419,9 @@ async function autoConsumeOffcut(sql, job, user) {
       await consumeItem(secItem.id, secondarySheets, 'secondary paper is offcut');
     }
   }
-  if (itemsConsumed.length) {
+  if (itemsAccounted.length) {
     particulars.offcut_pre_consumed = {
-      items: itemsConsumed,
+      items: itemsAccounted,
       total_sheets: totals.sheets,
       total_packets: totals.packets,
       consumed_at: new Date().toISOString(),
@@ -3484,7 +3429,7 @@ async function autoConsumeOffcut(sql, job, user) {
     };
   }
   const fullyIssuedFromOffcut = totals.sheets >= needSheets && needSheets > 0;
-  return { particulars, fullyIssuedFromOffcut, itemsConsumed };
+  return { particulars, fullyIssuedFromOffcut, itemsConsumed, itemsAccounted };
 }
 
 // Reverse a prior autoConsumeOffcut — refund each consumed item back
@@ -3520,8 +3465,8 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   `;
   if (existing[0]) return existing[0];
   const inserted = await sql`
-    INSERT INTO inventory_items (paper_type, size, gsm, brand, is_offcut, cut_from_size, reorder_threshold)
-    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, true, ${sourceItem.size||null}, 0)
+    INSERT INTO inventory_items (paper_type, size, gsm, brand, unit, supplier, is_offcut, cut_from_size, reorder_threshold)
+    VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, ${sourceItem.unit||'sheets'}, ${sourceItem.supplier||null}, true, ${sourceItem.size||null}, 0)
     RETURNING *
   `;
   return inserted[0];
@@ -3798,9 +3743,12 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
     // offcut, and/or secondary_paper if offcut). Store keeper's Pending
     // Stock only shows the FRESH portion afterwards. Pure-offcut jobs
     // skip Pending Stock entirely — marked 'issued' below.
-    const { particulars: nextParticulars, fullyIssuedFromOffcut, itemsConsumed } =
+    const { particulars: nextParticulars, fullyIssuedFromOffcut, itemsConsumed, itemsAccounted } =
       await autoConsumeOffcut(sql, job, req.user);
-    const issuedItemsPatch = itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
+    if (fullyIssuedFromOffcut && log.length) {
+      log[log.length - 1].notes = `CTP done by ${by} — moved directly to Printing (${itemsConsumed.length ? 'offcut re-issued after reversal' : 'existing offcut issuance still active'})`;
+    }
+    const issuedItemsPatch = (itemsAccounted || itemsConsumed).map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
     const particularsJson = JSON.stringify(nextParticulars);
     const stagesJson      = JSON.stringify(stages);
     const logJson         = JSON.stringify(log);
@@ -4963,29 +4911,57 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requireInventoryWriter,
     if (!job.inventory_item_id) return res.status(400).json({ error: 'Job has no paper linked — cannot approve' });
     const inv = await sql`SELECT * FROM inventory_items WHERE id=${job.inventory_item_id}`;
     const sourceItem = inv[0];
+    if (!sourceItem) return res.status(400).json({ error: 'Job paper no longer exists in inventory.' });
     const paperType = sourceItem?.paper_type || '';
     const ps = packetSize(paperType);
     const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
     const sheets = Math.round(parseFloat(t.qty) * ps);
     if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
-    await applyInventoryChange(sql, {
-      itemId: job.inventory_item_id,
-      change: -sheets,
-      reason: 'job-consumed',
-      jobId: job.id,
-      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${t.qty} ${unit} (${sheets} sheets) top-up issued by ${req.user.email}`,
-      user: req.user,
-    });
+    const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : [];
+    const splits = rawSplits.length
+      ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10) }))
+          .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0)
+      : [{ item_id: job.inventory_item_id, sheets }];
+    if (splits.reduce((sum, s) => sum + s.sheets, 0) !== sheets) {
+      return res.status(400).json({ error: `Top-up must issue exactly ${t.qty} ${unit} (${sheets} sheets).` });
+    }
+    const itemIds = [...new Set(splits.map(s => s.item_id))];
+    const splitItems = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
+    const byId = new Map(splitItems.map(x => [x.id, x]));
+    const challanNo = req.body && req.body.challan_no ? String(req.body.challan_no).trim() || null : null;
+    for (const s of splits) {
+      const splitItem = byId.get(s.item_id);
+      if (!splitItem) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
+      const sameGroup =
+        (splitItem.paper_type || '') === (sourceItem.paper_type || '') &&
+        (splitItem.size || '') === (sourceItem.size || '') &&
+        String(splitItem.gsm || '') === String(sourceItem.gsm || '') &&
+        !!splitItem.is_offcut === !!sourceItem.is_offcut;
+      if (!sameGroup) return res.status(400).json({ error: 'A selected brand is not in this job’s paper group.' });
+      await applyInventoryChange(sql, {
+        itemId: s.item_id,
+        change: -s.sheets,
+        reason: 'job-consumed',
+        jobId: job.id,
+        notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${s.sheets / ps} ${unit} (${s.sheets} sheets) top-up from ${splitItem.brand || 'no brand'} issued by ${req.user.email}`,
+        user: req.user,
+        challanNo,
+      });
+    }
     if (job.cut_size && job.offcut_size && sourceItem) {
-      const offcutItem = await findOrCreateOffcutItem(sql, sourceItem, job.offcut_size);
+      for (const s of splits) {
+        const splitItem = byId.get(s.item_id);
+        const offcutItem = await findOrCreateOffcutItem(sql, splitItem, job.offcut_size);
       await applyInventoryChange(sql, {
         itemId: offcutItem.id,
-        change: +sheets,
+          change: +s.sheets,
         reason: 'job-offcut',
         jobId: job.id,
-        notes: `Job E-${job.id}: ${sheets} sheets of ${job.offcut_size} offcut returned to stock (top-up)`,
+          notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${splitItem.brand || 'no brand'}) returned to stock (top-up)`,
         user: req.user,
+          challanNo,
       });
+      }
     }
     topups[idx] = { ...t, status: 'approved', approved_at: new Date().toISOString(), approved_by_id: req.user?.id || null, approved_by_email: req.user?.email || null };
     p.packets_topups = topups;
@@ -6496,6 +6472,17 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
     const itemId = parseInt(id, 10);
+    const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
+    const sourceItem = itemRows[0];
+    if (!sourceItem) return res.status(404).json({ error: 'Inventory item not found' });
+
+    // An Offcut stock-out is a reclassification, not physical consumption:
+    // move the exact same paper (type, size, GSM, brand, supplier and unit)
+    // from fresh stock into its matching offcut line.
+    const isOffcutTransfer = delta < 0 && String(reason || '').trim().toLowerCase() === 'offcut';
+    if (isOffcutTransfer && sourceItem.is_offcut) {
+      return res.status(400).json({ error: 'This stock is already classified as offcut. Choose another reason.' });
+    }
 
     // Optional Job Card No. resolution: accepts "E-85" or "85".
     let jobId = null;
@@ -6579,7 +6566,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       finalNotes = [finalNotes, `Job Card: ${String(job_card).trim()}`].filter(Boolean).join(' · ');
     }
 
-    await applyInventoryChange(sql, {
+    const sourceTxId = await applyInventoryChange(sql, {
       itemId,
       change: delta,
       reason: finalReason,
@@ -6588,6 +6575,24 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       user: req.user,
       challanNo: challan_no,
     });
+
+    let offcutItem = null;
+    if (isOffcutTransfer) {
+      offcutItem = await findOrCreateOffcutItem(sql, sourceItem, sourceItem.size || '');
+      const transferNotes = [
+        `Reclassified from fresh stock TX #${sourceTxId}`,
+        finalNotes,
+      ].filter(Boolean).join(' · ');
+      await applyInventoryChange(sql, {
+        itemId: offcutItem.id,
+        change: Math.abs(delta),
+        reason: 'offcut-transfer-in',
+        notes: transferNotes,
+        user: req.user,
+        pairedTxId: sourceTxId,
+        challanNo: challan_no,
+      });
+    }
 
     // Job state after a manual issuance:
     //   fully issued  → status='issued', clear partial marker
@@ -6629,6 +6634,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       linked_job_id: jobId,
       job_partial_remaining: isJobIssuance && !jobFullyIssued ? partialRemaining : 0,
       job_fully_issued: isJobIssuance && jobFullyIssued,
+      offcut_item_id: offcutItem?.id || null,
     });
   } catch (err) {
     console.error(err);
@@ -6685,6 +6691,9 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     if (tx.reverses_tx_id) {
       return res.status(400).json({ error: 'This row is itself a reversal — cannot reverse a reversal.' });
     }
+    if (tx.reason === 'offcut-transfer-in' && tx.paired_tx_id) {
+      return res.status(400).json({ error: `Reverse the original Offcut stock-out TX #${tx.paired_tx_id}; its matching offcut credit will reverse automatically.` });
+    }
     // Is the original already reversed?
     const existingReversal = await sql`SELECT id FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`;
     if (existingReversal[0]) {
@@ -6714,6 +6723,24 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     const _stamp    = isNaN(_d) ? String(tx.created_at) : businessStamp(_d);
     const note     = `Reversal of TX #${tx.id}${origBy} on ${_stamp}${origNote}`;
 
+    let pairedOffcutRows = [];
+    if (tx.reason === 'offcut') {
+      pairedOffcutRows = await sql`
+        SELECT t.*, i.current_balance FROM inventory_transactions t
+        JOIN inventory_items i ON i.id = t.item_id
+        WHERE t.paired_tx_id = ${tx.id}
+          AND t.reason = 'offcut-transfer-in'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+        ORDER BY t.id ASC
+      `;
+      for (const paired of pairedOffcutRows) {
+        if ((parseFloat(paired.current_balance) || 0) < paired.change) {
+          return res.status(400).json({ error: `Cannot reverse yet — only ${paired.current_balance || 0} sheets remain in the matching offcut stock, but ${paired.change} sheets must be removed.` });
+        }
+      }
+    }
+
     const newTxId = await applyInventoryChange(sql, {
       itemId: tx.item_id,
       change: -tx.change,            // exact opposite of original
@@ -6732,6 +6759,20 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
     // "Pending Stock" badge on the job until the store keeper acts.
     let jobReverted = false;
     let offcutRefundedSheets = 0;
+    if (tx.reason === 'offcut') {
+      for (const paired of pairedOffcutRows) {
+        await applyInventoryChange(sql, {
+          itemId: paired.item_id,
+          change: -paired.change,
+          reason: 'correction',
+          jobId: null,
+          notes: `Auto-reversal of paired offcut credit TX #${paired.id} (source Offcut stock-out TX #${tx.id} was reversed)`,
+          user: req.user,
+          reversesTxId: paired.id,
+        });
+        offcutRefundedSheets += Math.abs(paired.change);
+      }
+    }
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
@@ -6823,6 +6864,9 @@ app.get('/api/inventory/transactions', async (req, res) => {
     // other report below. No other caller of this endpoint sends this
     // flag, so their results are unaffected.
     const includeOffcutManual = req.query.include_offcut_manual === '1';
+    // Offcut Consumption report only: include automatic E-job deductions
+    // from offcut inventory while all other movement reports stay unchanged.
+    const includeOffcutAuto = req.query.include_offcut_auto === '1';
     // raw=1: return the TRUE ledger with NO exclusions — corrections,
     // reversals, and offcut rows all included. The Stock Summary needs
     // this to compute an accurate balance: 'correction' rows are real
@@ -6863,6 +6907,14 @@ app.get('/api/inventory/transactions', async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
         AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
+        -- Archived (soft-deleted) rows drop out ONLY of Manual Consumption
+        -- (the one caller that sends include_offcut_manual=1) — Stock
+        -- In/Out/Totals deliberately keep showing them. Deleting a row from
+        -- Manual Consumption must not make it vanish from Stock Out too;
+        -- deleted_at is only ever set by Manual Consumption's own delete
+        -- (see DELETE /api/inventory/transactions/:id?scope=manual below),
+        -- so every other caller (and raw=1) simply ignores it.
+        AND (${raw} OR NOT ${includeOffcutManual} OR t.deleted_at IS NULL)
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.
@@ -6885,6 +6937,7 @@ app.get('/api/inventory/transactions', async (req, res) => {
           ${raw}
           OR COALESCE(i.is_offcut, false) = false
           OR (${includeOffcutManual} AND t.reason = 'manual-job-card')
+          OR (${includeOffcutAuto} AND t.reason = 'job-consumed' AND t.job_id IS NOT NULL)
         )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
@@ -6922,24 +6975,47 @@ app.get('/api/inventory/consumption', requireAuth, async (req, res) => {
   }
 });
 
-// LEDGER for one item — full transaction history, newest first.
+// LEDGER for one item (or its whole brand group) — newest first.
 app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { id } = req.params;
+    const id = parseInt(req.params.id, 10);
+    const grouped = String(req.query.group || '') === '1';
     // has_been_reversed: a later tx pointing back at this one. Used by the
     // History UI to hide the Reverse button on rows that have already been
     // undone (prevents accidental double-reversals).
+    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
+    if (!anchorRows.length) return res.status(404).json({ error: 'Inventory item not found' });
+    const anchor = anchorRows[0];
+    const members = grouped ? await sql`
+      SELECT id, brand, current_balance
+        FROM inventory_items
+       WHERE COALESCE(paper_type, '') = ${anchor.paper_type || ''}
+         AND COALESCE(size, '') = ${anchor.size || ''}
+         AND COALESCE(gsm::text, '') = ${String(anchor.gsm || '')}
+         AND COALESCE(is_offcut, false) = ${!!anchor.is_offcut}
+       ORDER BY id
+    ` : [{ id: anchor.id, brand: anchor.brand, current_balance: anchor.current_balance }];
+    const memberIds = members.map(x => x.id);
     const txs = await sql`
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+        i.brand AS item_brand,
         EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed
       FROM inventory_transactions t
+      JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN jobs j ON j.id = t.job_id
-      WHERE t.item_id = ${id}
+      WHERE t.item_id = ANY(${memberIds})
       ORDER BY t.id DESC
     `;
-    res.json(txs);
+    if (!grouped) return res.json(txs);
+    const currentBalance = members.reduce((sum, x) => sum + (parseFloat(x.current_balance) || 0), 0);
+    res.json({
+      transactions: txs,
+      current_balance: currentBalance,
+      item_ids: memberIds,
+      brands: members.map(x => x.brand).filter(Boolean),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -7050,8 +7126,9 @@ const TRASH_RETENTION_DAYS = 30;
 // Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
 // idempotent — safe to call on every list request.
 async function purgeExpiredTrash(sql) {
-  await sql`DELETE FROM jobs              WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
-  await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
 }
 
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
@@ -7074,11 +7151,19 @@ app.get('/api/trash', requireAuth, async (req, res) => {
       FROM inventory_imports WHERE deleted_at IS NOT NULL
       ORDER BY deleted_at DESC
     `;
-    res.json({ jobs: jobsRows, imports: importsRows, retention_days: TRASH_RETENTION_DAYS });
+    const transactionsRows = await sql`
+      SELECT t.id, t.change, t.reason, t.notes, t.created_at, t.deleted_at, t.deleted_by,
+             i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
+        FROM inventory_transactions t
+        LEFT JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.deleted_at IS NOT NULL
+       ORDER BY t.deleted_at DESC
+    `;
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// RESTORE one row from trash. Body: { type: 'job'|'import', id: 123 }.
+// RESTORE one row from trash. Body: { type: 'job'|'import'|'transaction', id: 123 }.
 app.post('/api/trash/restore', requireAdmin, async (req, res) => {
   try {
     await dbReady;
@@ -7117,7 +7202,13 @@ app.post('/api/trash/restore', requireAdmin, async (req, res) => {
       await logAudit(sql, req, { action: 'import.restore', entityType: 'import', entityId: rowId, summary: `Restored ${updated[0].status} import #${rowId}: ${updated[0].paper_type}` });
       return res.json({ ok: true });
     }
-    res.status(400).json({ error: 'type must be "job" or "import"' });
+    if (type === 'transaction') {
+      const updated = await sql`UPDATE inventory_transactions SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
+      if (!updated.length) return res.status(404).json({ error: 'Transaction not in archive' });
+      await logAudit(sql, req, { action: 'inventory.tx.restore', entityType: 'inventory_item', entityId: rowId, summary: `Restored tx #${rowId} from Archive (${updated[0].change > 0 ? '+' : ''}${updated[0].change} sheets · ${updated[0].reason || 'no reason'})` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7141,7 +7232,13 @@ app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
       await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
       return res.json({ ok: true });
     }
-    res.status(400).json({ error: 'type must be "job" or "import"' });
+    if (type === 'transaction') {
+      const deleted = await sql`DELETE FROM inventory_transactions WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
+      if (!deleted.length) return res.status(404).json({ error: 'Transaction not in archive' });
+      await logAudit(sql, req, { action: 'inventory.tx.purge', entityType: 'inventory_item', entityId: rowId, summary: `Permanently deleted tx #${rowId} (${deleted[0].change > 0 ? '+' : ''}${deleted[0].change} sheets · ${deleted[0].reason || 'no reason'})` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7151,30 +7248,54 @@ app.post('/api/trash/empty', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const jobsDel    = await sql`DELETE FROM jobs              WHERE deleted_at IS NOT NULL RETURNING id`;
-    const importsDel = await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL RETURNING id`;
+    const jobsDel    = await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL RETURNING id`;
+    const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
+    const txDel       = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL RETURNING id`;
     await logAudit(sql, req, {
       action: 'trash.empty',
       entityType: 'system',
       entityId: 0,
-      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
+      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} + ${txDel.length} transaction${txDel.length===1?'':'s'} permanently deleted`,
     });
-    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length });
+    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length, transactions: txDel.length });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE an inventory transaction row from history (admin only). Pure archival
-// cleanup — does NOT touch current_balance, since the row already happened and
-// its effect is baked into the running balance. Intended for wiping old rows
-// after months/years. To actually undo a row's effect on stock, use the
-// per-row Reverse on the inventory History modal instead (which posts a
-// proper correction entry).
+// DELETE an inventory transaction row from history (admin only).
+// ?scope=manual (sent only by Manual Consumption's own Delete button) soft-
+// deletes — moves it to Archive (30-day retention, restorable), and is
+// scoped to Manual Consumption only: the row keeps showing in Stock In/Out
+// and Total In/Out exactly as before, since deleting a manual-consumption
+// entry is not the same thing as saying the stock movement never happened.
+// Every other caller (Stock In/Out's own bulk delete) hard-deletes, same as
+// always — no archive for those. Neither path touches current_balance; the
+// row already happened and its effect is baked into the running balance.
+// To actually undo a row's effect on stock, use the per-row Reverse on the
+// inventory History modal instead (which posts a proper correction entry).
 app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    if (req.query.scope === 'manual') {
+      const by = req.user?.email || 'unknown';
+      const updated = await sql`
+        UPDATE inventory_transactions
+           SET deleted_at = NOW(), deleted_by = ${by}
+         WHERE id = ${id} AND deleted_at IS NULL
+         RETURNING id, item_id, change, reason
+      `;
+      if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
+      const tx = updated[0];
+      await logAudit(sql, req, {
+        action: 'inventory.tx.delete',
+        entityType: 'inventory_item',
+        entityId: tx.item_id,
+        summary: `Moved tx #${id} to Archive from Manual Consumption (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — still shows in Stock In/Out, balance unchanged`,
+      });
+      return res.json({ ok: true });
+    }
     const tx = (await sql`SELECT id, item_id, change, reason FROM inventory_transactions WHERE id=${id}`)[0];
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     // reverses_tx_id has ON DELETE SET NULL so reversal rows pointing at this
@@ -7691,9 +7812,10 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         particulars: pAfter,
         fullyIssuedFromOffcut,
         itemsConsumed,
+        itemsAccounted,
       } = await autoConsumeOffcut(sql, { ...job, particulars }, req.user);
       particularsAfterOffcut = pAfter;
-      offcutIssuedPatch = itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
+      offcutIssuedPatch = (itemsAccounted || itemsConsumed).map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
       nextStatus = fullyIssuedFromOffcut ? 'issued' : 'pending';
     }
     const particularsJson = JSON.stringify(particularsAfterOffcut);
@@ -7970,185 +8092,6 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
       metadata: { transfer_note_no: rows[0].transfer_note_no },
     });
     res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// ── Artline: adjustment + finalized-jobs endpoints ──────────
-// Settings — read/write the global wastage defaults.
-app.get('/api/artline/settings', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT value FROM artline_settings WHERE key = 'wastage_defaults'`;
-    res.json(rows[0]?.value || { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const v = req.body;
-    const pcts = (v.printing_pct || 0) + (v.die_pct || 0) + (v.coating_pct || 0) + (v.pasting_pct || 0) + (v.sorting_pct || 0);
-    if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
-    if ((v.max_packets_per_job || 0) < 0.5) return res.status(400).json({ error: 'Max packets per job must be at least 0.5' });
-    await sql`
-      INSERT INTO artline_settings (key, value) VALUES ('wastage_defaults', ${JSON.stringify(v)})
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-    `;
-    res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// Unallocated manual consumption — manual-job-card stock-out rows that
-// haven't been absorbed into any job_adjustments yet. Grouped by paper
-// type + size so the frontend can match against delivered E-jobs.
-app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const from = req.query.from || null;
-    const to   = req.query.to   || null;
-    const rows = await sql`
-      SELECT t.id, t.item_id, ABS(t.change) AS sheets, t.notes, t.created_at,
-             i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
-        FROM inventory_transactions t
-        JOIN inventory_items i ON i.id = t.item_id
-       WHERE t.reason = 'manual-job-card'
-         AND t.change < 0
-         AND (${from}::date IS NULL OR t.created_at >= ${from}::date)
-         AND (${to}::date   IS NULL OR t.created_at <  (${to}::date + INTERVAL '1 day'))
-       ORDER BY t.created_at DESC
-    `;
-    res.json(rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// Adjust a delivered E-job — allocate manual packets as wastage.
-app.post('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const jobId = parseInt(req.params.jobId, 10);
-    const job = (await sql`SELECT id, stage_index, issuance_status, inventory_item_id FROM jobs WHERE id = ${jobId} AND deleted_at IS NULL`)[0];
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-    if (job.stage_index !== 7) return res.status(400).json({ error: 'Job must be Delivered before adjusting' });
-    const existing = (await sql`SELECT id FROM job_adjustments WHERE job_id = ${jobId}`)[0];
-    if (existing) return res.status(400).json({ error: 'Job already adjusted' });
-    const b = req.body;
-    const pcts = (b.printing_pct || 0) + (b.die_pct || 0) + (b.coating_pct || 0) + (b.pasting_pct || 0) + (b.sorting_pct || 0);
-    if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
-    if (!b.manual_packets || b.manual_packets <= 0) return res.status(400).json({ error: 'manual_packets must be > 0' });
-    const row = (await sql`
-      INSERT INTO job_adjustments (job_id, manual_packets, manual_sheets, printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes, adjusted_by)
-      VALUES (${jobId}, ${b.manual_packets}, ${b.manual_sheets || 0}, ${b.printing_pct}, ${b.die_pct}, ${b.coating_pct}, ${b.pasting_pct}, ${b.sorting_pct}, ${b.notes || ''}, ${req.user?.email || ''})
-      RETURNING *
-    `)[0];
-    // Link to specific manual-job-card transactions being absorbed.
-    // allocations: [{ transaction_id, sheets_allocated }]
-    if (Array.isArray(b.allocations) && b.allocations.length) {
-      for (const alloc of b.allocations) {
-        if (!alloc.transaction_id || !alloc.sheets_allocated) continue;
-        await sql`
-          INSERT INTO adjustment_allocations (adjustment_id, transaction_id, sheets_allocated)
-          VALUES (${row.id}, ${alloc.transaction_id}, ${alloc.sheets_allocated})
-          ON CONFLICT (adjustment_id, transaction_id) DO UPDATE SET sheets_allocated = EXCLUDED.sheets_allocated
-        `;
-      }
-    }
-    await logAudit(sql, req, {
-      action: 'artline.adjust',
-      entityType: 'job',
-      entityId: jobId,
-      summary: `Wastage adjustment: Job E-${jobId} with ${b.manual_packets} manual packets`,
-      metadata: { manual_packets: b.manual_packets, printing_pct: b.printing_pct, die_pct: b.die_pct, coating_pct: b.coating_pct, pasting_pct: b.pasting_pct, sorting_pct: b.sorting_pct },
-    });
-    res.json(row);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// Remove an adjustment (un-finalize). Admin only.
-app.delete('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const jobId = parseInt(req.params.jobId, 10);
-    const existing = (await sql`SELECT id, posted FROM job_adjustments WHERE job_id = ${jobId}`)[0];
-    if (!existing) return res.status(404).json({ error: 'No adjustment found for this job' });
-    if (existing.posted) return res.status(400).json({ error: 'Cannot remove a posted adjustment' });
-    await sql`DELETE FROM job_adjustments WHERE job_id = ${jobId}`;
-    await logAudit(sql, req, {
-      action: 'artline.unadjust',
-      entityType: 'job',
-      entityId: jobId,
-      summary: `Wastage adjustment removed from Job E-${jobId}`,
-    });
-    res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// List all finalized (adjusted) jobs with their adjustment data.
-app.get('/api/artline/finalized', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`
-      SELECT j.*, a.manual_packets, a.manual_sheets,
-             a.printing_pct, a.die_pct, a.coating_pct, a.pasting_pct, a.sorting_pct,
-             a.notes AS adjustment_notes, a.adjusted_by, a.adjusted_at,
-             a.posted, a.posted_at
-        FROM job_adjustments a
-        JOIN jobs j ON j.id = a.job_id
-       WHERE j.deleted_at IS NULL
-       ORDER BY a.adjusted_at DESC
-    `;
-    res.json(rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// Mark an adjusted job as "posted" (ready for the public app).
-app.post('/api/artline/post/:jobId', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const jobId = parseInt(req.params.jobId, 10);
-    const existing = (await sql`SELECT id, posted FROM job_adjustments WHERE job_id = ${jobId}`)[0];
-    if (!existing) return res.status(404).json({ error: 'No adjustment found' });
-    if (existing.posted) return res.status(400).json({ error: 'Already posted' });
-    await sql`UPDATE job_adjustments SET posted = true, posted_at = NOW() WHERE job_id = ${jobId}`;
-    await logAudit(sql, req, {
-      action: 'artline.post',
-      entityType: 'job',
-      entityId: jobId,
-      summary: `Job E-${jobId} posted for public app`,
-    });
-    res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// Allocation totals per inventory transaction — used by Manual Consumption report
-// to render green fill bars showing how much of each stock-out has been absorbed.
-app.get('/api/artline/allocations', requireSuperAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`
-      SELECT aa.transaction_id,
-             it.notes AS tx_notes,
-             SUM(aa.sheets_allocated) AS total_allocated,
-             json_agg(json_build_object(
-               'adjustment_id', aa.adjustment_id,
-               'job_id', ja.job_id,
-               'sheets', aa.sheets_allocated
-             )) AS jobs
-      FROM adjustment_allocations aa
-      JOIN job_adjustments ja ON ja.id = aa.adjustment_id
-      JOIN inventory_transactions it ON it.id = aa.transaction_id
-      GROUP BY aa.transaction_id, it.notes
-    `;
-    const map = {};
-    for (const r of rows) map[r.transaction_id] = { total: Number(r.total_allocated), jobs: r.jobs, notes: r.tx_notes || '' };
-    res.json(map);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
