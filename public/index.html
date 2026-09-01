@@ -955,14 +955,41 @@
     position: absolute; width: 1px; height: 1px; opacity: 0;
     pointer-events: none;
   }
-  .jr-mode-toggle-btn { display: inline-flex; align-items: center; justify-content:center; }
+  .jr-mode-slider {
+    position:relative; display:grid; grid-template-columns:1fr 1fr;
+    min-width:176px; padding:3px; overflow:hidden;
+    background:#fff; border:1px solid #d8c5c5; border-radius:10px;
+    box-shadow:0 2px 8px rgba(91,33,33,.12);
+  }
+  .jr-mode-slider::before {
+    content:""; position:absolute; top:3px; bottom:3px; left:3px;
+    width:calc(50% - 3px); border-radius:7px; background:#111;
+    box-shadow:0 2px 7px rgba(0,0,0,.24);
+    transform:translateX(0);
+    transition:transform .38s cubic-bezier(.34,1.2,.64,1);
+  }
+  .jr-mode-slider.mode-created::before { transform:translateX(100%); }
+  .jr-mode-toggle-btn {
+    position:relative; z-index:1; display:inline-flex; align-items:center;
+    justify-content:center; min-width:82px; padding:6px 12px;
+    background:transparent !important; border:0 !important; box-shadow:none !important;
+    color:var(--text); font-weight:700; cursor:pointer;
+    transition:color .25s ease;
+  }
+  .jr-mode-toggle-btn.is-selected { color:#fff; }
   .jr-mil-whole-toggle {
     display:inline-flex; align-items:center; min-height:34px; padding:7px 12px;
-    border:1px solid #f3a4a4; border-radius:8px; color:#dc2626;
+    background:#f3e8ff; border:1px solid #c084fc; border-radius:8px; color:#6b21a8;
     font-size:13px; font-weight:800; letter-spacing:.02em; cursor:pointer;
+    box-shadow:0 2px 7px rgba(107,33,168,.12);
+    transition:background .28s ease, color .28s ease, border-color .28s ease, box-shadow .28s ease;
+  }
+  .jr-mil-whole-toggle.is-on {
+    background:#7c3aed; border-color:#6d28d9; color:#fff;
+    box-shadow:0 0 0 3px rgba(124,58,237,.18), 0 4px 12px rgba(109,40,217,.28);
   }
   @media (prefers-reduced-motion: reduce) {
-    .whole-toggle, .whole-toggle::before { transition: none; animation: none !important; }
+    .whole-toggle, .whole-toggle::before, .jr-mode-slider::before { transition: none; animation: none !important; }
   }
   /* Create Mil Job toolbar button — same pill shape as the Shade Cards
      toggle so it feels part of the toolbar, red palette to stand out as
@@ -10245,8 +10272,6 @@ function openJobsReport() {
     : jobs;
   const clients = [...new Set(scopeJobs.map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
   const modeLabel = mode === 'delivered' ? 'Delivered' : 'Created';
-  const activeStyle = 'background:#111;color:#fff;border-color:#111;';
-  const idleStyle   = 'background:#fff;color:var(--text);';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Jobs Report</h2>
@@ -10264,9 +10289,9 @@ function openJobsReport() {
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
         <div class="dash-flbl">Show</div>
-        <div style="display:flex;gap:0;">
-          <button class="btn btn-sm jr-mode-toggle-btn whole-toggle ${mode==='delivered'?'is-on':''}" style="border-top-right-radius:0;border-bottom-right-radius:0;${mode==='delivered'?activeStyle:idleStyle}" onclick="setJrMode('delivered')"><span class="whole-toggle-text">Delivered</span></button>
-          <button class="btn btn-sm jr-mode-toggle-btn whole-toggle ${mode==='created'?'is-on':''}" style="border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;${mode==='created'?activeStyle:idleStyle}" onclick="setJrMode('created')"><span class="whole-toggle-text">Created</span></button>
+        <div class="jr-mode-slider mode-${mode}">
+          <button class="jr-mode-toggle-btn ${mode==='delivered'?'is-selected':''}" onclick="setJrMode('delivered')">Delivered</button>
+          <button class="jr-mode-toggle-btn ${mode==='created'?'is-selected':''}" onclick="setJrMode('created')">Created</button>
         </div>
       </div>
       <div>
@@ -10316,7 +10341,17 @@ function setJrMode(m) {
   if (jobsReportState.mode === m) return;
   jobsReportState.mode = m;
   jobsReportSel.clear();
-  openJobsReport();
+  const slider = document.querySelector('#rt-jobs-report .jr-mode-slider');
+  if (slider) {
+    slider.classList.toggle('mode-created', m === 'created');
+    slider.classList.toggle('mode-delivered', m === 'delivered');
+    slider.querySelectorAll('.jr-mode-toggle-btn').forEach((btn, i) => {
+      btn.classList.toggle('is-selected', (m === 'delivered' && i === 0) || (m === 'created' && i === 1));
+    });
+    setTimeout(openJobsReport, 380);
+  } else {
+    openJobsReport();
+  }
 }
 
 // ── Bulk selection (Jobs Report) ─────────────────────────────
