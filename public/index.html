@@ -17584,8 +17584,14 @@ function artlineWasteOverlay(job) {
 function computeArtlineTopFieldOverlay(job, manualSheets, manualPackets, ups) {
   const origSheets  = parseFloat(job.sheets) || 0;
   const origPackets = parseFloat((job.particulars || {}).quantity_of_packets) || 0;
-  const newSheets   = origSheets + (manualSheets || 0);
-  const newPackets  = origPackets + (manualPackets || 0);
+  // manual_packets is a NUMERIC column server-side — the DB driver returns
+  // NUMERIC as a string (to avoid precision loss), so without parseFloat
+  // here "3" + "2" concatenates to "32" instead of adding to 5. manual_sheets
+  // is INTEGER and comes back as a real number already, but parse it too
+  // for safety — this function shouldn't have to know which caller's data
+  // came from where.
+  const newSheets   = origSheets + (parseFloat(manualSheets) || 0);
+  const newPackets  = origPackets + (parseFloat(manualPackets) || 0);
   const newCartonQty = Math.round(newSheets * (ups || 0));
   return { newSheets, newPackets, newCartonQty };
 }
@@ -20759,7 +20765,7 @@ async function openHistory(id) {
   const artlineSection = adj ? `
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Wastage Adjustment</div>
     <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 14px;font-size:13px;color:#5b21b6;">
-      <div><b>${adj.manual_packets}</b> packets adjusted (${(adj.manual_sheets || 0).toLocaleString()} sheets)${adj.manual_packets !== _artlineSettings.max_packets_per_job ? ` <span style="color:var(--text2);font-weight:500;">(current default limit: ${_artlineSettings.max_packets_per_job})</span>` : ''}</div>
+      <div><b>${adj.manual_packets}</b> packets adjusted (${(adj.manual_sheets || 0).toLocaleString()} sheets)${parseFloat(adj.manual_packets) !== parseFloat(_artlineSettings.max_packets_per_job) ? ` <span style="color:var(--text2);font-weight:500;">(current default limit: ${_artlineSettings.max_packets_per_job})</span>` : ''}</div>
       <div style="margin-top:4px;">Wastage split: Printing ${adj.printing_pct}% &middot; Die ${adj.die_pct}% &middot; Coating ${adj.coating_pct}% &middot; Pasting ${adj.pasting_pct}% &middot; Sorting ${adj.sorting_pct}%</div>
       ${adjRefs && adjRefs.size ? `<div style="margin-top:4px;">From manual job card${adjRefs.size>1?'s':''}: <b>${[...adjRefs].map(r=>esc(r)).join(', ')}</b></div>` : ''}
       ${adj.notes ? `<div style="margin-top:4px;font-style:italic;">"${esc(adj.notes)}"</div>` : ''}
