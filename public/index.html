@@ -13925,6 +13925,15 @@ function paperMatchKey(paperType, size, gsm) {
   return p + '||' + s + '||' + g;
 }
 
+// Same cut factor jobPacketsSync() already uses for the job form's own
+// Sheets → Packets auto-fill ("1/2" → 2 pieces per raw sheet). The Adjust
+// flow's packets↔sheets conversion has to divide/multiply by this too —
+// a job cut in half needs TWICE the sheets for the same packet count.
+function jobCutPieces(job) {
+  const cutStr = (job.particulars && job.particulars.sheet_cut) || '1/1';
+  return parseInt(String(cutStr).split('/')[1], 10) || 1;
+}
+
 function jobHasManualMatch(j) {
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const paper = invIt ? invIt.paper_type : j.paper;
@@ -14053,7 +14062,10 @@ async function openAdjustModal(jobId) {
   }
   const s = _artlineSettings;
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '');
+  // Sheets-per-packet for THIS job — packet size × the job's own cut
+  // factor (e.g. "1/2" = cut in half = twice the sheets for the same
+  // packet count), matching jobPacketsSync()'s formula exactly.
+  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '') * jobCutPieces(j);
 
   let matchHtml = '<div style="font-size:12px;color:var(--text2);">Loading matching manual consumption...</div>';
   _adjModalTxMatches = [];
@@ -14205,7 +14217,10 @@ function adjPacketsChanged(jobId) {
   const sheetsEl = document.getElementById('adj-sheets');
   if (!j || !packetsEl || !sheetsEl) return;
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '');
+  // Sheets-per-packet for THIS job — packet size × the job's own cut
+  // factor (e.g. "1/2" = cut in half = twice the sheets for the same
+  // packet count), matching jobPacketsSync()'s formula exactly.
+  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '') * jobCutPieces(j);
   const packets = parseFloat(packetsEl.value) || 0;
   sheetsEl.value = Math.round(packets * ps);
   updateAdjustPreview(jobId);
@@ -14217,7 +14232,10 @@ function adjSheetsChanged(jobId) {
   const sheetsEl = document.getElementById('adj-sheets');
   if (!j || !packetsEl || !sheetsEl) return;
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '');
+  // Sheets-per-packet for THIS job — packet size × the job's own cut
+  // factor (e.g. "1/2" = cut in half = twice the sheets for the same
+  // packet count), matching jobPacketsSync()'s formula exactly.
+  const ps = packetSize(invIt ? invIt.paper_type : j.paper || '') * jobCutPieces(j);
   const sheets = parseFloat(sheetsEl.value) || 0;
   packetsEl.value = ps ? +(sheets / ps).toFixed(2) : 0;
   updateAdjustPreview(jobId);
