@@ -924,6 +924,48 @@
   .sc-toggle-idle:hover   { background: #ddd6fe; border-color: #a78bfa; }
   .sc-toggle-active { background: #c4b5fd; color: #4c1d95; border: 1.5px solid #a78bfa; }
   .sc-toggle-active:hover { background: #a78bfa; border-color: #8b5cf6; }
+  /* Compact sliding switch used inside filter/action buttons. It borrows
+     the referenced toggle motion while inheriting each button's own colour. */
+  .motion-switch {
+    width: 28px; height: 16px; padding: 2px; border-radius: 999px;
+    display: inline-flex; align-items: center; flex: 0 0 auto;
+    box-sizing: border-box; vertical-align: middle;
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 42%, transparent);
+    transition: background .28s ease, border-color .28s ease, transform .28s ease;
+  }
+  .motion-switch::after {
+    content: ""; width: 10px; height: 10px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 1px 3px rgba(0,0,0,.22);
+    transform: translateX(0); transition: transform .34s cubic-bezier(.34,1.56,.64,1);
+  }
+  .motion-switch.is-on,
+  input:checked + .motion-switch {
+    background: color-mix(in srgb, currentColor 30%, transparent);
+  }
+  .motion-switch.is-on::after,
+  input:checked + .motion-switch::after {
+    transform: translateX(12px);
+    animation: toggle-thumb-on .34s cubic-bezier(.34,1.56,.64,1);
+  }
+  .toggle-motion-click .motion-switch { animation: toggle-track-pop .48s ease; }
+  @keyframes toggle-thumb-on {
+    from { transform: translateX(0) scale(.82); }
+    to { transform: translateX(12px) scale(1); }
+  }
+  @keyframes toggle-track-pop {
+    0%, 100% { transform: scale(1); }
+    45% { transform: scale(1.14); }
+  }
+  .jr-mil-toggle-input {
+    position: absolute; width: 1px; height: 1px; opacity: 0;
+    pointer-events: none;
+  }
+  .jr-mode-toggle-btn { display: inline-flex; align-items: center; gap: 7px; }
+  @media (prefers-reduced-motion: reduce) {
+    .motion-switch, .motion-switch::after, .toggle-motion-click .motion-switch { transition: none; animation: none; }
+    .motion-switch.is-on::after, input:checked + .motion-switch::after { animation: none; }
+  }
   /* Create Mil Job toolbar button — same pill shape as the Shade Cards
      toggle so it feels part of the toolbar, red palette to stand out as
      a create action. */
@@ -2335,14 +2377,14 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <select class="filter" id="machine-filter" onchange="setMachineFilter(this.value)">
       <option value="">All machines</option>
     </select>
-    <button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
-      &#128230; Create Mil Job
+    <button id="create-group-btn" class="ceo-hide" onclick="playActionToggle(this); openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
+      <span class="motion-switch" aria-hidden="true"></span> &#128230; Create Mil Job
     </button>
     <!-- Shade Cards toggle: same visual pattern as the Pending Stock
          button in inventory. Click once to see only shade-card jobs;
          click again to clear. -->
     <button id="shade-card-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
-      &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
+      <span class="motion-switch" aria-hidden="true"></span> &#127912; <span id="shade-card-toggle-label">Shade Cards</span>
     </button>
     <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)">
       <option value="">All stages</option>
@@ -2413,7 +2455,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
          on the right edge of the toolbar so the two store-keeper actions
          are grouped together. -->
     <button id="inv-pending-toggle" onclick="toggleInvViewMode()" style="margin-left:auto;">
-      &#9201; <span id="inv-pending-label">Pending Stock</span>
+      <span class="motion-switch" aria-hidden="true"></span> &#9201; <span id="inv-pending-label">Pending Stock</span>
     </button>
     <button class="btn btn-primary ceo-hide" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
@@ -4353,6 +4395,20 @@ function renderShadeCardToggle() {
   if (label) label.textContent = count ? `Shade Cards (${count})` : 'Shade Cards';
   btn.classList.toggle('sc-toggle-active', filterShadeCard === 'only');
   btn.classList.toggle('sc-toggle-idle',   filterShadeCard !== 'only');
+  btn.querySelector('.motion-switch')?.classList.toggle('is-on', filterShadeCard === 'only');
+}
+
+function playActionToggle(btn) {
+  if (!btn) return;
+  const sw = btn.querySelector('.motion-switch');
+  btn.classList.remove('toggle-motion-click');
+  void btn.offsetWidth;
+  btn.classList.add('toggle-motion-click');
+  if (sw) sw.classList.add('is-on');
+  setTimeout(() => {
+    btn.classList.remove('toggle-motion-click');
+    if (sw) sw.classList.remove('is-on');
+  }, 520);
 }
 
 // Batch-print action bar for the New Jobs tab and the CTP tab. Populates a
@@ -6069,6 +6125,7 @@ function renderInvPendingToggle() {
   if (label) label.textContent = count ? `Pending Stock (${count})` : 'Pending Stock';
   btn.classList.toggle('inv-pending-active', invViewMode === 'pending');
   btn.classList.toggle('inv-pending-idle',   invViewMode !== 'pending');
+  btn.querySelector('.motion-switch')?.classList.toggle('is-on', invViewMode === 'pending');
 }
 
 function toggleInvViewMode() {
@@ -10213,8 +10270,8 @@ function openJobsReport() {
       <div>
         <div class="dash-flbl">Show</div>
         <div style="display:flex;gap:0;">
-          <button class="btn btn-sm" style="border-top-right-radius:0;border-bottom-right-radius:0;${mode==='delivered'?activeStyle:idleStyle}" onclick="setJrMode('delivered')">Delivered</button>
-          <button class="btn btn-sm" style="border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;${mode==='created'?activeStyle:idleStyle}" onclick="setJrMode('created')">Created</button>
+          <button class="btn btn-sm jr-mode-toggle-btn" style="border-top-right-radius:0;border-bottom-right-radius:0;${mode==='delivered'?activeStyle:idleStyle}" onclick="setJrMode('delivered')"><span class="motion-switch ${mode==='delivered'?'is-on':''}" aria-hidden="true"></span>Delivered</button>
+          <button class="btn btn-sm jr-mode-toggle-btn" style="border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;${mode==='created'?activeStyle:idleStyle}" onclick="setJrMode('created')"><span class="motion-switch ${mode==='created'?'is-on':''}" aria-hidden="true"></span>Created</button>
         </div>
       </div>
       <div>
@@ -10238,8 +10295,9 @@ function openJobsReport() {
       </div>
       <div>
         <div class="dash-flbl">&nbsp;</div>
-        <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding:8px 0;">
-          <input type="checkbox" id="jr-mil-only" ${jobsReportState.milOnly ? 'checked' : ''} onchange="setJrMilOnly(this.checked)" style="width:15px;height:15px;">
+        <label style="display:inline-flex;align-items:center;gap:7px;font-size:13px;color:#dc2626;cursor:pointer;padding:8px 0;">
+          <input class="jr-mil-toggle-input" type="checkbox" id="jr-mil-only" ${jobsReportState.milOnly ? 'checked' : ''} onchange="setJrMilOnly(this.checked)">
+          <span class="motion-switch" aria-hidden="true"></span>
           <span style="color:#dc2626;font-weight:800;letter-spacing:0.02em;">MIL Products only</span>
         </label>
       </div>
