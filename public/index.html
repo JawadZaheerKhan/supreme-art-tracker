@@ -14096,12 +14096,17 @@ async function openAdjustModal(jobId) {
   const initialPackets = Math.min(s.max_packets_per_job, 2);
   const initialSheets = Math.round(initialPackets * ps);
   const initialOverlay = computeArtlineWasteSplit(initialSheets, s, ups);
+  const initialTopOverlay = computeArtlineTopFieldOverlay(j, initialSheets, initialPackets, ups);
 
   // Same job card modal used everywhere (Edit/View) — the particulars
-  // table's wastage rows get preview placeholders so the side panel can
-  // update them live as packets/sheets change, without altering anything
-  // else about how the card looks or behaves.
-  openEdit(jobId, { particularsOpts: { preview: true, previewOverlay: initialOverlay } });
+  // table's wastage rows AND the Sheets Qty/Packets/Unit Carton Qty fields
+  // up top get preview placeholders so the side panel can update them live
+  // as packets/sheets change, without altering anything else about how the
+  // card looks or behaves.
+  openEdit(jobId, {
+    particularsOpts: { preview: true, previewOverlay: initialOverlay },
+    topFieldsPreview: initialTopOverlay,
+  });
   buildAdjustSidePanel(j, s, ps, matchHtml);
 }
 
@@ -14157,9 +14162,12 @@ function buildAdjustSidePanel(j, s, ps, matchHtml) {
 function updateAdjustPreview(jobId) {
   const j = jobs.find(x => x.id === jobId);
   const sheetsEl = document.getElementById('adj-sheets');
+  const packetsEl = document.getElementById('adj-packets');
   if (!j || !sheetsEl) return;
   const sheets = parseFloat(sheetsEl.value) || 0;
-  const overlay = computeArtlineWasteSplit(sheets, _artlineSettings, parseFloat(j.ups) || 0);
+  const packets = packetsEl ? (parseFloat(packetsEl.value) || 0) : 0;
+  const ups = parseFloat(j.ups) || 0;
+  const overlay = computeArtlineWasteSplit(sheets, _artlineSettings, ups);
   for (const row of Object.values(ARTLINE_WASTE_ROW_MAP)) {
     const el = document.getElementById('wp-' + row.key);
     if (!el) continue;
@@ -14172,6 +14180,16 @@ function updateAdjustPreview(jobId) {
       el.textContent = '';
       el.style.display = 'none';
     }
+  }
+  // Same live update for the top-of-card Sheets Qty / Quantity of Packets /
+  // Unit Carton Qty overlays.
+  const topOverlay = computeArtlineTopFieldOverlay(j, sheets, packets, ups);
+  const topFields = [['wp-top-sheets', topOverlay.newSheets], ['wp-top-packets', topOverlay.newPackets], ['wp-top-cartonqty', topOverlay.newCartonQty]];
+  for (const [id, val] of topFields) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (val > 0) { el.textContent = val.toLocaleString(); el.style.display = ''; }
+    else { el.textContent = ''; el.style.display = 'none'; }
   }
 }
 
@@ -17558,6 +17576,28 @@ function artlineWasteOverlay(job) {
   return computeArtlineWasteSplit(adj.manual_sheets || 0, adj, parseFloat(job.ups) || 0);
 }
 
+// Same idea as computeArtlineWasteSplit but for the job card's own top-level
+// Sheets Qty / Quantity of Packets / Unit Carton Qty fields — these show the
+// MERGED total (original + adjustment), not a delta. Unit Carton Qty isn't a
+// stored field at all here; it's always sheets × Ups, recomputed off the new
+// sheet count.
+function computeArtlineTopFieldOverlay(job, manualSheets, manualPackets, ups) {
+  const origSheets  = parseFloat(job.sheets) || 0;
+  const origPackets = parseFloat((job.particulars || {}).quantity_of_packets) || 0;
+  const newSheets   = origSheets + (manualSheets || 0);
+  const newPackets  = origPackets + (manualPackets || 0);
+  const newCartonQty = Math.round(newSheets * (ups || 0));
+  return { newSheets, newPackets, newCartonQty };
+}
+
+// Builds the saved-adjustment version of the above — only called when
+// actually viewing a finalized job from the Finalized tab.
+function artlineTopFieldOverlay(job) {
+  const adj = job ? _adjustments[job.id] : null;
+  if (!adj) return null;
+  return computeArtlineTopFieldOverlay(job, adj.manual_sheets, adj.manual_packets, parseFloat(job.ups) || 0);
+}
+
 // A particulars Quantity value can be a plain number or several pipe-
 // joined entries (e.g. "15 | 19", one per production run/entry). The
 // wastage overlay's total extra for that row is split back across each
@@ -17713,6 +17753,13 @@ function particularsTable(p, job, opts) {
 
 function jobForm(j={}, opts) {
   opts = opts || {};
+  // Purple overlay for Sheets Qty / Quantity of Packets / Unit Carton Qty —
+  // same rule as the particulars table: live preview during the Adjust
+  // flow (opts.topFieldsPreview), or the saved adjustment when actually
+  // viewing a finalized job from the Finalized tab. Never both at once.
+  const topOverlay = opts.topFieldsPreview !== undefined
+    ? opts.topFieldsPreview
+    : ((j && j.id && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id)) ? artlineTopFieldOverlay(j) : null);
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const v = x => esc(x||'');
   // Paper picker inputs. Same shape specsSection used to compute; moved
@@ -17848,6 +17895,7 @@ function jobForm(j={}, opts) {
               <input type="text" id="f-sheets-2" value="${esc(hasSecond ? String(secSh || '') : '')}" placeholder="0" oninput="jobSecondarySheetsEdited();" style="flex:1 1 0;min-width:0;text-align:center;">
             </span>
           </div>
+          <div id="wp-top-sheets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newSheets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newSheets) ? topOverlay.newSheets.toLocaleString() : ''}</div>
         </td>
         <td colspan="3">
           <span class="jc-lbl">Quantity of Packets</span>
@@ -17872,7 +17920,8 @@ function jobForm(j={}, opts) {
                 <input type="number" id="f-packets-2" min="0" step="any" value="${esc(hasSecond ? String(secPkts || '') : '')}" placeholder="e.g. 5" oninput="jobSecondaryPacketsEdited()" style="flex:1 1 0;min-width:0;text-align:center;">
               </span>
             </div>
-          </div>`;
+          </div>
+          <div id="wp-top-packets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newPackets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newPackets) ? topOverlay.newPackets.toLocaleString() : ''}</div>`;
         })()}
           ${packetTopupsApproved(j).length
             ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
@@ -17924,7 +17973,9 @@ function jobForm(j={}, opts) {
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
         <td colspan="2"><span class="jc-lbl">Batch No.</span><input type="text" id="f-bno" value="${v(j.bno)}" placeholder="Batch"></td>
         <td colspan="1"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100"></td>
+        <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100">
+          <div id="wp-top-cartonqty" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newCartonQty) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newCartonQty) ? topOverlay.newCartonQty.toLocaleString() : ''}</div>
+        </td>
       </tr>
       <tr>
         <td colspan="1"><span class="jc-lbl">Mfg Date</span><input type="text" id="f-mfgdate" value="${v(j.mfgdate)}" placeholder="2026 or 07-2026 or 01-07-2026"></td>
@@ -21341,6 +21392,11 @@ function buildPrintCard(j) {
   // tab (and any other context) always prints the untouched original card.
   const wasteOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
     ? artlineWasteOverlay(j) : null;
+  // Same rule for the top-of-card Sheets Qty / Quantity of Packets / Unit
+  // Carton Qty — printed values are REPLACED by the adjusted totals (not
+  // shown alongside), same as the particulars rows.
+  const topOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
+    ? artlineTopFieldOverlay(j) : null;
   // Paper source: prefer the live inventory item; fall back to the legacy
   // particulars fields for pre-inventory jobs.
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -21376,6 +21432,11 @@ function buildPrintCard(j) {
   // means "5 primary | 5 secondary", NOT "10 | 5"). Primary yellow-under
   // when primary paper is offcut, secondary yellow-under when it is.
   const packetsCellHtml = (() => {
+    // Finalized print: the adjusted total replaces the original outright —
+    // simpler than trying to layer the adjustment onto a 2nd-paper split.
+    if (topOverlay) {
+      return topOverlay.newPackets.toLocaleString() + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+    }
     const totalPkts = parseFloat(p.quantity_of_packets);
     const secPkts   = secRefPrint ? (parseFloat(secRefPrint.packets) || 0) : 0;
     const displayFallback = packetsDisplay(j) || v(p.quantity_of_packets);
@@ -21715,14 +21776,14 @@ function buildPrintCard(j) {
       <tr>
         <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
         <td colspan="2"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
-        <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${v(j.sheets)}</div></td>
+        <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${topOverlay ? topOverlay.newSheets.toLocaleString() : v(j.sheets)}</div></td>
         <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${packetsCellHtml}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
         <td colspan="2"><div class="pc-label">Batch No.</div><div class="pc-value">${v(j.bno)}</div></td>
         <td colspan="1"><div class="pc-label">Code</div><div class="pc-value pc-code">${v(j.jobcode)}</div></td>
-        <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${v(j.cartonqty)}</div></td>
+        <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${topOverlay ? topOverlay.newCartonQty.toLocaleString() : v(j.cartonqty)}</div></td>
       </tr>
       <tr>
         <td colspan="2"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
