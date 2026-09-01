@@ -213,8 +213,10 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-// Bumped for inventory_transactions.paired_tx_id.
-const SCHEMA_VERSION = 'v2026-09-01-offcut-pairs';
+// Bumped for inventory_transactions.deleted_at/deleted_by (Manual
+// Consumption + Stock movement deletes now go to Archive instead of
+// hard-deleting outright).
+const SCHEMA_VERSION = 'v2026-09-01-tx-archive';
 
 async function initDb() {
   try {
@@ -590,6 +592,14 @@ async function initDb() {
     // and pre-existing rows leave it blank.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS challan_no TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_challan_idx ON inventory_transactions(challan_no) WHERE challan_no IS NOT NULL`;
+    // Soft delete: "Delete from history" (Manual Consumption, Stock In/Out
+    // bulk delete) moves a row to the Archive instead of wiping it outright,
+    // same 30-day-retention pattern as jobs/imports. Never touches
+    // current_balance — the deduction already happened; archiving only
+    // hides the row from movement reports.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS inventory_tx_deleted_at_idx ON inventory_transactions(deleted_at) WHERE deleted_at IS NOT NULL`;
 
     // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
     // pending → received (creates a stock-in transaction) or pending → cancelled.
@@ -6897,6 +6907,12 @@ app.get('/api/inventory/transactions', async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
         AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
+        -- Archived (soft-deleted) rows drop out of every movement report —
+        -- EXCEPT raw=1 (Stock Summary), which still needs them: the row's
+        -- effect on current_balance already happened, archiving only hides
+        -- it from display, so excluding it there would throw off the
+        -- opening-balance reconciliation math.
+        AND (${raw} OR t.deleted_at IS NULL)
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.
@@ -7108,8 +7124,9 @@ const TRASH_RETENTION_DAYS = 30;
 // Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
 // idempotent — safe to call on every list request.
 async function purgeExpiredTrash(sql) {
-  await sql`DELETE FROM jobs              WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
-  await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
 }
 
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
@@ -7132,11 +7149,19 @@ app.get('/api/trash', requireAuth, async (req, res) => {
       FROM inventory_imports WHERE deleted_at IS NOT NULL
       ORDER BY deleted_at DESC
     `;
-    res.json({ jobs: jobsRows, imports: importsRows, retention_days: TRASH_RETENTION_DAYS });
+    const transactionsRows = await sql`
+      SELECT t.id, t.change, t.reason, t.notes, t.created_at, t.deleted_at, t.deleted_by,
+             i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
+        FROM inventory_transactions t
+        LEFT JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.deleted_at IS NOT NULL
+       ORDER BY t.deleted_at DESC
+    `;
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// RESTORE one row from trash. Body: { type: 'job'|'import', id: 123 }.
+// RESTORE one row from trash. Body: { type: 'job'|'import'|'transaction', id: 123 }.
 app.post('/api/trash/restore', requireAdmin, async (req, res) => {
   try {
     await dbReady;
@@ -7175,7 +7200,13 @@ app.post('/api/trash/restore', requireAdmin, async (req, res) => {
       await logAudit(sql, req, { action: 'import.restore', entityType: 'import', entityId: rowId, summary: `Restored ${updated[0].status} import #${rowId}: ${updated[0].paper_type}` });
       return res.json({ ok: true });
     }
-    res.status(400).json({ error: 'type must be "job" or "import"' });
+    if (type === 'transaction') {
+      const updated = await sql`UPDATE inventory_transactions SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
+      if (!updated.length) return res.status(404).json({ error: 'Transaction not in archive' });
+      await logAudit(sql, req, { action: 'inventory.tx.restore', entityType: 'inventory_item', entityId: rowId, summary: `Restored tx #${rowId} from Archive (${updated[0].change > 0 ? '+' : ''}${updated[0].change} sheets · ${updated[0].reason || 'no reason'})` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7199,7 +7230,13 @@ app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
       await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
       return res.json({ ok: true });
     }
-    res.status(400).json({ error: 'type must be "job" or "import"' });
+    if (type === 'transaction') {
+      const deleted = await sql`DELETE FROM inventory_transactions WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
+      if (!deleted.length) return res.status(404).json({ error: 'Transaction not in archive' });
+      await logAudit(sql, req, { action: 'inventory.tx.purge', entityType: 'inventory_item', entityId: rowId, summary: `Permanently deleted tx #${rowId} (${deleted[0].change > 0 ? '+' : ''}${deleted[0].change} sheets · ${deleted[0].reason || 'no reason'})` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7209,22 +7246,25 @@ app.post('/api/trash/empty', requireAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const jobsDel    = await sql`DELETE FROM jobs              WHERE deleted_at IS NOT NULL RETURNING id`;
-    const importsDel = await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL RETURNING id`;
+    const jobsDel    = await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL RETURNING id`;
+    const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
+    const txDel       = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL RETURNING id`;
     await logAudit(sql, req, {
       action: 'trash.empty',
       entityType: 'system',
       entityId: 0,
-      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} permanently deleted`,
+      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} + ${txDel.length} transaction${txDel.length===1?'':'s'} permanently deleted`,
     });
-    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length });
+    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length, transactions: txDel.length });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE an inventory transaction row from history (admin only). Pure archival
-// cleanup — does NOT touch current_balance, since the row already happened and
-// its effect is baked into the running balance. Intended for wiping old rows
-// after months/years. To actually undo a row's effect on stock, use the
+// DELETE an inventory transaction row from history (admin only). Soft
+// delete — moves it to Archive (30-day retention, restorable), same
+// pattern as jobs/imports. Never touches current_balance, since the row
+// already happened and its effect is baked into the running balance;
+// archiving only hides it from Manual Consumption / Stock In-Out /
+// Total In-Out. To actually undo a row's effect on stock, use the
 // per-row Reverse on the inventory History modal instead (which posts a
 // proper correction entry).
 app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => {
@@ -7233,17 +7273,20 @@ app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => 
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    const tx = (await sql`SELECT id, item_id, change, reason FROM inventory_transactions WHERE id=${id}`)[0];
-    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-    // reverses_tx_id has ON DELETE SET NULL so reversal rows pointing at this
-    // one (if any) survive — they just lose their back-link. Acceptable for
-    // archival purposes.
-    await sql`DELETE FROM inventory_transactions WHERE id=${id}`;
+    const by = req.user?.email || 'unknown';
+    const updated = await sql`
+      UPDATE inventory_transactions
+         SET deleted_at = NOW(), deleted_by = ${by}
+       WHERE id = ${id} AND deleted_at IS NULL
+       RETURNING id, item_id, change, reason
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
+    const tx = updated[0];
     await logAudit(sql, req, {
       action: 'inventory.tx.delete',
       entityType: 'inventory_item',
       entityId: tx.item_id,
-      summary: `Deleted tx #${id} from history (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
+      summary: `Moved tx #${id} to Archive (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
