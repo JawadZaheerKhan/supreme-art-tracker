@@ -14182,13 +14182,19 @@ function updateAdjustPreview(jobId) {
     }
   }
   // Same live update for the top-of-card Sheets Qty / Quantity of Packets /
-  // Unit Carton Qty overlays.
+  // Unit Carton Qty overlays. Sheets/Packets use the display STRING (which
+  // already carries the "primary + secondary" split when the job has a 2nd
+  // paper), Unit Carton Qty is always a single number.
   const topOverlay = computeArtlineTopFieldOverlay(j, sheets, packets, ups);
-  const topFields = [['wp-top-sheets', topOverlay.newSheets], ['wp-top-packets', topOverlay.newPackets], ['wp-top-cartonqty', topOverlay.newCartonQty]];
-  for (const [id, val] of topFields) {
+  const topFields = [
+    ['wp-top-sheets', topOverlay.newSheets, topOverlay.sheetsDisplay],
+    ['wp-top-packets', topOverlay.newPackets, topOverlay.packetsDisplay],
+    ['wp-top-cartonqty', topOverlay.newCartonQty, topOverlay.newCartonQty.toLocaleString()],
+  ];
+  for (const [id, val, display] of topFields) {
     const el = document.getElementById(id);
     if (!el) continue;
-    if (val > 0) { el.textContent = val.toLocaleString(); el.style.display = ''; }
+    if (val > 0) { el.textContent = display; el.style.display = ''; }
     else { el.textContent = ''; el.style.display = 'none'; }
   }
 }
@@ -17582,18 +17588,41 @@ function artlineWasteOverlay(job) {
 // stored field at all here; it's always sheets × Ups, recomputed off the new
 // sheet count.
 function computeArtlineTopFieldOverlay(job, manualSheets, manualPackets, ups) {
-  const origSheets  = parseFloat(job.sheets) || 0;
-  const origPackets = parseFloat((job.particulars || {}).quantity_of_packets) || 0;
+  const p = job.particulars || {};
+  const totalSheets  = parseFloat(job.sheets) || 0;
+  const totalPackets = parseFloat(p.quantity_of_packets) || 0;
   // manual_packets is a NUMERIC column server-side — the DB driver returns
   // NUMERIC as a string (to avoid precision loss), so without parseFloat
   // here "3" + "2" concatenates to "32" instead of adding to 5. manual_sheets
   // is INTEGER and comes back as a real number already, but parse it too
   // for safety — this function shouldn't have to know which caller's data
   // came from where.
-  const newSheets   = origSheets + (parseFloat(manualSheets) || 0);
-  const newPackets  = origPackets + (parseFloat(manualPackets) || 0);
+  const mSheets  = parseFloat(manualSheets) || 0;
+  const mPackets = parseFloat(manualPackets) || 0;
+  const newSheets  = totalSheets + mSheets;
+  const newPackets = totalPackets + mPackets;
   const newCartonQty = Math.round(newSheets * (ups || 0));
-  return { newSheets, newPackets, newCartonQty };
+  // A job split across 2 papers shows Sheets/Packets as "primary + secondary"
+  // rather than one combined figure — the adjustment has to respect that
+  // split too, not just land on whichever number happens to be totaled.
+  // Same rule as the particulars wastage rows: distribute the extra
+  // proportionally by each side's share (applyOverlayToPipeEntries already
+  // does exactly this for pipe-joined values, so it's reused here).
+  const sec = p.secondary_paper || null;
+  const hasSecond = !!(sec && sec.inventory_item_id);
+  let sheetsDisplay = newSheets.toLocaleString();
+  let packetsDisplay = newPackets.toLocaleString();
+  if (hasSecond) {
+    const primItem = job.inventory_item_id ? inventory.find(i => i.id === job.inventory_item_id) : null;
+    const psForm = primItem ? packetSize(primItem.paper_type) : 100;
+    const secPackets = parseFloat(sec.packets) || 0;
+    const secSheets  = Math.round(secPackets * psForm);
+    const primPackets = Math.max(0, totalPackets - secPackets);
+    const primSheets  = Math.max(0, totalSheets - secSheets);
+    sheetsDisplay  = applyOverlayToPipeEntries(`${primSheets} | ${secSheets}`, mSheets).replace(' | ', ' + ');
+    packetsDisplay = applyOverlayToPipeEntries(`${primPackets} | ${secPackets}`, mPackets).replace(' | ', ' + ');
+  }
+  return { newSheets, newPackets, newCartonQty, sheetsDisplay, packetsDisplay };
 }
 
 // Builds the saved-adjustment version of the above — only called when
@@ -17901,7 +17930,7 @@ function jobForm(j={}, opts) {
               <input type="text" id="f-sheets-2" value="${esc(hasSecond ? String(secSh || '') : '')}" placeholder="0" oninput="jobSecondarySheetsEdited();" style="flex:1 1 0;min-width:0;text-align:center;">
             </span>
           </div>
-          <div id="wp-top-sheets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newSheets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newSheets) ? topOverlay.newSheets.toLocaleString() : ''}</div>
+          <div id="wp-top-sheets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newSheets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newSheets) ? topOverlay.sheetsDisplay : ''}</div>
         </td>
         <td colspan="3">
           <span class="jc-lbl">Quantity of Packets</span>
@@ -17927,7 +17956,7 @@ function jobForm(j={}, opts) {
               </span>
             </div>
           </div>
-          <div id="wp-top-packets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newPackets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newPackets) ? topOverlay.newPackets.toLocaleString() : ''}</div>`;
+          <div id="wp-top-packets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newPackets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newPackets) ? topOverlay.packetsDisplay : ''}</div>`;
         })()}
           ${packetTopupsApproved(j).length
             ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
@@ -21438,10 +21467,11 @@ function buildPrintCard(j) {
   // means "5 primary | 5 secondary", NOT "10 | 5"). Primary yellow-under
   // when primary paper is offcut, secondary yellow-under when it is.
   const packetsCellHtml = (() => {
-    // Finalized print: the adjusted total replaces the original outright —
-    // simpler than trying to layer the adjustment onto a 2nd-paper split.
+    // Finalized print: the adjusted total replaces the original outright.
+    // packetsDisplay already carries the "primary + secondary" split when
+    // the job has a 2nd paper — same rule as the wastage rows.
     if (topOverlay) {
-      return topOverlay.newPackets.toLocaleString() + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+      return topOverlay.packetsDisplay + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
     }
     const totalPkts = parseFloat(p.quantity_of_packets);
     const secPkts   = secRefPrint ? (parseFloat(secRefPrint.packets) || 0) : 0;
@@ -21782,7 +21812,7 @@ function buildPrintCard(j) {
       <tr>
         <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
         <td colspan="2"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
-        <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${topOverlay ? topOverlay.newSheets.toLocaleString() : v(j.sheets)}</div></td>
+        <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${topOverlay ? topOverlay.sheetsDisplay : v(j.sheets)}</div></td>
         <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${packetsCellHtml}</div></td>
       </tr>
       <tr>
