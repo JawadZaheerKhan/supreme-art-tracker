@@ -214,6 +214,48 @@
   .rsb-item.active { background: var(--brand); color: #fff; }
   .rsb-item.active .rsb-icon { color: #fff !important; }
 
+  /* One liquid selection shape travels between every Reports sidebar item.
+     The labels stay above it, so the active report can grow without making
+     the sidebar itself jump. */
+  .reports-sidebar.report-flow-connected { position:relative; isolation:isolate; }
+  .report-flowing-indicator {
+    position:absolute; z-index:0; pointer-events:none;
+    left:10px; right:10px; top:0;
+    height:var(--report-flow-h, 0px);
+    transform:translateY(var(--report-flow-y, 0px));
+    border-radius:8px;
+    background:linear-gradient(112deg, #7f1d1d, var(--brand), #b73737);
+    box-shadow:0 4px 14px rgba(121,31,31,.36);
+    transition:transform 1.08s cubic-bezier(.16,1,.3,1), height .96s cubic-bezier(.16,1,.3,1);
+  }
+  .report-flowing-indicator::after {
+    content:""; position:absolute; inset:-7px 2px; z-index:-1;
+    border-radius:12px; background:rgba(163,45,45,.22);
+    filter:blur(9px); opacity:.68;
+  }
+  .report-flow-connected.is-report-flowing > .report-flowing-indicator {
+    animation:liquid-report-morph 1.12s cubic-bezier(.16,1,.3,1);
+  }
+  @keyframes liquid-report-morph {
+    0% { border-radius:8px; filter:saturate(1) blur(0); }
+    38% { border-radius:44% 56% 46% 54% / 18% 22% 78% 82%; filter:saturate(1.08) blur(.25px); }
+    72% { border-radius:54% 46% 58% 42% / 76% 72% 28% 24%; filter:saturate(1.04) blur(.12px); }
+    100% { border-radius:8px; filter:saturate(1) blur(0); }
+  }
+  .report-flow-connected > .rsb-item {
+    position:relative; z-index:1;
+    transition:transform .68s cubic-bezier(.16,1,.3,1), color .52s ease, background .4s ease;
+  }
+  .report-flow-connected > .rsb-item.active {
+    background:transparent !important;
+    color:#fff;
+    transform:scale(1.045);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .report-flowing-indicator,
+    .report-flow-connected > .rsb-item { transition:none !important; animation:none !important; }
+  }
+
   /* Earlier sweep retained for the inventory/action controls that were not
      part of the new colourful-button request. */
   #create-group-btn, #shade-card-toggle, #inv-pending-toggle,
@@ -4211,6 +4253,45 @@ function syncFlowingTabIndicator(containerOrId) {
       syncFlowingTabIndicator('mode-switch');
       syncFlowingTabIndicator('tabs-wrap');
     });
+  }
+}
+
+// Vertical version of the shared liquid selector for every Reports group.
+// It measures the active row so section headings and role-hidden rows do not
+// disturb the travel distance.
+function syncReportsFlowIndicators() {
+  document.querySelectorAll('#reports-mode .reports-sidebar').forEach(sidebar => {
+    if (sidebar.offsetParent === null) return;
+    sidebar.classList.add('report-flow-connected');
+    let indicator = sidebar.querySelector(':scope > .report-flowing-indicator');
+    if (!indicator) {
+      indicator = document.createElement('span');
+      indicator.className = 'report-flowing-indicator';
+      indicator.setAttribute('aria-hidden', 'true');
+      sidebar.appendChild(indicator);
+    }
+    const active = sidebar.querySelector(':scope > .rsb-item.active');
+    if (!active || active.offsetParent === null) return;
+    const sidebarRect = sidebar.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+    const y = activeRect.top - sidebarRect.top + sidebar.scrollTop;
+    const h = activeRect.height;
+    const previousY = Number(sidebar.dataset.reportFlowY);
+    const moved = Number.isFinite(previousY) && Math.abs(previousY - y) > 1;
+    sidebar.style.setProperty('--report-flow-y', `${y}px`);
+    sidebar.style.setProperty('--report-flow-h', `${h}px`);
+    sidebar.dataset.reportFlowY = String(y);
+    if (moved) {
+      sidebar.classList.remove('is-report-flowing');
+      void sidebar.offsetWidth;
+      sidebar.classList.add('is-report-flowing');
+      clearTimeout(sidebar._reportFlowTimer);
+      sidebar._reportFlowTimer = setTimeout(() => sidebar.classList.remove('is-report-flowing'), 1180);
+    }
+  });
+  if (!syncReportsFlowIndicators.resizeBound) {
+    syncReportsFlowIndicators.resizeBound = true;
+    window.addEventListener('resize', () => requestAnimationFrame(syncReportsFlowIndicators));
   }
 }
 
@@ -12902,6 +12983,7 @@ function openReportsGroup(groupId) {
   if (groupId === 'analysis-group') setReportsTab('summary');
   if (groupId === 'jobs-group')     setReportsTab('jobs-report');
   if (groupId === 'trash-group')    setReportsTab('trash-jobs');
+  requestAnimationFrame(syncReportsFlowIndicators);
 }
 
 // Return to the 3-card landing — hides every group.
@@ -12919,6 +13001,7 @@ function exitReportsGroup() {
 // to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
+  requestAnimationFrame(syncReportsFlowIndicators);
   const inlinePanes = ['stock-in', 'stock-out', 'total-in', 'total-out', 'manual-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
