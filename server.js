@@ -213,7 +213,10 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-const SCHEMA_VERSION = 'v2026-08-25-sessions';
+// Bumped for inventory_transactions.paired_tx_id. Without this bump,
+// databases already stamped with the sessions version take the fast path
+// above and skip the ALTER TABLE that creates the offcut-pair link column.
+const SCHEMA_VERSION = 'v2026-09-01-offcut-pairs';
 
 async function initDb() {
   try {
