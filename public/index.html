@@ -3441,6 +3441,25 @@ function totalDeliveredCartons(j) {
     return a + (Number.isFinite(n) ? n : 0);
   }, 0);
 }
+// True when more has been delivered than the job's own Unit Carton Qty —
+// an impossible/anomalous state (data entry mistake somewhere upstream:
+// wrong Ups, wrong Sheets Qty, or a delivery logged against the wrong
+// job). Zero shortfall (delivered exactly matches) is a normal, cleanly-
+// finished job and does NOT flag. Feeds the small red mark on the job
+// tile so whoever's watching the Delivered tab notices and fixes it —
+// also the exact case the wastage formula can't sanity-check on its own.
+function isOverDelivered(j) {
+  const cartonQty = parseFloat(j && j.cartonqty) || 0;
+  if (cartonQty <= 0) return false;
+  return totalDeliveredCartons(j) > cartonQty;
+}
+function overDeliveredMarkHtml(j) {
+  if (!isDone(j) || !isOverDelivered(j)) return '';
+  const cartonQty = parseFloat(j.cartonqty) || 0;
+  const delivered = totalDeliveredCartons(j);
+  const over = delivered - cartonQty;
+  return `<span title="Delivered (${delivered.toLocaleString()}) exceeds Unit Carton Qty (${cartonQty.toLocaleString()}) by ${over.toLocaleString()} — check these values." style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#dc2626;color:#fff;font-size:10px;font-weight:800;line-height:1;flex:0 0 auto;">!</span>`;
+}
 function isPartialDelivery(j) {
   // A job that already reached the Delivered stage is closed — even if
   // the delivered qty came in under the booked qty (yield shortfall,
@@ -4940,6 +4959,7 @@ function renderJobRowCompact(j, opts) {
           <div class="job-id-row">
             ${selBox}
             <span class="job-id">#${j.id}</span>
+            ${overDeliveredMarkHtml(j)}
             ${badge}
             ${linkedJobBadgeHtml(j, false)}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -5439,7 +5459,7 @@ function renderJobCard(j, opts) {
       ${selBox}
       ${clientPreview
         ? ''
-        : `<span class="job-id">#${j.id}</span>`}
+        : `<span class="job-id">#${j.id}</span>${overDeliveredMarkHtml(j)}`}
       ${badge}
       ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -14286,7 +14306,7 @@ async function openAdjustModal(jobId) {
   const ups = parseFloat(j.ups) || 0;
   const initialPackets = Math.min(s.max_packets_per_job, 2);
   const initialSheets = Math.round(initialPackets * ps);
-  const initialOverlay = computeArtlineWasteSplit(initialSheets, s, ups);
+  const initialOverlay = computeArtlineWasteSplit(j, initialSheets, s, ups);
   const initialTopOverlay = computeArtlineTopFieldOverlay(j, initialSheets, initialPackets, ups);
 
   // Same job card modal used everywhere (Edit/View) — the particulars
@@ -14358,14 +14378,13 @@ function updateAdjustPreview(jobId) {
   const sheets = parseFloat(sheetsEl.value) || 0;
   const packets = packetsEl ? (parseFloat(packetsEl.value) || 0) : 0;
   const ups = parseFloat(j.ups) || 0;
-  const overlay = computeArtlineWasteSplit(sheets, _artlineSettings, ups);
+  const overlay = computeArtlineWasteSplit(j, sheets, _artlineSettings, ups);
   for (const row of Object.values(ARTLINE_WASTE_ROW_MAP)) {
     const el = document.getElementById('wp-' + row.key);
     if (!el) continue;
-    const extra = overlay[row.key];
-    if (extra > 0) {
-      const rawQty = (j.particulars && j.particulars[row.key] && j.particulars[row.key].quantity) || '';
-      el.textContent = applyOverlayToPipeEntries(rawQty, extra);
+    const val = overlay[row.key];
+    if (val > 0) {
+      el.textContent = val.toLocaleString();
       el.style.display = '';
     } else {
       el.textContent = '';
@@ -17998,14 +18017,24 @@ const ARTLINE_WASTE_ROW_MAP = {
 const ARTLINE_WASTE_ROW_UNIT = Object.fromEntries(Object.values(ARTLINE_WASTE_ROW_MAP).map(r => [r.key, r.unit]));
 
 // Core math shared by the saved-adjustment overlay and the live Adjust-
-// modal preview: splits `sheets` across each wastage row by `pcts` (an
-// object with printing_pct/die_pct/coating_pct/pasting_pct/sorting_pct),
-// converting to cartons via `ups` for the two carton-based rows.
-function computeArtlineWasteSplit(sheets, pcts, ups) {
+// modal preview. Ignores whatever the operators actually wrote in the
+// wastage particulars fields entirely — the base wastage is derived
+// purely from the job's own numbers:
+//   base wastage (sheets) = (Unit Carton Qty − Delivered Qty) ÷ Ups
+// added to the manual adjustment sheets (packets × packet size × cut
+// factor), then that TOTAL is split across each wastage row by `pcts`
+// (printing_pct/die_pct/coating_pct/pasting_pct/sorting_pct), converting
+// to cartons via `ups` for the two carton-based rows. The returned value
+// per row is the row's whole new total, not a delta to add onto anything.
+function computeArtlineWasteSplit(job, manualSheets, pcts, ups) {
+  const cartonQty  = parseFloat(job && job.cartonqty) || 0;
+  const delivered  = totalDeliveredCartons(job);
+  const baseWastageSheets = ups > 0 ? (cartonQty - delivered) / ups : 0;
+  const totalSheets = baseWastageSheets + (manualSheets || 0);
   const overlay = {};
   for (const [pctKey, row] of Object.entries(ARTLINE_WASTE_ROW_MAP)) {
-    const stageSheets = Math.round((sheets || 0) * ((pcts && pcts[pctKey]) || 0) / 100);
-    overlay[row.key] = row.unit === 'cartons' ? Math.round(stageSheets * (ups || 0)) : stageSheets;
+    const stageSheets = totalSheets * ((pcts && pcts[pctKey]) || 0) / 100;
+    overlay[row.key] = row.unit === 'cartons' ? Math.round(stageSheets * (ups || 0)) : Math.round(stageSheets);
   }
   return overlay;
 }
@@ -18015,7 +18044,7 @@ function computeArtlineWasteSplit(sheets, pcts, ups) {
 function artlineWasteOverlay(job) {
   const adj = job ? _adjustments[job.id] : null;
   if (!adj) return null;
-  return computeArtlineWasteSplit(adj.manual_sheets || 0, adj, parseFloat(job.ups) || 0);
+  return computeArtlineWasteSplit(job, adj.manual_sheets || 0, adj, parseFloat(job.ups) || 0);
 }
 
 // Same idea as computeArtlineWasteSplit but for the job card's own top-level
@@ -18182,14 +18211,17 @@ function particularsTable(p, job, opts) {
       const personsListId = `p-${r.key}-persons-list`;
       const personsOpts = personsForMachineName(nameVal)
         .map(pn => `<option value="${esc(pn.name || '')}"></option>`).join('');
-      const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
+      // The purple figure is now the row's whole new total straight from
+      // the wastage formula — it does NOT add onto whatever the operator
+      // wrote in the black field above; that value is ignored entirely.
+      const wasteNewValue = wasteOverlay ? wasteOverlay[r.key] : undefined;
       const wasteExtraHtml = (opts.preview && isWasteRow)
         // Preview mode always renders the element (even empty/hidden) so
         // updateAdjustPreview() can find it by id and refresh it live as
         // the admin edits the packet count — no full re-render needed.
-        ? `<div id="wp-${r.key}" style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;${(wasteExtra !== undefined && wasteExtra > 0) ? '' : 'display:none;'}">${(wasteExtra !== undefined && wasteExtra > 0) ? applyOverlayToPipeEntries(raw(r.key, 'quantity'), wasteExtra) : ''}</div>`
-        : (wasteExtra !== undefined && wasteExtra > 0)
-          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="+${wasteExtra.toLocaleString()} ${ARTLINE_WASTE_ROW_UNIT[r.key]} from the wastage adjustment, split across each entry by its share of the original total">${applyOverlayToPipeEntries(raw(r.key, 'quantity'), wasteExtra)}</div>`
+        ? `<div id="wp-${r.key}" style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;${(wasteNewValue !== undefined && wasteNewValue > 0) ? '' : 'display:none;'}">${(wasteNewValue !== undefined && wasteNewValue > 0) ? wasteNewValue.toLocaleString() : ''}</div>`
+        : (wasteNewValue !== undefined && wasteNewValue > 0)
+          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="New ${ARTLINE_WASTE_ROW_UNIT[r.key]} total from the wastage formula — (Unit Carton Qty − Delivered) ÷ Ups + manual adjustment, split by percentage. Ignores the operator's own entry above.">${wasteNewValue.toLocaleString()}</div>`
           : '';
       return `
     <tr>
@@ -21959,9 +21991,11 @@ function buildPrintCard(j) {
   };
 
   const dataRow = r => {
-    const wasteExtra = wasteOverlay ? wasteOverlay[r.key] : undefined;
-    const qtyOut = (wasteExtra !== undefined && wasteExtra > 0)
-      ? v(applyOverlayToPipeEntries(p[r.key]?.quantity, wasteExtra))
+    // The formula's new total REPLACES the operator's own printed value
+    // outright (not added onto it) — same rule as the on-screen purple figure.
+    const wasteNewValue = wasteOverlay ? wasteOverlay[r.key] : undefined;
+    const qtyOut = (wasteNewValue !== undefined && wasteNewValue > 0)
+      ? v(wasteNewValue.toLocaleString())
       : v(p[r.key]?.quantity);
     return `
     <tr class="pp-data-row">
