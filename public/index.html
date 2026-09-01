@@ -13175,8 +13175,8 @@ function setReportsTab(name) {
 // paper type + period (today/week/month/custom). Each direction owns its own
 // state so flipping between tabs doesn't lose your filters.
 const stockMovementStates = {
-  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
-  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
+  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [] },
+  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [] },
 };
 
 // Per-direction bulk selection. Independent sets so flipping tabs keeps the
@@ -13342,6 +13342,14 @@ function openStockMovementPane(direction) {
                oninput="setMovementChallan('${direction}', this.value)"
                style="min-width:140px;">
       </div>
+      <div>
+        <div class="dash-flbl">Job Card No.</div>
+        <input class="filter" type="text" id="sm-${direction}-jobcard" value="${esc(state.jobCard || '')}"
+               placeholder="E-254 or manual no."
+               title="Matches an E-job (e.g. E-254 or 254) or a Manual Job Card reference"
+               oninput="setMovementJobCard('${direction}', this.value)"
+               style="min-width:150px;">
+      </div>
       <div id="sm-${direction}-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
         <div><div class="dash-flbl">From</div><input class="filter" type="date" id="sm-${direction}-from" value="${state.from}" onchange="setMovementCustom('${direction}')"></div>
         <div><div class="dash-flbl">To</div><input class="filter" type="date" id="sm-${direction}-to" value="${state.to}" onchange="setMovementCustom('${direction}')"></div>
@@ -13383,6 +13391,26 @@ function setMovementChallan(dir, v) {
   stockMovementSel[dir].clear();
   clearTimeout(_smChallanTimer[dir]);
   _smChallanTimer[dir] = setTimeout(() => loadStockMovement(dir), 250);
+}
+// Job Card No. filter matches client-side against rows already fetched for
+// the period — no server round-trip needed, unlike Challan (which the
+// server itself filters on). Matches EITHER an E-job (typed as "254" or
+// "E-254") or a Manual Job Card reference (extracted from notes, same
+// pattern Manual Consumption's own search uses).
+let _smJobCardTimer = { in: null, out: null };
+function setMovementJobCard(dir, v) {
+  stockMovementStates[dir].jobCard = String(v || '').trim();
+  stockMovementSel[dir].clear();
+  clearTimeout(_smJobCardTimer[dir]);
+  const state = stockMovementStates[dir];
+  _smJobCardTimer[dir] = setTimeout(() => renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to), 200);
+}
+function txMatchesJobCardSearch(t, qLower) {
+  if (!qLower) return true;
+  if (t.job_id != null && (`e-${t.job_id}`.includes(qLower) || String(t.job_id).includes(qLower))) return true;
+  const mcNo = extractManualJobCardNo(t.notes);
+  if (mcNo && mcNo !== '(no reference)' && mcNo.toLowerCase().includes(qLower)) return true;
+  return false;
 }
 function resetMovementFilters(dir) {
   const state = stockMovementStates[dir];
@@ -13523,11 +13551,13 @@ function renderStockMovement(direction, from, to) {
   // selected paper type (so dropdowns only show options that exist in this
   // subset — no dead "5,000gsm" options).
   refreshMovementFilterOptions(direction);
-  // Apply all three filters (paper type / size / gsm) client-side before totals.
+  // Apply all filters (paper type / size / gsm / job card) client-side before totals.
+  const jobCardL = (state.jobCard || '').toLowerCase();
   const rawTxs = state.rows.filter(t =>
        (!state.paperType || t.paper_type === state.paperType)
     && (!state.size      || (t.item_size || '') === state.size)
     && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+    && txMatchesJobCardSearch(t, jobCardL)
   );
   // Split-issuance grouping: a single Issue Stock click may deduct from
   // 2+ brands at once (same job, same paper group, within-a-second of
@@ -14602,10 +14632,12 @@ function printOffcutConsumption() {
 function stockMovementPrintRows(direction) {
   const state = stockMovementStates[direction];
   const sel = stockMovementSel[direction];
+  const jobCardL = (state.jobCard || '').toLowerCase();
   const filtered = sel && sel.size ? state.rows.filter(t => sel.has(t.id)) : state.rows.filter(t =>
        (!state.paperType || t.paper_type === state.paperType)
     && (!state.size      || (t.item_size || '') === state.size)
     && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+    && txMatchesJobCardSearch(t, jobCardL)
   );
   return collapseSplitIssuances(filtered);
 }
