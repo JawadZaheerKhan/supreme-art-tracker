@@ -3306,25 +3306,66 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
 // Store keeper never sees these deductions in Pending Stock — the offcut
 // is silently deducted here so their queue only shows the FRESH portion
 // they need to physically issue.
-// Idempotent: if particulars.offcut_pre_consumed already exists, skip
-// (won't double-deduct on retry / mistaken re-fire). Returns:
-//   { particulars, fullyIssuedFromOffcut, itemsConsumed }
+// Idempotent: an existing offcut_pre_consumed marker is verified against
+// the latest ledger row for each item. Active rows are reused without a
+// second deduction; reversed rows make the marker stale and are consumed
+// again. Returns:
+//   { particulars, fullyIssuedFromOffcut, itemsConsumed, itemsAccounted }
 // Caller decides whether to flip issuance_status to 'issued' (pure
 // offcut) or leave as 'pending' (mixed / no offcut).
 async function autoConsumeOffcut(sql, job, user) {
   const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
-  if (particulars.offcut_pre_consumed && Array.isArray(particulars.offcut_pre_consumed.items) && particulars.offcut_pre_consumed.items.length) {
-    return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], already: true };
-  }
   const anchorId = job.inventory_item_id;
-  if (!anchorId) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  if (!anchorId) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], itemsAccounted: [] };
   const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${anchorId}`;
   const anchor = anchorRows[0];
-  if (!anchor) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  if (!anchor) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], itemsAccounted: [] };
   const paperType = anchor.paper_type || '';
   const ps = packetSize(paperType);
   const needSheets = jobDeductionSheets({ paperType, particulars });
-  if (needSheets <= 0) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [] };
+  if (needSheets <= 0) return { particulars, fullyIssuedFromOffcut: false, itemsConsumed: [], itemsAccounted: [] };
+  const prior = particulars.offcut_pre_consumed;
+  const activePriorItems = [];
+  if (prior && Array.isArray(prior.items) && prior.items.length) {
+    for (const it of prior.items) {
+      if (!it || !it.item_id || !(it.sheets > 0)) continue;
+      const latest = it.tx_id
+        ? await sql`
+            SELECT t.id, EXISTS(
+              SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
+            ) AS reversed
+            FROM inventory_transactions t
+            WHERE t.id = ${it.tx_id} AND t.job_id = ${job.id} AND t.reason = 'job-auto-offcut'
+            LIMIT 1
+          `
+        : await sql`
+            SELECT t.id, EXISTS(
+              SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id
+            ) AS reversed
+            FROM inventory_transactions t
+            WHERE t.job_id = ${job.id} AND t.item_id = ${it.item_id}
+              AND t.reason = 'job-auto-offcut'
+            ORDER BY t.id DESC
+            LIMIT 1
+          `;
+      if (!latest[0] || latest[0].reversed) continue;
+      activePriorItems.push({ ...it, tx_id: it.tx_id || latest[0].id });
+    }
+    if (activePriorItems.length === prior.items.length) {
+      const priorSheets = activePriorItems.reduce((sum, it) => sum + (parseFloat(it && it.sheets) || 0), 0);
+      particulars.offcut_pre_consumed = { ...prior, items: activePriorItems };
+      return {
+        particulars,
+        fullyIssuedFromOffcut: priorSheets >= needSheets,
+        itemsConsumed: [],
+        itemsAccounted: activePriorItems,
+        already: true,
+      };
+    }
+    // At least one marked deduction was reversed. Keep any still-active
+    // source accounted for, but only re-deduct the reversed source(s).
+    delete particulars.offcut_pre_consumed;
+  }
   const secondary = (particulars.secondary_paper && typeof particulars.secondary_paper === 'object')
     ? particulars.secondary_paper : null;
   const secondaryPackets = secondary ? (parseFloat(secondary.packets) || 0) : 0;
@@ -3333,17 +3374,30 @@ async function autoConsumeOffcut(sql, job, user) {
   // job's ENTIRE non-secondary portion comes from it.
   const primarySheets = Math.max(0, needSheets - secondarySheets);
   const itemsConsumed = [];
-  const totals = { sheets: 0, packets: 0 };
+  const itemsAccounted = [...activePriorItems];
+  const totals = activePriorItems.reduce((acc, it) => {
+    const sheets = parseFloat(it.sheets) || 0;
+    acc.sheets += sheets;
+    acc.packets += ps ? sheets / ps : 0;
+    return acc;
+  }, { sheets: 0, packets: 0 });
+  const reusablePriorKeys = new Set(activePriorItems.map(it => `${it.item_id}:${parseFloat(it.sheets) || 0}`));
   const consumeItem = async (itemId, sheets, note) => {
     if (!itemId || sheets <= 0) return;
-    await applyInventoryChange(sql, {
+    const priorKey = `${itemId}:${sheets}`;
+    if (reusablePriorKeys.has(priorKey)) {
+      reusablePriorKeys.delete(priorKey);
+      return;
+    }
+    const txId = await applyInventoryChange(sql, {
       itemId, change: -sheets,
       reason: 'job-auto-offcut',
       jobId: job.id,
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: auto-consumed ${sheets} sheets from offcut on CTP forward (${note}).`,
       user,
     });
-    itemsConsumed.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0 });
+    itemsConsumed.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0, tx_id: txId });
+    itemsAccounted.push({ item_id: itemId, sheets, packets: ps ? sheets / ps : 0, tx_id: txId });
     totals.sheets += sheets;
     totals.packets += (ps ? sheets / ps : 0);
   };
@@ -3357,9 +3411,9 @@ async function autoConsumeOffcut(sql, job, user) {
       await consumeItem(secItem.id, secondarySheets, 'secondary paper is offcut');
     }
   }
-  if (itemsConsumed.length) {
+  if (itemsAccounted.length) {
     particulars.offcut_pre_consumed = {
-      items: itemsConsumed,
+      items: itemsAccounted,
       total_sheets: totals.sheets,
       total_packets: totals.packets,
       consumed_at: new Date().toISOString(),
@@ -3367,7 +3421,7 @@ async function autoConsumeOffcut(sql, job, user) {
     };
   }
   const fullyIssuedFromOffcut = totals.sheets >= needSheets && needSheets > 0;
-  return { particulars, fullyIssuedFromOffcut, itemsConsumed };
+  return { particulars, fullyIssuedFromOffcut, itemsConsumed, itemsAccounted };
 }
 
 // Reverse a prior autoConsumeOffcut — refund each consumed item back
@@ -3681,9 +3735,12 @@ app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) =
     // offcut, and/or secondary_paper if offcut). Store keeper's Pending
     // Stock only shows the FRESH portion afterwards. Pure-offcut jobs
     // skip Pending Stock entirely — marked 'issued' below.
-    const { particulars: nextParticulars, fullyIssuedFromOffcut, itemsConsumed } =
+    const { particulars: nextParticulars, fullyIssuedFromOffcut, itemsConsumed, itemsAccounted } =
       await autoConsumeOffcut(sql, job, req.user);
-    const issuedItemsPatch = itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
+    if (fullyIssuedFromOffcut && log.length) {
+      log[log.length - 1].notes = `CTP done by ${by} — moved directly to Printing (${itemsConsumed.length ? 'offcut re-issued after reversal' : 'existing offcut issuance still active'})`;
+    }
+    const issuedItemsPatch = (itemsAccounted || itemsConsumed).map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
     const particularsJson = JSON.stringify(nextParticulars);
     const stagesJson      = JSON.stringify(stages);
     const logJson         = JSON.stringify(log);
@@ -7694,9 +7751,10 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         particulars: pAfter,
         fullyIssuedFromOffcut,
         itemsConsumed,
+        itemsAccounted,
       } = await autoConsumeOffcut(sql, { ...job, particulars }, req.user);
       particularsAfterOffcut = pAfter;
-      offcutIssuedPatch = itemsConsumed.map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
+      offcutIssuedPatch = (itemsAccounted || itemsConsumed).map(x => ({ item_id: x.item_id, brand: '', sheets: x.sheets, source: 'offcut' }));
       nextStatus = fullyIssuedFromOffcut ? 'issued' : 'pending';
     }
     const particularsJson = JSON.stringify(particularsAfterOffcut);
