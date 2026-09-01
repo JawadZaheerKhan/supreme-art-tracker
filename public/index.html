@@ -19603,7 +19603,19 @@ function collectParticulars() {
   const secondId  = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
   const secondPkts = parseFloat((document.getElementById('f-packets-2')||{}).value);
   if (useSecond && Number.isFinite(secondId) && Number.isFinite(secondPkts) && secondPkts > 0) {
-    out.secondary_paper = { inventory_item_id: secondId, packets: secondPkts };
+    // Preserve issued_sheets from the prior secondary_paper when the paper
+    // source hasn't changed — this block used to be rebuilt from scratch on
+    // every Save, silently wiping the "already issued" tracking and making
+    // an already-issued 2nd paper reappear as a pending issue request the
+    // next time anyone edited an unrelated field on the job card. Switching
+    // to a genuinely different paper item correctly resets it to fresh.
+    const priorSec = priorParticularsCP.secondary_paper;
+    const sameSecondaryItem = priorSec && priorSec.inventory_item_id === secondId;
+    out.secondary_paper = {
+      inventory_item_id: secondId,
+      packets: secondPkts,
+      ...(sameSecondaryItem && priorSec.issued_sheets != null ? { issued_sheets: priorSec.issued_sheets } : {}),
+    };
   } else {
     // Explicit null so the merge in the row-preservation code path doesn't
     // silently keep an old secondary. (undefined would inherit from prior.)
