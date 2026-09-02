@@ -5185,12 +5185,18 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, link
   log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
     notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
     by: `${by} (${STAGES[stage_index] || '?'})`, time });
-  if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
+  // With no booked P.O. Qty (bookedQty falsy — routine for shade cards,
+  // which never carry one) there's no target to compare against, so any
+  // recorded shipment counts as the whole delivery rather than leaving
+  // the job stuck at "Ready to Deliver" forever waiting to clear a
+  // booked qty of 0.
+  const deliveryComplete = bookedQty ? nextTotal >= bookedQty : nextTotal > 0;
+  if (deliveryComplete && stage_index < 7) {
     // Mark 6 done, move to 7.
     stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
     stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
     stage_index = 7;
-    log.push({ stage: STAGES[7], status: 'done', notes: `All ${bookedQty.toLocaleString()} pcs delivered`, by: `${by} (${STAGES[7]})`, time });
+    log.push({ stage: STAGES[7], status: 'done', notes: bookedQty ? `All ${bookedQty.toLocaleString()} pcs delivered` : `${nextTotal.toLocaleString()} delivered (no booked qty set)`, by: `${by} (${STAGES[7]})`, time });
   }
   return { deliveries, delqty: String(nextTotal), stage_index, stages, log, entry, nextTotal, bookedQty };
 }
