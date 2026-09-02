@@ -5224,6 +5224,22 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, link
   return { deliveries, delqty: String(nextTotal), stage_index, stages, log, entry, nextTotal, bookedQty };
 }
 
+// Read-only peek at the next Delivery Challan number — does NOT claim/
+// increment it, purely so the delivery form can show the PM what number
+// they're about to get before they actually submit. The real, atomic
+// claim still happens in POST /deliveries via nextShadeCardDcNumber();
+// if two shade cards get delivered in the same moment, this peeked
+// number can go stale for whichever one submits second — harmless,
+// since that one just gets re-peeked/assigned the number after it.
+app.get('/api/shade-card-dc/peek', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT next_number FROM shade_card_dc_counter WHERE id = 1`;
+    res.json({ next: rows.length ? rows[0].next_number : 1 });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // CREATE a partial delivery. Input is CARTONS — the only quantity unit
 // used for deliveries in this shop (1 carton == 1 piece per the owner).
 // delqty stays in sync as the running sum of cartons so the tile's

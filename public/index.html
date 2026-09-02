@@ -18049,6 +18049,24 @@ function clientDeliveriesBreakdown(j, clientPreview) {
   </div>`;
 }
 
+// Fills the Challan No. field with the actual upcoming DC number as soon
+// as a shade card's job card opens, so the PM sees it before delivering
+// instead of just a "will be auto-filled" hint. Read-only peek — doesn't
+// claim the number; the real, atomic assignment still happens server-
+// side in POST /deliveries when this field is submitted blank OR (as it
+// normally will be here) already carrying the very number that gets
+// assigned. Only writes in if the field exists (delivery form showing)
+// and is still empty (never overwrite something the PM already typed).
+async function prefillNextShadeCardDc() {
+  const el = document.getElementById('deliv-notes');
+  if (!el || el.value.trim()) return;
+  try {
+    const { next } = await api('GET', '/api/shade-card-dc/peek');
+    if (!el.isConnected || el.value.trim()) return;
+    el.value = `DC-${String(next).padStart(2, '0')}`;
+  } catch (e) { /* silent — field just stays blank, server still auto-assigns on submit */ }
+}
+
 async function recordDelivery(jobId) {
   const cartons = ((document.getElementById('deliv-cartons')||{}).value || '').trim();
   const date    = ((document.getElementById('deliv-date')||{}).value || '').trim();
@@ -20284,6 +20302,7 @@ function openEdit(id, opts) {
   if (typeof updateStockHint2 === 'function') updateStockHint2();
   renderCutPreview();
   initSpecialsEditor();
+  if (j.is_shade_card) prefillNextShadeCardDc();
   // CEO gets the same modal so they can see EVERY spec, but nothing
   // inside it is editable — every input/select/checkbox is locked,
   // and any form-internal button (coating toggles, specials editor,
