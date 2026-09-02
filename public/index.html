@@ -10592,7 +10592,7 @@ function printImports() {
 // q matches job number ("59" / "E-59") or job name.
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '', mode: 'delivered', milOnly: false };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', mode: 'delivered', milOnly: false, shadeOnly: false };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -10664,6 +10664,13 @@ function openJobsReport() {
           <span class="whole-toggle-text">MIL Products only</span>
         </label>
       </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <label class="jr-mil-whole-toggle whole-toggle ${jobsReportState.shadeOnly?'is-on':''}">
+          <input class="jr-mil-toggle-input" type="checkbox" id="jr-shade-only" ${jobsReportState.shadeOnly ? 'checked' : ''} onchange="setJrShadeOnly(this.checked)">
+          <span class="whole-toggle-text">Shade Cards only</span>
+        </label>
+      </div>
     </div>
     <div id="jr-content" style="font-size:12px;"></div>
   `;
@@ -10676,6 +10683,12 @@ function setJrClient(v)  { jobsReportState.client = v;  jobsReportSel.clear(); r
 function setJrMilOnly(v) {
   jobsReportState.milOnly = !!v;
   document.getElementById('jr-mil-only')?.closest('.whole-toggle')?.classList.toggle('is-on', !!v);
+  jobsReportSel.clear();
+  renderJobsReport();
+}
+function setJrShadeOnly(v) {
+  jobsReportState.shadeOnly = !!v;
+  document.getElementById('jr-shade-only')?.closest('.whole-toggle')?.classList.toggle('is-on', !!v);
   jobsReportSel.clear();
   renderJobsReport();
 }
@@ -10775,7 +10788,7 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { client, dfrom, dto, q, mode, milOnly } = jobsReportState;
+  const { client, dfrom, dto, q, mode, milOnly, shadeOnly } = jobsReportState;
   const isCreatedMode = mode === 'created';
   const lastStageIdx = STAGES.length - 1;       // Delivered
   // Search: "59" or "e-59" matches the job number; anything else matches
@@ -10794,6 +10807,7 @@ function buildJobsReportRows() {
     if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
     if (client && j.client !== client) continue;
     if (milOnly && !j.stock_group_name) continue;
+    if (shadeOnly && !j.is_shade_card) continue;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
@@ -10942,6 +10956,7 @@ function buildJobsReportRows() {
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
       linkPartner,
       stockGroupName: j.stock_group_name || null,
+      isShadeCard: !!j.is_shade_card,
     });
   }
   // Merge Linked-Jobs pairs into one combined row — only when BOTH rows
@@ -10989,6 +11004,7 @@ function buildJobsReportRows() {
         linkPartner: null,
         mergedPartnerId: hi.id,
         stockGroupName: (lo.stockGroupName && lo.stockGroupName === hi.stockGroupName) ? lo.stockGroupName : null,
+        isShadeCard: !!(lo.isShadeCard || hi.isShadeCard),
       });
     } else {
       merged.push(r);
@@ -11045,6 +11061,7 @@ function buildJobsReportRows() {
         coatings: dedupePipe(sorted.map(b => b.coatings)),
         linkPartner: null,
         stockGroupName: sorted[0].stockGroupName,
+        isShadeCard: sorted.some(b => b.isShadeCard),
       });
     } else {
       withMilMerge.push(r);
@@ -11131,7 +11148,7 @@ function renderJobsReport() {
     return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);" onclick="openEdit(${r.id})" title="Open this job's card">
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)"></td>
       <td ${td}>${esc(r.idDisplay || 'E-' + r.id)}</td>
-      <td ${td}>${esc(r.name)}</td>
+      <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
       <td style="padding:8px 10px;white-space:nowrap;${r.isLate?'color:#dc2626;font-weight:600;':''}" title="${r.isLate?'Delivered after the deadline':''}">${esc(r.deliveredAt)}</td>
       <td ${td}>${esc(r.client)}</td>
@@ -11141,7 +11158,7 @@ function renderJobsReport() {
       ${milQtyCell}
       <td ${tdR}>${esc(r.poQty)}</td>
       <td ${tdR}>${esc(r.cartonQty)}</td>
-      <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}</td>
+      <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
       <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
       <td ${td}>${esc(r.paper)}</td>
@@ -11215,13 +11232,14 @@ async function exportJobsReport() {
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
     // spreadsheet reader can filter/sort them out without needing a
-    // separate flag column.
-    const deliveredCell = r.isPartial && r.deliveredQty
-      ? `${r.deliveredQty} (PARTIAL)`
-      : r.deliveredQty;
+    // separate flag column. Shade cards get "copies" instead of a bare
+    // number — they're counted in copies, not cartons.
+    let deliveredCell = r.isShadeCard && r.deliveredQty !== '' ? `${r.deliveredQty} copies` : r.deliveredQty;
+    if (r.isPartial && r.deliveredQty) deliveredCell = `${deliveredCell} (PARTIAL)`;
+    const nameCell = r.isShadeCard ? `${r.name} (Shade Card)` : r.name;
     aoa.push([
       r.idDisplay || ('E-' + r.id),
-      r.name,
+      nameCell,
       r.createdAt,
       r.deliveredAt,
       r.client,
@@ -11265,7 +11283,7 @@ function printJobsReport() {
     const deliveredStyle = r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '';
     return `<tr>
     <td ${tdL}>${esc(r.idDisplay || 'E-' + r.id)}</td>
-    <td ${tdL}>${esc(r.name)}</td>
+    <td ${tdL}>${esc(r.name)}${r.isShadeCard ? ' <b>(Shade Card)</b>' : ''}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
     <td ${tdL}>${esc(r.deliveredAt)}</td>
     <td ${tdL}>${esc(r.client)}</td>
@@ -11275,7 +11293,7 @@ function printJobsReport() {
     ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
     <td ${tdR}>${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
-    <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${milMode ? fmt(r.readyQty) : (r.stockGroupName ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage)))}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
