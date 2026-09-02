@@ -14492,7 +14492,7 @@ function printManualConsumption() {
 // ── Offcut Consumption ───────────────────────────────────────
 // Automatic offcut issues to tracked E-jobs. Kept separate from Manual
 // Consumption (offline job cards) and from normal fresh-stock movement.
-const offcutConsumptionState = { period: 'month', from: '', to: '', paperType: '', rows: [], selected: new Set() };
+const offcutConsumptionState = { period: 'month', from: '', to: '', paperType: '', jobCard: '', rows: [], selected: new Set() };
 
 function openOffcutConsumptionPane() {
   const state = offcutConsumptionState;
@@ -14518,6 +14518,10 @@ function openOffcutConsumptionPane() {
         <div><div class="dash-flbl">From</div><input class="filter" type="date" id="oc-from" value="${state.from}" onchange="setOffcutConsumptionCustom()"></div>
         <div><div class="dash-flbl">To</div><input class="filter" type="date" id="oc-to" value="${state.to}" onchange="setOffcutConsumptionCustom()"></div>
       </div>
+      <div>
+        <div class="dash-flbl">Job Card No.</div>
+        <input class="filter" type="text" id="oc-jobcard" value="${esc(state.jobCard || '')}" placeholder="E-254 or manual no." title="Matches an E-job (e.g. E-254 or 254) or a Manual Job Card reference" oninput="setOffcutConsumptionJobCard(this.value)" style="min-width:150px;">
+      </div>
     </div>
     <div id="oc-summary" style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;"></div>
     <div id="oc-content">Loading…</div>`;
@@ -14533,6 +14537,15 @@ function setOffcutConsumptionCustom() {
   offcutConsumptionState.to = document.getElementById('oc-to')?.value || '';
   if (offcutConsumptionState.from && offcutConsumptionState.to) loadOffcutConsumption();
 }
+// Client-side filter against rows already fetched for the period — same
+// matcher Stock In/Out's own Job Card No. search uses (E-job by number,
+// or a Manual Job Card reference extracted from notes).
+let _ocJobCardTimer = null;
+function setOffcutConsumptionJobCard(v) {
+  offcutConsumptionState.jobCard = String(v || '').trim();
+  clearTimeout(_ocJobCardTimer);
+  _ocJobCardTimer = setTimeout(renderOffcutConsumption, 200);
+}
 async function loadOffcutConsumption() {
   const s = offcutConsumptionState;
   const {from,to} = periodToDateRange(s.period, s.from, s.to);
@@ -14547,8 +14560,10 @@ async function loadOffcutConsumption() {
   } catch (e) { const el=document.getElementById('oc-content'); if(el) el.textContent='Error: '+e.message; }
 }
 function offcutConsumptionRows() {
+  const jobCardL = (offcutConsumptionState.jobCard || '').toLowerCase();
   return (offcutConsumptionState.rows || [])
     .filter(t => !offcutConsumptionState.paperType || t.paper_type === offcutConsumptionState.paperType)
+    .filter(t => txMatchesJobCardSearch(t, jobCardL))
     .sort((a,b) => new Date(b.created_at)-new Date(a.created_at));
 }
 function renderOffcutConsumption() {
