@@ -17794,6 +17794,14 @@ function jobForm(j={}, opts) {
 // since there's nothing to ship yet.
 function deliveriesSection(j) {
   if (!j || !j.id) return '';
+  // Shade cards ship without a PO/Batch — they're proofs, not a booked
+  // production order — and are counted in Copies rather than Unit
+  // Cartons. Same underlying delivery record (still stored as `cartons`,
+  // `po_no`, `batch_no`) — this only changes what the delivery form/table
+  // asks for and shows.
+  const isShadeCard = !!j.is_shade_card;
+  const countLabel = isShadeCard ? 'Copies' : 'Unit Cartons';
+  const countUnit  = isShadeCard ? 'copies' : 'unit cartons';
   const list = Array.isArray(j.deliveries) ? j.deliveries : [];
   const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const shipped = totalDeliveredCartons(j);
@@ -17834,43 +17842,43 @@ function deliveriesSection(j) {
         return `<tr>
           <td style="padding:6px 8px;white-space:nowrap;">${esc(dt)}</td>
           <td style="text-align:right;font-weight:600;padding:6px 8px;white-space:nowrap;">${esc(ctns)}</td>
-          <td style="padding:6px 8px;word-break:break-all;" title="${esc(po)}">${esc(po)}</td>
-          <td style="padding:6px 8px;word-break:break-all;" title="${esc(bat)}">${esc(bat)}</td>
+          ${isShadeCard ? '' : `<td style="padding:6px 8px;word-break:break-all;" title="${esc(po)}">${esc(po)}</td>
+          <td style="padding:6px 8px;word-break:break-all;" title="${esc(bat)}">${esc(bat)}</td>`}
           <td style="padding:6px 8px;word-break:break-all;" title="${esc(nt)}">${esc(nt)}${linkedTag}</td>
           <td style="font-size:11px;color:var(--text2);padding:6px 8px;word-break:break-all;" title="${esc(by)}">${esc(by)}</td>
           <td style="text-align:center;padding:6px 4px;">${delBtn}</td>
         </tr>`;
       }).join('')
-    : `<tr><td colspan="7" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
+    : `<tr><td colspan="${isShadeCard ? 5 : 7}" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
 
   const statusPill = isDelivered
     ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">FULLY DELIVERED</span>`
     : list.length
-      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' UNIT CARTONS LEFT' : ''}</span>`
+      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' ' + countUnit.toUpperCase() + ' LEFT' : ''}</span>`
       : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>`;
 
   const summaryLine = booked
-    ? `Booked: <b>${booked.toLocaleString()}</b> unit cartons &middot; Shipped: <b>${shipped.toLocaleString()}</b> unit cartons &middot; Remaining: <b>${remaining.toLocaleString()}</b> unit cartons`
-    : `Shipped: <b>${shipped.toLocaleString()}</b> unit cartons (booked P.O. qty not set)`;
+    ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
+    : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
 
   const addForm = canAddDelivery
-    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:0.7fr 1fr 0.9fr 0.9fr 1fr auto;gap:8px;align-items:end;">
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:${isShadeCard ? '0.7fr 1fr 1fr auto' : '0.7fr 1fr 0.9fr 0.9fr 1fr auto'};gap:8px;align-items:end;">
         <div style="min-width:0;">
-          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Unit Cartons *</label>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${countLabel} *</label>
           <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
           <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <div style="min-width:0;">
+        ${isShadeCard ? '' : `<div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
           <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
           <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
-        </div>
+        </div>`}
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Challan No.</label>
           <input type="text" id="deliv-notes" placeholder="e.g. CH-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
@@ -17895,8 +17903,8 @@ function deliveriesSection(j) {
       <colgroup>
         <col style="width:12%;">
         <col style="width:10%;">
-        <col style="width:15%;">
-        <col style="width:12%;">
+        ${isShadeCard ? '' : `<col style="width:15%;">
+        <col style="width:12%;">`}
         <col style="width:14%;">
         <col style="width:auto;">
         <col style="width:36px;">
@@ -17904,9 +17912,9 @@ function deliveriesSection(j) {
       <thead>
         <tr style="background:#f3f4f6;">
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Date</th>
-          <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Unit Cartons</th>
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>
+          <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">${countLabel}</th>
+          ${isShadeCard ? '' : `<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>`}
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Challan No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border);"></th>
