@@ -17622,12 +17622,12 @@ function jobForm(j={}, opts) {
       <tr>
         <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : localDateISO()))}"></td>
         <td><span class="jc-lbl">Deadline</span><input type="date" id="f-deadline" value="${v(j.deadline)}"></td>
-        <td colspan="2"><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}" placeholder="50000"></td>
+        <td colspan="2"><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}"></td>
         <td colspan="2">
           <span class="jc-lbl">Machine Name</span>
           <select id="f-machine"><option value="">—</option>${(printingMachines && printingMachines.length ? printingMachines : MACHINES).map(m=>`<option ${j.machine===m?'selected':''}>${esc(m)}</option>`).join('')}${j.machine && !((printingMachines && printingMachines.length ? printingMachines : MACHINES).includes(j.machine))?`<option selected>${esc(j.machine)}</option>`:''}</select>
         </td>
-        <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" placeholder="4" oninput="jobCartonQtySync()"></td>
+        <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" oninput="jobCartonQtySync()"></td>
       </tr>
       <tr>
         <td colspan="5"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g"></td>
@@ -17699,7 +17699,7 @@ function jobForm(j={}, opts) {
           return `
         <td colspan="1"><span class="jc-lbl">Sheets Qty</span>
           <div id="f-sheets-wrap" data-mode="${packetsMode}" data-lock-total="${totalSh || 0}" style="display:flex;gap:2px;align-items:center;">
-            <input type="text" id="f-sheets" value="${esc(String(sheetsPrimVal))}" placeholder="12500" oninput="jobSheetsPrimaryEdited(); jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="flex:1 1 0;min-width:0;${hasSecond ? 'text-align:center;' : ''}">
+            <input type="text" id="f-sheets" value="${esc(String(sheetsPrimVal))}" oninput="jobSheetsPrimaryEdited(); jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="flex:1 1 0;min-width:0;${hasSecond ? 'text-align:center;' : ''}">
             <span id="sheets-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:2px;align-items:center;flex:1 1 0;min-width:0;">
               <span style="font-weight:700;color:var(--text2);flex:0 0 auto;">+</span>
               <input type="text" id="f-sheets-2" value="${esc(hasSecond ? String(secSh || '') : '')}" placeholder="0" oninput="jobSecondarySheetsEdited();" style="flex:1 1 0;min-width:0;text-align:center;">
@@ -17781,7 +17781,7 @@ function jobForm(j={}, opts) {
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
         <td colspan="2"><span class="jc-lbl">Batch No.</span><input type="text" id="f-bno" value="${v(j.bno)}" placeholder="Batch"></td>
         <td colspan="1"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}" placeholder="100">
+        <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}">
         </td>
       </tr>
       <tr>
@@ -17825,6 +17825,12 @@ function deliveriesSection(j) {
   const shipped = totalDeliveredCartons(j);
   const remaining = booked ? Math.max(0, booked - shipped) : 0;
   const isDelivered = booked && shipped >= booked;
+  // Status-pill only: with no booked P.O. Qty there's no target to be
+  // "partial" against, so any recorded shipment reads as delivered
+  // outright instead of a misleading PARTIAL-against-zero badge. Doesn't
+  // affect isDelivered/canAddDelivery below — the form should still stay
+  // available to log more shipments later even once this shows green.
+  const showAsDelivered = isDelivered || (!booked && shipped > 0);
   const stageIdx = j.stage_index || 0;
   // Delivery is allowed from Ready to Deliver onward, and also from
   // Pasting when the operator has recorded some pasted cartons but
@@ -17869,8 +17875,8 @@ function deliveriesSection(j) {
       }).join('')
     : `<tr><td colspan="${isShadeCard ? 5 : 7}" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
 
-  const statusPill = isDelivered
-    ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">FULLY DELIVERED</span>`
+  const statusPill = showAsDelivered
+    ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">${isDelivered ? 'FULLY DELIVERED' : 'DELIVERED'}</span>`
     : list.length
       ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' ' + countUnit.toUpperCase() + ' LEFT' : ''}</span>`
       : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>`;
