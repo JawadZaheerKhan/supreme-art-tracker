@@ -244,10 +244,11 @@ function getDb() {
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
 // Bumped for inventory_transactions.paired_tx_id, the super_admin role
-// migration, AND inventory_transactions.deleted_at/deleted_by (Manual
-// Consumption archive) — all three landed on separate branches and need
-// to run on any DB still stamped with an earlier predecessor version.
-const SCHEMA_VERSION = 'v2026-09-10-manager-pin';
+// migration, inventory_transactions.deleted_at/deleted_by (Manual
+// Consumption archive), AND shade_card_dc_counter (auto-numbered Delivery
+// Challans on shade-card deliveries) — all landed on separate branches
+// and need to run on any DB still stamped with an earlier version.
+const SCHEMA_VERSION = 'v2026-09-11-shade-dc';
 
 async function initDb() {
   try {
@@ -258,6 +259,16 @@ async function initDb() {
     await sql`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)`;
     const cur = await sql`SELECT value FROM schema_meta WHERE key = 'schema_version'`;
     if (cur.length && cur[0].value === SCHEMA_VERSION) return;
+    // Single-row counter for shade-card Delivery Challan numbers
+    // (DC-01, DC-02, …) — see nextShadeCardDcNumber(). Seeded to start
+    // the sequence at DC-01 on first use.
+    await sql`
+      CREATE TABLE IF NOT EXISTS shade_card_dc_counter (
+        id          INTEGER PRIMARY KEY,
+        next_number INTEGER NOT NULL DEFAULT 1
+      )
+    `;
+    await sql`INSERT INTO shade_card_dc_counter (id, next_number) VALUES (1, 1) ON CONFLICT (id) DO NOTHING`;
     await sql`
       CREATE TABLE IF NOT EXISTS jobs (
         id          SERIAL PRIMARY KEY,
@@ -5538,6 +5549,20 @@ function deliveryEligibilityError(job) {
   return `Job E-${job.id} is at stage "${STAGES[curStage]||'?'}" with no cartons ready yet — record a Ready to Delivery Qty (or pasted cartons) before recording a delivery.`;
 }
 
+// Atomically claims the next Delivery Challan number for a shade-card
+// delivery. Single UPDATE (Postgres row-locks it), so two shade cards
+// delivered at the same moment can never collide on the same number —
+// the whole point, since the store keeper copies this same number by
+// hand into the physical DC register right after.
+async function nextShadeCardDcNumber(sql) {
+  const rows = await sql`
+    UPDATE shade_card_dc_counter SET next_number = next_number + 1
+     WHERE id = 1
+     RETURNING next_number - 1 AS assigned
+  `;
+  return rows[0].assigned;
+}
+
 // Builds the { deliveries, delqty, stage_index, stages, log } fields to
 // persist for one delivery entry on one job — shared by the single-job
 // delivery endpoint and the Linked-Jobs joint delivery endpoint so the
@@ -5595,7 +5620,7 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     const id = parseInt(req.params.id, 10);
     const cartons = String(req.body.cartons ?? '').trim();
     const date    = String(req.body.date    ?? '').trim() || businessDateISO();
-    const notes   = String(req.body.notes   ?? '').trim() || null;
+    let notes     = String(req.body.notes   ?? '').trim() || null;
     const poNo    = String(req.body.po_no    ?? '').trim() || null;
     const batchNo = String(req.body.batch_no ?? '').trim() || null;
     const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
@@ -5607,6 +5632,15 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     const job = rows[0];
     const eligErr = deliveryEligibilityError(job);
     if (eligErr) return res.status(400).json({ error: eligErr });
+    // Shade cards don't get a challan from a customer PO — they ship
+    // against an internally-numbered Delivery Challan (DC-01, DC-02, …)
+    // that the store also writes into the physical DC register by hand.
+    // Auto-assigned only when the PM left Challan No. blank, so a
+    // deliberately-typed reference is never overwritten.
+    if (job.is_shade_card && !notes) {
+      const n = await nextShadeCardDcNumber(sql);
+      notes = `DC-${String(n).padStart(2, '0')}`;
+    }
     // No cap against booked qty — the shop routinely ships slightly more
     // or less than the P.O. asked for (yield, over-run, customer top-up
     // request). Recording reality is the priority; the tile just shows
