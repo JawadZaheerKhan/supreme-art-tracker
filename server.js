@@ -5885,8 +5885,13 @@ app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => 
     let log = Array.isArray(job.log) ? [...job.log] : [];
     // If a corrected removal drops the running total below the booked qty
     // AND the job was Delivered, walk it back to Ready to Deliver so the
-    // remaining balance shows in the queue again.
-    if (stage_index === 7 && bookedQty && totalCartons < bookedQty) {
+    // remaining balance shows in the queue again. With no booked qty set
+    // (bookedQty falsy — routine for shade cards, which never carry one)
+    // there's no target to compare against, so instead revert whenever
+    // nothing is left delivered at all — mirrors how such a job was
+    // advanced to Delivered in the first place (see computeDeliveryUpdate).
+    const shouldRevert = bookedQty ? totalCartons < bookedQty : totalCartons <= 0;
+    if (stage_index === 7 && shouldRevert) {
       stages[7] = { ...(stages[7] || {}), status: 'active' };
       stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
       delete stages[7];
