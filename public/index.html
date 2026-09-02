@@ -14346,14 +14346,34 @@ function renderManualConsumption() {
   if (headCheck) headCheck.indeterminate = true;
 }
 
+// Selection-only changes update just the affected checkboxes + the Delete
+// Selected button — never a full renderManualConsumption() re-render.
+// Replacing #mc-content's innerHTML while a just-clicked checkbox still
+// had focus destroyed that element mid-click, and the browser jumped
+// scroll to compensate for the lost focus target. Keeping the existing
+// DOM in place avoids that entirely.
+function syncManualConsumptionSelectionUI() {
+  const { rows } = computeManualConsumptionRows();
+  const visibleIds = rows.flatMap(r => r.txIds || []);
+  const allSelected = visibleIds.length > 0 && visibleIds.every(id => manualConsumptionState.selected.has(id));
+  const someSelected = visibleIds.some(id => manualConsumptionState.selected.has(id));
+  const headCheck = document.querySelector('#mc-content thead input[type="checkbox"]');
+  if (headCheck) { headCheck.checked = allSelected; headCheck.indeterminate = someSelected && !allSelected; }
+  const deleteSelectedBtn = document.getElementById('mc-delete-selected');
+  if (deleteSelectedBtn) {
+    deleteSelectedBtn.style.display = manualConsumptionState.selected.size ? '' : 'none';
+    deleteSelectedBtn.textContent = `Delete Selected (${manualConsumptionState.selected.size})`;
+  }
+}
 function toggleManualConsumptionRow(ids, checked) {
   for (const id of ids || []) checked ? manualConsumptionState.selected.add(id) : manualConsumptionState.selected.delete(id);
-  renderManualConsumption();
+  syncManualConsumptionSelectionUI();
 }
 function toggleAllManualConsumption(checked) {
   const { rows } = computeManualConsumptionRows();
   rows.flatMap(r => r.txIds || []).forEach(id => checked ? manualConsumptionState.selected.add(id) : manualConsumptionState.selected.delete(id));
-  renderManualConsumption();
+  document.querySelectorAll('#mc-content tbody input[type="checkbox"]').forEach(cb => { cb.checked = checked; });
+  syncManualConsumptionSelectionUI();
 }
 async function deleteManualConsumptionRows(ids, skipConfirm = false) {
   const cleanIds = [...new Set((ids || []).filter(Number.isFinite))];
