@@ -5515,11 +5515,6 @@ function sumDeliveryCartons(arr) {
   }, 0);
 }
 
-// Delivery eligibility — same rule everywhere a delivery can be recorded
-// (single-job endpoint AND Linked-Jobs joint delivery): from Ready to
-// Deliver (6) onward, or from Pasting (5) once the operator has recorded
-// some pasted cartons (partial-ready). Returns an error string, or null
-// when eligible.
 // Sums one particulars row's qty — entries[] (station submissions) if
 // present, else the admin-edited pipe-joined quantity string. Mirrors
 // the client's readyCartonsTotal()/pastedCartonsTotal() parsing exactly.
