@@ -5137,25 +5137,34 @@ function sumDeliveryCartons(arr) {
 // Deliver (6) onward, or from Pasting (5) once the operator has recorded
 // some pasted cartons (partial-ready). Returns an error string, or null
 // when eligible.
+// Sums one particulars row's qty — entries[] (station submissions) if
+// present, else the admin-edited pipe-joined quantity string. Mirrors
+// the client's readyCartonsTotal()/pastedCartonsTotal() parsing exactly.
+function readyQtyFromParticularsRow(row) {
+  if (!row) return 0;
+  const fromEntries = Array.isArray(row.entries)
+    ? row.entries.reduce((a, e) => a + (parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, '')) || 0), 0)
+    : 0;
+  if (fromEntries > 0) return fromEntries;
+  return String(row.quantity || '').split('|').reduce((a, s) => a + (parseFloat(String(s).replace(/[^0-9.\-]/g, '')) || 0), 0);
+}
+// Delivery eligibility — same rule everywhere a delivery can be recorded
+// (single-job endpoint, FIFO group delivery, AND Linked-Jobs joint
+// delivery): from Ready to Deliver (6) onward, or earlier once QC has
+// signed off some Ready to Delivery Qty — that can land before the job
+// formally reaches Pasting, e.g. a batch pulled out and QC'd early while
+// the rest of the job is still at Print. Falls back to Pasting's own
+// running total if QC hasn't signed off anything yet. Mirrors the
+// client's isPartialReady()/earlyReadyTotal(). Returns an error string,
+// or null when eligible.
 function deliveryEligibilityError(job) {
   const curStage = job.stage_index || 0;
-  if (curStage < 5) {
-    return `Job E-${job.id} is at stage "${STAGES[curStage]||'?'}" — reach "Ready to Deliver" before recording a delivery.`;
-  }
-  if (curStage === 5) {
-    const pastedRow = (job.particulars && job.particulars.pasted_cartons_qty) || null;
-    const pastedFromEntries = pastedRow && Array.isArray(pastedRow.entries)
-      ? pastedRow.entries.reduce((a, e) => a + (parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, '')) || 0), 0)
-      : 0;
-    const pastedFromQty = pastedRow
-      ? String(pastedRow.quantity || '').split('|').reduce((a, s) => a + (parseFloat(String(s).replace(/[^0-9.\-]/g, '')) || 0), 0)
-      : 0;
-    const pastedReady = pastedFromEntries || pastedFromQty;
-    if (pastedReady <= 0) {
-      return `Job E-${job.id} is at Pasting with no cartons recorded — record some pasted cartons on the station first.`;
-    }
-  }
-  return null;
+  if (curStage >= 6) return null;
+  const parts = job.particulars || {};
+  const readyQty = readyQtyFromParticularsRow(parts.delivered_cartons_qty)
+    || readyQtyFromParticularsRow(parts.pasted_cartons_qty);
+  if (readyQty > 0) return null;
+  return `Job E-${job.id} is at stage "${STAGES[curStage]||'?'}" with no cartons ready yet — record a Ready to Delivery Qty (or pasted cartons) before recording a delivery.`;
 }
 
 // Atomically claims the next Delivery Challan number for a shade-card
