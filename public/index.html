@@ -3554,11 +3554,21 @@ function pastedCartonsTotal(j) {
   }
   return 0;
 }
+// Ready qty for a job that hasn't formally reached the Ready/Delivered
+// stage yet. QC can sign off "Ready to Delivery Qty" (readyCartonsTotal)
+// on a batch before the job's stage_index has caught up to Pasting —
+// e.g. a rush portion QC'd and set aside while the rest of the job is
+// still mid-production. That confirmed QC figure is the authoritative
+// one whenever it exists; Pasting's own running total is only a proxy
+// for "ready" before QC has signed off on anything.
+function earlyReadyTotal(j) {
+  return readyCartonsTotal(j) || pastedCartonsTotal(j);
+}
 function isPartialReady(j) {
   if (!j) return false;
   const stage = j.stage_index || 0;
   if (stage >= 6) return false; // Already at Ready or later
-  return pastedCartonsTotal(j) > 0;
+  return earlyReadyTotal(j) > 0;
 }
 function readyCartonsTotal(j) {
   if (!j) return 0;
@@ -3627,14 +3637,14 @@ function linkedJobBadgeHtml(j, clientPreview) {
 // Any zero bucket is omitted. Returns segmented HTML for the top badge.
 function partialSegmentsHtml(j, booked, shipped) {
   // "Ready" is whatever finished stock is sitting on the shelf but hasn't
-  // shipped yet. When the job is at Ready/Delivered stage, that comes from
-  // delivered_cartons_qty; when it's still at Pasting (partial-ready), it
-  // comes from pasted_cartons_qty. Subtract shipped so a full-delivery
-  // doesn't double-count.
+  // shipped yet. QC's confirmed delivered_cartons_qty wins whenever it's
+  // set — including before the job has formally reached Pasting/Ready
+  // (a batch can be QC'd and set aside early while the rest of the job
+  // is still mid-production) — falling back to Pasting's own running
+  // total (pasted_cartons_qty) only if QC hasn't signed off yet.
+  // Subtract shipped so a full delivery doesn't double-count.
   const stage = j && j.stage_index || 0;
-  let readyTotal = 0;
-  if (stage >= 6) readyTotal = readyCartonsTotal(j);
-  else if (isPartialReady(j)) readyTotal = pastedCartonsTotal(j);
+  const readyTotal = stage >= 6 ? readyCartonsTotal(j) : earlyReadyTotal(j);
   const ready = Math.max(0, readyTotal - shipped);
   // In-process = cartons still being produced.
   //   Once Pasting forwards the job to Ready (stage >= 6), the operator
@@ -4873,7 +4883,7 @@ function renderJobRowCompact(j, opts) {
     // the books (partial delivery takes precedence).
     const partialReady = isPartialReady(j) && !partialDelv;
     const partialReadyBadge = partialReady
-      ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${pastedCartonsTotal(j).toLocaleString()}</span>`
+      ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${earlyReadyTotal(j).toLocaleString()}</span>`
       : '';
     const readyTotalCL = si === 6 ? readyCartonsTotal(j) : 0;
     const readyLabelCL = readyTotalCL > 0
@@ -5182,7 +5192,7 @@ function renderJobCard(j, opts) {
   // is on the books (partial delivery takes precedence).
   const partialReady = isPartialReady(j) && !partialDelv;
   const partialReadyBadge = partialReady
-    ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${pastedCartonsTotal(j).toLocaleString()}</span>`
+    ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${earlyReadyTotal(j).toLocaleString()}</span>`
     : '';
 
   // Fully-delivered badge carries the shipped qty too, so at a glance
@@ -18336,15 +18346,17 @@ function groupStats(groupJobs) {
       // already delivered or scrap (not in-process).
       ready += Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j));
     } else if (!done && !isNewJob(j) && j.issuance_status !== 'pending' && si >= 1 && si <= 5) {
-      // Still in production. If Pasting has already saved some cartons
-      // (partial-ready) but hasn't advanced to Ready yet, those pasted
-      // cartons are the "ready" segment and the rest is in-process.
-      // Without partial-ready, the whole booked qty is in-process.
+      // Still in production. QC can sign off Ready to Delivery Qty (or,
+      // failing that, Pasting can save some cartons) before the job has
+      // formally advanced to Ready — those are the "ready" segment and
+      // the rest is in-process. Without either, the whole booked qty is
+      // in-process. Not restricted to si===5 (Pasting) specifically —
+      // QC's figure can land earlier, same as isPartialReady checks.
       const booked = parseFloat(String(j.cartonqty || '').replace(/[^0-9.]/g, '')) || 0;
-      if (si === 5 && isPartialReady(j)) {
-        const pasted = pastedCartonsTotal(j);
-        ready     += Math.max(0, pasted - totalDeliveredCartons(j));
-        inProcess += Math.max(0, booked - pasted);
+      if (isPartialReady(j)) {
+        const readyQty = earlyReadyTotal(j);
+        ready     += Math.max(0, readyQty - totalDeliveredCartons(j));
+        inProcess += Math.max(0, booked - readyQty);
       } else {
         inProcess += booked;
       }
