@@ -23049,6 +23049,37 @@ const STATION_STAGE_FIELDS = {
   ],
 };
 
+// Maps a production stage index to the particulars key holding how much
+// qty has cleared that stage — mirrors STAGE_QTY_FIELD in server.js
+// exactly. Stage 0 (CTP) is deliberately absent: plate-making is
+// all-or-nothing, there's no partial qty to peek on.
+const STAGE_QTY_FIELD = {
+  1: 'printed_sheets_qty',
+  2: 'coating_sheets_qty',
+  3: 'die_cutting_sheets',
+  4: 'sorted_cartons_qty',
+  5: 'pasted_cartons_qty',
+};
+// Sums one stage's recorded qty for a job — entries[] (station
+// submissions) if present, else the admin-edited pipe-joined quantity
+// string. Same parsing pattern as pastedCartonsTotal()/readyCartonsTotal().
+function stageDoneQty(j, stageIdx) {
+  const key = STAGE_QTY_FIELD[stageIdx];
+  if (!key || !j) return 0;
+  const row = j.particulars && j.particulars[key];
+  if (!row) return 0;
+  if (Array.isArray(row.entries) && row.entries.length) {
+    return row.entries.reduce((a, e) => {
+      const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+      return a + (Number.isFinite(n) ? n : 0);
+    }, 0);
+  }
+  return String(row.quantity || '').split('|').reduce((a, s) => {
+    const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
+
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
 let stationPerson   = null;   // picked person from stationOperator.persons — { name, name_ur }
 let stationPersonPickView = 'own'; // 'own' = machine's own roster, 'custom' = roster from all machines
@@ -23351,13 +23382,24 @@ function stationQueueHtml() {
   const stIdx = stationOperator.stage_index;
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   const myFinishes = stIdx === 2 ? allowedFinishesForOperator(stationOperator) : null;
-  // Jobs currently sitting at this operator's stage, ready to work.
-  // At Coatings, an operator only sees jobs that have at least one pending
-  // coating they're qualified for (Coatings role → wet finishes;
-  // Embellishments role → foil/emboss).
-  let queue = jobs.filter(j =>
-    (j.stage_index || 0) === stIdx && !isDone(j) && !isBlocked(j) && !isNewJob(j)
-  );
+  // Jobs currently sitting at this operator's stage, ready to work — PLUS
+  // jobs still officially sitting at an earlier stage once that earlier
+  // stage already has some qty recorded (checked against whichever stage
+  // sits immediately before this queue's own — see stageDoneQty()). That
+  // lets each stage reveal ready work to the next one right away instead
+  // of waiting for someone to formally advance the job: once Die Cutting
+  // has logged some sheets, Sort already sees the job; once Sort has
+  // logged some, Pasting sees it too, and so on — same idea as Pasting's
+  // own partial-ready qty already revealing early to Ready to Deliver,
+  // just generalized to every stage. The server enforces the identical
+  // rule (see the peek block in /api/jobs/:id/station-update) so this is
+  // purely what's shown here, never a way to bypass real scope.
+  let queue = jobs.filter(j => {
+    if (isDone(j) || isBlocked(j) || isNewJob(j)) return false;
+    const si = j.stage_index || 0;
+    if (si === stIdx) return true;
+    return si < stIdx && stageDoneQty(j, stIdx - 1) > 0;
+  });
   if (stIdx === 2 && myFinishes && myFinishes.size) {
     // Show a job only while it has a PENDING finish this machine can do.
     // Once the machine records its coating, that finish drops out of
@@ -23395,6 +23437,14 @@ function stationQueueHtml() {
       : '';
     const pending = isPendingIssuance(j);
     const pendingBadge = pending ? `<span class="sj-pending-badge">&#8987; Pending Stock</span>` : '';
+    // Peeked-forward job — officially still at an earlier stage, showing
+    // here early because that earlier stage already has some qty done.
+    // Without this, a job with nothing yet entered at MY stage would look
+    // like a mistake sitting in my queue.
+    const jSi = j.stage_index || 0;
+    const peekBadge = jSi < stIdx
+      ? `<span class="sj-pending-badge" title="Officially still at ${esc(STAGES[jSi] || 'an earlier stage')} — showing early because it already has some qty done there">&#8618; from ${esc(STAGES[jSi] || 'earlier')}</span>`
+      : '';
     // At Coatings, show the pending coatings the OPERATOR can do (in solid
     // colour) plus any other pending coatings that belong to the other
     // section (dimmed) — so the floor knows the full picture.
@@ -23411,7 +23461,7 @@ function stationQueueHtml() {
     <button class="station-job${pending ? ' is-pending' : ''}" onclick="stationOpenJob(${j.id})">
       <div class="sj-id">#${j.id}</div>
       <div class="sj-main">
-        <div class="sj-name">${esc(j.name)} ${pendingBadge}${noteBadge}</div>
+        <div class="sj-name">${esc(j.name)} ${pendingBadge}${peekBadge}${noteBadge}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
         ${finishBadges ? `<div class="sj-finishes" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${finishBadges}</div>` : ''}
       </div>

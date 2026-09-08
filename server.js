@@ -7581,9 +7581,31 @@ app.patch('/api/jobs/:id/stage', requireJobsWriter, async (req, res) => {
   }
 });
 
+// Maps a production stage index to the particulars key that holds how
+// much qty has cleared that stage. Stage 0 (CTP) is deliberately absent —
+// plate-making is all-or-nothing, there's no partial qty to peek on.
+const STAGE_QTY_FIELD = {
+  1: 'printed_sheets_qty',
+  2: 'coating_sheets_qty',
+  3: 'die_cutting_sheets',
+  4: 'sorted_cartons_qty',
+  5: 'pasted_cartons_qty',
+};
+// Sums one stage's recorded qty — entries[] (station submissions) if
+// present, else the admin-edited pipe-joined quantity string. Mirrors
+// readyQtyFromParticularsRow() above and the client's stageDoneQty().
+function stageDoneQtyServer(job, stageIdx) {
+  const key = STAGE_QTY_FIELD[stageIdx];
+  if (!key) return 0;
+  const row = job.particulars && job.particulars[key];
+  return readyQtyFromParticularsRow(row);
+}
+
 // Station update — a shop-floor operator advances a job and/or records that
 // stage's production numbers, identified by a 4-digit PIN. PIN is verified
-// server-side; the operator must be assigned to the job's current stage.
+// server-side; the operator must be assigned to the job's current stage —
+// or, per the peek rule below, to the stage right after wherever the job
+// truly sits, once that stage already has some qty recorded.
 app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) => {
   try {
     // CEO can enter the terminal to observe, but every write action is
@@ -7655,18 +7677,36 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     if (job.issuance_status === 'pending') {
       return res.status(400).json({ error: 'Stock must be issued before this job can be updated.' });
     }
-    const curStage = job.stage_index || 0;
+    const dbStage = job.stage_index || 0;
     // CTP-queue jobs are the exception to the "must be issued" rule above:
     // CTP work happens BEFORE paper is ordered. The CTP operator (stage 0)
     // is the only station allowed to act on them; every other stage still
     // needs stock to be issued before anything can be recorded.
-    if (job.issuance_status === 'ctp' && curStage !== 0) {
+    if (job.issuance_status === 'ctp' && dbStage !== 0) {
       return res.status(400).json({ error: 'This job is still in the CTP queue — plates must be finished first.' });
     }
 
-    // 3) Scope: the operator may only act on jobs at one of their assigned stages.
-    if (!opStages.includes(curStage)) {
-      return res.status(400).json({ error: "This job isn't at your station right now." });
+    // 3) Scope: the operator may act on a job sitting exactly at one of
+    // their assigned stages (the normal case) — OR, new, on a job that
+    // hasn't officially reached their stage yet, as long as the stage
+    // right before theirs already has some qty recorded. That lets each
+    // stage reveal ready work to the next one immediately (a Sort machine
+    // can start once Die Cutting has logged some sheets, a Pasting machine
+    // once Sort has, and so on), the same way Pasting's own partial-ready
+    // qty already reveals early to Ready to Deliver — just generalized to
+    // every stage instead of only the last one. dbStage is the job's true,
+    // un-advanced position; curStage is where THIS operator's work is
+    // actually happening (identical to dbStage outside of a peek).
+    let curStage = dbStage;
+    if (!opStages.includes(dbStage)) {
+      const peekCandidates = opStages
+        .filter(s => s > dbStage && stageDoneQtyServer(job, s - 1) > 0)
+        .sort((a, b) => a - b);
+      if (peekCandidates.length) {
+        curStage = peekCandidates[0];
+      } else {
+        return res.status(400).json({ error: "This job isn't at your station right now." });
+      }
     }
 
     // 4) Merge the stage's number fields into particulars. Two payload
@@ -7788,7 +7828,11 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // regardless of where the code runs (Vercel UTC vs browser PKT).
     const nowIso = new Date().toISOString();
 
-    let stage_index = curStage;
+    // Starts from dbStage (not curStage) so a plain "save numbers, stay
+    // here" action on a peeked-forward job never silently moves the job's
+    // official position — it only actually moves below, inside the
+    // advance branch, once this operator explicitly confirms it should.
+    let stage_index = dbStage;
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
     let log = Array.isArray(job.log) ? [...job.log] : [];
     let coatings_done = Array.isArray(job.coatings_done) ? [...job.coatings_done] : [];
@@ -7884,21 +7928,34 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         }
         target = next;
       }
-      const skipped = Math.max(0, target - curStage - 1); // intermediate stages we're flying past
+      const skipped = Math.max(0, target - dbStage - 1); // intermediate stages we're flying past
       const finishing = curStage === STAGES.length - 1;
       stages[curStage] = { ...(stages[curStage] || {}), status: target === curStage ? (stages[curStage]?.status || 'active') : 'done', by, time, at: nowIso };
-      if (target !== curStage && !finishing) {
+      // The OR clause catches a peeked operator who clicked "Done" but
+      // target lands right back on curStage (e.g. Coatings still has
+      // another finish pending for a different machine) — dbStage still
+      // needs to catch up to curStage even though nothing moves past it.
+      if ((target !== curStage || curStage !== dbStage) && !finishing) {
         // Mark every skipped intermediate stage as done with an audit note
-        // so the pipeline UI shows them passed, not blank.
-        for (let i = curStage + 1; i < target; i++) {
-          stages[i] = { ...(stages[i] || {}), status: 'done', by, time, at: nowIso, notes: `Skipped — job went from ${STAGES[curStage]} directly to ${STAGES[target]}` };
+        // so the pipeline UI shows them passed, not blank. Starts from
+        // dbStage (the job's true prior position, which may sit behind
+        // curStage when this operator peeked in) rather than curStage, so
+        // a multi-stage peek backfills every stage in between — curStage
+        // itself is skipped here since it's already stamped accurately
+        // (with this operator's own by/time) just above.
+        for (let i = dbStage + 1; i < target; i++) {
+          if (i === curStage) continue;
+          stages[i] = { ...(stages[i] || {}), status: 'done', by, time, at: nowIso, notes: `Skipped — job went from ${STAGES[dbStage]} directly to ${STAGES[target]}` };
+        }
+        if (curStage !== dbStage) {
+          stages[dbStage] = { ...(stages[dbStage] || {}), status: 'done', by, time, at: nowIso };
         }
         const status = target === STAGES.length - 1 ? 'done' : 'active';
         stages[target] = { status, notes: '', by, time, at: nowIso };
         for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
         stage_index = target;
         const skipNote = skipped > 0 ? ` (skipped ${skipped} stage${skipped > 1 ? 's' : ''})` : '';
-        log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[curStage]} by ${operator.name}${skipNote}`, by, time });
+        log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[dbStage]} by ${operator.name}${skipNote}`, by, time });
       } else if (finishing) {
         log.push({ stage: STAGES[curStage], status: 'done', notes: `Completed by ${operator.name}`, by, time });
       }
@@ -7997,7 +8054,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
          RETURNING *
       `;
     }
-    const skippedCount = Math.max(0, stage_index - curStage - 1);
+    const skippedCount = Math.max(0, stage_index - dbStage - 1);
     await logAudit(sql, req, {
       action: 'job.station',
       entityType: 'job',
