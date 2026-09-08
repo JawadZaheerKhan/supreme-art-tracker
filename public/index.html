@@ -982,8 +982,25 @@
     #tabs-wrap.flow-connected > .tab { transition:none !important; animation:none !important; }
   }
   .search-wrap { flex: 1; min-width: 160px; position: relative; }
-  .search-wrap input { width: 100%; padding: 7px 30px 7px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); }
-  .search-icon { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--text3); font-size: 13px; pointer-events: none; line-height: 1; }
+  /* A plain white box on the app's white/cream backgrounds was nearly
+     invisible — no visual cue that these are search fields at all until
+     you click in. A soft transparent red wash (on-brand, matches the
+     search icon + the rest of the red accent language) plus a visible
+     red-tinted border fixes that everywhere this markup is reused,
+     without darkening the placeholder/typed text underneath. */
+  .search-wrap input {
+    width: 100%; padding: 7px 30px 7px 12px; font-size: 13px; border-radius: var(--radius-sm);
+    color: var(--text); font-family: var(--font);
+    border: 1px solid rgba(163,45,45,0.32);
+    background: linear-gradient(135deg, rgba(163,45,45,0.05), rgba(163,45,45,0.14));
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .search-wrap input:focus {
+    outline: none; border-color: var(--brand);
+    background: linear-gradient(135deg, rgba(163,45,45,0.08), rgba(163,45,45,0.18));
+  }
+  .search-wrap input::placeholder { color: var(--text2); }
+  .search-icon { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--brand); font-size: 13px; pointer-events: none; line-height: 1; opacity: 0.75; }
   select.filter { padding: 7px 32px 7px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); min-width: 160px; }
   #date-filter { min-width: 170px; margin-left: 0; }
   #date-custom { margin-left: 8px; }
@@ -9235,7 +9252,7 @@ function printStockReport() {
 // for opening balance, then IN/OUT/balance buckets across the chosen range
 // (monthly OR weekly), then totals (consumption, current stock, weight) and
 // projections (stock required next period, total imports).
-let stockSummaryState = { paperType: 'bleach board', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+let stockSummaryState = { paperType: 'bleach board', search: '', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
 
 // Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
 // {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
@@ -9305,7 +9322,7 @@ function buildSummaryBuckets(from, to, granularity) {
 //   both     — one row per (brand, supplier) combination — both columns visible
 //   ignore   — collapse to paper/size/gsm/fresh-offcut only, NO brand/supplier columns
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
-let invReportState = { groupBy: 'brand', paperType: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
+let invReportState = { groupBy: 'ignore', paperType: '', search: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
@@ -9328,6 +9345,13 @@ function openInventoryReport() {
           <option value="both"${invReportState.groupBy==='both'?' selected':''}>By both</option>
           <option value="ignore"${(invReportState.groupBy==='ignore'||invReportState.groupBy==='consolidated')?' selected':''}>Ignore both</option>
         </select>
+      </div>
+      <div style="min-width:220px;">
+        <div class="dash-flbl">Search</div>
+        <div class="search-wrap">
+          <input type="text" id="ir-search" value="${esc(invReportState.search || '')}" placeholder="Paper type, size, gsm, brand…" oninput="setIRSearch(this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
       </div>
       <div>
         <div class="dash-flbl">Paper Type</div>
@@ -9388,6 +9412,12 @@ async function loadIRPendingImports() {
 }
 function setIRGroup(v)           { invReportState.groupBy = v;        renderInventoryReport(); }
 function setIRPaperType(v)       { invReportState.paperType = v;      renderInventoryReport(); }
+let _irSearchTimer = null;
+function setIRSearch(v) {
+  invReportState.search = String(v || '').trim();
+  clearTimeout(_irSearchTimer);
+  _irSearchTimer = setTimeout(renderInventoryReport, 200);
+}
 function setIRIncludeOffcuts(v)  { invReportState.includeOffcuts = !!v; renderInventoryReport(); }
 function setIRStockLevel(v) {
   invReportState.stockLevel = v;
@@ -9433,9 +9463,23 @@ async function refreshIRActiveItemIds() {
 // implied by groupBy. is_offcut is always part of the key — fresh and
 // offcut of the same dimensions stay separate so users can see them apart.
 function buildInventoryReportRows() {
-  const { groupBy, paperType, includeOffcuts, _activeItemIds, stockLevel, consumption, pendingImports } = invReportState;
+  const { groupBy, paperType, search, includeOffcuts, _activeItemIds, stockLevel, consumption, pendingImports } = invReportState;
   let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
   if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
+  // Free-text search — narrows to a single item (or handful) so the user
+  // can pull up and print just one paper's record instead of the whole
+  // report. Matches across every column a row could plausibly be found
+  // by, not just paper type.
+  if (search) {
+    const q = search.toLowerCase();
+    items = items.filter(i =>
+      String(i.paper_type || '').toLowerCase().includes(q) ||
+      String(i.size       || '').toLowerCase().includes(q) ||
+      String(i.gsm        || '').toLowerCase().includes(q) ||
+      String(i.brand      || '').toLowerCase().includes(q) ||
+      String(i.supplier   || '').toLowerCase().includes(q)
+    );
+  }
   // Date range narrows to items with at least one movement in [from, to].
   if (_activeItemIds instanceof Set) items = items.filter(i => _activeItemIds.has(i.id));
   if (stockLevel === 'out') items = items.filter(i => (i.current_balance || 0) <= 0);
@@ -9797,6 +9841,13 @@ function openStockSummary() {
         <div class="dash-flbl">Paper Type</div>
         <select class="filter" id="ss-paper-type" onchange="setSummaryPaperType(this.value)">${paperOpts}</select>
       </div>
+      <div style="min-width:220px;">
+        <div class="dash-flbl">Search</div>
+        <div class="search-wrap">
+          <input type="text" id="ss-search" value="${esc(stockSummaryState.search || '')}" placeholder="Size, gsm, brand…" oninput="setSummarySearch(this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
+      </div>
       <div>
         <div class="dash-flbl">From</div>
         <input class="filter" type="date" id="ss-from" value="${stockSummaryState.from}" onchange="setSummaryFrom(this.value)">
@@ -9822,6 +9873,12 @@ function setSummaryPaperType(v) { stockSummaryState.paperType = v; loadStockSumm
 function setSummaryFrom(v)      { stockSummaryState.from = v; loadStockSummary(); }
 function setSummaryTo(v)        { stockSummaryState.to   = v; loadStockSummary(); }
 function setSummaryGranularity(v){stockSummaryState.granularity = v; renderStockSummary(); }
+let _ssSearchTimer = null;
+function setSummarySearch(v) {
+  stockSummaryState.search = String(v || '').trim();
+  clearTimeout(_ssSearchTimer);
+  _ssSearchTimer = setTimeout(renderStockSummary, 200);
+}
 
 async function loadStockSummary() {
   const el = document.getElementById('ss-content');
@@ -9852,7 +9909,19 @@ async function loadStockSummary() {
 // Each row has: item, opening, periods (array of {in, out, balance}), totalOut,
 // stockNow, weightKg, requiredNext, importPkts, importKg.
 function computeSummaryRows() {
-  const { paperType, from, to, granularity, items, txs, imports } = stockSummaryState;
+  const { paperType, from, to, granularity, txs, imports } = stockSummaryState;
+  // Free-text search — narrows the paper type's items down to one (or a
+  // few) so the user can pull up and print just a single size/gsm/brand's
+  // record instead of every item under that paper type.
+  const search = (stockSummaryState.search || '').toLowerCase();
+  const items = search
+    ? stockSummaryState.items.filter(i =>
+        String(i.size    || '').toLowerCase().includes(search) ||
+        String(i.gsm     || '').toLowerCase().includes(search) ||
+        String(i.brand   || '').toLowerCase().includes(search) ||
+        String(i.supplier|| '').toLowerCase().includes(search)
+      )
+    : stockSummaryState.items;
   const buckets = buildSummaryBuckets(from, to, granularity);
   const fromD = new Date(from + 'T00:00:00');
   const ps    = packetSize(paperType);
@@ -10127,7 +10196,9 @@ function renderStockSummary() {
   const el = document.getElementById('ss-content');
   if (!el) return;
   if (!rows.length) {
-    el.innerHTML = `<div class="empty">No inventory items of type "${esc(paperType)}".</div>`;
+    el.innerHTML = stockSummaryState.search
+      ? `<div class="empty">No "${esc(paperType)}" items match "${esc(stockSummaryState.search)}".</div>`
+      : `<div class="empty">No inventory items of type "${esc(paperType)}".</div>`;
     return;
   }
   const unit = packetUnitLabel(paperType); // "Packets" or "Reams"
