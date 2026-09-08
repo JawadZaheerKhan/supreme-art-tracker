@@ -19362,7 +19362,18 @@ function getFormData() {
     machine: document.getElementById('f-machine').value,
     coatings: [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c=>c.value),
     priority: document.getElementById('f-priority').value,
-    delqty: ((document.getElementById('p-delivered_cartons_qty-quantity')||{}).value || '').trim(),
+    // delqty is the legacy pre-ledger "delivered qty" scalar — jobs.js's
+    // partial-delivery logic (isPartialDelivery, the DELIVERED/READY/IN
+    // PROCESS tile badges, Finalize as Delivered) falls back to it as
+    // "already shipped" whenever the real deliveries[] ledger is empty.
+    // This used to read the Ready to Delivery Qty input, which is a
+    // completely different thing (finished/staged production output,
+    // NOT a customer shipment) — saving that field on any in-flight job
+    // silently marked it as partially delivered with zero real
+    // deliveries recorded. saveEdit()/saveAdd() set the real value
+    // (preserve for edits, blank for new jobs); leave it out of the
+    // normal DOM-collection path entirely so it can't get re-polluted.
+    delqty: undefined,
     cartonqty: document.getElementById('f-cartonqty').value.trim(),
     notes: document.getElementById('f-notes').value.trim(),
     bno: document.getElementById('f-bno').value.trim(),
@@ -20257,6 +20268,9 @@ function openDuplicateJob(id) {
 
 async function saveAdd() {
   const data = getFormData();
+  // New job — never pre-populate the legacy delivered-qty scalar (see
+  // getFormData()). It's not delivered yet.
+  data.delqty = '';
   if (!data.name || !data.client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
   if (!(await checkStockBeforeSave(data))) return;
   showSaving(true);
@@ -20399,6 +20413,10 @@ async function saveEdit(id) {
   const data = getFormData();
   if (!data.name || !data.client) { await alertDialog({ title: 'Name and company are required', kind: 'warn' }); return; }
   const prior = jobs.find(j => j.id === id);
+  // Preserve whatever legacy delqty this job already had — never derive
+  // it from the Ready to Delivery Qty field (see getFormData()). Only
+  // matters for jobs old enough to predate the deliveries[] ledger.
+  data.delqty = (prior && prior.delqty) || '';
   const itemChanged   = prior && prior.inventory_item_id !== data.inventory_item_id;
   const sheetsChanged = prior && (prior.sheets || '') !== data.sheets;
   // Paper swap AFTER issuance is a big deal — the job goes back to Pending
