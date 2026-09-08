@@ -23778,6 +23778,37 @@ function stageDoneQty(j, stageIdx) {
   return String(row.quantity || '').split('|').reduce((a, s) => a + parseQtyMult(s).total, 0);
 }
 
+// Maps a production stage index to the particulars key holding how much
+// qty has cleared that stage — mirrors STAGE_QTY_FIELD in server.js
+// exactly. Stage 0 (CTP) is deliberately absent: plate-making is
+// all-or-nothing, there's no partial qty to peek on.
+const STAGE_QTY_FIELD = {
+  1: 'printed_sheets_qty',
+  2: 'coating_sheets_qty',
+  3: 'die_cutting_sheets',
+  4: 'sorted_cartons_qty',
+  5: 'pasted_cartons_qty',
+};
+// Sums one stage's recorded qty for a job — entries[] (station
+// submissions) if present, else the admin-edited pipe-joined quantity
+// string. Same parsing pattern as pastedCartonsTotal()/readyCartonsTotal().
+function stageDoneQty(j, stageIdx) {
+  const key = STAGE_QTY_FIELD[stageIdx];
+  if (!key || !j) return 0;
+  const row = j.particulars && j.particulars[key];
+  if (!row) return 0;
+  if (Array.isArray(row.entries) && row.entries.length) {
+    return row.entries.reduce((a, e) => {
+      const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+      return a + (Number.isFinite(n) ? n : 0);
+    }, 0);
+  }
+  return String(row.quantity || '').split('|').reduce((a, s) => {
+    const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
+
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
 let stationPerson   = null;   // picked person from stationOperator.persons — { name, name_ur }
 let stationPersonPickView = 'own'; // 'own' = machine's own roster, 'custom' = roster from all machines
