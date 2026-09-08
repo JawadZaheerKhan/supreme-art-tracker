@@ -4914,6 +4914,11 @@ function renderJobRowCompact(j, opts) {
     const partialReadyBadge = partialReady
       ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${earlyReadyTotal(j).toLocaleString()}</span>`
       : '';
+    // Companion IN PROCESS chip — see the card-view renderer for why.
+    const partialInProcess = partialReady ? Math.max(0, bookedCartons - earlyReadyTotal(j) - shippedCartons) : 0;
+    const partialInProcessBadge = partialInProcess > 0
+      ? ` <span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">IN PROCESS - ${partialInProcess.toLocaleString()}</span>`
+      : '';
     const readyTotalCL = si === 6 ? readyCartonsTotal(j) : 0;
     const readyLabelCL = readyTotalCL > 0
       ? `&#128230; READY TO DELIVER - ${readyTotalCL.toLocaleString()}`
@@ -4933,7 +4938,7 @@ function renderJobRowCompact(j, opts) {
     const topupBadge = hasPendingPacketTopup(j)
       ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
       : '';
-    const badge = badge0 + partialBadge + topupBadge + partialReadyBadge;
+    const badge = badge0 + partialBadge + topupBadge + partialReadyBadge + partialInProcessBadge;
     // Stage pipeline is meaningless for a New Job / CTP-queue job —
     // it hasn't entered production yet, so showing all the stage pills
     // invites clicking one and confusing the workflow. Hide until stock.
@@ -5227,6 +5232,15 @@ function renderJobCard(j, opts) {
   const partialReadyBadge = partialReady
     ? ` <span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">READY - ${earlyReadyTotal(j).toLocaleString()}</span>`
     : '';
+  // Companion IN PROCESS chip — whatever's booked minus what QC/Pasting
+  // has already flagged ready. Without this, a partial-ready job showed
+  // "READY - 73,600" with no visible account of the other 215,400 still
+  // in production, unlike the DELIVERED/READY/IN PROCESS three-way split
+  // partialSegmentsHtml() shows once a real shipment starts.
+  const partialInProcess = partialReady ? Math.max(0, bookedCartons - earlyReadyTotal(j) - shippedCartons) : 0;
+  const partialInProcessBadge = partialInProcess > 0
+    ? ` <span class="badge" style="background:#2563eb;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">IN PROCESS - ${partialInProcess.toLocaleString()}</span>`
+    : '';
 
   // Fully-delivered badge carries the shipped qty too, so at a glance
   // the user sees "how much went out" without opening the card.
@@ -5255,7 +5269,7 @@ function renderJobCard(j, opts) {
   const topupBadge = (!clientPreview && hasPendingPacketTopup(j))
     ? ` <span class="badge badge-low-stock">&#128229; Extra Stock Required</span>`
     : '';
-  const badge = badge0 + partialBadge + topupBadge + partialReadyBadge;
+  const badge = badge0 + partialBadge + topupBadge + partialReadyBadge + partialInProcessBadge;
 
   // Progress ribbon — 8 clickable dots, same moveToStage behavior as the
   // compact pills. done = filled, current = pulsing ring, future = muted.
