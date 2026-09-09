@@ -3529,18 +3529,20 @@ function overDeliveredMarkHtml(j) {
   return `<span title="Delivered (${delivered.toLocaleString()}) exceeds Unit Carton Qty (${cartonQty.toLocaleString()}) by ${over.toLocaleString()} — check these values." style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#dc2626;color:#fff;font-size:10px;font-weight:800;line-height:1;flex:0 0 auto;">!</span>`;
 }
 function isPartialDelivery(j) {
-  // A job that already reached the Delivered stage is closed — even if
-  // the delivered qty came in under the booked qty (yield shortfall,
-  // rounding, historical typos), it must not retro-flip into Partial.
-  // The partial-delivery system only applies to jobs still in flight.
-  if ((j && j.stage_index) === 7) return false;
   const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
   if (!booked) return false;
+  const fromLedger = totalDeliveredCartons(j);
+  // A job already at the Delivered stage is normally closed — a legacy
+  // delqty rounding mismatch (yield shortfall, historical typos) must
+  // not retro-flip it into Partial. But a REAL ledger shortfall (actual
+  // shipments recorded, genuinely still short of booked) is not a
+  // rounding artifact — it's real cartons still sitting ready, so it
+  // still counts even once the job has reached Delivered.
+  if ((j && j.stage_index) === 7) return fromLedger > 0 && fromLedger < booked;
   // Prefer the deliveries[] running total (accurate per-shipment record);
   // fall back to legacy delqty so jobs whose delivered qty was typed
   // straight on the job card (before the ledger existed) still register
   // as partial once shipping starts.
-  const fromLedger = totalDeliveredCartons(j);
   const fromLegacy = parseFloat(String((j && j.delqty) || '').replace(/[^0-9.\-]/g, '')) || 0;
   const delivered = fromLedger || fromLegacy;
   return delivered > 0 && delivered < booked;
@@ -18758,11 +18760,18 @@ function deliveriesSection(j) {
       }).join('')
     : `<tr><td colspan="7" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
 
+  // Ready-but-not-shipped chip — same figure the tile's own READY badge
+  // shows (Ready to Deliver Qty minus what's already shipped). Sits right
+  // next to the PARTIAL pill so it's obvious this isn't just "owed"
+  // cartons still in production — some of it is already sitting ready.
+  const readyChip = readyNotYetShipped > 0
+    ? ` <span style="background:#16a34a;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">READY &mdash; ${readyNotYetShipped.toLocaleString()}</span>`
+    : '';
   const statusPill = isDelivered
     ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">FULLY DELIVERED</span>`
     : list.length
-      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' UNIT CARTONS LEFT' : ''}</span>`
-      : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>`;
+      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' UNIT CARTONS LEFT' : ''}</span>${readyChip}`
+      : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>${readyChip}`;
 
   const summaryLine = booked
     ? `Booked: <b>${booked.toLocaleString()}</b> unit cartons &middot; Shipped: <b>${shipped.toLocaleString()}</b> unit cartons &middot; Remaining: <b>${remaining.toLocaleString()}</b> unit cartons`
