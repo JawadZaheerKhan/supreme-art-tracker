@@ -10739,7 +10739,7 @@ function printImports() {
 // q matches job number ("59" / "E-59") or job name.
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '', mode: 'delivered', milOnly: false, shadeOnly: false };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -10789,6 +10789,21 @@ function openJobsReport() {
         <div class="dash-flbl">Search (Job No. / Name)</div>
         <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setJrQ(this.value)" style="min-width:180px;">
       </div>
+      ${mode === 'delivered' ? `
+      <div style="min-width:160px;">
+        <div class="dash-flbl">PO No. Search</div>
+        <div class="search-wrap">
+          <input type="text" id="jr-po-search" value="${esc(jobsReportState.poSearch)}" placeholder="Search PO No…" oninput="setJrPoSearch(this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
+      </div>
+      <div style="min-width:160px;">
+        <div class="dash-flbl">Challan No. Search</div>
+        <div class="search-wrap">
+          <input type="text" id="jr-challan-search" value="${esc(jobsReportState.challanSearch)}" placeholder="Search Challan No…" oninput="setJrChallanSearch(this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
+      </div>` : ''}
       <div>
         <div class="dash-flbl">From</div>
         <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
@@ -10826,6 +10841,20 @@ function openJobsReport() {
 function setJrDFrom(v)   { jobsReportState.dfrom = v;   jobsReportSel.clear(); renderJobsReport(); }
 function setJrDTo(v)     { jobsReportState.dto = v;     jobsReportSel.clear(); renderJobsReport(); }
 function setJrQ(v)       { jobsReportState.q = v;       jobsReportSel.clear(); renderJobsReport(); }
+let _jrPoSearchTimer = null;
+function setJrPoSearch(v) {
+  jobsReportState.poSearch = String(v || '').trim();
+  jobsReportSel.clear();
+  clearTimeout(_jrPoSearchTimer);
+  _jrPoSearchTimer = setTimeout(renderJobsReport, 200);
+}
+let _jrChallanSearchTimer = null;
+function setJrChallanSearch(v) {
+  jobsReportState.challanSearch = String(v || '').trim();
+  jobsReportSel.clear();
+  clearTimeout(_jrChallanSearchTimer);
+  _jrChallanSearchTimer = setTimeout(renderJobsReport, 200);
+}
 function setJrClient(v)  { jobsReportState.client = v;  jobsReportSel.clear(); renderJobsReport(); }
 function setJrMilOnly(v) {
   jobsReportState.milOnly = !!v;
@@ -10935,7 +10964,7 @@ async function bulkDeleteJobsReport() {
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
 function buildJobsReportRows() {
-  const { client, dfrom, dto, q, mode, milOnly, shadeOnly } = jobsReportState;
+  const { client, dfrom, dto, q, poSearch, challanSearch, mode, milOnly, shadeOnly } = jobsReportState;
   const isCreatedMode = mode === 'created';
   const lastStageIdx = STAGES.length - 1;       // Delivered
   // Search: "59" or "e-59" matches the job number; anything else matches
@@ -10943,6 +10972,12 @@ function buildJobsReportRows() {
   const qNorm  = String(q || '').trim().toLowerCase();
   const qId    = qNorm.replace(/^e-?/, '');
   const qIsNum = /^\d+$/.test(qId);
+  // PO No. / Challan No. search — Delivered mode only (see the toolbar).
+  // Matched against the same joined "1st | 2nd" strings the PO No. /
+  // Challan No. columns display, so a substring hit on any one shipment's
+  // reference is enough to surface the job.
+  const poSearchNorm      = String(poSearch      || '').trim().toLowerCase();
+  const challanSearchNorm = String(challanSearch || '').trim().toLowerCase();
   const out = [];
   for (const j of jobs) {
     // Delivered mode now surfaces every job that has any shipment on the
@@ -11063,6 +11098,15 @@ function buildJobsReportRows() {
       .join(' | ');
     const poNoJoined    = joinRefs('po_no',    j.ref);
     const batchNoJoined = joinRefs('batch_no', j.bno);
+    // Only enforced in Delivered mode — matches the toolbar, which hides
+    // these two fields in Created mode. Without this guard, a leftover
+    // search value from a prior Delivered-mode visit would keep silently
+    // filtering Created mode too, since the state isn't cleared on toggle
+    // (same as every other Jobs Report filter).
+    if (!isCreatedMode) {
+      if (poSearchNorm      && !poNoJoined.toLowerCase().includes(poSearchNorm))    continue;
+      if (challanSearchNorm && !challans.toLowerCase().includes(challanSearchNorm)) continue;
+    }
     // Partial when there's at least one shipment but the running total
     // is still short of the booked qty. Uses the deliveries ledger, but
     // falls back to delqty so legacy jobs (typed straight on the card)
