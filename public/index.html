@@ -15062,7 +15062,22 @@ function renderManualConsumption() {
   const deleteSelectedBtn = document.getElementById('mc-delete-selected');
   if (deleteSelectedBtn) {
     deleteSelectedBtn.style.display = manualConsumptionState.selected.size ? '' : 'none';
-    deleteSelectedBtn.textContent = `Delete Selected (${manualConsumptionState.selected.size})`;
+    // Sum the consumed quantity behind the selected rows — a row counts
+    // only once its every underlying tx id is selected, same rule the
+    // row's own checkbox state follows. Split by pack unit (packets vs
+    // reams) so a mixed selection reads clearly instead of a misleading
+    // combined total.
+    let selPkts = 0, selReams = 0, selSheets = 0;
+    for (const r of rows) {
+      if (!(r.txIds||[]).length || !(r.txIds||[]).every(id => manualConsumptionState.selected.has(id))) continue;
+      selSheets += r.totalSheets;
+      if (isReamPaper(r.paperType || '')) selReams += r.totalPkts; else selPkts += r.totalPkts;
+    }
+    const qtyParts = [];
+    if (selPkts)  qtyParts.push(`${fmt(selPkts)} pkts`);
+    if (selReams) qtyParts.push(`${fmt(selReams)} reams`);
+    const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${selSheets.toLocaleString()} sheets)` : '';
+    deleteSelectedBtn.textContent = `Delete Selected (${manualConsumptionState.selected.size})${qtyLabel}`;
   }
   contentEl.innerHTML = !rows.length
     ? `<div class="empty">No manual job card consumption in this period.</div>`
@@ -15324,7 +15339,21 @@ function renderOffcutConsumption() {
   const deleteBtn = document.getElementById('oc-delete-selected');
   if (deleteBtn) {
     deleteBtn.style.display = offcutConsumptionState.selected.size ? '' : 'none';
-    deleteBtn.textContent = `Delete Selected (${offcutConsumptionState.selected.size})`;
+    // Sum the consumed quantity behind the selected rows, split by pack
+    // unit (packets vs reams) so a mixed selection reads clearly.
+    let selPkts = 0, selReams = 0, selSheets = 0;
+    for (const t of rows) {
+      if (!offcutConsumptionState.selected.has(t.id)) continue;
+      const chg = Math.abs(+t.change || 0);
+      selSheets += chg;
+      const units = chg / packetSize(t.paper_type || '');
+      if (isReamPaper(t.paper_type || '')) selReams += units; else selPkts += units;
+    }
+    const qtyParts = [];
+    if (selPkts)  qtyParts.push(`${fmt(selPkts)} pkts`);
+    if (selReams) qtyParts.push(`${fmt(selReams)} reams`);
+    const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${selSheets.toLocaleString()} sheets)` : '';
+    deleteBtn.textContent = `Delete Selected (${offcutConsumptionState.selected.size})${qtyLabel}`;
   }
   if (!rows.length) { el.innerHTML = '<div class="empty">No automatic offcut consumption in this period.</div>'; return; }
   const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
