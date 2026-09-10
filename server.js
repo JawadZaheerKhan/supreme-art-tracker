@@ -3180,10 +3180,23 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
     // The station only needs jobs that are still moving through stages, so
     // it passes ?active=1 to skip Delivered + soft-deleted rows. The full
     // list (used by Reports, History, etc.) loads everything as before.
+    // paper_resolved: same fallback the client portal already uses
+    // (jobs.paper when set, else the linked inventory item's paper_type)
+    // — added as an extra field, not a replacement, so nothing that reads
+    // the raw `paper` column elsewhere changes. The Station terminal needs
+    // this because operator-role logins never get the `inventory` array
+    // loaded (403 there), so they can't resolve it client-side the way
+    // the Job Card does.
     const deliveredIdx = STAGES.length - 1;
     const jobs = req.query.active
-      ? await sql`SELECT * FROM jobs WHERE deleted_at IS NULL AND stage_index < ${deliveredIdx} ORDER BY id ASC`
-      : await sql`SELECT * FROM jobs WHERE deleted_at IS NULL ORDER BY id ASC`;
+      ? await sql`
+          SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved
+          FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+          WHERE j.deleted_at IS NULL AND j.stage_index < ${deliveredIdx} ORDER BY j.id ASC`
+      : await sql`
+          SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved
+          FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+          WHERE j.deleted_at IS NULL ORDER BY j.id ASC`;
     res.json(jobs);
   } catch (err) {
     console.error(err);
