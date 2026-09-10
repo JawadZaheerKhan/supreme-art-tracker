@@ -22342,8 +22342,8 @@ function renderOperators() {
     return `
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
-        <div class="inv-name">&#9881; ${esc(o.name || '(unnamed machine)')}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
-        <div class="inv-sub">${esc(operatorStageNames(o))} · PIN ${esc(o.pin)} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
+        <div class="inv-name">${o.is_manager ? '&#128100;' : '&#9881;'} ${esc(o.name || '(unnamed machine)')}${o.is_manager?' <span class="inv-badge" style="background:#f5f3ff;color:#5b21b6;">manager</span>':''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
+        <div class="inv-sub">${o.is_manager ? 'All stages' : esc(operatorStageNames(o))} · PIN ${esc(o.pin)} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm ceo-hide" onclick="openOperatorModal(${o.id})">Edit</button>
@@ -22362,6 +22362,7 @@ function operatorStageNames(o) {
 function openOperatorModal(id) {
   const o = id ? operatorsList.find(x => x.id === id) : null;
   const assigned = o ? rolesOfOperator(o) : [];
+  const isManager = !!(o && o.is_manager);
   const boxes = ROLES.map(r => {
     const hint = r.finishes ? ` <span style="font-weight:400;color:var(--text2);font-size:12px;">(${r.finishes.join(', ')})</span>` : '';
     return `
@@ -22372,23 +22373,29 @@ function openOperatorModal(id) {
   }).join('');
   const startingPersons = (o && Array.isArray(o.persons) && o.persons.length) ? o.persons : [{ name: '', name_ur: '' }];
   openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2>${o ? 'Edit' : 'Add'} Machine</h2>
+    <h2>${o ? 'Edit' : 'Add'} ${isManager ? 'Manager' : 'Machine'}</h2>
+    <div class="form-group">
+      <label class="op-stage-chk" style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid #7c3aed;border-radius:6px;cursor:pointer;background:#f5f3ff;">
+        <input type="checkbox" id="op-is-manager" ${isManager ? 'checked' : ''} onchange="toggleOperatorManagerFields()">
+        <span style="font-weight:600;color:#5b21b6;">This is a Manager PIN — sees every stage &amp; can edit the Machine field, not tied to one machine</span>
+      </label>
+    </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Machine Name</label>
+      <div class="form-group"><label class="form-label" id="op-name-label">${isManager ? 'Manager Station Name' : 'Machine Name'}</label>
         <input type="text" id="op-name" value="${o?esc(o.name||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
       <div class="form-group"><label class="form-label">3-digit PIN</label>
         <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;"></div>
     </div>
-    <div class="form-group">
+    <div class="form-group" id="op-roles-group" style="${isManager ? 'display:none;' : ''}">
       <label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(tick all this machine handles)</span></label>
       <div id="op-roles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;">${boxes}</div>
     </div>
     <div class="form-group">
-      <label class="form-label">Operators on this Machine <span style="font-weight:400;color:var(--text2);">(after PIN, the operator picks themselves from this list)</span></label>
+      <label class="form-label" id="op-persons-label">${isManager ? 'Managers using this PIN' : 'Operators on this Machine'} <span style="font-weight:400;color:var(--text2);">(after PIN, they pick themselves from this list)</span></label>
       <div id="op-persons" style="display:flex;flex-direction:column;gap:6px;">
         ${startingPersons.map((p, i) => personRowHtml(p, i)).join('')}
       </div>
-      <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addPersonRow()">+ Add operator</button>
+      <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addPersonRow()">+ Add ${isManager ? 'manager' : 'operator'}</button>
     </div>
     ${o ? `<div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="op-active" ${o.active!==false?'checked':''}> Active</label></div>` : ''}
     <div class="modal-actions">
@@ -22396,6 +22403,18 @@ function openOperatorModal(id) {
       <button class="btn btn-primary" onclick="saveOperator(${o?o.id:'null'})">Save</button>
     </div>
   </div>`);
+}
+// Toggles the Roles checklist + a couple labels when the "Manager PIN"
+// checkbox flips — a manager gets every role automatically (see
+// saveOperator), so ticking individual stages would be misleading.
+function toggleOperatorManagerFields() {
+  const isManager = !!document.getElementById('op-is-manager')?.checked;
+  const rolesGroup = document.getElementById('op-roles-group');
+  if (rolesGroup) rolesGroup.style.display = isManager ? 'none' : '';
+  const nameLabel = document.getElementById('op-name-label');
+  if (nameLabel) nameLabel.textContent = isManager ? 'Manager Station Name' : 'Machine Name';
+  const personsLabel = document.getElementById('op-persons-label');
+  if (personsLabel) personsLabel.firstChild.textContent = isManager ? 'Managers using this PIN ' : 'Operators on this Machine ';
 }
 
 function personRowHtml(p, i) {
@@ -22549,17 +22568,19 @@ function suggestUrduFromRow(btn) {
 async function saveOperator(id) {
   const name = document.getElementById('op-name').value.trim();
   const pin = document.getElementById('op-pin').value.trim();
-  const roles = Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
+  const isManager = !!document.getElementById('op-is-manager')?.checked;
+  // Manager PIN → every role, regardless of the (hidden) checkboxes.
+  const roles = isManager ? ROLES.map(r => r.id) : Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
   const persons = Array.from(document.querySelectorAll('#op-persons .op-person-row')).map(row => ({
     name: row.querySelector('.op-person-name').value.trim(),
     name_ur: row.querySelector('.op-person-name-ur').value.trim(),
   })).filter(p => p.name);
   const activeEl = document.getElementById('op-active');
-  if (!name) { notify('Machine name is required'); return; }
+  if (!name) { notify(isManager ? 'Manager name is required' : 'Machine name is required'); return; }
   if (!/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
   if (!roles.length) { notify('Select at least one role'); return; }
-  if (!persons.length) { notify('Add at least one operator on this machine'); return; }
-  const body = { name, pin, roles, persons };
+  if (!persons.length) { notify(isManager ? 'Add at least one manager' : 'Add at least one operator on this machine'); return; }
+  const body = { name, pin, roles, persons, is_manager: isManager };
   if (activeEl) body.active = activeEl.checked;
   showSaving(true);
   try {
@@ -22720,6 +22741,8 @@ function stationLogout(silent) {
   stationPassCount = 1;
   stationJobPassKey = null;
   stationNotes = [];
+  stationManagerTab = 0;
+  stationManagerSearch = '';
   stationClosePad();
   stationCloseQwerty();
   stationRecAbort();
@@ -22743,6 +22766,7 @@ function stationRender() {
   if (stationView === 'person-pick') root.innerHTML = stationPersonPickHtml();
   else if (stationView === 'stage-pick') root.innerHTML = stationStagePickHtml();
   else if (stationView === 'update' && stationJobId != null) root.innerHTML = stationUpdateHtml();
+  else if (stationView === 'manager-queue') root.innerHTML = stationManagerQueueHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -22800,6 +22824,14 @@ async function stationPinSubmit() {
     stationOperator = { ...machine, pin, stage_indices: stages, machine: machine.name };
     stationPerson = persons.length === 1 ? persons[0] : null;
     if (!stationPerson) { stationView = 'person-pick'; stationRender(); return; }
+    // Manager PIN — skip the single-stage pick entirely, land on the
+    // all-stages/search screen instead.
+    if (stationOperator.is_manager) {
+      stationView = 'manager-queue';
+      await loadJobsForStation();
+      stationRender();
+      return;
+    }
     if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
     stationOperator.stage_index = stages[0];
     stationView = 'queue';
@@ -22824,6 +22856,12 @@ async function stationPickPerson(idx) {
   const p = persons[idx];
   if (!p) return;
   stationPerson = p;
+  if (stationOperator.is_manager) {
+    stationView = 'manager-queue';
+    await loadJobsForStation();
+    stationRender();
+    return;
+  }
   const stages = stationOperator.stage_indices || [stationOperator.stage_index];
   if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
   stationOperator.stage_index = stages[0];
@@ -23065,8 +23103,79 @@ function stationQueueHtml() {
     <div class="station-queue">${rows}</div>`;
 }
 
+// Manager station screen — not scoped to a stage. Tabs across every
+// production stage (shows every job currently sitting there, no
+// finish/peek filtering — that's a machine-qualification concept that
+// doesn't apply to a manager) plus a Search tab that looks across every
+// job by number, name, or client.
+let stationManagerTab = 0; // a STAGES index, or 'search'
+let stationManagerSearch = '';
+function stationManagerSetTab(t) {
+  stationManagerTab = t;
+  if (t === 'search') stationManagerSearch = '';
+  stationRender();
+}
+function stationManagerSearchInput(v) {
+  stationManagerSearch = v;
+  stationRender();
+  const el = document.getElementById('station-mgr-search-input');
+  if (el) { el.focus(); const len = el.value.length; el.setSelectionRange(len, len); }
+}
+function stationManagerJobRow(j) {
+  const stageName = STAGES[j.stage_index || 0] || '';
+  return `
+    <button class="station-job" onclick="stationOpenJob(${j.id})">
+      <div class="sj-id">#${j.id}</div>
+      <div class="sj-main">
+        <div class="sj-name">${esc(j.name)}</div>
+        <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''} &middot; ${esc(stageName)}</div>
+      </div>
+      <div class="sj-go">›</div>
+    </button>`;
+}
+function stationManagerQueueHtml() {
+  const tabs = STAGES.map((s, i) => `<button class="btn btn-sm${stationManagerTab===i?' btn-primary':''}" onclick="stationManagerSetTab(${i})">${esc(SHORT[i]||s)}</button>`).join('');
+  const searchTab = `<button class="btn btn-sm${stationManagerTab==='search'?' btn-primary':''}" onclick="stationManagerSetTab('search')">&#128269; Search</button>`;
+  let listHtml;
+  if (stationManagerTab === 'search') {
+    const q = stationManagerSearch.trim().toLowerCase();
+    const results = q ? jobs.filter(j => !isNewJob(j) && (
+      String(j.id).includes(q) ||
+      (j.name && j.name.toLowerCase().includes(q)) ||
+      (j.client && j.client.toLowerCase().includes(q))
+    )) : [];
+    listHtml = `
+      <div style="padding:12px 16px;">
+        <input type="text" id="station-mgr-search-input" value="${esc(stationManagerSearch)}" placeholder="Search by job #, name or client…" oninput="stationManagerSearchInput(this.value)" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:15px;">
+      </div>
+      <div class="station-queue">${
+        q ? (results.length ? results.map(j => stationManagerJobRow(j)).join('') : `<div class="empty">No jobs match "${esc(stationManagerSearch)}".</div>`)
+          : `<div class="empty">Type to search every job.</div>`
+      }</div>`;
+  } else {
+    const idx = stationManagerTab;
+    const queue = jobs.filter(j => !isNewJob(j) && (j.stage_index || 0) === idx).reverse();
+    listHtml = `<div class="station-queue">${queue.length ? queue.map(j => stationManagerJobRow(j)).join('') : `<div class="empty">Nothing at ${esc(STAGES[idx] || '')} right now.</div>`}</div>`;
+  }
+  return `
+    <div class="station-head">
+      <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}</div><div class="station-where">Manager &middot; All Stages</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 16px;">${tabs}${searchTab}</div>
+    ${listHtml}`;
+}
+
 function stationOpenJob(id) {
   stationJobId = id;
+  // Manager isn't scoped to a stage — jump their "current stage" to
+  // wherever this job actually sits so the update screen shows the right
+  // fields (STATION_STAGE_FIELDS[stIdx]) and Advance/Skip target forward
+  // from the job's true position, exactly like a regular stage operator.
+  if (stationOperator && stationOperator.is_manager) {
+    const j = jobs.find(x => x.id === id);
+    stationOperator.stage_index = (j && Number.isInteger(j.stage_index)) ? j.stage_index : 0;
+  }
   stationView = 'update';
   stationRecBlobs = [];
   stationDraftValues = {};
@@ -23374,6 +23483,22 @@ function stationUpdateHtml() {
       <div id="sn-preview"></div>
     </div>` : '';
 
+  // Manager-only: an editable Machine field, mirroring the Job Card's
+  // #f-machine dropdown (same source list, same "keep an off-list value"
+  // fallback). Regular operators never see this — they're not allowed to
+  // change it (see the is_manager gate in /api/jobs/:id/station-update).
+  const managerMachineHtml = (stationOperator && stationOperator.is_manager) ? (() => {
+    const list = (printingMachines && printingMachines.length) ? printingMachines : MACHINES;
+    const cur = j.machine || '';
+    const opts = ['', ...list].map(m => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${m ? esc(m) : '— Select machine —'}</option>`).join('')
+      + (cur && !list.includes(cur) ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : '');
+    return `
+      <div class="station-field" style="margin:8px 0 14px;max-width:280px;">
+        <label>Machine</label>
+        <select id="sf-job-machine">${opts}</select>
+      </div>`;
+  })() : '';
+
   return `
     <div class="station-head">
       <div style="display:flex;align-items:center;gap:12px;">
@@ -23385,6 +23510,7 @@ function stationUpdateHtml() {
     <div class="station-update">
       <div class="su-job">#${j.id} · ${esc(j.name)}</div>
       <div class="su-jobsub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
+      ${managerMachineHtml}
       ${notesIn}
       ${finishTopHtml}
       ${fieldHtml}
@@ -23408,7 +23534,8 @@ function stationUpdateHtml() {
     </div>`;
 }
 function stationBackToQueue() {
-  stationView = 'queue'; stationJobId = null;
+  stationView = (stationOperator && stationOperator.is_manager) ? 'manager-queue' : 'queue';
+  stationJobId = null;
   stationPassCount = 1; stationJobPassKey = null; stationDraftValues = {};
   stationClosePad(); stationCloseQwerty(); stationRecAbort();
   // Refresh badges in the background — a note may have landed meanwhile.
@@ -23975,6 +24102,10 @@ async function stationSubmit(advance, skipTo) {
     }
     stationRecBlobs = [];
     const stationBody = { pin: stationOperator.pin, particulars_patch: patch, advance };
+    if (stationOperator.is_manager) {
+      const machEl = document.getElementById('sf-job-machine');
+      if (machEl) stationBody.job_machine = machEl.value;
+    }
     if (stationPerson && stationPerson.name) stationBody.person_name = stationPerson.name;
     if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
     if (finishKind) {
