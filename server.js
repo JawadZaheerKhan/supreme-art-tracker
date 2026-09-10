@@ -2024,7 +2024,13 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
 // Printing and Die endpoints use this — the only difference is which
 // stage we filter on and which particulars-key supplies the sheet count.
 async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sheetsKey, wasteKey }) {
-  const machineRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
+  // Die Cutting also pulls embellish-role machines into the roster — a
+  // machine tagged 'embellish' but not 'diecut' (e.g. one used only for
+  // embossing/foiling) still needs to show up here, since that's where
+  // its embellish_sheets_qty/embellish_waste_sheets entries are credited.
+  const machineRows = stageLabel === 'Die Cutting'
+    ? await sql`SELECT name, persons FROM operators WHERE active AND (roles @> ARRAY['diecut']::text[] OR roles @> ARRAY['embellish']::text[]) ORDER BY name`
+    : await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
   const machines = machineRows.map(r => r.name).filter(Boolean);
   // Person-name → machine-name map for THIS section's operators only. Used
   // by the LEGACY (no-entries[]) fallback to credit "obaid" (typed on the
