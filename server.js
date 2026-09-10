@@ -3006,10 +3006,19 @@ async function buildClientJobsView(sql, companyRaw, opts) {
   };
   // Blocked jobs are now INCLUDED in the client view (per user request) —
   // clients need to see when a job is blocked and why. Delivered jobs
-  // still drop off after 2 days.
+  // still drop off after 2 days — UNLESS the job is genuinely partial
+  // (a real ledger shortfall, still owes cartons): reaching stage_index 7
+  // only means production is done, not that shipping is. A job the
+  // client is still owed cartons on shouldn't silently vanish from their
+  // portal just because the cutoff window passed.
   const filtered = rows.filter(r => {
     const deliveredAt = parseDeliveredAt(r.stages);
-    if (deliveredAt !== null && (now - deliveredAt) > cutoffMs) return false;
+    if (deliveredAt !== null && (now - deliveredAt) > cutoffMs) {
+      const booked  = parseFloat(String(r.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      const shipped = sumDeliveryCartons(r.deliveries);
+      const stillPartial = booked > 0 && shipped > 0 && shipped < booked;
+      if (!stillPartial) return false;
+    }
     return true;
   });
   const coatingsList = j => Array.isArray(j.coatings) ? j.coatings : [];
