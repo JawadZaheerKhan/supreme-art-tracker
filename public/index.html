@@ -17200,6 +17200,7 @@ function closeModal() {
   const adjPanel = document.getElementById('adj-side-panel');
   if (adjPanel) adjPanel.remove();
   if (typeof _adjLockObserver !== 'undefined' && _adjLockObserver) { _adjLockObserver.disconnect(); _adjLockObserver = null; }
+  if (typeof _mgrLockObserver !== 'undefined' && _mgrLockObserver) { _mgrLockObserver.disconnect(); _mgrLockObserver = null; }
   // Any modal close drops the pending "auto-join group after save" intent.
   // saveAdd/saveEdit have already read + cleared it before their closeModal
   // call, so this only matters when the user cancels a Duplicate modal
@@ -21370,6 +21371,43 @@ function lockJobCardExceptAdjustFields() {
   _adjLockObserver.observe(root, { childList: true, subtree: true });
 }
 
+// Manager station flow: lock every field on the job card modal EXCEPT the
+// Machine dropdown and the Particulars table. Same allowlist-walk pattern
+// as lockJobCardExceptAdjustFields() above (see its comment for why a
+// MutationObserver is needed — Special Colors etc. inject rows after the
+// modal opens). Kept as its own function/observer rather than reusing the
+// adjust one since the allowlist and trigger condition are different.
+let _mgrLockObserver = null;
+function lockJobCardExceptMachineAndParticulars() {
+  const root = document.querySelector('.job-edit-modal');
+  if (!root) return;
+  const isAllowedField = el => {
+    if (el.closest('table.jc-part:not(.jc-specs):not(.jc-ctp-table)')) return true;
+    if (el.id === 'f-machine') return true;
+    return false;
+  };
+  const lockOne = el => {
+    if (isAllowedField(el)) return;
+    if (el.closest('.modal-actions')) return;
+    if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') { el.disabled = true; return; }
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+      else el.readOnly = true;
+    }
+  };
+  const lockSubtree = node => {
+    if (node.nodeType !== 1) return;
+    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(node.tagName)) lockOne(node);
+    node.querySelectorAll && node.querySelectorAll('input, textarea, select, button').forEach(lockOne);
+  };
+  lockSubtree(root);
+  if (_mgrLockObserver) _mgrLockObserver.disconnect();
+  _mgrLockObserver = new MutationObserver(mutations => {
+    for (const m of mutations) m.addedNodes.forEach(lockSubtree);
+  });
+  _mgrLockObserver.observe(root, { childList: true, subtree: true });
+}
+
 function openEdit(id, opts) {
   opts = opts || {};
   // The Adjust flow reuses this exact modal for its live wastage preview,
@@ -21379,6 +21417,10 @@ function openEdit(id, opts) {
   // "Save Adjustment" (a separate POST to the adjustment mirror) can save
   // anything while this flag is set.
   const adjustMode = !!(opts.particularsOpts && opts.particularsOpts.preview);
+  // Manager station flow (see stationManagerOpenJobCard): same modal, but
+  // only Machine + Particulars save, via a PIN-verified endpoint instead
+  // of the normal admin/PM saveEdit().
+  const managerMode = !!opts.managerStationMode;
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   // Lazy-load the machines/operators roster so the particulars-table
@@ -21389,7 +21431,7 @@ function openEdit(id, opts) {
   // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
   // both offered from inside the Edit modal so the PM can flip status
   // right after tweaking specs, without closing back to the list.
-  const processBtn = adjustMode ? '' : (isNewJob(j) && canWriteJobs())
+  const processBtn = (adjustMode || managerMode) ? '' : (isNewJob(j) && canWriteJobs())
     ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
     : (isCtpQueue(j) && canWriteJobs())
       ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
@@ -21400,17 +21442,22 @@ function openEdit(id, opts) {
     ? `<div style="margin:-4px 0 12px;padding:10px 14px;background:#f5f3ff;color:#5b21b6;border:1px solid #ddd6fe;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
         &#128274; Adjust mode — only Paper, Cutting Size, Packets/Sheets and the Particulars table below are editable, and nothing here saves to the real job card. Use the side panel to save the wastage adjustment.
       </div>` : '';
+  const managerBanner = managerMode
+    ? `<div style="margin:-4px 0 12px;padding:10px 14px;background:#f5f3ff;color:#5b21b6;border:1px solid #ddd6fe;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
+        &#128100; Manager view — only Machine and the Particulars table below are editable.
+      </div>` : '';
   openModal(`<div class="modal modal-card job-edit-modal" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
     <div class="ceo-only-block" style="margin:-4px 0 12px;padding:10px 14px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
       &#128065; View-only — your role can review this job card but can&rsquo;t edit or save changes.
     </div>
     ${adjustBanner}
+    ${managerBanner}
     ${jobForm(j, opts)}
     <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="closeModal()">${managerMode ? 'Close' : 'Cancel'}</button>
       ${processBtn}
-      ${adjustMode ? '' : '<button class="btn btn-primary ceo-hide" onclick="saveEdit(' + j.id + ')">Save Changes</button>'}
+      ${managerMode ? `<button class="btn btn-primary" onclick="stationManagerSaveJobCard(${j.id})">Save Machine &amp; Particulars</button>` : (adjustMode ? '' : '<button class="btn btn-primary ceo-hide" onclick="saveEdit(' + j.id + ')">Save Changes</button>')}
     </div>
   </div>`);
   updateStockHint();
@@ -21441,6 +21488,8 @@ function openEdit(id, opts) {
   // (Save Changes is gone above), but locking makes it visually obvious
   // which parts of the card are just for reference right now.
   if (adjustMode) lockJobCardExceptAdjustFields();
+  // Manager station flow: lock everything except Machine + Particulars.
+  if (managerMode) lockJobCardExceptMachineAndParticulars();
 }
 
 async function saveEdit(id) {
@@ -23866,17 +23915,77 @@ function stationManagerSearchInput(v) {
   const el = document.getElementById('station-mgr-search-input');
   if (el) { el.focus(); const len = el.value.length; el.setSelectionRange(len, len); }
 }
+// Same stage-pill pipeline the Jobs tab shows on every job row (compact
+// view, public/index.html ~4997), simplified: no partial-delivery/partial-
+// ready/regressed nuance, no virtual Pending Stock pill — just plain
+// done/active/pending state per stage, since that's the part the manager
+// actually needs to read and act on at a glance. Delivered is rendered
+// view-only (never clickable) — same rule the Station skip-to-stage picker
+// already enforces elsewhere; it only flips via the real delivery flow.
+function stationManagerPipelineHtml(j) {
+  if (isNewJob(j) || j.issuance_status === 'ctp') return '';
+  const si = j.stage_index || 0;
+  return STAGES.map((s, i) => {
+    const isLast = i === STAGES.length - 1;
+    let cls = 's-pending';
+    if (i < si || (j.stages && j.stages[i] && j.stages[i].status === 'done')) cls = 's-done';
+    else if (i === si) cls = 's-active';
+    const pill = isLast
+      ? `<span class="stage-pill ${cls}" style="cursor:default;">${SHORT[i]}</span>`
+      : `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="stationManagerMoveToStage(${j.id},${i})" style="cursor:pointer">${SHORT[i]}</span>`;
+    return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
+  }).join('');
+}
+async function stationManagerMoveToStage(id, target) {
+  const j = jobs.find(x => x.id === id);
+  if (!j || !stationOperator) return;
+  if ((j.stage_index || 0) === target) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/manager-stage`, { pin: stationOperator.pin, stage_index: target });
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify(`Moved to ${STAGES[target]}`);
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
 function stationManagerJobRow(j) {
-  const stageName = STAGES[j.stage_index || 0] || '';
+  const pipeline = stationManagerPipelineHtml(j);
   return `
-    <button class="station-job" onclick="stationOpenJob(${j.id})">
+    <div class="station-job" style="cursor:default;flex-wrap:wrap;">
       <div class="sj-id">#${j.id}</div>
-      <div class="sj-main">
+      <div class="sj-main" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">
         <div class="sj-name">${esc(j.name)}</div>
-        <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''} &middot; ${esc(stageName)}</div>
+        <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
       </div>
-      <div class="sj-go">›</div>
-    </button>`;
+      <div class="sj-go" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">›</div>
+      ${pipeline ? `<div class="pipeline" style="flex-basis:100%;flex-wrap:wrap;row-gap:6px;overflow:visible;" onclick="event.stopPropagation()">${pipeline}</div>` : ''}
+    </div>`;
+}
+// Manager clicks a job (not a stage pill) — same job-card modal admin/PM
+// gets from the Jobs tab, reused as-is (openEdit → jobForm) so it looks and
+// behaves identically, just locked to view-only except Machine + Particulars.
+function stationManagerOpenJobCard(id) {
+  openEdit(id, { managerStationMode: true });
+}
+// Saves ONLY Machine + Particulars from the (mostly locked) job-card modal,
+// PIN-verified — everything else on the form is locked client-side by
+// lockJobCardExceptMachineAndParticulars() and ignored server-side by
+// /api/jobs/:id/manager-update regardless of what this collects.
+async function stationManagerSaveJobCard(id) {
+  if (!stationOperator) return;
+  const machEl = document.getElementById('f-machine');
+  const body = { pin: stationOperator.pin, particulars: collectParticulars() };
+  if (machEl) body.machine = machEl.value;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/manager-update`, body);
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify('Saved');
+    closeModal();
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 function stationManagerQueueHtml() {
   const tabs = STAGES.map((s, i) => `<button class="btn btn-sm${stationManagerTab===i?' btn-primary':''}" onclick="stationManagerSetTab(${i})">${esc(SHORT[i]||s)}</button>`).join('');
@@ -23913,14 +24022,6 @@ function stationManagerQueueHtml() {
 
 function stationOpenJob(id) {
   stationJobId = id;
-  // Manager isn't scoped to a stage — jump their "current stage" to
-  // wherever this job actually sits so the update screen shows the right
-  // fields (STATION_STAGE_FIELDS[stIdx]) and Advance/Skip target forward
-  // from the job's true position, exactly like a regular stage operator.
-  if (stationOperator && stationOperator.is_manager) {
-    const j = jobs.find(x => x.id === id);
-    stationOperator.stage_index = (j && Number.isInteger(j.stage_index)) ? j.stage_index : 0;
-  }
   stationView = 'update';
   stationRecBlobs = [];
   stationDraftValues = {};
@@ -24228,22 +24329,6 @@ function stationUpdateHtml() {
       <div id="sn-preview"></div>
     </div>` : '';
 
-  // Manager-only: an editable Machine field, mirroring the Job Card's
-  // #f-machine dropdown (same source list, same "keep an off-list value"
-  // fallback). Regular operators never see this — they're not allowed to
-  // change it (see the is_manager gate in /api/jobs/:id/station-update).
-  const managerMachineHtml = (stationOperator && stationOperator.is_manager) ? (() => {
-    const list = (printingMachines && printingMachines.length) ? printingMachines : MACHINES;
-    const cur = j.machine || '';
-    const opts = ['', ...list].map(m => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${m ? esc(m) : '— Select machine —'}</option>`).join('')
-      + (cur && !list.includes(cur) ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : '');
-    return `
-      <div class="station-field" style="margin:8px 0 14px;max-width:280px;">
-        <label>Machine</label>
-        <select id="sf-job-machine">${opts}</select>
-      </div>`;
-  })() : '';
-
   return `
     <div class="station-head">
       <div style="display:flex;align-items:center;gap:12px;">
@@ -24255,7 +24340,6 @@ function stationUpdateHtml() {
     <div class="station-update">
       <div class="su-job">#${j.id} · ${esc(j.name)}</div>
       <div class="su-jobsub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
-      ${managerMachineHtml}
       ${notesIn}
       ${finishTopHtml}
       ${fieldHtml}
@@ -24847,10 +24931,6 @@ async function stationSubmit(advance, skipTo) {
     }
     stationRecBlobs = [];
     const stationBody = { pin: stationOperator.pin, particulars_patch: patch, advance };
-    if (stationOperator.is_manager) {
-      const machEl = document.getElementById('sf-job-machine');
-      if (machEl) stationBody.job_machine = machEl.value;
-    }
     if (stationPerson && stationPerson.name) stationBody.person_name = stationPerson.name;
     if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
     if (finishKind) {

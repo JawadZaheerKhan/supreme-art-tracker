@@ -7662,7 +7662,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 
     // 1) Identify the operator by PIN (server-side — never trust the client).
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
     const machine = ops[0];
     const opStages = (machine.stage_indices && machine.stage_indices.length) ? machine.stage_indices : [machine.stage_index];
@@ -7717,15 +7717,6 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     if (job.issuance_status === 'ctp' && dbStage !== 0) {
       return res.status(400).json({ error: 'This job is still in the CTP queue — plates must be finished first.' });
     }
-
-    // Manager-only: the Machine field on the job card. Regular operators
-    // never send job_machine (the client only renders that input for a
-    // manager PIN), but we still gate on machine.is_manager server-side
-    // so a crafted request from a non-manager PIN can't change it.
-    const managerMachineEdit = (machine.is_manager && typeof req.body.job_machine === 'string')
-      ? req.body.job_machine.trim() : null;
-    const jobMachineToSave = managerMachineEdit !== null ? managerMachineEdit : (job.machine || null);
-    const machineChanged = managerMachineEdit !== null && managerMachineEdit !== (job.machine || '');
 
     // 3) Scope: the operator may act on a job sitting exactly at one of
     // their assigned stages (the normal case) — OR, new, on a job that
@@ -7877,9 +7868,6 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
     let log = Array.isArray(job.log) ? [...job.log] : [];
     let coatings_done = Array.isArray(job.coatings_done) ? [...job.coatings_done] : [];
-    if (machineChanged) {
-      log.push({ stage: stageLabel, status: stages[curStage]?.status || 'active', notes: `Machine changed to ${jobMachineToSave || '—'} by ${operator.name}`, by, time });
-    }
 
     // Coatings flow: the operator records which planned finish they did.
     // The sheets + waste NUMBERS ride in on particularsPatch just like any
@@ -8064,7 +8052,6 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
                stages          = ${stagesJson},
                log             = ${logJson},
                coatings_done   = ${doneJson},
-               machine         = ${jobMachineToSave},
                issuance_status = 'issued',
                issued_at       = COALESCE(issued_at, NOW()),
                issued_by_id    = COALESCE(issued_by_id, ${req.user?.id || null}),
@@ -8081,7 +8068,6 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
                stages          = ${stagesJson},
                log             = ${logJson},
                coatings_done   = ${doneJson},
-               machine         = ${jobMachineToSave},
                issuance_status = ${nextStatus},
                issued_items    = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
          WHERE id = ${id}
@@ -8095,7 +8081,6 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
                stages          = ${stagesJson},
                log             = ${logJson},
                coatings_done   = ${doneJson},
-               machine         = ${jobMachineToSave},
                issuance_status = ${nextStatus}
          WHERE id = ${id}
          RETURNING *
@@ -8116,6 +8101,107 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Look up a Manager PIN and confirm it's actually a manager (not a regular
+// machine operator). Shared by the two manager-only endpoints below so a
+// crafted request against a non-manager PIN is always rejected the same way.
+async function verifyManagerPin(sql, pin) {
+  if (!validPin(pin)) return { error: 'Enter a 3-digit PIN', status: 400 };
+  const ops = await sql`SELECT id, name, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+  if (!ops.length || !ops[0].is_manager) return { error: 'PIN not recognized as a manager', status: 401 };
+  return { operator: ops[0] };
+}
+
+// Manager: move a job directly to any stage (forward OR backward), the same
+// freedom the Jobs-tab stage pills give admin/production_manager — but PIN-
+// verified and with the stages/log entry computed server-side (never trust
+// the client for this), unlike /api/jobs/:id/stage which is a thin,
+// session-authenticated pass-through for the admin/PM UI. Deliberately
+// simpler than /station-update: no coatings/offcut/CTP business logic, no
+// peek rule — a manager overseeing the floor just needs "put it here."
+app.post('/api/jobs/:id/manager-stage', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const v = await verifyManagerPin(sql, String(req.body.pin || '').trim());
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const target = parseInt(req.body.stage_index, 10);
+    // Delivered (last stage) is never a valid manager target — same rule
+    // the Station's own skip-to-stage picker already enforces; that stage
+    // only flips via the real delivery-recording flow.
+    if (!Number.isInteger(target) || target < 0 || target >= STAGES.length - 1) {
+      return res.status(400).json({ error: 'Invalid target stage' });
+    }
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (job.issuance_status === 'pending') {
+      return res.status(400).json({ error: 'Stock must be issued before moving this job to a stage.' });
+    }
+    if (job.issuance_status === 'ctp') {
+      return res.status(400).json({ error: 'This job is still in the CTP queue — plates must be finished first.' });
+    }
+    const prevSi = job.stage_index || 0;
+    if (target === prevSi) return res.json(job);
+    const time = businessStamp();
+    const at = new Date().toISOString();
+    const by = `${v.operator.name} (Manager)`;
+    const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    for (let i = 0; i < target; i++) {
+      if (!stages[i] || stages[i].status !== 'done') stages[i] = { ...(stages[i] || {}), status: 'done', by, time, at };
+    }
+    const status = target === STAGES.length - 1 ? 'done' : 'active';
+    stages[target] = { status, notes: '', by, time, at };
+    for (let i = target + 1; i < STAGES.length; i++) delete stages[i];
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    log.push({ stage: STAGES[target], status, notes: `Moved from ${STAGES[prevSi]} by ${v.operator.name} (Manager)`, by, time });
+    const updated = await sql`
+      UPDATE jobs SET stage_index=${target}, stages=${JSON.stringify(stages)}, log=${JSON.stringify(log)}
+      WHERE id=${id} RETURNING *
+    `;
+    await logAudit(sql, req, { action: 'job.manager_stage', entityType: 'job', entityId: id, summary: `Job E-${id} moved to ${STAGES[target]} by manager ${v.operator.name}` });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Manager: save ONLY the Machine field and the Particulars table from the
+// full job-card modal — every other field on that modal is locked client-
+// side, and this endpoint only ever writes these two columns (plus a log
+// entry when Machine changes) regardless of what else the request body
+// contains, so a crafted request can't smuggle other job-card edits through.
+app.post('/api/jobs/:id/manager-update', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const v = await verifyManagerPin(sql, String(req.body.pin || '').trim());
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const machine = typeof req.body.machine === 'string' ? req.body.machine.trim() : (job.machine || '');
+    const particulars = (req.body.particulars && typeof req.body.particulars === 'object' && !Array.isArray(req.body.particulars))
+      ? req.body.particulars : (job.particulars || {});
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    if (machine !== (job.machine || '')) {
+      const curStage = job.stage_index || 0;
+      log.push({
+        stage: STAGES[curStage] || '',
+        status: (job.stages && job.stages[curStage] && job.stages[curStage].status) || 'active',
+        notes: `Machine changed to ${machine || '—'} by ${v.operator.name} (Manager)`,
+        by: `${v.operator.name} (Manager)`,
+        time: businessStamp(),
+      });
+    }
+    const updated = await sql`
+      UPDATE jobs SET machine=${machine || null}, particulars=${JSON.stringify(particulars)}, log=${JSON.stringify(log)}
+      WHERE id=${id} RETURNING *
+    `;
+    await logAudit(sql, req, { action: 'job.manager_update', entityType: 'job', entityId: id, summary: `Job E-${id} machine/particulars edited by manager ${v.operator.name}` });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // ── Station notes (text + voice, operator → next station) ───
