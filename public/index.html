@@ -1745,6 +1745,27 @@
   .station-update { display: flex; flex-direction: column; gap: 14px; }
   .su-job { font-size: 26px; font-weight: 800; color: var(--text); }
   .su-jobsub { font-size: 17px; color: var(--text2); margin-top: -8px; }
+  /* Smaller operator-name variant for the per-job update screen — the
+     loud full-size .station-who is right for the queue list (read across
+     the room), but on this screen the job's own details matter more than
+     re-announcing who's signed in. */
+  .station-who--sm { font-size: 17px; font-weight: 700; gap: 8px; }
+  .station-who--sm .station-mach { font-size: 13px; padding: 2px 8px; border-radius: 7px; }
+  .station-who--sm .station-who-ur { font-size: 16px; }
+  /* Job info panel — the facts an operator actually needs at a glance
+     (PO Qty, Carton Qty, Paper, Size/GSM, Cutting Size, Sheets, Packets,
+     Urgency), replacing the old big machine animation. Auto-fit grid so
+     it reflows cleanly from a wide tablet down to a narrow phone without
+     ever needing horizontal scroll. */
+  .station-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px 16px; margin: 2px 0 4px; padding: 12px 14px; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; }
+  .station-info-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .sii-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text2); }
+  .sii-val { font-size: 16px; font-weight: 800; color: var(--text); overflow-wrap: break-word; }
+  .sii-val.sii-urgent { color: var(--red-text); }
+  @media (max-width: 480px) {
+    .station-info-grid { grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 8px 12px; padding: 10px 12px; }
+    .sii-val { font-size: 14px; }
+  }
   .station-field { display: flex; flex-direction: column; gap: 6px; }
   /* Number-entry grid: 1 field stretches full width, 2+ share a row so
      the station view doesn't waste vertical space. auto-fit + minmax
@@ -1986,8 +2007,14 @@
     border-radius: 8px; padding: 3px 8px; font-size: 12px; font-weight: 600;
   }
   .sa-pill--done { background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); }
-  .sf-radio { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 15px; }
-  .sf-radio input { transform: scale(1.2); }
+  /* Coating/embellishment finish picker — same "pill goes bright when
+     picked" language as the Printing Nx buttons (.pm-mult-btn), so the
+     operator can see at a glance which finish they're doing. The native
+     radio dot is hidden; the whole pill is the clickable target (label
+     wraps the input, so clicking anywhere in it still fires the radio). */
+  .sf-radio { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 2px solid var(--border2); border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 700; color: var(--text2); background: var(--bg); transition: background .15s, border-color .15s, color .15s; }
+  .sf-radio input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .sf-radio:has(input:checked) { background: #2563eb; border-color: #1d4ed8; color: #fff; }
   .station-addnote { border-top: 2px dashed var(--border); margin-top: 6px; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
   /* Title row holds the 'Message for...' label on the left and the
      compact Record voice button on the right so the textarea below
@@ -24509,17 +24536,32 @@ function stationUpdateHtml() {
       <div id="sn-preview"></div>
     </div>` : '';
 
+  // Job info panel — what the operator actually needs (PO Qty, Carton
+  // Qty, Paper, Size/GSM, Cutting Size, Sheets, Packets, Urgency), in
+  // place of the old big machine animation. "—" for anything not set
+  // rather than skipping the cell, so the grid doesn't reflow oddly.
+  const infoVal = val => val ? esc(val) : '—';
+  const jobPriority = normalizePriority(j.priority);
+  const stationInfoGrid = `
+    <div class="station-info-grid">
+      <div class="station-info-item"><span class="sii-label">PO Qty</span><span class="sii-val">${infoVal(j.qty)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Unit Carton Qty</span><span class="sii-val">${infoVal(j.cartonqty)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Paper</span><span class="sii-val">${infoVal(j.paper)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Size / GSM</span><span class="sii-val">${infoVal(j.size)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Cutting Size</span><span class="sii-val">${infoVal((j.particulars||{}).cutting_size_gsm)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Sheets</span><span class="sii-val">${infoVal(j.sheets)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Packets</span><span class="sii-val">${infoVal(packetsDisplay(j))}</span></div>
+      <div class="station-info-item"><span class="sii-label">Urgency</span><span class="sii-val${jobPriority==='Urgent'?' sii-urgent':''}">${infoVal(jobPriority)}</span></div>
+    </div>`;
   return `
     <div class="station-head">
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div class="station-machine station-machine--sm stage-machine">${stageMachineSVG(stIdx, {})}</div>
-        <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
-      </div>
+      <div><div class="station-who station-who--sm">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>
     </div>
     <div class="station-update">
       <div class="su-job">#${j.id} · ${esc(j.name)}</div>
       <div class="su-jobsub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
+      ${stationInfoGrid}
       ${notesIn}
       ${finishTopHtml}
       ${fieldHtml}
