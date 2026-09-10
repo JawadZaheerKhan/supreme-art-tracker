@@ -2037,7 +2037,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       if (n && !personToMachine.has(n)) personToMachine.set(n, r.name);
     }
   }
-  const jobs = await sql`SELECT id, particulars, log, machine, stages FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
+  const jobs = await sql`SELECT id, particulars, log, machine, stages, coatings FROM jobs WHERE deleted_at IS NULL AND log IS NOT NULL`;
 
   // Per-machine accumulator. `jobsMap` keeps a per-job breakdown so the
   // report can list "E-152-4clr / E-153-3+1clr" instead of the old
@@ -2051,6 +2051,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       jobsMap: new Map(),   // jobId -> { colorsRaw, platesRaw, firstMs }
       operators: new Set(),
       printBreakdown: [],   // Printing only — [{ qty: '1200x3', job_id }]
+      embellishJobs: new Map(), // Die Cutting only — jobId -> Set(finish names)
     });
     return acc.get(m);
   };
@@ -2199,6 +2200,44 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
         wastePassesByMc.set(legacyMc, (wastePassesByMc.get(legacyMc) || 0) + 1);
       }
     }
+    // Die Cutting only: embellishment (Emboss/Color Seal/Dripup/Cylinder
+    // Emboss/Hot Foiling) physically happens on these same die-cutting
+    // machines, so its embellish_sheets_qty/embellish_waste_sheets entries
+    // feed into THIS report's normal sheets/waste/Jobs totals rather than
+    // the Coatings report. embMachinesToday tracks which machines this job
+    // credited via embellishment (as opposed to plain die-cutting), so the
+    // merge loop below can note it for the Remarks auto-hint.
+    const embMachinesToday = new Set();
+    if (stageLabel === 'Die Cutting') {
+      const embSheetsField = part.embellish_sheets_qty;
+      const embWasteField  = part.embellish_waste_sheets;
+      const embSheetEntries = embSheetsField && Array.isArray(embSheetsField.entries) && embSheetsField.entries.length ? embSheetsField.entries : null;
+      const embWasteEntries = embWasteField && Array.isArray(embWasteField.entries) && embWasteField.entries.length ? embWasteField.entries : null;
+      if (embSheetEntries) {
+        for (const e of embSheetEntries) {
+          if (!e || e.date !== date) continue;
+          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (!Number.isFinite(n) || n === 0) continue;
+          const mc = String(e.machine || '').trim();
+          if (!mc) continue;
+          bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
+          sheetPassesByMc.set(mc, (sheetPassesByMc.get(mc) || 0) + 1);
+          embMachinesToday.add(mc);
+        }
+      }
+      if (embWasteEntries) {
+        for (const e of embWasteEntries) {
+          if (!e || e.date !== date) continue;
+          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          if (!Number.isFinite(n) || n === 0) continue;
+          const mc = String(e.machine || '').trim();
+          if (!mc) continue;
+          bumpCredit(mc, 'waste', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
+          wastePassesByMc.set(mc, (wastePassesByMc.get(mc) || 0) + 1);
+          embMachinesToday.add(mc);
+        }
+      }
+    }
     // Merge: passes = max(sheet count, waste count). A paired save (both
     // sides present) → max is the pair count. A waste-only save (sheets
     // blank) → waste count wins so the pass still shows in "E-135 ×N".
@@ -2225,6 +2264,13 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       for (const op of c.operators) row.operators.add(op);
       const pb = printBreak.get(mc);
       if (pb) for (const rawQty of pb) row.printBreakdown.push({ qty: rawQty, job_id: job.id });
+      if (embMachinesToday.has(mc)) {
+        const embFinishes = (Array.isArray(job.coatings) ? job.coatings : []).filter(f => ROLE_FINISHES.embellish.includes(f));
+        if (embFinishes.length) {
+          if (!row.embellishJobs.has(job.id)) row.embellishJobs.set(job.id, new Set());
+          embFinishes.forEach(f => row.embellishJobs.get(job.id).add(f));
+        }
+      }
       const passesForMc = passesByMc.get(mc) || 1;
       if (!row.jobsMap.has(job.id)) {
         row.jobsMap.set(job.id, {
@@ -2370,13 +2416,12 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
 
-    // Coating machines = operators with 'coatings' (wet) or 'embellish'
-    // (foil/emboss) roles. Both share this tab — embellishments machines
-    // live in the same shop as the coatings machines.
+    // Coating machines = operators with the 'coatings' (wet) role.
+    // Embellishment (Emboss/Hot Foiling/etc.) is reported under Die
+    // Cutting instead — those are the machines that actually do it.
     const machineRows = await sql`
       SELECT name FROM operators
-      WHERE active
-        AND (roles @> ARRAY['coatings']::text[] OR roles @> ARRAY['embellish']::text[])
+      WHERE active AND roles @> ARRAY['coatings']::text[]
       ORDER BY name
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
@@ -2436,14 +2481,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         const n = parseInt(part.replace(/[^0-9-]/g, ''), 10);
         return acc + (Number.isFinite(n) ? n : 0);
       }, 0);
-      // Embellishment now writes into its own embellish_sheets_qty /
-      // embellish_waste_sheets pair instead of sharing the wet-coating
-      // coating_sheets_qty / uv_waste_sheets keys (see particularsRowsFor
-      // on the client) — fold both sources in here so this report keeps
-      // crediting whichever machine each entry is actually stamped with,
-      // same as before the split.
-      const coatSheetsAdmin = sumPipe(part.coating_sheets_qty && part.coating_sheets_qty.quantity)
-        + sumPipe(part.embellish_sheets_qty && part.embellish_sheets_qty.quantity);
+      const coatSheetsAdmin = sumPipe(part.coating_sheets_qty && part.coating_sheets_qty.quantity);
       // Fallback: if admin hasn't filled in Coating Sheets Qty, derive from
       // printed − printed-waste (legacy formula). sumPipe — NOT parseInt —
       // because multi-pass quantities are pipe-joined ("26000 | 500") and a
@@ -2455,12 +2493,11 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       // passes are date- and machine-stamped in entries[], so sheets/waste
       // land on the day the work was entered (a 500/500 split across two
       // days shows 500 on each day), and each machine only gets ITS OWN
-      // entries (UV 1000 + Emboss 800 no longer shows 1800 on both rows).
-      const entriesOf = key => (part[key] && Array.isArray(part[key].entries) && part[key].entries.length) ? part[key].entries : null;
-      const qtyEntries = entriesOf('coating_sheets_qty');
-      const wasteEntries = entriesOf('uv_waste_sheets');
-      const embQtyEntries = entriesOf('embellish_sheets_qty');
-      const embWasteEntries = entriesOf('embellish_waste_sheets');
+      // entries.
+      const qtyEntries = part.coating_sheets_qty && Array.isArray(part.coating_sheets_qty.entries) && part.coating_sheets_qty.entries.length
+        ? part.coating_sheets_qty.entries : null;
+      const wasteEntries = part.uv_waste_sheets && Array.isArray(part.uv_waste_sheets.entries) && part.uv_waste_sheets.entries.length
+        ? part.uv_waste_sheets.entries : null;
       // Log-derived earliest Coatings-byline ms per machine on this
       // date — used as firstMs so the Jobs column renders in the order
       // the operators actually worked, not by jobId.
@@ -2498,8 +2535,6 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
       };
       if (qtyEntries) creditEntries(qtyEntries, 'sheets', sheetPassesByMc);
       if (wasteEntries) creditEntries(wasteEntries, 'waste', wastePassesByMc);
-      if (embQtyEntries) creditEntries(embQtyEntries, 'sheets', sheetPassesByMc);
-      if (embWasteEntries) creditEntries(embWasteEntries, 'waste', wastePassesByMc);
       // Merge per-side counts → passes with max, then bump the jobsMap
       // entry once. Skips machines with 0 passes so a coatings_done
       // badge (below) doesn't get an inflated ×N suffix.
@@ -2512,9 +2547,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         }
       }
       // Legacy jobs (no entries at all) keep the old badge-day behavior.
-      const hasAnyQtyEntries = qtyEntries || embQtyEntries;
-      const hasAnyWasteEntries = wasteEntries || embWasteEntries;
-      if (!hasAnyQtyEntries && !hasAnyWasteEntries && sheetsN <= 0) continue;
+      if (!qtyEntries && !wasteEntries && sheetsN <= 0) continue;
       // ✓ badges still drive the finishes column, operator list, and job
       // count for the day the finish was recorded. Sheets/waste from the
       // badges only apply when the job has NO entries (legacy) — otherwise
@@ -2529,14 +2562,14 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
         const row = ensure(mc);
         const doneMs = (() => { const d = new Date(entry.done_at); return isNaN(d) ? 0 : d.getTime(); })();
         noteFirstMs(row, job.id, doneMs);
-        if (!hasAnyQtyEntries && !sheetsCredited.has(mc)) {
+        if (!qtyEntries && !sheetsCredited.has(mc)) {
           row.sheets += sheetsN;
           sheetsCredited.add(mc);
         }
         const opName = String(entry.operator_name || '').trim();
         if (opName) row.operators.add(opName);
         if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
-        if (!hasAnyWasteEntries) {
+        if (!wasteEntries) {
           const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
           if (Number.isFinite(w)) row.waste += w;
         }
@@ -2713,6 +2746,12 @@ app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res)
         settings: note.settings || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
+        // Auto note ("E-417 Emboss, E-420 Hot Foiling") for jobs on this
+        // machine that were embellishment work, not plain die cutting —
+        // shown alongside (not merged into) the admin-typed Remarks cell.
+        embellish_note: (!isCustom && row && row.embellishJobs && row.embellishJobs.size)
+          ? [...row.embellishJobs.entries()].map(([jobId, finishes]) => `E-${jobId} ${[...finishes].join('+')}`).join(', ')
+          : '',
       };
     });
     res.json(out);
@@ -2858,6 +2897,35 @@ async function aggregateProductionRange(sql, { from, to }) {
           if (n) bump(mc, op, eDate, 'waste', n);
         }
       }
+      // Die Cutting only: embellishment (Emboss/Color Seal/Dripup/Cylinder
+      // Emboss/Hot Foiling) physically happens on these same die-cutting
+      // machines (see particularsRowsFor on the client), so its
+      // embellish_sheets_qty/embellish_waste_sheets entries feed into
+      // THIS bucket's sheets/waste totals — not Coatings.
+      if (stageLabel === 'Die Cutting') {
+        const embSheetsField = part.embellish_sheets_qty;
+        const embWasteField  = part.embellish_waste_sheets;
+        if (embSheetsField && Array.isArray(embSheetsField.entries)) {
+          for (const e of embSheetsField.entries) {
+            if (!e) continue;
+            const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+            if (!Number.isFinite(n) || n === 0) continue;
+            const mc = String(e.machine || '').trim();
+            const op = String(e.operator || '').trim();
+            bump(mc, op, e.date, 'sheets', n);
+            bump(mc, op, e.date, 'sheetsMult', n);
+          }
+        }
+        if (embWasteField && Array.isArray(embWasteField.entries)) {
+          for (const e of embWasteField.entries) {
+            if (!e) continue;
+            const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+            if (!Number.isFinite(n) || n === 0) continue;
+            const mc = String(e.machine || '').trim();
+            bump(mc, String(e.operator || '').trim(), e.date, 'waste', n);
+          }
+        }
+      }
     }
     // Coatings: sheets AND waste come from the date+machine-stamped
     // entries (coating_sheets_qty / uv_waste_sheets) — same per-day source
@@ -2890,17 +2958,6 @@ async function aggregateProductionRange(sql, { from, to }) {
     const wfPart = part.uv_waste_sheets;
     const wasteEntries = wfPart && Array.isArray(wfPart.entries) && wfPart.entries.length ? wfPart.entries : null;
     if (wasteEntries) creditCoatingEntries(wasteEntries, 'waste');
-    // Embellishment now writes into its own embellish_sheets_qty /
-    // embellish_waste_sheets pair instead of sharing the wet-coating keys
-    // above (see particularsRowsFor on the client) — credit the same way.
-    const embSheetsPart = part.embellish_sheets_qty;
-    const embSheetEntries = embSheetsPart && Array.isArray(embSheetsPart.entries) && embSheetsPart.entries.length ? embSheetsPart.entries : null;
-    if (embSheetEntries) creditCoatingEntries(embSheetEntries, 'sheets');
-    const embWastePart = part.embellish_waste_sheets;
-    const embWasteEntries = embWastePart && Array.isArray(embWastePart.entries) && embWastePart.entries.length ? embWastePart.entries : null;
-    if (embWasteEntries) creditCoatingEntries(embWasteEntries, 'waste');
-    const hasAnySheetEntries = coatSheetEntries || embSheetEntries;
-    const hasAnyWasteEntries = wasteEntries || embWasteEntries;
     // Sheets legacy fallback — mirrors what the Daily Coatings report
     // already does (server's /api/reports/daily-production/coatings/:date):
     // when there's no coating_sheets_qty.entries[] at all, derive a sheets
@@ -2912,12 +2969,12 @@ async function aggregateProductionRange(sql, { from, to }) {
     // Production Report while the exact same row DID count in Daily
     // Production — the two reports disagreeing on the same data.
     let sheetsFallbackN = 0;
-    if (!hasAnySheetEntries) {
+    if (!coatSheetEntries) {
       const sumPipe = (s) => String(s || '').split('|').reduce((acc, p) => {
         const n = parseInt(p.replace(/[^0-9-]/g, ''), 10);
         return acc + (Number.isFinite(n) ? n : 0);
       }, 0);
-      const coatSheetsAdmin = sumPipe(csPart && csPart.quantity) + sumPipe(embSheetsPart && embSheetsPart.quantity);
+      const coatSheetsAdmin = sumPipe(csPart && csPart.quantity);
       const printedN = sumPipe(part.printed_sheets_qty && part.printed_sheets_qty.quantity);
       const printedWasteN = sumPipe(part.printed_waste_sheets && part.printed_waste_sheets.quantity);
       sheetsFallbackN = coatSheetsAdmin > 0 ? coatSheetsAdmin : Math.max(0, printedN - printedWasteN);
@@ -2930,17 +2987,17 @@ async function aggregateProductionRange(sql, { from, to }) {
       if (!c) continue;
       const cDate = isoTsToDate(c.done_at);
       if (!cDate || cDate < from || cDate > to) continue;
-      const w = hasAnyWasteEntries ? 0 : (parseInt(String(c.waste_sheets || '').replace(/[^0-9-]/g, ''), 10) || 0);
+      const w = wasteEntries ? 0 : (parseInt(String(c.waste_sheets || '').replace(/[^0-9-]/g, ''), 10) || 0);
       if (c.machine) {
         const r = ensureMD(cDate, c.machine); r.waste += w; r.jobs.add(job.id);
-        if (!hasAnySheetEntries && sheetsFallbackN > 0) {
+        if (!coatSheetEntries && sheetsFallbackN > 0) {
           const k = cDate + '|mc|' + c.machine;
           if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; r.sheetsMult += sheetsFallbackN; sheetsCreditedKeys.add(k); }
         }
       }
       if (c.operator_name) {
         const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id);
-        if (!hasAnySheetEntries && sheetsFallbackN > 0) {
+        if (!coatSheetEntries && sheetsFallbackN > 0) {
           const k = cDate + '|op|' + c.operator_name;
           if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; r.sheetsMult += sheetsFallbackN; sheetsCreditedKeys.add(k); }
         }
