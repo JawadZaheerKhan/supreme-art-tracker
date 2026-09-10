@@ -238,7 +238,7 @@ function getDb() {
 // kept the Station PIN waiting 30 s on every cold start.
 // Bumped for shade_card_dc_counter (auto-numbered Delivery Challans on
 // shade-card deliveries).
-const SCHEMA_VERSION = 'v2026-09-02-shade-dc';
+const SCHEMA_VERSION = 'v2026-09-10-manager-pin';
 
 async function initDb() {
   try {
