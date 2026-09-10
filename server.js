@@ -1874,6 +1874,27 @@ app.get('/api/operators/machines', requireAuth, async (req, res) => {
   }
 });
 
+// Lightweight roster: name + roles for every active machine, NO pin and
+// NO persons — safe for any signed-in station user, unlike the full
+// GET /api/operators (admin/PM-only, includes PINs). Exists specifically
+// so the Station screen can tell "is this saved entry mine or a
+// different machine's?" for entries shared across a stage (see
+// entryVisible/entryVisibleForSubmit in the client) — before this, that
+// role check silently had nothing to look up for any operator-role login
+// (ensureOperatorsLoaded() only fetches the full roster for admin/PM/CEO),
+// so every entry looked "not recognized, so assume it's mine", letting one
+// machine's save clobber another machine's numbers on a shared job.
+app.get('/api/operators/roster', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT name, roles FROM operators WHERE active ORDER BY name`;
+    res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
   try {
     await dbReady;

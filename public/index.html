@@ -22496,6 +22496,26 @@ let usersList = [];
 let auditList = [];
 
 let operatorsList = [];
+// Lightweight name+roles roster (no PIN, no persons) — loaded for EVERY
+// signed-in station user (not just admin/PM/CEO, unlike operatorsList via
+// ensureOperatorsLoaded), so entryVisible/entryVisibleForSubmit can always
+// tell whether a saved Coatings entry belongs to the current machine's own
+// section or a different one, instead of defaulting to "don't recognize
+// it, so treat it as mine" — which is what let one machine's station save
+// silently overwrite another machine's numbers on a shared job.
+let machineRoster = [];
+async function loadMachineRoster() {
+  try { machineRoster = await api('GET', '/api/operators/roster'); }
+  catch { machineRoster = []; }
+}
+// Shared by entryVisible/entryVisibleForSubmit — operatorsList (the full
+// roster, admin/PM/CEO only) wins when it's loaded since it's always
+// fresher; machineRoster (everyone) is the fallback so the role check
+// still works for a plain operator login.
+function findMachineForRoleCheck(name) {
+  const list = (operatorsList && operatorsList.length) ? operatorsList : machineRoster;
+  return list.find(o => o.name === name);
+}
 async function loadUsersAndAudit() {
   try {
     // PM only sees the Floor Operators section — skip the Authorized
@@ -23492,7 +23512,7 @@ function stationUpdateHtml() {
     if (canDeleteEntry) return true;
     if (stIdx !== 2 || !e || !e.machine) return true;
     if (e.machine === (stationOperator.machine || '')) return true;
-    const entryOp = operatorsList.find(o => o.name === e.machine);
+    const entryOp = findMachineForRoleCheck(e.machine);
     if (!entryOp) return true;
     const entryRoles = rolesOfOperator(entryOp);
     return entryRoles.some(r => myRoles.has(r));
@@ -24331,7 +24351,7 @@ async function stationSubmit(advance, skipTo) {
           if (adminBypass) return true;
           if (!e || !e.machine) return true;
           if (e.machine === myMachine) return true;
-          const entryOp = operatorsList.find(o => o.name === e.machine);
+          const entryOp = findMachineForRoleCheck(e.machine);
           if (!entryOp) return true;
           const entryRoles = rolesOfOperator(entryOp);
           return entryRoles.some(r => myRoles.has(r));
@@ -25533,7 +25553,7 @@ async function init() {
   renderUserChip();
   // Operators can't read inventory (403), so skip the call for them.
   // Everyone else loads jobs + inventory in parallel.
-  const loaders = [loadJobs(), loadPrintingMachines()];
+  const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster()];
   if (!isOperator()) loaders.push(loadInventory());
   await Promise.all(loaders);
   // Route to the same landing tab the login flow uses so a refresh
