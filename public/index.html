@@ -11175,7 +11175,10 @@ function buildJobsReportRows() {
       client: j.client || '',
       poNo: poNoJoined,
       batchNo: batchNoJoined,
-      poQty: j.qty || '',
+      // MIL sub jobs: PO Qty isn't a real per-job PO (see milTileShipmentFacts
+      // on the job tile) — the report shows what actually shipped instead,
+      // same number as the Delivered Qty column, colored purple below.
+      poQty: j.stock_group_name ? (j.delqty || '') : (j.qty || ''),
       cartonQty: j.cartonqty || '',
       deliveredQty: j.delqty || '',
       challan: challans,
@@ -11284,7 +11287,10 @@ function buildJobsReportRows() {
         client: dedupePipe(sorted.map(b => b.client)),
         poNo: sorted[0].poNo,
         batchNo: dedupePipe(sorted.map(b => b.batchNo)),
-        poQty: sorted.map(b => b.poQty).filter(v => v !== '' && v != null).join(' | '),
+        // Same rule as the per-job row: PO Qty = what shipped, so it
+        // matches deliveredQty exactly rather than pipe-joining each
+        // member's own (now-shipped) figure.
+        poQty: sorted.reduce((s, b) => s + (+b.deliveredQty || 0), 0),
         cartonQty: sorted.reduce((s, b) => s + (+b.cartonQty || 0), 0),
         deliveredQty: sorted.reduce((s, b) => s + (+b.deliveredQty || 0), 0),
         challan: sorted[0].challan,
@@ -11391,7 +11397,7 @@ function renderJobsReport() {
       <td ${td}>${esc(r.batchNo)}</td>
       <td ${td}>${esc(r.challan)}</td>
       ${milQtyCell}
-      <td ${tdR}>${esc(r.poQty)}</td>
+      <td style="padding:8px 10px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}" title="${r.stockGroupName?'MIL job — PO Qty shown is what actually shipped':''}">${esc(r.poQty)}</td>
       <td ${tdR}>${esc(r.cartonQty)}</td>
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
@@ -11530,7 +11536,7 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.batchNo || '')}</td>
     <td ${tdL}>${esc(r.challan || '')}</td>
     ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
-    <td ${tdR}>${esc(r.poQty)}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}">${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${r.stockGroupName ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
