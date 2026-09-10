@@ -247,7 +247,7 @@ function getDb() {
 // migration, AND inventory_transactions.deleted_at/deleted_by (Manual
 // Consumption archive) — all three landed on separate branches and need
 // to run on any DB still stamped with an earlier predecessor version.
-const SCHEMA_VERSION = 'v2026-09-01-offcut-pairs-superadmin-tx-archive';
+const SCHEMA_VERSION = 'v2026-09-10-manager-pin';
 
 async function initDb() {
   try {
