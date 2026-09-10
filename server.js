@@ -116,6 +116,10 @@ const ROLE_FINISHES = {
 };
 const ALL_FINISHES = [...ROLE_FINISHES.coatings, ...ROLE_FINISHES.embellish];
 const ROLE_IDS = new Set(ROLES.map(r => r.id));
+// Every role id, in order — a Manager PIN gets all of them so they're
+// treated as qualified for every stage/finish without a special-cased
+// scope check anywhere in the station pipeline.
+const ALL_ROLE_IDS = ROLES.map(r => r.id);
 
 function rolesOf(operator) {
   if (Array.isArray(operator.roles) && operator.roles.length) return operator.roles;
@@ -795,6 +799,12 @@ async function initDb() {
     // Each row in `operators` now represents a MACHINE. PIN belongs to the
     // machine; one or more people work on it. persons is [{name, name_ur}].
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS persons JSONB DEFAULT '[]'::jsonb`;
+    // Manager PIN — same roster, same PIN pad, but not tied to one machine
+    // or stage. Holds every role (see ALL_ROLE_IDS) so the normal
+    // stage-scope + finish checks in station-update pass unchanged; the
+    // client uses this flag to show the all-stages/search station screen
+    // and to unlock the Machine field instead of a single-stage queue.
+    await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS is_manager BOOLEAN NOT NULL DEFAULT false`;
     // One-time migration: turn each existing single-person row into a machine
     // with that one person, and move the machine-name column into `name` so
     // `name` consistently means the machine label going forward.
@@ -1848,19 +1858,24 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
     const sql = getDb();
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
-    const parsed = parseOperatorRoles(req.body);
+    const isManager = req.body.is_manager === true;
+    // Manager PINs always get every role, regardless of what (if anything)
+    // was checked client-side — they're not scoped to a stage.
+    const parsed = isManager
+      ? { roles: ALL_ROLE_IDS, stageIndices: stageIndicesFromRoles(ALL_ROLE_IDS), primary: stageIndicesFromRoles(ALL_ROLE_IDS)[0] }
+      : parseOperatorRoles(req.body);
     const persons = parsePersons(req.body);
-    if (!name) return res.status(400).json({ error: 'Machine name is required' });
+    if (!name) return res.status(400).json({ error: isManager ? 'Manager name is required' : 'Machine name is required' });
     if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
-    if (!persons.length) return res.status(400).json({ error: 'Add at least one operator on this machine' });
+    if (!persons.length) return res.status(400).json({ error: isManager ? 'Add at least one manager' : 'Add at least one operator on this machine' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const inserted = await sql`
-      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons)
-      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}) RETURNING *
+      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons, is_manager)
+      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}, ${isManager}) RETURNING *
     `;
-    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added machine ${name} (roles ${parsed.roles.join(',')}, ${persons.length} operator${persons.length === 1 ? '' : 's'})` });
+    await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added ${isManager ? 'manager' : 'machine'} ${name} (roles ${parsed.roles.join(',')}, ${persons.length} operator${persons.length === 1 ? '' : 's'})` });
     res.json(inserted[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -1874,21 +1889,24 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
-    const parsed = parseOperatorRoles(req.body);
+    const isManager = req.body.is_manager === true;
+    const parsed = isManager
+      ? { roles: ALL_ROLE_IDS, stageIndices: stageIndicesFromRoles(ALL_ROLE_IDS), primary: stageIndicesFromRoles(ALL_ROLE_IDS)[0] }
+      : parseOperatorRoles(req.body);
     const persons = parsePersons(req.body);
     const active = req.body.active !== false;
-    if (!name) return res.status(400).json({ error: 'Machine name is required' });
+    if (!name) return res.status(400).json({ error: isManager ? 'Manager name is required' : 'Machine name is required' });
     if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
-    if (!persons.length) return res.status(400).json({ error: 'Add at least one operator on this machine' });
+    if (!persons.length) return res.status(400).json({ error: isManager ? 'Add at least one manager' : 'Add at least one operator on this machine' });
     const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const updated = await sql`
-      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}, is_manager=${isManager}
       WHERE id=${id} RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
-    await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `Edited operator ${name}` });
+    await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `Edited ${isManager ? 'manager' : 'operator'} ${name}` });
     res.json(updated[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -1918,7 +1936,7 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const sql = getDb();
     const pin = String(req.body.pin || '').trim();
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
@@ -7644,7 +7662,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 
     // 1) Identify the operator by PIN (server-side — never trust the client).
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
     const machine = ops[0];
     const opStages = (machine.stage_indices && machine.stage_indices.length) ? machine.stage_indices : [machine.stage_index];
@@ -7699,6 +7717,15 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     if (job.issuance_status === 'ctp' && dbStage !== 0) {
       return res.status(400).json({ error: 'This job is still in the CTP queue — plates must be finished first.' });
     }
+
+    // Manager-only: the Machine field on the job card. Regular operators
+    // never send job_machine (the client only renders that input for a
+    // manager PIN), but we still gate on machine.is_manager server-side
+    // so a crafted request from a non-manager PIN can't change it.
+    const managerMachineEdit = (machine.is_manager && typeof req.body.job_machine === 'string')
+      ? req.body.job_machine.trim() : null;
+    const jobMachineToSave = managerMachineEdit !== null ? managerMachineEdit : (job.machine || null);
+    const machineChanged = managerMachineEdit !== null && managerMachineEdit !== (job.machine || '');
 
     // 3) Scope: the operator may act on a job sitting exactly at one of
     // their assigned stages (the normal case) — OR, new, on a job that
@@ -7850,6 +7877,9 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
     let log = Array.isArray(job.log) ? [...job.log] : [];
     let coatings_done = Array.isArray(job.coatings_done) ? [...job.coatings_done] : [];
+    if (machineChanged) {
+      log.push({ stage: stageLabel, status: stages[curStage]?.status || 'active', notes: `Machine changed to ${jobMachineToSave || '—'} by ${operator.name}`, by, time });
+    }
 
     // Coatings flow: the operator records which planned finish they did.
     // The sheets + waste NUMBERS ride in on particularsPatch just like any
@@ -8034,6 +8064,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
                stages          = ${stagesJson},
                log             = ${logJson},
                coatings_done   = ${doneJson},
+               machine         = ${jobMachineToSave},
                issuance_status = 'issued',
                issued_at       = COALESCE(issued_at, NOW()),
                issued_by_id    = COALESCE(issued_by_id, ${req.user?.id || null}),
@@ -8050,6 +8081,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
                stages          = ${stagesJson},
                log             = ${logJson},
                coatings_done   = ${doneJson},
+               machine         = ${jobMachineToSave},
                issuance_status = ${nextStatus},
                issued_items    = (COALESCE(issued_items, '[]'::jsonb) || ${patchJson}::jsonb)
          WHERE id = ${id}
@@ -8063,6 +8095,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
                stages          = ${stagesJson},
                log             = ${logJson},
                coatings_done   = ${doneJson},
+               machine         = ${jobMachineToSave},
                issuance_status = ${nextStatus}
          WHERE id = ${id}
          RETURNING *
