@@ -3513,6 +3513,20 @@ function totalDeliveredCartons(j) {
     return a + (Number.isFinite(n) ? n : 0);
   }, 0);
 }
+// MIL-group member tiles: a sub job's own PO Qty / PO No. fields aren't
+// meaningful (production is pooled and FIFO-allocated to real client
+// POs only at delivery time via /api/groups/deliver), so the tile shows
+// what actually shipped instead — each delivery's cartons + po_no,
+// pipe-joined in shipment order. Returns null when nothing has shipped
+// yet (caller falls back to the normal PO Qty / PO No. display).
+function milTileShipmentFacts(j) {
+  const deliveries = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  if (!deliveries.length) return null;
+  return {
+    qtyLine: deliveries.map(d => esc(String((d && d.cartons) || '').trim() || '—')).join(' | '),
+    poLine:  deliveries.map(d => esc(String((d && d.po_no) || '').trim() || '—')).join(' | '),
+  };
+}
 function isPartialDelivery(j) {
   const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
   if (!booked) return false;
@@ -5006,6 +5020,10 @@ function renderJobRowCompact(j, opts) {
     const sidePanel = j.cut_size
       ? `<div class="job-side"><div><div class="lbl">Cut to</div><div class="val">${esc(j.cut_size)}${j.offcut_size?` <span style="font-weight:500;">(offcut ${esc(j.offcut_size)})</span>`:''}</div></div></div>`
       : '';
+    // MIL-group member tile (not the aggregate group tile itself): PO Qty
+    // and PO No. swap to the per-shipment shipped qty + PO number instead
+    // of the job's own fields — see milTileShipmentFacts().
+    const milShipFacts = (j.stock_group_name && !isGroupTile) ? milTileShipmentFacts(j) : null;
     // Selection checkbox — shown on the New Jobs tab (view === 'new') and
     // the CTP tab (view === 'ctp'), and only for users who can print. Lets
     // the PM pick several jobs and batch-print them in one dialog. See
@@ -5030,8 +5048,12 @@ function renderJobRowCompact(j, opts) {
                full production specifications remain in Edit / View. -->
           <div class="job-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' &middot; ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>
           <div class="job-facts">
-            ${j.qty?`<span><b>${isGroupTile?'Mil':'PO'} Qty:</b> ${esc(j.qty)} pcs</span>`:''}
-            ${j.ref?`<span><b>PO No.:</b> ${esc(j.ref)}</span>`:''}
+            ${milShipFacts
+              ? `<span><b>PO Qty:</b> ${milShipFacts.qtyLine} pcs</span>`
+              : (j.qty?`<span><b>${isGroupTile?'Mil':'PO'} Qty:</b> ${esc(j.qty)} pcs</span>`:'')}
+            ${milShipFacts
+              ? `<span><b>PO No.:</b> ${milShipFacts.poLine}</span>`
+              : (j.ref?`<span><b>PO No.:</b> ${esc(j.ref)}</span>`:'')}
             ${readyQtyForTile?`<span><b>Ready to Deliver Qty:</b> ${esc(readyQtyForTile)}</span>`:''}
             ${j.deadline?`<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Deadline:</b> ${esc(fmtDMY(j.deadline))}</span>`:''}
           </div>
@@ -5370,14 +5392,18 @@ function renderJobCard(j, opts) {
   // details, delivered qty, deadline). Internal fields like Machine,
   // Size/GSM, Sheets, Ups, Unit Carton, Code, Cut Size are not exposed.
   const coatingsStr = Array.isArray(j.coatings) ? j.coatings.filter(Boolean).join(', ') : '';
+  // MIL-group member tile (not the aggregate group tile itself): PO Qty
+  // and PO No. swap to the per-shipment shipped qty + PO number instead
+  // of the job's own fields — see milTileShipmentFacts().
+  const milShipFacts = (j.stock_group_name && !isGroupTile) ? milTileShipmentFacts(j) : null;
   const facts = clientPreview
     ? [
         // Job Card No. (E-<id>) is shown at the tile's top-left, so it's
         // intentionally omitted from the facts row. Code (jobcode) stays
         // in the facts row per user preference.
         j.jobcode ? `<span><b>Code</b> ${esc(j.jobcode)}</span>` : '',
-        j.ref     ? `<span><b>PO No.</b> ${esc(j.ref)}</span>` : '',
-        j.qty     ? `<span><b>${isGroupTile ? 'Mil' : 'PO'} Qty</b> ${esc(j.qty)}</span>` : '',
+        milShipFacts ? `<span><b>PO No.</b> ${milShipFacts.poLine}</span>` : (j.ref ? `<span><b>PO No.</b> ${esc(j.ref)}</span>` : ''),
+        milShipFacts ? `<span><b>PO Qty</b> ${milShipFacts.qtyLine}</span>` : (j.qty ? `<span><b>${isGroupTile ? 'Mil' : 'PO'} Qty</b> ${esc(j.qty)}</span>` : ''),
         j.bno     ? `<span><b>Batch No.</b> ${esc(j.bno)}</span>` : '',
         coatingsStr ? `<span><b>Coatings</b> ${esc(coatingsStr)}</span>` : '',
         (() => {
@@ -17919,6 +17945,15 @@ function jobForm(j={}, opts) {
   const currentBalance = currentItem
     ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
     : 0;
+  // MIL-group member (or a new sub job being seeded into one): the P.O.
+  // Qty field isn't a real per-job PO — it's the group's own standing
+  // MIL quantity, shared across every sub job. Relabel + pull the live
+  // value from the group entity so it can never drift from Edit Group.
+  const milGroupForQty = j.group_job_id ? stockGroupById(j.group_job_id) : null;
+  const qtyLabelHtml = milGroupForQty
+    ? `<span class="jc-lbl" style="color:#7c3aed;">MIL Qty</span>`
+    : `<span class="jc-lbl">P.O. Qty</span>`;
+  const qtyValueForForm = milGroupForQty ? (milGroupForQty.po_qty ?? j.qty) : j.qty;
   return `
     <img class="jc-watermark-screen" src="/logo.png" alt="">
     <input type="hidden" id="f-editing-id" value="${j.id ? esc(j.id) : ''}">
@@ -17959,7 +17994,7 @@ function jobForm(j={}, opts) {
       <tr>
         <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : localDateISO()))}"></td>
         <td><span class="jc-lbl">Deadline</span><input type="date" id="f-deadline" value="${v(j.deadline)}"></td>
-        <td colspan="2"><span class="jc-lbl">P.O. Qty</span><input type="text" id="f-qty" value="${v(j.qty)}"></td>
+        <td colspan="2">${qtyLabelHtml}<input type="text" id="f-qty" value="${v(qtyValueForForm)}"></td>
         <td colspan="2">
           <span class="jc-lbl">Machine Name</span>
           <select id="f-machine"><option value="">—</option>${(printingMachines && printingMachines.length ? printingMachines : MACHINES).map(m=>`<option ${j.machine===m?'selected':''}>${esc(m)}</option>`).join('')}${j.machine && !((printingMachines && printingMachines.length ? printingMachines : MACHINES).includes(j.machine))?`<option selected>${esc(j.machine)}</option>`:''}</select>
@@ -18855,7 +18890,7 @@ function openGroupEdit(groupId) {
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">GROUP JOB CARD <span style="font-size:12px;color:var(--text2);text-transform:none;letter-spacing:normal;font-weight:400;">&middot; ${esc(g.product || '')}</span></h2>
     <div style="text-align:center;font-size:12px;color:var(--text2);margin:-6px 0 10px;">Editing the group template only — existing sub jobs keep their current values.</div>
-    ${jobForm(synthetic).replace('<span class="jc-lbl">P.O. Qty</span>', '<span class="jc-lbl">MIL Qty</span>')}
+    ${jobForm(synthetic).replace('<span class="jc-lbl">P.O. Qty</span>', '<span class="jc-lbl" style="color:#7c3aed;">MIL Qty</span>')}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       ${isAdmin() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
@@ -21538,6 +21573,12 @@ function buildPrintCard(j) {
   const fmt = d => d ? fmtDMY(d) : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const p = j.particulars || {};
+  // MIL-group member: print the group's standing MIL Qty (purple label),
+  // not the sub job's own PO Qty field — same rule the on-screen job
+  // card and Edit/View modal follow.
+  const milGroupForPrint = j.group_job_id ? stockGroupById(j.group_job_id) : null;
+  const poQtyLabelPrint = milGroupForPrint ? 'MIL Qty' : 'P.O. Qty';
+  const poQtyValuePrint = milGroupForPrint ? (milGroupForPrint.po_qty ?? j.qty) : j.qty;
   // Same rule as the on-screen job card: the wastage adjustment overlay
   // only prints when printing from the Finalized tab, so the Delivered
   // tab (and any other context) always prints the untouched original card.
@@ -21901,7 +21942,7 @@ function buildPrintCard(j) {
       <tr>
         ${dateCell('Date', j.dateissued)}
         <td><div class="pc-label">Deadline</div><div class="pc-value pc-deadline">${fmt(j.deadline)}</div></td>
-        <td colspan="2"><div class="pc-label">P.O. Qty</div><div class="pc-value">${v(j.qty)}</div></td>
+        <td colspan="2"><div class="pc-label"${milGroupForPrint ? ' style="color:#7c3aed;"' : ''}>${poQtyLabelPrint}</div><div class="pc-value">${v(poQtyValuePrint)}</div></td>
         <td colspan="2"><div class="pc-label">Machine Name</div><div class="pc-value pc-machine">${v(j.machine)}</div></td>
         ${cell('Ups', j.ups)}
       </tr>
