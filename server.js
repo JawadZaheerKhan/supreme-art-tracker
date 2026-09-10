@@ -6842,14 +6842,14 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       return res.status(409).json({ error: 'This entry has already been reversed.' });
     }
 
-    // 7-day rolling window applies to everyone except admin. Store manager
-    // and production manager can self-correct mistakes for a week; anything
+    // 30-day rolling window applies to everyone except admin. Store manager
+    // and production manager can self-correct mistakes for a month; anything
     // older needs an admin to keep the audit trail intact.
     if (!userHasRole(req.user, 'admin')) {
-      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-      const within7Days = (Date.now() - new Date(tx.created_at).getTime()) <= SEVEN_DAYS_MS;
-      if (!within7Days) {
-        return res.status(403).json({ error: 'You can only reverse entries created in the last 7 days. Ask an admin to reverse older entries.' });
+      const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+      const withinWindow = (Date.now() - new Date(tx.created_at).getTime()) <= THIRTY_DAYS_MS;
+      if (!withinWindow) {
+        return res.status(403).json({ error: 'You can only reverse entries created in the last 30 days. Ask an admin to reverse older entries.' });
       }
     }
 
