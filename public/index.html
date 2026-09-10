@@ -10589,9 +10589,21 @@ function renderImportsBulkBar() {
   // ones — both still need a Receive action.
   const allPending = selectedItems.length && selectedItems.every(i => i.status === 'pending' || i.status === 'partial');
   const noneReceived = selectedItems.every(i => i.status !== 'received');
+  // Sum the booked quantity behind the selection, split into packets vs
+  // reams the same way each row's Qty cell reads.
+  let totalPkts = 0, totalReams = 0;
+  for (const i of selectedItems) {
+    const val = +i.packets || 0;
+    if (isReamPaper(i.paper_type || '')) totalReams += val; else totalPkts += val;
+  }
+  const fmtQ = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const qtyParts = [];
+  if (totalPkts)  qtyParts.push(`${fmtQ(totalPkts)} pkts`);
+  if (totalReams) qtyParts.push(`${fmtQ(totalReams)} reams`);
+  const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')}` : '';
   bar.style.display = 'flex';
   bar.innerHTML = `
-    <span class="bulk-count">${selected.length} selected</span>
+    <span class="bulk-count">${selected.length} selected${qtyLabel}</span>
     <button class="btn btn-sm btn-clear" onclick="clearImportsSelection()">Clear</button>
     <span class="bulk-spacer"></span>
     ${allPending ? `<button class="btn btn-sm btn-bulk-receive ceo-hide" onclick="bulkReceiveImports()">&#10003; Receive Selected</button>` : ''}
@@ -13505,11 +13517,29 @@ function renderStockMovementBulkBar(dir) {
   const sel = [...stockMovementSel[dir]];
   if (!sel.length) { bar.style.display = 'none'; return; }
   bar.style.display = 'flex';
+  // Sum the actual paper quantity behind the selected rows — sheets, split
+  // into packets vs reams the same way the page header totals do — so the
+  // bar reads as a real subtotal, not just a row count.
+  const rows = stockMovementStates[dir].rows || [];
+  let totalSheets = 0, totalPkts = 0, totalReams = 0;
+  for (const id of sel) {
+    const t = rows.find(r => r.id === id);
+    if (!t) continue;
+    totalSheets += Math.abs(t.change);
+    const ps = packetSize(t.paper_type || '');
+    const units = Math.abs(t.change) / ps;
+    if (isReamPaper(t.paper_type || '')) totalReams += units; else totalPkts += units;
+  }
+  const fmtQ = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const qtyParts = [];
+  if (totalPkts)  qtyParts.push(`${fmtQ(totalPkts)} pkts`);
+  if (totalReams) qtyParts.push(`${fmtQ(totalReams)} reams`);
+  const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${totalSheets.toLocaleString()} sheets)` : '';
   // Admin-only "Delete from History" — pure archival cleanup for old rows.
   // Does NOT change the current balance (use per-row Reverse on the inventory
   // History modal if you actually want to undo a row's effect on stock).
   bar.innerHTML = `
-    <span class="bulk-count">${sel.length} selected</span>
+    <span class="bulk-count">${sel.length} selected${qtyLabel}</span>
     <button class="btn btn-sm btn-clear" onclick="clearStockMovementSel('${dir}')">Clear</button>
     <span class="bulk-spacer"></span>
     ${isAdmin()
