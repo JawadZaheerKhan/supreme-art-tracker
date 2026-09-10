@@ -3522,8 +3522,15 @@ function isPartialDelivery(j) {
   // not retro-flip it into Partial. But a REAL ledger shortfall (actual
   // shipments recorded, genuinely still short of booked) is not a
   // rounding artifact — it's real cartons still sitting ready, so it
-  // still counts even once the job has reached Delivered.
-  if ((j && j.stage_index) === 7) return fromLedger > 0 && fromLedger < booked;
+  // still counts even once the job has reached Delivered. Exception:
+  // finalizeAsDelivered() stamps stages[7].finalized when the PM
+  // deliberately closes a job and waives the remainder — that's a
+  // knowing decision, not an oversight, so it stays fully delivered
+  // even with a ledger shortfall.
+  if ((j && j.stage_index) === 7) {
+    if (j.stages && j.stages[7] && j.stages[7].finalized) return false;
+    return fromLedger > 0 && fromLedger < booked;
+  }
   // Prefer the deliveries[] running total (accurate per-shipment record);
   // fall back to legacy delqty so jobs whose delivered qty was typed
   // straight on the job card (before the ledger existed) still register
@@ -18058,7 +18065,11 @@ function deliveriesSection(j) {
   const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const shipped = totalDeliveredCartons(j);
   const remaining = booked ? Math.max(0, booked - shipped) : 0;
-  const isDelivered = booked && shipped >= booked;
+  // Fully delivered either the normal way (shipped covers booked) or via
+  // finalizeAsDelivered() deliberately waiving the rest — see its
+  // stages[7].finalized stamp and isPartialDelivery()'s matching check.
+  const isFinalized = !!(j.stages && j.stages[7] && j.stages[7].finalized);
+  const isDelivered = (booked && shipped >= booked) || isFinalized;
   // Status-pill only: with no booked P.O. Qty there's no target to be
   // "partial" against, so any recorded shipment reads as delivered
   // outright instead of a misleading PARTIAL-against-zero badge. Doesn't
@@ -20883,7 +20894,30 @@ async function finalizeAsDelivered(id) {
     confirmText: 'Finalize as Delivered',
   });
   if (!ok) return;
-  await moveToStage(id, STAGES.length - 1);
+  // Own stage-move (rather than delegating to moveToStage) so the final
+  // stage entry can be stamped `finalized: true` — a deliberate waiver,
+  // not just a job that happens to be sitting at Delivered with a real
+  // shortfall. isPartialDelivery() checks this flag to stop treating a
+  // knowingly-closed job as still partial/READY once it's been waived
+  // here, while an un-finalized job with a genuine ledger gap still
+  // correctly shows as partial.
+  const target = STAGES.length - 1;
+  const time = fmtDMYT(new Date());
+  const at = new Date().toISOString();
+  const by = STAGES[target];
+  const stages = { ...(j.stages || {}) };
+  const log = [...(j.log || [])];
+  for (let i = 0; i < target; i++) {
+    if (!stages[i] || stages[i].status !== 'done') stages[i] = { ...(stages[i] || {}), status: 'done', by, time, at };
+  }
+  stages[target] = { status: 'done', notes: `Finalized — ${remaining.toLocaleString()} cartons waived`, by, time, at, finalized: true };
+  log.push({ stage: STAGES[target], status: 'done', notes: `Finalized as Delivered by ${by} — ${remaining.toLocaleString()} cartons waived`, by, time });
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: target, stages, log });
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+  } catch (e) { notify('Error: ' + e.message); showSaving(false); return; }
+  showSaving(false);
   closeModal();
   render();
   notify(`Job E-${id} finalized as Delivered`);

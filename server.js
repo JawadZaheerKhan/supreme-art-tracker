@@ -3014,9 +3014,14 @@ async function buildClientJobsView(sql, companyRaw, opts) {
   const filtered = rows.filter(r => {
     const deliveredAt = parseDeliveredAt(r.stages);
     if (deliveredAt !== null && (now - deliveredAt) > cutoffMs) {
+      // A job the PM deliberately finalized (finalizeAsDelivered() stamps
+      // stages[7].finalized when waiving the remainder) is closed by
+      // choice, not oversight — it drops off on the normal schedule like
+      // any other finished delivery, same as isPartialDelivery() treats it.
+      const isFinalized = !!(r.stages && r.stages['7'] && r.stages['7'].finalized);
       const booked  = parseFloat(String(r.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
       const shipped = sumDeliveryCartons(r.deliveries);
-      const stillPartial = booked > 0 && shipped > 0 && shipped < booked;
+      const stillPartial = !isFinalized && booked > 0 && shipped > 0 && shipped < booked;
       if (!stillPartial) return false;
     }
     return true;
