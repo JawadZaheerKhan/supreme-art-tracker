@@ -3382,6 +3382,47 @@ const PARTICULARS_ROWS = [
   { key: 'pasting_waste_qty',        label: 'Pasting Waste Qty' },
   { key: 'delivered_cartons_qty',    label: 'Ready to Delivery Qty' },
 ];
+// Embellishment gets its own particulars row pair, right after the wet-
+// coating row — only shown once the job actually has an embellish finish
+// planned (Emboss / Color Seal / Dripup / Cylinder Emboss / Hot Foiling).
+const EMBELLISH_SHEETS_KEY = 'embellish_sheets_qty';
+const EMBELLISH_WASTE_KEY  = 'embellish_waste_sheets';
+// Both the wet-coating row and the embellishment row are named after
+// whichever specific finish(es) are actually planned on the job (e.g.
+// "Emboss Sheets Qty"), falling back to the generic label when nothing in
+// that section is picked yet. roleId is 'coatings' (wet) or 'embellish'.
+function coatingRowLabel(job, roleId, suffix) {
+  const finishes = (roleById(roleId) || {}).finishes || [];
+  const planned = Array.isArray(job && job.coatings) ? job.coatings : [];
+  const picked = finishes.filter(f => planned.includes(f));
+  const name = picked.length ? picked.join(' + ') : (roleId === 'embellish' ? 'Embellishment' : 'Coating');
+  return `${name} ${suffix}`;
+}
+function embellishPlannedOnJob(job) {
+  const finishes = (roleById('embellish') || {}).finishes || [];
+  const planned = Array.isArray(job && job.coatings) ? job.coatings : [];
+  return finishes.some(f => planned.includes(f));
+}
+// The effective particulars row list for THIS job — same as
+// PARTICULARS_ROWS everywhere else, except the coating row is relabeled
+// and an embellishment row pair is spliced in right after it when
+// embellishPlannedOnJob(job) is true.
+function particularsRowsFor(job) {
+  const out = [];
+  for (const r of PARTICULARS_ROWS) {
+    if (r.key === 'coating_sheets_qty') { out.push({ key: r.key, label: coatingRowLabel(job, 'coatings', 'Sheets Qty') }); continue; }
+    if (r.key === 'uv_waste_sheets') {
+      out.push({ key: r.key, label: coatingRowLabel(job, 'coatings', 'Waste Sheets') });
+      if (embellishPlannedOnJob(job)) {
+        out.push({ key: EMBELLISH_SHEETS_KEY, label: coatingRowLabel(job, 'embellish', 'Sheets Qty') });
+        out.push({ key: EMBELLISH_WASTE_KEY,  label: coatingRowLabel(job, 'embellish', 'Waste Sheets') });
+      }
+      continue;
+    }
+    out.push(r);
+  }
+  return out;
+}
 
 let jobs = [];
 let inventory = [];          // cached inventory items (refreshed on load + after mutations)
@@ -17505,7 +17546,7 @@ function specsSection(p, coatings, j) {
     </td></tr>`;
   const coatRow = list => `
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
-      ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''}> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
+      ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''} onchange="refreshJobFormParticulars()"> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
     </td></tr>`;
   // Special-colors editor — up to 5 named specials, each with its own mix
   // list (color name + %). Cap enforced in addSpecialColor(). The block is
@@ -17740,6 +17781,7 @@ function ctpSetupRow(p) {
 const PARTICULARS_STAGE_MAP = {
   printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
   coating_sheets_qty: 'Coatings', uv_waste_sheets: 'Coatings',
+  embellish_sheets_qty: 'Coatings', embellish_waste_sheets: 'Coatings',
   die_cutting_sheets: 'Die Cutting', die_cutting_waste: 'Die Cutting',
   sorted_cartons_qty: 'Sorting', sorted_cartons_waste: 'Sorting',
   pasted_cartons_qty: 'Pasting', pasting_waste_qty: 'Pasting',
@@ -17936,8 +17978,9 @@ function particularsTable(p, job, opts) {
   // Build one machines datalist per relevant stage (dedup) so multiple
   // rows for the same stage (e.g. Printed Sheets + Printed Waste both
   // point at Printing) share a single option list.
+  const jobParticularsRows = particularsRowsFor(job);
   const stagesUsed = new Set();
-  PARTICULARS_ROWS.filter(r => !CTP_PARTICULARS_KEYS.has(r.key)).forEach(r => {
+  jobParticularsRows.filter(r => !CTP_PARTICULARS_KEYS.has(r.key)).forEach(r => {
     const stage = PARTICULARS_STAGE_MAP[r.key];
     if (stage) stagesUsed.add(stage);
   });
@@ -17949,7 +17992,7 @@ function particularsTable(p, job, opts) {
       machines.map(m => `<option value="${esc(m.name)}"></option>`).join('')
     }</datalist>`;
   }).join('');
-  const rows = PARTICULARS_ROWS
+  const rows = jobParticularsRows
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
     .map(r => {
       const stage = PARTICULARS_STAGE_MAP[r.key];
@@ -18021,6 +18064,26 @@ function particularsTable(p, job, opts) {
         <td colspan="4"><textarea id="p-comments" placeholder="Any comments...">${esc(p.comments||'')}</textarea></td>
       </tr>
     </table>`;
+}
+
+// Live-updates the particulars table when a coating checkbox is ticked or
+// unticked — specifically so ticking an embellishment finish (Emboss /
+// Color Seal / Dripup / Cylinder Emboss / Hot Foiling) immediately shows
+// its own Sheets/Waste row (see particularsRowsFor), without losing
+// whatever's already typed into the other rows. Only wired to the coating
+// checkboxes in the normal edit/create flow — Adjust mode, the Manager
+// station modal, and CEO view-only all lock those checkboxes, so this
+// never fires there and never needs to know about those opts.
+function refreshJobFormParticulars() {
+  const wrap = document.getElementById('jc-particulars-wrap');
+  if (!wrap) return;
+  const editingId = parseInt((document.getElementById('f-editing-id') || {}).value, 10) || 0;
+  const baseJob = editingId ? (jobs.find(x => x.id === editingId) || {}) : {};
+  const liveCoatings = [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c => c.value);
+  const snapshot = collectParticulars();
+  const mergedParticulars = { ...(baseJob.particulars || {}), ...snapshot };
+  const syntheticJob = { ...baseJob, coatings: liveCoatings };
+  wrap.innerHTML = particularsTable(mergedParticulars, syntheticJob, {});
 }
 
 function jobForm(j={}, opts) {
@@ -18261,7 +18324,7 @@ function jobForm(j={}, opts) {
     </table>
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
-    ${particularsTable(j.particulars||{}, j, opts.particularsOpts)}
+    <div id="jc-particulars-wrap">${particularsTable(j.particulars||{}, j, opts.particularsOpts)}</div>
     ${deliveriesSection(j)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
@@ -19798,7 +19861,11 @@ function collectParticulars() {
   const priorParticularsCP = editingIdCP
     ? ((jobs.find(x => x.id === editingIdCP) || {}).particulars || {})
     : {};
-  PARTICULARS_ROWS.forEach(r => {
+  // Live coatings checkbox state, not job.coatings — the embellishment row
+  // (see particularsRowsFor) only exists in the DOM when its checkbox is
+  // currently ticked, so that's what decides which p-<key>-* inputs exist.
+  const liveCoatingsCP = [...document.querySelectorAll('input[name="f-coatings"]:checked')].map(c => c.value);
+  particularsRowsFor({ coatings: liveCoatingsCP }).forEach(r => {
     if (r.type) return;
     // CTP-setup fields (artworks_matter_approval / shade_card / plates /
     // no_of_colors) don't have p-<key>-details inputs anymore — they live
@@ -21814,7 +21881,7 @@ function buildPrintCard(j) {
       <td class="pp-row-label" style="vertical-align:top;">Comments</td>
       <td colspan="4" style="vertical-align:top;">${v(p.comments)}</td>
     </tr>`;
-  const partRows = PARTICULARS_ROWS
+  const partRows = particularsRowsFor(j)
     .filter(r => !PRINT_SKIP_PARTICULARS.has(r.key))
     .map(dataRow).join('') + commentsRow;
 
@@ -22765,6 +22832,26 @@ const STATION_STAGE_FIELDS = {
     { key: 'ready_packets_qty',     label: 'Packets / Cartons' },
   ],
 };
+// Coatings (stage 2) fields depend on which section the operator belongs
+// to — a wet-coatings machine writes coating_sheets_qty/uv_waste_sheets,
+// an embellishments-only machine writes its own embellish_sheets_qty/
+// embellish_waste_sheets (see particularsRowsFor — same split the Job
+// Card shows). Both are labeled after whichever specific finish(es) are
+// actually planned on the job, same as the Job Card.
+function stationCoatingsFields(operator, job) {
+  const roles = rolesOfOperator(operator);
+  const isEmbellishOnly = roles.includes('embellish') && !roles.includes('coatings');
+  if (isEmbellishOnly) {
+    return [
+      { key: EMBELLISH_SHEETS_KEY, label: coatingRowLabel(job, 'embellish', 'Sheets Qty') },
+      { key: EMBELLISH_WASTE_KEY,  label: coatingRowLabel(job, 'embellish', 'Waste Sheets') },
+    ];
+  }
+  return [
+    { key: 'coating_sheets_qty', label: coatingRowLabel(job, 'coatings', 'Sheets Qty') },
+    { key: 'uv_waste_sheets',    label: coatingRowLabel(job, 'coatings', 'Waste Sheets') },
+  ];
+}
 
 // Maps a production stage index to the particulars key holding how much
 // qty has cleared that stage — mirrors STAGE_QTY_FIELD in server.js
@@ -23352,7 +23439,7 @@ function stationUpdateHtml() {
   const stIdx = stationOperator.stage_index;
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   const nextName = stIdx < STAGES.length - 1 ? STAGES[stIdx + 1] : null;
-  const fields = STATION_STAGE_FIELDS[stIdx] || [];
+  const fields = stIdx === 2 ? stationCoatingsFields(stationOperator, j) : (STATION_STAGE_FIELDS[stIdx] || []);
   // Tablet view uses an on-screen number pad (readonly + onclick that
   // slides up the custom pad). Laptop view lets the user type natively
   // with their physical keyboard. Detection is one-shot per render so
@@ -24153,7 +24240,7 @@ async function stationSubmit(advance, skipTo) {
   const j = jobs.find(x => x.id === stationJobId);
   if (!j || !stationOperator) return;
   const stIdx = stationOperator.stage_index;
-  const fields = STATION_STAGE_FIELDS[stIdx] || [];
+  const fields = stIdx === 2 ? stationCoatingsFields(stationOperator, j) : (STATION_STAGE_FIELDS[stIdx] || []);
   const patch = {};
   // Decide whether to use the legacy single-string payload or the new
   // array-of-passes payload. If the job already has entries[] for any
