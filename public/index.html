@@ -11143,8 +11143,14 @@ function buildJobsReportRows() {
       .map(d => deliveryChallanText(d).trim())
       .filter(Boolean)
       .join(' | ');
-    const poNoJoined    = joinRefs('po_no',    j.ref);
     const batchNoJoined = joinRefs('batch_no', j.bno);
+    // MIL sub jobs: PO No. and PO Qty both come from milTileShipmentFacts
+    // (same helper the job tile uses) so the two stay positionally
+    // aligned — including a "—" placeholder for any shipment recorded
+    // without a PO No., which the plain joinRefs above would just drop,
+    // throwing off the pairing (e.g. 3 qty entries vs 2 PO numbers).
+    const milFacts = j.stock_group_name ? milTileShipmentFacts(j) : null;
+    const poNoJoined = milFacts ? milFacts.poLine : joinRefs('po_no', j.ref);
     // Only enforced in Delivered mode — matches the toolbar, which hides
     // these two fields in Created mode. Without this guard, a leftover
     // search value from a prior Delivered-mode visit would keep silently
@@ -11177,8 +11183,8 @@ function buildJobsReportRows() {
       batchNo: batchNoJoined,
       // MIL sub jobs: PO Qty isn't a real per-job PO (see milTileShipmentFacts
       // on the job tile) — the report shows what actually shipped instead,
-      // same number as the Delivered Qty column, colored purple below.
-      poQty: j.stock_group_name ? (j.delqty || '') : (j.qty || ''),
+      // one figure per shipment (summing to Delivered Qty), colored purple below.
+      poQty: milFacts ? milFacts.qtyLine : (j.qty || ''),
       cartonQty: j.cartonqty || '',
       deliveredQty: j.delqty || '',
       challan: challans,
@@ -11356,8 +11362,12 @@ function renderJobsReport() {
       const gk = r.stockGroupName || `row-${r.id}`;
       if (!seenMilGroups.has(gk)) { seenMilGroups.add(gk); milQtyAdd = +r.milQty || 0; }
     }
+    // A MIL row's poQty can be a pipe-joined "10000 | 15000" display
+    // string (multi-shipment) — +r.poQty would parse as NaN, so total
+    // off the numeric deliveredQty instead (same figure, single number).
+    const poQtyAdd = r.stockGroupName ? (+r.deliveredQty || 0) : (+r.poQty || 0);
     return {
-      poQty:        a.poQty        + (+r.poQty || 0),
+      poQty:        a.poQty        + poQtyAdd,
       milQty:       a.milQty       + milQtyAdd,
       cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
       deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
