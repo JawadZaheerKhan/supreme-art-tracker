@@ -81,6 +81,25 @@ function businessInstantForDate(dateStr) {
 // station-update endpoint to build stage names + detect the final stage.
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Ready to Deliver','Delivered'];
 
+// Printing-only "Nx" multiplier encoding — mirrors parseQtyMult in
+// public/index.html. A pass qty string is either a plain number ("1200")
+// or "1200x3" meaning that qty was printed 3 times. total = base*mult is
+// the real physical sheet count. Every other stage's qty strings never
+// contain "x", so this is a safe drop-in wherever any particulars qty
+// string gets parsed as a number.
+function parseQtyMult(raw) {
+  const s = String(raw || '').trim();
+  const m = /^(-?[\d.]+)\s*[xX]\s*(\d+)$/.exec(s);
+  if (m) {
+    const base = parseFloat(m[1]);
+    const mult = parseInt(m[2], 10);
+    if (Number.isFinite(base) && Number.isFinite(mult) && mult > 0) return { base, mult, total: base * mult };
+  }
+  const base = parseFloat(s.replace(/[^0-9.\-]/g, ''));
+  const n = Number.isFinite(base) ? base : 0;
+  return { base: n, mult: 1, total: n };
+}
+
 // Coating finish kinds split into wet (Coatings tab) and embellishment
 // (Embellishments tab) so each tab shows only the work that section does.
 // Color Seal and Colour Seal are both accepted because the print label
@@ -1916,6 +1935,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       sheets: 0, waste: 0,
       jobsMap: new Map(),   // jobId -> { colorsRaw, platesRaw, firstMs }
       operators: new Set(),
+      printBreakdown: [],   // Printing only — [{ qty: '1200x3', job_id }]
     });
     return acc.get(m);
   };
@@ -1950,6 +1970,15 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       c[key] += qty;
       if (op) c.operators.add(op);
       if (ms && ms < c.firstMs) c.firstMs = ms;
+    };
+    // Printing only: raw per-entry breakdown (machine -> [rawQty, ...]) so
+    // the report can show "2000 total, made of 1200x3 and 800x1" instead
+    // of just the summed number. Merged into row.printBreakdown below.
+    const printBreak = new Map();
+    const bumpPrintBreakdown = (mc, rawQty) => {
+      if (!mc) return;
+      if (!printBreak.has(mc)) printBreak.set(mc, []);
+      printBreak.get(mc).push(rawQty);
     };
     // Log-derived earliest ms per machine, so the per-machine job list
     // orders by "who submitted first that day". Preferred over the entry
@@ -2016,13 +2045,19 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
     if (hasSheetEntries) {
       for (const e of sheetsField.entries) {
         if (!e || e.date !== date) continue;
-        const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+        // Printing's "1200x3" multiplier encoding (see parseQtyMult) —
+        // the report's headline sheets total stays the RAW entered base
+        // number (matches Job Card / Jobs Report), not base*mult; the
+        // multiplied total only shows in the breakdown / Production
+        // Report bracket. Every other section's qty never contains "x".
+        const n = Math.round(parseQtyMult(e.qty).base);
         if (!Number.isFinite(n) || n === 0) continue;
         let mc = String(e.machine || '').trim();
         if (!mc && isPrinting && job.machine) mc = job.machine;   // Printing-only safety fallback
         if (!mc) continue;
         bumpCredit(mc, 'sheets', n, String(e.operator || '').trim(), logFirstMsByMc.get(mc));
         sheetPassesByMc.set(mc, (sheetPassesByMc.get(mc) || 0) + 1);
+        if (isPrinting) bumpPrintBreakdown(mc, e.qty);
       }
     } else if (sheetsField && sheetsField.quantity && legacyMc) {
       const sN = sumPipeInts(sheetsField.quantity);
@@ -2073,6 +2108,8 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       row.sheets += c.sheets;
       row.waste  += c.waste;
       for (const op of c.operators) row.operators.add(op);
+      const pb = printBreak.get(mc);
+      if (pb) for (const rawQty of pb) row.printBreakdown.push({ qty: rawQty, job_id: job.id });
       const passesForMc = passesByMc.get(mc) || 1;
       if (!row.jobsMap.has(job.id)) {
         row.jobsMap.set(job.id, {
@@ -2181,6 +2218,10 @@ app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req,
         hours: note.hours || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
+        // Raw per-entry breakdown behind the sheets total, e.g.
+        // [{qty:'1200x3', job_id:152}, {qty:'800', job_id:153}] — powers
+        // the green breakdown-dot next to Sheets on the Printing tab.
+        print_breakdown: isCustom ? [] : (row ? row.printBreakdown : []),
       };
     });
     res.json(out);
@@ -2567,14 +2608,19 @@ async function aggregateProductionRange(sql, { from, to }) {
   // entity and show its day-by-day rows in the range.
   const byMachineDaily = new Map();   // key: 'YYYY-MM-DD|machine'
   const byOperatorDaily = new Map();  // key: 'YYYY-MM-DD|operator'
+  // sheetsMult = the same total but with Printing's "1200x3" multiplier
+  // applied (base*mult instead of just base) — equal to `sheets` unless a
+  // Printing entry in this bucket actually used the multiplier, since no
+  // other stage's qty string ever contains "x". Powers the green
+  // "(4400)" bracket on the Production Report.
   const ensureMD = (date, m) => {
     const k = date + '|' + m;
-    if (!byMachineDaily.has(k)) byMachineDaily.set(k, { date, machine: m, sheets: 0, waste: 0, hours: 0, jobs: new Set() });
+    if (!byMachineDaily.has(k)) byMachineDaily.set(k, { date, machine: m, sheets: 0, sheetsMult: 0, waste: 0, hours: 0, jobs: new Set() });
     return byMachineDaily.get(k);
   };
   const ensureOD = (date, op) => {
     const k = date + '|' + op;
-    if (!byOperatorDaily.has(k)) byOperatorDaily.set(k, { date, operator: op, sheets: 0, waste: 0, hours: 0, jobs: new Set() });
+    if (!byOperatorDaily.has(k)) byOperatorDaily.set(k, { date, operator: op, sheets: 0, sheetsMult: 0, waste: 0, hours: 0, jobs: new Set() });
     return byOperatorDaily.get(k);
   };
   // Stage label -> [sheetsKey, wasteKey] for particulars extraction.
@@ -2654,17 +2700,19 @@ async function aggregateProductionRange(sql, { from, to }) {
       if (hasSheetEntries) {
         for (const e of sheetsField.entries) {
           if (!e) continue;
-          const n = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
+          const { base: n, total: nMult } = parseQtyMult(e.qty);
           if (!Number.isFinite(n) || n === 0) continue;
           let mc = String(e.machine || '').trim();
           if (!mc && isPrinting && job.machine) mc = job.machine;
-          bump(mc, String(e.operator || '').trim(), e.date, 'sheets', n);
+          const op = String(e.operator || '').trim();
+          bump(mc, op, e.date, 'sheets', n);
+          bump(mc, op, e.date, 'sheetsMult', nMult);
         }
       } else if (sheetsField && sheetsField.quantity) {
         const perDate = computeLegacyByDate();
         for (const [eDate, { mc, op }] of perDate) {
           const n = qtyForDate(sheetsField, eDate);
-          if (n) bump(mc, op, eDate, 'sheets', n);
+          if (n) { bump(mc, op, eDate, 'sheets', n); bump(mc, op, eDate, 'sheetsMult', n); }
         }
       }
       if (hasWasteEntries) {
@@ -2702,8 +2750,11 @@ async function aggregateProductionRange(sql, { from, to }) {
         const op = String(e.operator || '').trim();
         const v = parseInt(String(e.qty || '').replace(/[^0-9-]/g, ''), 10);
         if (!Number.isFinite(v) || v === 0) continue;
-        if (mc) { const r = ensureMD(e.date, mc); r[field] += v; r.jobs.add(job.id); }
-        if (op) { const r = ensureOD(e.date, op); r[field] += v; r.jobs.add(job.id); }
+        // Coatings sheets never carry Printing's "x" multiplier, so
+        // sheetsMult always mirrors sheets here — keeps the two fields
+        // from drifting apart (sheetsMult must stay >= sheets overall).
+        if (mc) { const r = ensureMD(e.date, mc); r[field] += v; if (field === 'sheets') r.sheetsMult += v; r.jobs.add(job.id); }
+        if (op) { const r = ensureOD(e.date, op); r[field] += v; if (field === 'sheets') r.sheetsMult += v; r.jobs.add(job.id); }
       }
     };
     const csPart = part.coating_sheets_qty;
@@ -2746,14 +2797,14 @@ async function aggregateProductionRange(sql, { from, to }) {
         const r = ensureMD(cDate, c.machine); r.waste += w; r.jobs.add(job.id);
         if (!coatSheetEntries && sheetsFallbackN > 0) {
           const k = cDate + '|mc|' + c.machine;
-          if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; sheetsCreditedKeys.add(k); }
+          if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; r.sheetsMult += sheetsFallbackN; sheetsCreditedKeys.add(k); }
         }
       }
       if (c.operator_name) {
         const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id);
         if (!coatSheetEntries && sheetsFallbackN > 0) {
           const k = cDate + '|op|' + c.operator_name;
-          if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; sheetsCreditedKeys.add(k); }
+          if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; r.sheetsMult += sheetsFallbackN; sheetsCreditedKeys.add(k); }
         }
       }
     }
@@ -2814,12 +2865,12 @@ async function aggregateProductionRange(sql, { from, to }) {
     }
   }
   const toMRow = r => ({
-    date: r.date, machine: r.machine, sheets: r.sheets, waste: r.waste,
+    date: r.date, machine: r.machine, sheets: r.sheets, sheets_mult: r.sheetsMult, waste: r.waste,
     hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size,
     sections: [...(machineSections.get(String(r.machine || '').trim().toLowerCase()) || [])],
   });
   const toORow = r => ({
-    date: r.date, operator: r.operator, sheets: r.sheets, waste: r.waste,
+    date: r.date, operator: r.operator, sheets: r.sheets, sheets_mult: r.sheetsMult, waste: r.waste,
     hours: Math.round(r.hours * 100) / 100, jobs: r.jobs.size,
     sections: [...(personSections.get(String(r.operator || '').trim().toLowerCase()) || [])],
   });
@@ -5175,10 +5226,10 @@ function sumDeliveryCartons(arr) {
 function readyQtyFromParticularsRow(row) {
   if (!row) return 0;
   const fromEntries = Array.isArray(row.entries)
-    ? row.entries.reduce((a, e) => a + (parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, '')) || 0), 0)
+    ? row.entries.reduce((a, e) => a + parseQtyMult((e && e.qty) || '').total, 0)
     : 0;
   if (fromEntries > 0) return fromEntries;
-  return String(row.quantity || '').split('|').reduce((a, s) => a + (parseFloat(String(s).replace(/[^0-9.\-]/g, '')) || 0), 0);
+  return String(row.quantity || '').split('|').reduce((a, s) => a + parseQtyMult(s).total, 0);
 }
 // Delivery eligibility — same rule everywhere a delivery can be recorded
 // (single-job endpoint, FIFO group delivery, AND Linked-Jobs joint

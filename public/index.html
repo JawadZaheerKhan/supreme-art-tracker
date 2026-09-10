@@ -1773,6 +1773,15 @@
   .station-field-grid--3up .station-field label { font-size: 12px; }
   .station-field-grid--3up .station-field input { font-size: 20px; padding: 10px 6px; border-radius: 8px; }
   body.station-fixed .station-field-grid--3up .station-field input { font-size: 20px; padding: 10px 6px; }
+  /* Printing stage only: per-pass "printed Nx" multiplier buttons — sits
+     as the third column next to Printed Sheets Qty / Printed Waste Sheets
+     (both shrunk via --3up above). Green when selected. */
+  .pm-mult-group { display: flex; flex-wrap: wrap; gap: 6px; align-content: center; }
+  .pm-mult-btn { flex: 1 1 auto; min-width: 40px; padding: 8px 4px; border: 2px solid var(--border2); border-radius: 8px; background: var(--bg); color: var(--text2); font-weight: 700; font-size: 14px; cursor: pointer; }
+  .pm-mult-btn.is-on { background: var(--green-bg); border-color: var(--green-border); color: var(--green-text); }
+  .dp-breakdown-dot { color: var(--green-text); cursor: pointer; font-size: 10px; vertical-align: middle; }
+  .pm-breakdown-row { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .pm-breakdown-row:last-child { border-bottom: none; }
   /* Multi-pass groupings — each pass holds one day's qty + waste pair
      and gets a subtle label so the operator sees which day's numbers
      they're looking at. The red + button anchors to the last pass's
@@ -3226,6 +3235,24 @@ function ensureXlsx() {
 }
 
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Ready to Deliver','Delivered'];
+// Printing-only "Nx" multiplier encoding: a pass qty string can be a plain
+// number ("1200") or "1200x3" meaning that qty was printed 3 times instead
+// of the operator adding 3 separate pass rows. base = the entered number,
+// mult = repeat count (1 when absent), total = base*mult (physical sheets
+// actually produced). Every other stage's qty strings never contain "x",
+// so this is a safe drop-in wherever a printed_sheets_qty qty gets parsed.
+function parseQtyMult(raw) {
+  const s = String(raw || '').trim();
+  const m = /^(-?[\d.]+)\s*[xX]\s*(\d+)$/.exec(s);
+  if (m) {
+    const base = parseFloat(m[1]);
+    const mult = parseInt(m[2], 10);
+    if (Number.isFinite(base) && Number.isFinite(mult) && mult > 0) return { base, mult, total: base * mult };
+  }
+  const base = parseFloat(s.replace(/[^0-9.\-]/g, ''));
+  const n = Number.isFinite(base) ? base : 0;
+  return { base: n, mult: 1, total: n };
+}
 const SHORT  = ['CTP','Print','Coat','Die Cut','Sort','Paste','Ready','Delivered'];
 // Operator roles — admin assigns by role name. Coatings and Embellishments
 // share stage_index 2 but cover different finish kinds, so an operator gets
@@ -11703,6 +11730,13 @@ function renderProductionReport() {
     .concat(entityNames.map(n => `<option value="${esc(n)}"${s.pick === n ? ' selected' : ''}>${esc(n)}</option>`)).join('');
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const sum = (rows, key) => rows.reduce((a, r) => a + (+r[key] || 0), 0);
+  // Sheets cell: plain base total, plus a green "(4400)" bracket for the
+  // Printing-only Nx-multiplied physical total whenever it differs from
+  // the base — see parseQtyMult / sheets vs sheets_mult on the server.
+  const fmtSheets = (base, mult) => {
+    const b = +base || 0, m = +mult || 0;
+    return m > b ? `${fmt(b)} <span style="color:var(--green-text);font-weight:700;">(${fmt(m)})</span>` : fmt(b);
+  };
   const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const td  = 'style="padding:8px 10px;"';
@@ -11715,12 +11749,12 @@ function renderProductionReport() {
     const body = rows.map(r => `
       <tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
         <td ${td}>${fmtDate(r.date)}</td>
-        <td ${tdR}>${fmt(r.sheets)}</td>
+        <td ${tdR}>${fmtSheets(r.sheets, r.sheets_mult)}</td>
         <td ${tdR}>${fmt(r.waste)}</td>
         <td ${tdR}>${fmt(r.hours)}</td>
         <td ${tdR}>${fmt(r.jobs)}</td>
       </tr>`).join('') || `<tr><td colspan="5" style="padding:18px;text-align:center;color:var(--text2);">No activity for ${esc(s.pick)} in this window.</td></tr>`;
-    const totals = { sheets: sum(rows, 'sheets'), waste: sum(rows, 'waste'), hours: sum(rows, 'hours'), jobs: sum(rows, 'jobs') };
+    const totals = { sheets: sum(rows, 'sheets'), sheetsMult: sum(rows, 'sheets_mult'), waste: sum(rows, 'waste'), hours: sum(rows, 'hours'), jobs: sum(rows, 'jobs') };
     return `
       <div style="margin-top:18px;">
         <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">${esc(s.pick)} <span style="font-weight:400;color:var(--text2);">— day-by-day, ${rows.length} day${rows.length===1?'':'s'} with activity</span></div>
@@ -11737,7 +11771,7 @@ function renderProductionReport() {
           ${rows.length ? `<tfoot>
             <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
               <td ${td} style="color:var(--text2);">Total</td>
-              <td ${tdR}>${fmt(totals.sheets)}</td>
+              <td ${tdR}>${fmtSheets(totals.sheets, totals.sheetsMult)}</td>
               <td ${tdR}>${fmt(totals.waste)}</td>
               <td ${tdR}>${fmt(totals.hours)}</td>
               <td ${tdR}>${fmt(totals.jobs)}</td>
@@ -11752,9 +11786,10 @@ function renderProductionReport() {
     const acc = new Map();
     for (const r of dailyRows) {
       const k = r[nameKey];
-      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, waste: 0, hours: 0, jobs: 0 });
+      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, sheetsMult: 0, waste: 0, hours: 0, jobs: 0 });
       const e = acc.get(k);
       e.sheets += (+r.sheets || 0);
+      e.sheetsMult += (+r.sheets_mult || 0);
       e.waste  += (+r.waste  || 0);
       e.hours  += (+r.hours  || 0);
       e.jobs   += (+r.jobs   || 0);
@@ -11763,12 +11798,12 @@ function renderProductionReport() {
     const body = rows.map(r => `
       <tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="setPrPick('${esc(r.name).replace(/'/g, "\\'")}')" title="Drill into ${esc(r.name)}'s day-by-day view">
         <td ${td}>${esc(r.name)}</td>
-        <td ${tdR}>${fmt(r.sheets)}</td>
+        <td ${tdR}>${fmtSheets(r.sheets, r.sheetsMult)}</td>
         <td ${tdR}>${fmt(r.waste)}</td>
         <td ${tdR}>${fmt(r.hours)}</td>
         <td ${tdR}>${fmt(r.jobs)}</td>
       </tr>`).join('') || `<tr><td colspan="5" style="padding:18px;text-align:center;color:var(--text2);">No activity in this window.</td></tr>`;
-    const totals = { sheets: sum(rows, 'sheets'), waste: sum(rows, 'waste'), hours: Math.round(sum(rows, 'hours') * 100) / 100, jobs: sum(rows, 'jobs') };
+    const totals = { sheets: sum(rows, 'sheets'), sheetsMult: sum(rows, 'sheetsMult'), waste: sum(rows, 'waste'), hours: Math.round(sum(rows, 'hours') * 100) / 100, jobs: sum(rows, 'jobs') };
     const label = isMachine ? 'machine' : 'operator';
     return `
       <div style="margin-top:18px;">
@@ -11786,7 +11821,7 @@ function renderProductionReport() {
           ${rows.length ? `<tfoot>
             <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
               <td ${td} style="color:var(--text2);">Total</td>
-              <td ${tdR}>${fmt(totals.sheets)}</td>
+              <td ${tdR}>${fmtSheets(totals.sheets, totals.sheetsMult)}</td>
               <td ${tdR}>${fmt(totals.waste)}</td>
               <td ${tdR}>${fmt(totals.hours)}</td>
               <td ${tdR}>${fmt(totals.jobs)}</td>
@@ -12644,9 +12679,15 @@ function renderDailyProductionDie(rows, date) {
     </div>`;
 }
 
+// Printing sheets breakdown ("2000, made of 1200x3 and 800x1") behind the
+// green dot next to a machine's sheets total. Rebuilt on every render;
+// read by showPrintBreakdown() below.
+let _dpPrintBreakdownByMachine = {};
 function renderDailyProductionPrinting(rows, date) {
   const body = document.getElementById('dp-printing-body');
   if (!body) return;
+  _dpPrintBreakdownByMachine = {};
+  rows.forEach(row => { _dpPrintBreakdownByMachine[row.machine] = row.print_breakdown || []; });
   if (!rows.length) {
     body.innerHTML = '<div class="empty">No printing machines configured. Add machines with the "Printing" role under Users &rarr; Operators.</div>';
     return;
@@ -12690,7 +12731,7 @@ function renderDailyProductionPrinting(rows, date) {
     </tr>` : `
     <tr>
       <td class="dp-machine">${esc(row.machine)}</td>
-      <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}</td>
+      <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}${row.print_breakdown && row.print_breakdown.length ? ` <span class="dp-breakdown-dot" title="Show breakdown" onclick="showPrintBreakdown('${esc(row.machine)}')">&#9679;</span>` : ''}</td>
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="printing" data-field="hours"
                  value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
@@ -12722,6 +12763,25 @@ function renderDailyProductionPrinting(rows, date) {
         <tbody>${r}</tbody>
       </table>
     </div>`;
+}
+
+// Green breakdown dot next to a machine's Sheets total on the Printing
+// register — lists exactly which entries made up that sum, each shown as
+// "base x multiplier" (a plain single entry shows "x1") so a 2000 total
+// made of one 1200x3 pass and one 800 pass reads as "1200 x 3" / "800 x 1".
+function showPrintBreakdown(machine) {
+  const entries = _dpPrintBreakdownByMachine[machine] || [];
+  const rowsHtml = entries.length
+    ? entries.map(e => {
+        const { base, mult } = parseQtyMult(e.qty);
+        return `<div class="pm-breakdown-row"><b>${base.toLocaleString()}</b> &times; ${mult} <span style="color:var(--text2);">(E-${e.job_id}${mult > 1 ? `, total ${(base * mult).toLocaleString()}` : ''})</span></div>`;
+      }).join('')
+    : '<div class="empty">No entries.</div>';
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+    <h2>${esc(machine)} — Sheets Breakdown</h2>
+    ${rowsHtml}
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
 }
 
 // Remove a custom row from a Daily Production tab. Draft rows (added
@@ -22726,15 +22786,9 @@ function stageDoneQty(j, stageIdx) {
   const row = j.particulars && j.particulars[key];
   if (!row) return 0;
   if (Array.isArray(row.entries) && row.entries.length) {
-    return row.entries.reduce((a, e) => {
-      const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
-      return a + (Number.isFinite(n) ? n : 0);
-    }, 0);
+    return row.entries.reduce((a, e) => a + parseQtyMult((e && e.qty) || '').total, 0);
   }
-  return String(row.quantity || '').split('|').reduce((a, s) => {
-    const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
-    return a + (Number.isFinite(n) ? n : 0);
-  }, 0);
+  return String(row.quantity || '').split('|').reduce((a, s) => a + parseQtyMult(s).total, 0);
 }
 
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
@@ -22753,6 +22807,10 @@ let stationJobPassKey = null;
 // yet (fields like Waste Sheets have no server-backed value to restore
 // from). Snapshot before re-render, replay into the new markup after.
 let stationDraftValues = {};
+// Printing stage only: per-pass "this qty was printed Nx" multiplier
+// (2/3/4/5). Keyed by passIdx; undefined/1 = plain single entry. Reset
+// whenever the pass count/job resets, same lifecycle as stationDraftValues.
+let stationPrintMult = {};
 let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
 let stationJobId    = null;
@@ -22788,6 +22846,7 @@ function stationLogout(silent) {
   stationJobId = null;
   stationPassCount = 1;
   stationJobPassKey = null;
+  stationPrintMult = {};
   stationNotes = [];
   stationManagerTab = 0;
   stationManagerSearch = '';
@@ -23279,6 +23338,7 @@ function stationOpenJob(id) {
   stationView = 'update';
   stationRecBlobs = [];
   stationDraftValues = {};
+  stationPrintMult = {};
   // Text notes count as read the moment they're on screen; voice notes
   // wait for an actual play (stationNoteHeard via onplay).
   stationNotes.filter(n => n.job_id === id && n.kind === 'text' && !n.heard_at)
@@ -23345,6 +23405,10 @@ function stationUpdateHtml() {
     // next render shows every persisted pass.
     stationPassCount = Math.max(1, existingPassCount);
   }
+  // Printing sheets qty may be stored as "1200x3" (see parseQtyMult) — the
+  // numeric input always shows just the base number; the "x3" lives in the
+  // multiplier buttons instead. Every other field's raw qty passes through.
+  const stripMult = (f, raw) => (f.key === 'printed_sheets_qty' && raw) ? String(parseQtyMult(raw).base) : raw;
   const passValue = (f, passIdx) => {
     const part = j.particulars && j.particulars[f.key];
     if (!part) return '';
@@ -23352,10 +23416,25 @@ function stationUpdateHtml() {
     if (ent) {
       const vis = visibleIdxsOf(f);
       const realIdx = vis[passIdx];
-      return realIdx !== undefined ? (ent[realIdx].qty || '') : '';
+      return realIdx !== undefined ? stripMult(f, ent[realIdx].qty || '') : '';
     }
-    if (passIdx === 0) return part.quantity || '';
+    if (passIdx === 0) return stripMult(f, part.quantity || '');
     return '';
+  };
+  // Multiplier already saved on this pass (from a prior save), read straight
+  // off the raw printed_sheets_qty entry — undefined when this pass has no
+  // saved entry yet (brand-new row) or the field isn't Printing.
+  const savedMultOf = (passIdx) => {
+    if (stIdx !== 1) return undefined;
+    const sheetsField = fields.find(f => f.key === 'printed_sheets_qty');
+    if (!sheetsField) return undefined;
+    const ent = entriesOf(sheetsField);
+    if (!ent) return undefined;
+    const vis = visibleIdxsOf(sheetsField);
+    const realIdx = vis[passIdx];
+    if (realIdx === undefined || !ent[realIdx]) return undefined;
+    const mult = parseQtyMult(ent[realIdx].qty).mult;
+    return mult > 1 ? mult : undefined;
   };
   const passMeta = (passIdx) => {
     // First field with a meta (date / operator) labels the whole pass.
@@ -23466,14 +23545,23 @@ function stationUpdateHtml() {
                  value="${esc(shownVal)}" placeholder="0">
         </div>`;
     }).join('');
+    // Printing only: third column, "this qty was printed Nx" instead of the
+    // operator adding N separate pass rows. Encoded into the saved qty
+    // string as "1200x3" (see parseQtyMult) — the sheets input above always
+    // shows the clean base number.
+    const multHtml = stIdx === 1 ? (() => {
+      const current = stationPrintMult[passIdx] !== undefined ? stationPrintMult[passIdx] : (savedMultOf(passIdx) || 1);
+      const btns = [2, 3, 4, 5].map(n => `<button type="button" class="pm-mult-btn${current === n ? ' is-on' : ''}" onclick="stationSetPrintMult(${passIdx},${n},${current})">${n}x</button>`).join('');
+      return `<div class="station-field"><label>Printed Nx</label><div class="pm-mult-group">${btns}</div></div>`;
+    })() : '';
     // CTP stage is one-shot (checkbox + colors + plates) — no multi-day
     // passes make sense there, so we skip the "+" / "−" buttons.
     const allowMultiPass = stIdx !== 0;
     return `
       <div class="station-pass">
         ${label ? `<div class="station-pass-label">${label}</div>` : ''}
-        <div class="station-field-grid${fields.length === 3 ? ' station-field-grid--3up' : ''}">
-          ${inputs}
+        <div class="station-field-grid${(fields.length === 3 || stIdx === 1) ? ' station-field-grid--3up' : ''}">
+          ${inputs}${multHtml}
           ${isLast && allowMultiPass ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
           ${showMinus && allowMultiPass ? `<button type="button" class="station-pass-remove" style="${minusRightOverride}" onclick="${minusOnClick}" title="${minusTitle}">&minus;</button>` : ''}
         </div>
@@ -23619,7 +23707,7 @@ function stationUpdateHtml() {
 function stationBackToQueue() {
   stationView = (stationOperator && stationOperator.is_manager) ? 'manager-queue' : 'queue';
   stationJobId = null;
-  stationPassCount = 1; stationJobPassKey = null; stationDraftValues = {};
+  stationPassCount = 1; stationJobPassKey = null; stationDraftValues = {}; stationPrintMult = {};
   stationClosePad(); stationCloseQwerty(); stationRecAbort();
   // Refresh badges in the background — a note may have landed meanwhile.
   stationLoadNotes().then(() => { if (stationView === 'queue') stationRender(); });
@@ -23661,6 +23749,21 @@ function stationRemovePass() {
   stationRender();
 }
 
+// Printing-only Nx multiplier button — clicking the already-selected value
+// toggles it back off (plain single entry). `current` is what's actually
+// on screen right now (may be a previously-SAVED multiplier, not just an
+// in-session pick), so toggling off stores the explicit "1" sentinel
+// rather than leaving stationPrintMult[passIdx] undefined — undefined
+// means "not touched yet, fall back to the saved value" (see savedMultOf
+// in stationUpdateHtml), which would otherwise make an explicit "turn it
+// off" click silently do nothing on an already-saved multiplied pass.
+// Snapshot first so re-rendering the panel doesn't wipe typed qty/waste.
+function stationSetPrintMult(passIdx, mult, current) {
+  stationSnapshotDraft();
+  stationPrintMult[passIdx] = (current === mult) ? 1 : mult;
+  stationRender();
+}
+
 // Admin / PM only: delete one already-saved pass from a job's particulars.
 // Called from the × next to a pass label. Confirms first (irreversible),
 // then posts field keys + the real entries[] index; the server rebuilds
@@ -23697,6 +23800,7 @@ async function stationDeleteEntry(jobId, idx, keysJson) {
     // Reset the pass counter so the render re-derives from entries[].
     stationPassCount = 1;
     stationJobPassKey = null;
+    stationPrintMult = {};
     stationRender();
     notify('Entry deleted');
   } catch (e) {
@@ -24127,6 +24231,27 @@ async function stationSubmit(advance, skipTo) {
       if (el) patch[f.key] = (el.value || '').trim();
     }
   });
+  // Printing only: fold the per-pass Nx multiplier into the qty string
+  // ("1200" -> "1200x3") before it's sent — the input itself only ever
+  // holds the base number (see passValue's stripMult in stationUpdateHtml).
+  // Falls back to whatever multiplier this pass was already saved with
+  // when the operator didn't touch the buttons this save (e.g. editing
+  // just the waste number on an already-"x3" pass shouldn't drop the x3).
+  if (stIdx === 1 && 'printed_sheets_qty' in patch) {
+    const savedMultForPass = (passIdx) => {
+      const ent = j.particulars && j.particulars.printed_sheets_qty && j.particulars.printed_sheets_qty.entries;
+      return (Array.isArray(ent) && ent[passIdx]) ? parseQtyMult(ent[passIdx].qty).mult : 1;
+    };
+    const encode = (val, passIdx) => {
+      const v = String(val == null ? '' : val).trim();
+      if (!v) return v;
+      const chosen = stationPrintMult[passIdx] !== undefined ? stationPrintMult[passIdx] : savedMultForPass(passIdx);
+      return chosen > 1 ? `${v}x${chosen}` : v;
+    };
+    patch.printed_sheets_qty = Array.isArray(patch.printed_sheets_qty)
+      ? patch.printed_sheets_qty.map((v, i) => encode(v, i))
+      : encode(patch.printed_sheets_qty, 0);
+  }
   // At Coatings (2) the operator picks which planned coating they just
   // did. Only validated client-side when there are picks for THIS operator
   // — if the operator has nothing pickable (other section's work only),
