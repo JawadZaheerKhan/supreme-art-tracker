@@ -14839,7 +14839,6 @@ function openManualConsumptionPane() {
       <h2 style="margin:0;font-size:20px;">Manual Job Card Consumption</h2>
       <span style="color:var(--text2);font-size:12px;">Paper issued against a Manual Job Card No. (offline jobs, not tracked in the app) — one row per job card + paper item.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
-        <button class="btn btn-sm btn-danger" id="mc-delete-selected" style="display:none;" onclick="deleteSelectedManualConsumption()">Delete Selected</button>
         <button class="btn btn-sm" onclick="exportManualConsumption()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printManualConsumption()">&#128424; Print Report</button>
       </div>
@@ -14875,6 +14874,7 @@ function openManualConsumptionPane() {
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetMcFilters()">Reset filters</button>
     </div>
     <div id="mc-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    <div id="mc-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div id="mc-content" style="font-size:13px;color:var(--text);">Loading…</div>
   `;
   loadManualConsumption();
@@ -15059,26 +15059,7 @@ function renderManualConsumption() {
   const visibleIds = rows.flatMap(r => r.txIds || []);
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => manualConsumptionState.selected.has(id));
   const someSelected = visibleIds.some(id => manualConsumptionState.selected.has(id));
-  const deleteSelectedBtn = document.getElementById('mc-delete-selected');
-  if (deleteSelectedBtn) {
-    deleteSelectedBtn.style.display = manualConsumptionState.selected.size ? '' : 'none';
-    // Sum the consumed quantity behind the selected rows — a row counts
-    // only once its every underlying tx id is selected, same rule the
-    // row's own checkbox state follows. Split by pack unit (packets vs
-    // reams) so a mixed selection reads clearly instead of a misleading
-    // combined total.
-    let selPkts = 0, selReams = 0, selSheets = 0;
-    for (const r of rows) {
-      if (!(r.txIds||[]).length || !(r.txIds||[]).every(id => manualConsumptionState.selected.has(id))) continue;
-      selSheets += r.totalSheets;
-      if (isReamPaper(r.paperType || '')) selReams += r.totalPkts; else selPkts += r.totalPkts;
-    }
-    const qtyParts = [];
-    if (selPkts)  qtyParts.push(`${fmt(selPkts)} pkts`);
-    if (selReams) qtyParts.push(`${fmt(selReams)} reams`);
-    const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${selSheets.toLocaleString()} sheets)` : '';
-    deleteSelectedBtn.textContent = `Delete Selected (${manualConsumptionState.selected.size})${qtyLabel}`;
-  }
+  renderManualConsumptionBulkBar(rows);
   contentEl.innerHTML = !rows.length
     ? `<div class="empty">No manual job card consumption in this period.</div>`
     : `<div class="report-scroll-wrap">
@@ -15138,6 +15119,42 @@ function renderManualConsumption() {
   if (headCheck) headCheck.indeterminate = true;
 }
 
+// Sticky bar above the table (same spot Board IN/OUT and Imports use),
+// not pinned to the page header — count + quantity, Clear, and the
+// actual bulk delete action.
+function renderManualConsumptionBulkBar(rows) {
+  const bar = document.getElementById('mc-bulk-bar');
+  if (!bar) return;
+  const n = manualConsumptionState.selected.size;
+  if (!n) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  // Sum the consumed quantity behind the selected rows — a row counts
+  // only once its every underlying tx id is selected, same rule the
+  // row's own checkbox state follows. Split by pack unit (packets vs
+  // reams) so a mixed selection reads clearly instead of a misleading
+  // combined total.
+  const fmt = n2 => Number.isInteger(n2) ? n2.toLocaleString() : (+n2.toFixed(2)).toLocaleString();
+  let selPkts = 0, selReams = 0, selSheets = 0;
+  for (const r of rows) {
+    if (!(r.txIds||[]).length || !(r.txIds||[]).every(id => manualConsumptionState.selected.has(id))) continue;
+    selSheets += r.totalSheets;
+    if (isReamPaper(r.paperType || '')) selReams += r.totalPkts; else selPkts += r.totalPkts;
+  }
+  const qtyParts = [];
+  if (selPkts)  qtyParts.push(`${fmt(selPkts)} pkts`);
+  if (selReams) qtyParts.push(`${fmt(selReams)} reams`);
+  const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${selSheets.toLocaleString()} sheets)` : '';
+  bar.innerHTML = `
+    <span class="bulk-count">${n} selected${qtyLabel}</span>
+    <button class="btn btn-sm btn-clear" onclick="clearManualConsumptionSelection()">Clear</button>
+    <span class="bulk-spacer"></span>
+    <button class="btn btn-sm btn-bulk-delete" onclick="deleteSelectedManualConsumption()">&#128465; Delete Selected</button>
+  `;
+}
+function clearManualConsumptionSelection() {
+  manualConsumptionState.selected.clear();
+  renderManualConsumption();
+}
 function toggleManualConsumptionRow(ids, checked) {
   for (const id of ids || []) checked ? manualConsumptionState.selected.add(id) : manualConsumptionState.selected.delete(id);
   renderManualConsumption();
@@ -15278,7 +15295,6 @@ function openOffcutConsumptionPane() {
       <h2 style="margin:0;font-size:20px;">Offcut Consumption</h2>
       <span style="color:var(--text2);font-size:12px;">Offcut paper automatically issued to tracked E-jobs.</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
-        ${isAdmin() ? '<button class="btn btn-sm btn-danger" id="oc-delete-selected" style="display:none;" onclick="deleteSelectedOffcutConsumption()">Delete Selected</button>' : ''}
         <button class="btn btn-sm" onclick="exportOffcutConsumption()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printOffcutConsumption()">&#128424; Print Report</button>
       </div>
@@ -15292,6 +15308,7 @@ function openOffcutConsumptionPane() {
       </div>
     </div>
     <div id="oc-summary" style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;"></div>
+    <div id="oc-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div id="oc-content">Loading…</div>`;
   loadOffcutConsumption();
 }
@@ -15336,25 +15353,7 @@ function renderOffcutConsumption() {
   const visibleIds = rows.map(t => t.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => offcutConsumptionState.selected.has(id));
   const someSelected = visibleIds.some(id => offcutConsumptionState.selected.has(id));
-  const deleteBtn = document.getElementById('oc-delete-selected');
-  if (deleteBtn) {
-    deleteBtn.style.display = offcutConsumptionState.selected.size ? '' : 'none';
-    // Sum the consumed quantity behind the selected rows, split by pack
-    // unit (packets vs reams) so a mixed selection reads clearly.
-    let selPkts = 0, selReams = 0, selSheets = 0;
-    for (const t of rows) {
-      if (!offcutConsumptionState.selected.has(t.id)) continue;
-      const chg = Math.abs(+t.change || 0);
-      selSheets += chg;
-      const units = chg / packetSize(t.paper_type || '');
-      if (isReamPaper(t.paper_type || '')) selReams += units; else selPkts += units;
-    }
-    const qtyParts = [];
-    if (selPkts)  qtyParts.push(`${fmt(selPkts)} pkts`);
-    if (selReams) qtyParts.push(`${fmt(selReams)} reams`);
-    const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${selSheets.toLocaleString()} sheets)` : '';
-    deleteBtn.textContent = `Delete Selected (${offcutConsumptionState.selected.size})${qtyLabel}`;
-  }
+  renderOffcutConsumptionBulkBar(rows, canDelete);
   if (!rows.length) { el.innerHTML = '<div class="empty">No automatic offcut consumption in this period.</div>'; return; }
   const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
   el.innerHTML = `<div class="report-scroll-wrap">
@@ -15387,6 +15386,41 @@ function renderOffcutConsumption() {
   </div>`;
   const headCheck = el.querySelector('thead input[data-indeterminate="1"]');
   if (headCheck) headCheck.indeterminate = true;
+}
+// Sticky bar above the table (same spot Board IN/OUT and Imports use),
+// not pinned to the page header — count + quantity, Clear, and the
+// actual bulk delete action. Only admins get checkboxes at all (see
+// canDelete in renderOffcutConsumption), so the bar stays hidden for
+// everyone else too.
+function renderOffcutConsumptionBulkBar(rows, canDelete) {
+  const bar = document.getElementById('oc-bulk-bar');
+  if (!bar) return;
+  const n = offcutConsumptionState.selected.size;
+  if (!canDelete || !n) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  const fmt = n2 => Number.isInteger(n2) ? n2.toLocaleString() : (+n2.toFixed(2)).toLocaleString();
+  let selPkts = 0, selReams = 0, selSheets = 0;
+  for (const t of rows) {
+    if (!offcutConsumptionState.selected.has(t.id)) continue;
+    const chg = Math.abs(+t.change || 0);
+    selSheets += chg;
+    const units = chg / packetSize(t.paper_type || '');
+    if (isReamPaper(t.paper_type || '')) selReams += units; else selPkts += units;
+  }
+  const qtyParts = [];
+  if (selPkts)  qtyParts.push(`${fmt(selPkts)} pkts`);
+  if (selReams) qtyParts.push(`${fmt(selReams)} reams`);
+  const qtyLabel = qtyParts.length ? ` · ${qtyParts.join(' + ')} (${selSheets.toLocaleString()} sheets)` : '';
+  bar.innerHTML = `
+    <span class="bulk-count">${n} selected${qtyLabel}</span>
+    <button class="btn btn-sm btn-clear" onclick="clearOffcutConsumptionSelection()">Clear</button>
+    <span class="bulk-spacer"></span>
+    <button class="btn btn-sm btn-bulk-delete" onclick="deleteSelectedOffcutConsumption()">&#128465; Delete Selected</button>
+  `;
+}
+function clearOffcutConsumptionSelection() {
+  offcutConsumptionState.selected.clear();
+  renderOffcutConsumption();
 }
 function toggleOffcutConsumptionRow(id, checked) {
   checked ? offcutConsumptionState.selected.add(id) : offcutConsumptionState.selected.delete(id);
