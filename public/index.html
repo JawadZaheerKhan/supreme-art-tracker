@@ -14667,6 +14667,63 @@ async function bulkDeleteSelectedFinalizedJobs() {
 }
 
 let _adjModalTxMatches = [];
+let _adjSourceMode = 'job';
+let _adjSelectedSources = new Set();
+
+function adjConsumptionGroups() {
+  const groups = new Map();
+  _adjModalTxMatches.forEach((m, i) => {
+    const key = paperMatchKey(m.paperType, m.size, m.gsm);
+    if (!groups.has(key)) groups.set(key, { ...m, remaining: 0, indices: [] });
+    const group = groups.get(key);
+    group.remaining += m.remaining;
+    group.indices.push(i);
+  });
+  return [...groups.values()];
+}
+
+function setAdjustSourceMode(mode) {
+  _adjSourceMode = mode;
+  renderAdjustSources();
+}
+
+function toggleAdjustSource(indices, checked) {
+  for (const i of indices) {
+    if (checked) _adjSelectedSources.add(i);
+    else _adjSelectedSources.delete(i);
+  }
+  renderAdjustSources();
+}
+
+function renderAdjustSources() {
+  const list = document.getElementById('adj-alloc-list');
+  if (!list) return;
+  const scrollTop = list.scrollTop;
+  document.querySelectorAll('[data-adj-mode]').forEach(button => {
+    const active = button.dataset.adjMode === _adjSourceMode;
+    button.setAttribute('aria-pressed', String(active));
+    button.style.background = active ? '#dcfce7' : 'transparent';
+    button.style.color = active ? '#166534' : 'var(--text2)';
+    button.style.borderColor = active ? '#22c55e' : 'var(--border)';
+  });
+  const rows = _adjSourceMode === 'consumption'
+    ? adjConsumptionGroups()
+    : _adjModalTxMatches.map((m, i) => ({ ...m, indices: [i] }));
+  list.innerHTML = rows.map(m => {
+    const selected = m.indices.filter(i => _adjSelectedSources.has(i)).length;
+    const checked = selected === m.indices.length;
+    const partial = selected > 0 && !checked;
+    const pkts = m.remaining / packetSize(m.paperType || '');
+    const paper = esc(m.paperType || '') + ' ' + esc(m.size || '') + '/' + esc(String(m.gsm || ''));
+    const label = (_adjSourceMode === 'job' ? '<strong>' + esc(m.mcNo) + '</strong> ' : '') + paper;
+    return '<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:9px;border:1px solid ' + (selected ? '#22c55e' : 'var(--border)') + ';border-radius:8px;margin-bottom:6px;cursor:pointer;background:' + (selected ? '#dcfce7' : '#fff') + ';color:' + (selected ? '#166534' : 'var(--text2)') + '">' +
+      '<input type="checkbox" style="accent-color:#16a34a" data-partial="' + partial + '" ' + (checked ? 'checked' : '') + ' onchange="toggleAdjustSource([' + m.indices.join(',') + '],this.checked)">' +
+      '<span>' + label + ' — <strong>' + fmtPkts(pkts, {keepZero:true}) + ' ' + esc(packetUnitLabel(m.paperType || '').toLowerCase()) + '</strong><br><span>' + m.remaining.toLocaleString() + ' sheets available</span></span></label>';
+  }).join('') || '<div style="font-size:12px;color:var(--text2);">No unallocated manual consumption available.</div>';
+  list.querySelectorAll('[data-partial="true"]').forEach(cb => { cb.indeterminate = true; });
+  list.scrollTop = scrollTop;
+}
+
 
 async function openAdjustModal(jobId) {
   if (!isSuperAdmin()) return;
@@ -14685,16 +14742,16 @@ async function openAdjustModal(jobId) {
 
   let matchHtml = '<div style="font-size:12px;color:var(--text2);">Loading matching manual consumption...</div>';
   _adjModalTxMatches = [];
+  _adjSourceMode = 'job';
+  _adjSelectedSources = new Set();
   try {
     const txs = await api('GET', '/api/artline/unallocated');
     const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
     const jobPaper = invIt ? invIt.paper_type : j.paper;
     const jobKey = paperMatchKey(jobPaper, invIt ? invIt.size : j.size, invIt ? invIt.gsm : j.gsm);
-    const jobPaperL = String(jobPaper || '').trim().toLowerCase();
     const matches = [];
     for (const t of txs) {
-      const tPaperL = String(t.paper_type || '').trim().toLowerCase();
-      if (tPaperL && jobPaperL && tPaperL !== jobPaperL) continue;
+      // Both views expose all available paper consumption sources.
       const allocated = allocMap[t.id] ? allocMap[t.id].total : 0;
       const remaining = (t.sheets || Math.abs(t.change || 0)) - allocated;
       if (remaining <= 0) continue;
@@ -14706,18 +14763,9 @@ async function openAdjustModal(jobId) {
     // obvious at a glance which sources are actually being used.
     matches.sort((a, b) => (b.exactMatch ? 1 : 0) - (a.exactMatch ? 1 : 0));
     _adjModalTxMatches = matches;
+    _adjSelectedSources = new Set(matches.flatMap((m, i) => m.exactMatch ? [i] : []));
     if (matches.length) {
-      matchHtml = matches.map((m, i) => {
-        const psM   = packetSize(m.paperType || '');
-        const pktsM = psM ? m.remaining / psM : 0;
-        const unitM = packetUnitLabel(m.paperType || '').toLowerCase();
-        return `
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;cursor:pointer;">
-          <input type="checkbox" class="adj-alloc-cb" data-idx="${i}" ${m.exactMatch ? 'checked' : ''}>
-          <span style="font-weight:600;">${esc(m.mcNo)}</span>
-          <span style="color:var(--text2);">${esc(m.paperType||'')} ${esc(m.size||'')} ${m.gsm||''} — ${m.remaining.toLocaleString()} sheets | ${fmtPkts(pktsM, {keepZero:true})} ${unitM}</span>
-        </label>`;
-      }).join('');
+      matchHtml = '';
     } else {
       matchHtml = '<div style="font-size:12px;color:var(--text2);">No matching unallocated manual consumption found for this paper type/size.</div>';
     }
@@ -14779,7 +14827,12 @@ function buildAdjustSidePanel(j, s, ps, matchHtml) {
         <div style="font-size:11px;color:var(--text2);margin-top:4px;">Max ${s.max_packets_per_job} packets per job. 1 packet = ${ps} sheets.</div>
       </div>
       <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;background:#fff;margin-bottom:12px;">
-        <div class="dash-flbl" style="margin-bottom:8px;">Manual Job Card Consumption Sources</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;" role="group" aria-label="Consumption source view">
+          <button type="button" class="btn btn-sm" data-adj-mode="job" onclick="setAdjustSourceMode('job')">By Job</button>
+          <button type="button" class="btn btn-sm" data-adj-mode="consumption" onclick="setAdjustSourceMode('consumption')">By Consumption</button>
+        </div>
+        <div class="dash-flbl" style="margin-bottom:8px;">Manual Consumption Sources</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">Select sources for the total quantity entered above. Save Adjustment applies that quantity across the selected sources.</div>
         <div id="adj-alloc-list" style="max-height:180px;overflow-y:auto;">${matchHtml}</div>
       </div>
       <button class="btn btn-primary" style="width:100%;" onclick="submitAdjustment(${j.id})">Save Adjustment</button>
@@ -14787,6 +14840,7 @@ function buildAdjustSidePanel(j, s, ps, matchHtml) {
   `;
   panel.querySelector('.cv-compare-close').addEventListener('click', () => { panel.remove(); closeModal(); });
   document.body.appendChild(panel);
+  if (_adjModalTxMatches.length) renderAdjustSources();
 }
 
 // Recomputes the wastage split from the current packets/sheets inputs and
@@ -14876,10 +14930,8 @@ async function submitAdjustment(jobId) {
   }
 
   const allocations = [];
-  const cbs = document.querySelectorAll('.adj-alloc-cb:checked');
   let sheetsLeft = manual_sheets;
-  for (const cb of cbs) {
-    const idx = parseInt(cb.dataset.idx);
+  for (const idx of [..._adjSelectedSources].sort((a, b) => a - b)) {
     const m = _adjModalTxMatches[idx];
     if (!m || sheetsLeft <= 0) continue;
     const take = Math.min(m.remaining, sheetsLeft);
@@ -14888,7 +14940,12 @@ async function submitAdjustment(jobId) {
   }
 
   if (!allocations.length) {
-    notify('Cannot adjust — no matching manual consumption sources found for this job\'s paper type/size.');
+    notify('Select at least one manual consumption source.');
+    return;
+  }
+
+  if (sheetsLeft > 0) {
+    notify('Selected sources do not have enough consumption. Select more sources or reduce the quantity.');
     return;
   }
 
