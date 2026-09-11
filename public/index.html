@@ -3721,6 +3721,16 @@ function isPartialReady(j) {
   if (stage >= 6) return false; // Already at Ready or later
   return earlyReadyTotal(j) > 0;
 }
+// Delivery eligibility — normally a job must reach Ready to Deliver (or
+// have some ready cartons recorded early). Shade cards skip that gate
+// entirely: they're proofs, not full production runs, so ticking Shade
+// Card on a job — even mid-stage — makes it deliverable right away.
+// "Ticking the box makes the job work as a shade card" per owner ask.
+function canDeliverNow(j) {
+  if (!j) return false;
+  if (j.is_shade_card) return true;
+  return (j.stage_index || 0) >= 6 || isPartialReady(j);
+}
 function readyCartonsTotal(j) {
   if (!j) return 0;
   const readFrom = (p) => {
@@ -5197,7 +5207,7 @@ function renderJobRowCompact(j, opts) {
       ${partialIssueBannerHtml(j)}
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
-        ${(canRecordDelivery() && !done && (si >= 6 || isPartialReady(j))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;">
+        ${(canRecordDelivery() && !done && canDeliverNow(j)) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;">
           ${j.linked_job_id ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
           <button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>
         </div>` : ''}
@@ -5683,8 +5693,10 @@ function renderJobCard(j, opts) {
       ${primary}
       ${updateBtn}
       ${more}
-      ${(canRecordDelivery() && !done && (si >= 6 || isPartialReady(j)) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
-      ${(canRecordDelivery() && !done && (si >= 6 || isPartialReady(j))) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
+      ${(canRecordDelivery() && !done && canDeliverNow(j) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
+      ${(canRecordDelivery() && !done && canDeliverNow(j)) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
+      ${(done && isSuperAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+      ${(_finalizedJobIds.has(j.id) && isSuperAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -18396,7 +18408,7 @@ function deliveriesSection(j) {
   // Pasting when the operator has recorded some pasted cartons but
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
-  const canAddDelivery = (stageIdx >= 6 || isPartialReady(j)) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
+  const canAddDelivery = canDeliverNow(j) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
@@ -23406,7 +23418,7 @@ function stationManagerOffcutPending(j) { return !!j.paper_is_offcut && isPendin
 // Shade-card delivery eligibility — same rule the Jobs tab's yellow
 // Record Delivery button uses (canRecordDelivery() dropped: the manager
 // PIN is the authority here, verified server-side on manager-deliver).
-function stationManagerCanDeliver(j) { return !!j.is_shade_card && !isDone(j) && ((j.stage_index||0) >= 6 || isPartialReady(j)); }
+function stationManagerCanDeliver(j) { return !!j.is_shade_card && !isDone(j); }
 function stationManagerJobRow(j) {
   const pipeline = stationManagerPipelineHtml(j);
   const issueBtn = stationManagerOffcutPending(j)
