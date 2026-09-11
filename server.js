@@ -5524,6 +5524,11 @@ function readyQtyFromParticularsRow(row) {
 // client's isPartialReady()/earlyReadyTotal(). Returns an error string,
 // or null when eligible.
 function deliveryEligibilityError(job) {
+  // Shade cards are proofs, not full production runs — ticking Shade Card
+  // on a job (even mid-stage) makes it deliverable right away, skipping
+  // the normal Ready-to-Deliver / ready-cartons gate below. Mirrors
+  // canDeliverNow() on the client.
+  if (job.is_shade_card) return null;
   const curStage = job.stage_index || 0;
   if (curStage >= 6) return null;
   const parts = job.particulars || {};
