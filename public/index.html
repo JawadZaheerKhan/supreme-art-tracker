@@ -2112,6 +2112,31 @@
   #calc-launcher:hover { background: #1e3a8a; transform: scale(1.06); }
   #calc-launcher:active { transform: scale(0.97); }
   .modal { background: var(--bg); border-radius: var(--radius); border: 1px solid var(--border); padding: 1.5rem; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; }
+  /* Keep the adjustment controls beside the complete job card. */
+  .overlay.adjust-layout {
+    display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 30vw, 420px);
+    gap: 12px; padding: 12px; align-items: start; overflow-y: auto;
+  }
+  .adjust-layout > .modal {
+    width: 760px; max-width: 760px !important; min-width: 0;
+    justify-self: center; margin: 0;
+    animation: adjustCardSlide .22s ease-out;
+  }
+  .adjust-layout > #adj-side-panel {
+    position: static; width: 100%; max-height: calc(100vh - 24px);
+    min-width: 0; margin: 0;
+  }
+  @keyframes adjustCardSlide {
+    from { transform: translateX(20px); }
+    to { transform: translateX(0); }
+  }
+  @media (max-width: 760px) {
+    .overlay.adjust-layout { grid-template-columns: minmax(0, 1fr); }
+    .adjust-layout > #adj-side-panel { max-height: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .adjust-layout > .modal, .adjust-layout > #adj-side-panel { animation: none; }
+  }
   .modal h2 { font-size: 17px; font-weight: 600; margin-bottom: 1rem; }
   .form-group { margin-bottom: 14px; }
   .form-label { font-size: 12px; color: var(--text2); margin-bottom: 5px; display: block; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -14833,7 +14858,7 @@ async function openAdjustModal(jobId) {
 // from the job card modal so the real Edit/View card renders unmodified.
 function buildAdjustSidePanel(j, s, ps, matchHtml) {
   const existing = document.getElementById('adj-side-panel');
-  if (existing) existing.remove();
+  if (existing) { existing._layoutObserver?.disconnect(); existing.remove(); }
   const initialPackets = Math.min(s.max_packets_per_job, 2);
   const initialSheets = Math.round(initialPackets * ps);
   const panel = document.createElement('div');
@@ -14875,8 +14900,21 @@ function buildAdjustSidePanel(j, s, ps, matchHtml) {
       <button class="btn btn-primary" style="width:100%;" onclick="submitAdjustment(${j.id})">Save Adjustment</button>
     </div>
   `;
-  panel.querySelector('.cv-compare-close').addEventListener('click', () => { panel.remove(); closeModal(); });
-  document.body.appendChild(panel);
+  panel.querySelector('.cv-compare-close').addEventListener('click', () => { closeModal(); });
+  const overlay = document.getElementById('overlay');
+  const card = overlay.querySelector('.modal');
+  overlay.classList.add('adjust-layout');
+  overlay.appendChild(panel);
+  const fitAdjustCard = () => {
+    const stacked = window.innerWidth <= 760;
+    const available = overlay.clientWidth - 24 - (stacked ? 0 : panel.offsetWidth + 12);
+    const scale = Math.min(1, Math.max(0.1, available / 760));
+    card.style.zoom = scale;
+    card.style.maxHeight = ((window.innerHeight - 24) / scale) + 'px';
+  };
+  panel._layoutObserver = new ResizeObserver(fitAdjustCard);
+  panel._layoutObserver.observe(overlay);
+  fitAdjustCard();
   if (_adjModalTxMatches.length) renderAdjustSources();
 }
 
@@ -17450,13 +17488,14 @@ function setDateCustom() {
 // ── Modals ────────────────────────────────────────────────────
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
 function closeModal() {
+  const adjPanel = document.getElementById('adj-side-panel');
+  if (adjPanel) adjPanel._layoutObserver?.disconnect();
   document.getElementById('modal-root').innerHTML='';
   selSection=null;
   // The Adjust flow's side panel (packets/sheets + manual consumption
   // sources) is paired 1:1 with the job-card modal it floats beside —
   // always dismiss it together with the modal, however the modal closed
   // (Cancel, Save, overlay click, Esc).
-  const adjPanel = document.getElementById('adj-side-panel');
   if (adjPanel) adjPanel.remove();
   if (typeof _adjLockObserver !== 'undefined' && _adjLockObserver) { _adjLockObserver.disconnect(); _adjLockObserver = null; }
   if (typeof _mgrLockObserver !== 'undefined' && _mgrLockObserver) { _mgrLockObserver.disconnect(); _mgrLockObserver = null; }
