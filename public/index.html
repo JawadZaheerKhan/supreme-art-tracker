@@ -23398,8 +23398,26 @@ async function stationManagerMoveToStage(id, target) {
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
+// Offcut re-issuance request pending on this job — job.paper_is_offcut is
+// a server-computed field (see GET /api/jobs) rather than the usual
+// isOffcutJob()/inventory lookup, because operator-role Station sessions
+// never get the `inventory` array loaded client-side (403 there).
+function stationManagerOffcutPending(j) { return !!j.paper_is_offcut && isPendingIssuance(j); }
+// Shade-card delivery eligibility — same rule the Jobs tab's yellow
+// Record Delivery button uses (canRecordDelivery() dropped: the manager
+// PIN is the authority here, verified server-side on manager-deliver).
+function stationManagerCanDeliver(j) { return !!j.is_shade_card && !isDone(j) && ((j.stage_index||0) >= 6 || isPartialReady(j)); }
 function stationManagerJobRow(j) {
   const pipeline = stationManagerPipelineHtml(j);
+  const issueBtn = stationManagerOffcutPending(j)
+    ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="stationManagerIssueStock(${j.id})" title="Issue the pending offcut stock for this job">&#128230; Issue Stock</button>`
+    : '';
+  const deliverBtn = stationManagerCanDeliver(j)
+    ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="stationManagerOpenDeliver(${j.id})" title="Record a shade-card delivery">&#128666; Record Delivery</button>`
+    : '';
+  const actionsRow = (issueBtn || deliverBtn)
+    ? `<div style="flex-basis:100%;display:flex;gap:8px;flex-wrap:wrap;" onclick="event.stopPropagation()">${issueBtn}${deliverBtn}</div>`
+    : '';
   return `
     <div class="station-job" style="cursor:default;flex-wrap:wrap;">
       <div class="sj-id">#${j.id}</div>
@@ -23409,7 +23427,77 @@ function stationManagerJobRow(j) {
       </div>
       <div class="sj-go" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">›</div>
       ${pipeline ? `<div class="pipeline" style="flex-basis:100%;flex-wrap:wrap;row-gap:6px;overflow:visible;" onclick="event.stopPropagation()">${pipeline}</div>` : ''}
+      ${actionsRow}
     </div>`;
+}
+// One-tap offcut re-issuance from the Station manager queue — no split
+// popup (offcut lines are single inventory rows in practice); issues the
+// job's full pending need in one shot via the PIN-verified endpoint.
+async function stationManagerIssueStock(id) {
+  if (!stationOperator) return;
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  const ok = await confirmDialog({
+    title: `Issue offcut stock for Job E-${id}?`,
+    message: `"${j.name}" has a pending offcut re-issuance. This issues the full pending quantity from the offcut ledger.`,
+    confirmText: 'Issue Stock',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/manager-issue-stock`, { pin: stationOperator.pin });
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify('Offcut stock issued');
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Small touch-friendly Record Delivery form for a shade-card job tile.
+function stationManagerOpenDeliver(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  openModal(`
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+      <h2 style="margin-top:0;">Record Delivery &middot; E-${id}</h2>
+      <div style="font-weight:600;margin-bottom:10px;">${esc(j.name)}</div>
+      <div class="form-group"><label class="form-label">Unit Cartons *</label>
+        <input type="number" id="smd-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
+      </div>
+      <div class="form-group"><label class="form-label">Date *</label>
+        <input type="date" id="smd-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
+      </div>
+      <div class="form-group"><label class="form-label">PO No.</label>
+        <input type="text" id="smd-po" value="${esc(j.ref || '')}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
+      </div>
+      <div class="form-group"><label class="form-label">Batch No.</label>
+        <input type="text" id="smd-batch" value="${esc(j.bno || '')}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
+      </div>
+      <div class="form-group"><label class="form-label">Challan No.</label>
+        <input type="text" id="smd-challan" placeholder="e.g. CH-042" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="stationManagerSubmitDelivery(${id})">&#128666; Record Delivery</button>
+      </div>
+    </div>`);
+}
+async function stationManagerSubmitDelivery(id) {
+  if (!stationOperator) return;
+  const cartons = document.getElementById('smd-cartons')?.value || '';
+  const date    = document.getElementById('smd-date')?.value || '';
+  const poNo    = document.getElementById('smd-po')?.value || '';
+  const batchNo = document.getElementById('smd-batch')?.value || '';
+  const notes   = document.getElementById('smd-challan')?.value || '';
+  if (!parseFloat(cartons)) { notify('Enter Unit Cartons'); return; }
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/manager-deliver`, { pin: stationOperator.pin, cartons, date, po_no: poNo, batch_no: batchNo, notes });
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify('Delivery recorded');
+    closeModal();
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 // Manager clicks a job (not a stage pill) — same job-card modal admin/PM
 // gets from the Jobs tab, reused as-is (openEdit → jobForm) so it looks and
