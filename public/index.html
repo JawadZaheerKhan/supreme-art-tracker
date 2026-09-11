@@ -1738,6 +1738,16 @@
   .station-job:active { transform: scale(0.99); }
   .station-job:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
   .sj-id { font-size: 18px; font-weight: 800; color: var(--blue-text); min-width: 52px; }
+  .job-number-stack, .station-job-number { display:inline-flex; flex-direction:column; align-items:flex-start; gap:3px; flex-shrink:0; }
+  .station-job-number .sj-id { min-width:0; }
+  .mil-sign, .shade-card-sign {
+    display:inline-flex; align-items:center; width:max-content; padding:2px 7px;
+    border-radius:999px; font-size:10px; line-height:1.25; font-weight:800;
+    letter-spacing:.07em; text-transform:uppercase; white-space:nowrap;
+  }
+  .mil-sign { color:#6d28d9; background:rgba(237,233,254,.78); border:1px solid rgba(167,139,250,.72); }
+  .shade-card-sign { color:#166534; background:rgba(220,252,231,.72); border:1px solid rgba(134,239,172,.72); }
+  .job-card-type-row, .su-type-row { display:flex; justify-content:center; align-items:center; flex-wrap:wrap; gap:6px; margin:-6px 0 10px; }
   .sj-main { flex: 1; min-width: 0; }
   .sj-name { font-size: 17px; font-weight: 700; color: var(--text); }
   .sj-sub { font-size: 13px; color: var(--text2); margin-top: 2px; }
@@ -1753,7 +1763,8 @@
      so the floor gets the identical signal whether they're holding the
      paper card or looking at the Station screen — including a job that
      only became a shade card mid-stage, after the card was already printed. */
-  .su-shade-banner { background: #166534; color: #fff; font-weight: 800; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; text-align: center; padding: 5px 8px; border-radius: 8px; }
+  .su-shade-banner { background:rgba(220,252,231,.72); color:#166534; border:1px solid rgba(134,239,172,.72); font-weight:800; font-size:12px; letter-spacing:.05em; text-transform:uppercase; text-align:center; padding:5px 10px; border-radius:8px; }
+  .su-mil-banner { background:rgba(237,233,254,.78); color:#6d28d9; border:1px solid rgba(167,139,250,.72); font-weight:800; font-size:12px; letter-spacing:.07em; text-transform:uppercase; text-align:center; padding:5px 10px; border-radius:8px; }
   /* Job info panel — the facts an operator actually needs at a glance
      (PO Qty, Carton Qty, Paper, Size/GSM, Cutting Size, Sheets, Packets,
      Urgency), replacing the old big machine animation. Auto-fit grid so
@@ -5205,7 +5216,10 @@ function renderJobRowCompact(j, opts) {
         <div class="job-meta">
           <div class="job-id-row">
             ${selBox}
-            <span class="job-id">#${j.id}</span>
+            <span class="job-number-stack">
+              <span class="job-id">#${j.id}</span>
+              ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
+            </span>
             ${overDeliveredMarkHtml(j)}
             ${badge}
             ${linkedJobBadgeHtml(j, false)}
@@ -5724,7 +5738,10 @@ function renderJobCard(j, opts) {
       ${selBox}
       ${clientPreview
         ? ''
-        : `<span class="job-id">#${j.id}</span>${overDeliveredMarkHtml(j)}`}
+        : `<span class="job-number-stack">
+             <span class="job-id">#${j.id}</span>
+             ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
+           </span>${overDeliveredMarkHtml(j)}`}
       ${badge}
       ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -21766,6 +21783,10 @@ function openEdit(id, opts) {
       </div>` : '';
   openModal(`<div class="modal modal-card job-edit-modal" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">JOB CARD #${j.id}</h2>
+    ${(j.stock_group_name || j.group_job_id || j.is_shade_card) ? `<div class="job-card-type-row">
+      ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
+      ${j.is_shade_card ? '<span class="shade-card-sign">&#127912; Shade Card</span>' : ''}
+    </div>` : ''}
     <div class="ceo-only-block" style="margin:-4px 0 12px;padding:10px 14px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
       &#128065; View-only — your role can review this job card but can&rsquo;t edit or save changes.
     </div>
@@ -23054,6 +23075,12 @@ function buildPrintCard(j) {
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
       }
+      .pc-value.pc-mil-tag {
+        color: #7c3aed !important;
+        font-weight: 800 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
       /* Special-colors block prints its filled cells in the same blue as
          the other typed values, but the header stripe stays black-on-grey
          so the color name reads as a label. */
@@ -23074,6 +23101,7 @@ function buildPrintCard(j) {
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
       <div style="display:flex;flex-direction:column;gap:2px;">
         <div class="pc-serial" style="text-align:left;padding-top:8px;">E-${v(j.id)}</div>
+        ${(j.stock_group_name || j.group_job_id) ? '<div class="pc-mil-tag pc-value" style="font-size:16pt;font-weight:800;letter-spacing:.08em;line-height:1.1;margin-top:2px;color:#7c3aed !important;">MIL</div>' : ''}
         ${(() => {
           const norm = normalizePriority(j.priority);
           // Only surface Urgent / Most Urgent on the printed card —
@@ -24237,7 +24265,11 @@ function stationQueueHtml() {
     }
     return `
     <button class="station-job${pending ? ' is-pending' : ''}" onclick="stationOpenJob(${j.id})">
-      <div class="sj-id">#${j.id}</div>
+      <div class="station-job-number">
+        <div class="sj-id">#${j.id}</div>
+        ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
+        ${j.is_shade_card ? '<span class="shade-card-sign">&#127912; Shade Card</span>' : ''}
+      </div>
       <div class="sj-main">
         <div class="sj-name">${esc(j.name)} ${pendingBadge}${peekBadge}${noteBadge}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
@@ -24329,9 +24361,13 @@ function stationManagerJobRow(j) {
     : '';
   return `
     <div class="station-job" style="cursor:default;flex-wrap:wrap;">
-      <div class="sj-id">#${j.id}</div>
+      <div class="station-job-number">
+        <div class="sj-id">#${j.id}</div>
+        ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
+        ${j.is_shade_card ? '<span class="shade-card-sign">&#127912; Shade Card</span>' : ''}
+      </div>
       <div class="sj-main" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">
-        <div class="sj-name">${esc(j.name)} ${j.is_shade_card ? '<span class="badge" style="background:#dcfce7;color:#166534;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;">&#127912; Shade Card</span>' : ''}</div>
+        <div class="sj-name">${esc(j.name)}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
       </div>
       <div class="sj-go" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">›</div>
@@ -24828,7 +24864,10 @@ function stationUpdateHtml() {
     <div class="station-update">
       <div class="su-job">#${j.id} · ${esc(j.name)}</div>
       <div class="su-jobsub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
-      ${j.is_shade_card ? `<div class="su-shade-banner">&#127912; Shade Card</div>` : ''}
+      ${(j.stock_group_name || j.group_job_id || j.is_shade_card) ? `<div class="su-type-row">
+        ${(j.stock_group_name || j.group_job_id) ? '<div class="su-mil-banner">MIL</div>' : ''}
+        ${j.is_shade_card ? '<div class="su-shade-banner">&#127912; Shade Card</div>' : ''}
+      </div>` : ''}
       ${stationInfoGrid}
       ${notesIn}
       ${finishTopHtml}
