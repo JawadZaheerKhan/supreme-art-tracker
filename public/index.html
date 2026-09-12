@@ -14919,11 +14919,17 @@ function buildAdjustSidePanel(j, s, ps, matchHtml) {
   const card = overlay.querySelector('.modal');
   overlay.classList.add('adjust-layout');
   overlay.appendChild(panel);
+  // Scale via transform (GPU-composited), not zoom — zoom forces a full
+  // layout recompute of the whole card on every scroll/paint, which is
+  // what made this modal feel laggy to scroll. transform only affects
+  // compositing, and the browser still hit-tests/scrolls the card
+  // correctly through it, same as the linked-job compare panel's fitCard.
   const fitAdjustCard = () => {
     const stacked = window.innerWidth <= 760;
     const available = overlay.clientWidth - 24 - (stacked ? 0 : panel.offsetWidth + 12);
     const scale = Math.min(1, Math.max(0.1, available / 760));
-    card.style.zoom = scale;
+    card.style.transformOrigin = 'top center';
+    card.style.transform = scale < 1 ? `scale(${scale})` : '';
     card.style.maxHeight = ((window.innerHeight - 24) / scale) + 'px';
   };
   panel._layoutObserver = new ResizeObserver(fitAdjustCard);
