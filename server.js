@@ -7003,11 +7003,18 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       return res.status(400).json({ error: 'This stock is already classified as offcut. Choose another reason.' });
     }
 
-    // Optional Job Card No. resolution: accepts "E-85" or "85".
+    // Optional Job Card No. resolution: accepts "E-85" or "85" — but ONLY
+    // when the whole field is a single clean reference. The old /(\d+)/
+    // matched the FIRST number anywhere in the string, so typing more than
+    // one reference (e.g. "364, 370") silently linked job E-364 and threw
+    // the rest away entirely (not even kept in notes, since the text below
+    // is only preserved when nothing resolved). Multi-reference input is
+    // never auto-linked now — it falls through to the "not resolved"
+    // branch below, which preserves the FULL typed text as-is.
     let jobId = null;
     let jobRow = null;
     if (job_card) {
-      const m = String(job_card).match(/(\d+)/);
+      const m = String(job_card).trim().match(/^E?-?\s*(\d+)$/i);
       if (m) {
         const candidate = parseInt(m[1], 10);
         const rows = await sql`SELECT * FROM jobs WHERE id = ${candidate} AND deleted_at IS NULL`;
