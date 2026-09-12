@@ -3250,6 +3250,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   </div>
   <div class="pm-hide" style="margin-top:1.5rem;">
     <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:0.5rem;">Recent Activity</div>
+    <div id="audit-filter-bar"></div>
     <div class="inventory-list" id="audit-list"></div>
   </div>
 </div>
@@ -23524,6 +23525,100 @@ async function exportCSV() {
 let usersList = [];
 let auditList = [];
 
+// Recent Activity feed filters — type (matches the action-tag badge, e.g.
+// "job" catches job.create/job.stage/…) and a date period, same today/
+// week/month/custom pattern as the Stock Report. Defaults to a much higher
+// cap than the old fixed limit=50 so "All time" actually shows the history
+// instead of just the last few entries.
+let auditFeedState = { type: '', period: 'all', from: '', to: '', limit: 500 };
+const AUDIT_TYPE_OPTS = [
+  ['', 'All Types'], ['job', 'Jobs'], ['inventory', 'Inventory'], ['user', 'Users'],
+  ['operator', 'Operators'], ['group', 'Groups'], ['import', 'Imports'],
+  ['transfer_note', 'Transfer Notes'], ['trash', 'Trash'], ['artline', 'Artline'],
+];
+function auditFeedDateRange() {
+  const now = new Date();
+  const iso = localDateISO;
+  const period = auditFeedState.period;
+  if (period === 'today') { const t = iso(now); return { from: t, to: t }; }
+  if (period === 'week') {
+    const day = now.getDay() === 0 ? 6 : now.getDay() - 1;
+    const monday = new Date(now); monday.setDate(now.getDate() - day);
+    return { from: iso(monday), to: iso(now) };
+  }
+  if (period === 'month') {
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { from: iso(first), to: iso(now) };
+  }
+  if (period === 'custom') return { from: auditFeedState.from, to: auditFeedState.to };
+  return { from: '', to: '' }; // 'all'
+}
+function auditFeedQueryParams() {
+  const { from, to } = auditFeedDateRange();
+  const qs = new URLSearchParams();
+  qs.set('limit', String(auditFeedState.limit));
+  if (auditFeedState.type) qs.set('type', auditFeedState.type);
+  if (from) qs.set('from', from);
+  if (to)   qs.set('to', to);
+  return qs.toString();
+}
+function auditFeedFilterBarHtml() {
+  const typeOpts = AUDIT_TYPE_OPTS.filter(([v]) => v !== 'artline' || isSuperAdmin())
+    .map(([v, lbl]) => `<option value="${v}" ${auditFeedState.type === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('');
+  return `
+  <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:10px;">
+    <div>
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Type</div>
+      <select class="filter" id="audit-type" onchange="setAuditFeedType(this.value)">${typeOpts}</select>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Period</div>
+      <select class="filter" id="audit-period" onchange="setAuditFeedPeriod(this.value)">
+        <option value="all" ${auditFeedState.period === 'all' ? 'selected' : ''}>All time</option>
+        <option value="today" ${auditFeedState.period === 'today' ? 'selected' : ''}>Today</option>
+        <option value="week" ${auditFeedState.period === 'week' ? 'selected' : ''}>This Week</option>
+        <option value="month" ${auditFeedState.period === 'month' ? 'selected' : ''}>This Month</option>
+        <option value="custom" ${auditFeedState.period === 'custom' ? 'selected' : ''}>Custom range…</option>
+      </select>
+    </div>
+    <div id="audit-custom" style="display:${auditFeedState.period === 'custom' ? 'flex' : 'none'};align-items:flex-end;gap:8px;">
+      <div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">From</div>
+        <input class="filter" type="date" id="audit-from" value="${esc(auditFeedState.from)}" onchange="setAuditFeedCustom()">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">To</div>
+        <input class="filter" type="date" id="audit-to" value="${esc(auditFeedState.to)}" onchange="setAuditFeedCustom()">
+      </div>
+    </div>
+  </div>`;
+}
+// Re-fetches just the activity feed (not the whole Users tab) so tweaking a
+// filter doesn't also reload Authorized Users / Floor Operators.
+async function refreshAuditFeed() {
+  const list = document.getElementById('audit-list');
+  if (!list) return;
+  list.innerHTML = 'Loading…';
+  try {
+    auditList = await api('GET', `/api/audit?${auditFeedQueryParams()}`);
+    list.innerHTML = renderAuditFeed(auditList);
+  } catch (e) {
+    list.innerHTML = 'Error: ' + e.message;
+  }
+}
+function setAuditFeedType(v) { auditFeedState.type = v; refreshAuditFeed(); }
+function setAuditFeedPeriod(v) {
+  auditFeedState.period = v;
+  const box = document.getElementById('audit-custom');
+  if (box) box.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') refreshAuditFeed();
+}
+function setAuditFeedCustom() {
+  auditFeedState.from = document.getElementById('audit-from').value;
+  auditFeedState.to   = document.getElementById('audit-to').value;
+  if (auditFeedState.from && auditFeedState.to) refreshAuditFeed();
+}
+
 let operatorsList = [];
 // Lightweight name+roles roster (no PIN, no persons) — loaded for EVERY
 // signed-in station user (not just admin/PM/CEO, unlike operatorsList via
@@ -23554,7 +23649,7 @@ async function loadUsersAndAudit() {
     const reqs = [];
     if (wantsUsersAndAudit) {
       reqs.push(api('GET', '/api/users'));
-      reqs.push(api('GET', '/api/audit?limit=50'));
+      reqs.push(api('GET', `/api/audit?${auditFeedQueryParams()}`));
     }
     // Operators roster: admin (write), PM (write), CEO (read-only).
     const wantsOperators = isAdmin() || hasRole('ceo') || isProductionManager();
@@ -25742,7 +25837,9 @@ function renderUsersTab() {
     </div>`;
   }).join('') || '<div class="empty">No users yet.</div>';
 
-  // Recent activity feed — top 50 entries across everything.
+  // Recent activity feed — type + date filtered, see auditFeedState above.
+  const filterBarEl = document.getElementById('audit-filter-bar');
+  if (filterBarEl) filterBarEl.innerHTML = auditFeedFilterBarHtml();
   document.getElementById('audit-list').innerHTML = renderAuditFeed(auditList);
 }
 
