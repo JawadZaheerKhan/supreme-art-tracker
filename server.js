@@ -1765,15 +1765,36 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { entity_type, entity_id, user_id, limit } = req.query;
-    const cap = Math.min(parseInt(limit, 10) || 100, 500);
-    let rows;
-    if (entity_type && entity_id) {
-      rows = await sql`SELECT * FROM audit_log WHERE entity_type = ${entity_type} AND entity_id = ${entity_id} ORDER BY id DESC LIMIT ${cap}`;
-    } else if (user_id) {
-      rows = await sql`SELECT * FROM audit_log WHERE user_id = ${user_id} ORDER BY id DESC LIMIT ${cap}`;
-    } else {
-      rows = await sql`SELECT * FROM audit_log ORDER BY id DESC LIMIT ${cap}`;
-    }
+    const cap = Math.min(parseInt(limit, 10) || 100, 2000);
+    const entityIdNum = entity_id !== undefined && entity_id !== '' ? parseInt(entity_id, 10) : null;
+    const userIdNum   = user_id   !== undefined && user_id   !== '' ? parseInt(user_id, 10)   : null;
+    // Type filter matches the action-tag badge shown in the UI (e.g. "job"
+    // matches job.create/job.stage/job.update/…) — one dropdown value per
+    // action prefix rather than entity_type, since artline.* rows are
+    // entity_type 'job' too and need to stay their own filterable bucket.
+    const typePrefix = req.query.type ? String(req.query.type) + '.%' : null;
+    // Day boundaries in BUSINESS time — same conversion as the inventory
+    // transactions report, so "From/To" here means the same calendar day
+    // everywhere in the app (see businessWallClockToMs above).
+    const dayStartIso = (d) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d));
+      return m ? new Date(businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0)).toISOString() : null;
+    };
+    const fromTs   = req.query.from ? dayStartIso(req.query.from) : null;
+    const toEndIso = req.query.to   ? (() => {
+      const s = dayStartIso(req.query.to);
+      return s ? new Date(new Date(s).getTime() + 86400000).toISOString() : null;
+    })() : null;
+    let rows = await sql`
+      SELECT * FROM audit_log
+      WHERE (${entity_type || null}::text IS NULL OR entity_type = ${entity_type || null})
+        AND (${entityIdNum}::int IS NULL OR entity_id = ${entityIdNum})
+        AND (${userIdNum}::int   IS NULL OR user_id   = ${userIdNum})
+        AND (${typePrefix}::text IS NULL OR action LIKE ${typePrefix})
+        AND (${fromTs}::timestamptz   IS NULL OR created_at >= ${fromTs}::timestamptz)
+        AND (${toEndIso}::timestamptz IS NULL OR created_at <  ${toEndIso}::timestamptz)
+      ORDER BY id DESC LIMIT ${cap}
+    `;
     // Artline is a Super Admin-only feature (regular Admins no longer have
     // access either) — its audit trail (adjust/post/remove) must never leak
     // to anyone else viewing a job's shared history/audit log.
