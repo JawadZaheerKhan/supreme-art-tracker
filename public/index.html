@@ -632,6 +632,18 @@
   .ledger-table th, .ledger-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   .ledger-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); font-weight: 700; }
   .ss-table th     { color: var(--text); font-weight: 700; }
+  /* Compact "who did what" activity feed — used for Job audit log, Inventory
+     audit log, and per-User activity. Grouped by day, one line per event:
+     time + action-tag badge + short bold summary + "by <person>". */
+  .audit-feed .audit-day + .audit-day { margin-top: 14px; }
+  .audit-day-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .audit-row { display: grid; grid-template-columns: 54px auto 1fr; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .audit-row:last-child { border-bottom: none; }
+  .audit-time { font-size: 11px; color: var(--text3); white-space: nowrap; }
+  .audit-tag-badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 700; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.03em; background: var(--bg2); color: var(--text2); white-space: nowrap; }
+  .audit-desc { color: var(--text); font-size: 13px; }
+  .audit-desc b { font-weight: 600; }
+  .audit-by { color: var(--text2); font-weight: 400; }
   /* Reports scroll wrapper — caps table height to (roughly) the viewport
      so the horizontal scrollbar is always visible at the bottom of the
      wrapper without scrolling the page down. thead sticks to the top of
@@ -9102,6 +9114,35 @@ async function renderInvHistory(id) {
   }
 }
 
+// Renders GET /api/audit rows as a compact "who did what" feed grouped by
+// day — one line per event (time · action tag · short bold summary · by
+// person) instead of a plain table, so an admin can scan a job/item/user's
+// history at a glance. Shared by Job History, Inventory History, and
+// per-User Activity so all three read the same way.
+function renderAuditFeed(rows) {
+  if (!rows || !rows.length) return '<div class="empty">No activity yet.</div>';
+  const groups = [];
+  let curKey = null, curArr = null;
+  rows.forEach(a => {
+    const d = new Date(a.created_at);
+    const key = d.toDateString();
+    if (key !== curKey) { curKey = key; curArr = []; groups.push({ date: d, rows: curArr }); }
+    curArr.push(a);
+  });
+  const dayHeader = d => d.toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase();
+  const timeOf = t => new Date(t).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: false });
+  return `<div class="audit-feed">${groups.map(g => `
+    <div class="audit-day">
+      <div class="audit-day-header">${esc(dayHeader(g.date))}</div>
+      ${g.rows.map(a => `
+      <div class="audit-row">
+        <div class="audit-time">${timeOf(a.created_at)}</div>
+        <div><span class="audit-tag-badge">${esc(String(a.action || '').toUpperCase())}</span></div>
+        <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span></div>
+      </div>`).join('')}
+    </div>`).join('')}</div>`;
+}
+
 // Field-edit audit trail for the item's History modal (paper_type/size/
 // gsm/brand/threshold/supplier changes) — separate from the transaction
 // ledger above, which only covers stock in/out/correction quantities.
@@ -9115,9 +9156,7 @@ async function loadInvAuditContent(id) {
       api('GET', `/api/audit?entity_type=inventory&entity_id=${itemId}`)
     ));
     const rows = batches.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    el.innerHTML = rows.length
-      ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
-      : '<div class="empty">No audit entries yet.</div>';
+    el.innerHTML = renderAuditFeed(rows);
   } catch(e) {
     el.innerHTML = 'Error: ' + e.message;
   }
@@ -22168,9 +22207,7 @@ async function openHistory(id) {
   });
   try {
     const audit = await api('GET', `/api/audit?entity_type=job&entity_id=${id}`);
-    document.getElementById('job-audit-content').innerHTML = audit.length
-      ? `<table class="ledger-table"><tr><th>When</th><th>User</th><th>Summary</th></tr>${audit.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.user_email||'system')}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
-      : '<div class="empty">No audit entries yet.</div>';
+    document.getElementById('job-audit-content').innerHTML = renderAuditFeed(audit);
   } catch(e) {
     document.getElementById('job-audit-content').innerHTML = 'Error: ' + e.message;
   }
@@ -25706,16 +25743,7 @@ function renderUsersTab() {
   }).join('') || '<div class="empty">No users yet.</div>';
 
   // Recent activity feed — top 50 entries across everything.
-  document.getElementById('audit-list').innerHTML = auditList.length ? auditList.map(a => {
-    const when = fmtDMYT(a.created_at);
-    return `
-    <div class="inv-card">
-      <div class="inv-main">
-        <div class="inv-name">${esc(a.summary)}</div>
-        <div class="inv-sub">${esc(a.user_email || 'system')} · ${esc(a.action)} · ${when}</div>
-      </div>
-    </div>`;
-  }).join('') : '<div class="empty">No activity yet.</div>';
+  document.getElementById('audit-list').innerHTML = renderAuditFeed(auditList);
 }
 
 function openInviteUser() {
@@ -25827,9 +25855,7 @@ async function openUserActivity(userId) {
   </div>`);
   try {
     const rows = await api('GET', `/api/audit?user_id=${userId}&limit=200`);
-    document.getElementById('user-audit-content').innerHTML = rows.length
-      ? `<table class="ledger-table"><tr><th>When</th><th>Action</th><th>Summary</th></tr>${rows.map(a=>`<tr><td>${fmtDMYT(a.created_at)}</td><td>${esc(a.action)}</td><td>${esc(a.summary)}</td></tr>`).join('')}</table>`
-      : '<div class="empty">No activity yet.</div>';
+    document.getElementById('user-audit-content').innerHTML = renderAuditFeed(rows);
   } catch(e) {
     document.getElementById('user-audit-content').innerHTML = 'Error: ' + e.message;
   }
