@@ -7815,7 +7815,11 @@ function stockOutReasonChanged(itemId) {
     chipsWrap.style.display = '';
     manualWrap.style.display = 'none';
     stockOutLoadPendingChips(itemId);
-  } else if (reason === 'manual-job-card') {
+  } else if (reason === 'manual-job-card' || reason === 'adjustment') {
+    // Adjustment gets the field too — a store keeper correcting a balance
+    // against a specific (often offline) job card needs somewhere to
+    // record that reference; it used to only exist for Manual Job Card
+    // and got silently dropped if typed anywhere else.
     chipsWrap.style.display = 'none';
     manualWrap.style.display = '';
   } else {
@@ -7957,11 +7961,12 @@ async function saveInvRemoveStock(id) {
   }
 
   // Manual Job Card / Sold / Damaged / Offcut / Adjustment — plain
-  // inventory transaction. Manual mode stores the typed reference in
-  // job_card so the server records it in the ledger notes; server
-  // doesn't attempt to resolve it to an app job.
+  // inventory transaction. Manual Job Card and Adjustment both expose the
+  // Job Card No. field (see stockOutReasonChanged) — its value is sent as
+  // job_card so the server links it to a real job when the reference
+  // resolves to one, or records it in the ledger notes otherwise.
   let jobCard = null;
-  if (reason === 'manual-job-card') {
+  if (reason === 'manual-job-card' || reason === 'adjustment') {
     jobCard = (document.getElementById('stockout-jobcard').value || '').trim() || null;
   }
   const data = {
@@ -8866,10 +8871,13 @@ async function saveBulkStockOut() {
       } else {
         // Manual / non-job flows — regular ledger row per brand when
         // brand splits are set, else a single row on the picked item.
-        let notes = sharedNote;
-        if (p.reason === 'manual-job-card' && p.jobCard) {
-          notes = ['Manual Job Card: ' + p.jobCard, sharedNote].filter(Boolean).join(' · ');
-        }
+        // job_card is sent through (not just for reason='manual-job-card')
+        // because the Job Card No. field is shown for every reason in this
+        // branch — Adjustment included — and used to be silently dropped
+        // here (hardcoded job_card: null) even though the store keeper had
+        // typed one in. The server resolves it to a real job when the
+        // reference matches one, and otherwise tags notes with "Job Card:
+        // X" itself, same as the single-item Remove Stock flow.
         const txSet = p.brandSplits.length
           ? p.brandSplits.map(s => ({ item_id: s.item_id, sheets: s.sheets }))
           : [{ item_id: p.match.id, sheets: p.qty }];
@@ -8877,8 +8885,8 @@ async function saveBulkStockOut() {
           await api('POST', `/api/inventory/${s.item_id}/transactions`, {
             change: -s.sheets,
             reason: p.reason,
-            notes,
-            job_card: null,
+            notes: sharedNote,
+            job_card: p.jobCard || null,
             challan_no: ref || null,
           });
         }
@@ -8916,6 +8924,20 @@ async function saveBulkStockOut() {
 // sample remarks, etc). Every transaction ledger view uses this.
 function txDisplayNotes(t) {
   return (t && t.reason === 'job-consumed') ? '' : ((t && t.notes) || '');
+}
+
+// Job column for a ledger row. A real linked job shows "Job E-<id>" as
+// before; a Manual Job Card / Adjustment row that carries an off-system
+// reference (server tags it "Job Card: X" in notes when it can't resolve
+// job_card to a real job — see extractManualJobCardNo) used to leave this
+// column blank ("—") with the reference visible only in Notes, even though
+// the Job column exists for exactly this. Surface it here too, styled
+// distinctly since it's a typed reference, not a clickable job link.
+function txJobCellHtml(t) {
+  if (t && t.job_id) return `Job E-${t.job_id}`;
+  const ref = extractManualJobCardNo(t && t.notes);
+  return ref === '(no reference)' ? '<span style="color:var(--text3)">—</span>'
+    : `<span style="color:var(--text2);" title="Off-system job card reference — not a linked job">${esc(ref)}</span>`;
 }
 
 // A one-time schema-upgrade migration backfilled deliveries[] on legacy
@@ -9029,7 +9051,7 @@ async function renderInvHistory(id) {
       // Color: positive=green, negative=red, reversal row=orange tint
       const cls  = isReversal ? 'ledger-reversal' : (t.change > 0 ? 'ledger-pos' : 'ledger-neg');
       const sign = t.change > 0 ? '+' : '';
-      const job  = t.job_id ? `Job E-${t.job_id}` : '—';
+      const job  = txJobCellHtml(t);
       const packets = fmtPackets(t.change);
 
       // Reason cell — show a "REVERSAL" badge when this row undoes another.
@@ -9365,7 +9387,7 @@ function renderStockReport(from, to) {
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-    const job  = t.job_id ? `Job E-${t.job_id}` : '—';
+    const job  = txJobCellHtml(t);
     // Convert sheets → packets/reams using the item's paper-type convention.
     // Show 2dp when fractional, integer otherwise, so "exactly 50 packets" reads cleanly.
     const ps    = packetSize(t.paper_type || '');
@@ -14203,7 +14225,7 @@ function renderStockMovement(direction, from, to) {
     const date = fmtDMYT(t.created_at);
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
-    const job  = t.job_id ? `Job E-${t.job_id}` : '—';
+    const job  = txJobCellHtml(t);
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const pkts  = t.change / ps;
@@ -15180,12 +15202,13 @@ async function saveArtlineSettings() {
 // ── Manual Consumption ───────────────────────────────────────
 // "Manual Job Card" is a Stock Out reason for paper issued against an
 // offline job reference that isn't a real job in the app (typed free-text
-// in Bulk/Single Stock Out). The server tags the ledger row's notes with
-// "Job Card: {value}" (bulk entry prefixes "Manual Job Card: {value}",
-// which still contains that same substring) so it survives even though
-// there's no job_id to join against. This report surfaces exactly those
-// rows, grouped by (job card no. + paper item), so the store keeper can
-// see how many packets went to off-system jobs without hunting through
+// in Bulk/Single Stock Out — and other reasons like Adjustment can carry
+// one too). The server tags the ledger row's notes with "Job Card:
+// {value}" whenever the typed reference doesn't resolve to a real job,
+// so it survives even though there's no job_id to join against. This
+// report surfaces exactly those rows, grouped by (job card no. + paper
+// item), so the store keeper can see how many packets went to off-system
+// jobs without hunting through
 // the full Stock Out ledger.
 const manualConsumptionState = { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', search: '', rows: [], selected: new Set() };
 
