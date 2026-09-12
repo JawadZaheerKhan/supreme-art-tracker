@@ -23911,12 +23911,23 @@ const STAGE_QTY_FIELD = {
 function stageDoneQty(j, stageIdx) {
   const key = STAGE_QTY_FIELD[stageIdx];
   if (!key || !j) return 0;
-  const row = j.particulars && j.particulars[key];
-  if (!row) return 0;
-  if (Array.isArray(row.entries) && row.entries.length) {
-    return row.entries.reduce((a, e) => a + parseQtyMult((e && e.qty) || '').total, 0);
-  }
-  return String(row.quantity || '').split('|').reduce((a, s) => a + parseQtyMult(s).total, 0);
+  const sumRow = (row) => {
+    if (!row) return 0;
+    if (Array.isArray(row.entries) && row.entries.length) {
+      return row.entries.reduce((a, e) => a + parseQtyMult((e && e.qty) || '').total, 0);
+    }
+    return String(row.quantity || '').split('|').reduce((a, s) => a + parseQtyMult(s).total, 0);
+  };
+  const own = sumRow(j.particulars && j.particulars[key]);
+  if (own > 0 || stageIdx !== 4) return own;
+  // Sorting (stage 4) is done by hand — no automated counter yet, so
+  // operators only ever log Sorted Cartons Waste, never a real Qty.
+  // Without this, stageDoneQty() always read 0 for Sorting and Pasting
+  // could never peek a job early no matter how much had actually been
+  // sorted. Only used as a >0 "has some work happened here" gate (see
+  // the peek check below), never displayed as a literal quantity, so
+  // falling back to waste here doesn't misrepresent anything on screen.
+  return sumRow(j.particulars && j.particulars.sorted_cartons_waste);
 }
 
 let stationOperator = null;   // the MACHINE (id, name=machine, pin, persons[], stage_indices, roles) once PIN-verified
