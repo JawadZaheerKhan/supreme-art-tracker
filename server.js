@@ -1058,9 +1058,28 @@ async function initDb() {
     `;
     // One-time rename: this table (and the 'artline.*' audit_log actions,
     // and the /api/artline/* routes) used to be called "Artline" — retired
-    // in favor of the app's own "Wastage Adjustment" name. IF EXISTS makes
-    // this a no-op on a fresh DB or once already renamed.
-    await sql`ALTER TABLE IF EXISTS artline_settings RENAME TO wastage_adjustment_settings`;
+    // in favor of the app's own "Wastage Adjustment" name. A plain
+    // `ALTER TABLE IF EXISTS artline_settings RENAME TO ...` isn't safe
+    // here: while this new code and the still-deploying old code raced on
+    // the same DB, old code's own migration recreated a fresh
+    // artline_settings after this had already renamed it once, so a later
+    // rename attempt hit "relation wastage_adjustment_settings already
+    // exists". This DO block only renames when the target doesn't already
+    // exist, and otherwise drops the stray re-created source table (which
+    // in that situation only ever holds the hardcoded seed defaults, never
+    // real data — the real row lives in wastage_adjustment_settings).
+    await sql`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'artline_settings') THEN
+          IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'wastage_adjustment_settings') THEN
+            DROP TABLE artline_settings;
+          ELSE
+            ALTER TABLE artline_settings RENAME TO wastage_adjustment_settings;
+          END IF;
+        END IF;
+      END $$;
+    `;
     await sql`UPDATE audit_log SET action = 'wastage_adjustment.' || substring(action from 9) WHERE action LIKE 'artline.%'`;
     // Global default wastage split percentages (must sum to 100).
     await sql`
