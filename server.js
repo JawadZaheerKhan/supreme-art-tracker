@@ -7967,8 +7967,14 @@ const STAGE_QTY_FIELD = {
 function stageDoneQtyServer(job, stageIdx) {
   const key = STAGE_QTY_FIELD[stageIdx];
   if (!key) return 0;
-  const row = job.particulars && job.particulars[key];
-  return readyQtyFromParticularsRow(row);
+  const own = readyQtyFromParticularsRow(job.particulars && job.particulars[key]);
+  if (own > 0 || stageIdx !== 4) return own;
+  // Sorting (stage 4) is done by hand — no automated counter yet, so
+  // operators only ever log Sorted Cartons Waste, never a real Qty.
+  // Fall back to waste so Pasting can still peek a job that's genuinely
+  // had work done on it. Only used as a >0 gate (see the peek scope
+  // check below), never returned to the client as a real quantity.
+  return readyQtyFromParticularsRow(job.particulars && job.particulars.sorted_cartons_waste);
 }
 
 // Station update — a shop-floor operator advances a job and/or records that
