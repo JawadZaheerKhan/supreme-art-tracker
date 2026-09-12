@@ -15,8 +15,8 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const JWT_SECRET       = process.env.JWT_SECRET || 'dev-only-change-me';
 const BOOTSTRAP_ADMIN  = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase();
 // Super Admin: a role above Admin, exclusively gated to a small set of
-// sensitive features (Artline wastage adjustments, Manual Consumption
-// report) that regular Admins no longer see at all. Bootstrapped the same
+// sensitive features (Wastage Adjustment, Manual Consumption report) that
+// regular Admins no longer see at all. Bootstrapped the same
 // way the very first Admin account is — by email, on every cold start, so
 // it's idempotent and doesn't require a one-off DB script. Defaults to the
 // owner's account; override via env var if the login email ever changes.
@@ -243,13 +243,16 @@ function getDb() {
 // value to schema_meta; subsequent cold starts read the marker in a single
 // query and skip the ~30 CREATE/ALTER statements entirely. This is what
 // kept the Station PIN waiting 30 s on every cold start.
-// Bumped for the feature/hamza -> main port: inventory_transactions.
-// paired_tx_id, the super_admin role + Artline tables migration, and
-// inventory_transactions.deleted_at/deleted_by (Manual Consumption
-// archive) all need to run on any DB still stamped with an earlier
-// predecessor version (this includes shade_card_dc_counter below, already
-// covered by main's own prior bump).
-const SCHEMA_VERSION = 'v2026-09-11-hamza-port-superadmin-artline';
+// Bumped for inventory_transactions.paired_tx_id, the super_admin role
+// migration, inventory_transactions.deleted_at/deleted_by (Manual
+// Consumption archive), AND shade_card_dc_counter (auto-numbered Delivery
+// Challans on shade-card deliveries) — all landed on separate branches
+// and need to run on any DB still stamped with an earlier version.
+// Bumped again to rename the artline_settings table to
+// wastage_adjustment_settings and rewrite historical 'artline.*'
+// audit_log actions to 'wastage_adjustment.*' — the "Artline" internal
+// name is retired in favor of the app's own "Wastage Adjustment" name.
+const SCHEMA_VERSION = 'v2026-09-13-wastage-adjustment-rename';
 
 async function initDb() {
   try {
@@ -1029,7 +1032,7 @@ async function initDb() {
     await sql`UPDATE jobs SET name   = LOWER(TRIM(name))   WHERE name   IS NOT NULL AND name   <> LOWER(TRIM(name))`;
     await sql`UPDATE jobs SET client = LOWER(TRIM(client)) WHERE client IS NOT NULL AND client <> LOWER(TRIM(client))`;
 
-    // ── Artline: manual-consumption adjustment into E-jobs ──────
+    // ── Wastage Adjustment: manual-consumption adjustment into E-jobs ──
     // Each row represents a delivered E-job that has been "adjusted" —
     // manual (offline) paper consumption allocated as wastage. The
     // original job row in `jobs` is NEVER modified; this is a parallel
@@ -1053,16 +1056,22 @@ async function initDb() {
         UNIQUE(job_id)
       )
     `;
+    // One-time rename: this table (and the 'artline.*' audit_log actions,
+    // and the /api/artline/* routes) used to be called "Artline" — retired
+    // in favor of the app's own "Wastage Adjustment" name. IF EXISTS makes
+    // this a no-op on a fresh DB or once already renamed.
+    await sql`ALTER TABLE IF EXISTS artline_settings RENAME TO wastage_adjustment_settings`;
+    await sql`UPDATE audit_log SET action = 'wastage_adjustment.' || substring(action from 9) WHERE action LIKE 'artline.%'`;
     // Global default wastage split percentages (must sum to 100).
     await sql`
-      CREATE TABLE IF NOT EXISTS artline_settings (
+      CREATE TABLE IF NOT EXISTS wastage_adjustment_settings (
         key   TEXT PRIMARY KEY,
         value JSONB NOT NULL
       )
     `;
     // Seed defaults if not present.
     await sql`
-      INSERT INTO artline_settings (key, value)
+      INSERT INTO wastage_adjustment_settings (key, value)
       VALUES ('wastage_defaults', '{"printing_pct":40,"die_pct":20,"coating_pct":15,"pasting_pct":15,"sorting_pct":10,"max_packets_per_job":2}'::jsonb)
       ON CONFLICT (key) DO NOTHING
     `;
@@ -1226,8 +1235,8 @@ function requireAdmin(req, res, next) {
   if (!userHasRole(req.user, 'admin')) return res.status(403).json({ error: 'Admin only' });
   next();
 }
-// Super Admin — a role above Admin, exclusively for Artline (wastage
-// adjustments) and the Manual Consumption report. Regular Admins are
+// Super Admin — a role above Admin, exclusively for Wastage Adjustment
+// and the Manual Consumption report. Regular Admins are
 // deliberately excluded from both, so this checks 'super_admin' only,
 // never 'admin'.
 function requireSuperAdmin(req, res, next) {
@@ -1612,7 +1621,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
     }
     // Same guardrail for super_admin — otherwise a Super Admin editing their
     // own row without re-checking the (hidden-to-others) box would silently
-    // demote themselves out of Artline/Manual Consumption access.
+    // demote themselves out of Wastage Adjustment/Manual Consumption access.
     if (parseInt(id, 10) === req.user.id && userHasRole(req.user, 'super_admin') && !roles.includes('super_admin')) {
       return res.status(400).json({ error: "You can't remove the Super Admin role from your own account." });
     }
@@ -1771,8 +1780,9 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     const userIdNum   = user_id   !== undefined && user_id   !== '' ? parseInt(user_id, 10)   : null;
     // Type filter matches the action-tag badge shown in the UI (e.g. "job"
     // matches job.create/job.stage/job.update/…) — one dropdown value per
-    // action prefix rather than entity_type, since artline.* rows are
-    // entity_type 'job' too and need to stay their own filterable bucket.
+    // action prefix rather than entity_type, since wastage_adjustment.*
+    // rows are entity_type 'job' too and need to stay their own filterable
+    // bucket.
     const typePrefix = req.query.type ? String(req.query.type) + '.%' : null;
     // Day boundaries in BUSINESS time — same conversion as the inventory
     // transactions report, so "From/To" here means the same calendar day
@@ -1796,10 +1806,11 @@ app.get('/api/audit', requireAuth, async (req, res) => {
         AND (${toEndIso}::timestamptz IS NULL OR created_at <  ${toEndIso}::timestamptz)
       ORDER BY id DESC LIMIT ${cap}
     `;
-    // Artline is a Super Admin-only feature (regular Admins no longer have
-    // access either) — its audit trail (adjust/post/remove) must never leak
-    // to anyone else viewing a job's shared history/audit log.
-    if (!userHasRole(req.user, 'super_admin')) rows = rows.filter(r => !String(r.action || '').startsWith('artline.'));
+    // Wastage Adjustment is a Super Admin-only feature (regular Admins no
+    // longer have access either) — its audit trail (adjust/post/remove)
+    // must never leak to anyone else viewing a job's shared history/audit
+    // log.
+    if (!userHasRole(req.user, 'super_admin')) rows = rows.filter(r => !String(r.action || '').startsWith('wastage_adjustment.'));
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -8796,18 +8807,18 @@ app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// ── Artline: adjustment + finalized-jobs endpoints ──────────
+// ── Wastage Adjustment: adjustment + finalized-jobs endpoints ────
 // Settings — read/write the global wastage defaults.
-app.get('/api/artline/settings', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/settings', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT value FROM artline_settings WHERE key = 'wastage_defaults'`;
+    const rows = await sql`SELECT value FROM wastage_adjustment_settings WHERE key = 'wastage_defaults'`;
     res.json(rows[0]?.value || { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
+app.put('/api/wastage-adjustment/settings', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8816,7 +8827,7 @@ app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
     if (Math.round(pcts) !== 100) return res.status(400).json({ error: 'Wastage percentages must sum to 100' });
     if ((v.max_packets_per_job || 0) < 0.5) return res.status(400).json({ error: 'Max packets per job must be at least 0.5' });
     await sql`
-      INSERT INTO artline_settings (key, value) VALUES ('wastage_defaults', ${JSON.stringify(v)})
+      INSERT INTO wastage_adjustment_settings (key, value) VALUES ('wastage_defaults', ${JSON.stringify(v)})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     `;
     res.json({ ok: true });
@@ -8833,7 +8844,7 @@ app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
 // keeper deleted from Manual Consumption, or one that was reversed
 // (corrected), was still showing up here as "available" before this
 // excluded them the same way the report does.
-app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/unallocated', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8858,7 +8869,7 @@ app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
 });
 
 // Adjust a delivered E-job — allocate manual packets as wastage.
-app.post('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
+app.post('/api/wastage-adjustment/adjust/:jobId', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8890,7 +8901,7 @@ app.post('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
       }
     }
     await logAudit(sql, req, {
-      action: 'artline.adjust',
+      action: 'wastage_adjustment.adjust',
       entityType: 'job',
       entityId: jobId,
       summary: `Wastage adjustment: Job E-${jobId} with ${b.manual_packets} manual packets`,
@@ -8901,7 +8912,7 @@ app.post('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
 });
 
 // Remove an adjustment (un-finalize). Admin only.
-app.delete('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => {
+app.delete('/api/wastage-adjustment/adjust/:jobId', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8911,7 +8922,7 @@ app.delete('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => 
     if (existing.posted) return res.status(400).json({ error: 'Cannot remove a posted adjustment' });
     await sql`DELETE FROM job_adjustments WHERE job_id = ${jobId}`;
     await logAudit(sql, req, {
-      action: 'artline.unadjust',
+      action: 'wastage_adjustment.unadjust',
       entityType: 'job',
       entityId: jobId,
       summary: `Wastage adjustment removed from Job E-${jobId}`,
@@ -8921,7 +8932,7 @@ app.delete('/api/artline/adjust/:jobId', requireSuperAdmin, async (req, res) => 
 });
 
 // List all finalized (adjusted) jobs with their adjustment data.
-app.get('/api/artline/finalized', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/finalized', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8940,7 +8951,7 @@ app.get('/api/artline/finalized', requireSuperAdmin, async (req, res) => {
 });
 
 // Mark an adjusted job as "posted" (ready for the public app).
-app.post('/api/artline/post/:jobId', requireSuperAdmin, async (req, res) => {
+app.post('/api/wastage-adjustment/post/:jobId', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8950,7 +8961,7 @@ app.post('/api/artline/post/:jobId', requireSuperAdmin, async (req, res) => {
     if (existing.posted) return res.status(400).json({ error: 'Already posted' });
     await sql`UPDATE job_adjustments SET posted = true, posted_at = NOW() WHERE job_id = ${jobId}`;
     await logAudit(sql, req, {
-      action: 'artline.post',
+      action: 'wastage_adjustment.post',
       entityType: 'job',
       entityId: jobId,
       summary: `Job E-${jobId} posted for public app`,
@@ -8961,7 +8972,7 @@ app.post('/api/artline/post/:jobId', requireSuperAdmin, async (req, res) => {
 
 // Allocation totals per inventory transaction — used by Manual Consumption report
 // to render green fill bars showing how much of each stock-out has been absorbed.
-app.get('/api/artline/allocations', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/allocations', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
