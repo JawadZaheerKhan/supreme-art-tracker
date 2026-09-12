@@ -8785,6 +8785,13 @@ app.put('/api/artline/settings', requireSuperAdmin, async (req, res) => {
 // Unallocated manual consumption — manual-job-card stock-out rows that
 // haven't been absorbed into any job_adjustments yet. Grouped by paper
 // type + size so the frontend can match against delivered E-jobs.
+// Must mirror the Manual Job Card Consumption report's own row set
+// exactly (GET /api/inventory/transactions?include_offcut_manual=1,
+// filtered client-side to reason='manual-job-card') — otherwise Adjust
+// offers sources the report itself no longer counts: a row the store
+// keeper deleted from Manual Consumption, or one that was reversed
+// (corrected), was still showing up here as "available" before this
+// excluded them the same way the report does.
 app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
   try {
     await dbReady;
@@ -8798,6 +8805,9 @@ app.get('/api/artline/unallocated', requireSuperAdmin, async (req, res) => {
         JOIN inventory_items i ON i.id = t.item_id
        WHERE t.reason = 'manual-job-card'
          AND t.change < 0
+         AND t.deleted_at IS NULL
+         AND t.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
          AND (${from}::date IS NULL OR t.created_at >= ${from}::date)
          AND (${to}::date   IS NULL OR t.created_at <  (${to}::date + INTERVAL '1 day'))
        ORDER BY t.created_at DESC
