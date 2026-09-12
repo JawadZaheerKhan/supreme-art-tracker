@@ -4100,7 +4100,7 @@ function myRoles() {
 }
 function hasRole(r) { return myRoles().includes(r); }
 function isAdmin()             { return hasRole('admin'); }
-// Super Admin — above Admin, exclusively for Artline (wastage adjustments)
+// Super Admin — above Admin, exclusively for Wastage Adjustment
 // and the Manual Consumption report. Regular Admins are deliberately
 // excluded from both, so every gate for those two features must check
 // isSuperAdmin(), never isAdmin().
@@ -4461,7 +4461,7 @@ async function onGoogleCredential(response) {
     // lands on Station; everyone else stays on Jobs (default).
     const loaders = [loadJobs()];
     if (!isOperator()) loaders.push(loadInventory());
-    if (isSuperAdmin()) loaders.push(loadArtlineData());
+    if (isSuperAdmin()) loaders.push(loadWastageAdjData());
     await Promise.all(loaders);
     if (isOperator())            setMode('station');
     else if (isStoreManager())   setMode('inventory');
@@ -4983,7 +4983,7 @@ function renderJobs() {
     b.classList.toggle('active', b.dataset.jv === jobsViewMode));
   renderNewJobsBulkBar();
   renderShadeCardToggle();
-  renderArtlineBar();
+  renderWastageAdjBar();
   if (jobsViewMode === 'cards') renderJobsCards();
   else renderJobsCompact();
 }
@@ -5782,7 +5782,7 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : overIssueBannerHtml(j)}
     ${clientPreview ? '' : partialIssueBannerHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
-    ${clientPreview ? '' : artlineAdjBanner(j.id)}
+    ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
       ${updateBtn}
@@ -6405,11 +6405,11 @@ function setView(v) {
   if (v !== 'finalized' && selectedFinalizedJobIds.size) selectedFinalizedJobIds.clear();
   view=v; render();
   // _manualPaperKeys (drives the Adjust button's bright/dim state) only
-  // updates when loadArtlineData() runs — refresh it on entry to Delivered
+  // updates when loadWastageAdjData() runs — refresh it on entry to Delivered
   // /Finalized so newly-issued manual consumption is reflected without
   // requiring a full page reload.
   if ((v === 'done' || v === 'finalized') && isSuperAdmin()) {
-    loadArtlineData().then(() => { if (view === v) renderJobs(); });
+    loadWastageAdjData().then(() => { if (view === v) renderJobs(); });
   }
 }
 function setJobsViewMode(m) {
@@ -7968,10 +7968,10 @@ async function saveInvRemoveStock(id) {
     if (result && (result.job_flipped || result.job_fully_issued || result.job_partial_remaining || result.linked_job_id)) {
       await loadJobs();
     }
-    // A new manual-job-card stock-out changes which jobs can be Artline-
-    // adjusted — refresh the match data so Adjust buttons light up without
+    // A new manual-job-card stock-out changes which jobs can be Wastage-
+    // Adjusted — refresh the match data so Adjust buttons light up without
     // needing a page reload.
-    if (reason === 'manual-job-card' && isSuperAdmin()) await loadArtlineData();
+    if (reason === 'manual-job-card' && isSuperAdmin()) await loadWastageAdjData();
     closeModal();
     render();
     let tail = '';
@@ -8884,7 +8884,7 @@ async function saveBulkStockOut() {
   }
   await loadInventory();
   if (flipped || partials || plan.some(p => p.reason === 'job-card')) await loadJobs();
-  if (plan.some(p => p.reason === 'manual-job-card') && isSuperAdmin()) await loadArtlineData();
+  if (plan.some(p => p.reason === 'manual-job-card') && isSuperAdmin()) await loadWastageAdjData();
   const stockOutPane = document.getElementById('rt-stock-out');
   if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
     loadStockMovement('out');
@@ -14638,23 +14638,23 @@ function printStockTotal(direction) {
   });
 }
 
-// ── Artline: adjustment + finalized jobs ─────────────────────
+// ── Wastage Adjustment: adjustment + finalized jobs ───────────
 // Set of job ids that have been adjusted (finalized). Populated on load
 // so the Delivered tab hides them and the Finalized tab shows them.
 const _finalizedJobIds = new Set();
-let _artlineSettings = { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 };
+let _wastageAdjSettings = { printing_pct: 40, die_pct: 20, coating_pct: 15, pasting_pct: 15, sorting_pct: 10, max_packets_per_job: 2 };
 let _adjustments = {};
 let _adjJobManualRefs = {};
 let _manualPaperKeys = new Set();
 
-async function loadArtlineData() {
+async function loadWastageAdjData() {
   const [settings, finalized, allocMap, unallocTxs] = await Promise.all([
-    api('GET', '/api/artline/settings').catch(() => _artlineSettings),
-    api('GET', '/api/artline/finalized').catch(() => []),
-    api('GET', '/api/artline/allocations').catch(() => ({})),
-    api('GET', '/api/artline/unallocated').catch(() => []),
+    api('GET', '/api/wastage-adjustment/settings').catch(() => _wastageAdjSettings),
+    api('GET', '/api/wastage-adjustment/finalized').catch(() => []),
+    api('GET', '/api/wastage-adjustment/allocations').catch(() => ({})),
+    api('GET', '/api/wastage-adjustment/unallocated').catch(() => []),
   ]);
-  try { _artlineSettings = settings; } catch(e) {}
+  try { _wastageAdjSettings = settings; } catch(e) {}
   _finalizedJobIds.clear();
   _adjustments = {};
   for (const row of (finalized || [])) {
@@ -14708,9 +14708,9 @@ function jobHasManualMatch(j) {
 }
 
 // Console helper for diagnosing why a job's Adjust button isn't bright —
-// run debugArtlineMatch(135) in devtools to see the computed key vs the
+// run debugWastageAdjMatch(135) in devtools to see the computed key vs the
 // set of keys that have unallocated manual consumption.
-window.debugArtlineMatch = function(jobId) {
+window.debugWastageAdjMatch = function(jobId) {
   const j = jobs.find(x => x.id === jobId);
   if (!j) { console.log('Job not found:', jobId); return; }
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -14723,11 +14723,11 @@ window.debugArtlineMatch = function(jobId) {
   console.log('Match found:', _manualPaperKeys.has(paperMatchKey(paper, size, gsm)));
 };
 
-function artlineAdjustmentForJob(jobId) {
+function wastageAdjustmentForJob(jobId) {
   return _adjustments[jobId] || null;
 }
 
-function artlineAdjBanner(jobId) {
+function wastageAdjBanner(jobId) {
   // Super Admin-only feature, checked explicitly rather than relying on
   // _adjustments simply staying empty for other roles (it only ever loads
   // for super_admin, but this keeps the banner safe even if that changes).
@@ -14746,7 +14746,7 @@ function artlineAdjBanner(jobId) {
   </div>`;
 }
 
-function renderArtlineBar() {
+function renderWastageAdjBar() {
   const bar = document.getElementById('new-jobs-bulk');
   if (view !== 'finalized' || !isSuperAdmin()) return;
   if (!bar) return;
@@ -14758,11 +14758,11 @@ function renderArtlineBar() {
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
       <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Finalized Jobs</span>
-      <button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;" onclick="openArtlineSettingsModal()">&#9881; Wastage Settings</button>
+      <button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;" onclick="openWastageAdjSettingsModal()">&#9881; Wastage Settings</button>
       ${n ? `<span class="njb-count">${n} selected</span>
         <button class="btn btn-sm btn-danger" onclick="bulkDeleteSelectedFinalizedJobs()" title="Permanently move the selected finalized jobs to Archive">&#128465; Delete Selected (${n})</button>` : ''}
       <span style="font-size:12px;color:var(--text2);margin-left:auto;">
-        Default: Printing ${_artlineSettings.printing_pct}% · Die ${_artlineSettings.die_pct}% · Coating ${_artlineSettings.coating_pct}% · Pasting ${_artlineSettings.pasting_pct}% · Sorting ${_artlineSettings.sorting_pct}% · Max ${_artlineSettings.max_packets_per_job} pkts/job
+        Default: Printing ${_wastageAdjSettings.printing_pct}% · Die ${_wastageAdjSettings.die_pct}% · Coating ${_wastageAdjSettings.coating_pct}% · Pasting ${_wastageAdjSettings.pasting_pct}% · Sorting ${_wastageAdjSettings.sorting_pct}% · Max ${_wastageAdjSettings.max_packets_per_job} pkts/job
       </span>
     </div>
   `;
@@ -14774,7 +14774,7 @@ function toggleFinalizedJobSelect(id, on) {
   // Cheap update — just refresh the bar + the affected tile's highlight,
   // same pattern as toggleJobSelect. Avoids a full render so scroll
   // position and any open dropdowns survive.
-  renderArtlineBar();
+  renderWastageAdjBar();
   document.querySelectorAll(`.job-card, .job-tile`).forEach(el => {
     const idAttr = el.querySelector(`input[type="checkbox"][onchange*="toggleFinalizedJobSelect(${id},"]`);
     if (idAttr) el.classList.toggle('is-selected', on);
@@ -14784,7 +14784,7 @@ function toggleFinalizedJobSelect(id, on) {
 // Bulk-archives every ticked finalized job in one confirm — same soft
 // delete (30-day Archive, restorable) as the single-job Delete button.
 // The adjustment mirror (job_adjustments row) isn't touched directly;
-// /api/artline/finalized already excludes jobs with deleted_at set, so
+// /api/wastage-adjustment/finalized already excludes jobs with deleted_at set, so
 // an archived job simply drops out of the Finalized tab.
 async function bulkDeleteSelectedFinalizedJobs() {
   if (!isSuperAdmin()) return;
@@ -14809,7 +14809,7 @@ async function bulkDeleteSelectedFinalizedJobs() {
   }
   selectedFinalizedJobIds.clear();
   await loadInventory();
-  await loadArtlineData();
+  await loadWastageAdjData();
   render();
   showSaving(false);
   notify(`${deleted} job${deleted === 1 ? '' : 's'} moved to Archive${errored ? ` · ${errored} failed` : ''}`);
@@ -14882,7 +14882,7 @@ async function openAdjustModal(jobId) {
     notify('This job is already adjusted/finalized.');
     return;
   }
-  const s = _artlineSettings;
+  const s = _wastageAdjSettings;
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   // Sheets-per-packet for THIS job — packet size × the job's own cut
   // factor (e.g. "1/2" = cut in half = twice the sheets for the same
@@ -14894,8 +14894,8 @@ async function openAdjustModal(jobId) {
   _adjSourceMode = 'job';
   _adjSelectedSources = new Set();
   try {
-    const txs = await api('GET', '/api/artline/unallocated');
-    const allocMap = await api('GET', '/api/artline/allocations').catch(() => ({}));
+    const txs = await api('GET', '/api/wastage-adjustment/unallocated');
+    const allocMap = await api('GET', '/api/wastage-adjustment/allocations').catch(() => ({}));
     const jobPaper = invIt ? invIt.paper_type : j.paper;
     const jobKey = paperMatchKey(jobPaper, invIt ? invIt.size : j.size, invIt ? invIt.gsm : j.gsm);
     const matches = [];
@@ -14925,8 +14925,8 @@ async function openAdjustModal(jobId) {
   const ups = parseFloat(j.ups) || 0;
   const initialPackets = Math.min(s.max_packets_per_job, 2);
   const initialSheets = Math.round(initialPackets * ps);
-  const initialOverlay = computeArtlineWasteSplit(j, initialSheets, s, ups);
-  const initialTopOverlay = computeArtlineTopFieldOverlay(j, initialSheets, initialPackets, ups);
+  const initialOverlay = computeWastageAdjSplit(j, initialSheets, s, ups);
+  const initialTopOverlay = computeWastageAdjTopFieldOverlay(j, initialSheets, initialPackets, ups);
 
   // Same job card modal used everywhere (Edit/View) — the particulars
   // table's wastage rows AND the Sheets Qty/Packets/Unit Carton Qty fields
@@ -14958,7 +14958,7 @@ function buildAdjustSidePanel(j, s, ps, matchHtml) {
     </div>
     <div class="cv-compare-body">
       <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">
-        Wastage split uses the defaults from <a href="#" onclick="event.preventDefault();openArtlineSettingsModal()">Wastage Settings</a>:
+        Wastage split uses the defaults from <a href="#" onclick="event.preventDefault();openWastageAdjSettingsModal()">Wastage Settings</a>:
         Printing ${s.printing_pct}% &middot; Die ${s.die_pct}% &middot; Coating ${s.coating_pct}% &middot; Pasting ${s.pasting_pct}% &middot; Sorting ${s.sorting_pct}%.
       </div>
       <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;background:#fff;margin-bottom:12px;">
@@ -15022,8 +15022,8 @@ function updateAdjustPreview(jobId) {
   const sheets = parseFloat(sheetsEl.value) || 0;
   const packets = packetsEl ? (parseFloat(packetsEl.value) || 0) : 0;
   const ups = parseFloat(j.ups) || 0;
-  const overlay = computeArtlineWasteSplit(j, sheets, _artlineSettings, ups);
-  for (const row of Object.values(ARTLINE_WASTE_ROW_MAP)) {
+  const overlay = computeWastageAdjSplit(j, sheets, _wastageAdjSettings, ups);
+  for (const row of Object.values(WASTAGE_ADJ_ROW_MAP)) {
     const el = document.getElementById('wp-' + row.key);
     if (!el) continue;
     const val = overlay[row.key];
@@ -15039,7 +15039,7 @@ function updateAdjustPreview(jobId) {
   // Unit Carton Qty overlays. Sheets/Packets use the display STRING (which
   // already carries the "primary + secondary" split when the job has a 2nd
   // paper), Unit Carton Qty is always a single number.
-  const topOverlay = computeArtlineTopFieldOverlay(j, sheets, packets, ups);
+  const topOverlay = computeWastageAdjTopFieldOverlay(j, sheets, packets, ups);
   const topFields = [
     ['wp-top-sheets', topOverlay.newSheets, topOverlay.sheetsDisplay],
     ['wp-top-packets', topOverlay.newPackets, topOverlay.packetsDisplay],
@@ -15088,7 +15088,7 @@ async function submitAdjustment(jobId) {
   const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
   const manual_sheets = Math.round(parseFloat(document.getElementById('adj-sheets').value) || 0);
   const notes = '';
-  const s = _artlineSettings;
+  const s = _wastageAdjSettings;
   const printing_pct = s.printing_pct, die_pct = s.die_pct, coating_pct = s.coating_pct,
         pasting_pct = s.pasting_pct, sorting_pct = s.sorting_pct;
   if (packets <= 0 || manual_sheets <= 0) { notify('Enter a valid number of packets/sheets.'); return; }
@@ -15123,13 +15123,13 @@ async function submitAdjustment(jobId) {
   });
   if (!ok) return;
   try {
-    await api('POST', `/api/artline/adjust/${jobId}`, {
+    await api('POST', `/api/wastage-adjustment/adjust/${jobId}`, {
       manual_packets: packets, manual_sheets,
       printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, notes, allocations,
     });
     closeModal();
     notify(`Job E-${jobId} adjusted and finalized.`);
-    await loadArtlineData();
+    await loadWastageAdjData();
     renderJobs();
   } catch (e) { notify('Error: ' + e.message); }
 }
@@ -15143,16 +15143,16 @@ async function removeAdjustment(jobId) {
   });
   if (!ok) return;
   try {
-    await api('DELETE', `/api/artline/adjust/${jobId}`);
+    await api('DELETE', `/api/wastage-adjustment/adjust/${jobId}`);
     notify(`Adjustment removed from Job E-${jobId}.`);
-    await loadArtlineData();
+    await loadWastageAdjData();
     renderJobs();
   } catch (e) { notify('Error: ' + e.message); }
 }
 
-async function openArtlineSettingsModal() {
+async function openWastageAdjSettingsModal() {
   if (!isSuperAdmin()) return;
-  const s = _artlineSettings;
+  const s = _wastageAdjSettings;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
     <h2 style="text-align:center;letter-spacing:1px;">WASTAGE SETTINGS</h2>
     <div style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:14px;">
@@ -15169,12 +15169,12 @@ async function openArtlineSettingsModal() {
     <div id="as-warn" style="font-size:11px;color:#dc2626;margin-bottom:8px;display:none;"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveArtlineSettings()">Save Settings</button>
+      <button class="btn btn-primary" onclick="saveWastageAdjSettings()">Save Settings</button>
     </div>
   </div>`);
 }
 
-async function saveArtlineSettings() {
+async function saveWastageAdjSettings() {
   if (!isSuperAdmin()) return;
   const printing_pct = parseFloat(document.getElementById('as-printing').value) || 0;
   const die_pct      = parseFloat(document.getElementById('as-die').value) || 0;
@@ -15189,8 +15189,8 @@ async function saveArtlineSettings() {
     return;
   }
   try {
-    await api('PUT', '/api/artline/settings', { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job });
-    _artlineSettings = { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job };
+    await api('PUT', '/api/wastage-adjustment/settings', { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job });
+    _wastageAdjSettings = { printing_pct, die_pct, coating_pct, pasting_pct, sorting_pct, max_packets_per_job };
     closeModal();
     notify('Wastage settings saved.');
   } catch (e) { notify('Error: ' + e.message); }
@@ -15348,7 +15348,7 @@ async function loadManualConsumption() {
   try {
     const [txs, allocs] = await Promise.all([
       api('GET', `/api/inventory/transactions?${qs.toString()}`),
-      api('GET', '/api/artline/allocations').catch(() => ({})),
+      api('GET', '/api/wastage-adjustment/allocations').catch(() => ({})),
     ]);
     state.rows = txs;
     const liveIds = new Set(txs.map(t => t.id));
@@ -18721,20 +18721,20 @@ function openMultiDatePickerPopover(btn, targetEl, segments) {
   });
 }
 
-// Which wastage particulars row each Artline stage percentage feeds, and
+// Which wastage particulars row each Wastage Adjustment stage percentage feeds, and
 // whether that row's Quantity is in sheets or finished cartons/units.
 // Printing/Coating/Die waste is recorded in sheets — the adjustment's
 // manual_sheets split by percentage applies directly. Sorting/Pasting
 // waste is recorded in cartons — the sheet-share converts via the job's
 // Ups (units printed per sheet) before it's added.
-const ARTLINE_WASTE_ROW_MAP = {
+const WASTAGE_ADJ_ROW_MAP = {
   printing_pct: { key: 'printed_waste_sheets', unit: 'sheets' },
   coating_pct:  { key: 'uv_waste_sheets',      unit: 'sheets' },
   die_pct:      { key: 'die_cutting_waste',    unit: 'sheets' },
   sorting_pct:  { key: 'sorted_cartons_waste', unit: 'cartons' },
   pasting_pct:  { key: 'pasting_waste_qty',    unit: 'cartons' },
 };
-const ARTLINE_WASTE_ROW_UNIT = Object.fromEntries(Object.values(ARTLINE_WASTE_ROW_MAP).map(r => [r.key, r.unit]));
+const WASTAGE_ADJ_ROW_UNIT = Object.fromEntries(Object.values(WASTAGE_ADJ_ROW_MAP).map(r => [r.key, r.unit]));
 
 // Core math shared by the saved-adjustment overlay and the live Adjust-
 // modal preview. Ignores whatever the operators actually wrote in the
@@ -18746,33 +18746,33 @@ const ARTLINE_WASTE_ROW_UNIT = Object.fromEntries(Object.values(ARTLINE_WASTE_RO
 // (printing_pct/die_pct/coating_pct/pasting_pct/sorting_pct), converting
 // to cartons via `ups` for the two carton-based rows. The returned value
 // per row is the row's whole new total, not a delta to add onto anything.
-function computeArtlineWasteSplit(job, manualSheets, pcts, ups) {
+function computeWastageAdjSplit(job, manualSheets, pcts, ups) {
   const cartonQty  = parseFloat(job && job.cartonqty) || 0;
   const delivered  = totalDeliveredCartons(job);
   const baseWastageSheets = ups > 0 ? (cartonQty - delivered) / ups : 0;
   const totalSheets = baseWastageSheets + (manualSheets || 0);
   const overlay = {};
-  for (const [pctKey, row] of Object.entries(ARTLINE_WASTE_ROW_MAP)) {
+  for (const [pctKey, row] of Object.entries(WASTAGE_ADJ_ROW_MAP)) {
     const stageSheets = totalSheets * ((pcts && pcts[pctKey]) || 0) / 100;
     overlay[row.key] = row.unit === 'cartons' ? Math.round(stageSheets * (ups || 0)) : Math.round(stageSheets);
   }
   return overlay;
 }
 
-// Builds { particularsRowKey: extraWasteQty } for a finalized job's Artline
-// adjustment — only called when actually viewing from the Finalized tab.
-function artlineWasteOverlay(job) {
+// Builds { particularsRowKey: extraWasteQty } for a finalized job's
+// Wastage Adjustment — only called when actually viewing from the Finalized tab.
+function wastageAdjOverlay(job) {
   const adj = job ? _adjustments[job.id] : null;
   if (!adj) return null;
-  return computeArtlineWasteSplit(job, adj.manual_sheets || 0, adj, parseFloat(job.ups) || 0);
+  return computeWastageAdjSplit(job, adj.manual_sheets || 0, adj, parseFloat(job.ups) || 0);
 }
 
-// Same idea as computeArtlineWasteSplit but for the job card's own top-level
+// Same idea as computeWastageAdjSplit but for the job card's own top-level
 // Sheets Qty / Quantity of Packets / Unit Carton Qty fields — these show the
 // MERGED total (original + adjustment), not a delta. Unit Carton Qty isn't a
 // stored field at all here; it's always sheets × Ups, recomputed off the new
 // sheet count.
-function computeArtlineTopFieldOverlay(job, manualSheets, manualPackets, ups) {
+function computeWastageAdjTopFieldOverlay(job, manualSheets, manualPackets, ups) {
   const p = job.particulars || {};
   const totalSheets  = parseFloat(job.sheets) || 0;
   const totalPackets = parseFloat(p.quantity_of_packets) || 0;
@@ -18812,10 +18812,10 @@ function computeArtlineTopFieldOverlay(job, manualSheets, manualPackets, ups) {
 
 // Builds the saved-adjustment version of the above — only called when
 // actually viewing a finalized job from the Finalized tab.
-function artlineTopFieldOverlay(job) {
+function wastageAdjTopFieldOverlay(job) {
   const adj = job ? _adjustments[job.id] : null;
   if (!adj) return null;
-  return computeArtlineTopFieldOverlay(job, adj.manual_sheets, adj.manual_packets, parseFloat(job.ups) || 0);
+  return computeWastageAdjTopFieldOverlay(job, adj.manual_sheets, adj.manual_packets, parseFloat(job.ups) || 0);
 }
 
 // A particulars Quantity value can be a plain number or several pipe-
@@ -18842,7 +18842,7 @@ function applyOverlayToPipeEntries(str, wasteExtra) {
 
 // Short "Wastage Adjustment Applied" banner for the particulars table (and
 // print card) — same wording on both, colored on-screen and plain in print.
-function artlineJobCardBanner(job, color) {
+function wastageAdjJobCardBanner(job, color) {
   const adj = job ? _adjustments[job.id] : null;
   if (!adj) return '';
   const refs = _adjJobManualRefs[job.id];
@@ -18855,14 +18855,14 @@ function particularsTable(p, job, opts) {
   const get = (k, sub) => esc((p[k] && p[k][sub]) || '');
   const raw = (k, sub) => (p[k] && p[k][sub]) || '';
   const log = job && Array.isArray(job.log) ? job.log : [];
-  // Artline overlay only shows when actually viewing the job from the
+  // Wastage Adjustment overlay only shows when actually viewing the job from the
   // Finalized tab — the Delivered tab (and everywhere else) keeps showing
   // the untouched original numbers, per the user's explicit request to
   // keep both versions available. In preview mode (the Adjust flow, before
   // saving) the caller supplies opts.previewOverlay directly instead.
   const wasteOverlay = opts.preview
     ? (opts.previewOverlay || null)
-    : ((job && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? artlineWasteOverlay(job) : null);
+    : ((job && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? wastageAdjOverlay(job) : null);
   // Build one machines datalist per relevant stage (dedup) so multiple
   // rows for the same stage (e.g. Printed Sheets + Printed Waste both
   // point at Printing) share a single option list.
@@ -18913,7 +18913,7 @@ function particularsTable(p, job, opts) {
         const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
         qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
       }
-      const isWasteRow = ARTLINE_WASTE_ROW_UNIT[r.key] !== undefined;
+      const isWasteRow = WASTAGE_ADJ_ROW_UNIT[r.key] !== undefined;
       // A wastage row with nothing recorded yet still needs a visible base
       // so the purple total below reads as "original → new" rather than a
       // bare number with no context. Uses a placeholder (not the actual
@@ -18942,7 +18942,7 @@ function particularsTable(p, job, opts) {
         // the admin edits the packet count — no full re-render needed.
         ? `<div id="wp-${r.key}" style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;${(wasteNewValue !== undefined && wasteNewValue > 0) ? '' : 'display:none;'}">${(wasteNewValue !== undefined && wasteNewValue > 0) ? wasteNewValue.toLocaleString() : ''}</div>`
         : (wasteNewValue !== undefined && wasteNewValue > 0)
-          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="New ${ARTLINE_WASTE_ROW_UNIT[r.key]} total from the wastage formula — (Unit Carton Qty − Delivered) ÷ Ups + manual adjustment, split by percentage. Ignores the operator's own entry above.">${wasteNewValue.toLocaleString()}</div>`
+          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="New ${WASTAGE_ADJ_ROW_UNIT[r.key]} total from the wastage formula — (Unit Carton Qty − Delivered) ÷ Ups + manual adjustment, split by percentage. Ignores the operator's own entry above.">${wasteNewValue.toLocaleString()}</div>`
           : '';
       return `
     <tr>
@@ -18957,7 +18957,7 @@ function particularsTable(p, job, opts) {
     </tr>`;
     }).join('');
   return `
-    ${wasteOverlay ? artlineJobCardBanner(job, '#7c3aed') : ''}
+    ${wasteOverlay ? wastageAdjJobCardBanner(job, '#7c3aed') : ''}
     ${machineDatalists}
     <table class="jc-part">
       <tr>
@@ -19003,7 +19003,7 @@ function jobForm(j={}, opts) {
   // viewing a finalized job from the Finalized tab. Never both at once.
   const topOverlay = opts.topFieldsPreview !== undefined
     ? opts.topFieldsPreview
-    : ((j && j.id && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id)) ? artlineTopFieldOverlay(j) : null);
+    : ((j && j.id && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id)) ? wastageAdjTopFieldOverlay(j) : null);
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const v = x => esc(x||'');
   // Paper picker inputs. Same shape specsSection used to compute; moved
@@ -22140,15 +22140,15 @@ async function openHistory(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   const log = [...(j.log||[])].reverse();
-  // Artline adjustment section — Super Admin-only, shown only for finalized
+  // Wastage Adjustment section — Super Admin-only, shown only for finalized
   // jobs. Surfaces exactly what was applied at adjustment time (which can
   // differ from the current default settings if those were changed after).
   const adj = (isSuperAdmin() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
   const adjRefs = adj ? _adjJobManualRefs[id] : null;
-  const artlineSection = adj ? `
+  const wastageAdjSection = adj ? `
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Wastage Adjustment</div>
     <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 14px;font-size:13px;color:#5b21b6;">
-      <div><b>${adj.manual_packets}</b> packets adjusted (${(adj.manual_sheets || 0).toLocaleString()} sheets)${parseFloat(adj.manual_packets) !== parseFloat(_artlineSettings.max_packets_per_job) ? ` <span style="color:var(--text2);font-weight:500;">(current default limit: ${_artlineSettings.max_packets_per_job})</span>` : ''}</div>
+      <div><b>${adj.manual_packets}</b> packets adjusted (${(adj.manual_sheets || 0).toLocaleString()} sheets)${parseFloat(adj.manual_packets) !== parseFloat(_wastageAdjSettings.max_packets_per_job) ? ` <span style="color:var(--text2);font-weight:500;">(current default limit: ${_wastageAdjSettings.max_packets_per_job})</span>` : ''}</div>
       <div style="margin-top:4px;">Wastage split: Printing ${adj.printing_pct}% &middot; Die ${adj.die_pct}% &middot; Coating ${adj.coating_pct}% &middot; Pasting ${adj.pasting_pct}% &middot; Sorting ${adj.sorting_pct}%</div>
       ${adjRefs && adjRefs.size ? `<div style="margin-top:4px;">From manual job card${adjRefs.size>1?'s':''}: <b>${[...adjRefs].map(r=>esc(r)).join(', ')}</b></div>` : ''}
       ${adj.notes ? `<div style="margin-top:4px;font-style:italic;">"${esc(adj.notes)}"</div>` : ''}
@@ -22157,7 +22157,7 @@ async function openHistory(id) {
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History — #${j.id}</h2>
     <div style="font-size:13px;color:#6b6960;margin-bottom:1rem;">${esc(j.name)} &middot; ${esc(j.client)}</div>
-    ${artlineSection}
+    ${wastageAdjSection}
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Stage Log</div>
     ${log.length===0?'<div style="text-align:center;padding:1.5rem;color:#9e9c94">No stage updates yet.</div>':log.map(l=>`
     <div class="history-item">
@@ -22807,12 +22807,12 @@ function buildPrintCard(j) {
   // only prints when printing from the Finalized tab, so the Delivered
   // tab (and any other context) always prints the untouched original card.
   const wasteOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
-    ? artlineWasteOverlay(j) : null;
+    ? wastageAdjOverlay(j) : null;
   // Same rule for the top-of-card Sheets Qty / Quantity of Packets / Unit
   // Carton Qty — printed values are REPLACED by the adjusted totals (not
   // shown alongside), same as the particulars rows.
   const topOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
-    ? artlineTopFieldOverlay(j) : null;
+    ? wastageAdjTopFieldOverlay(j) : null;
   // Paper source: prefer the live inventory item; fall back to the legacy
   // particulars fields for pre-inventory jobs.
   const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -23258,7 +23258,7 @@ function buildPrintCard(j) {
       </tr>
       ${partRows}
     </table>
-    ${wasteOverlay ? `<div style="margin-top:6px;font-size:9pt;">${artlineJobCardBanner(j)}</div>` : ''}
+    ${wasteOverlay ? `<div style="margin-top:6px;font-size:9pt;">${wastageAdjJobCardBanner(j)}</div>` : ''}
     ${j.notes ? `<div style="margin-top:10px;font-size:9pt;"><b>Notes:</b> ${v(j.notes)}</div>` : ''}
     <div class="pc-sig">Signature: ____________________________</div>
     </div>
@@ -23519,7 +23519,7 @@ let auditFeedState = { type: '', period: 'all', from: '', to: '', limit: 500 };
 const AUDIT_TYPE_OPTS = [
   ['', 'All Types'], ['job', 'Jobs'], ['inventory', 'Inventory'], ['user', 'Users'],
   ['operator', 'Operators'], ['group', 'Groups'], ['import', 'Imports'],
-  ['transfer_note', 'Transfer Notes'], ['trash', 'Trash'], ['artline', 'Artline'],
+  ['transfer_note', 'Transfer Notes'], ['trash', 'Trash'], ['wastage_adjustment', 'Wastage Adjustment'],
 ];
 function auditFeedDateRange() {
   const now = new Date();
@@ -23548,7 +23548,7 @@ function auditFeedQueryParams() {
   return qs.toString();
 }
 function auditFeedFilterBarHtml() {
-  const typeOpts = AUDIT_TYPE_OPTS.filter(([v]) => v !== 'artline' || isSuperAdmin())
+  const typeOpts = AUDIT_TYPE_OPTS.filter(([v]) => v !== 'wastage_adjustment' || isSuperAdmin())
     .map(([v, lbl]) => `<option value="${v}" ${auditFeedState.type === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('');
   return `
   <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:10px;">
