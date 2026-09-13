@@ -7404,7 +7404,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
 //   to         — ISO date (inclusive upper bound, e.g. "2026-05-31")
 //   direction  — "in" (change > 0), "out" (change < 0), or omitted for both
 // Newest first. Used by the Inventory Stock Report screen.
-app.get('/api/inventory/transactions', async (req, res) => {
+app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7585,7 +7585,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
 
 // LIST imports. Optional status query param ("pending" by default — that's
 // the only thing the UI cares about most of the time).
-app.get('/api/imports', async (req, res) => {
+app.get('/api/imports', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
