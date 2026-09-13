@@ -674,6 +674,11 @@
   .acc-table td.acc-cell.partial { background: var(--amber-bg); color: var(--amber-text); }
   .acc-table td.acc-cell.deny { background: var(--red-bg); color: var(--red-text); }
   .acc-table td.acc-cell sup { font-size: 9px; margin-left: 1px; opacity: 0.8; }
+  .acc-table td.acc-cell.editable { cursor: pointer; box-shadow: inset 0 0 0 1.5px rgba(0,0,0,0.18); transition: box-shadow 0.12s, filter 0.12s; }
+  .acc-table td.acc-cell.editable:hover { filter: brightness(0.93); box-shadow: inset 0 0 0 1.5px rgba(0,0,0,0.35); }
+  .acc-table td.acc-cell.locked { opacity: 0.55; }
+  .acc-table tr.acc-group-row th.acc-rowlabel { font-weight: 700; }
+  .acc-group-tag { display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 8px; background: var(--brand-soft); color: var(--brand); vertical-align: 1px; }
   .acc-foot { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text3); }
   /* Reports scroll wrapper — caps table height to (roughly) the viewport
      so the horizontal scrollbar is always visible at the bottom of the
@@ -4139,6 +4144,20 @@ async function api(method, path, body) {
 // 'store_manager' (inventory+imports write), 'operator' (station only),
 // 'ceo' (read-only). The server enforces the same matrix on every endpoint.
 let currentUser = null;
+// This session's own effective role permissions — { job_write: bool,
+// inventory_write: bool, ... } — fetched once at boot (see
+// loadEffectivePermissions, called from both init() and
+// onGoogleCredential()) and read by canWriteJobs()/canWriteInventory()/
+// etc. instead of a hardcoded role list, so a Super Admin's Access
+// Register edit takes effect without a redeploy. Empty object is a safe
+// default (every can*() treats a missing key as false — see roleHasPermission
+// server-side, which has its own hardcoded-default fallback for the
+// equivalent brief window server-side; this is just the client's copy).
+let _rolePerms = {};
+async function loadEffectivePermissions() {
+  try { _rolePerms = await api('GET', '/api/role-permissions/effective'); }
+  catch (e) { _rolePerms = {}; }
+}
 // Multi-role: a user can hold SEVERAL roles at once (e.g. CEO + Admin).
 // hasRole() checks raw membership; capability helpers (can*) grant access
 // when ANY held role allows it — highest privilege wins. The persona
@@ -4177,38 +4196,57 @@ function isOperator()          { return hasRole('operator') && !isAdmin() && !is
 // in parseRolesInput). Presence of 'client' means the user is external and
 // gets routed to the client portal instead of the main app.
 function isClient()            { return hasRole('client'); }
-// Per-area write capability. Used to gate UI write buttons. Server enforces
-// the same matrix server-side so the UI gates are convenience, not security.
-function canWriteJobs()      { return isAdmin() || isProductionManager(); }
-// Delivery ledger — admin, PM, or finance. Finance is the only role
-// that can write only this narrow slice of the job while being otherwise
-// read-only. Every delivery button / form uses this instead of canWriteJobs.
-function canRecordDelivery() { return isAdmin() || isProductionManager() || hasRole('finance'); }
-function canWriteInventory() { return isAdmin() || hasRole('store_manager'); }
+// Per-area write capability. These read from _rolePerms (fetched once at
+// boot from GET /api/role-permissions/effective, see loadEffectivePermissions())
+// instead of a hardcoded role list, so a Super Admin's edit in the Access
+// Register takes effect without a code change. Server enforces the same
+// role_permissions table independently — see canWriteJobs(user) etc. in
+// server.js — so these client checks are convenience/UI-dimming, not the
+// actual security boundary, exactly as before this was made editable.
+function canWriteJobs()      { return isSuperAdmin() || !!(_rolePerms && _rolePerms.job_write); }
+// Delivery ledger — admin, PM, or finance by default. Finance is the only
+// role that can write only this narrow slice of the job while being
+// otherwise read-only. Every delivery button / form uses this instead of
+// canWriteJobs.
+function canRecordDelivery() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.delivery_write); }
+function canWriteInventory() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.inventory_write); }
 // Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
 // else with a PIN and sees the whole queue + update screens for that
 // station — but every WRITE control inside is tagged .ceo-hide so they
 // can only look, never process. Admin / PM / operator get full write
-// access as before.
-function canRunStation()     { return isAdmin() || isProductionManager() || hasRole('operator') || hasRole('ceo'); }
+// access as before. NOTE: station_write's OWN dynamic state (see
+// canProcessStationClient below) only really affects the server-side
+// enforcement if edited away from its default — the .ceo-hide-based
+// dimming here is not yet wired to it, so an edit to station_write in
+// the Access Register changes real access before it changes what the
+// Station UI visually dims. Fails safe (server still rejects), just not
+// visually perfect yet.
+function canRunStation()     { return isSuperAdmin() || !!(_rolePerms && _rolePerms.station_access); }
+// Mirrors server's canProcessStation(user) — not yet wired into Station's
+// own CSS dimming (see the note on canRunStation above), but available for
+// any write-path that wants to ask "can I actually process, not just view."
+function canProcessStationClient() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.station_write); }
 // Operator roster management (Users tab → Floor Operators section).
-// Admin and production manager can add / edit / remove operators.
-function canManageOperators() { return isAdmin() || isProductionManager(); }
+// Admin and production manager can add / edit / remove operators by default.
+function canManageOperators() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.operator_admin); }
 // Generic legacy helper — kept so widely-used .ceo-hide elements + existing
 // call sites don't need to change. Reads as "is this user allowed to mutate
-// anything at all" (anyone holding at least one write-capable role).
-function canWrite() { return isAdmin() || isProductionManager() || hasRole('store_manager'); }
+// anything at all" (anyone holding at least one write-capable role). Now
+// derived from the same two dynamic checks it always meant, instead of an
+// independently hardcoded role list, so it can't drift from them.
+function canWrite() { return canWriteJobs() || canWriteInventory(); }
 // Anyone who can write inventory can issue stock. CEO + operator are blocked
-// unless they also hold a write role.
-function canIssueStock() { return isAdmin() || hasRole('store_manager'); }
+// unless they also hold a write role. Same underlying capability as
+// canWriteInventory() — kept as its own name for readability at call sites.
+function canIssueStock() { return canWriteInventory(); }
 // Offcut-based jobs were meant to be hand-managed by the production side
 // (admin + PM) too, not just the store keeper — but both offcut and
 // fresh issuance actually go through the same POST /api/jobs/:id/issue-stock
-// route, gated server-side by requireInventoryWriter (admin/store_manager
-// only, no production_manager). PM saw this button and got a 403 with no
-// warning. Matches canIssueStock()/the server exactly now; if PM offcut
-// issuance is wanted, that needs a deliberate server-side change first.
-function canIssueOffcutStock() { return isAdmin() || hasRole('store_manager'); }
+// route, gated server-side by requireInventoryWriter (canWriteInventory).
+// Kept as its own name for readability, but now literally the same check
+// so it can never drift from it the way it used to (PM used to see this
+// button and get a 403 with no warning).
+function canIssueOffcutStock() { return canWriteInventory(); }
 // A job counts as offcut-based when its linked inventory item is an
 // offcut row. Used to swap the Issue Stock button to yellow and hide
 // it from the store keeper on the Pending Stock queue.
@@ -4217,9 +4255,12 @@ function isOffcutJob(j) {
   const it = inventory.find(x => x.id === j.inventory_item_id);
   return !!(it && it.is_offcut);
 }
-// Print job card — admin / production manager / CEO. Store manager and
-// operator don't print job cards.
-function canPrintJobCard() { return isAdmin() || isProductionManager() || hasRole('ceo'); }
+// Print job card — admin / production manager / CEO by default. Store
+// manager and operator don't print job cards. Display-only — there's no
+// independent server enforcement of who can print (see the Access
+// Register's note on this row), so editing it changes who SEES the
+// button, not a real security boundary.
+function canPrintJobCard() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.job_print); }
 // Pretty label for the role pill / dropdowns. Falls back to the raw value for
 // forward-compatibility.
 function roleLabel(role) {
@@ -4512,6 +4553,11 @@ async function onGoogleCredential(response) {
       return;
     }
     hideLogin();
+    // Load this session's effective permissions BEFORE anything renders a
+    // write button — canWriteJobs()/canWriteInventory()/etc. all read from
+    // this, so rendering first would flash "no write access" for a real
+    // admin/PM/store-manager until it caught up.
+    await loadEffectivePermissions();
     renderUserChip();
     // Operators don't have permission to read inventory; skip the call so it
     // doesn't 403 in their console. Store Manager lands on Inventory; Operator
@@ -25952,7 +25998,12 @@ function renderUsersSubtabs() {
     <button class="tab ${usersSubTab === 'access-register' ? 'active' : ''}" onclick="setUsersSubTab('access-register')">Access Register</button>
   `;
 }
-function setUsersSubTab(tab) {
+// Live matrix backing the Access Register's editable rows — { groups:
+// [{key,label}], roles: [editable role codes], matrix: {key: {role: level}} }
+// fetched from GET /api/role-permissions (Super Admin only) and kept in
+// sync locally after each edit so re-rendering doesn't need a re-fetch.
+let _roleMatrixData = null;
+async function setUsersSubTab(tab) {
   usersSubTab = tab;
   const teamEl = document.getElementById('users-team-section');
   const accEl = document.getElementById('users-access-register-section');
@@ -25963,8 +26014,14 @@ function setUsersSubTab(tab) {
   teamEl.style.display = showAccess ? 'none' : '';
   accEl.style.display = showAccess ? '' : 'none';
   if (showAccess && !accEl.dataset.rendered) {
-    accEl.innerHTML = renderAccessRegisterHtml();
-    accEl.dataset.rendered = '1';
+    accEl.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      _roleMatrixData = await api('GET', '/api/role-permissions');
+      accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
+      accEl.dataset.rendered = '1';
+    } catch (e) {
+      accEl.innerHTML = 'Error: ' + e.message;
+    }
   }
   const bar = document.getElementById('users-subtabs');
   if (bar && isSuperAdmin()) {
@@ -25973,13 +26030,52 @@ function setUsersSubTab(tab) {
     if (bar.children[idx]) bar.children[idx].classList.add('active');
   }
 }
+// Click a group cell to flip it yes<->no. Confirms first (this is a real,
+// immediately-live permission change — not a documentation edit), PUTs
+// it, updates the local matrix copy, and re-renders in place. Other
+// currently-signed-in sessions of the affected role pick this up the
+// next time they load the app (their _rolePerms is fetched once at boot),
+// not instantly — there's no push mechanism to already-open tabs.
+async function cycleRolePermission(key, role) {
+  if (!_roleMatrixData) return;
+  const groupDef = _roleMatrixData.groups.find(g => g.key === key);
+  if (!groupDef) return;
+  const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'no';
+  const next = current === 'yes' ? 'no' : 'yes';
+  const ok = await confirmDialog({
+    title: `${next === 'yes' ? 'Allow' : 'Remove access'} — ${roleLabel(role)}`,
+    message: `"${groupDef.label}"\n\n${roleLabel(role)} will change from ${current.toUpperCase()} to ${next.toUpperCase()}. This takes effect immediately for that role.`,
+    danger: next === 'no',
+    confirmText: next === 'yes' ? 'Allow' : 'Remove access',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('PUT', '/api/role-permissions', { key, role, level: next });
+    if (!_roleMatrixData.matrix[key]) _roleMatrixData.matrix[key] = {};
+    _roleMatrixData.matrix[key][role] = next;
+    const accEl = document.getElementById('users-access-register-section');
+    if (accEl) accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
+    notify(`${roleLabel(role)}: ${groupDef.label} → ${next.toUpperCase()}`);
+  } catch (e) {
+    notify('Error: ' + e.message);
+  }
+  showSaving(false);
+}
 
-// Access Register — a static capability-by-role matrix compiled by hand
-// from the actual gating code (server middleware + client role checks),
-// not from what the UI merely implies. Content is fixed reference
-// material, not live data, so it's just one big template — update it
-// here when a permission actually changes, same as any other doc.
-function renderAccessRegisterHtml() {
+// Access Register — most rows are still a fixed reference table compiled
+// by hand from the actual gating code (server middleware + client role
+// checks), same as before. The 7 rows tagged "editable" are different:
+// they're rendered live from matrixData (GET /api/role-permissions) and
+// each non-locked cell is clickable — see cycleRolePermission(). These 7
+// cover the capabilities that map to one real, reusable gate function on
+// both client and server; everything else (destructive admin-only
+// actions, Super-Admin-exclusive features, PIN-gated Station actions,
+// structurally-absent routes) is deliberately left fixed — either too
+// sensitive to reassign with a stray click, or there's no single function
+// backing it to make dynamic. Column order matches COLUMN_ROLES.
+const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'client'];
+function renderAccessRegisterHtml(matrixData) {
   const cell = (cls, label, note) => `<td class="acc-cell ${cls}">${label}${note ? `<sup>${note}</sup>` : ''}</td>`;
   const row = (label, cells) => `<tr><th class="acc-rowlabel">${label}</th>${cells.join('')}</tr>`;
   const section = (label) => `<tr class="acc-section"><th colspan="9">${label}</th></tr>`;
@@ -25987,34 +26083,55 @@ function renderAccessRegisterHtml() {
   const D = (note) => cell('deny', 'NO', note);
   const P = (label, note) => cell('partial', label, note);
 
+  // One live, clickable row per editable group. super_admin and client
+  // columns are always locked (see canWriteJobs() etc. and
+  // roleHasPermission's hard client block server-side) — only the other
+  // 6 columns are ever clickable.
+  const groupRow = (key) => {
+    const def = (matrixData.groups || []).find(g => g.key === key);
+    const label = def ? esc(def.label) : key;
+    const group = (matrixData.matrix && matrixData.matrix[key]) || {};
+    const cells = COLUMN_ROLES.map(role => {
+      if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">YES</td>`;
+      if (role === 'client') return `<td class="acc-cell deny locked" title="Client accounts can never reach internal capabilities, regardless of this table">NO</td>`;
+      const level = group[role] || 'no';
+      const cls = level === 'yes' ? 'allow' : 'deny';
+      return `<td class="acc-cell ${cls} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${level === 'yes' ? 'YES' : 'NO'}</td>`;
+    });
+    return `<tr class="acc-group-row"><th class="acc-rowlabel">${label}<span class="acc-group-tag">editable</span></th>${cells.join('')}</tr>`;
+  };
+  // Reverse a stock transaction isn't its own group — it derives from
+  // inventory_write (whoever has it gets the 30-day/reason-limited tier)
+  // PLUS an unconditional bypass for the literal admin role specifically
+  // (canReverse's own isAdmin() || (canWriteInventory() && ...) formula —
+  // admin bypasses the window even if inventory_write were ever edited
+  // away from admin, since that OR-branch never re-checks it). Shown
+  // read-only here, computed from the live inventory_write state.
+  const reverseRow = () => {
+    const inv = (matrixData.matrix && matrixData.matrix.inventory_write) || {};
+    const cells = COLUMN_ROLES.map(role => {
+      if (role === 'super_admin' || role === 'admin') return A();
+      if (role === 'client') return D();
+      return inv[role] === 'yes' ? P('30-DAY') : D();
+    });
+    return row('Reverse a stock transaction <span style="font-weight:400;color:var(--text2);font-size:11px;">(follows Inventory Write, above — Admin always bypasses the 30-day window)</span>', cells);
+  };
+
   const rows = [
     section('Jobs tab &amp; job card'),
     row('View Jobs list &amp; every status tab', [A(), A(), A(), A(), A(), A(), A(), D()]),
-    row('Create a new job', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Edit &amp; save a job card', [A(), A(), P('VIEW ONLY'), A(), D(), D(), D(), D()]),
+    groupRow('job_write'),
+    groupRow('job_print'),
     row('Delete a job', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row("Move a job's stage", [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Print a job card', [A(), A(), A(), A(), D(), D(), D(), D()]),
-    row('Duplicate a job', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Link / unlink two jobs', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Deliver two linked jobs on one challan', [A(), A(), D(), A(), D(), A(), D(), D()]),
-    row('Create &amp; manage a MIL job group', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Delete a MIL job group', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Block / unblock a job', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Record a delivery', [A(), A(), D(), A(), D(), A(), D(), D()]),
     row('Delete a delivery ledger entry', [A(), A(), D(), D(), D(), D(), D(), D()]),
     row('Wastage Adjustment: Adjust / Un-adjust wastage', [A(), D(), D(), D(), D(), D(), D(), D()]),
     row('View the Finalized Jobs tab', [A(), D(), D(), D(), D(), D(), D(), D()]),
+    groupRow('delivery_write'),
 
     section('Inventory'),
-    row('View the Inventory tab', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    row('Add / edit a paper item, add an offcut', [A(), A(), D(), D(), A(), D(), D(), D()]),
+    groupRow('inventory_write'),
     row('Delete a paper item', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Manual Stock In / Stock Out', [A(), A(), D(), D(), A(), D(), D(), D()]),
-    row('Bulk Stock In / Stock Out', [A(), A(), D(), D(), A(), D(), D(), D()]),
-    row('Issue fresh stock to a job', [A(), A(), D(), D(), A(), D(), D(), D()]),
-    row('Issue offcut stock to a job', [A(), A(), D(), D(), A(), D(), D(), D()]),
-    row('Reverse a stock transaction', [A(), A(), D(), D(), P('30-DAY'), D(), D(), D()]),
+    reverseRow(),
 
     section('Reports'),
     row('Stock / Total In &amp; Out reports', [A(), A(), A(), A(), A(), A(), D(), D()]),
@@ -26030,10 +26147,10 @@ function renderAccessRegisterHtml() {
     row('Delete / archive a transaction or import row', [A(), A(), D(), D(), D(), D(), D(), D()]),
 
     section('Station terminal'),
-    row('Open Station &amp; enter a PIN', [A(), A(), P('VIEW ONLY'), A(), D(), D(), A(), D()]),
-    row('Process a station (save / advance / skip / notes)', [A(), A(), D(), A(), D(), D(), A(), D()]),
+    groupRow('station_access'),
+    groupRow('station_write'),
     row('Manager-PIN actions (stage, machine, offcut, shade-card delivery)', [A(), A(), P('VIA PIN'), A(), D(), D(), P('VIA PIN'), D()]),
-    row('Manage the Floor Operators PIN roster', [A(), A(), D(), A(), D(), D(), D(), D()]),
+    groupRow('operator_admin'),
 
     section('Stickers &amp; Forms'),
     row('Stickers &mdash; open &amp; print', [A(), A(), A(), A(), D(), D(), D(), D()]),
@@ -26045,7 +26162,6 @@ function renderAccessRegisterHtml() {
     row("Edit a user's roles or details", [A(), A(), D(), D(), D(), D(), D(), D()]),
     row('Block / unblock / delete a user', [A(), A(), D(), D(), D(), D(), D(), D()]),
     row('Grant the Super Admin role', [A(), D(), D(), D(), D(), D(), D(), D()]),
-    row('View Floor Operators roster (from Users tab)', [A(), A(), D(), A(), D(), D(), D(), D()]),
 
     section('Client View &amp; portal'),
     row('Open the internal "Client View" preview', [A(), A(), A(), A(), D(), D(), D(), D()]),
@@ -26054,12 +26170,11 @@ function renderAccessRegisterHtml() {
   ].join('');
 
   return `
-  <div class="acc-reg-dek">Every role, every module — Jobs, Inventory, Reports, Station, Stickers &amp; Forms, Users, Client View — traced to the actual function or middleware that grants or blocks it, not what the UI merely implies.</div>
+  <div class="acc-reg-dek">Every role, every module — Jobs, Inventory, Reports, Station, Stickers &amp; Forms, Users, Client View — traced to the actual function or middleware that grants or blocks it, not what the UI merely implies. Rows tagged <span class="acc-group-tag" style="margin-left:0;">editable</span> are live — click a cell to change that role's access immediately. Everything else is fixed reference (destructive, Super-Admin-exclusive, PIN-gated, or structurally absent).</div>
   <div class="acc-reg-legend">
     <span><span class="acc-swatch allow"></span>Allowed</span>
     <span><span class="acc-swatch partial"></span>Partial / conditional</span>
     <span><span class="acc-swatch deny"></span>Not allowed</span>
-    <span>Superscript numbers &rarr; Notes below</span>
   </div>
 
   <div class="acc-tablewrap">
@@ -27023,6 +27138,9 @@ async function init() {
     return;
   }
   hideLogin();
+  // Same ordering reason as onGoogleCredential(): load effective
+  // permissions before the first role-gated render.
+  await loadEffectivePermissions();
   renderUserChip();
   // Operators can't read inventory (403), so skip the call for them.
   // Everyone else loads jobs + inventory in parallel.
