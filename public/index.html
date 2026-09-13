@@ -3278,7 +3278,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <div class="stats-row pm-hide" id="users-stats-row"></div>
     <div class="toolbar pm-hide">
       <div style="font-size:14px;font-weight:600;color:var(--text);">Authorized Users</div>
-      <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openInviteUser()">+ Invite User</button>
+      <button class="btn btn-sm btn-primary" id="invite-user-btn" style="margin-left:auto;display:none;" onclick="openInviteUser()">+ Invite User</button>
     </div>
     <div class="inventory-list pm-hide" id="users-list"></div>
     <!-- Shop-floor operators (PIN roster for the Station terminal). Admin + PM can write, CEO views. -->
@@ -4144,19 +4144,27 @@ async function api(method, path, body) {
 // 'store_manager' (inventory+imports write), 'operator' (station only),
 // 'ceo' (read-only). The server enforces the same matrix on every endpoint.
 let currentUser = null;
-// This session's own effective role permissions — { job_write: bool,
-// inventory_write: bool, ... } — fetched once at boot (see
-// loadEffectivePermissions, called from both init() and
-// onGoogleCredential()) and read by canWriteJobs()/canWriteInventory()/
-// etc. instead of a hardcoded role list, so a Super Admin's Access
-// Register edit takes effect without a redeploy. Empty object is a safe
-// default (every can*() treats a missing key as false — see roleHasPermission
-// server-side, which has its own hardcoded-default fallback for the
-// equivalent brief window server-side; this is just the client's copy).
+// This session's own effective role permissions — { job_write: 'yes',
+// user_view: 'view', inventory_reverse: '30-day', ... } — fetched once
+// at boot (see loadEffectivePermissions, called from both init() and
+// onGoogleCredential()) and read via hasPerm()/permLevel() instead of a
+// hardcoded role list, so a Super Admin's Access Register edit takes
+// effect without a redeploy. Empty object is a safe default (permLevel
+// treats a missing key as 'no').
 let _rolePerms = {};
 async function loadEffectivePermissions() {
   try { _rolePerms = await api('GET', '/api/role-permissions/effective'); }
   catch (e) { _rolePerms = {}; }
+}
+// level ordering mirrors the server's permLevelAtLeast exactly — 'no'
+// and 'hidden' both fail every check above rank 0; 'view' passes a
+// 'view' check but not a 'yes' one. '30-day' (inventory_reverse only)
+// isn't in this order — callers that care about it read permLevel()
+// directly and compare the string, same as the server's reverseTierFor.
+function permLevel(key) { return (_rolePerms && _rolePerms[key]) || 'no'; }
+function hasPerm(key, min = 'yes') {
+  const order = { no: 0, hidden: 0, view: 1, yes: 2 };
+  return (order[permLevel(key)] ?? 0) >= (order[min] ?? 2);
 }
 // Multi-role: a user can hold SEVERAL roles at once (e.g. CEO + Admin).
 // hasRole() checks raw membership; capability helpers (can*) grant access
@@ -4203,13 +4211,13 @@ function isClient()            { return hasRole('client'); }
 // role_permissions table independently — see canWriteJobs(user) etc. in
 // server.js — so these client checks are convenience/UI-dimming, not the
 // actual security boundary, exactly as before this was made editable.
-function canWriteJobs()      { return isSuperAdmin() || !!(_rolePerms && _rolePerms.job_write); }
+function canWriteJobs()      { return isSuperAdmin() || hasPerm('job_write'); }
 // Delivery ledger — admin, PM, or finance by default. Finance is the only
 // role that can write only this narrow slice of the job while being
 // otherwise read-only. Every delivery button / form uses this instead of
 // canWriteJobs.
-function canRecordDelivery() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.delivery_write); }
-function canWriteInventory() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.inventory_write); }
+function canRecordDelivery() { return isSuperAdmin() || hasPerm('delivery_write'); }
+function canWriteInventory() { return isSuperAdmin() || hasPerm('inventory_write'); }
 // Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
 // else with a PIN and sees the whole queue + update screens for that
 // station — but every WRITE control inside is tagged .ceo-hide so they
@@ -4221,14 +4229,14 @@ function canWriteInventory() { return isSuperAdmin() || !!(_rolePerms && _rolePe
 // the Access Register changes real access before it changes what the
 // Station UI visually dims. Fails safe (server still rejects), just not
 // visually perfect yet.
-function canRunStation()     { return isSuperAdmin() || !!(_rolePerms && _rolePerms.station_access); }
+function canRunStation()     { return isSuperAdmin() || hasPerm('station_access'); }
 // Mirrors server's canProcessStation(user) — not yet wired into Station's
 // own CSS dimming (see the note on canRunStation above), but available for
 // any write-path that wants to ask "can I actually process, not just view."
-function canProcessStationClient() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.station_write); }
+function canProcessStationClient() { return isSuperAdmin() || hasPerm('station_write'); }
 // Operator roster management (Users tab → Floor Operators section).
 // Admin and production manager can add / edit / remove operators by default.
-function canManageOperators() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.operator_admin); }
+function canManageOperators() { return isSuperAdmin() || hasPerm('operator_admin'); }
 // Generic legacy helper — kept so widely-used .ceo-hide elements + existing
 // call sites don't need to change. Reads as "is this user allowed to mutate
 // anything at all" (anyone holding at least one write-capable role). Now
@@ -4260,7 +4268,15 @@ function isOffcutJob(j) {
 // independent server enforcement of who can print (see the Access
 // Register's note on this row), so editing it changes who SEES the
 // button, not a real security boundary.
-function canPrintJobCard() { return isSuperAdmin() || !!(_rolePerms && _rolePerms.job_print); }
+function canPrintJobCard() { return isSuperAdmin() || hasPerm('job_print'); }
+// Wastage Adjustment (adjust/un-adjust), the Finalized Jobs tab, and the
+// Manual Job Card Consumption report all share this one permission —
+// defaults to nobody but Super Admin, same as before this was editable,
+// but a Super Admin can now grant it to another role from the Access
+// Register. Named separately from isSuperAdmin() itself since the
+// Access Register's own visibility, and who can grant Super Admin,
+// deliberately stay hardcoded Super-Admin-only regardless of this.
+function canWastageAdjust() { return isSuperAdmin() || hasPerm('wastage_adjustment'); }
 // Pretty label for the role pill / dropdowns. Falls back to the raw value for
 // forward-compatibility.
 function roleLabel(role) {
@@ -4481,20 +4497,22 @@ function renderUserChip() {
   lockTab('mode-reports-btn',   !op);
   // Finance keeps every tab clickable — the blocked ones render a
   // .role-block-msg overlay instead of the real content (see CSS above).
-  lockTab('mode-stickers-btn',  fin || (!op && !sm));
+  lockTab('mode-stickers-btn',  fin || hasPerm('stickers_print', 'view'));
   lockTab('mode-station-btn',   fin || canRunStation());
-  lockTab('mode-forms-btn',     !op && !sm);
-  // Users tab — open to admin (full control), CEO (read-only audit feed),
-  // production_manager (Floor Operators roster only — other sections
-  // tagged .pm-hide), and finance (sees the block-msg placeholder).
-  lockTab('mode-users-btn',     fin || isAdmin() || hasRole('ceo') || isProductionManager());
-  // Client View — admin / PM / CEO preview; finance sees the block-msg
-  // placeholder. Store manager + operator remain locked.
-  lockTab('mode-client-view-btn', fin || isAdmin() || hasRole('ceo') || isProductionManager());
-  // Trash card — visible to anyone who can navigate the app (so operators
-  // never see it). Admin can act (restore / empty); others browse only.
+  lockTab('mode-forms-btn',     fin || hasPerm('forms_print', 'view'));
+  // Users tab — open to whoever can see the Authorized Users list
+  // (user_view) or manage Floor Operators (operator_admin — other
+  // sections tagged .pm-hide), and finance (sees the block-msg placeholder).
+  lockTab('mode-users-btn',     fin || hasPerm('user_view', 'view') || hasPerm('operator_admin'));
+  // Client View — preview access; finance sees the block-msg placeholder.
+  lockTab('mode-client-view-btn', fin || hasPerm('client_view_preview', 'view'));
+  // Trash card — gated by trash_view (default admin/ceo, was previously
+  // just "anyone who isn't an operator," which let PM/Store Manager/
+  // Finance see it too even though the server never actually allowed
+  // them in). Admin can act (restore / empty) via trash_admin; CEO
+  // browses only.
   const trashBtn = document.getElementById('trash-card-btn');
-  if (trashBtn) trashBtn.style.display = op ? 'none' : 'flex';
+  if (trashBtn) trashBtn.style.display = hasPerm('trash_view', 'view') ? 'flex' : 'none';
   // CEOs see a read-only version of the app — flip a body class so the CSS
   // rule below hides every element tagged .ceo-hide in one go. Store Manager
   // gets the same .ceo-hide treatment on Jobs (read-only for them too), and
@@ -4513,10 +4531,10 @@ function renderUserChip() {
   const lockInventory = !isCeo() && !op && !canWriteInventory();
   document.body.classList.toggle('role-lock-jobs', lockJobs);
   document.body.classList.toggle('role-lock-inventory', lockInventory);
-  // Manual Consumption report — Super Admin only. Regular Admins and
-  // everyone else (CEO, production/store manager, finance) never see the
-  // sidebar entry.
-  document.body.classList.toggle('role-not-superadmin', !isSuperAdmin());
+  // Manual Consumption report — gated by wastage_adjustment, same as
+  // Wastage Adjustment and the Finalized tab (default: Super Admin only,
+  // editable from the Access Register).
+  document.body.classList.toggle('role-not-superadmin', !canWastageAdjust());
   renderAppDate();
 }
 
@@ -4564,7 +4582,7 @@ async function onGoogleCredential(response) {
     // lands on Station; everyone else stays on Jobs (default).
     const loaders = [loadJobs()];
     if (!isOperator()) loaders.push(loadInventory());
-    if (isSuperAdmin()) loaders.push(loadWastageAdjData());
+    if (canWastageAdjust()) loaders.push(loadWastageAdjData());
     await Promise.all(loaders);
     if (isOperator())            setMode('station');
     else if (isStoreManager())   setMode('inventory');
@@ -5046,7 +5064,7 @@ function renderTabs() {
   // Finalized (wastage adjustment) is a Super Admin-only feature end to
   // end — the tab itself stays hidden from every other role, not just the
   // data, and regular Admins are deliberately excluded too.
-  if (isSuperAdmin()) views.push(['finalized','Finalized']);
+  if (canWastageAdjust()) views.push(['finalized','Finalized']);
   const tabsWrap = document.getElementById('tabs-wrap');
   const viewsKey = views.map(([v]) => v).join('|');
   // Preserve the existing buttons between renders so the shared selector can
@@ -5334,7 +5352,7 @@ function renderJobRowCompact(j, opts) {
     // printSelectedJobs().
     const selBox = (((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
       ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
-      : (view === 'finalized' && _finalizedJobIds.has(j.id) && isSuperAdmin())
+      : (view === 'finalized' && _finalizedJobIds.has(j.id) && canWastageAdjust())
         ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
         : '';
     return `
@@ -5382,9 +5400,9 @@ function renderJobRowCompact(j, opts) {
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
-            ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
-            ${(done && isSuperAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
-            ${(_finalizedJobIds.has(j.id) && isSuperAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
+            ${hasPerm('job_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+            ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+            ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
@@ -5788,7 +5806,7 @@ function renderJobCard(j, opts) {
   // the New Jobs tab and the CTP tab, and only for users who can print job cards.
   const selBox = (!clientPreview && ((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
     ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
-    : (!clientPreview && view === 'finalized' && _finalizedJobIds.has(j.id) && isSuperAdmin())
+    : (!clientPreview && view === 'finalized' && _finalizedJobIds.has(j.id) && canWastageAdjust())
       ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
       : '';
   // Blocked banner + red tint on the whole tile — clients need to see
@@ -5893,8 +5911,8 @@ function renderJobCard(j, opts) {
       ${more}
       ${(canRecordDelivery() && !done && canDeliverNow(j) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#5b21b6;border-color:#5b21b6;color:#fff;font-weight:700;margin-left:auto;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
       ${(canRecordDelivery() && !done && canDeliverNow(j)) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${j.linked_job_id ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
-      ${(done && isSuperAdmin() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
-      ${(_finalizedJobIds.has(j.id) && isSuperAdmin() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
+      ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
+      ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
   </div>`;
 }
@@ -6512,7 +6530,7 @@ function setView(v) {
   // updates when loadWastageAdjData() runs — refresh it on entry to Delivered
   // /Finalized so newly-issued manual consumption is reflected without
   // requiring a full page reload.
-  if ((v === 'done' || v === 'finalized') && isSuperAdmin()) {
+  if ((v === 'done' || v === 'finalized') && canWastageAdjust()) {
     loadWastageAdjData().then(() => { if (view === v) renderJobs(); });
   }
 }
@@ -6730,7 +6748,7 @@ function renderInvCardHtml(it) {
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
-        ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
+        ${hasPerm('inventory_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
     </div>`;
 }
@@ -6762,7 +6780,7 @@ function renderInvBrandRow(it) {
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
-        ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
+        ${hasPerm('inventory_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
     </div>`;
 }
@@ -7679,7 +7697,7 @@ async function saveInvEdit(id) {
 // the full stock-transaction history. Two-step confirm because there's no
 // undo button — the ledger goes with it.
 async function deleteInvItem(id) {
-  if (!isAdmin()) return;
+  if (!hasPerm('inventory_delete')) return;
   const it = inventory.find(x => x.id === id);
   if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
@@ -8075,7 +8093,7 @@ async function saveInvRemoveStock(id) {
     // A new manual-job-card stock-out changes which jobs can be Wastage-
     // Adjusted — refresh the match data so Adjust buttons light up without
     // needing a page reload.
-    if (reason === 'manual-job-card' && isSuperAdmin()) await loadWastageAdjData();
+    if (reason === 'manual-job-card' && canWastageAdjust()) await loadWastageAdjData();
     closeModal();
     render();
     let tail = '';
@@ -8988,7 +9006,7 @@ async function saveBulkStockOut() {
   }
   await loadInventory();
   if (flipped || partials || plan.some(p => p.reason === 'job-card')) await loadJobs();
-  if (plan.some(p => p.reason === 'manual-job-card') && isSuperAdmin()) await loadWastageAdjData();
+  if (plan.some(p => p.reason === 'manual-job-card') && canWastageAdjust()) await loadWastageAdjData();
   const stockOutPane = document.getElementById('rt-stock-out');
   if (stockOutPane && stockOutPane.style.display !== 'none' && mode === 'reports') {
     loadStockMovement('out');
@@ -11177,7 +11195,7 @@ const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', c
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
 function openJobsReportPage() {
-  if (isStoreManager()) { notify('Jobs Report is not available for the Store Manager role.'); return; }
+  if (!hasPerm('production_reports', 'view')) { notify('Jobs Report is not available for your role.'); return; }
   openReportsGroup('jobs-group');
 }
 
@@ -12731,7 +12749,7 @@ function renderDailyProductionBreaking(rows, date) {
     body.innerHTML = '<div class="empty">No breaking operators configured. Add operators on any machine with the "Sorting" role under Users &rarr; Operators.</div>';
     return;
   }
-  const editable = canWriteJobs() || canWriteInventory();
+  const editable = hasPerm('production_edit');
   const cellAttrs = editable ? '' : 'readonly disabled';
   const r = rows.map(row => `
     <tr>
@@ -12814,7 +12832,7 @@ function renderDailyProductionPasting(rows, date) {
     waste: t.waste + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { units: 0, jobs: 0, waste: 0 });
 
-  const editable = canWriteJobs() || canWriteInventory();
+  const editable = hasPerm('production_edit');
   const cellAttrs = editable ? '' : 'readonly disabled';
   // Pasting stores the numeric value in `sheets` server-side but the
   // column is labelled "Units" — a custom row's Units input maps to
@@ -12887,7 +12905,7 @@ function renderDailyProductionCoatings(rows, date) {
     waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, waste: 0 });
 
-  const editable = canWriteJobs() || canWriteInventory();
+  const editable = hasPerm('production_edit');
   const cellAttrs = editable ? '' : 'readonly disabled';
   const editableCell = (row, field, opts) => {
     const o = opts || {};
@@ -12960,7 +12978,7 @@ function renderDailyProductionDie(rows, date) {
     waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, waste: 0 });
 
-  const editable = canWriteJobs() || canWriteInventory();
+  const editable = hasPerm('production_edit');
   const cellAttrs = editable ? '' : 'readonly disabled';
   const editableCell = (row, field, opts) => {
     const o = opts || {};
@@ -13049,7 +13067,7 @@ function renderDailyProductionPrinting(rows, date) {
     waste:  t.waste  + (parseInt(String(r.waste || '').replace(/[^0-9-]/g, ''), 10) || 0),
   }), { sheets: 0, jobs: 0, plates: 0, waste: 0 });
 
-  const editable = canWriteJobs() || canWriteInventory();
+  const editable = hasPerm('production_edit');
   const cellAttrs = editable ? '' : 'readonly disabled';
   // Auto rows render auto-derived cells as plain text; custom (admin-
   // added) rows render every cell as a free input so the user can
@@ -13782,6 +13800,7 @@ async function purgeTrash(type, id) {
 }
 
 async function emptyTrash() {
+  if (!hasPerm('trash_admin')) return;
   const total = (trashCache.jobs?.length || 0) + (trashCache.imports?.length || 0) + (trashCache.transactions?.length || 0);
   if (!total) { notify('Archive is already empty.'); return; }
   const ok = await confirmDialog({
@@ -14826,8 +14845,9 @@ function wastageAdjustmentForJob(jobId) {
 function wastageAdjBanner(jobId) {
   // Super Admin-only feature, checked explicitly rather than relying on
   // _adjustments simply staying empty for other roles (it only ever loads
-  // for super_admin, but this keeps the banner safe even if that changes).
-  if (!isSuperAdmin()) return '';
+  // for a role with wastage_adjustment access, but this keeps the banner
+  // safe even if that changes).
+  if (!canWastageAdjust()) return '';
   const a = _adjustments[jobId];
   if (!a) return '';
   const refs = _adjJobManualRefs[jobId];
@@ -14844,7 +14864,7 @@ function wastageAdjBanner(jobId) {
 
 function renderWastageAdjBar() {
   const bar = document.getElementById('new-jobs-bulk');
-  if (view !== 'finalized' || !isSuperAdmin()) return;
+  if (view !== 'finalized' || !canWastageAdjust()) return;
   if (!bar) return;
   // Prune any ticked jobs that are no longer finalized (un-adjusted from
   // elsewhere, or archived out from under the selection).
@@ -14865,7 +14885,7 @@ function renderWastageAdjBar() {
 }
 
 function toggleFinalizedJobSelect(id, on) {
-  if (!isSuperAdmin()) return;
+  if (!canWastageAdjust()) return;
   if (on) selectedFinalizedJobIds.add(id); else selectedFinalizedJobIds.delete(id);
   // Cheap update — just refresh the bar + the affected tile's highlight,
   // same pattern as toggleJobSelect. Avoids a full render so scroll
@@ -14883,7 +14903,7 @@ function toggleFinalizedJobSelect(id, on) {
 // /api/wastage-adjustment/finalized already excludes jobs with deleted_at set, so
 // an archived job simply drops out of the Finalized tab.
 async function bulkDeleteSelectedFinalizedJobs() {
-  if (!isSuperAdmin()) return;
+  if (!canWastageAdjust()) return;
   const ids = [...selectedFinalizedJobIds];
   if (!ids.length) return;
   const names = ids.map(id => { const j = jobs.find(x => x.id === id); return j ? `E-${id} (${j.name})` : `E-${id}`; });
@@ -14971,7 +14991,7 @@ function renderAdjustSources() {
 
 
 async function openAdjustModal(jobId) {
-  if (!isSuperAdmin()) return;
+  if (!canWastageAdjust()) return;
   const j = jobs.find(x => x.id === jobId);
   if (!j) return;
   if (_finalizedJobIds.has(jobId)) {
@@ -15180,7 +15200,7 @@ function adjSheetsChanged(jobId) {
 }
 
 async function submitAdjustment(jobId) {
-  if (!isSuperAdmin()) return;
+  if (!canWastageAdjust()) return;
   const packets = parseFloat(document.getElementById('adj-packets').value) || 0;
   const manual_sheets = Math.round(parseFloat(document.getElementById('adj-sheets').value) || 0);
   const notes = '';
@@ -15231,7 +15251,7 @@ async function submitAdjustment(jobId) {
 }
 
 async function removeAdjustment(jobId) {
-  if (!isSuperAdmin()) return;
+  if (!canWastageAdjust()) return;
   const ok = await confirmDialog({
     title: 'Remove Adjustment',
     message: `Remove the adjustment from Job E-${jobId}?\nIt will move back to the Delivered tab.`,
@@ -15322,8 +15342,8 @@ function openManualConsumptionPane() {
   // + .superadmin-only-report CSS, but this handles every other path into
   // the pane. Also skips loading the data (loadManualConsumption) and the
   // export/print buttons, so those can't leak the data either.
-  if (typeof isSuperAdmin === 'function' && !isSuperAdmin()) {
-    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Job Card Consumption report is Super Admin-only.</div></div>`;
+  if (typeof canWastageAdjust === 'function' && !canWastageAdjust()) {
+    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Job Card Consumption report needs Wastage Adjustment access.</div></div>`;
     return;
   }
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
@@ -18993,7 +19013,7 @@ function particularsTable(p, job, opts) {
   // saving) the caller supplies opts.previewOverlay directly instead.
   const wasteOverlay = opts.preview
     ? (opts.previewOverlay || null)
-    : ((job && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? wastageAdjOverlay(job) : null);
+    : ((job && canWastageAdjust() && view === 'finalized' && _finalizedJobIds.has(job.id)) ? wastageAdjOverlay(job) : null);
   // Build one machines datalist per relevant stage (dedup) so multiple
   // rows for the same stage (e.g. Printed Sheets + Printed Waste both
   // point at Printing) share a single option list.
@@ -19134,7 +19154,7 @@ function jobForm(j={}, opts) {
   // viewing a finalized job from the Finalized tab. Never both at once.
   const topOverlay = opts.topFieldsPreview !== undefined
     ? opts.topFieldsPreview
-    : ((j && j.id && isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id)) ? wastageAdjTopFieldOverlay(j) : null);
+    : ((j && j.id && canWastageAdjust() && view === 'finalized' && _finalizedJobIds.has(j.id)) ? wastageAdjTopFieldOverlay(j) : null);
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const v = x => esc(x||'');
   // Paper picker inputs. Same shape specsSection used to compute; moved
@@ -19419,7 +19439,7 @@ function deliveriesSection(j) {
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
   const canAddDelivery = canDeliverNow(j) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
-  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  const isAdminUser = typeof hasPerm === 'function' && hasPerm('delivery_delete');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
   // No. / Batch No. pre-filling from the job card, still fully editable
@@ -22279,7 +22299,7 @@ async function openHistory(id) {
   // Wastage Adjustment section — Super Admin-only, shown only for finalized
   // jobs. Surfaces exactly what was applied at adjustment time (which can
   // differ from the current default settings if those were changed after).
-  const adj = (isSuperAdmin() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
+  const adj = (canWastageAdjust() && _finalizedJobIds.has(id)) ? _adjustments[id] : null;
   const adjRefs = adj ? _adjJobManualRefs[id] : null;
   const wastageAdjSection = adj ? `
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">&#9881; Wastage Adjustment</div>
@@ -22339,7 +22359,7 @@ async function openHistory(id) {
 // ledger keeps its rows (FK is ON DELETE SET NULL on inventory_transactions.job_id),
 // so historical consumption stays traceable even after the job is gone.
 async function deleteJob(id) {
-  if (!isAdmin()) return;
+  if (!hasPerm('job_delete')) return;
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   const ok = await confirmDialog({
@@ -22947,12 +22967,12 @@ function buildPrintCard(j) {
   // Same rule as the on-screen job card: the wastage adjustment overlay
   // only prints when printing from the Finalized tab, so the Delivered
   // tab (and any other context) always prints the untouched original card.
-  const wasteOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
+  const wasteOverlay = (canWastageAdjust() && view === 'finalized' && _finalizedJobIds.has(j.id))
     ? wastageAdjOverlay(j) : null;
   // Same rule for the top-of-card Sheets Qty / Quantity of Packets / Unit
   // Carton Qty — printed values are REPLACED by the adjusted totals (not
   // shown alongside), same as the particulars rows.
-  const topOverlay = (isSuperAdmin() && view === 'finalized' && _finalizedJobIds.has(j.id))
+  const topOverlay = (canWastageAdjust() && view === 'finalized' && _finalizedJobIds.has(j.id))
     ? wastageAdjTopFieldOverlay(j) : null;
   // Paper source: prefer the live inventory item; fall back to the legacy
   // particulars fields for pre-inventory jobs.
@@ -23689,7 +23709,7 @@ function auditFeedQueryParams() {
   return qs.toString();
 }
 function auditFeedFilterBarHtml() {
-  const typeOpts = AUDIT_TYPE_OPTS.filter(([v]) => v !== 'wastage_adjustment' || isSuperAdmin())
+  const typeOpts = AUDIT_TYPE_OPTS.filter(([v]) => v !== 'wastage_adjustment' || canWastageAdjust())
     .map(([v, lbl]) => `<option value="${v}" ${auditFeedState.type === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('');
   return `
   <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:10px;">
@@ -23771,7 +23791,7 @@ async function loadUsersAndAudit() {
     // PM only sees the Floor Operators section — skip the Authorized
     // Users + Recent Activity fetches entirely so the page is faster
     // and we don't paint data nobody will see.
-    const wantsUsersAndAudit = isAdmin() || hasRole('ceo');
+    const wantsUsersAndAudit = hasPerm('user_view', 'view');
     const reqs = [];
     if (wantsUsersAndAudit) {
       reqs.push(api('GET', '/api/users'));
@@ -23783,7 +23803,7 @@ async function loadUsersAndAudit() {
     // this WHOLE Promise.all and silently broke the rest of the Users tab
     // (Authorized Users + Recent Activity) for any CEO account. Matching
     // the server's real behavior: CEO no longer requests this at all.
-    const wantsOperators = isAdmin() || isProductionManager();
+    const wantsOperators = hasPerm('operator_admin');
     if (wantsOperators) reqs.push(api('GET', '/api/operators'));
     const results = await Promise.all(reqs);
     let i = 0;
@@ -23810,7 +23830,7 @@ function renderOperators() {
   // showing an empty "No operators yet" state to CEO would be misleading
   // (see loadUsersAndAudit()'s wantsOperators, which no longer fetches
   // this for CEO at all).
-  if (!isAdmin() && !isProductionManager()) { el.innerHTML = ''; return; }
+  if (!hasPerm('operator_admin')) { el.innerHTML = ''; return; }
   if (!operatorsList.length) {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
@@ -25915,6 +25935,8 @@ function clientCompanyOptions(current) {
 }
 function renderUsersTab() {
   renderUsersSubtabs();
+  const inviteBtn = document.getElementById('invite-user-btn');
+  if (inviteBtn) inviteBtn.style.display = hasPerm('user_admin') ? '' : 'none';
   const stats = {
     total: usersList.length,
     admins: usersList.filter(u => userRolesOf(u).includes('admin')).length,
@@ -25942,7 +25964,7 @@ function renderUsersTab() {
         <div class="inv-sub">${esc(u.email)} · Last login: ${last} · ${devicesLabel}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
       </div>
       <div class="inv-balance">
-        ${isCeo() || !isAdmin()
+        ${!hasPerm('user_admin')
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(visibleRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
@@ -25963,10 +25985,10 @@ function renderUsersTab() {
       <div class="inv-actions">
         <button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>
         <button class="btn btn-sm" onclick="openUserSessions(${u.id})">Sessions${sessCount?' ('+sessCount+')':''}</button>
-        ${(isMe || isCeo()) ? '' : (u.blocked_at
+        ${(isMe || !hasPerm('user_admin')) ? '' : (u.blocked_at
           ? `<button class="btn btn-sm btn-success" onclick="toggleUserBlock(${u.id}, false)">Unblock</button>`
           : `<button class="btn btn-sm" style="background:#b45309;border-color:#b45309;color:#fff;" onclick="toggleUserBlock(${u.id}, true)">Block</button>`)}
-        ${(isMe || isCeo()) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
+        ${(isMe || !hasPerm('user_admin')) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
       </div>
     </div>`;
   }).join('') || '<div class="empty">No users yet.</div>';
@@ -26036,17 +26058,26 @@ async function setUsersSubTab(tab) {
 // currently-signed-in sessions of the affected role pick this up the
 // next time they load the app (their _rolePerms is fetched once at boot),
 // not instantly — there's no push mechanism to already-open tabs.
+// Click-to-cycle order: YES -> (any group-specific extra, e.g. 30-DAY) ->
+// VIEW -> HIDDEN -> NO -> back to YES. Matches the level vocabulary the
+// rest of the register/server uses everywhere (permLevelAtLeast etc.).
+const ACC_LEVEL_LABEL = { yes: 'YES', view: 'VIEW', hidden: 'HIDDEN', no: 'NO', '30-day': '30-DAY' };
+function nextAccLevel(current, extra) {
+  const order = ['yes', ...(extra || []), 'view', 'hidden', 'no'];
+  const idx = order.indexOf(current);
+  return order[(idx + 1) % order.length] || order[0];
+}
 async function cycleRolePermission(key, role) {
   if (!_roleMatrixData) return;
   const groupDef = _roleMatrixData.groups.find(g => g.key === key);
   if (!groupDef) return;
   const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'no';
-  const next = current === 'yes' ? 'no' : 'yes';
+  const next = nextAccLevel(current, groupDef.extra);
   const ok = await confirmDialog({
-    title: `${next === 'yes' ? 'Allow' : 'Remove access'} — ${roleLabel(role)}`,
-    message: `"${groupDef.label}"\n\n${roleLabel(role)} will change from ${current.toUpperCase()} to ${next.toUpperCase()}. This takes effect immediately for that role.`,
+    title: `Change access — ${roleLabel(role)}`,
+    message: `"${groupDef.label}"\n\n${roleLabel(role)} will change from ${ACC_LEVEL_LABEL[current] || current.toUpperCase()} to ${ACC_LEVEL_LABEL[next] || next.toUpperCase()}. This takes effect immediately for that role.`,
     danger: next === 'no',
-    confirmText: next === 'yes' ? 'Allow' : 'Remove access',
+    confirmText: `Set to ${ACC_LEVEL_LABEL[next] || next.toUpperCase()}`,
   });
   if (!ok) return;
   showSaving(true);
@@ -26056,7 +26087,7 @@ async function cycleRolePermission(key, role) {
     _roleMatrixData.matrix[key][role] = next;
     const accEl = document.getElementById('users-access-register-section');
     if (accEl) accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
-    notify(`${roleLabel(role)}: ${groupDef.label} → ${next.toUpperCase()}`);
+    notify(`${roleLabel(role)}: ${groupDef.label} → ${ACC_LEVEL_LABEL[next] || next.toUpperCase()}`);
   } catch (e) {
     notify('Error: ' + e.message);
   }
@@ -26086,7 +26117,9 @@ function renderAccessRegisterHtml(matrixData) {
   // One live, clickable row per editable group. super_admin and client
   // columns are always locked (see canWriteJobs() etc. and
   // roleHasPermission's hard client block server-side) — only the other
-  // 6 columns are ever clickable.
+  // 6 columns are ever clickable. Click cycles YES -> (extra, e.g.
+  // 30-DAY) -> VIEW -> HIDDEN -> NO -> back to YES.
+  const ACC_CELL_CLASS = { yes: 'allow', view: 'partial', hidden: 'deny', no: 'deny', '30-day': 'partial' };
   const groupRow = (key) => {
     const def = (matrixData.groups || []).find(g => g.key === key);
     const label = def ? esc(def.label) : key;
@@ -26095,86 +26128,63 @@ function renderAccessRegisterHtml(matrixData) {
       if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">YES</td>`;
       if (role === 'client') return `<td class="acc-cell deny locked" title="Client accounts can never reach internal capabilities, regardless of this table">NO</td>`;
       const level = group[role] || 'no';
-      const cls = level === 'yes' ? 'allow' : 'deny';
-      return `<td class="acc-cell ${cls} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${level === 'yes' ? 'YES' : 'NO'}</td>`;
+      const cls = ACC_CELL_CLASS[level] || 'deny';
+      return `<td class="acc-cell ${cls} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
     });
     return `<tr class="acc-group-row"><th class="acc-rowlabel">${label}<span class="acc-group-tag">editable</span></th>${cells.join('')}</tr>`;
   };
-  // Reverse a stock transaction isn't its own group — it derives from
-  // inventory_write (whoever has it gets the 30-day/reason-limited tier)
-  // PLUS an unconditional bypass for the literal admin role specifically
-  // (canReverse's own isAdmin() || (canWriteInventory() && ...) formula —
-  // admin bypasses the window even if inventory_write were ever edited
-  // away from admin, since that OR-branch never re-checks it). Shown
-  // read-only here, computed from the live inventory_write state.
-  const reverseRow = () => {
-    const inv = (matrixData.matrix && matrixData.matrix.inventory_write) || {};
-    const cells = COLUMN_ROLES.map(role => {
-      if (role === 'super_admin' || role === 'admin') return A();
-      if (role === 'client') return D();
-      return inv[role] === 'yes' ? P('30-DAY') : D();
-    });
-    return row('Reverse a stock transaction <span style="font-weight:400;color:var(--text2);font-size:11px;">(follows Inventory Write, above — Admin always bypasses the 30-day window)</span>', cells);
-  };
-
   const rows = [
     section('Jobs tab &amp; job card'),
-    row('View Jobs list &amp; every status tab', [A(), A(), A(), A(), A(), A(), A(), D()]),
+    groupRow('job_view'),
     groupRow('job_write'),
     groupRow('job_print'),
-    row('Delete a job', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Delete a delivery ledger entry', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Wastage Adjustment: Adjust / Un-adjust wastage', [A(), D(), D(), D(), D(), D(), D(), D()]),
-    row('View the Finalized Jobs tab', [A(), D(), D(), D(), D(), D(), D(), D()]),
+    groupRow('job_delete'),
     groupRow('delivery_write'),
+    groupRow('delivery_delete'),
+    groupRow('wastage_adjustment'),
 
     section('Inventory'),
+    groupRow('inventory_view'),
     groupRow('inventory_write'),
-    row('Delete a paper item', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    reverseRow(),
+    groupRow('inventory_delete'),
+    groupRow('inventory_reverse'),
 
     section('Reports'),
     row('Stock / Total In &amp; Out reports', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    row('Manual Job Card Consumption report', [A(), D(), D(), D(), D(), D(), D(), D()]),
     row('Offcut Consumption report', [A(), A(), A(), A(), A(), A(), D(), D()]),
     row('Stock Summary &amp; Inventory Report', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    row('Jobs Report', [A(), A(), A(), A(), P('HIDDEN'), A(), D(), D()]),
-    row('Production Report', [A(), A(), A(), A(), P('HIDDEN'), A(), D(), D()]),
-    row('Daily Production registers &mdash; view', [A(), A(), A(), A(), P('HIDDEN'), A(), D(), D()]),
-    row('Daily Production registers &mdash; edit', [A(), A(), D(), A(), A(), D(), D(), D()]),
-    row('Trash / Archive &mdash; view', [A(), A(), A(), D(), D(), D(), D(), D()]),
-    row('Trash / Archive &mdash; restore, purge, empty', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Delete / archive a transaction or import row', [A(), A(), D(), D(), D(), D(), D(), D()]),
+    groupRow('production_reports'),
+    groupRow('production_edit'),
+    groupRow('trash_view'),
+    groupRow('trash_admin'),
 
     section('Station terminal'),
     groupRow('station_access'),
     groupRow('station_write'),
-    row('Manager-PIN actions (stage, machine, offcut, shade-card delivery)', [A(), A(), P('VIA PIN'), A(), D(), D(), P('VIA PIN'), D()]),
+    groupRow('station_manager_pin'),
     groupRow('operator_admin'),
 
     section('Stickers &amp; Forms'),
-    row('Stickers &mdash; open &amp; print', [A(), A(), A(), A(), D(), D(), D(), D()]),
-    row('Forms &mdash; open &amp; print Transfer Note', [A(), A(), A(), A(), D(), A(), D(), D()]),
+    groupRow('stickers_print'),
+    groupRow('forms_print'),
 
     section('Users &amp; accounts'),
-    row('View the Authorized Users list', [A(), A(), P('READ ONLY'), D(), D(), D(), D(), D()]),
-    row('Invite / create a user', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row("Edit a user's roles or details", [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Block / unblock / delete a user', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Grant the Super Admin role', [A(), D(), D(), D(), D(), D(), D(), D()]),
+    groupRow('user_view'),
+    groupRow('user_admin'),
+    row('Grant the Super Admin role <span style="font-weight:400;color:var(--text2);font-size:11px;">(always fixed — see the Access Register\'s own explanation)</span>', [A(), D(), D(), D(), D(), D(), D(), D()]),
 
     section('Client View &amp; portal'),
-    row('Open the internal "Client View" preview', [A(), A(), A(), A(), D(), D(), D(), D()]),
+    groupRow('client_view_preview'),
     row("External portal &mdash; view own company's jobs", [D(), D(), D(), D(), D(), D(), D(), A()]),
     row('External portal &mdash; any write action', [D(), D(), D(), D(), D(), D(), D(), D()]),
   ].join('');
 
   return `
-  <div class="acc-reg-dek">Every role, every module — Jobs, Inventory, Reports, Station, Stickers &amp; Forms, Users, Client View — traced to the actual function or middleware that grants or blocks it, not what the UI merely implies. Rows tagged <span class="acc-group-tag" style="margin-left:0;">editable</span> are live — click a cell to change that role's access immediately. Everything else is fixed reference (destructive, Super-Admin-exclusive, PIN-gated, or structurally absent).</div>
+  <div class="acc-reg-dek">Every role, every module — Jobs, Inventory, Reports, Station, Stickers &amp; Forms, Users, Client View. Rows tagged <span class="acc-group-tag" style="margin-left:0;">editable</span> are live — click a cell to cycle it through YES &rarr; VIEW &rarr; HIDDEN &rarr; NO (Reverse a stock transaction also cycles through a 30-DAY tier), applying immediately for that role. Manager-PIN actions controls who may even attempt a manager PIN — the PIN itself is still checked either way. Two rows stay permanently fixed: Grant Super Admin (the bootstrap that stops a self-promotion to Super Admin) and External Portal — any write action (no such capability exists in the code at all, so there's nothing to grant).</div>
   <div class="acc-reg-legend">
-    <span><span class="acc-swatch allow"></span>Allowed</span>
-    <span><span class="acc-swatch partial"></span>Partial / conditional</span>
-    <span><span class="acc-swatch deny"></span>Not allowed</span>
+    <span><span class="acc-swatch allow"></span>Yes — full access</span>
+    <span><span class="acc-swatch partial"></span>View / 30-day — partial, still enforced</span>
+    <span><span class="acc-swatch deny"></span>Hidden / No — blocked</span>
   </div>
 
   <div class="acc-tablewrap">
