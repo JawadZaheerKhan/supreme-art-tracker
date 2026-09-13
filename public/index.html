@@ -155,6 +155,15 @@
   body.role-lock-jobs #jobs-mode .ceo-hide,
   body.role-lock-jobs #forms-mode .ceo-hide,
   body.role-lock-jobs #stickers-mode .ceo-hide { display: none !important; }
+  /* Finance also gets role-lock-jobs (can't write jobs generally), which
+     was silently defeating .finance-allow's escape hatch above (line 110)
+     because #jobs-mode's ID selector out-specifies a plain class selector
+     even with !important on both. Finance CAN record deliveries — the
+     server (requireDeliveryWriter) already allows it — so this re-shows
+     just the .finance-allow buttons for Finance specifically, without
+     touching Store Manager, who gets the same role-lock-jobs class but
+     is NOT meant to record deliveries. */
+  body.role-finance.role-lock-jobs #jobs-mode .ceo-hide.finance-allow { display: inline-block !important; }
   /* Store Manager: hide elements tagged .sm-hide regardless of where they
      live. Used for the Jobs Report card in the Reports landing — SM's
      focus is paper movement, not job-by-job production logs. */
@@ -4178,11 +4187,14 @@ function canWrite() { return isAdmin() || isProductionManager() || hasRole('stor
 // Anyone who can write inventory can issue stock. CEO + operator are blocked
 // unless they also hold a write role.
 function canIssueStock() { return isAdmin() || hasRole('store_manager'); }
-// Offcut-based jobs are hand-managed by the production side (admin +
-// PM), not by the store keeper — the offcut ledger is thinner and
-// error-prone, so pending-stock issuance for those jobs is gated
-// separately here.
-function canIssueOffcutStock() { return isAdmin() || isProductionManager() || hasRole('store_manager'); }
+// Offcut-based jobs were meant to be hand-managed by the production side
+// (admin + PM) too, not just the store keeper — but both offcut and
+// fresh issuance actually go through the same POST /api/jobs/:id/issue-stock
+// route, gated server-side by requireInventoryWriter (admin/store_manager
+// only, no production_manager). PM saw this button and got a 403 with no
+// warning. Matches canIssueStock()/the server exactly now; if PM offcut
+// issuance is wanted, that needs a deliberate server-side change first.
+function canIssueOffcutStock() { return isAdmin() || hasRole('store_manager'); }
 // A job counts as offcut-based when its linked inventory item is an
 // offcut row. Used to swap the Issue Stock button to yellow and hide
 // it from the store keeper on the Pending Stock queue.
@@ -9099,11 +9111,15 @@ async function renderInvHistory(id) {
       const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
       const withinWindow = (Date.now() - new Date(t.created_at).getTime()) <= THIRTY_DAYS_MS;
       // Admin can reverse ANY reason at any time — no reason allow-list,
-      // no time window. Non-admins are still bound by both.
+      // no time window. Everyone else is bound by both AND must actually
+      // pass the server's own gate on this route (requireInventoryWriter =
+      // canWriteInventory(), admin/store_manager only) — canWrite() also
+      // includes production_manager, who was shown this button and then
+      // rejected server-side before the window/reason check even ran.
       const canReverse =
         !isReversal &&
         !hasBeenReversed &&
-        (isAdmin() || (canWrite() && withinWindow && REVERSIBLE.has(t.reason)));
+        (isAdmin() || (canWriteInventory() && withinWindow && REVERSIBLE.has(t.reason)));
       const reverseTooltip = t.change > 0
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
         : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
@@ -19998,7 +20014,7 @@ function openGroupEdit(groupId) {
     ${jobForm(synthetic).replace('<span class="jc-lbl">P.O. Qty</span>', '<span class="jc-lbl" style="color:#7c3aed;">MIL Qty</span>')}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      ${isAdmin() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
+      ${canWriteJobs() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
       <button class="btn btn-primary" onclick="saveGroupEdit(${groupId})">Save Group</button>
     </div>
   </div>`);
@@ -22114,6 +22130,11 @@ async function moveJobToPendingStock(id) {
 async function moveToStage(id, target) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // The pipeline pills themselves render unconditionally for every role —
+  // only the server (requireJobsWriter) actually rejects a non-writer's
+  // move. Guard here too so a non-writer gets a clear message instead of
+  // an unexplained failed request.
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can move a job between stages.'); return; }
   // Special-case: from Pending Stock, allow moving BACK to CTP (undo an
   // accidental Process to Printing). Runs its own endpoint that flips
   // issuance_status back to 'ctp' AND clears the stale Printing stage
@@ -22792,6 +22813,11 @@ async function rejectPacketsTopup(jobId, topupId) {
 async function toggleBlock(id) {
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
+  // Same gap as moveToStage(): the Block/Unblock control renders for
+  // every role — only the server (requireJobsWriter, same /stage route)
+  // rejects a non-writer. Guard here so they don't get prompted for a
+  // reason only to have it fail server-side.
+  if (!canWriteJobs()) { notify('Only Production Manager / Admin can block or unblock a job.'); return; }
   const si = j.stage_index || 0;
   const currentlyBlocked = isBlocked(j);
   const action = currentlyBlocked ? 'Unblock' : 'Block';
@@ -23667,8 +23693,13 @@ async function loadUsersAndAudit() {
       reqs.push(api('GET', '/api/users'));
       reqs.push(api('GET', `/api/audit?${auditFeedQueryParams()}`));
     }
-    // Operators roster: admin (write), PM (write), CEO (read-only).
-    const wantsOperators = isAdmin() || hasRole('ceo') || isProductionManager();
+    // Operators roster: admin (write), PM (write). CEO was included here
+    // too (meant to be read-only), but the server route (requireOperatorAdmin)
+    // has only ever accepted admin/PM — CEO's request 403'd, which failed
+    // this WHOLE Promise.all and silently broke the rest of the Users tab
+    // (Authorized Users + Recent Activity) for any CEO account. Matching
+    // the server's real behavior: CEO no longer requests this at all.
+    const wantsOperators = isAdmin() || isProductionManager();
     if (wantsOperators) reqs.push(api('GET', '/api/operators'));
     const results = await Promise.all(reqs);
     let i = 0;
@@ -23690,10 +23721,12 @@ async function loadUsersAndAudit() {
 function renderOperators() {
   const el = document.getElementById('operators-list');
   if (!el) return;
-  // Visible to admin, production_manager (write), and CEO (read-only).
-  // Edit / Remove buttons are tagged .ceo-hide so CEO sees the list but
-  // can't change it.
-  if (!isAdmin() && !isProductionManager() && !hasRole('ceo')) { el.innerHTML = ''; return; }
+  // Visible to admin and production_manager only — the server route this
+  // list comes from (requireOperatorAdmin) has never accepted CEO, so
+  // showing an empty "No operators yet" state to CEO would be misleading
+  // (see loadUsersAndAudit()'s wantsOperators, which no longer fetches
+  // this for CEO at all).
+  if (!isAdmin() && !isProductionManager()) { el.innerHTML = ''; return; }
   if (!operatorsList.length) {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
@@ -25918,7 +25951,7 @@ function renderAccessRegisterHtml() {
 
   const rows = [
     section('Jobs tab &amp; job card'),
-    row('View Jobs list &amp; every status tab', [A(), A(), A(), A(), A(), A(), A('1'), D()]),
+    row('View Jobs list &amp; every status tab', [A(), A(), A(), A(), A(), A(), A(), D()]),
     row('Create a new job', [A(), A(), D(), A(), D(), D(), D(), D()]),
     row('Edit &amp; save a job card', [A(), A(), P('VIEW ONLY'), A(), D(), D(), D(), D()]),
     row('Delete a job', [A(), A(), D(), D(), D(), D(), D(), D()]),
@@ -25928,7 +25961,7 @@ function renderAccessRegisterHtml() {
     row('Link / unlink two jobs', [A(), A(), D(), A(), D(), D(), D(), D()]),
     row('Deliver two linked jobs on one challan', [A(), A(), D(), A(), D(), A(), D(), D()]),
     row('Create &amp; manage a MIL job group', [A(), A(), D(), A(), D(), D(), D(), D()]),
-    row('Delete a MIL job group', [A(), A(), D(), P('NO BUTTON', '2'), D(), D(), D(), D()]),
+    row('Delete a MIL job group', [A(), A(), D(), A(), D(), D(), D(), D()]),
     row('Block / unblock a job', [A(), A(), D(), A(), D(), D(), D(), D()]),
     row('Record a delivery', [A(), A(), D(), A(), D(), A(), D(), D()]),
     row('Delete a delivery ledger entry', [A(), A(), D(), D(), D(), D(), D(), D()]),
@@ -25942,18 +25975,18 @@ function renderAccessRegisterHtml() {
     row('Manual Stock In / Stock Out', [A(), A(), D(), D(), A(), D(), D(), D()]),
     row('Bulk Stock In / Stock Out', [A(), A(), D(), D(), A(), D(), D(), D()]),
     row('Issue fresh stock to a job', [A(), A(), D(), D(), A(), D(), D(), D()]),
-    row('Issue offcut stock to a job', [A(), A(), D(), A(), A(), D(), D(), D()]),
-    row('Reverse a stock transaction', [A(), A(), D(), P('30-DAY', '3'), P('30-DAY', '3'), D(), D(), D()]),
+    row('Issue offcut stock to a job', [A(), A(), D(), D(), A(), D(), D(), D()]),
+    row('Reverse a stock transaction', [A(), A(), D(), D(), P('30-DAY'), D(), D(), D()]),
 
     section('Reports'),
     row('Stock / Total In &amp; Out reports', [A(), A(), A(), A(), A(), A(), D(), D()]),
     row('Manual Job Card Consumption report', [A(), D(), D(), D(), D(), D(), D(), D()]),
     row('Offcut Consumption report', [A(), A(), A(), A(), A(), A(), D(), D()]),
     row('Stock Summary &amp; Inventory Report', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    row('Jobs Report', [A(), A(), A(), A(), P('HIDDEN', '4'), A(), D(), D()]),
-    row('Production Report', [A(), A(), A(), A(), P('HIDDEN', '4'), A(), D(), D()]),
-    row('Daily Production registers &mdash; view', [A(), A(), A(), A(), P('HIDDEN', '4'), A(), D(), D()]),
-    row('Daily Production registers &mdash; edit', [A(), A(), D('5'), A(), A(), D('5'), D(), D()]),
+    row('Jobs Report', [A(), A(), A(), A(), P('HIDDEN'), A(), D(), D()]),
+    row('Production Report', [A(), A(), A(), A(), P('HIDDEN'), A(), D(), D()]),
+    row('Daily Production registers &mdash; view', [A(), A(), A(), A(), P('HIDDEN'), A(), D(), D()]),
+    row('Daily Production registers &mdash; edit', [A(), A(), D(), A(), A(), D(), D(), D()]),
     row('Trash / Archive &mdash; view', [A(), A(), A(), D(), D(), D(), D(), D()]),
     row('Trash / Archive &mdash; restore, purge, empty', [A(), A(), D(), D(), D(), D(), D(), D()]),
     row('Delete / archive a transaction or import row', [A(), A(), D(), D(), D(), D(), D(), D()]),
@@ -25961,25 +25994,25 @@ function renderAccessRegisterHtml() {
     section('Station terminal'),
     row('Open Station &amp; enter a PIN', [A(), A(), P('VIEW ONLY'), A(), D(), D(), A(), D()]),
     row('Process a station (save / advance / skip / notes)', [A(), A(), D(), A(), D(), D(), A(), D()]),
-    row('Manager-PIN actions (stage, machine, offcut, shade-card delivery)', [A(), A(), P('VIA PIN', '6'), A(), D(), D(), P('VIA PIN', '6'), D()]),
-    row('Manage the Floor Operators PIN roster', [A(), A(), D('7'), A(), D(), D(), D(), D()]),
+    row('Manager-PIN actions (stage, machine, offcut, shade-card delivery)', [A(), A(), P('VIA PIN'), A(), D(), D(), P('VIA PIN'), D()]),
+    row('Manage the Floor Operators PIN roster', [A(), A(), D(), A(), D(), D(), D(), D()]),
 
     section('Stickers &amp; Forms'),
     row('Stickers &mdash; open &amp; print', [A(), A(), A(), A(), D(), D(), D(), D()]),
     row('Forms &mdash; open &amp; print Transfer Note', [A(), A(), A(), A(), D(), A(), D(), D()]),
 
     section('Users &amp; accounts'),
-    row('View the Authorized Users list', [A(), A(), P('READ ONLY'), D('8'), D(), D(), D(), D()]),
+    row('View the Authorized Users list', [A(), A(), P('READ ONLY'), D(), D(), D(), D(), D()]),
     row('Invite / create a user', [A(), A(), D(), D(), D(), D(), D(), D()]),
     row("Edit a user's roles or details", [A(), A(), D(), D(), D(), D(), D(), D()]),
     row('Block / unblock / delete a user', [A(), A(), D(), D(), D(), D(), D(), D()]),
-    row('Grant the Super Admin role', [A(), D('9'), D(), D(), D(), D(), D(), D()]),
-    row('View Floor Operators roster (from Users tab)', [A(), A(), D('7'), A(), D(), D(), D(), D()]),
+    row('Grant the Super Admin role', [A(), D(), D(), D(), D(), D(), D(), D()]),
+    row('View Floor Operators roster (from Users tab)', [A(), A(), D(), A(), D(), D(), D(), D()]),
 
     section('Client View &amp; portal'),
     row('Open the internal "Client View" preview', [A(), A(), A(), A(), D(), D(), D(), D()]),
     row("External portal &mdash; view own company's jobs", [D(), D(), D(), D(), D(), D(), D(), A()]),
-    row('External portal &mdash; any write action', [D('10'), D(), D(), D(), D(), D(), D(), D('10')]),
+    row('External portal &mdash; any write action', [D(), D(), D(), D(), D(), D(), D(), D()]),
   ].join('');
 
   return `
