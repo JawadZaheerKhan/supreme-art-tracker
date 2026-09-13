@@ -252,26 +252,56 @@ function getDb() {
 // and rewrite historical 'artline.*' audit_log actions to
 // 'wastage_adjustment.*' — the "Artline" internal name is retired.
 // Bumped again to add role_permissions (the Access Register's editable
-// backing store).
-const SCHEMA_VERSION = 'v2026-09-13-role-permissions';
+// backing store). Bumped once more when that same table's default set
+// grew from 7 to 24 groups — a DB already stamped with the first,
+// smaller version would otherwise hit the fast-path and never seed the
+// new groups' rows at all.
+const SCHEMA_VERSION = 'v2026-09-13-role-permissions-v2';
 
 // Editable role-permission groups behind the Access Register's "click to
-// change" cells. Deliberately a SMALL set — most of the ~50 capabilities
-// in the register collapse onto one of these (e.g. Create/Move/Duplicate/
-// Link/Block a job all share job_write), and destructive or structurally
-// sensitive actions (Delete Job/User, Trash purge, Grant Super Admin,
-// Wastage Adjustment, PIN-gated Station actions) are deliberately left
-// out — not editable here, kept fixed for safety. `roles` is today's
-// exact hardcoded default (used only to seed role_permissions once; the
-// live source of truth after that is the table itself).
+// change" cells. Nearly every capability in the register is here — the
+// ~50 rows collapse onto these because many share one real function
+// (e.g. Create/Move/Duplicate/Link/Block a job all share job_write).
+// Exactly ONE thing is deliberately excluded: "Grant the Super Admin
+// role" — that's the bootstrap that stops an Admin from promoting
+// themselves to Super Admin, and making IT editable would let a Super
+// Admin session accidentally dissolve the two-tier model that this
+// whole table depends on. Everything else here is real and live.
+// `levels` is today's exact hardcoded default, keyed by role — a role
+// missing from it defaults to 'no' — used only to seed role_permissions
+// once; the live source of truth after that is the table itself.
+// `extra` lists any additional selectable level valid ONLY for that
+// group (currently just inventory_reverse's '30-day').
 const ROLE_PERMISSION_DEFAULTS = {
-  job_write:        { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', roles: ['admin', 'production_manager'] },
-  inventory_write:  { label: 'Add/edit inventory items, stock in/out (manual + bulk), and issue stock (fresh or offcut) to a job', roles: ['admin', 'store_manager'] },
-  delivery_write:   { label: 'Record a delivery (including linked-job challans)', roles: ['admin', 'production_manager', 'finance'] },
-  station_access:   { label: 'Open the Station terminal & enter a PIN', roles: ['admin', 'production_manager', 'operator', 'ceo'] },
-  station_write:    { label: 'Process a station — save / advance / skip / notes', roles: ['admin', 'production_manager', 'operator'] },
-  operator_admin:   { label: 'Manage (add/edit/remove) and view the Floor Operators PIN roster', roles: ['admin', 'production_manager'] },
-  job_print:        { label: 'Print a job card (display only — not independently server-enforced)', roles: ['admin', 'production_manager', 'ceo'] },
+  job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
+  job_view:             { label: 'View the Jobs list & every status tab', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'yes', finance: 'yes', operator: 'yes' } },
+  job_delete:           { label: 'Delete a job', levels: { admin: 'yes' } },
+  delivery_write:       { label: 'Record a delivery (including linked-job challans)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  delivery_delete:      { label: 'Delete a delivery ledger entry', levels: { admin: 'yes' } },
+  wastage_adjustment:   { label: 'Wastage Adjustment (adjust/un-adjust), the Finalized Jobs tab, and the Manual Job Card Consumption report', levels: {} },
+  inventory_write:      { label: 'Add/edit inventory items, stock in/out (manual + bulk), and issue stock (fresh or offcut) to a job', levels: { admin: 'yes', store_manager: 'yes' } },
+  inventory_view:       { label: 'View the Inventory tab', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'yes', finance: 'yes' } },
+  inventory_delete:     { label: 'Delete a paper item', levels: { admin: 'yes' } },
+  // 'yes' here means the full, unconditional bypass (no window, no reason
+  // allow-list) — only ever meant for admin. Store Manager's real default
+  // is the time-boxed '30-day' tier, NOT 'yes' — conflating the two would
+  // silently hand Store Manager admin's unconditional bypass.
+  inventory_reverse:    { label: 'Reverse a stock transaction', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
+  inventory_reports:    { label: 'Stock/Total In & Out, Offcut Consumption, and Stock Summary & Inventory reports', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'yes', finance: 'yes' } },
+  production_reports:   { label: 'Jobs Report, Production Report, and Daily Production registers — view', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'hidden', finance: 'yes' } },
+  production_edit:      { label: 'Daily Production registers — edit', levels: { admin: 'yes', production_manager: 'yes', store_manager: 'yes' } },
+  trash_view:           { label: 'Trash / Archive — view', levels: { admin: 'yes', ceo: 'yes' } },
+  trash_admin:          { label: 'Trash / Archive — restore, purge, empty; delete/archive a transaction or import row', levels: { admin: 'yes' } },
+  station_access:       { label: 'Open the Station terminal & enter a PIN', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
+  station_write:        { label: 'Process a station — save / advance / skip / notes', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
+  station_manager_pin:  { label: 'Attempt Manager-PIN actions (stage, machine, offcut, shade-card delivery) — a valid manager PIN is still required either way', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
+  operator_admin:       { label: 'Manage (add/edit/remove) and view the Floor Operators PIN roster', levels: { admin: 'yes', production_manager: 'yes' } },
+  stickers_print:       { label: 'Stickers — open & print', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
+  forms_print:          { label: 'Forms — open & print Transfer Note', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes', finance: 'yes' } },
+  user_view:            { label: 'View the Authorized Users list', levels: { admin: 'yes', ceo: 'view' } },
+  user_admin:           { label: "Invite/create a user, edit a user's roles, or block/unblock/delete a user", levels: { admin: 'yes' } },
+  client_view_preview:  { label: 'Open the internal "Client View" preview', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -294,12 +324,18 @@ async function refreshRolePermissions() {
     console.error('refreshRolePermissions failed:', e.message);
   }
 }
-// level ordering: 'no' < 'view' < 'yes'. Every current group is a plain
-// yes/no switch (no group uses 'view' yet) but the level column and this
-// helper support it for job_write's "Edit & save a job card" VIEW ONLY
-// case if that's ever made independently editable.
+// level ordering: 'no' and 'hidden' both mean "blocked" — the only
+// difference between them is how the CLIENT renders the control (hidden
+// = not shown at all, no = also not shown, kept as a distinct label
+// purely so the register's wording can match "hidden" for tab/report
+// visibility vs "no" for a plain denial; see the client's permCellHtml).
+// 'view' sits above both: read-only / visible-but-disabled, still never
+// satisfies a 'yes' check. Neither 'no' nor 'hidden' ever weakens
+// server-side enforcement — both are hard blocks, unlike the old
+// "landing card hidden but endpoint unguarded" bug this project fixed
+// earlier; a deliberate 'hidden' here never reintroduces that gap.
 function permLevelAtLeast(level, min) {
-  const order = { no: 0, view: 1, yes: 2 };
+  const order = { no: 0, hidden: 0, view: 1, yes: 2 };
   return (order[level] ?? 0) >= (order[min] ?? 2);
 }
 function roleHasPermission(user, key, min = 'yes') {
@@ -313,11 +349,49 @@ function roleHasPermission(user, key, min = 'yes') {
   // (a request landing in the brief window before refreshRolePermissions()
   // first resolves) — safer than treating an empty cache as "nobody has
   // any permission," which would lock every role out of the app at boot.
-  const group = ROLE_PERMS[key] || (ROLE_PERMISSION_DEFAULTS[key] &&
-    Object.fromEntries(ROLE_PERMISSION_DEFAULTS[key].roles.map(r => [r, 'yes'])));
+  const def = ROLE_PERMISSION_DEFAULTS[key];
+  const group = ROLE_PERMS[key] || (def && def.levels);
   if (!group) return false;
   const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
   return roles.some(r => permLevelAtLeast(group[r] || 'no', min));
+}
+// Reverse-transaction access has its own 3-tier model beyond the generic
+// no/hidden/view/yes: 'yes' = unconditional bypass (any reason, any age)
+// — only ever meant for the literal admin role; '30-day' = reversible
+// reasons only, within the last 30 days; anything else = no access.
+// Super Admin always gets the full bypass regardless of the table.
+// The highest level any of the user's roles hold for a group — 'no' if
+// none. Unlike roleHasPermission (a >=min boolean check), this returns
+// the actual level string so the client can tell 'view'/'hidden' apart,
+// not just "yes or not yes". Super Admin/client short-circuits mirror
+// every other permission check in this file.
+function effectiveLevelFor(user, key) {
+  if (userHasRole(user, 'client')) return 'no';
+  if (userHasRole(user, 'super_admin')) return 'yes';
+  const def = ROLE_PERMISSION_DEFAULTS[key];
+  const group = ROLE_PERMS[key] || (def && def.levels);
+  if (!group) return 'no';
+  const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
+  let best = 'no';
+  for (const r of roles) {
+    const lvl = group[r] || 'no';
+    if (lvl === 'yes') return 'yes';
+    if (permLevelAtLeast(lvl, 'view') && best !== 'yes' && !permLevelAtLeast(best, 'view')) best = lvl;
+  }
+  return best;
+}
+function reverseTierFor(user) {
+  if (userHasRole(user, 'client')) return 'no';
+  if (userHasRole(user, 'admin', 'super_admin')) return 'yes';
+  const group = ROLE_PERMS.inventory_reverse || ROLE_PERMISSION_DEFAULTS.inventory_reverse.levels;
+  const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
+  let best = 'no';
+  for (const r of roles) {
+    const lvl = group[r] || 'no';
+    if (lvl === 'yes') return 'yes';
+    if (lvl === '30-day') best = '30-day';
+  }
+  return best;
 }
 
 async function initDb() {
@@ -1192,10 +1266,10 @@ async function initDb() {
       )
     `;
     for (const [key, def] of Object.entries(ROLE_PERMISSION_DEFAULTS)) {
-      for (const role of def.roles) {
+      for (const [role, level] of Object.entries(def.levels)) {
         await sql`
           INSERT INTO role_permissions (permission_key, role, level)
-          VALUES (${key}, ${role}, 'yes')
+          VALUES (${key}, ${role}, ${level})
           ON CONFLICT (permission_key, role) DO NOTHING
         `;
       }
@@ -1438,6 +1512,19 @@ function requireOperatorAdmin(req, res, next) {
     return res.status(403).json({ error: 'Not allowed — operator admin access required' });
   }
   next();
+}
+// Generic middleware factory for every route whose access is governed by
+// one of the newer role_permissions groups that isn't (yet) wrapped in
+// its own named canX()/requireX — Super Admin always passes regardless
+// of the table, same as every other permission check in this file.
+function requirePermission(key, min = 'yes') {
+  return function (req, res, next) {
+    if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, key, min)) {
+      return res.status(403).json({ error: 'Not allowed' });
+    }
+    next();
+  };
 }
 // Client portal — the only middleware that ADMITS 'client' role users.
 // requireAuth blocks them from everything else, so this is the sole gate
@@ -1682,8 +1769,8 @@ function parseRolesInput(body, actingUser) {
 // GET users — admin + ceo (CEO is read-only; mutation endpoints below stay
 // requireAdmin so role change / invite / remove are still locked down).
 app.get('/api/users', requireAuth, async (req, res) => {
-  if (!userHasRole(req.user, 'admin', 'ceo')) {
-    return res.status(403).json({ error: 'Admin or CEO only' });
+  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'user_view', 'view')) {
+    return res.status(403).json({ error: 'Not allowed' });
   }
   try {
     await dbReady;
@@ -1701,7 +1788,7 @@ app.get('/api/users', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/users', requireAdmin, async (req, res) => {
+app.post('/api/users', requirePermission('user_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1730,7 +1817,7 @@ app.post('/api/users', requireAdmin, async (req, res) => {
   }
 });
 
-app.put('/api/users/:id', requireAdmin, async (req, res) => {
+app.put('/api/users/:id', requirePermission('user_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1795,7 +1882,7 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/users/:id', requireAdmin, async (req, res) => {
+app.delete('/api/users/:id', requirePermission('user_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1860,7 +1947,7 @@ app.post('/api/users/:id/sessions/:sid/revoke', requireAdmin, async (req, res) =
   }
 });
 
-app.post('/api/users/:id/block', requireAdmin, async (req, res) => {
+app.post('/api/users/:id/block', requirePermission('user_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1876,7 +1963,7 @@ app.post('/api/users/:id/block', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/users/:id/unblock', requireAdmin, async (req, res) => {
+app.post('/api/users/:id/unblock', requirePermission('user_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1928,11 +2015,12 @@ app.get('/api/audit', requireAuth, async (req, res) => {
         AND (${toEndIso}::timestamptz IS NULL OR created_at <  ${toEndIso}::timestamptz)
       ORDER BY id DESC LIMIT ${cap}
     `;
-    // Wastage Adjustment is a Super Admin-only feature (regular Admins no
-    // longer have access either) — its audit trail (adjust/post/remove)
-    // must never leak to anyone else viewing a job's shared history/audit
-    // log.
-    if (!userHasRole(req.user, 'super_admin')) rows = rows.filter(r => !String(r.action || '').startsWith('wastage_adjustment.'));
+    // Wastage Adjustment's audit trail (adjust/post/remove) follows the
+    // same wastage_adjustment permission as the feature itself — it must
+    // never leak to a role that can't otherwise see the feature.
+    if (!roleHasPermission(req.user, 'wastage_adjustment', 'view') && !userHasRole(req.user, 'super_admin')) {
+      rows = rows.filter(r => !String(r.action || '').startsWith('wastage_adjustment.'));
+    }
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -1953,7 +2041,11 @@ app.get('/api/role-permissions/effective', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const effective = {};
-    for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) effective[key] = roleHasPermission(req.user, key);
+    for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) {
+      // inventory_reverse has its own tier logic (30-day) the generic
+      // level-lookup doesn't know about.
+      effective[key] = key === 'inventory_reverse' ? reverseTierFor(req.user) : effectiveLevelFor(req.user, key);
+    }
     res.json(effective);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -1969,7 +2061,7 @@ app.get('/api/role-permissions', requireSuperAdmin, async (req, res) => {
       if (!matrix[r.permission_key]) matrix[r.permission_key] = {};
       matrix[r.permission_key][r.role] = r.level;
     }
-    const groups = Object.entries(ROLE_PERMISSION_DEFAULTS).map(([key, def]) => ({ key, label: def.label }));
+    const groups = Object.entries(ROLE_PERMISSION_DEFAULTS).map(([key, def]) => ({ key, label: def.label, extra: def.extra || [] }));
     res.json({ groups, roles: EDITABLE_PERMISSION_ROLES, matrix });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -1979,9 +2071,11 @@ app.put('/api/role-permissions', requireSuperAdmin, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const { key, role, level } = req.body || {};
-    if (!ROLE_PERMISSION_DEFAULTS[key]) return res.status(400).json({ error: 'Unknown permission key' });
+    const def = ROLE_PERMISSION_DEFAULTS[key];
+    if (!def) return res.status(400).json({ error: 'Unknown permission key' });
     if (!EDITABLE_PERMISSION_ROLES.includes(role)) return res.status(400).json({ error: 'Unknown or non-editable role' });
-    if (!['no', 'view', 'yes'].includes(level)) return res.status(400).json({ error: "level must be 'no', 'view', or 'yes'" });
+    const validLevels = ['no', 'hidden', 'view', 'yes', ...(def.extra || [])];
+    if (!validLevels.includes(level)) return res.status(400).json({ error: `level must be one of: ${validLevels.join(', ')}` });
     await sql`
       INSERT INTO role_permissions (permission_key, role, level, updated_by, updated_at)
       VALUES (${key}, ${role}, ${level}, ${req.user.email}, NOW())
@@ -1992,7 +2086,7 @@ app.put('/api/role-permissions', requireSuperAdmin, async (req, res) => {
       action: 'role_permission.update',
       entityType: 'role_permission',
       entityId: null,
-      summary: `${ROLE_PERMISSION_DEFAULTS[key].label}: ${role} → ${level.toUpperCase()}`,
+      summary: `${def.label}: ${role} → ${level.toUpperCase()}`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -2572,7 +2666,7 @@ function jobsDisplayPair(jobsMap) {
 // machine with sheets, jobs count, colors breakdown, plates and the
 // operator list. Hours + Remarks come from daily_production_notes so
 // admin can scribble what the auto-totals can't capture.
-app.get('/api/reports/daily-production/printing/:date', requireAuth, async (req, res) => {
+app.get('/api/reports/daily-production/printing/:date', requirePermission('production_reports', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2661,7 +2755,7 @@ function isoTsToDate(ts) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
   return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
 }
-app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req, res) => {
+app.get('/api/reports/daily-production/coatings/:date', requirePermission('production_reports', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2867,7 +2961,7 @@ app.get('/api/reports/daily-production/coatings/:date', requireAuth, async (req,
 // there's no workflow stage to aggregate from, so all numeric cells
 // are admin-entered. We pull the operator roster from anyone whose
 // machine has the 'break' role and serve their saved cells.
-app.get('/api/reports/daily-production/breaking/:date', requireAuth, async (req, res) => {
+app.get('/api/reports/daily-production/breaking/:date', requirePermission('production_reports', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2923,7 +3017,7 @@ app.get('/api/reports/daily-production/breaking/:date', requireAuth, async (req,
 // Daily Production register — Pasting section. Same byline-parsing
 // pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
 // per job per machine on the chosen date.
-app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, res) => {
+app.get('/api/reports/daily-production/pasting/:date', requirePermission('production_reports', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2966,7 +3060,7 @@ app.get('/api/reports/daily-production/pasting/:date', requireAuth, async (req, 
 // Printing endpoint but sheets come from die_cutting_sheets, the stage
 // label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
 // as admin-editable cells.
-app.get('/api/reports/daily-production/die/:date', requireAuth, async (req, res) => {
+app.get('/api/reports/daily-production/die/:date', requirePermission('production_reports', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3332,7 +3426,7 @@ async function aggregateProductionRange(sql, { from, to }) {
   return { byMachineDaily: byMachineDailyArr, byOperatorDaily: byOperatorDailyArr };
 }
 
-app.get('/api/reports/production', requireAuth, async (req, res) => {
+app.get('/api/reports/production', requirePermission('production_reports', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3361,9 +3455,8 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     const machine = String(req.params.machine || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
-    // Only admin / managers can edit register cells. Read is fine for
-    // everyone with an account.
-    if (!userHasRole(req.user, 'admin', 'production_manager', 'store_manager')) return res.status(403).json({ error: 'Not allowed' });
+    // Only roles with production_edit access can edit register cells.
+    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed' });
     const hours      = (req.body.hours      == null) ? null : String(req.body.hours).trim();
     const remarks    = (req.body.remarks    == null) ? null : String(req.body.remarks).trim();
     const makeReady  = (req.body.make_ready == null) ? null : String(req.body.make_ready).trim();
@@ -3410,7 +3503,7 @@ app.delete('/api/reports/daily-production/:section/:date/:machine', requireAuth,
     const machine = String(req.params.machine || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
-    if (!userHasRole(req.user, 'admin', 'production_manager', 'store_manager')) return res.status(403).json({ error: 'Not allowed' });
+    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed' });
     await sql`DELETE FROM daily_production_notes WHERE date = ${date} AND section = ${section} AND machine = ${machine}`;
     res.json({ ok: true });
   } catch (err) {
@@ -3721,8 +3814,8 @@ app.get('/api/client/jobs', requireClient, async (req, res) => {
 // default so the admin can't accidentally reveal the wrong client's
 // jobs from a saved link.
 app.get('/api/admin/client-view', requireAuth, async (req, res) => {
-  if (!userHasRole(req.user, 'admin', 'production_manager', 'ceo')) {
-    return res.status(403).json({ error: 'Admin / Production Manager / CEO only' });
+  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'client_view_preview')) {
+    return res.status(403).json({ error: 'Not allowed' });
   }
   try {
     await dbReady;
@@ -5322,7 +5415,7 @@ app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) =
 // can now clear that request in one tap instead of routing it back to
 // the store keeper, matching canIssueOffcutStock()'s existing rule that
 // offcut issuance is production's call, not the store keeper's.
-app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, async (req, res) => {
+app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, requirePermission('station_manager_pin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5905,7 +5998,7 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
 // delivery a manager needs to log from the floor without a desktop.
 // Shares deliveryEligibilityError()/computeDeliveryUpdate() with the
 // route above so the two never drift out of sync.
-app.post('/api/jobs/:id/manager-deliver', requireStationUser, async (req, res) => {
+app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission('station_manager_pin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6532,7 +6625,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
 // DELETE a specific delivery entry by index — admin only, for corrections.
 // If removing the last entry drops the job below full delivery, moves stage
 // back from Delivered (7) to Ready to Deliver (6).
-app.delete('/api/jobs/:id/deliveries/:index', requireAdmin, async (req, res) => {
+app.delete('/api/jobs/:id/deliveries/:index', requirePermission('delivery_delete'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6807,7 +6900,7 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
 // Also stamps a marker into job.log so the History modal's Stage Log shows
 // who moved it — audit_log INSERT is best-effort (errors swallowed), but the
 // stage log lives on the row itself and can never silently disappear.
-app.delete('/api/jobs/:id', requireAdmin, async (req, res) => {
+app.delete('/api/jobs/:id', requirePermission('job_delete'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7123,7 +7216,7 @@ app.post('/api/inventory/dropdown/:field/:value/unhide', requireAdmin, async (re
 // losing the link would orphan them). Issued/in-progress/delivered jobs are
 // fine to lose the live link — their deductions already happened. Cascades
 // the full transaction history (intentional — admin saw the warning).
-app.delete('/api/inventory/:id', requireAdmin, async (req, res) => {
+app.delete('/api/inventory/:id', requirePermission('inventory_delete'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7377,10 +7470,12 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
 //   • The transaction is itself a reversal (no chain reversals)
 //   • The reason isn't one of the reversible kinds (delivery, job-consumed,
 //     job-edit-apply, job-edit-revert, job-offcut, adjustment)
-app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, async (req, res) => {
+app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
+    const reverseTier = reverseTierFor(req.user);
+    if (reverseTier === 'no') return res.status(403).json({ error: 'Not allowed — reverse access required' });
     const txId = parseInt(req.params.id, 10);
     if (!Number.isFinite(txId)) return res.status(400).json({ error: 'Invalid id' });
 
@@ -7401,10 +7496,11 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       // a selectable reason going forward.
       'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
     ]);
-    // Admin can reverse ANY reason (including bookkeeping rows like
-    // 'correction' or 'opening-balance'). Non-admins are still bound
-    // to the standard reversible-reasons allow-list.
-    if (!REVERSIBLE_REASONS.has(tx.reason) && !userHasRole(req.user, 'admin')) {
+    // Full 'yes' tier (admin/Super Admin, or anyone explicitly granted it)
+    // can reverse ANY reason (including bookkeeping rows like 'correction'
+    // or 'opening-balance'). The '30-day' tier is still bound to the
+    // standard reversible-reasons allow-list.
+    if (!REVERSIBLE_REASONS.has(tx.reason) && reverseTier !== 'yes') {
       return res.status(400).json({ error: `Cannot reverse a '${tx.reason}' entry.` });
     }
     if (tx.reverses_tx_id) {
@@ -7419,10 +7515,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireInventoryWriter, asyn
       return res.status(409).json({ error: 'This entry has already been reversed.' });
     }
 
-    // 30-day rolling window applies to everyone except admin. Store manager
-    // and production manager can self-correct mistakes for a month; anything
-    // older needs an admin to keep the audit trail intact.
-    if (!userHasRole(req.user, 'admin')) {
+    // 30-day rolling window applies to the '30-day' tier only. Anything
+    // older needs someone with the full 'yes' tier (admin by default) to
+    // keep the audit trail intact.
+    if (reverseTier === '30-day') {
       const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
       const withinWindow = (Date.now() - new Date(tx.created_at).getTime()) <= THIRTY_DAYS_MS;
       if (!withinWindow) {
@@ -7855,7 +7951,7 @@ async function purgeExpiredTrash(sql) {
 // (CEO is read-only — the write endpoints below still require admin).
 // Anyone signed in can view the Trash bin (admin, user, stock, ceo). Restore
 // and Empty stay admin-only — see those endpoints below.
-app.get('/api/trash', requireAuth, async (req, res) => {
+app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7883,7 +7979,7 @@ app.get('/api/trash', requireAuth, async (req, res) => {
 });
 
 // RESTORE one row from trash. Body: { type: 'job'|'import'|'transaction', id: 123 }.
-app.post('/api/trash/restore', requireAdmin, async (req, res) => {
+app.post('/api/trash/restore', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7932,7 +8028,7 @@ app.post('/api/trash/restore', requireAdmin, async (req, res) => {
 });
 
 // PERMANENT delete from trash. Same shape as restore. Hard-deletes the row.
-app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
+app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7963,7 +8059,7 @@ app.delete('/api/trash/:type/:id', requireAdmin, async (req, res) => {
 
 // EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes everything
 // currently in trash regardless of age.
-app.post('/api/trash/empty', requireAdmin, async (req, res) => {
+app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7991,7 +8087,7 @@ app.post('/api/trash/empty', requireAdmin, async (req, res) => {
 // row already happened and its effect is baked into the running balance.
 // To actually undo a row's effect on stock, use the per-row Reverse on the
 // inventory History modal instead (which posts a proper correction entry).
-app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => {
+app.delete('/api/inventory/transactions/:id', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8035,7 +8131,7 @@ app.delete('/api/inventory/transactions/:id', requireAdmin, async (req, res) => 
 // on the Imports page. Refuses to delete a "received" row because that would
 // orphan the stock-in transaction it created. Pending / Cancelled are fine to
 // hard-delete since they never touched inventory.
-app.delete('/api/imports/:id', requireAdmin, async (req, res) => {
+app.delete('/api/imports/:id', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8689,7 +8785,7 @@ async function verifyManagerPin(sql, pin) {
 // session-authenticated pass-through for the admin/PM UI. Deliberately
 // simpler than /station-update: no coatings/offcut/CTP business logic, no
 // peek rule — a manager overseeing the floor just needs "put it here."
-app.post('/api/jobs/:id/manager-stage', requireStationUser, async (req, res) => {
+app.post('/api/jobs/:id/manager-stage', requireStationUser, requirePermission('station_manager_pin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8740,7 +8836,7 @@ app.post('/api/jobs/:id/manager-stage', requireStationUser, async (req, res) => 
 // side, and this endpoint only ever writes these two columns (plus a log
 // entry when Machine changes) regardless of what else the request body
 // contains, so a crafted request can't smuggle other job-card edits through.
-app.post('/api/jobs/:id/manager-update', requireStationUser, async (req, res) => {
+app.post('/api/jobs/:id/manager-update', requireStationUser, requirePermission('station_manager_pin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8931,7 +9027,7 @@ app.get('/api/transfer-notes/:id', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/transfer-notes', requireAuth, async (req, res) => {
+app.post('/api/transfer-notes', requirePermission('forms_print'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -9019,7 +9115,7 @@ app.put('/api/wastage-adjustment/settings', requireSuperAdmin, async (req, res) 
 // keeper deleted from Manual Consumption, or one that was reversed
 // (corrected), was still showing up here as "available" before this
 // excluded them the same way the report does.
-app.get('/api/wastage-adjustment/unallocated', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/unallocated', requirePermission('wastage_adjustment'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -9044,7 +9140,7 @@ app.get('/api/wastage-adjustment/unallocated', requireSuperAdmin, async (req, re
 });
 
 // Adjust a delivered E-job — allocate manual packets as wastage.
-app.post('/api/wastage-adjustment/adjust/:jobId', requireSuperAdmin, async (req, res) => {
+app.post('/api/wastage-adjustment/adjust/:jobId', requirePermission('wastage_adjustment'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -9087,7 +9183,7 @@ app.post('/api/wastage-adjustment/adjust/:jobId', requireSuperAdmin, async (req,
 });
 
 // Remove an adjustment (un-finalize). Admin only.
-app.delete('/api/wastage-adjustment/adjust/:jobId', requireSuperAdmin, async (req, res) => {
+app.delete('/api/wastage-adjustment/adjust/:jobId', requirePermission('wastage_adjustment'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -9107,7 +9203,7 @@ app.delete('/api/wastage-adjustment/adjust/:jobId', requireSuperAdmin, async (re
 });
 
 // List all finalized (adjusted) jobs with their adjustment data.
-app.get('/api/wastage-adjustment/finalized', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/finalized', requirePermission('wastage_adjustment', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -9126,7 +9222,7 @@ app.get('/api/wastage-adjustment/finalized', requireSuperAdmin, async (req, res)
 });
 
 // Mark an adjusted job as "posted" (ready for the public app).
-app.post('/api/wastage-adjustment/post/:jobId', requireSuperAdmin, async (req, res) => {
+app.post('/api/wastage-adjustment/post/:jobId', requirePermission('wastage_adjustment'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -9147,7 +9243,7 @@ app.post('/api/wastage-adjustment/post/:jobId', requireSuperAdmin, async (req, r
 
 // Allocation totals per inventory transaction — used by Manual Consumption report
 // to render green fill bars showing how much of each stock-out has been absorbed.
-app.get('/api/wastage-adjustment/allocations', requireSuperAdmin, async (req, res) => {
+app.get('/api/wastage-adjustment/allocations', requirePermission('wastage_adjustment', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
