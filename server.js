@@ -251,7 +251,74 @@ function getDb() {
 // Bumped again to rename artline_settings -> wastage_adjustment_settings
 // and rewrite historical 'artline.*' audit_log actions to
 // 'wastage_adjustment.*' — the "Artline" internal name is retired.
-const SCHEMA_VERSION = 'v2026-09-12-wastage-adj-rename';
+// Bumped again to add role_permissions (the Access Register's editable
+// backing store).
+const SCHEMA_VERSION = 'v2026-09-13-role-permissions';
+
+// Editable role-permission groups behind the Access Register's "click to
+// change" cells. Deliberately a SMALL set — most of the ~50 capabilities
+// in the register collapse onto one of these (e.g. Create/Move/Duplicate/
+// Link/Block a job all share job_write), and destructive or structurally
+// sensitive actions (Delete Job/User, Trash purge, Grant Super Admin,
+// Wastage Adjustment, PIN-gated Station actions) are deliberately left
+// out — not editable here, kept fixed for safety. `roles` is today's
+// exact hardcoded default (used only to seed role_permissions once; the
+// live source of truth after that is the table itself).
+const ROLE_PERMISSION_DEFAULTS = {
+  job_write:        { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', roles: ['admin', 'production_manager'] },
+  inventory_write:  { label: 'Add/edit inventory items, stock in/out (manual + bulk), and issue stock (fresh or offcut) to a job', roles: ['admin', 'store_manager'] },
+  delivery_write:   { label: 'Record a delivery (including linked-job challans)', roles: ['admin', 'production_manager', 'finance'] },
+  station_access:   { label: 'Open the Station terminal & enter a PIN', roles: ['admin', 'production_manager', 'operator', 'ceo'] },
+  station_write:    { label: 'Process a station — save / advance / skip / notes', roles: ['admin', 'production_manager', 'operator'] },
+  operator_admin:   { label: 'Manage (add/edit/remove) and view the Floor Operators PIN roster', roles: ['admin', 'production_manager'] },
+  job_print:        { label: 'Print a job card (display only — not independently server-enforced)', roles: ['admin', 'production_manager', 'ceo'] },
+};
+// In-memory cache, refreshed on write. Read on every request, so it must
+// never be empty/stale relative to the DB for longer than one write's
+// round trip — refreshRolePermissions() is awaited right after every
+// successful PUT.
+let ROLE_PERMS = {};
+async function refreshRolePermissions() {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT permission_key, role, level FROM role_permissions`;
+    const next = {};
+    for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) next[key] = {};
+    for (const r of rows) {
+      if (!next[r.permission_key]) next[r.permission_key] = {};
+      next[r.permission_key][r.role] = r.level;
+    }
+    ROLE_PERMS = next;
+  } catch (e) {
+    console.error('refreshRolePermissions failed:', e.message);
+  }
+}
+// level ordering: 'no' < 'view' < 'yes'. Every current group is a plain
+// yes/no switch (no group uses 'view' yet) but the level column and this
+// helper support it for job_write's "Edit & save a job card" VIEW ONLY
+// case if that's ever made independently editable.
+function permLevelAtLeast(level, min) {
+  const order = { no: 0, view: 1, yes: 2 };
+  return (order[level] ?? 0) >= (order[min] ?? 2);
+}
+function roleHasPermission(user, key, min = 'yes') {
+  // Client accounts are walled off from every internal capability no
+  // matter what role_permissions says — requireJobsWriter and friends
+  // don't independently re-check for the client role the way requireAuth
+  // does, so a mistaken edit here must never be the thing that grants an
+  // external client account internal write access.
+  if (userHasRole(user, 'client')) return false;
+  // Fall back to the hardcoded defaults if the cache hasn't loaded yet
+  // (a request landing in the brief window before refreshRolePermissions()
+  // first resolves) — safer than treating an empty cache as "nobody has
+  // any permission," which would lock every role out of the app at boot.
+  const group = ROLE_PERMS[key] || (ROLE_PERMISSION_DEFAULTS[key] &&
+    Object.fromEntries(ROLE_PERMISSION_DEFAULTS[key].roles.map(r => [r, 'yes'])));
+  if (!group) return false;
+  const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
+  return roles.some(r => permLevelAtLeast(group[r] || 'no', min));
+}
 
 async function initDb() {
   try {
@@ -1108,6 +1175,32 @@ async function initDb() {
     `;
     await sql`CREATE INDEX IF NOT EXISTS adj_alloc_tx_idx ON adjustment_allocations(transaction_id)`;
 
+    // Role permissions — lets a Super Admin reassign the app's core write
+    // capabilities per role from the Access Register, instead of them
+    // being hardcoded. A row's ABSENCE means "no" — only roles that
+    // currently have a capability get a seeded 'yes' row, so this seed
+    // reproduces today's exact hardcoded defaults (see ROLE_PERMISSION_DEFAULTS)
+    // and nothing changes until a Super Admin explicitly edits one.
+    await sql`
+      CREATE TABLE IF NOT EXISTS role_permissions (
+        permission_key TEXT NOT NULL,
+        role           TEXT NOT NULL,
+        level          TEXT NOT NULL DEFAULT 'yes',
+        updated_by     TEXT,
+        updated_at     TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (permission_key, role)
+      )
+    `;
+    for (const [key, def] of Object.entries(ROLE_PERMISSION_DEFAULTS)) {
+      for (const role of def.roles) {
+        await sql`
+          INSERT INTO role_permissions (permission_key, role, level)
+          VALUES (${key}, ${role}, 'yes')
+          ON CONFLICT (permission_key, role) DO NOTHING
+        `;
+      }
+    }
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -1123,6 +1216,10 @@ async function initDb() {
 // Run schema migrations once at module load. Every handler awaits this so
 // requests can't race ahead of ALTER TABLE on a cold start.
 const dbReady = initDb();
+// Load the role_permissions cache as soon as the table exists. Requests
+// arriving before this resolves fall back to ROLE_PERMISSION_DEFAULTS
+// (see roleHasPermission) rather than being incorrectly denied.
+dbReady.then(() => refreshRolePermissions());
 
 // ── Auth helpers ─────────────────────────────────────────────
 
@@ -1262,20 +1359,27 @@ function requireSuperAdmin(req, res, next) {
   if (!userHasRole(req.user, 'super_admin')) return res.status(403).json({ error: 'Super Admin only' });
   next();
 }
-function canWriteJobs(user)      { return userHasRole(user, 'admin', 'production_manager'); }
-function canWriteInventory(user) { return userHasRole(user, 'admin', 'store_manager'); }
-function canRunStation(user)     { return userHasRole(user, 'admin', 'production_manager', 'operator', 'ceo'); }
-// Delivery ledger — admin, PM, or the dedicated finance role. Finance is
-// otherwise fully read-only; recording shipments is the one thing they own.
-function canRecordDelivery(user) { return userHasRole(user, 'admin', 'production_manager', 'finance'); }
+// These six were hardcoded role lists; now backed by role_permissions
+// (see ROLE_PERMISSION_DEFAULTS above) so a Super Admin can reassign them
+// from the Access Register. Super Admin implicitly passes every one of
+// these regardless of the table, the same way it always has (an account
+// short of the 'admin' role it's meant to hold alongside super_admin
+// should never lose baseline write access because of an editing mistake).
+function canWriteJobs(user)      { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'job_write'); }
+function canWriteInventory(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'inventory_write'); }
+function canRunStation(user)     { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_access'); }
+// Delivery ledger — admin, PM, or the dedicated finance role by default.
+// Finance is otherwise fully read-only; recording shipments is the one
+// thing they own.
+function canRecordDelivery(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'delivery_write'); }
 // Station WRITE actions — Save / Advance / Skip / Notes. CEO can enter
 // the terminal (view-only) via canRunStation, but must never process a
-// job. Admin / PM / operator still write freely.
-function canProcessStation(user) { return userHasRole(user, 'admin', 'production_manager', 'operator'); }
-// Operator roster CRUD — admin or production manager. The PM owns the
-// floor and needs to add / edit / retire operators without an admin
-// having to be involved every time.
-function canManageOperators(user){ return userHasRole(user, 'admin', 'production_manager'); }
+// job by default. Admin / PM / operator still write freely.
+function canProcessStation(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_write'); }
+// Operator roster CRUD — admin or production manager by default. The PM
+// owns the floor and needs to add / edit / retire operators without an
+// admin having to be involved every time.
+function canManageOperators(user){ return userHasRole(user, 'super_admin') || roleHasPermission(user, 'operator_admin'); }
 
 // Generic "not read-only" check. Used for cross-cutting endpoints (audit
 // metadata, profile edits, etc.) where any write-capable role is fine.
@@ -1833,6 +1937,65 @@ app.get('/api/audit', requireAuth, async (req, res) => {
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
+});
+
+// ── Role Permissions (Access Register editing) — Super Admin only ────
+// client is deliberately never offered here — see roleHasPermission's
+// hard client-role block above; letting it appear in the editor would
+// invite a mistaken edit into something that actually can't take effect
+// safely, which is worse than just not offering it.
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator'];
+
+// Every signed-in user needs to know their OWN effective permissions
+// (client-side canWriteJobs() etc. read this at boot) — this is not
+// Super-Admin-gated like the two below, which expose the full matrix.
+app.get('/api/role-permissions/effective', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const effective = {};
+    for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) effective[key] = roleHasPermission(req.user, key);
+    res.json(effective);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/role-permissions', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT permission_key, role, level FROM role_permissions`;
+    const matrix = {};
+    for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) matrix[key] = {};
+    for (const r of rows) {
+      if (!matrix[r.permission_key]) matrix[r.permission_key] = {};
+      matrix[r.permission_key][r.role] = r.level;
+    }
+    const groups = Object.entries(ROLE_PERMISSION_DEFAULTS).map(([key, def]) => ({ key, label: def.label }));
+    res.json({ groups, roles: EDITABLE_PERMISSION_ROLES, matrix });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/role-permissions', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { key, role, level } = req.body || {};
+    if (!ROLE_PERMISSION_DEFAULTS[key]) return res.status(400).json({ error: 'Unknown permission key' });
+    if (!EDITABLE_PERMISSION_ROLES.includes(role)) return res.status(400).json({ error: 'Unknown or non-editable role' });
+    if (!['no', 'view', 'yes'].includes(level)) return res.status(400).json({ error: "level must be 'no', 'view', or 'yes'" });
+    await sql`
+      INSERT INTO role_permissions (permission_key, role, level, updated_by, updated_at)
+      VALUES (${key}, ${role}, ${level}, ${req.user.email}, NOW())
+      ON CONFLICT (permission_key, role) DO UPDATE SET level = EXCLUDED.level, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+    `;
+    await refreshRolePermissions();
+    await logAudit(sql, req, {
+      action: 'role_permission.update',
+      entityType: 'role_permission',
+      entityId: null,
+      summary: `${ROLE_PERMISSION_DEFAULTS[key].label}: ${role} → ${level.toUpperCase()}`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // ── Operators (shop-floor roster) ────────────────────────────
