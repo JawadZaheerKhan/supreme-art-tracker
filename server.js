@@ -314,7 +314,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // at all. Every job_btn_* is 3-state (yes=Edit / view=View, disabled /
   // hidden=not shown) — one row per button on the Jobs tab.
   job_tab_access:          { label: 'Jobs tab — view the job list and every status tab', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
-  job_btn_edit:            { label: 'Edit button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), and Add/Remove Job from Group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_history:         { label: 'History button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', store_manager: 'view', finance: 'view' } },
   job_btn_link:            { label: 'Link Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_print:           { label: 'Print button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -322,9 +322,17 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_delete:          { label: 'Delete button', levels: { admin: 'yes' } },
   job_btn_create_mil:      { label: 'Create Mil Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_stage_forward:   { label: 'Stage forwarding', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_record_delivery: { label: 'Record Delivery button', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing and Finalize as Delivered', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
+  job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
+  // Distinct from the existing wastage_adjustment group above (which also
+  // covers the Finalized Jobs tab and the Manual Job Card Consumption
+  // report, and keeps enforcing those exactly as before) — this is just
+  // the Adjust/Un-adjust button's own row in the new per-button layout.
+  // Empty by default, same as wastage_adjustment, since only Super Admin
+  // gets this today.
+  job_btn_adjust:          { label: 'Adjust / Un-adjust button (Wastage Adjustment)', levels: {} },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
