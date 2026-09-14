@@ -4762,6 +4762,23 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
       if (cleanParticulars === newParticulars) cleanParticulars = { ...newParticulars };
       delete cleanParticulars.offcut_pre_consumed;
     }
+    // Same reasoning, PRIMARY item this time: if the paper is being
+    // changed to a different item, any offcut_pre_consumed stamp names
+    // inventory_transactions row(s) against the OLD item — meaningless
+    // for the new one. Left in place, /issue-stock's needSheets math
+    // trusts its total_sheets at face value with no re-check against the
+    // job's current item (unlike autoConsumeOffcut's own verification),
+    // so a new paper whose need happens to match the stale total gets
+    // silently marked "fully covered" and the job auto-issues WITHOUT
+    // the new item ever being deducted — a real missing deduction, not
+    // just a display gap. Confirmed on Job E-393/394/395: all three sat
+    // at issuance_status='issued' with zero inventory_transactions rows
+    // for their current item. Runs regardless of wasIssued — the marker
+    // is just as wrong for a job that hasn't reached issue-stock yet.
+    if (oldItemId && oldItemId !== newItemId && cleanParticulars.offcut_pre_consumed) {
+      if (cleanParticulars === newParticulars) cleanParticulars = { ...newParticulars };
+      delete cleanParticulars.offcut_pre_consumed;
+    }
 
     // Reconcile Delivered/Ready-to-Deliver status against a PO Qty edit.
     // Recording or removing a delivery already keeps stage_index in sync
@@ -4903,6 +4920,16 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     //     Pending Stock queue with the NEW paper.
     //   - Clear issued_items so the fresh issuance starts clean.
     //   - Clear any stale partial_pending_sheets marker.
+    //   - Clear any offcut_pre_consumed marker — it names the OLD item's
+    //     inventory_transactions row(s), which the NEW item has nothing
+    //     to do with. Left in place, /issue-stock reads its total_sheets
+    //     at face value with no re-check against the current item (unlike
+    //     autoConsumeOffcut's own verification), and if the new paper's
+    //     need happens to match the stale total it silently marks the job
+    //     "fully covered" and auto-issues it without ever deducting the
+    //     new item — a real missing deduction, not just a display gap.
+    //     Confirmed against Job E-393/394/395: all three showed "issued"
+    //     with zero inventory_transactions rows for their current item.
     //   - Leave stage_index untouched — job stays where it is (usually
     //     Printing) and the operator carries on with the sheets they
     //     already have while store keeper prepares the new issuance.
@@ -4910,6 +4937,7 @@ app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
     if (wasIssued && paperItemChanged) {
       const cleanP = { ...(job.particulars || {}) };
       delete cleanP.partial_pending_sheets;
+      delete cleanP.offcut_pre_consumed;
       const updated2 = await sql`
         UPDATE jobs
            SET issuance_status = 'pending',
@@ -7752,7 +7780,14 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
           ${raw}
           OR COALESCE(i.is_offcut, false) = false
           OR (${includeOffcutManual} AND t.reason = 'manual-job-card')
-          OR (${includeOffcutAuto} AND t.reason = 'job-consumed' AND t.job_id IS NOT NULL)
+          -- 'job-consumed' = store keeper manually issuing against an
+          -- offcut item; 'job-auto-offcut' = autoConsumeOffcut's silent
+          -- CTP-forward deduction (the more common path). Both are real
+          -- offcut consumption for a job and belong in this report —
+          -- this condition previously only let 'job-consumed' through,
+          -- so every auto-consumed job (e.g. E-514, E-544) never reached
+          -- the client at all, regardless of any client-side filtering.
+          OR (${includeOffcutAuto} AND t.reason IN ('job-consumed', 'job-auto-offcut') AND t.job_id IS NOT NULL)
         )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
