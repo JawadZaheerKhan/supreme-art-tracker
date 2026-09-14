@@ -15877,7 +15877,14 @@ async function loadOffcutConsumption() {
   if (from) qs.set('from', from); if (to) qs.set('to', to);
   try {
     const rows = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
-    s.rows = rows.filter(t => t.item_is_offcut && t.reason === 'job-consumed' && t.job_id);
+    // 'job-consumed' is a normal store-keeper issuance against an offcut
+    // item; 'job-auto-offcut' is the silent CTP-forward auto-consumption
+    // (see autoConsumeOffcut server-side) — both are real offcut
+    // consumption for a job and belong here. The request already passes
+    // include_offcut_auto=1 to ask the server for the auto rows at all;
+    // this filter was then throwing them straight back out again, so
+    // every auto-consumed job (the more common path) never showed up.
+    s.rows = rows.filter(t => t.item_is_offcut && (t.reason === 'job-consumed' || t.reason === 'job-auto-offcut') && t.job_id);
     const liveIds = new Set(s.rows.map(t => t.id));
     for (const id of [...s.selected]) if (!liveIds.has(id)) s.selected.delete(id);
     renderOffcutConsumption();
