@@ -2906,7 +2906,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <button class="report-card" onclick="openReportsGroup('stocks-group')">
         <div class="report-card-icon">&#128200;</div>
         <div class="report-card-title">Board IN/OUT</div>
-        <div class="report-card-desc">Every stock-in and stock-out movement (with a Totals filter for each), Stock Summary, Current Balance Summary, and Total In/Out. Pick a report from the sidebar inside.</div>
+        <div class="report-card-desc">Every stock-in and stock-out movement (with a Totals filter for each), Stock Summary, and Current Balance Summary. Pick a report from the sidebar inside.</div>
       </button>
       <button class="report-card" onclick="openImportsPage()">
         <div class="report-card-icon">&#128666;</div>
@@ -2944,9 +2944,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rt="stock-out" onclick="setReportsTab('stock-out')">
           <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Stock Out
         </button>
-        <button class="rsb-item" data-rt="total-inout" onclick="setReportsTab('total-inout')">
-          <span class="rsb-icon" style="color:#7c3aed;">&#8645;</span> Total In/Out
-        </button>
         <div class="rsb-section">Analysis</div>
         <button class="rsb-item" data-rt="summary" onclick="setReportsTab('summary')">
           <span class="rsb-icon">&#128203;</span> Stock Summary
@@ -2965,7 +2962,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <main class="reports-content">
         <div id="rt-stock-in"  class="rt-pane"></div>
         <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
-        <div id="rt-total-inout" class="rt-pane" style="display:none;"></div>
         <div id="rt-summary"          class="rt-pane" style="display:none;"></div>
         <div id="rt-inventory-report" class="rt-pane" style="display:none;"></div>
         <div id="rt-manual-consumption" class="rt-pane" style="display:none;"></div>
@@ -9619,7 +9615,7 @@ function printStockReport() {
 // for opening balance, then IN/OUT/balance buckets across the chosen range
 // (monthly OR weekly), then totals (consumption, current stock, weight) and
 // projections (stock required next period, total imports).
-let stockSummaryState = { paperType: 'bleach board', search: '', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+let stockSummaryState = { paperType: 'bleach board', search: '', period: 'custom', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
 
 // Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
 // {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
@@ -10180,8 +10176,10 @@ function printInventoryReport() {
 }
 
 function openStockSummary() {
-  // Default to last 5 months ending today, monthly granularity, first paper type.
-  // Only initialize date defaults on first open (from === '') — preserving
+  // Default to last 5 months ending today, monthly granularity, first paper
+  // type actually in use (not the old hardcoded PAPERS[0] — that list was
+  // missing sticker/local paper/off-white, see invDistinct below). Only
+  // initialize date defaults on first open (from === '') — preserving
   // filters across tab switches keeps the user's context.
   if (!stockSummaryState.from) {
     const today = new Date();
@@ -10189,11 +10187,17 @@ function openStockSummary() {
     const iso = localDateISO;
     stockSummaryState.from = iso(start);
     stockSummaryState.to   = iso(today);
-    if (!stockSummaryState.paperType) stockSummaryState.paperType = PAPERS[0];
+    if (!stockSummaryState.paperType) stockSummaryState.paperType = invDistinct('paper_type')[0] || '';
   }
   const pane = document.getElementById('rt-summary');
   if (!pane) return;
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${p===stockSummaryState.paperType?' selected':''}>${esc(p)}</option>`).join('');
+  // Paper types actually in inventory (same source the Inventory tab's own
+  // filter uses) instead of the old static PAPERS list, which was missing
+  // sticker / local paper / off-white — items of those types silently never
+  // had a way to be selected here. "All paper types" (value '') is new too.
+  const paperOpts = invDistinct('paper_type').map(p => `<option value="${esc(p)}"${p===stockSummaryState.paperType?' selected':''}>${esc(p)}</option>`).join('');
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+    .map(([v, l]) => `<option value="${v}"${stockSummaryState.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Stock Summary</h2>
@@ -10206,22 +10210,31 @@ function openStockSummary() {
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
         <div class="dash-flbl">Paper Type</div>
-        <select class="filter" id="ss-paper-type" onchange="setSummaryPaperType(this.value)">${paperOpts}</select>
+        <select class="filter" id="ss-paper-type" onchange="setSummaryPaperType(this.value)">
+          <option value=""${stockSummaryState.paperType?'':' selected'}>All paper types</option>
+          ${paperOpts}
+        </select>
       </div>
       <div style="min-width:220px;">
         <div class="dash-flbl">Search</div>
         <div class="search-wrap">
-          <input type="text" id="ss-search" value="${esc(stockSummaryState.search || '')}" placeholder="Size, gsm, brand…" oninput="setSummarySearch(this.value)">
+          <input type="text" id="ss-search" value="${esc(stockSummaryState.search || '')}" placeholder="Paper type, size, gsm, brand…" oninput="setSummarySearch(this.value)">
           <span class="search-icon">&#128269;</span>
         </div>
       </div>
       <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="ss-from" value="${stockSummaryState.from}" onchange="setSummaryFrom(this.value)">
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="ss-period" onchange="setSummaryPeriod(this.value)">${periodOpts}</select>
       </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="ss-to" value="${stockSummaryState.to}" onchange="setSummaryTo(this.value)">
+      <div id="ss-custom-wrap" style="display:${stockSummaryState.period==='custom'?'flex':'none'};gap:14px;">
+        <div>
+          <div class="dash-flbl">From</div>
+          <input class="filter" type="date" id="ss-from" value="${stockSummaryState.from}" onchange="setSummaryFrom(this.value)">
+        </div>
+        <div>
+          <div class="dash-flbl">To</div>
+          <input class="filter" type="date" id="ss-to" value="${stockSummaryState.to}" onchange="setSummaryTo(this.value)">
+        </div>
       </div>
       <div>
         <div class="dash-flbl">Group by</div>
@@ -10240,6 +10253,17 @@ function setSummaryPaperType(v) { stockSummaryState.paperType = v; loadStockSumm
 function setSummaryFrom(v)      { stockSummaryState.from = v; loadStockSummary(); }
 function setSummaryTo(v)        { stockSummaryState.to   = v; loadStockSummary(); }
 function setSummaryGranularity(v){stockSummaryState.granularity = v; renderStockSummary(); }
+function setSummaryPeriod(v) {
+  stockSummaryState.period = v;
+  const wrap = document.getElementById('ss-custom-wrap');
+  if (wrap) wrap.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v === 'custom') return; // keep whatever From/To are already set until the user picks new ones
+  const { from, to } = periodToDateRange(v, stockSummaryState.from, stockSummaryState.to);
+  stockSummaryState.from = from; stockSummaryState.to = to;
+  const fromEl = document.getElementById('ss-from'); if (fromEl) fromEl.value = from;
+  const toEl   = document.getElementById('ss-to');   if (toEl)   toEl.value   = to;
+  loadStockSummary();
+}
 let _ssSearchTimer = null;
 function setSummarySearch(v) {
   stockSummaryState.search = String(v || '').trim();
@@ -10262,9 +10286,17 @@ async function loadStockSummary() {
       api('GET', '/api/inventory/transactions?raw=1'),
       api('GET', '/api/imports?status=pending'),
     ]);
-    stockSummaryState.txs     = allTxs.filter(t => t.paper_type === stockSummaryState.paperType);
-    stockSummaryState.items   = inventory.filter(i => i.paper_type === stockSummaryState.paperType);
-    stockSummaryState.imports = imports.filter(i => i.paper_type === stockSummaryState.paperType);
+    // Empty paperType ("All paper types") means no paper_type filter at all.
+    // Offcut items are excluded here — this report is about ordering more
+    // FRESH paper, which offcut isn't; its own movement already has a
+    // dedicated report (Offcut Consumption). Every fresh item of the
+    // selected type(s) is kept regardless of whether it has moved at all,
+    // so a paper that's never had a transaction still shows a zero row
+    // instead of silently not appearing.
+    const pt = stockSummaryState.paperType;
+    stockSummaryState.txs     = allTxs.filter(t => !pt || t.paper_type === pt);
+    stockSummaryState.items   = inventory.filter(i => (!pt || i.paper_type === pt) && !i.is_offcut);
+    stockSummaryState.imports = imports.filter(i => !pt || i.paper_type === pt);
     renderStockSummary();
   } catch (e) {
     if (el) el.innerHTML = 'Error: ' + esc(e.message);
@@ -10276,22 +10308,24 @@ async function loadStockSummary() {
 // Each row has: item, opening, periods (array of {in, out, balance}), totalOut,
 // stockNow, weightKg, requiredNext, importPkts, importKg.
 function computeSummaryRows() {
-  const { paperType, from, to, granularity, txs, imports } = stockSummaryState;
-  // Free-text search — narrows the paper type's items down to one (or a
-  // few) so the user can pull up and print just a single size/gsm/brand's
-  // record instead of every item under that paper type.
-  const search = (stockSummaryState.search || '').toLowerCase();
-  const items = search
-    ? stockSummaryState.items.filter(i =>
-        String(i.size    || '').toLowerCase().includes(search) ||
-        String(i.gsm     || '').toLowerCase().includes(search) ||
-        String(i.brand   || '').toLowerCase().includes(search) ||
-        String(i.supplier|| '').toLowerCase().includes(search)
-      )
+  const { from, to, granularity, txs, imports } = stockSummaryState;
+  // Free-text search — narrows the items down to one (or a few) so the user
+  // can pull up and print just a single size/gsm/brand's record. Matched
+  // against ALL of an item's fields joined into one string, word-by-word
+  // (every typed word must appear somewhere), not "the whole search string
+  // must appear in one single field" — that older check meant something
+  // like "22x28 230" (size + gsm, spanning two different fields) could never
+  // match anything even though the item genuinely exists, since neither the
+  // size field alone nor the gsm field alone contains that whole phrase.
+  const searchWords = (stockSummaryState.search || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const items = searchWords.length
+    ? stockSummaryState.items.filter(i => {
+        const hay = [i.paper_type, i.size, i.gsm, i.brand, i.supplier].filter(Boolean).join(' ').toLowerCase();
+        return searchWords.every(w => hay.includes(w));
+      })
     : stockSummaryState.items;
   const buckets = buildSummaryBuckets(from, to, granularity);
   const fromD = new Date(from + 'T00:00:00');
-  const ps    = packetSize(paperType);
   // Track which imports got attributed to an inventory row, so we can flag
   // any orphans (e.g. an import booked with blank/mismatched size/gsm/brand
   // that doesn't link to any item). Surfaced under the table as a warning.
@@ -10310,6 +10344,10 @@ function computeSummaryRows() {
     return true;
   };
   const rows  = items.map(it => {
+    // Packet/ream size and weight are properties of the ITEM's own paper
+    // type, not the (possibly empty, "All paper types") filter — matters
+    // once "All" mixes packet-type and ream-type papers in one table.
+    const ps = packetSize(it.paper_type);
     const itemTxs = txs.filter(t => t.item_id === it.id);
     // Opening balance (in sheets) = sum of EVERY change (movement +
     // corrections + reversals) recorded BEFORE the from date — the true
@@ -10337,7 +10375,7 @@ function computeSummaryRows() {
     // Total Consumption — sum of OUT across buckets.
     const totalOutSheets = periods.reduce((a, p) => a + p.out, 0);
     const stockNowSheets = it.current_balance || 0;
-    const wPerPack = packWeightKg(paperType, it.size, it.gsm);
+    const wPerPack = packWeightKg(it.paper_type, it.size, it.gsm);
     // Pending imports for this item. Prefer the inventory_item_id the
     // server stored at import time (most reliable), and fall back to a
     // normalized paper_type + size + gsm + brand match for legacy or
@@ -10379,6 +10417,7 @@ function computeSummaryRows() {
     const balDiffPkts = (stockNowSheets - lastBucketBalSheets) / ps;
     return {
       item: it,
+      unit: packetUnitLabel(it.paper_type),
       openingPkts: openingSheets / ps,
       periods: periods.map(p => ({ in: p.in / ps, out: p.out / ps, balance: p.balance / ps })),
       totalOutPkts:   totalOutSheets / ps,
@@ -10403,10 +10442,14 @@ function computeSummaryRows() {
   // collapse into a single summary row whose numbers are the sum across
   // brands. is_offcut is kept separate — an offcut and a fresh sheet at the
   // same dimensions are still two different rows.
-  const groupedRows = aggregateSummaryRowsByGsmSize(rows, paperType);
-  // Sort: GSM ascending (numeric), then size — width then height, numeric-aware
-  // so "9x12" comes before "10x15" rather than after.
+  const groupedRows = aggregateSummaryRowsByGsmSize(rows);
+  // Sort: Paper Type (only matters in "All paper types" view — a no-op
+  // otherwise, since every row already shares one type), then GSM ascending
+  // (numeric), then size — width then height, numeric-aware so "9x12" comes
+  // before "10x15" rather than after.
   groupedRows.sort((a, b) => {
+    const at = String(a.item.paper_type||''), bt = String(b.item.paper_type||'');
+    if (at !== bt) return at.localeCompare(bt);
     const ag = parseFloat(a.item.gsm) || 0, bg = parseFloat(b.item.gsm) || 0;
     if (ag !== bg) return ag - bg;
     const ad = parseSizeInches(a.item.size) || { w: 0, h: 0 };
@@ -10423,15 +10466,20 @@ function computeSummaryRows() {
   return { rows: groupedRows, buckets, orphanImports };
 }
 
-// Collapse per-item rows into one row per (gsm, size, is_offcut) group. All
-// numeric columns are summed; brands are joined with " / " for the display.
-// The Weight / Import (kg) / Required (kg) columns are recomputed from the
-// aggregated packet counts (same formula as the per-item rows) since items
-// in a group share size+gsm and therefore share weight-per-pack.
-function aggregateSummaryRowsByGsmSize(rows, paperType) {
+// Collapse per-item rows into one row per (paper_type, gsm, size, is_offcut)
+// group. All numeric columns are summed; brands are joined with " / " for
+// the display. The Weight / Import (kg) / Required (kg) columns are
+// recomputed from the aggregated packet counts (same formula as the
+// per-item rows) since items in a group share paper_type+size+gsm and
+// therefore share weight-per-pack. paper_type is part of the key (not just
+// carried along) so that, in "All paper types" view, two unrelated items
+// that happen to share a gsm+size (e.g. bleach board 230gsm 22x28 and some
+// other type at the same dimensions) never get summed into one misleading
+// row — they only ever merge when they're actually the same paper.
+function aggregateSummaryRowsByGsmSize(rows) {
   const groups = new Map();
   for (const r of rows) {
-    const key = `${r.item.gsm || ''}|${r.item.size || ''}|${r.item.is_offcut ? '1' : '0'}`;
+    const key = `${r.item.paper_type || ''}|${r.item.gsm || ''}|${r.item.size || ''}|${r.item.is_offcut ? '1' : '0'}`;
     if (!groups.has(key)) {
       groups.set(key, {
         item: {
@@ -10442,6 +10490,7 @@ function aggregateSummaryRowsByGsmSize(rows, paperType) {
           cut_from_size: r.item.cut_from_size,
           brand: '',          // filled at the end from the brands set
         },
+        unit: r.unit,
         _brands: [],
         openingPkts: 0,
         totalOutPkts: 0,
@@ -10559,30 +10608,40 @@ function fmtSignedKg(n) {
 
 function renderStockSummary() {
   const { paperType } = stockSummaryState;
+  const isAll = !paperType;
   const { rows, buckets, orphanImports } = computeSummaryRows();
   const el = document.getElementById('ss-content');
   if (!el) return;
   if (!rows.length) {
+    const scope = isAll ? 'items' : `"${esc(paperType)}" items`;
     el.innerHTML = stockSummaryState.search
-      ? `<div class="empty">No "${esc(paperType)}" items match "${esc(stockSummaryState.search)}".</div>`
-      : `<div class="empty">No inventory items of type "${esc(paperType)}".</div>`;
+      ? `<div class="empty">No ${scope} match "${esc(stockSummaryState.search)}".</div>`
+      : `<div class="empty">No inventory ${isAll ? 'items' : `items of type "${esc(paperType)}"`}.</div>`;
     return;
   }
-  const unit = packetUnitLabel(paperType); // "Packets" or "Reams"
   // Header — two rows so each period column has IN / OUT / Balance under one period label.
   const periodHeaders = buckets.map(b =>
     `<th colspan="3" style="text-align:center;background:var(--bg2);">${esc(b.label)}</th>`).join('');
   const periodSubHeaders = buckets.map(() =>
     `<th>IN</th><th>OUT</th><th>Bal</th>`).join('');
+  // Paper Type / Unit columns only appear in "All paper types" view — in the
+  // normal single-type view they'd just repeat the same value on every row
+  // (the summary line above the table already says which type this is).
+  const typeCell = (r) => isAll ? `<td>${esc(r.item.paper_type || '—')}</td>` : '';
+  const unitCell = (r) => isAll ? `<td>${esc(r.unit)}</td>` : '';
+  const typeTh = isAll ? '<th rowspan="2">Paper Type</th>' : '';
+  const unitTh = isAll ? '<th rowspan="2">Unit</th>' : '';
   const tbody = rows.map(r => {
     const periodCells = r.periods.map(p =>
       `<td style="text-align:right;color:#166534;font-weight:600;">${fmtPkts(p.in)}</td>
        <td style="text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(p.out)}</td>
        <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
     return `<tr class="row-hover-red">
+      ${typeCell(r)}
       <td>${esc(r.item.gsm || '—')}</td>
       <td>${esc(r.item.size || '—')}</td>
       <td class="brand-upper">${esc(r.item.brand || '—')}</td>
+      ${unitCell(r)}
       <td style="text-align:right;">${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
       <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
@@ -10595,15 +10654,19 @@ function renderStockSummary() {
       <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
+  const scopeLabel = isAll ? 'All paper types' : esc(paperType);
+  const unitLabel = isAll ? 'units vary by row' : `units: ${esc(packetUnitLabel(paperType).toLowerCase())}`;
   el.innerHTML = `
-    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${esc(paperType)} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · units: ${esc(unit.toLowerCase())}</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${scopeLabel} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · ${unitLabel}</div>
     <div class="report-scroll-wrap">
     <table class="ledger-table" style="font-size:12px;min-width:max-content;">
       <thead>
         <tr>
+          ${typeTh}
           <th rowspan="2">GSM</th>
           <th rowspan="2">Size (in)</th>
           <th rowspan="2">Brand(s)</th>
+          ${unitTh}
           <th rowspan="2">Opening</th>
           ${periodHeaders}
           <th rowspan="2">Total Out</th>
@@ -10643,8 +10706,8 @@ function renderStockSummary() {
 // Print version — landscape A4, same numbers but with company header.
 function printStockSummary() {
   const { paperType, from, to, granularity } = stockSummaryState;
+  const isAll = !paperType;
   const { rows, buckets } = computeSummaryRows();
-  const unit = packetUnitLabel(paperType);
   const periodHeaders = buckets.map(b =>
     `<th colspan="3" style="border:1px solid #000;padding:3px;text-align:center;background:#eee;">${esc(b.label)}</th>`).join('');
   const periodSubHeaders = buckets.map(() =>
@@ -10653,13 +10716,19 @@ function printStockSummary() {
      <th style="border:1px solid #000;padding:3px;background:#eee;">Bal</th>`).join('');
   const tdL = 'style="border:1px solid #000;padding:3px;"';
   const tdR = 'style="border:1px solid #000;padding:3px;text-align:right;"';
+  const typeTd = (r) => isAll ? `<td ${tdL}>${esc(r.item.paper_type || '—')}</td>` : '';
+  const unitTd = (r) => isAll ? `<td ${tdL}>${esc(r.unit)}</td>` : '';
+  const typeTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Paper Type</th>' : '';
+  const unitTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Unit</th>' : '';
   const body = rows.map(r => {
     const periodCells = r.periods.map(p =>
       `<td style="border:1px solid #000;padding:3px;text-align:right;color:#166534;"><b>${fmtPkts(p.in)}</b></td><td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(p.out)}</b></td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
     return `<tr>
+      ${typeTd(r)}
       <td ${tdL}>${esc(r.item.gsm || '—')}</td>
       <td ${tdL}>${esc(r.item.size || '—')}</td>
       <td ${tdL} style="border:1px solid #000;padding:3px;text-transform:uppercase;letter-spacing:0.03em;">${esc(r.item.brand || '—')}</td>
+      ${unitTd(r)}
       <td ${tdR}>${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
       <td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(r.totalOutPkts)}</b></td>
@@ -10679,20 +10748,22 @@ function printStockSummary() {
         <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
         <div>
           <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Stock Summary — ${esc(paperType)}</div>
+          <div style="font-size:10pt;">Stock Summary — ${isAll ? 'All Paper Types' : esc(paperType)}</div>
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
           <div><b>From:</b> ${esc(from)} &nbsp; <b>To:</b> ${esc(to)}</div>
-          <div><b>Group by:</b> ${granularity} &nbsp; <b>Units:</b> ${esc(unit)}</div>
+          <div><b>Group by:</b> ${granularity}${isAll ? '' : ` &nbsp; <b>Units:</b> ${esc(packetUnitLabel(paperType))}`}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
       ${rows.length ? `
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr>
+          ${typeTh}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">GSM</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Size (in)</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Brand(s)</th>
+          ${unitTh}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Opening</th>
           ${periodHeaders}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Out</th>
@@ -10706,7 +10777,7 @@ function printStockSummary() {
         </tr>
         <tr>${periodSubHeaders}</tr>
         ${body}
-      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items of this paper type.</div>'}
+      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
@@ -10724,21 +10795,26 @@ function printStockSummary() {
 async function exportStockSummary() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const { paperType, from, to, granularity } = stockSummaryState;
+  const isAll = !paperType;
   const { rows, buckets } = computeSummaryRows();
   if (!rows.length) { notify('Nothing to export — no items in this view.'); return; }
-  const unit = packetUnitLabel(paperType);
-  // Header: fixed columns + IN/OUT/Bal triplet per bucket.
-  const header = ['GSM', 'Size', 'Brand(s)', `Opening (${unit})`];
+  // Single-type view keeps the unit baked into each header label (e.g.
+  // "Opening (Packets)") same as always; "All paper types" mixes packet-
+  // and ream-based papers, so units move to their own per-row column
+  // instead and the headers drop the now-ambiguous suffix.
+  const unit = isAll ? '' : packetUnitLabel(paperType);
+  const qty = (label) => isAll ? label : `${label} (${unit})`;
+  const header = [...(isAll ? ['Paper Type'] : []), 'GSM', 'Size', 'Brand(s)', ...(isAll ? ['Unit'] : []), qty('Opening')];
   for (const b of buckets) {
     header.push(`${b.label} IN`, `${b.label} OUT`, `${b.label} Bal`);
   }
-  header.push(`Total Out (${unit})`, `Stock Now (${unit})`, 'Weight (kg)',
-              `Pending Import (${unit})`, `After Import (${unit})`, 'Import (kg)',
-              `Status (${unit})`, 'Status (kg)');
+  header.push(qty('Total Out'), qty('Stock Now'), 'Weight (kg)',
+              qty('Pending Import'), qty('After Import'), 'Import (kg)',
+              qty('Status'), 'Status (kg)');
   const aoa = [header];
   const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
   for (const r of rows) {
-    const row = [r.item.gsm || '', r.item.size || '', r.item.brand || '', round2(r.openingPkts)];
+    const row = [...(isAll ? [r.item.paper_type || ''] : []), r.item.gsm || '', r.item.size || '', r.item.brand || '', ...(isAll ? [r.unit] : []), round2(r.openingPkts)];
     for (const p of r.periods) row.push(round2(p.in), round2(p.out), round2(p.balance));
     row.push(round2(r.totalOutPkts), round2(r.stockNowPkts), round2(r.weightKg),
              round2(r.pendingImportPkts), round2(r.afterImportPkts), round2(r.importKg),
@@ -10752,7 +10828,7 @@ async function exportStockSummary() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Summary');
   const stamp = localDateISO();
-  const typeTag = paperType.replace(/\s+/g, '-').toLowerCase();
+  const typeTag = isAll ? 'all' : paperType.replace(/\s+/g, '-').toLowerCase();
   XLSX.writeFile(wb, `supreme-art-summary-${typeTag}-${stamp}.xlsx`);
   notify('Exported!');
 }
@@ -13837,14 +13913,13 @@ function exitReportsGroup() {
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['stock-in', 'stock-out', 'total-inout', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
+  const inlinePanes = ['stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
   if (name === 'stock-in')        openStockMovementPane('in');
   if (name === 'stock-out')       openStockMovementPane('out');
-  if (name === 'total-inout')     openTotalInOutPane();
   if (name === 'manual-consumption') openManualConsumptionPane();
   if (name === 'offcut-consumption') openOffcutConsumptionPane();
   if (name === 'summary')         openStockSummary();
@@ -14666,328 +14741,6 @@ function printStockTotal(direction) {
         </tr>
         ${bodyRows}
       </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No transactions in this period.</div>'}
-    </div>`;
-  const area = document.getElementById('print-area');
-  area.innerHTML = html;
-  const imgs = Array.from(area.querySelectorAll('img'));
-  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
-  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
-    window.print();
-    setTimeout(() => { area.innerHTML = ''; }, 500);
-  });
-}
-
-// ── Total In/Out ──────────────────────────────────────────────
-// One card per inventory item (every item, even ones with zero movement),
-// showing its identity + Current Balance + Weight once, with a scrollable
-// transaction ledger (Date/In/Out/Reason/Job No./Challan No.) underneath —
-// so a busy item's long history doesn't push everything else off-screen.
-// Fetches ALL transactions (both directions) for the selected period once;
-// Paper Type / search / offcut are then pure client-side filters over which
-// item cards show, while the period is what actually scopes each card's
-// transaction list.
-const totalInOutState = { period: 'month', from: '', to: '', paperType: '', search: '', offcut: '', rows: [] };
-
-function openTotalInOutPane() {
-  const state = totalInOutState;
-  const pane  = document.getElementById('rt-total-inout');
-  if (!pane) return;
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
-    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
-  pane.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-      <h2 style="margin:0;font-size:20px;">Total In/Out</h2>
-      <span style="color:var(--text2);font-size:12px;">Every item, its current balance, and its full in/out ledger for the selected period.</span>
-      <div style="margin-left:auto;display:flex;gap:8px;">
-        <button class="btn btn-sm" onclick="exportTotalInOut()">&#128202; Export to Excel</button>
-        <button class="btn btn-sm" onclick="printTotalInOut()">&#128424; Print Report</button>
-      </div>
-    </div>
-    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
-      <div>
-        <div class="dash-flbl">Search item</div>
-        <input class="filter" type="text" id="tio-search" value="${esc(state.search || '')}"
-               placeholder="Paper type, brand, size…"
-               oninput="setTioSearch(this.value)"
-               style="min-width:170px;">
-      </div>
-      <div>
-        <div class="dash-flbl">Paper Type</div>
-        <select class="filter" id="tio-paper-type" onchange="setTioPaperType(this.value)">
-          <option value="">All paper types</option>
-          ${paperOpts}
-        </select>
-      </div>
-      <div>
-        <div class="dash-flbl">Offcut</div>
-        <select class="filter" id="tio-offcut" onchange="setTioOffcut(this.value)">
-          <option value="">All (fresh + offcut)</option>
-          <option value="fresh"${state.offcut==='fresh'?' selected':''}>Fresh only</option>
-          <option value="offcut"${state.offcut==='offcut'?' selected':''}>Offcut only</option>
-        </select>
-      </div>
-      <div>
-        <div class="dash-flbl">Period</div>
-        <select class="filter" id="tio-period" onchange="setTioPeriod(this.value)">${periodOpts}</select>
-      </div>
-      <div id="tio-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
-        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="tio-from" value="${state.from}" onchange="setTioCustom()"></div>
-        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="tio-to" value="${state.to}" onchange="setTioCustom()"></div>
-      </div>
-      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetTioFilters()">Reset filters</button>
-    </div>
-    <div id="tio-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
-    <div id="tio-content" style="font-size:13px;color:var(--text);">Loading…</div>
-  `;
-  loadTotalInOut();
-}
-
-function setTioPeriod(v) {
-  totalInOutState.period = v;
-  const custom = document.getElementById('tio-custom');
-  if (custom) custom.style.display = v === 'custom' ? 'flex' : 'none';
-  if (v !== 'custom') loadTotalInOut();
-}
-function setTioCustom() {
-  const state = totalInOutState;
-  state.from = document.getElementById('tio-from').value;
-  state.to   = document.getElementById('tio-to').value;
-  if (state.from && state.to) loadTotalInOut();
-}
-function setTioPaperType(v) { totalInOutState.paperType = v; renderTotalInOut(); }
-function setTioOffcut(v)    { totalInOutState.offcut    = v; renderTotalInOut(); }
-let _tioSearchTimer = null;
-function setTioSearch(v) {
-  totalInOutState.search = String(v || '').trim();
-  clearTimeout(_tioSearchTimer);
-  _tioSearchTimer = setTimeout(renderTotalInOut, 200);
-}
-function resetTioFilters() {
-  const state = totalInOutState;
-  state.paperType = ''; state.search = ''; state.offcut = '';
-  const pt = document.getElementById('tio-paper-type'); if (pt) pt.value = '';
-  const sr = document.getElementById('tio-search');     if (sr) sr.value = '';
-  const oc = document.getElementById('tio-offcut');     if (oc) oc.value = '';
-  renderTotalInOut();
-}
-
-async function loadTotalInOut() {
-  const state = totalInOutState;
-  const { from, to } = periodToDateRange(state.period, state.from, state.to);
-  const qs = new URLSearchParams({ direction: 'all', include_offcut_manual: '1', include_offcut_auto: '1' });
-  if (from) qs.set('from', from);
-  if (to)   qs.set('to',   to);
-  try {
-    state.rows = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
-    renderTotalInOut();
-  } catch (e) {
-    const el = document.getElementById('tio-content');
-    if (el) el.innerHTML = 'Error: ' + esc(e.message);
-  }
-}
-
-// One row per (item, transaction) — items with nothing in the period still
-// get one row apiece with blank transaction columns, so "every item, even
-// zero movement" holds for the card list AND for export/print, not just
-// the on-screen view.
-function computeTotalInOutRows() {
-  const state = totalInOutState;
-  const searchL = state.search.toLowerCase();
-  const items = inventory.filter(it => {
-    if (state.paperType && it.paper_type !== state.paperType) return false;
-    if (state.offcut === 'fresh'  && it.is_offcut)  return false;
-    if (state.offcut === 'offcut' && !it.is_offcut) return false;
-    if (searchL) {
-      const hay = [it.paper_type, it.brand, it.size, it.gsm].filter(Boolean).join(' ').toLowerCase();
-      if (!hay.includes(searchL)) return false;
-    }
-    return true;
-  }).sort((a, b) => {
-    if (a.paper_type !== b.paper_type) return String(a.paper_type||'').localeCompare(String(b.paper_type||''));
-    const ag = parseFloat(a.gsm) || 0, bg = parseFloat(b.gsm) || 0;
-    if (ag !== bg) return ag - bg;
-    if ((a.size||'') !== (b.size||'')) return String(a.size||'').localeCompare(String(b.size||''));
-    return String(a.brand||'').localeCompare(String(b.brand||''));
-  });
-  const byItem = new Map();
-  for (const t of state.rows) {
-    if (!t.item_id) continue;
-    if (!byItem.has(t.item_id)) byItem.set(t.item_id, []);
-    byItem.get(t.item_id).push(t);
-  }
-  return items.map(it => {
-    const txs = (byItem.get(it.id) || []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const ps = packetSize(it.paper_type);
-    const unit = packetUnitLabel(it.paper_type).toLowerCase();
-    const bal = it.current_balance || 0;
-    const wPerPack = packWeightKg(it.paper_type, it.size, it.gsm);
-    const balKg = wPerPack !== null ? wPerPack * (bal / ps) : null;
-    let totalIn = 0, totalOut = 0;
-    for (const t of txs) { if (t.change > 0) totalIn += t.change; else totalOut += -t.change; }
-    return { item: it, txs, ps, unit, bal, balKg, totalIn, totalOut };
-  });
-}
-
-function renderTotalInOut() {
-  const groups = computeTotalInOutRows();
-  const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
-  const grandIn  = groups.reduce((a, g) => a + g.totalIn, 0);
-  const grandOut = groups.reduce((a, g) => a + g.totalOut, 0);
-  const totalTxCount = groups.reduce((a, g) => a + g.txs.length, 0);
-  const tile = (label, value, c, sub) =>
-    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
-       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
-       <div style="font-size:22px;font-weight:600;color:${c};margin-top:2px;line-height:1.1;">${value}</div>
-       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
-     </div>`;
-  const summaryEl = document.getElementById('tio-summary');
-  if (summaryEl) summaryEl.innerHTML =
-      tile('Items', groups.length.toLocaleString(), 'var(--text)')
-    + tile('Total In', fmt(grandIn) + ' sheets', '#166534')
-    + tile('Total Out', fmt(grandOut) + ' sheets', '#A32D2D')
-    + tile('Transactions', totalTxCount.toLocaleString(), 'var(--text)');
-
-  const contentEl = document.getElementById('tio-content');
-  if (!contentEl) return;
-  if (!groups.length) { contentEl.innerHTML = '<div class="empty">No items match this filter.</div>'; return; }
-
-  // One flat table, one row per (item, transaction) — same shape as every
-  // other report here (Stock In/Out etc.) instead of a separate card per
-  // item. Current Balance / Weight are item-level facts, so they repeat
-  // down the item's rows rather than sitting in a one-off header — same
-  // convention Stock In/Out's own "Current Balance" column already uses.
-  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
-  const rows = groups.map(g => {
-    const it = g.item;
-    const itemLabel = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand].filter(Boolean).map(esc).join(' · ');
-    const offcutTag = it.is_offcut ? ' <span style="display:inline-block;background:#DBEAFE;color:#1D4ED8;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;vertical-align:middle;">OFFCUT</span>' : '';
-    const itemCell = `${itemLabel || '(unnamed item)'}${offcutTag}`;
-    const balCell = `${fmt(g.bal/g.ps)} ${g.unit}<br><span style="color:var(--text2);font-size:11px;">${g.bal.toLocaleString()} sheets</span>`;
-    const weightCell = g.balKg === null ? '<span style="color:var(--text3)">—</span>' : `${fmt(g.balKg)} kg`;
-    if (!g.txs.length) {
-      return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
-        <td style="padding:8px 10px;">${itemCell}</td>
-        <td colspan="4" style="padding:8px 10px;text-align:center;color:var(--text3);font-style:italic;">No transactions in this period.</td>
-        <td style="padding:8px 10px;">${balCell}</td>
-        <td style="padding:8px 10px;">${weightCell}</td>
-        <td></td><td></td>
-      </tr>`;
-    }
-    return g.txs.map(t => {
-      const inCell  = t.change > 0 ? `<span style="color:#166534;font-weight:600;">${fmt(t.change)} sh</span>`  : '<span style="color:var(--text3)">—</span>';
-      const outCell = t.change < 0 ? `<span style="color:#A32D2D;font-weight:600;">${fmt(-t.change)} sh</span>` : '<span style="color:var(--text3)">—</span>';
-      return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
-        <td style="padding:8px 10px;">${itemCell}</td>
-        <td style="padding:8px 10px;white-space:nowrap;">${fmtDMYT(t.created_at)}</td>
-        <td style="padding:8px 10px;">${inCell}</td>
-        <td style="padding:8px 10px;">${outCell}</td>
-        <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
-        <td style="padding:8px 10px;">${balCell}</td>
-        <td style="padding:8px 10px;">${weightCell}</td>
-        <td style="padding:8px 10px;">${txJobCellHtml(t)}</td>
-        <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
-      </tr>`;
-    }).join('');
-  }).join('');
-
-  contentEl.innerHTML = `<div class="report-scroll-wrap">
-    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead>
-        <tr style="background:var(--bg2);">
-          <th ${th}>Item</th><th ${th}>Date</th><th ${th}>In</th><th ${th}>Out</th><th ${th}>Reason</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Job No.</th><th ${th}>Challan No.</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-    </div>`;
-}
-
-async function exportTotalInOut() {
-  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
-  const groups = computeTotalInOutRows();
-  if (!groups.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['Paper Type', 'Size', 'GSM', 'Brand', 'Offcut', 'Current Balance (sheets)', 'Weight of Current Balance (kg)', 'Date', 'In (sheets)', 'Out (sheets)', 'Reason', 'Job No.', 'Challan No.'];
-  const aoa = [header];
-  for (const g of groups) {
-    const it = g.item;
-    const base = [it.paper_type, it.size, it.gsm, it.brand, it.is_offcut ? 'Yes' : 'No', g.bal, g.balKg === null ? '' : +g.balKg.toFixed(2)];
-    if (!g.txs.length) { aoa.push([...base, '', '', '', '', '', '']); continue; }
-    for (const t of g.txs) {
-      aoa.push([...base, fmtDMYT(t.created_at), t.change > 0 ? t.change : '', t.change < 0 ? -t.change : '',
-        t.reason || '', t.job_id ? `E-${t.job_id}` : extractManualJobCardNo(t.notes), t.challan_no || '']);
-    }
-  }
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = header.map((h, i) => ({ wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2 }));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Total In-Out');
-  XLSX.writeFile(wb, `supreme-art-total-inout-${localDateISO()}.xlsx`);
-  notify('Exported!');
-}
-
-function printTotalInOut() {
-  const groups = computeTotalInOutRows();
-  const state = totalInOutState;
-  const { from, to } = periodToDateRange(state.period, state.from, state.to);
-  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', all:'All Time', custom:'Custom range'})[state.period] || state.period;
-  const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
-  const tdL = 'style="border:1px solid #000;padding:3px 5px;"';
-  const tdR = 'style="border:1px solid #000;padding:3px 5px;text-align:right;"';
-  // Same flat, one-row-per-transaction shape as the on-screen table — Item /
-  // Current Balance / Weight repeat down each item's rows rather than a
-  // one-off header per item.
-  const bodyRows = groups.map(g => {
-    const it = g.item;
-    const label = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand, it.is_offcut ? '(offcut)' : ''].filter(Boolean).join(' · ');
-    const balCell = `${fmt(g.bal)} sheets`;
-    const weightCell = g.balKg === null ? '—' : `${fmt(g.balKg)} kg`;
-    if (!g.txs.length) {
-      return `<tr>
-        <td ${tdL}>${esc(label)}</td>
-        <td ${tdL} colspan="4" style="border:1px solid #000;padding:3px 5px;text-align:center;font-style:italic;">No transactions in this period.</td>
-        <td ${tdL}>${balCell}</td>
-        <td ${tdL}>${weightCell}</td>
-        <td ${tdL}></td><td ${tdL}></td>
-      </tr>`;
-    }
-    return g.txs.map(t => `<tr>
-        <td ${tdL}>${esc(label)}</td>
-        <td ${tdL}>${fmtDMYT(t.created_at)}</td>
-        <td ${tdR}>${t.change > 0 ? fmt(t.change) : '—'}</td>
-        <td ${tdR}>${t.change < 0 ? fmt(-t.change) : '—'}</td>
-        <td ${tdL}>${esc(t.reason||'')}</td>
-        <td ${tdL}>${balCell}</td>
-        <td ${tdL}>${weightCell}</td>
-        <td ${tdL}>${t.job_id ? 'E-'+t.job_id : esc(extractManualJobCardNo(t.notes))}</td>
-        <td ${tdL}>${esc(t.challan_no||'')}</td>
-      </tr>`).join('');
-  }).join('');
-  const html = `
-    <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:11pt;">Total In/Out Report</div>
-        </div>
-        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
-      </div>
-      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
-        <tr>
-          <td style="padding:2px 8px 2px 0;"><b>Period:</b> ${periodLabel}</td>
-          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>Items:</b> ${groups.length}</td>
-        </tr>
-      </table>
-      ${groups.length ? `
-      <table style="width:100%;font-size:8pt;border-collapse:collapse;">
-        <tr style="background:#eee;">
-          <th ${tdL}>Item</th><th ${tdL}>Date</th><th ${tdL}>In</th><th ${tdL}>Out</th><th ${tdL}>Reason</th><th ${tdL}>Current Balance</th><th ${tdL}>Weight</th><th ${tdL}>Job No.</th><th ${tdL}>Challan No.</th>
-        </tr>
-        ${bodyRows}
-      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
