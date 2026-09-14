@@ -2892,12 +2892,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <button class="report-card" onclick="openReportsGroup('stocks-group')">
         <div class="report-card-icon">&#128200;</div>
         <div class="report-card-title">Board IN/OUT</div>
-        <div class="report-card-desc">Every stock-in and stock-out movement, with date and paper-type filters. Pick a direction from the sidebar inside.</div>
-      </button>
-      <button class="report-card" onclick="openReportsGroup('analysis-group')">
-        <div class="report-card-icon">&#128203;</div>
-        <div class="report-card-title">Inventory Report</div>
-        <div class="report-card-desc">Stock Summary — per-paper-type position with opening balance, in/out, after-import, and required-next.</div>
+        <div class="report-card-desc">Every stock-in and stock-out movement (with a Totals filter for each), Stock Summary, Current Balance Summary, and Total In/Out. Pick a report from the sidebar inside.</div>
       </button>
       <button class="report-card" onclick="openImportsPage()">
         <div class="report-card-icon">&#128666;</div>
@@ -2935,12 +2930,15 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rt="stock-out" onclick="setReportsTab('stock-out')">
           <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Stock Out
         </button>
-        <div class="rsb-section">Totals</div>
-        <button class="rsb-item" data-rt="total-in" onclick="setReportsTab('total-in')">
-          <span class="rsb-icon" style="color:#166534;">&#8595;</span> Total Stock In
+        <button class="rsb-item" data-rt="total-inout" onclick="setReportsTab('total-inout')">
+          <span class="rsb-icon" style="color:#7c3aed;">&#8645;</span> Total In/Out
         </button>
-        <button class="rsb-item" data-rt="total-out" onclick="setReportsTab('total-out')">
-          <span class="rsb-icon" style="color:#A32D2D;">&#8593;</span> Total Stock Out
+        <div class="rsb-section">Analysis</div>
+        <button class="rsb-item" data-rt="summary" onclick="setReportsTab('summary')">
+          <span class="rsb-icon">&#128203;</span> Stock Summary
+        </button>
+        <button class="rsb-item" data-rt="inventory-report" onclick="setReportsTab('inventory-report')">
+          <span class="rsb-icon">&#128230;</span> Current Balance Summary
         </button>
         <div class="rsb-section superadmin-only-report">Manual</div>
         <button class="rsb-item superadmin-only-report" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
@@ -2953,8 +2951,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <main class="reports-content">
         <div id="rt-stock-in"  class="rt-pane"></div>
         <div id="rt-stock-out" class="rt-pane" style="display:none;"></div>
-        <div id="rt-total-in"  class="rt-pane" style="display:none;"></div>
-        <div id="rt-total-out" class="rt-pane" style="display:none;"></div>
+        <div id="rt-total-inout" class="rt-pane" style="display:none;"></div>
+        <div id="rt-summary"          class="rt-pane" style="display:none;"></div>
+        <div id="rt-inventory-report" class="rt-pane" style="display:none;"></div>
         <div id="rt-manual-consumption" class="rt-pane" style="display:none;"></div>
         <div id="rt-offcut-consumption" class="rt-pane" style="display:none;"></div>
       </main>
@@ -2974,27 +2973,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       </aside>
       <main class="reports-content">
         <div id="rt-imports" class="rt-pane"></div>
-      </main>
-    </div>
-  </div>
-
-  <!-- Analysis group — sidebar nav: Stock Summary + Inventory Report.
-       Both render inline (no more modal). -->
-  <div id="analysis-group" class="reports-group" style="display:none;">
-    <div class="reports-layout">
-      <aside class="reports-sidebar">
-        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
-        <div class="rsb-section">Analysis</div>
-        <button class="rsb-item active" data-rt="summary" onclick="setReportsTab('summary')">
-          <span class="rsb-icon">&#128203;</span> Stock Summary
-        </button>
-        <button class="rsb-item" data-rt="inventory-report" onclick="setReportsTab('inventory-report')">
-          <span class="rsb-icon">&#128230;</span> Current Balance Summary
-        </button>
-      </aside>
-      <main class="reports-content">
-        <div id="rt-summary"          class="rt-pane"></div>
-        <div id="rt-inventory-report" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -13825,7 +13803,7 @@ async function emptyTrash() {
 // directly from the card.
 
 // Show one of the grouped views, hide the landing and other groups.
-// Pass the wrapper id ('stocks-group' or 'analysis-group').
+// Pass the wrapper id (e.g. 'stocks-group', 'jobs-group', 'trash-group').
 function openReportsGroup(groupId) {
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'none';
@@ -13835,7 +13813,6 @@ function openReportsGroup(groupId) {
   // Default each group to its first pane on entry so the user sees data
   // immediately rather than an empty sidebar+blank area.
   if (groupId === 'stocks-group')   setReportsTab('stock-in');
-  if (groupId === 'analysis-group') setReportsTab('summary');
   if (groupId === 'jobs-group')     setReportsTab('jobs-report');
   if (groupId === 'trash-group')    setReportsTab('trash-jobs');
   requestAnimationFrame(syncReportsFlowIndicators);
@@ -13857,15 +13834,14 @@ function exitReportsGroup() {
 function setReportsTab(name) {
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['stock-in', 'stock-out', 'total-in', 'total-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
+  const inlinePanes = ['stock-in', 'stock-out', 'total-inout', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
   if (name === 'stock-in')        openStockMovementPane('in');
   if (name === 'stock-out')       openStockMovementPane('out');
-  if (name === 'total-in')        openStockTotalPane('in');
-  if (name === 'total-out')       openStockTotalPane('out');
+  if (name === 'total-inout')     openTotalInOutPane();
   if (name === 'manual-consumption') openManualConsumptionPane();
   if (name === 'offcut-consumption') openOffcutConsumptionPane();
   if (name === 'summary')         openStockSummary();
@@ -13886,9 +13862,13 @@ function setReportsTab(name) {
 // Inline versions of the old Stock Report modal, one per direction. Filters:
 // paper type + period (today/week/month/custom). Each direction owns its own
 // state so flipping between tabs doesn't lose your filters.
+// viewMode: 'list' (one row per transaction) or 'total' (one row per item,
+// aggregated) — the Totals view used to be its own sidebar tab; it's now a
+// filter toggle inside Stock In / Stock Out so the two share one set of
+// paper-type/size/gsm/period/challan filters instead of two independent ones.
 const stockMovementStates = {
-  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [] },
-  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [] },
+  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
+  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
 };
 
 // Per-direction bulk selection. Independent sets so flipping tabs keeps the
@@ -14037,15 +14017,22 @@ function openStockMovementPane(direction) {
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">${title}</h2>
       <span style="color:var(--text2);font-size:12px;">${direction === 'in' ? 'Every stock addition (deliveries, imports received, opening balances).' : 'Every stock deduction (job consumption, manual adjustments).'}</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
-        <button class="btn btn-sm" onclick="exportStockMovement('${direction}')">&#128202; Export to Excel</button>
-        <button class="btn btn-sm" onclick="printStockMovement('${direction}')">&#128424; Print Report</button>
+        <button class="btn btn-sm" onclick="exportCurrentMovement('${direction}')">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printCurrentMovement('${direction}')">&#128424; Print Report</button>
       </div>
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">View</div>
+        <div id="sm-${direction}-view-toggle" style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+          <button type="button" class="btn btn-sm${state.viewMode!=='total'?' btn-primary':''}" data-mode="list" style="border:none;border-radius:0;" onclick="setMovementViewMode('${direction}','list')">List</button>
+          <button type="button" class="btn btn-sm${state.viewMode==='total'?' btn-primary':''}" data-mode="total" style="border:none;border-radius:0;border-left:1px solid var(--border);" onclick="setMovementViewMode('${direction}','total')" title="One row per item, totalled over the selected filters/period">Totals</button>
+        </div>
+      </div>
       <div>
         <div class="dash-flbl">Paper Type</div>
         <select class="filter" id="sm-${direction}-paper-type" onchange="setMovementPaperType('${direction}', this.value)">
@@ -14072,7 +14059,7 @@ function openStockMovementPane(direction) {
                oninput="setMovementChallan('${direction}', this.value)"
                style="min-width:140px;">
       </div>
-      <div>
+      <div id="sm-${direction}-jobcard-wrap" style="display:${state.viewMode==='total'?'none':'block'};">
         <div class="dash-flbl">Job Card No.</div>
         <input class="filter" type="text" id="sm-${direction}-jobcard" value="${esc(state.jobCard || '')}"
                placeholder="E-254 or manual no."
@@ -14086,10 +14073,56 @@ function openStockMovementPane(direction) {
       </div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetMovementFilters('${direction}')">Reset filters</button>
     </div>
-    <div id="sm-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
-    <div id="sm-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
+    <div id="sm-${direction}-list-wrap" style="display:${state.viewMode==='total'?'none':'block'};">
+      <div id="sm-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+      <div id="sm-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
+    </div>
+    <div id="sm-${direction}-total-wrap" style="display:${state.viewMode==='total'?'block':'none'};">
+      <div id="st-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+      <div id="st-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
+    </div>
   `;
   loadStockMovement(direction);
+  if (state.viewMode === 'total') syncStockTotalFromMovement(direction);
+}
+
+// Totals view is a filter toggle on the same pane now, not its own tab —
+// switches which wrap is visible and (re)builds the totals side from the
+// SAME filters/rows as the list side, so the two never show different
+// numbers for what looks like one report with a view switch.
+function setMovementViewMode(dir, mode) {
+  const state = stockMovementStates[dir];
+  if (state.viewMode === mode) return;
+  state.viewMode = mode;
+  const listWrap  = document.getElementById(`sm-${dir}-list-wrap`);
+  const totalWrap = document.getElementById(`sm-${dir}-total-wrap`);
+  const jobcardWrap = document.getElementById(`sm-${dir}-jobcard-wrap`);
+  if (listWrap)    listWrap.style.display    = mode === 'list'  ? 'block' : 'none';
+  if (totalWrap)   totalWrap.style.display   = mode === 'total' ? 'block' : 'none';
+  if (jobcardWrap) jobcardWrap.style.display = mode === 'total' ? 'none'  : 'block';
+  const toggle = document.getElementById(`sm-${dir}-view-toggle`);
+  if (toggle) toggle.querySelectorAll('button').forEach(b => b.classList.toggle('btn-primary', b.dataset.mode === mode));
+  if (mode === 'total') syncStockTotalFromMovement(dir);
+}
+
+// Mirrors Stock In/Out's own paper-type/size/gsm/period/challan filters
+// into stockTotalStates (kept as its own object purely so
+// computeStockTotalRows/renderStockTotal/export/print didn't need a
+// rewrite) and reuses the already-fetched rows — no second network call.
+function syncStockTotalFromMovement(dir) {
+  const src = stockMovementStates[dir];
+  const dst = stockTotalStates[dir];
+  dst.period = src.period; dst.from = src.from; dst.to = src.to;
+  dst.paperType = src.paperType; dst.size = src.size; dst.gsm = src.gsm;
+  dst.challan = src.challan; dst.rows = src.rows;
+  renderStockTotal(dir);
+}
+
+function exportCurrentMovement(dir) {
+  return stockMovementStates[dir].viewMode === 'total' ? exportStockTotal(dir) : exportStockMovement(dir);
+}
+function printCurrentMovement(dir) {
+  return stockMovementStates[dir].viewMode === 'total' ? printStockTotal(dir) : printStockMovement(dir);
 }
 
 function setMovementPaperType(dir, v) {
@@ -14100,18 +14133,21 @@ function setMovementPaperType(dir, v) {
   state.paperType = v; state.size = ''; state.gsm = '';
   stockMovementSel[dir].clear();
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+  if (state.viewMode === 'total') syncStockTotalFromMovement(dir);
 }
 function setMovementSize(dir, v) {
   stockMovementStates[dir].size = v;
   stockMovementSel[dir].clear();
   const state = stockMovementStates[dir];
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+  if (state.viewMode === 'total') syncStockTotalFromMovement(dir);
 }
 function setMovementGsm(dir, v) {
   stockMovementStates[dir].gsm = v;
   stockMovementSel[dir].clear();
   const state = stockMovementStates[dir];
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+  if (state.viewMode === 'total') syncStockTotalFromMovement(dir);
 }
 // Challan filter is server-side (URL param), so a change re-fetches
 // the report. Debounced lightly to avoid a fetch per keystroke.
@@ -14148,6 +14184,7 @@ function resetMovementFilters(dir) {
   stockMovementSel[dir].clear();
   const pt = document.getElementById(`sm-${dir}-paper-type`); if (pt) pt.value = '';
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
+  if (state.viewMode === 'total') syncStockTotalFromMovement(dir);
 }
 function setMovementPeriod(dir, v) {
   stockMovementStates[dir].period = v;
@@ -14212,6 +14249,7 @@ async function loadStockMovement(direction) {
     const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     state.rows = txs;
     renderStockMovement(direction, from, to);
+    if (state.viewMode === 'total') syncStockTotalFromMovement(direction);
   } catch (e) {
     document.getElementById(`sm-${direction}-content`).innerHTML = 'Error: ' + esc(e.message);
   }
@@ -14418,146 +14456,19 @@ function renderStockMovement(direction, from, to) {
   renderStockMovementBulkBar(direction);
 }
 
-// ── Total In / Total Out panes ───────────────────────────────
-// Same underlying ledger as Stock In / Stock Out, but aggregated to one
-// row per paper item (Paper Type / Size / GSM / Brand(s)) instead of one
-// row per transaction — the "how much of X moved in this window" view.
-// Separate state from stockMovementStates so filtering here never
-// disturbs the raw per-transaction tabs.
+// ── Totals view (Stock In / Stock Out) ───────────────────────
+// Same underlying ledger as the List view, aggregated to one row per
+// paper item (Paper Type / Size / GSM / Brand(s)) instead of one row per
+// transaction — the "how much of X moved in this window" view. Used to be
+// its own sidebar tab with its own filters/fetch; now it's a view-mode
+// toggle on Stock In / Stock Out (see setMovementViewMode /
+// syncStockTotalFromMovement), sharing that pane's filters and rows. Kept
+// as its own state object purely so this aggregation code didn't need a
+// rewrite — syncStockTotalFromMovement is the only place that touches it.
 const stockTotalStates = {
   in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
   out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', rows: [] },
 };
-
-function openStockTotalPane(direction) {
-  const state = stockTotalStates[direction];
-  const pane  = document.getElementById('rt-total-' + direction);
-  const title = direction === 'in' ? 'Total Stock In' : 'Total Stock Out';
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
-    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
-  pane.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-      <h2 style="margin:0;font-size:20px;">${title}</h2>
-      <span style="color:var(--text2);font-size:12px;">Every paper item's total ${direction === 'in' ? 'received' : 'consumed'} in the selected window — one row per item.</span>
-      <div style="margin-left:auto;display:flex;gap:8px;">
-        <button class="btn btn-sm" onclick="exportStockTotal('${direction}')">&#128202; Export to Excel</button>
-        <button class="btn btn-sm" onclick="printStockTotal('${direction}')">&#128424; Print Report</button>
-      </div>
-    </div>
-    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
-      <div>
-        <div class="dash-flbl">Paper Type</div>
-        <select class="filter" id="st-${direction}-paper-type" onchange="setTotalPaperType('${direction}', this.value)">
-          <option value="">All paper types</option>
-          ${paperOpts}
-        </select>
-      </div>
-      <div>
-        <div class="dash-flbl">Size</div>
-        <select class="filter" id="st-${direction}-size" onchange="setTotalSize('${direction}', this.value)"><option value="">All sizes</option></select>
-      </div>
-      <div>
-        <div class="dash-flbl">GSM</div>
-        <select class="filter" id="st-${direction}-gsm" onchange="setTotalGsm('${direction}', this.value)"><option value="">All GSM</option></select>
-      </div>
-      <div>
-        <div class="dash-flbl">Period</div>
-        <select class="filter" id="st-${direction}-period" onchange="setTotalPeriod('${direction}', this.value)">${periodOpts}</select>
-      </div>
-      <div>
-        <div class="dash-flbl">Challan No.</div>
-        <input class="filter" type="text" id="st-${direction}-challan" value="${esc(state.challan || '')}"
-               placeholder="Any challan"
-               oninput="setTotalChallan('${direction}', this.value)"
-               style="min-width:140px;">
-      </div>
-      <div id="st-${direction}-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
-        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="st-${direction}-from" value="${state.from}" onchange="setTotalCustom('${direction}')"></div>
-        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="st-${direction}-to" value="${state.to}" onchange="setTotalCustom('${direction}')"></div>
-      </div>
-      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetTotalFilters('${direction}')">Reset filters</button>
-    </div>
-    <div id="st-${direction}-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
-    <div id="st-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
-  `;
-  loadStockTotal(direction);
-}
-
-function setTotalPaperType(dir, v) {
-  const state = stockTotalStates[dir];
-  state.paperType = v; state.size = ''; state.gsm = '';
-  renderStockTotal(dir);
-}
-function setTotalSize(dir, v) { stockTotalStates[dir].size = v; renderStockTotal(dir); }
-function setTotalGsm(dir, v)  { stockTotalStates[dir].gsm  = v; renderStockTotal(dir); }
-let _stChallanTimer = { in: null, out: null };
-function setTotalChallan(dir, v) {
-  stockTotalStates[dir].challan = String(v || '').trim();
-  clearTimeout(_stChallanTimer[dir]);
-  _stChallanTimer[dir] = setTimeout(() => loadStockTotal(dir), 250);
-}
-function resetTotalFilters(dir) {
-  const state = stockTotalStates[dir];
-  state.paperType = ''; state.size = ''; state.gsm = '';
-  const pt = document.getElementById(`st-${dir}-paper-type`); if (pt) pt.value = '';
-  renderStockTotal(dir);
-}
-function setTotalPeriod(dir, v) {
-  stockTotalStates[dir].period = v;
-  const custom = document.getElementById(`st-${dir}-custom`);
-  if (custom) custom.style.display = v === 'custom' ? 'flex' : 'none';
-  if (v !== 'custom') loadStockTotal(dir);
-}
-function setTotalCustom(dir) {
-  const state = stockTotalStates[dir];
-  state.from = document.getElementById(`st-${dir}-from`).value;
-  state.to   = document.getElementById(`st-${dir}-to`).value;
-  if (state.from && state.to) loadStockTotal(dir);
-}
-
-// Repopulate Size + GSM dropdowns from the loaded rows, narrowed by the
-// active paper-type filter — same pattern as refreshMovementFilterOptions.
-function refreshTotalFilterOptions(direction) {
-  const state = stockTotalStates[direction];
-  const subset = state.paperType ? state.rows.filter(t => t.paper_type === state.paperType) : state.rows;
-  const sizes = [...new Set(subset.map(t => t.item_size).filter(Boolean))].sort();
-  const gsms  = [...new Set(subset.map(t => t.item_gsm ).filter(Boolean))].sort((a,b) => (+a) - (+b));
-  const sizeEl = document.getElementById(`st-${direction}-size`);
-  const gsmEl  = document.getElementById(`st-${direction}-gsm`);
-  if (sizeEl) {
-    if (state.size && !sizes.includes(state.size)) state.size = '';
-    sizeEl.innerHTML = '<option value="">All sizes</option>' +
-      sizes.map(s => `<option value="${esc(s)}"${state.size===s?' selected':''}>${esc(s)}</option>`).join('');
-  }
-  if (gsmEl) {
-    if (state.gsm && !gsms.map(String).includes(String(state.gsm))) state.gsm = '';
-    gsmEl.innerHTML = '<option value="">All GSM</option>' +
-      gsms.map(g => `<option value="${esc(g)}"${String(state.gsm)===String(g)?' selected':''}>${esc(g)}</option>`).join('');
-  }
-}
-
-async function loadStockTotal(direction) {
-  const state = stockTotalStates[direction];
-  const { from, to } = periodToDateRange(state.period, state.from, state.to);
-  const qs = new URLSearchParams();
-  if (from) qs.set('from', from);
-  if (to)   qs.set('to',   to);
-  qs.set('direction', direction);
-  if (state.challan) qs.set('challan', state.challan);
-  // Same reasoning as loadStockMovement: a manual job-card issuance
-  // against an offcut item is a real stock-out and must count toward
-  // the total, not just show up in Manual Consumption.
-  qs.set('include_offcut_manual', '1');
-  try {
-    const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
-    state.rows = txs;
-    renderStockTotal(direction);
-  } catch (e) {
-    const el = document.getElementById(`st-${direction}-content`);
-    if (el) el.innerHTML = 'Error: ' + esc(e.message);
-  }
-}
 
 // Aggregate the loaded + filtered rows into one row per (paper type, size,
 // gsm, fresh/offcut) — sums the transaction count, moved quantity, and the
@@ -14619,8 +14530,9 @@ function computeStockTotalRows(direction) {
 }
 
 function renderStockTotal(direction) {
-  const state = stockTotalStates[direction];
-  refreshTotalFilterOptions(direction);
+  // Size/GSM dropdown repopulation is handled by the shared Stock In/Out
+  // filter bar's own renderStockMovement → refreshMovementFilterOptions
+  // (same underlying rows) — this view no longer owns separate dropdowns.
   const { itemRows, rawTxs, from, to, total, totalKg, totalCards, totalReams } = computeStockTotalRows(direction);
   const color = direction === 'in' ? '#166534' : '#A32D2D';
   const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
@@ -14751,6 +14663,307 @@ function printStockTotal(direction) {
         </tr>
         ${bodyRows}
       </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No transactions in this period.</div>'}
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
+// ── Total In/Out ──────────────────────────────────────────────
+// One card per inventory item (every item, even ones with zero movement),
+// showing its identity + Current Balance + Weight once, with a scrollable
+// transaction ledger (Date/In/Out/Reason/Job No./Challan No.) underneath —
+// so a busy item's long history doesn't push everything else off-screen.
+// Fetches ALL transactions (both directions) for the selected period once;
+// Paper Type / search / offcut are then pure client-side filters over which
+// item cards show, while the period is what actually scopes each card's
+// transaction list.
+const totalInOutState = { period: 'month', from: '', to: '', paperType: '', search: '', offcut: '', rows: [] };
+
+function openTotalInOutPane() {
+  const state = totalInOutState;
+  const pane  = document.getElementById('rt-total-inout');
+  if (!pane) return;
+  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+    .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Total In/Out</h2>
+      <span style="color:var(--text2);font-size:12px;">Every item, its current balance, and its full in/out ledger for the selected period.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportTotalInOut()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printTotalInOut()">&#128424; Print Report</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Search item</div>
+        <input class="filter" type="text" id="tio-search" value="${esc(state.search || '')}"
+               placeholder="Paper type, brand, size…"
+               oninput="setTioSearch(this.value)"
+               style="min-width:170px;">
+      </div>
+      <div>
+        <div class="dash-flbl">Paper Type</div>
+        <select class="filter" id="tio-paper-type" onchange="setTioPaperType(this.value)">
+          <option value="">All paper types</option>
+          ${paperOpts}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Offcut</div>
+        <select class="filter" id="tio-offcut" onchange="setTioOffcut(this.value)">
+          <option value="">All (fresh + offcut)</option>
+          <option value="fresh"${state.offcut==='fresh'?' selected':''}>Fresh only</option>
+          <option value="offcut"${state.offcut==='offcut'?' selected':''}>Offcut only</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="tio-period" onchange="setTioPeriod(this.value)">${periodOpts}</select>
+      </div>
+      <div id="tio-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="tio-from" value="${state.from}" onchange="setTioCustom()"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="tio-to" value="${state.to}" onchange="setTioCustom()"></div>
+      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetTioFilters()">Reset filters</button>
+    </div>
+    <div id="tio-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    <div id="tio-content" style="font-size:13px;color:var(--text);">Loading…</div>
+  `;
+  loadTotalInOut();
+}
+
+function setTioPeriod(v) {
+  totalInOutState.period = v;
+  const custom = document.getElementById('tio-custom');
+  if (custom) custom.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') loadTotalInOut();
+}
+function setTioCustom() {
+  const state = totalInOutState;
+  state.from = document.getElementById('tio-from').value;
+  state.to   = document.getElementById('tio-to').value;
+  if (state.from && state.to) loadTotalInOut();
+}
+function setTioPaperType(v) { totalInOutState.paperType = v; renderTotalInOut(); }
+function setTioOffcut(v)    { totalInOutState.offcut    = v; renderTotalInOut(); }
+let _tioSearchTimer = null;
+function setTioSearch(v) {
+  totalInOutState.search = String(v || '').trim();
+  clearTimeout(_tioSearchTimer);
+  _tioSearchTimer = setTimeout(renderTotalInOut, 200);
+}
+function resetTioFilters() {
+  const state = totalInOutState;
+  state.paperType = ''; state.search = ''; state.offcut = '';
+  const pt = document.getElementById('tio-paper-type'); if (pt) pt.value = '';
+  const sr = document.getElementById('tio-search');     if (sr) sr.value = '';
+  const oc = document.getElementById('tio-offcut');     if (oc) oc.value = '';
+  renderTotalInOut();
+}
+
+async function loadTotalInOut() {
+  const state = totalInOutState;
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  const qs = new URLSearchParams({ direction: 'all', include_offcut_manual: '1', include_offcut_auto: '1' });
+  if (from) qs.set('from', from);
+  if (to)   qs.set('to',   to);
+  try {
+    state.rows = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
+    renderTotalInOut();
+  } catch (e) {
+    const el = document.getElementById('tio-content');
+    if (el) el.innerHTML = 'Error: ' + esc(e.message);
+  }
+}
+
+// One row per (item, transaction) — items with nothing in the period still
+// get one row apiece with blank transaction columns, so "every item, even
+// zero movement" holds for the card list AND for export/print, not just
+// the on-screen view.
+function computeTotalInOutRows() {
+  const state = totalInOutState;
+  const searchL = state.search.toLowerCase();
+  const items = inventory.filter(it => {
+    if (state.paperType && it.paper_type !== state.paperType) return false;
+    if (state.offcut === 'fresh'  && it.is_offcut)  return false;
+    if (state.offcut === 'offcut' && !it.is_offcut) return false;
+    if (searchL) {
+      const hay = [it.paper_type, it.brand, it.size, it.gsm].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(searchL)) return false;
+    }
+    return true;
+  }).sort((a, b) => {
+    if (a.paper_type !== b.paper_type) return String(a.paper_type||'').localeCompare(String(b.paper_type||''));
+    const ag = parseFloat(a.gsm) || 0, bg = parseFloat(b.gsm) || 0;
+    if (ag !== bg) return ag - bg;
+    if ((a.size||'') !== (b.size||'')) return String(a.size||'').localeCompare(String(b.size||''));
+    return String(a.brand||'').localeCompare(String(b.brand||''));
+  });
+  const byItem = new Map();
+  for (const t of state.rows) {
+    if (!t.item_id) continue;
+    if (!byItem.has(t.item_id)) byItem.set(t.item_id, []);
+    byItem.get(t.item_id).push(t);
+  }
+  return items.map(it => {
+    const txs = (byItem.get(it.id) || []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const ps = packetSize(it.paper_type);
+    const unit = packetUnitLabel(it.paper_type).toLowerCase();
+    const bal = it.current_balance || 0;
+    const wPerPack = packWeightKg(it.paper_type, it.size, it.gsm);
+    const balKg = wPerPack !== null ? wPerPack * (bal / ps) : null;
+    let totalIn = 0, totalOut = 0;
+    for (const t of txs) { if (t.change > 0) totalIn += t.change; else totalOut += -t.change; }
+    return { item: it, txs, ps, unit, bal, balKg, totalIn, totalOut };
+  });
+}
+
+function renderTotalInOut() {
+  const groups = computeTotalInOutRows();
+  const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const grandIn  = groups.reduce((a, g) => a + g.totalIn, 0);
+  const grandOut = groups.reduce((a, g) => a + g.totalOut, 0);
+  const totalTxCount = groups.reduce((a, g) => a + g.txs.length, 0);
+  const tile = (label, value, c, sub) =>
+    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
+       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
+       <div style="font-size:22px;font-weight:600;color:${c};margin-top:2px;line-height:1.1;">${value}</div>
+       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
+     </div>`;
+  const summaryEl = document.getElementById('tio-summary');
+  if (summaryEl) summaryEl.innerHTML =
+      tile('Items', groups.length.toLocaleString(), 'var(--text)')
+    + tile('Total In', fmt(grandIn) + ' sheets', '#166534')
+    + tile('Total Out', fmt(grandOut) + ' sheets', '#A32D2D')
+    + tile('Transactions', totalTxCount.toLocaleString(), 'var(--text)');
+
+  const contentEl = document.getElementById('tio-content');
+  if (!contentEl) return;
+  if (!groups.length) { contentEl.innerHTML = '<div class="empty">No items match this filter.</div>'; return; }
+
+  contentEl.innerHTML = groups.map(g => {
+    const it = g.item;
+    const label = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand].filter(Boolean).map(esc).join(' · ');
+    const offcutTag = it.is_offcut ? ' <span style="display:inline-block;background:#DBEAFE;color:#1D4ED8;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;vertical-align:middle;">OFFCUT</span>' : '';
+    const rows = g.txs.length ? g.txs.map(t => {
+      const inCell  = t.change > 0 ? `<span style="color:#166534;font-weight:600;">${fmt(t.change)} sh</span>`  : '<span style="color:var(--text3)">—</span>';
+      const outCell = t.change < 0 ? `<span style="color:#A32D2D;font-weight:600;">${fmt(-t.change)} sh</span>` : '<span style="color:var(--text3)">—</span>';
+      return `<tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:5px 8px;white-space:nowrap;">${fmtDMYT(t.created_at)}</td>
+        <td style="padding:5px 8px;text-align:right;">${inCell}</td>
+        <td style="padding:5px 8px;text-align:right;">${outCell}</td>
+        <td style="padding:5px 8px;">${esc(t.reason||'')}</td>
+        <td style="padding:5px 8px;">${txJobCellHtml(t)}</td>
+        <td style="padding:5px 8px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="6" style="padding:10px;text-align:center;color:var(--text3);font-style:italic;">No transactions in this period.</td></tr>`;
+    return `<div style="background:#fff;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden;">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--border);">
+        <div style="font-weight:700;">${label || '(unnamed item)'}${offcutTag}</div>
+        <div style="margin-left:auto;display:flex;gap:16px;font-size:12px;">
+          <div><span style="color:var(--text2);">Current Balance:</span> <b>${fmt(g.bal/g.ps)} ${g.unit}</b> <span style="color:var(--text2);">(${g.bal.toLocaleString()} sheets)</span></div>
+          <div><span style="color:var(--text2);">Weight:</span> <b>${g.balKg===null?'—':fmt(g.balKg)+' kg'}</b></div>
+        </div>
+      </div>
+      <div style="max-height:220px;overflow-y:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead style="position:sticky;top:0;">
+            <tr style="background:var(--bg);">
+              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Date</th>
+              <th style="text-align:right;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">In</th>
+              <th style="text-align:right;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Out</th>
+              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Reason</th>
+              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Job No.</th>
+              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Challan No.</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function exportTotalInOut() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const groups = computeTotalInOutRows();
+  if (!groups.length) { notify('Nothing to export — empty filter result.'); return; }
+  const header = ['Paper Type', 'Size', 'GSM', 'Brand', 'Offcut', 'Current Balance (sheets)', 'Weight of Current Balance (kg)', 'Date', 'In (sheets)', 'Out (sheets)', 'Reason', 'Job No.', 'Challan No.'];
+  const aoa = [header];
+  for (const g of groups) {
+    const it = g.item;
+    const base = [it.paper_type, it.size, it.gsm, it.brand, it.is_offcut ? 'Yes' : 'No', g.bal, g.balKg === null ? '' : +g.balKg.toFixed(2)];
+    if (!g.txs.length) { aoa.push([...base, '', '', '', '', '', '']); continue; }
+    for (const t of g.txs) {
+      aoa.push([...base, fmtDMYT(t.created_at), t.change > 0 ? t.change : '', t.change < 0 ? -t.change : '',
+        t.reason || '', t.job_id ? `E-${t.job_id}` : extractManualJobCardNo(t.notes), t.challan_no || '']);
+    }
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({ wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Total In-Out');
+  XLSX.writeFile(wb, `supreme-art-total-inout-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+
+function printTotalInOut() {
+  const groups = computeTotalInOutRows();
+  const state = totalInOutState;
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
+  const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  const tdL = 'style="border:1px solid #000;padding:3px 5px;"';
+  const tdR = 'style="border:1px solid #000;padding:3px 5px;text-align:right;"';
+  const blocks = groups.map(g => {
+    const it = g.item;
+    const label = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand, it.is_offcut ? '(offcut)' : ''].filter(Boolean).join(' · ');
+    const rows = g.txs.length ? g.txs.map(t => `<tr>
+        <td ${tdL}>${fmtDMYT(t.created_at)}</td>
+        <td ${tdR}>${t.change > 0 ? fmt(t.change) : '—'}</td>
+        <td ${tdR}>${t.change < 0 ? fmt(-t.change) : '—'}</td>
+        <td ${tdL}>${esc(t.reason||'')}</td>
+        <td ${tdL}>${t.job_id ? 'E-'+t.job_id : esc(extractManualJobCardNo(t.notes))}</td>
+        <td ${tdL}>${esc(t.challan_no||'')}</td>
+      </tr>`).join('') : `<tr><td colspan="6" style="border:1px solid #000;padding:6px;text-align:center;font-style:italic;">No transactions in this period.</td></tr>`;
+    return `
+      <div style="margin-bottom:14px;page-break-inside:avoid;">
+        <div style="font-weight:bold;font-size:10.5pt;margin-bottom:3px;">${esc(label)} — Current Balance: ${fmt(g.bal)} sheets${g.balKg===null?'':' · '+fmt(g.balKg)+' kg'}</div>
+        <table style="width:100%;font-size:8.5pt;border-collapse:collapse;">
+          <tr style="background:#eee;">
+            <th ${tdL}>Date</th><th ${tdL}>In</th><th ${tdL}>Out</th><th ${tdL}>Reason</th><th ${tdL}>Job No.</th><th ${tdL}>Challan No.</th>
+          </tr>
+          ${rows}
+        </table>
+      </div>`;
+  }).join('');
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:11pt;">Total In/Out Report</div>
+        </div>
+        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
+      </div>
+      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
+        <tr>
+          <td style="padding:2px 8px 2px 0;"><b>Period:</b> ${periodLabel}</td>
+          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
+          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
+          <td style="padding:2px 8px;"><b>Items:</b> ${groups.length}</td>
+        </tr>
+      </table>
+      ${blocks || '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
