@@ -333,6 +333,27 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Empty by default, same as wastage_adjustment, since only Super Admin
   // gets this today.
   job_btn_adjust:          { label: 'Adjust / Un-adjust button (Wastage Adjustment)', levels: {} },
+
+  // Access Register — Inventory tab (Imports lives inside this same tab,
+  // per request, rather than its own top-level register tab). Same "not
+  // wired into any gate yet" note as the Jobs block above applies here —
+  // inventory_write/inventory_view/inventory_delete/inventory_reverse
+  // keep enforcing exactly as before in the meantime.
+  inventory_tab_access:    { label: 'Inventory tab — view the paper list', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  imports_tab_access:      { label: 'Imports — view the booked-shipments report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  inv_btn_stock_in:        { label: 'Stock In button — also covers Stock In (Bulk) and receiving a shipment in Imports', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk) and Issue Stock in the Pending Stock queue', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_offcut_issuance: { label: 'Offcut Issuance button', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_history:         { label: 'History button', levels: { admin: 'yes', ceo: 'view', production_manager: 'view', store_manager: 'yes', finance: 'view' } },
+  inv_btn_edit:            { label: 'Edit button', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_delete:          { label: 'Delete button', levels: { admin: 'yes' } },
+  inv_btn_add_offcut:      { label: 'Add Offcut button', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_add_paper:       { label: 'Add Paper button', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_add_import:      { label: 'Add Import button — also covers Edit and Cancel on an import', levels: { admin: 'yes', store_manager: 'yes' } },
+  // 'yes' = unconditional bypass; '30-day' = reversible reasons only,
+  // within the last 30 days — same tier the existing inventory_reverse
+  // group already uses, kept as this row's own extra level too.
+  inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's

@@ -26148,11 +26148,29 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_delete_delivery', type: 'button' },
   { key: 'job_btn_adjust',          type: 'button' },
 ];
+// Inventory tab — Imports lives inside here too (per request), as its own
+// tab-level view/hidden row right under Inventory's own. 'button-30day' is
+// a third row type: same 3 states as 'button' plus an extra 30-DAY tier
+// between Edit and View (mirrors the old inventory_reverse group's tier).
+const ACC_INVENTORY_TAB_ROWS = [
+  { key: 'inventory_tab_access',    type: 'tab' },
+  { key: 'imports_tab_access',      type: 'tab' },
+  { key: 'inv_btn_stock_in',        type: 'button' },
+  { key: 'inv_btn_stock_out',       type: 'button' },
+  { key: 'inv_btn_offcut_issuance', type: 'button' },
+  { key: 'inv_btn_history',         type: 'button' },
+  { key: 'inv_btn_edit',            type: 'button' },
+  { key: 'inv_btn_delete',          type: 'button' },
+  { key: 'inv_btn_add_offcut',      type: 'button' },
+  { key: 'inv_btn_add_paper',       type: 'button' },
+  { key: 'inv_btn_add_import',      type: 'button' },
+  { key: 'inv_btn_reverse',         type: 'button-30day' },
+];
 // Rows for every built tab, keyed by tab id. Add an entry here (and a
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS };
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
@@ -26163,10 +26181,15 @@ function setAccRegTab(tab) {
   if (accEl && _roleMatrixData) accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
 }
 
-const ACC_LEVEL_LABEL = { yes: 'EDIT', view: 'VIEW', hidden: 'HIDDEN', no: 'HIDDEN' };
+const ACC_LEVEL_LABEL = { yes: 'EDIT', view: 'VIEW', hidden: 'HIDDEN', no: 'HIDDEN', '30-day': '30-DAY' };
 function nextAccLevelTab(current)    { return current === 'view' ? 'hidden' : 'view'; }
 function nextAccLevelButton(current) {
   const order = ['yes', 'view', 'hidden'];
+  const idx = order.indexOf(current);
+  return order[(idx + 1) % order.length] || order[0];
+}
+function nextAccLevelButton30(current) {
+  const order = ['yes', '30-day', 'view', 'hidden'];
   const idx = order.indexOf(current);
   return order[(idx + 1) % order.length] || order[0];
 }
@@ -26182,7 +26205,7 @@ async function cycleRolePermission(key, role) {
   if (!groupDef) return;
   const rowType = ACC_ROW_TYPE[key] || 'button';
   const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'hidden';
-  const next = rowType === 'tab' ? nextAccLevelTab(current) : nextAccLevelButton(current);
+  const next = rowType === 'tab' ? nextAccLevelTab(current) : rowType === 'button-30day' ? nextAccLevelButton30(current) : nextAccLevelButton(current);
   showSaving(true);
   try {
     await api('PUT', '/api/role-permissions', { key, role, level: next });
@@ -26213,7 +26236,7 @@ function accGroupRow(matrixData, key, rowType) {
     ? esc(rawLabel)
     : `${esc(rawLabel.slice(0, sepIdx))}<span class="acc-rowlabel-sub">${esc(rawLabel.slice(sepIdx + 3))}</span>`;
   const group = (matrixData.matrix && matrixData.matrix[key]) || {};
-  const cellClass = (level) => rowType === 'tab' ? (level === 'view' ? 'allow' : 'deny') : ({ yes: 'allow', view: 'partial', hidden: 'deny' }[level] || 'deny');
+  const cellClass = (level) => rowType === 'tab' ? (level === 'view' ? 'allow' : 'deny') : ({ yes: 'allow', view: 'partial', hidden: 'deny', '30-day': 'partial' }[level] || 'deny');
   const cells = COLUMN_ROLES.map(role => {
     if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">${rowType === 'tab' ? 'VIEW' : 'EDIT'}</td>`;
     if (role === 'client') return `<td class="acc-cell deny locked" title="Client is not part of this system — see the Client View portal's own separate access">HIDDEN</td>`;
