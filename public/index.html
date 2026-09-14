@@ -14849,47 +14849,55 @@ function renderTotalInOut() {
   if (!contentEl) return;
   if (!groups.length) { contentEl.innerHTML = '<div class="empty">No items match this filter.</div>'; return; }
 
-  contentEl.innerHTML = groups.map(g => {
+  // One flat table, one row per (item, transaction) — same shape as every
+  // other report here (Stock In/Out etc.) instead of a separate card per
+  // item. Current Balance / Weight are item-level facts, so they repeat
+  // down the item's rows rather than sitting in a one-off header — same
+  // convention Stock In/Out's own "Current Balance" column already uses.
+  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const rows = groups.map(g => {
     const it = g.item;
-    const label = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand].filter(Boolean).map(esc).join(' · ');
+    const itemLabel = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand].filter(Boolean).map(esc).join(' · ');
     const offcutTag = it.is_offcut ? ' <span style="display:inline-block;background:#DBEAFE;color:#1D4ED8;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;vertical-align:middle;">OFFCUT</span>' : '';
-    const rows = g.txs.length ? g.txs.map(t => {
+    const itemCell = `${itemLabel || '(unnamed item)'}${offcutTag}`;
+    const balCell = `${fmt(g.bal/g.ps)} ${g.unit}<br><span style="color:var(--text2);font-size:11px;">${g.bal.toLocaleString()} sheets</span>`;
+    const weightCell = g.balKg === null ? '<span style="color:var(--text3)">—</span>' : `${fmt(g.balKg)} kg`;
+    if (!g.txs.length) {
+      return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+        <td style="padding:8px 10px;">${itemCell}</td>
+        <td colspan="4" style="padding:8px 10px;text-align:center;color:var(--text3);font-style:italic;">No transactions in this period.</td>
+        <td style="padding:8px 10px;">${balCell}</td>
+        <td style="padding:8px 10px;">${weightCell}</td>
+        <td></td><td></td>
+      </tr>`;
+    }
+    return g.txs.map(t => {
       const inCell  = t.change > 0 ? `<span style="color:#166534;font-weight:600;">${fmt(t.change)} sh</span>`  : '<span style="color:var(--text3)">—</span>';
       const outCell = t.change < 0 ? `<span style="color:#A32D2D;font-weight:600;">${fmt(-t.change)} sh</span>` : '<span style="color:var(--text3)">—</span>';
-      return `<tr style="border-bottom:1px solid var(--border);">
-        <td style="padding:5px 8px;white-space:nowrap;">${fmtDMYT(t.created_at)}</td>
-        <td style="padding:5px 8px;text-align:right;">${inCell}</td>
-        <td style="padding:5px 8px;text-align:right;">${outCell}</td>
-        <td style="padding:5px 8px;">${esc(t.reason||'')}</td>
-        <td style="padding:5px 8px;">${txJobCellHtml(t)}</td>
-        <td style="padding:5px 8px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
+      return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+        <td style="padding:8px 10px;">${itemCell}</td>
+        <td style="padding:8px 10px;white-space:nowrap;">${fmtDMYT(t.created_at)}</td>
+        <td style="padding:8px 10px;">${inCell}</td>
+        <td style="padding:8px 10px;">${outCell}</td>
+        <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
+        <td style="padding:8px 10px;">${balCell}</td>
+        <td style="padding:8px 10px;">${weightCell}</td>
+        <td style="padding:8px 10px;">${txJobCellHtml(t)}</td>
+        <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
       </tr>`;
-    }).join('') : `<tr><td colspan="6" style="padding:10px;text-align:center;color:var(--text3);font-style:italic;">No transactions in this period.</td></tr>`;
-    return `<div style="background:#fff;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden;">
-      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--border);">
-        <div style="font-weight:700;">${label || '(unnamed item)'}${offcutTag}</div>
-        <div style="margin-left:auto;display:flex;gap:16px;font-size:12px;">
-          <div><span style="color:var(--text2);">Current Balance:</span> <b>${fmt(g.bal/g.ps)} ${g.unit}</b> <span style="color:var(--text2);">(${g.bal.toLocaleString()} sheets)</span></div>
-          <div><span style="color:var(--text2);">Weight:</span> <b>${g.balKg===null?'—':fmt(g.balKg)+' kg'}</b></div>
-        </div>
-      </div>
-      <div style="max-height:220px;overflow-y:auto;">
-        <table style="width:100%;border-collapse:collapse;font-size:12px;">
-          <thead style="position:sticky;top:0;">
-            <tr style="background:var(--bg);">
-              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Date</th>
-              <th style="text-align:right;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">In</th>
-              <th style="text-align:right;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Out</th>
-              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Reason</th>
-              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Job No.</th>
-              <th style="text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);">Challan No.</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </div>`;
+    }).join('');
   }).join('');
+
+  contentEl.innerHTML = `<div class="report-scroll-wrap">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead>
+        <tr style="background:var(--bg2);">
+          <th ${th}>Item</th><th ${th}>Date</th><th ${th}>In</th><th ${th}>Out</th><th ${th}>Reason</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Job No.</th><th ${th}>Challan No.</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>`;
 }
 
 async function exportTotalInOut() {
@@ -14923,27 +14931,34 @@ function printTotalInOut() {
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
   const tdL = 'style="border:1px solid #000;padding:3px 5px;"';
   const tdR = 'style="border:1px solid #000;padding:3px 5px;text-align:right;"';
-  const blocks = groups.map(g => {
+  // Same flat, one-row-per-transaction shape as the on-screen table — Item /
+  // Current Balance / Weight repeat down each item's rows rather than a
+  // one-off header per item.
+  const bodyRows = groups.map(g => {
     const it = g.item;
     const label = [it.paper_type, it.size, it.gsm && (it.gsm + 'gsm'), it.brand, it.is_offcut ? '(offcut)' : ''].filter(Boolean).join(' · ');
-    const rows = g.txs.length ? g.txs.map(t => `<tr>
+    const balCell = `${fmt(g.bal)} sheets`;
+    const weightCell = g.balKg === null ? '—' : `${fmt(g.balKg)} kg`;
+    if (!g.txs.length) {
+      return `<tr>
+        <td ${tdL}>${esc(label)}</td>
+        <td ${tdL} colspan="4" style="border:1px solid #000;padding:3px 5px;text-align:center;font-style:italic;">No transactions in this period.</td>
+        <td ${tdL}>${balCell}</td>
+        <td ${tdL}>${weightCell}</td>
+        <td ${tdL}></td><td ${tdL}></td>
+      </tr>`;
+    }
+    return g.txs.map(t => `<tr>
+        <td ${tdL}>${esc(label)}</td>
         <td ${tdL}>${fmtDMYT(t.created_at)}</td>
         <td ${tdR}>${t.change > 0 ? fmt(t.change) : '—'}</td>
         <td ${tdR}>${t.change < 0 ? fmt(-t.change) : '—'}</td>
         <td ${tdL}>${esc(t.reason||'')}</td>
+        <td ${tdL}>${balCell}</td>
+        <td ${tdL}>${weightCell}</td>
         <td ${tdL}>${t.job_id ? 'E-'+t.job_id : esc(extractManualJobCardNo(t.notes))}</td>
         <td ${tdL}>${esc(t.challan_no||'')}</td>
-      </tr>`).join('') : `<tr><td colspan="6" style="border:1px solid #000;padding:6px;text-align:center;font-style:italic;">No transactions in this period.</td></tr>`;
-    return `
-      <div style="margin-bottom:14px;page-break-inside:avoid;">
-        <div style="font-weight:bold;font-size:10.5pt;margin-bottom:3px;">${esc(label)} — Current Balance: ${fmt(g.bal)} sheets${g.balKg===null?'':' · '+fmt(g.balKg)+' kg'}</div>
-        <table style="width:100%;font-size:8.5pt;border-collapse:collapse;">
-          <tr style="background:#eee;">
-            <th ${tdL}>Date</th><th ${tdL}>In</th><th ${tdL}>Out</th><th ${tdL}>Reason</th><th ${tdL}>Job No.</th><th ${tdL}>Challan No.</th>
-          </tr>
-          ${rows}
-        </table>
-      </div>`;
+      </tr>`).join('');
   }).join('');
   const html = `
     <div style="font-family:Arial,sans-serif;color:#000;">
@@ -14963,7 +14978,13 @@ function printTotalInOut() {
           <td style="padding:2px 8px;"><b>Items:</b> ${groups.length}</td>
         </tr>
       </table>
-      ${blocks || '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
+      ${groups.length ? `
+      <table style="width:100%;font-size:8pt;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th ${tdL}>Item</th><th ${tdL}>Date</th><th ${tdL}>In</th><th ${tdL}>Out</th><th ${tdL}>Reason</th><th ${tdL}>Current Balance</th><th ${tdL}>Weight</th><th ${tdL}>Job No.</th><th ${tdL}>Challan No.</th>
+        </tr>
+        ${bodyRows}
+      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
