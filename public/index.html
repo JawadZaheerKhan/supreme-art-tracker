@@ -26206,11 +26206,44 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_add_import',      type: 'button' },
   { key: 'inv_btn_reverse',         type: 'button-30day' },
 ];
+// Reports tab — every row is 2-state (view/hidden). Reports are read-only,
+// so there's no "edit" tier to give any of them.
+const ACC_REPORTS_TAB_ROWS = [
+  { key: 'reports_tab_access',              type: 'tab' },
+  { key: 'rpt_stock_in',                    type: 'tab' },
+  { key: 'rpt_stock_out',                   type: 'tab' },
+  { key: 'rpt_stock_summary',               type: 'tab' },
+  { key: 'rpt_current_balance',             type: 'tab' },
+  { key: 'rpt_offcut_consumption',          type: 'tab' },
+  { key: 'rpt_manual_job_card_consumption', type: 'tab' },
+  { key: 'rpt_jobs_report',                 type: 'tab' },
+  { key: 'rpt_production_report',           type: 'tab' },
+  { key: 'rpt_daily_production_report',     type: 'tab' },
+  { key: 'rpt_jobs_archive',                type: 'tab' },
+  { key: 'rpt_imports_archive',             type: 'tab' },
+];
+// Users tab. user_accessregister_tab_access is special-cased in
+// accGroupRow: every role except super_admin renders as a locked HIDDEN
+// cell for that one row, no matter what's saved — the Access Register
+// must stay Super-Admin-only, full stop.
+const ACC_USERS_TAB_ROWS = [
+  { key: 'user_tab_access',                type: 'tab' },
+  { key: 'user_team_tab_access',           type: 'tab' },
+  { key: 'user_btn_activity',              type: 'button' },
+  { key: 'user_btn_sessions',              type: 'button' },
+  { key: 'user_btn_change_role',           type: 'button' },
+  { key: 'user_btn_block',                 type: 'button' },
+  { key: 'user_btn_remove',                type: 'button' },
+  { key: 'user_btn_invite',                type: 'button' },
+  { key: 'user_btn_operators',             type: 'button' },
+  { key: 'user_activitylog_tab_access',    type: 'tab' },
+  { key: 'user_accessregister_tab_access', type: 'tab' },
+];
 // Rows for every built tab, keyed by tab id. Add an entry here (and a
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS };
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
@@ -26264,6 +26297,11 @@ async function cycleRolePermission(key, role) {
 // Admin always has full access; Client is never part of this system at
 // all — see roleHasPermission's hard client block server-side).
 const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'client'];
+// Rows where every role except Super Admin is force-locked to HIDDEN,
+// no matter what's saved in the DB — currently just the Access Register
+// row itself, so no role can ever grant itself (or another role) a way
+// to view or edit the register other than Super Admin.
+const ACC_SUPER_ADMIN_ONLY_ROWS = new Set(['user_accessregister_tab_access']);
 function accGroupRow(matrixData, key, rowType) {
   const def = (matrixData.groups || []).find(g => g.key === key);
   // Labels that bundle in other buttons' scope (e.g. "Edit button — also
@@ -26280,6 +26318,7 @@ function accGroupRow(matrixData, key, rowType) {
   const cells = COLUMN_ROLES.map(role => {
     if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">${rowType === 'tab' ? 'VIEW' : 'EDIT'}</td>`;
     if (role === 'client') return `<td class="acc-cell deny locked" title="Client is not part of this system — see the Client View portal's own separate access">HIDDEN</td>`;
+    if (ACC_SUPER_ADMIN_ONLY_ROWS.has(key)) return `<td class="acc-cell deny locked" title="Access Register is Super Admin only — this can't be changed">HIDDEN</td>`;
     const level = group[role] || 'hidden';
     return `<td class="acc-cell ${cellClass(level)} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
   });
