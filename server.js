@@ -5997,9 +5997,13 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // Shade cards don't get a challan from a customer PO — they ship
     // against an internally-numbered Delivery Challan (DC-01, DC-02, …)
     // that the store also writes into the physical DC register by hand.
-    // Auto-assigned only when the PM left Challan No. blank, so a
-    // deliberately-typed reference is never overwritten.
-    if (job.is_shade_card && !notes) {
+    // ALWAYS auto-assigned for a shade card, overwriting whatever the
+    // client sent: the client only ever shows this as a read-only
+    // preview (see deliveriesSection), never a free-text field to type
+    // into, and the sequence must stay gapless/collision-free to match
+    // the physical register — so this is not a "leave it alone if typed"
+    // convenience, it's the only source of truth.
+    if (job.is_shade_card) {
       const n = await nextShadeCardDcNumber(sql);
       notes = `DC-${String(n).padStart(2, '0')}`;
     }
@@ -6052,7 +6056,7 @@ app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission(
     }
     const cartons = String(req.body.cartons ?? '').trim();
     const date    = String(req.body.date    ?? '').trim() || businessDateISO();
-    const notes   = String(req.body.notes   ?? '').trim() || null;
+    let notes     = String(req.body.notes   ?? '').trim() || null;
     const poNo    = String(req.body.po_no    ?? '').trim() || null;
     const batchNo = String(req.body.batch_no ?? '').trim() || null;
     const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
@@ -6061,6 +6065,11 @@ app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission(
     }
     const eligErr = deliveryEligibilityError(job);
     if (eligErr) return res.status(400).json({ error: eligErr });
+    // Same auto-numbered Delivery Challan as the normal /deliveries route
+    // (see its comment) — every job reaching this endpoint is already
+    // shade-card-only (checked above), so this always fires.
+    const n = await nextShadeCardDcNumber(sql);
+    notes = `DC-${String(n).padStart(2, '0')}`;
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
       computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, byEmail: `${v.operator.name} (Manager)` });
     const updated = await sql`
