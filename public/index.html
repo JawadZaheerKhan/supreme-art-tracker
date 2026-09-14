@@ -19418,7 +19418,7 @@ function jobForm(j={}, opts) {
     ${specsSection(j.particulars||{}, coatings, j)}
     ${ctpSetupRow(j.particulars||{})}
     <div id="jc-particulars-wrap">${particularsTable(j.particulars||{}, j, opts.particularsOpts)}</div>
-    ${deliveriesSection(j)}
+    ${deliveriesSection(j, opts)}
     <div class="jc-extras">
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Additional notes (digital tracking only — not on printed card)</div>
       <div class="form-group"><label class="form-label">Notes / Special Instructions</label><textarea class="form-ta" id="f-notes" placeholder="Any special instructions...">${v(j.notes)}</textarea></div>
@@ -19430,8 +19430,17 @@ function jobForm(j={}, opts) {
 // job card between the particulars table and the Additional Notes box.
 // Only meaningful for saved jobs — hidden entirely on the New Job modal
 // since there's nothing to ship yet.
-function deliveriesSection(j) {
+function deliveriesSection(j, opts) {
   if (!j || !j.id) return '';
+  // Station Manager flow (see stationManagerOpenJobCard): the shared
+  // Station terminal's browser session usually isn't logged in with a
+  // delivery_write role, so canRecordDelivery() alone would hide this
+  // form entirely — the line manager's PIN is the authority here instead
+  // (verified server-side on manager-deliver), same as Machine +
+  // Particulars saves. Still shade-card only, matching the endpoint's
+  // own restriction ("Only shade-card jobs can be delivered from the
+  // Station").
+  const managerMode = !!(opts && opts.managerStationMode);
   // Shade cards ship without a PO/Batch — they're proofs, not a booked
   // production order — and are counted in Copies rather than Unit
   // Cartons. Same underlying delivery record (still stored as `cartons`,
@@ -19460,7 +19469,11 @@ function deliveriesSection(j) {
   // Pasting when the operator has recorded some pasted cartons but
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
-  const canAddDelivery = canDeliverNow(j) && !isDelivered && typeof canRecordDelivery === 'function' && canRecordDelivery();
+  const canAddDelivery = canDeliverNow(j) && !isDelivered && (
+    managerMode
+      ? !!j.is_shade_card
+      : (typeof canRecordDelivery === 'function' && canRecordDelivery())
+  );
   const isAdminUser = typeof hasPerm === 'function' && hasPerm('delivery_delete');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
@@ -19538,7 +19551,7 @@ function deliveriesSection(j) {
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Challan No.</label>
           <input type="text" id="deliv-notes" placeholder="${isShadeCard ? 'Leave blank — auto DC number' : 'e.g. CH-042'}" title="${isShadeCard ? 'Shade cards get an auto-numbered Delivery Challan (DC-01, DC-02, …) when this is left blank — the same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
-        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="recordDelivery(${j.id})">+ Record Delivery</button>
+        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>
       </div>${j.linked_job_id ? `<div style="margin-top:8px;">
         <button type="button" class="btn btn-sm" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>
       </div>` : ''}`
@@ -19696,6 +19709,32 @@ async function recordDelivery(jobId) {
     if (ix >= 0) jobs[ix] = updated;
     closeModal(); render(); notify('Delivery recorded');
     setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Station Manager equivalent of recordDelivery() — same form (see
+// deliveriesSection's managerMode branch), but posts through the
+// PIN-verified manager-deliver endpoint instead of the normal one, since
+// the shared Station terminal's session isn't necessarily logged in
+// with delivery_write. Shade-card only, enforced again server-side.
+async function recordDeliveryManager(jobId) {
+  if (!stationOperator) return;
+  const cartons = ((document.getElementById('deliv-cartons')||{}).value || '').trim();
+  const date    = ((document.getElementById('deliv-date')||{}).value || '').trim();
+  const notes   = ((document.getElementById('deliv-notes')||{}).value || '').trim();
+  const poNo    = ((document.getElementById('deliv-po')||{}).value    || '').trim();
+  const batchNo = ((document.getElementById('deliv-batch')||{}).value || '').trim();
+  const cartonsN = parseFloat(cartons);
+  if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/manager-deliver`, { pin: stationOperator.pin, cartons, date, notes, po_no: poNo, batch_no: batchNo });
+    jobs = jobs.map(x => x.id === jobId ? { ...x, ...updated } : x);
+    closeModal();
+    stationRender();
+    notify('Delivery recorded');
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -21909,42 +21948,6 @@ function openEditWithDelivery(id) {
   setTimeout(() => grab(), 120);
 }
 
-// Manager station flow: lock every field on the job card modal EXCEPT the
-// Machine dropdown and the Particulars table. Allowlist-walk pattern with a
-// MutationObserver so sections that render rows on-demand (e.g. Special
-// Colors' "+ Add Special Color") get locked too, even though they're added
-// to the DOM well after the modal opens.
-let _mgrLockObserver = null;
-function lockJobCardExceptMachineAndParticulars() {
-  const root = document.querySelector('.job-edit-modal');
-  if (!root) return;
-  const isAllowedField = el => {
-    if (el.closest('table.jc-part:not(.jc-specs):not(.jc-ctp-table)')) return true;
-    if (el.id === 'f-machine') return true;
-    return false;
-  };
-  const lockOne = el => {
-    if (isAllowedField(el)) return;
-    if (el.closest('.modal-actions')) return;
-    if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') { el.disabled = true; return; }
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
-      else el.readOnly = true;
-    }
-  };
-  const lockSubtree = node => {
-    if (node.nodeType !== 1) return;
-    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(node.tagName)) lockOne(node);
-    node.querySelectorAll && node.querySelectorAll('input, textarea, select, button').forEach(lockOne);
-  };
-  lockSubtree(root);
-  if (_mgrLockObserver) _mgrLockObserver.disconnect();
-  _mgrLockObserver = new MutationObserver(mutations => {
-    for (const m of mutations) m.addedNodes.forEach(lockSubtree);
-  });
-  _mgrLockObserver.observe(root, { childList: true, subtree: true });
-}
-
 // Adjust flow: lock every field on the job card modal except the ones
 // relevant to entering a wastage adjustment — Paper (incl. 2nd paper),
 // Cutting Size, Packets/Sheets, and the Particulars table. A plain one-time
@@ -21994,6 +21997,49 @@ function lockJobCardExceptAdjustFields() {
     for (const m of mutations) m.addedNodes.forEach(lockSubtree);
   });
   _adjLockObserver.observe(root, { childList: true, subtree: true });
+}
+
+// Manager station flow: lock every field on the job card modal EXCEPT the
+// Machine dropdown and the Particulars table. Same allowlist-walk pattern
+// as lockJobCardExceptAdjustFields() above (see its comment for why a
+// MutationObserver is needed — Special Colors etc. inject rows after the
+// modal opens). Kept as its own function/observer rather than reusing the
+// adjust one since the allowlist and trigger condition are different.
+let _mgrLockObserver = null;
+function lockJobCardExceptMachineAndParticulars() {
+  const root = document.querySelector('.job-edit-modal');
+  if (!root) return;
+  const isAllowedField = el => {
+    if (el.closest('table.jc-part:not(.jc-specs):not(.jc-ctp-table)')) return true;
+    if (el.id === 'f-machine') return true;
+    // Deliveries section — shade-card delivery goes through the
+    // PIN-verified manager-deliver endpoint (see deliveriesSection's
+    // managerMode branch / recordDeliveryManager), so its inputs and
+    // "+ Record Delivery" button must stay live even though everything
+    // else on this locked-down job card is read-only.
+    if (el.closest('.jc-deliveries')) return true;
+    return false;
+  };
+  const lockOne = el => {
+    if (isAllowedField(el)) return;
+    if (el.closest('.modal-actions')) return;
+    if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') { el.disabled = true; return; }
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+      else el.readOnly = true;
+    }
+  };
+  const lockSubtree = node => {
+    if (node.nodeType !== 1) return;
+    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(node.tagName)) lockOne(node);
+    node.querySelectorAll && node.querySelectorAll('input, textarea, select, button').forEach(lockOne);
+  };
+  lockSubtree(root);
+  if (_mgrLockObserver) _mgrLockObserver.disconnect();
+  _mgrLockObserver = new MutationObserver(mutations => {
+    for (const m of mutations) m.addedNodes.forEach(lockSubtree);
+  });
+  _mgrLockObserver.observe(root, { childList: true, subtree: true });
 }
 
 function openEdit(id, opts) {
@@ -24770,52 +24816,29 @@ async function stationManagerIssueStock(id) {
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
-// Small touch-friendly Record Delivery form for a shade-card job tile.
+// Record Delivery from the Station queue — opens the same job card used
+// everywhere else (jobForm, locked to Machine + Particulars + Deliveries
+// via lockJobCardExceptMachineAndParticulars) and scrolls the Deliveries
+// section into view, instead of a separate mini-form. That mini-form used
+// to hardcode "Unit Cartons" + PO No. + Batch No., which is the wrong
+// shape for a shade card (Copies, no PO/Batch) — the real job card's
+// deliveries section already gets this right via deliveriesSection's
+// isShadeCard handling, so there's no reason to keep a second, wrong copy
+// of the form. Submission goes through recordDeliveryManager (PIN-verified
+// manager-deliver endpoint), wired up by deliveriesSection's managerMode
+// branch.
 function stationManagerOpenDeliver(id) {
-  const j = jobs.find(x => x.id === id);
-  if (!j) return;
-  openModal(`
-    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
-      <h2 style="margin-top:0;">Record Delivery &middot; E-${id}</h2>
-      <div style="font-weight:600;margin-bottom:10px;">${esc(j.name)}</div>
-      <div class="form-group"><label class="form-label">Unit Cartons *</label>
-        <input type="number" id="smd-cartons" min="1" step="any" placeholder="e.g. 50" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
-      </div>
-      <div class="form-group"><label class="form-label">Date *</label>
-        <input type="date" id="smd-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
-      </div>
-      <div class="form-group"><label class="form-label">PO No.</label>
-        <input type="text" id="smd-po" value="${esc(j.ref || '')}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
-      </div>
-      <div class="form-group"><label class="form-label">Batch No.</label>
-        <input type="text" id="smd-batch" value="${esc(j.bno || '')}" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
-      </div>
-      <div class="form-group"><label class="form-label">Challan No.</label>
-        <input type="text" id="smd-challan" placeholder="e.g. CH-042" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;">
-      </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
-        <button class="btn" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="stationManagerSubmitDelivery(${id})">&#128666; Record Delivery</button>
-      </div>
-    </div>`);
-}
-async function stationManagerSubmitDelivery(id) {
-  if (!stationOperator) return;
-  const cartons = document.getElementById('smd-cartons')?.value || '';
-  const date    = document.getElementById('smd-date')?.value || '';
-  const poNo    = document.getElementById('smd-po')?.value || '';
-  const batchNo = document.getElementById('smd-batch')?.value || '';
-  const notes   = document.getElementById('smd-challan')?.value || '';
-  if (!parseFloat(cartons)) { notify('Enter Unit Cartons'); return; }
-  showSaving(true);
-  try {
-    const updated = await api('POST', `/api/jobs/${id}/manager-deliver`, { pin: stationOperator.pin, cartons, date, po_no: poNo, batch_no: batchNo, notes });
-    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
-    notify('Delivery recorded');
-    closeModal();
-    stationRender();
-  } catch (e) { notify('Error: ' + e.message); }
-  showSaving(false);
+  stationManagerOpenJobCard(id);
+  const grab = (tries = 0) => {
+    const el = document.getElementById('deliv-cartons');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => { try { el.focus(); } catch(_) {} }, 250);
+    } else if (tries < 20) {
+      setTimeout(() => grab(tries + 1), 60);
+    }
+  };
+  setTimeout(() => grab(), 120);
 }
 // Manager clicks a job (not a stage pill) — same job-card modal admin/PM
 // gets from the Jobs tab, reused as-is (openEdit → jobForm) so it looks and
