@@ -359,6 +359,44 @@ const ROLE_PERMISSION_DEFAULTS = {
   // within the last 30 days — same tier the existing inventory_reverse
   // group already uses, kept as this row's own extra level too.
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
+
+  // Access Register — Reports tab. All 2-state (view/hidden) — reports are
+  // read-only, there's no "edit" concept for any of them. Same "not wired
+  // into any gate yet" note applies — inventory_reports/production_reports/
+  // wastage_adjustment/trash_view keep enforcing exactly as before.
+  reports_tab_access:              { label: 'Reports tab — view the Reports landing page', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  rpt_stock_in:                    { label: 'Stock In report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  rpt_stock_out:                   { label: 'Stock Out report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  rpt_stock_summary:                { label: 'Stock Summary report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  rpt_current_balance:             { label: 'Current Balance Summary report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  rpt_offcut_consumption:          { label: 'Offcut Consumption report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  // Empty by default, same as the old wastage_adjustment group it mirrors
+  // (only Super Admin gets this today).
+  rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report', levels: {} },
+  rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  rpt_production_report:           { label: 'Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  rpt_daily_production_report:     { label: 'Daily Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  rpt_jobs_archive:                { label: 'Jobs Archive', levels: { admin: 'view', ceo: 'view' } },
+  rpt_imports_archive:             { label: 'Imports Archive', levels: { admin: 'view', ceo: 'view' } },
+
+  // Access Register — Users tab. Same "not wired into any gate yet" note
+  // applies — user_view/user_admin/operator_admin keep enforcing exactly
+  // as before. user_accessregister_tab_access is special: the client always
+  // force-locks it to HIDDEN for every role except super_admin (see
+  // accGroupRow in index.html) regardless of what's saved here, per
+  // explicit instruction that Access Register must stay Super-Admin-only
+  // no matter what. Its stored levels are therefore inert either way.
+  user_tab_access:                 { label: 'Users tab — view the Users section', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
+  user_team_tab_access:            { label: 'Team — view the Authorized Users list', levels: { admin: 'view', ceo: 'view' } },
+  user_btn_activity:               { label: "Activity button — a user's own activity feed", levels: { admin: 'yes', ceo: 'view' } },
+  user_btn_sessions:                { label: 'Sessions button', levels: { admin: 'yes', ceo: 'view' } },
+  user_btn_change_role:            { label: "Change Role — edit a user's role checkboxes", levels: { admin: 'yes' } },
+  user_btn_block:                  { label: 'Block / Unblock button', levels: { admin: 'yes' } },
+  user_btn_remove:                 { label: 'Remove button', levels: { admin: 'yes' } },
+  user_btn_invite:                 { label: 'Invite User button', levels: { admin: 'yes' } },
+  user_btn_operators:              { label: 'Operators — also covers every button in Floor Operators (add, edit, remove)', levels: { admin: 'yes', production_manager: 'yes' } },
+  user_activitylog_tab_access:     { label: 'Activity Log — view the site-wide activity feed', levels: { admin: 'view', ceo: 'view' } },
+  user_accessregister_tab_access:  { label: 'Access Register — Super Admin only; always locked hidden for every other role', levels: {} },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
