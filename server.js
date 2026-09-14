@@ -333,6 +333,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Empty by default, same as wastage_adjustment, since only Super Admin
   // gets this today.
   job_btn_adjust:          { label: 'Adjust / Un-adjust button (Wastage Adjustment)', levels: {} },
+  // Stickers is its own top-level app tab (not part of Jobs in the nav),
+  // but lives under this Jobs block in the register per request since it's
+  // job-related. Single row, not split into sub-buttons: view = can open
+  // the tab and look, edit = can also print.
+  job_btn_stickers:        { label: 'Stickers tab — open & print', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
   // Access Register — Inventory tab (Imports lives inside this same tab,
   // per request, rather than its own top-level register tab). Same "not
@@ -342,7 +347,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   inventory_tab_access:    { label: 'Inventory tab — view the paper list', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   imports_tab_access:      { label: 'Imports — view the booked-shipments report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   inv_btn_stock_in:        { label: 'Stock In button — also covers Stock In (Bulk) and receiving a shipment in Imports', levels: { admin: 'yes', store_manager: 'yes' } },
-  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk) and Issue Stock in the Pending Stock queue', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk), Issue Stock in the Pending Stock queue, and Approve/Reject a packet top-up request', levels: { admin: 'yes', store_manager: 'yes' } },
   inv_btn_offcut_issuance: { label: 'Offcut Issuance button', levels: { admin: 'yes', store_manager: 'yes' } },
   inv_btn_history:         { label: 'History button', levels: { admin: 'yes', ceo: 'view', production_manager: 'view', store_manager: 'yes', finance: 'view' } },
   inv_btn_edit:            { label: 'Edit button', levels: { admin: 'yes', store_manager: 'yes' } },
