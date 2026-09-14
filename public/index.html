@@ -10943,6 +10943,24 @@ function openImports() { openImportsPage(); }
 // call sites don't need to change at once.
 function fmtImpDate(d) { return fmtDMY(d, true); }
 
+// Does this import match an existing inventory item? Prefer the
+// inventory_item_id the server stored at import time (most reliable — set
+// once the item's been matched or auto-created), falling back to a
+// normalized paper_type + size + gsm + brand match for legacy/unlinked
+// rows. Same matching rule Stock Summary's own orphan-imports warning
+// uses (see computeSummaryRows) — kept as one shared function so the two
+// views can never disagree about which imports are "new to inventory".
+function importMatchesInventory(im) {
+  if (im.inventory_item_id != null) return inventory.some(it => it.id === im.inventory_item_id);
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  return inventory.some(it =>
+       norm(it.paper_type) === norm(im.paper_type)
+    && norm(it.size)  === norm(im.size)
+    && norm(it.gsm)   === norm(im.gsm)
+    && norm(it.brand) === norm(im.brand)
+  );
+}
+
 // Apply all active filters (status + paper type + exact-match expected and
 // booked dates) and return the visible rows in display order. Centralised so
 // the table, Print, and Excel export all see the exact same dataset.
@@ -11085,7 +11103,15 @@ function renderImportsTable() {
       ? `${received.toLocaleString()} / ${(+i.packets).toLocaleString()} ${unit} <span style="color:#1e40af;font-weight:600;">(${(+i.packets - received).toLocaleString()} remaining)</span>`
       : `${(+i.packets).toLocaleString()} ${unit}`;
     const isSel = importsBulkSel.has(i.id);
-    return `<tr data-imp-row="${i.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);">
+    // New-to-inventory: this import doesn't match any existing item (see
+    // importMatchesInventory) — it's for a paper the store hasn't stocked
+    // before, so it's worth a visual flag same as Stock Summary's orphan-
+    // imports warning already gives it, but right here in the row itself.
+    const isNew = !importMatchesInventory(i);
+    const rowStyle = isNew
+      ? 'border-bottom:1px solid var(--border);background:#fef9c3;'
+      : 'border-bottom:1px solid var(--border);';
+    return `<tr data-imp-row="${i.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="${rowStyle}"${isNew ? ' title="New to inventory — no existing item matches this paper type/size/gsm/brand yet"' : ''}>
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleImportRow(${i.id}, this.checked)"></td>
       <td style="padding:8px 10px;">${status}</td>
       <td style="padding:8px 10px;font-weight:500;">${esc(i.paper_type || '—')}</td>
@@ -11095,6 +11121,7 @@ function renderImportsTable() {
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;font-weight:600;">${qtyCell}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${weight}</td>
       <td style="padding:8px 10px;">${esc(i.supplier || '—')}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtDMYT(i.created_at))}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.booked_date))}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.expected_arrival))}</td>
       <td style="padding:8px 10px;">${esc(i.notes || '')}</td>
@@ -11108,7 +11135,9 @@ function renderImportsTable() {
   // Header checkbox state: checked only when every visible row is selected.
   const allVisSel = list.length && list.every(i => importsBulkSel.has(i.id));
   const someVisSel = !allVisSel && list.some(i => importsBulkSel.has(i.id));
+  const newCount = list.filter(i => !importMatchesInventory(i)).length;
   el.innerHTML = `<div id="imp-bulk-bar" class="bulk-actions" style="display:none;"></div>
+    ${newCount ? `<div style="margin-bottom:10px;font-size:12px;color:#92400e;"><span style="display:inline-block;width:10px;height:10px;background:#fef9c3;border:1px solid #eab308;vertical-align:middle;margin-right:6px;"></span>${newCount} import${newCount===1?'':'s'} highlighted below — new to inventory, no matching item yet.</div>` : ''}
     <div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
     <thead>
       <tr style="background:var(--bg2);">
@@ -11121,6 +11150,7 @@ function renderImportsTable() {
         <th ${thR}>Quantity</th>
         <th ${thR}>Weight</th>
         <th ${thL}>Supplier</th>
+        <th ${thL}>Added</th>
         <th ${thL}>Booked</th>
         <th ${thL}>Expected</th>
         <th ${thL}>Notes</th>
@@ -11145,7 +11175,7 @@ async function exportImports() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const { list, filterLabel } = visibleImportsForExport();
   if (!list.length) { notify('Nothing to export — no imports in this view.'); return; }
-  const header = ['Status', 'Paper Type', 'Size', 'GSM', 'Brand', 'Packets/Reams', 'Weight (kg)', 'Supplier', 'Booked', 'Expected', 'Received At', 'Notes'];
+  const header = ['Status', 'Paper Type', 'Size', 'GSM', 'Brand', 'Packets/Reams', 'Weight (kg)', 'Supplier', 'Added', 'Booked', 'Expected', 'Received At', 'Notes', 'New to Inventory'];
   const aoa = [header];
   for (const i of list) {
     aoa.push([
@@ -11157,10 +11187,12 @@ async function exportImports() {
       +(parseFloat(i.packets || 0).toFixed(2)),
       i.weight_kg === null || i.weight_kg === undefined ? '' : +(parseFloat(i.weight_kg).toFixed(2)),
       i.supplier || '',
+      i.created_at ? fmtDMYT(i.created_at) : '',
       i.booked_date || '',
       i.expected_arrival || '',
       i.received_at ? fmtDMYT(i.received_at) : '',
       i.notes || '',
+      importMatchesInventory(i) ? '' : 'Yes',
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -11181,7 +11213,9 @@ function printImports() {
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const fmt = n => n === null || n === undefined || n === '' ? '—' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
-  const tableRows = list.map(i => `<tr>
+  const tableRows = list.map(i => {
+    const rowBg = importMatchesInventory(i) ? '' : 'background:#fef9c3;';
+    return `<tr style="${rowBg}">
     <td ${tdL}>${esc((i.status || '').toUpperCase())}</td>
     <td ${tdL}>${esc(i.paper_type || '—')}</td>
     <td ${tdL}>${esc(i.size || '—')}</td>
@@ -11190,10 +11224,12 @@ function printImports() {
     <td ${tdR}>${fmt(i.packets)}</td>
     <td ${tdR}>${fmt(i.weight_kg)}</td>
     <td ${tdL}>${esc(i.supplier || '—')}</td>
+    <td ${tdL}>${esc(fmtDMY(i.created_at, true))}</td>
     <td ${tdL}>${esc(fmtDMY(i.booked_date, true))}</td>
     <td ${tdL}>${esc(fmtDMY(i.expected_arrival, true))}</td>
     <td ${tdL}>${esc(i.notes || '')}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   const html = `
     <style>@media print { @page { size: A4 landscape; margin: 0.4in; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
@@ -11218,6 +11254,7 @@ function printImports() {
           <th ${tdR}>Packets/Reams</th>
           <th ${tdR}>Weight (kg)</th>
           <th ${tdL}>Supplier</th>
+          <th ${tdL}>Added</th>
           <th ${tdL}>Booked</th>
           <th ${tdL}>Expected</th>
           <th ${tdL}>Notes</th>
