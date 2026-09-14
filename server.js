@@ -302,6 +302,29 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_view:            { label: 'View the Authorized Users list', levels: { admin: 'yes', ceo: 'view' } },
   user_admin:           { label: "Invite/create a user, edit a user's roles, or block/unblock/delete a user", levels: { admin: 'yes' } },
   client_view_preview:  { label: 'Open the internal "Client View" preview', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
+
+  // Access Register rebuild (Jobs tab only so far — Inventory/Reports/
+  // Station/Users/Client View still use the groups above until each gets
+  // its own rebuilt tab). These 12 are NOT wired into any gate yet — they
+  // exist purely so the new register's Jobs tab has something real to
+  // read/write while its design gets reviewed. job_write/job_print/
+  // job_view/job_delete above keep enforcing exactly as before in the
+  // meantime; nothing about current Jobs-tab behavior changes yet.
+  // job_tab_access is 2-state (view/hidden) — whether the Jobs tab shows
+  // at all. Every job_btn_* is 3-state (yes=Edit / view=View, disabled /
+  // hidden=not shown) — one row per button on the Jobs tab.
+  job_tab_access:          { label: 'Jobs tab — view the job list and every status tab', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
+  job_btn_edit:            { label: 'Edit button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_history:         { label: 'History button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', store_manager: 'view', finance: 'view' } },
+  job_btn_link:            { label: 'Link Job button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_print:           { label: 'Print button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
+  job_btn_block:           { label: 'Block button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_delete:          { label: 'Delete button', levels: { admin: 'yes' } },
+  job_btn_create_mil:      { label: 'Create Mil Job button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_stage_forward:   { label: 'Stage forwarding', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_record_delivery: { label: 'Record Delivery button', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
