@@ -5587,6 +5587,11 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
 // (deducts extra) or Reject (no ledger change).
 app.post('/api/jobs/:id/packets-topup', requireJobsWriter, async (req, res) => {
   try {
+    // Tighter than requireJobsWriter (which also allows production_manager)
+    // — extra-packet requests are admin / super admin only, per request.
+    if (!userHasRole(req.user, 'admin', 'super_admin')) {
+      return res.status(403).json({ error: 'Only admin or super admin can request extra packets' });
+    }
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
