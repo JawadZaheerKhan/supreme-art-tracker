@@ -372,7 +372,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_offcut_consumption:          { label: 'Offcut Consumption report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   // Empty by default, same as the old wastage_adjustment group it mirrors
   // (only Super Admin gets this today).
-  rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report', levels: {} },
+  rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
   rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_production_report:           { label: 'Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_daily_production_report:     { label: 'Daily Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
@@ -389,7 +389,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_tab_access:                 { label: 'Users tab — view the Users section', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
   user_team_tab_access:            { label: 'Team — view the Authorized Users list', levels: { admin: 'view', ceo: 'view' } },
   user_btn_activity:               { label: "Activity button — a user's own activity feed", levels: { admin: 'yes', ceo: 'view' } },
-  user_btn_sessions:                { label: 'Sessions button', levels: { admin: 'yes', ceo: 'view' } },
+  user_btn_sessions:                { label: 'Sessions button — also covers logging out one specific device', levels: { admin: 'yes', ceo: 'view' } },
   user_btn_change_role:            { label: "Change Role — edit a user's role checkboxes", levels: { admin: 'yes' } },
   user_btn_block:                  { label: 'Block / Unblock button', levels: { admin: 'yes' } },
   user_btn_remove:                 { label: 'Remove button', levels: { admin: 'yes' } },
