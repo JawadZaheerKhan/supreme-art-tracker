@@ -14203,6 +14203,14 @@ async function loadStockMovement(direction) {
   if (to)   qs.set('to',   to);
   qs.set('direction', direction);
   if (state.challan) qs.set('challan', state.challan);
+  // A manual job-card issuance against an offcut item is still a real
+  // stock-out and belongs here, not just in Manual Consumption. The
+  // server hides ALL offcut movement from this endpoint by default
+  // (it's normally a side ledger); this flag is the one carve-out that
+  // lets manual-job-card rows through regardless of the item's offcut
+  // flag. Harmless for direction=in — manual-job-card is always a
+  // deduction, so it never matches an "in" row anyway.
+  qs.set('include_offcut_manual', '1');
   try {
     const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     state.rows = txs;
@@ -14540,6 +14548,10 @@ async function loadStockTotal(direction) {
   if (to)   qs.set('to',   to);
   qs.set('direction', direction);
   if (state.challan) qs.set('challan', state.challan);
+  // Same reasoning as loadStockMovement: a manual job-card issuance
+  // against an offcut item is a real stock-out and must count toward
+  // the total, not just show up in Manual Consumption.
+  qs.set('include_offcut_manual', '1');
   try {
     const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     state.rows = txs;
