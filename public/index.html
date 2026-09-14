@@ -3241,19 +3241,24 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <button class="btn btn-sm btn-primary" id="invite-user-btn" style="margin-left:auto;display:none;" onclick="openInviteUser()">+ Invite User</button>
     </div>
     <div class="inventory-list pm-hide" id="users-list"></div>
-    <!-- Shop-floor operators (PIN roster for the Station terminal). Admin + PM can write, CEO views. -->
-    <div style="margin-top:1.5rem;">
-      <div class="toolbar" style="padding:0;">
-        <div style="font-size:14px;font-weight:600;color:var(--text);">Floor Operators <span style="font-weight:400;color:var(--text2);">— PIN roster for the Station terminal</span></div>
-        <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openOperatorModal()">+ Add Operator</button>
-      </div>
-      <div class="inventory-list" id="operators-list" style="margin-top:0.5rem;"></div>
+  </div>
+
+  <!-- Shop-floor operators (PIN roster for the Station terminal). Admin + PM
+       can write, CEO views. Its own sub-tab now (used to be stacked under
+       Team) so a Super Admin can jump straight to it. -->
+  <div id="users-operators-section" style="display:none;">
+    <div class="toolbar" style="padding:0;">
+      <div style="font-size:14px;font-weight:600;color:var(--text);">Floor Operators <span style="font-weight:400;color:var(--text2);">— PIN roster for the Station terminal</span></div>
+      <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openOperatorModal()">+ Add Operator</button>
     </div>
-    <div class="pm-hide" style="margin-top:1.5rem;">
-      <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:0.5rem;">Recent Activity</div>
-      <div id="audit-filter-bar"></div>
-      <div class="inventory-list" id="audit-list"></div>
-    </div>
+    <div class="inventory-list" id="operators-list" style="margin-top:0.5rem;"></div>
+  </div>
+
+  <!-- Recent Activity — also its own sub-tab now, same reason as Operators. -->
+  <div id="users-activity-section" style="display:none;">
+    <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:0.5rem;">Recent Activity</div>
+    <div id="audit-filter-bar"></div>
+    <div class="inventory-list" id="audit-list"></div>
   </div>
 
   <!-- Access Register — Super Admin only. Rendered lazily by setUsersSubTab(). -->
@@ -26030,10 +26035,13 @@ function renderUsersTab() {
 }
 
 // Super Admin-only sub-tab switcher for the Users page: "Team" (the
-// existing Authorized Users / Floor Operators / Recent Activity content,
-// unchanged) and "Access Register" (a read-only capability matrix — see
+// existing Authorized Users content), "Operators" (Floor Operators PIN
+// roster) and "Activity Log" (Recent Activity) — those last two used to be
+// stacked underneath Team and are now their own tabs so a Super Admin can
+// jump straight to either — and "Access Register" (see
 // renderAccessRegisterHtml()). Anyone below Super Admin never sees this
-// bar at all, so their Users tab looks exactly as it did before it existed.
+// bar at all: their Users tab still shows Team + Operators + Activity all
+// stacked together exactly as it always did (see setUsersSubTab below).
 let usersSubTab = 'team';
 function renderUsersSubtabs() {
   const bar = document.getElementById('users-subtabs');
@@ -26047,6 +26055,8 @@ function renderUsersSubtabs() {
   bar.style.display = 'flex';
   bar.innerHTML = `
     <button class="tab ${usersSubTab === 'team' ? 'active' : ''}" onclick="setUsersSubTab('team')">Team</button>
+    <button class="tab ${usersSubTab === 'operators' ? 'active' : ''}" onclick="setUsersSubTab('operators')">Operators</button>
+    <button class="tab ${usersSubTab === 'activity' ? 'active' : ''}" onclick="setUsersSubTab('activity')">Activity Log</button>
     <button class="tab ${usersSubTab === 'access-register' ? 'active' : ''}" onclick="setUsersSubTab('access-register')">Access Register</button>
   `;
 }
@@ -26058,14 +26068,23 @@ let _roleMatrixData = null;
 async function setUsersSubTab(tab) {
   usersSubTab = tab;
   const teamEl = document.getElementById('users-team-section');
-  const accEl = document.getElementById('users-access-register-section');
-  if (!teamEl || !accEl) return;
-  // Belt-and-suspenders: even if something called this directly, the
-  // register content only ever renders for a Super Admin session.
-  const showAccess = tab === 'access-register' && isSuperAdmin();
-  teamEl.style.display = showAccess ? 'none' : '';
-  accEl.style.display = showAccess ? '' : 'none';
-  if (showAccess && !accEl.dataset.rendered) {
+  const opsEl  = document.getElementById('users-operators-section');
+  const actEl  = document.getElementById('users-activity-section');
+  const accEl  = document.getElementById('users-access-register-section');
+  if (!teamEl || !opsEl || !actEl || !accEl) return;
+  if (!isSuperAdmin()) {
+    // No subtab bar for anyone but Super Admin — keep the original flat
+    // page everyone else has always had: Team + Operators + Activity all
+    // stacked together, Access Register never shown.
+    teamEl.style.display = ''; opsEl.style.display = ''; actEl.style.display = '';
+    accEl.style.display = 'none';
+    return;
+  }
+  teamEl.style.display = tab === 'team'           ? '' : 'none';
+  opsEl.style.display  = tab === 'operators'       ? '' : 'none';
+  actEl.style.display  = tab === 'activity'        ? '' : 'none';
+  accEl.style.display  = tab === 'access-register' ? '' : 'none';
+  if (tab === 'access-register' && !accEl.dataset.rendered) {
     accEl.innerHTML = '<div class="empty">Loading…</div>';
     try {
       _roleMatrixData = await api('GET', '/api/role-permissions');
@@ -26076,35 +26095,91 @@ async function setUsersSubTab(tab) {
     }
   }
   const bar = document.getElementById('users-subtabs');
-  if (bar && isSuperAdmin()) {
+  if (bar) {
     [...bar.querySelectorAll('.tab')].forEach(b => b.classList.remove('active'));
-    const idx = tab === 'team' ? 0 : 1;
+    const idx = ['team','operators','activity','access-register'].indexOf(tab);
     if (bar.children[idx]) bar.children[idx].classList.add('active');
   }
 }
-// Click a group cell to flip it yes<->no. Confirms first (this is a real,
-// immediately-live permission change — not a documentation edit), PUTs
-// it, updates the local matrix copy, and re-renders in place. Other
-// currently-signed-in sessions of the affected role pick this up the
-// next time they load the app (their _rolePerms is fetched once at boot),
-// not instantly — there's no push mechanism to already-open tabs.
-// Click-to-cycle order: YES -> (any group-specific extra, e.g. 30-DAY) ->
-// VIEW -> HIDDEN -> NO -> back to YES. Matches the level vocabulary the
-// rest of the register/server uses everywhere (permLevelAtLeast etc.).
-const ACC_LEVEL_LABEL = { yes: 'YES', view: 'VIEW', hidden: 'HIDDEN', no: 'NO', '30-day': '30-DAY' };
-function nextAccLevel(current, extra) {
-  const order = ['yes', ...(extra || []), 'view', 'hidden', 'no'];
+// Access Register v2 — rebuilt from scratch per request. Structure is now
+// one tab per app module (Jobs/Inventory/Reports/Station/Users/Client
+// View) instead of one long flat list. Only Jobs has real rows so far —
+// the rest show a placeholder until they're built the same way. Client
+// role is deliberately NOT part of this system at all (unchanged from
+// before — see roleHasPermission's hard client block server-side and the
+// separate External Portal behavior).
+//
+// Two row types, each with its own click-to-cycle:
+//   'tab'    — whole-module visibility. 2 states: View / Hidden.
+//   'button' — one control within a module. 3 states: Edit (full access) /
+//              View (visible but disabled) / Hidden (not shown at all).
+// Both states are enforced server-side regardless of what the client shows
+// (once wired up — see the comment on the new *_btn_* keys in server.js:
+// they're live in the register now but not yet read by any gate).
+let _accRegTab = 'jobs';
+const ACC_REG_TABS = [
+  ['jobs', 'Jobs'],
+  ['inventory', 'Inventory'],
+  ['reports', 'Reports'],
+  ['station', 'Station'],
+  ['users', 'Users'],
+  ['client-view', 'Client View'],
+];
+// Keys + order for the Jobs tab, matching the exact button list given:
+// Edit, History, Link Job, Print, Block, Delete, Create Mil Job, New Job,
+// Stage forwarding, Record Delivery, Delete Delivery — with the tab's own
+// view/hidden row first. Labels come from the server (matrixData.groups),
+// same single-source-of-truth pattern as before; this list only fixes
+// order + row type.
+const ACC_JOBS_TAB_ROWS = [
+  { key: 'job_tab_access',          type: 'tab' },
+  { key: 'job_btn_edit',            type: 'button' },
+  { key: 'job_btn_history',         type: 'button' },
+  { key: 'job_btn_link',            type: 'button' },
+  { key: 'job_btn_print',           type: 'button' },
+  { key: 'job_btn_block',           type: 'button' },
+  { key: 'job_btn_delete',          type: 'button' },
+  { key: 'job_btn_create_mil',      type: 'button' },
+  { key: 'job_btn_new_job',         type: 'button' },
+  { key: 'job_btn_stage_forward',   type: 'button' },
+  { key: 'job_btn_record_delivery', type: 'button' },
+  { key: 'job_btn_delete_delivery', type: 'button' },
+];
+// Rows for every built tab, keyed by tab id. Add an entry here (and a
+// matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
+// gets built — everything else (rendering, click-to-cycle, tab switcher)
+// already works generically off this map.
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS };
+// key -> row type, flattened across every built tab. Used by
+// cycleRolePermission to pick the 2-state or 3-state cycle for a click.
+const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
+
+function setAccRegTab(tab) {
+  _accRegTab = tab;
+  const accEl = document.getElementById('users-access-register-section');
+  if (accEl && _roleMatrixData) accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
+}
+
+const ACC_LEVEL_LABEL = { yes: 'EDIT', view: 'VIEW', hidden: 'HIDDEN', no: 'HIDDEN' };
+function nextAccLevelTab(current)    { return current === 'view' ? 'hidden' : 'view'; }
+function nextAccLevelButton(current) {
+  const order = ['yes', 'view', 'hidden'];
   const idx = order.indexOf(current);
   return order[(idx + 1) % order.length] || order[0];
 }
+// Click a cell to cycle it. Confirms nothing — a fast click-to-cycle needs
+// to actually be fast, and it's reversible (click again to cycle back).
+// PUTs immediately, updates the local matrix copy, and re-renders in
+// place. Other currently-signed-in sessions of the affected role pick
+// this up next time they load the app (their _rolePerms is fetched once
+// at boot), not instantly — there's no push mechanism to already-open tabs.
 async function cycleRolePermission(key, role) {
   if (!_roleMatrixData) return;
   const groupDef = _roleMatrixData.groups.find(g => g.key === key);
   if (!groupDef) return;
-  const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'no';
-  const next = nextAccLevel(current, groupDef.extra);
-  // No confirm dialog — a fast click-to-cycle needs to actually be fast.
-  // Still reversible: click again (up to 4-5 more times) cycles back.
+  const rowType = ACC_ROW_TYPE[key] || 'button';
+  const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'hidden';
+  const next = rowType === 'tab' ? nextAccLevelTab(current) : nextAccLevelButton(current);
   showSaving(true);
   try {
     await api('PUT', '/api/role-permissions', { key, role, level: next });
@@ -26119,119 +26194,58 @@ async function cycleRolePermission(key, role) {
   showSaving(false);
 }
 
-// Access Register — most rows are still a fixed reference table compiled
-// by hand from the actual gating code (server middleware + client role
-// checks), same as before. The 7 rows tagged "editable" are different:
-// they're rendered live from matrixData (GET /api/role-permissions) and
-// each non-locked cell is clickable — see cycleRolePermission(). These 7
-// cover the capabilities that map to one real, reusable gate function on
-// both client and server; everything else (destructive admin-only
-// actions, Super-Admin-exclusive features, PIN-gated Station actions,
-// structurally-absent routes) is deliberately left fixed — either too
-// sensitive to reassign with a stray click, or there's no single function
-// backing it to make dynamic. Column order matches COLUMN_ROLES.
+// Column order for every row — Super Admin and Client stay locked (Super
+// Admin always has full access; Client is never part of this system at
+// all — see roleHasPermission's hard client block server-side).
 const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'client'];
+function accGroupRow(matrixData, key, rowType) {
+  const def = (matrixData.groups || []).find(g => g.key === key);
+  const label = def ? esc(def.label) : key;
+  const group = (matrixData.matrix && matrixData.matrix[key]) || {};
+  const cellClass = (level) => rowType === 'tab' ? (level === 'view' ? 'allow' : 'deny') : ({ yes: 'allow', view: 'partial', hidden: 'deny' }[level] || 'deny');
+  const cells = COLUMN_ROLES.map(role => {
+    if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">${rowType === 'tab' ? 'VIEW' : 'EDIT'}</td>`;
+    if (role === 'client') return `<td class="acc-cell deny locked" title="Client is not part of this system — see the Client View portal's own separate access">HIDDEN</td>`;
+    const level = group[role] || 'hidden';
+    return `<td class="acc-cell ${cellClass(level)} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
+  });
+  return `<tr class="acc-group-row"><th class="acc-rowlabel">${label}</th>${cells.join('')}</tr>`;
+}
+
 function renderAccessRegisterHtml(matrixData) {
-  const cell = (cls, label, note) => `<td class="acc-cell ${cls}">${label}${note ? `<sup>${note}</sup>` : ''}</td>`;
-  const row = (label, cells) => `<tr><th class="acc-rowlabel">${label}</th>${cells.join('')}</tr>`;
-  const section = (label) => `<tr class="acc-section"><th colspan="9">${label}</th></tr>`;
-  const A = (note) => cell('allow', 'YES', note);
-  const D = (note) => cell('deny', 'NO', note);
-  const P = (label, note) => cell('partial', label, note);
-
-  // One live, clickable row per editable group. super_admin and client
-  // columns are always locked (see canWriteJobs() etc. and
-  // roleHasPermission's hard client block server-side) — only the other
-  // 6 columns are ever clickable. Click cycles YES -> (extra, e.g.
-  // 30-DAY) -> VIEW -> HIDDEN -> NO -> back to YES.
-  const ACC_CELL_CLASS = { yes: 'allow', view: 'partial', hidden: 'deny', no: 'deny', '30-day': 'partial' };
-  const groupRow = (key) => {
-    const def = (matrixData.groups || []).find(g => g.key === key);
-    const label = def ? esc(def.label) : key;
-    const group = (matrixData.matrix && matrixData.matrix[key]) || {};
-    const cells = COLUMN_ROLES.map(role => {
-      if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">YES</td>`;
-      if (role === 'client') return `<td class="acc-cell deny locked" title="Client accounts can never reach internal capabilities, regardless of this table">NO</td>`;
-      const level = group[role] || 'no';
-      const cls = ACC_CELL_CLASS[level] || 'deny';
-      return `<td class="acc-cell ${cls} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
-    });
-    return `<tr class="acc-group-row"><th class="acc-rowlabel">${label}<span class="acc-group-tag">editable</span></th>${cells.join('')}</tr>`;
-  };
-  const rows = [
-    section('Jobs tab &amp; job card'),
-    groupRow('job_view'),
-    groupRow('job_write'),
-    groupRow('job_print'),
-    groupRow('job_delete'),
-    groupRow('delivery_write'),
-    groupRow('delivery_delete'),
-    groupRow('wastage_adjustment'),
-
-    section('Inventory'),
-    groupRow('inventory_view'),
-    groupRow('inventory_write'),
-    groupRow('inventory_delete'),
-    groupRow('inventory_reverse'),
-
-    section('Reports'),
-    row('Stock / Total In &amp; Out reports', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    row('Offcut Consumption report', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    row('Stock Summary &amp; Inventory Report', [A(), A(), A(), A(), A(), A(), D(), D()]),
-    groupRow('production_reports'),
-    groupRow('production_edit'),
-    groupRow('trash_view'),
-    groupRow('trash_admin'),
-
-    section('Station terminal'),
-    groupRow('station_access'),
-    groupRow('station_write'),
-    groupRow('station_manager_pin'),
-    groupRow('operator_admin'),
-
-    section('Stickers &amp; Forms'),
-    groupRow('stickers_print'),
-    groupRow('forms_print'),
-
-    section('Users &amp; accounts'),
-    groupRow('user_view'),
-    groupRow('user_admin'),
-    row('Grant the Super Admin role <span style="font-weight:400;color:var(--text2);font-size:11px;">(always fixed — see the Access Register\'s own explanation)</span>', [A(), D(), D(), D(), D(), D(), D(), D()]),
-
-    section('Client View &amp; portal'),
-    groupRow('client_view_preview'),
-    row("External portal &mdash; view own company's jobs", [D(), D(), D(), D(), D(), D(), D(), A()]),
-    row('External portal &mdash; any write action', [D(), D(), D(), D(), D(), D(), D(), D()]),
-  ].join('');
+  const tabsBar = ACC_REG_TABS.map(([k, l]) => `<button class="tab ${_accRegTab === k ? 'active' : ''}" onclick="setAccRegTab('${k}')">${l}</button>`).join('');
+  const rowDefs = ACC_TAB_ROWS[_accRegTab];
+  const body = rowDefs
+    ? `<div class="acc-tablewrap">
+        <table class="acc-table">
+          <thead>
+            <tr>
+              <th>Capability</th>
+              <th>Super<br>Admin</th>
+              <th>Admin</th>
+              <th>CEO</th>
+              <th>Production<br>Manager</th>
+              <th>Store<br>Manager</th>
+              <th>Finance</th>
+              <th>Operator</th>
+              <th>Client</th>
+            </tr>
+          </thead>
+          <tbody>${rowDefs.map(r => accGroupRow(matrixData, r.key, r.type)).join('')}</tbody>
+        </table>
+      </div>`
+    : `<div class="empty" style="padding:32px;text-align:center;">This section hasn't been rebuilt yet.</div>`;
 
   return `
-  <div class="acc-reg-dek">Every role, every module — Jobs, Inventory, Reports, Station, Stickers &amp; Forms, Users, Client View. Rows tagged <span class="acc-group-tag" style="margin-left:0;">editable</span> are live — click a cell to cycle it through YES &rarr; VIEW &rarr; HIDDEN &rarr; NO (Reverse a stock transaction also cycles through a 30-DAY tier), applying immediately for that role. Manager-PIN actions controls who may even attempt a manager PIN — the PIN itself is still checked either way. Two rows stay permanently fixed: Grant Super Admin (the bootstrap that stops a self-promotion to Super Admin) and External Portal — any write action (no such capability exists in the code at all, so there's nothing to grant).</div>
+  <div class="acc-reg-dek">One tab per module. The tab's own row (e.g. "Jobs tab") controls whether that whole tab is visible at all — View or Hidden. Every button inside it has its own row: Edit (full access), View (visible but disabled), or Hidden (not shown at all) — both View and Hidden are meant to stay fully blocked server-side once wired up, regardless of what's shown client-side. Client is not part of this table — see the Client View portal's own separate, unrelated access.</div>
   <div class="acc-reg-legend">
-    <span><span class="acc-swatch allow"></span>Yes — full access</span>
-    <span><span class="acc-swatch partial"></span>View / 30-day — partial, still enforced</span>
-    <span><span class="acc-swatch deny"></span>Hidden / No — blocked</span>
+    <span><span class="acc-swatch allow"></span>View (tab) / Edit (button) — full access</span>
+    <span><span class="acc-swatch partial"></span>View (button) — visible, disabled</span>
+    <span><span class="acc-swatch deny"></span>Hidden — not shown</span>
   </div>
 
-  <div class="acc-tablewrap">
-    <table class="acc-table">
-      <thead>
-        <tr>
-          <th>Capability</th>
-          <th>Super<br>Admin</th>
-          <th>Admin</th>
-          <th>CEO</th>
-          <th>Production<br>Manager</th>
-          <th>Store<br>Manager</th>
-          <th>Finance</th>
-          <th>Operator</th>
-          <th>Client</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>
-
-  <div class="acc-foot">Compiled from public/index.html and server.js — every row traced to its gating function or middleware, not inferred from menu visibility alone. Super Admin always also holds Admin's own permissions.</div>
+  <div class="tabs" style="margin:12px 0 16px;">${tabsBar}</div>
+  ${body}
   `;
 }
 
