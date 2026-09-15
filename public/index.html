@@ -4802,14 +4802,14 @@ function setMode(m) {
     addBtn.style.display = canWriteJobs() ? '' : 'none';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
     exportBtn.style.display = '';
-    refreshBtn.style.display = '';
+    if (refreshBtn) refreshBtn.style.display = '';
     render();
     loadDailyStats();   // fills the Daily Unit Carton Qty card
   } else if (m === 'inventory') {
     addBtn.style.display = canWriteInventory() ? '' : 'none';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
-    refreshBtn.style.display = '';
+    if (refreshBtn) refreshBtn.style.display = '';
     // Offcuts are visible to everyone with inventory write — admin, PM,
     // AND store keeper. Owner change: store keeper handles day-to-day
     // stock and now needs the offcut side too.
@@ -4819,7 +4819,7 @@ function setMode(m) {
   } else if (m === 'reports') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
-    refreshBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
     // Always land on the 3-card landing when entering Reports — leaves
     // any sub-view state intact in case the user navigates back into a
     // group, but presents the same starting screen every time.
@@ -4827,12 +4827,12 @@ function setMode(m) {
   } else if (m === 'stickers') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
-    refreshBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
     initStickersTab();
   } else if (m === 'forms') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
-    refreshBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
     // Always show landing on (re-)entry — leaves any open form pane intact
     // in case the user backs out without losing what they typed.
     document.getElementById('forms-landing').style.display = 'block';
@@ -4843,12 +4843,12 @@ function setMode(m) {
   } else if (m === 'client-view') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
-    refreshBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
     enterClientView();
   } else if (m === 'station') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
-    refreshBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
     enterStation();
   }
   // Fixed-canvas behaviour for Station — calculator-app feel on tablets:
@@ -4958,24 +4958,24 @@ function sortJobsForView(list) {
 function renderAppDate() {
   const el = document.getElementById('app-date');
   if (!el) return;
+  // Build the Refresh button + date stack once, BEFORE the operator/
+  // logged-out early-return below — setMode() unconditionally touches
+  // #app-date-refresh for every role, including operator's station mode
+  // at boot. If this node didn't exist yet, that setMode() call threw
+  // (Cannot set properties of null), which aborted init() and left
+  // operators stuck on the loading animation forever, since the
+  // hideLoadingScreen() call after it never ran. Rebuilding only the text
+  // (not the whole node) on later calls also means the 5-minute heartbeat
+  // below doesn't wipe out whatever display setMode() had set on the
+  // button for the current tab.
+  if (!el.querySelector('#app-date-refresh')) {
+    el.innerHTML = `<button id="app-date-refresh" onclick="refreshCurrent()" title="Refresh">&#8635; Refresh</button><div class="ad-stack"><div class="ad-day"></div><div class="ad-date"></div></div>`;
+  }
   if (!currentUser || isOperator()) { el.style.display = 'none'; return; }
   el.style.display = 'flex';
   const d = new Date();
   const day = d.toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase();
   const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  // Build the Refresh button + date stack once and just update the text on
-  // later calls (this runs every 5 minutes) — rebuilding the button node
-  // every time would wipe out whatever display:none/'' setMode() had set
-  // on it for the current tab, making it flash visible on tabs where
-  // Refresh doesn't apply (Reports, Stickers, etc.).
-  // No inline display here — defaults to visible, same as the old
-  // #topbar-refresh button did. That matters: admin/ceo/production_manager
-  // /finance land on the Jobs tab at boot WITHOUT setMode('jobs') ever
-  // running (only isOperator()/isStoreManager() get an explicit setMode()
-  // call in init() — see there), so nothing else would ever un-hide it.
-  if (!el.querySelector('#app-date-refresh')) {
-    el.innerHTML = `<button id="app-date-refresh" onclick="refreshCurrent()" title="Refresh">&#8635; Refresh</button><div class="ad-stack"><div class="ad-day"></div><div class="ad-date"></div></div>`;
-  }
   el.querySelector('.ad-day').textContent = day;
   el.querySelector('.ad-date').textContent = date;
 }
@@ -27283,33 +27283,42 @@ async function init() {
     hideLoadingScreen();
     return;
   }
-  // Client users have their own portal shell — internal loaders (jobs,
-  // inventory, printing machines) all 403 for them, so skip everything
-  // and just fetch the filtered client jobs.
-  if (isClient()) {
-    showClientPortal();
+  // Everything below is wrapped so hideLoadingScreen() always runs even if
+  // something in here throws (e.g. a role-specific render bug) — otherwise
+  // that role is stuck on the boot animation forever with no way to tell
+  // what happened. This is exactly how operators got stuck on 2026-09-15:
+  // an unguarded null-element access inside setMode('station') threw,
+  // which skipped the hideLoadingScreen() call that used to sit right
+  // after it with nothing to catch the throw.
+  try {
+    // Client users have their own portal shell — internal loaders (jobs,
+    // inventory, printing machines) all 403 for them, so skip everything
+    // and just fetch the filtered client jobs.
+    if (isClient()) {
+      showClientPortal();
+      renderUserChip();
+      await loadClientJobs();
+      return;
+    }
+    hideLogin();
+    // Same ordering reason as onGoogleCredential(): load effective
+    // permissions before the first role-gated render.
+    await loadEffectivePermissions();
     renderUserChip();
-    await loadClientJobs();
+    // Operators can't read inventory (403), so skip the call for them.
+    // Everyone else loads jobs + inventory in parallel.
+    const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster()];
+    if (!isOperator()) loaders.push(loadInventory());
+    await Promise.all(loaders);
+    // Route to the same landing tab the login flow uses so a refresh
+    // doesn't dump operators onto Jobs (which they can't even see) or
+    // store managers onto the default Jobs view.
+    if (isOperator())          setMode('station');
+    else if (isStoreManager()) setMode('inventory');
+    startSmartPolling();
+  } finally {
     hideLoadingScreen();
-    return;
   }
-  hideLogin();
-  // Same ordering reason as onGoogleCredential(): load effective
-  // permissions before the first role-gated render.
-  await loadEffectivePermissions();
-  renderUserChip();
-  // Operators can't read inventory (403), so skip the call for them.
-  // Everyone else loads jobs + inventory in parallel.
-  const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster()];
-  if (!isOperator()) loaders.push(loadInventory());
-  await Promise.all(loaders);
-  // Route to the same landing tab the login flow uses so a refresh
-  // doesn't dump operators onto Jobs (which they can't even see) or
-  // store managers onto the default Jobs view.
-  if (isOperator())          setMode('station');
-  else if (isStoreManager()) setMode('inventory');
-  hideLoadingScreen();
-  startSmartPolling();
 }
 
 // ── Smart polling ────────────────────────────────────────────
