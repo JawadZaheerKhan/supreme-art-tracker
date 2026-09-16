@@ -5427,10 +5427,11 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
   try {
     await dbReady;
     const sql = getDb();
-    const deliveredIdx = STAGES.length - 1;
+    // Same set of jobs as the Pending Stock queue — every live job with an
+    // offcut side still owed, regardless of stage.
     const jobs = await sql`
       SELECT * FROM jobs
-      WHERE deleted_at IS NULL AND stage_index < ${deliveredIdx}
+      WHERE deleted_at IS NULL
         AND issuance_status IN ('pending', 'issued')
       ORDER BY id ASC`;
     const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true`;
