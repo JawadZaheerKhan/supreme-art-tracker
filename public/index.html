@@ -3422,6 +3422,8 @@ const ROLES = [
   { id: 'break',     label: 'Sorting',          stage_index: 4 },
   { id: 'paste',     label: 'Pasting',          stage_index: 5 },
   { id: 'storage',   label: 'Ready to Deliver',  stage_index: 6 },
+  // No stage — a Paper Cutting PIN opens the pending offcut issuance list.
+  { id: 'papercut',  label: 'Paper Cutting',     stage_index: null },
 ];
 function roleById(id) { return ROLES.find(r => r.id === id); }
 function rolesOfOperator(o) {
@@ -4273,9 +4275,13 @@ function canIssueStock() { return canWriteInventory(); }
 // so it can never drift from it the way it used to (PM used to see this
 // button and get a 403 with no warning).
 function canIssueOffcutStock() { return canWriteInventory(); }
+// Offcut issuance buttons/badges — one blue shared by Pending Stock and the
+// Station's Paper Cutting screen.
+const OFFCUT_BTN_STYLE = 'background:#1e3a8a;border-color:#1e3a8a;color:#fff;font-weight:700;';
+const OFFCUT_PENDING_BADGE = '<span class="badge" style="background:#dbeafe;color:#1e3a8a;border:1px solid #93c5fd;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:2px 8px;">OFFCUT</span>';
 // A job counts as offcut-based when its linked inventory item is an
-// offcut row. Used to swap the Issue Stock button to yellow and hide
-// it from the store keeper on the Pending Stock queue.
+// offcut row. Used to swap the Issue Stock button to offcut blue on the
+// Pending Stock queue.
 function isOffcutJob(j) {
   if (!j || !j.inventory_item_id) return false;
   const it = inventory.find(x => x.id === j.inventory_item_id);
@@ -4328,28 +4334,39 @@ function partialPendingSheets(j) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
-// Fresh 2nd-paper pending — sheets still owed on the secondary source.
-// Offcut secondary auto-deducts on CTP forward so it never shows here.
-// Fresh secondary is treated like a separate request the store keeper
-// needs to fulfill from its own paper group.
-function secondaryFreshPendingSheets(j) {
+// True when the 2nd paper was silently auto-consumed on CTP forward — the
+// old offcut behaviour. Those legacy jobs owe nothing on the 2nd paper.
+function secondaryInPreConsumed(j) {
+  const p = (j && j.particulars) || {};
+  const sec = p.secondary_paper;
+  const pre = p.offcut_pre_consumed;
+  return !!(sec && sec.inventory_item_id && pre && Array.isArray(pre.items)
+    && pre.items.some(it => it && it.item_id === sec.inventory_item_id));
+}
+// 2nd-paper pending — sheets still owed on the secondary source, fresh or
+// offcut. It's its own request in Pending Stock (offcut ones can also be
+// issued by a Paper Cutting PIN at the Station), raised once CTP forwards
+// the job. Mirrors secondaryOwedSheets() server-side.
+function secondaryPendingSheets(j) {
   const sec = j && j.particulars && j.particulars.secondary_paper;
   if (!sec || !sec.inventory_item_id) return 0;
+  if (j.issuance_status !== 'pending' && j.issuance_status !== 'issued') return 0;
+  if (secondaryInPreConsumed(j)) return 0;
   const packets = parseFloat(sec.packets);
   if (!Number.isFinite(packets) || packets <= 0) return 0;
   const item = inventory.find(x => x.id === sec.inventory_item_id);
-  if (!item || item.is_offcut) return 0;
+  if (!item) return 0;
   const ps = packetSize(item.paper_type);
   const needSheets = Math.round(packets * ps);
   const issued = parseInt(sec.issued_sheets, 10) || 0;
   return Math.max(0, needSheets - issued);
 }
-function hasFreshSecondaryPending(j) { return secondaryFreshPendingSheets(j) > 0; }
+function hasSecondaryPending(j) { return secondaryPendingSheets(j) > 0; }
 // A job is "in the Pending Stock queue" if it either was never issued OR
 // only some of its needed sheets have been issued so far. Partial jobs
 // stay visible in the queue so the store keeper knows to keep topping up,
 // even though the shop floor can already start processing them.
-function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j) || hasFreshSecondaryPending(j)); }
+function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j) || hasSecondaryPending(j)); }
 
 // Packets top-up helpers. An issued job may have extra packets requested
 // after issuance; each entry lives in particulars.packets_topups with a
@@ -5700,7 +5717,7 @@ function renderJobCard(j, opts) {
   const primaryLabel = j.paper || (invItemT ? invItemT.paper_type : '');
   // Secondary paper (if the PM ticked "Add 2nd paper" on the job form)
   // shows next to the primary as "primary | secondary". Offcut side is
-  // underlined yellow so it's obvious which side auto-deducted.
+  // underlined in offcut blue so it's obvious which side is offcut.
   const secRef = (j.particulars || {}).secondary_paper || null;
   const secItemT = (secRef && secRef.inventory_item_id) ? inventory.find(i => i.id === secRef.inventory_item_id) : null;
   const primaryIsOffcut = !!(invItemT && invItemT.is_offcut);
@@ -6995,17 +7012,15 @@ function renderInvPendingList() {
       const rec = (j.particulars || {}).offcut_pre_consumed;
       return rec && Number.isFinite(+rec.total_packets) ? +rec.total_packets : 0;
     })();
-    // Fresh 2nd-paper packets — subtracted from the primary display so
-    // "10 packets total, 5 in 2nd paper" reads as "5 primary + 5 2nd"
-    // on the two tiles instead of "10 + 5". Offcut secondary is already
-    // in preConsumedPkts, so exclude it here.
+    // 2nd-paper packets (fresh or offcut) — subtracted from the primary
+    // display so "10 packets total, 5 in 2nd paper" reads as "5 primary +
+    // 5 2nd" on the two tiles instead of "10 + 5". A legacy 2nd paper that
+    // was auto-consumed is already in preConsumedPkts, so exclude it here.
     const freshSecPkts = (() => {
       const sec = (j.particulars || {}).secondary_paper;
-      if (!sec || !sec.inventory_item_id) return 0;
+      if (!sec || !sec.inventory_item_id || secondaryInPreConsumed(j)) return 0;
       const packets = parseFloat(sec.packets);
       if (!Number.isFinite(packets) || packets <= 0) return 0;
-      const secItem = inventory.find(x => x.id === sec.inventory_item_id);
-      if (!secItem || secItem.is_offcut) return 0;
       return packets;
     })();
     const reducedPackets = Math.max(0, packetsIn - preConsumedPkts - freshSecPkts);
@@ -7042,14 +7057,15 @@ function renderInvPendingList() {
     const topupBtn = (partial && canIssueStock())
       ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
       : '';
-    // Offcut jobs: store keeper doesn't see the Issue Stock button (only
-    // admin / PM can pull from offcut stock). When rendered, it's yellow
-    // so the row visually calls out "this pulls from the offcut ledger".
+    // Offcut jobs: the Issue Stock button is offcut blue (same blue as the
+    // Offcut badges and + Add Offcut) so the row calls out "this pulls from
+    // the offcut ledger". Paper Cutting can also issue these at the Station.
     const offcut = isOffcutJob(j);
     const offcutOk = !offcut || canIssueOffcutStock();
     const offcutStyle = offcut
-      ? ' style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;"'
+      ? ` style="${OFFCUT_BTN_STYLE}"`
       : '';
+    const offcutBadge = offcut ? OFFCUT_PENDING_BADGE : '';
     const issueBtn = (!partial && canIssueStock() && offcutOk)
       ? `<button class="btn btn-sm ${offcut ? '' : cls} ceo-hide"${offcutStyle} onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
       : '';
@@ -7059,10 +7075,11 @@ function renderInvPendingList() {
     // secondary tile below carries the entire request.
     const primaryStillNeeded = j.issuance_status === 'pending' || isPartialIssuance(j);
     const primaryTile = primaryStillNeeded ? `
-      <div class="inv-card inv-pending-row"${partial ? ' style="border-left:3px solid #F59E0B;"' : ''}>
+      <div class="inv-card inv-pending-row"${partial ? ' style="border-left:3px solid #F59E0B;"' : (offcut ? ' style="border-left:3px solid #1e3a8a;"' : '')}>
         <div class="inv-main">
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
+            ${offcutBadge}
             ${j.priority && normalizePriority(j.priority) === 'Urgent' ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : ''}
             ${partialBadge}
           </div>
@@ -7093,11 +7110,11 @@ function renderInvPendingList() {
         </div>
       </div>` : '';
     // Secondary-paper tile — emitted right below the primary when the
-    // job has a fresh (non-offcut) 2nd paper that still needs issuing.
+    // job has a 2nd paper (fresh or offcut) that still needs issuing.
     // Rendered even when the primary is fully done so the store keeper
     // can finish the secondary side independently.
     const secondaryTile = (() => {
-      const remSecSheets = secondaryFreshPendingSheets(j);
+      const remSecSheets = secondaryPendingSheets(j);
       if (remSecSheets <= 0) return '';
       const secRef = j.particulars && j.particulars.secondary_paper;
       const secIt = secRef && inventory.find(x => x.id === secRef.inventory_item_id);
@@ -7118,8 +7135,9 @@ function renderInvPendingList() {
       const secUnit = packetUnitLabel(secIt.paper_type).toLowerCase();
       const secRemPkts = secPs ? remSecSheets / secPs : 0;
       const secRemStr = Number.isInteger(secRemPkts) ? String(secRemPkts) : (+secRemPkts.toFixed(2)).toString();
+      const secIsOffcut = !!secIt.is_offcut;
       const secIssueBtn = canIssueStock()
-        ? `<button class="btn btn-sm ${secCls} ceo-hide" onclick="issueStock(${j.id}, 'secondary')" title="${esc(secTip)}">${secIcon} ${secLabel}</button>`
+        ? `<button class="btn btn-sm ${secIsOffcut ? '' : secCls} ceo-hide"${secIsOffcut ? ` style="${OFFCUT_BTN_STYLE}"` : ''} onclick="issueStock(${j.id}, 'secondary')" title="${esc(secTip)}">${secIcon} ${secLabel}</button>`
         : '';
       return `
       <div class="inv-card inv-pending-row" style="border-left:3px solid #1e3a8a;background:#f8fafc;">
@@ -7127,6 +7145,7 @@ function renderInvPendingList() {
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
             <span class="badge" style="background:#1e3a8a;color:#fff;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:3px 8px;">2ND PAPER</span>
+            ${secIsOffcut ? OFFCUT_PENDING_BADGE : ''}
           </div>
           <div class="inv-sub">
             ${j.client ? esc(j.client) + ' &middot; ' : ''}
@@ -8610,7 +8629,7 @@ function pendingJobChipsForGroup(key) {
     if (sec && sec.inventory_item_id) {
       const sIt = inventory.find(x => x.id === sec.inventory_item_id);
       if (sIt && paperGroupKey(sIt) === key) {
-        const rem = secondaryFreshPendingSheets(j);
+        const rem = secondaryPendingSheets(j);
         if (rem > 0) {
           out.push({ job: j, jobId: j.id, source: 'secondary', needSheets: rem, label: `E-${j.id} (2nd)` });
         }
@@ -19299,7 +19318,7 @@ function jobForm(j={}, opts) {
           <input type="hidden" id="f-size" value="${v(j.size)}">
           <div style="font-size:11px;color:var(--text2);margin-top:2px;min-height:14px;"><span class="stock-hint" id="stock-hint"></span></div>
           <label style="display:inline-flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;font-size:11px;color:var(--text2);"
-                 title="Split the job across a 2nd paper source — usually offcut, but any inventory item works. Offcut portion auto-deducts on CTP forward.">
+                 title="Split the job across a 2nd paper source — usually offcut, but any inventory item works. Both papers go to Pending Stock on CTP forward.">
             <input type="checkbox" id="f-use-second-paper"
                    ${((j.particulars||{}).secondary_paper && (j.particulars||{}).secondary_paper.inventory_item_id) ? 'checked' : ''}
                    onchange="toggleSecondPaper()"
@@ -19400,7 +19419,7 @@ function jobForm(j={}, opts) {
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#1e3a8a;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">
               <span style="display:inline-block;background:#1e3a8a;color:#fff;font-size:10px;padding:2px 8px;border-radius:8px;">2ND PAPER</span>
-              <span>offcut auto-deducts on CTP forward · fresh goes to store keeper</span>
+              <span>goes to Pending Stock on CTP forward · offcut can also be issued by Paper Cutting</span>
             </div>
           </div>
           <div style="display:flex;gap:10px;align-items:flex-start;margin-top:8px;flex-wrap:wrap;">
@@ -22609,10 +22628,8 @@ async function issueStock(id, source) {
     return;
   }
   const totalNeedSheets = Math.round(packetsIn * ps);
-  // Secondary side is independent of offcut_pre_consumed (offcut only
-  // applies to the primary paper — offcut-as-secondary auto-deducts on
-  // CTP forward and never reaches here). Subtract any already-issued
-  // sheets so a top-up popup shows the true remainder.
+  // Secondary side (fresh or offcut) — subtract any already-issued sheets
+  // so a top-up popup shows the true remainder.
   let needSheets;
   if (src === 'secondary') {
     const issued = parseInt(secondaryRef && secondaryRef.issued_sheets, 10) || 0;
@@ -22625,17 +22642,15 @@ async function issueStock(id, source) {
     const preConsumed = (j.particulars || {}).offcut_pre_consumed || null;
     const preConsumedSheets = preConsumed && Number.isFinite(+preConsumed.total_sheets)
       ? Math.max(0, Math.round(+preConsumed.total_sheets)) : 0;
-    // Fresh 2nd-paper packets belong to the secondary tile — subtract
-    // them from the primary popup's need so the store keeper only issues
-    // (total − 2nd) here. Offcut 2nd paper is already covered via
-    // preConsumedSheets (skip it here to avoid double-subtracting).
+    // 2nd-paper packets (fresh or offcut) belong to the secondary tile —
+    // subtract them from the primary popup's need so the store keeper only
+    // issues (total − 2nd) here. A legacy auto-consumed 2nd paper is already
+    // in preConsumedSheets (skip it here to avoid double-subtracting).
     const freshSecSheets = (() => {
       const sec = (j.particulars || {}).secondary_paper;
-      if (!sec || !sec.inventory_item_id) return 0;
+      if (!sec || !sec.inventory_item_id || secondaryInPreConsumed(j)) return 0;
       const secPackets = parseFloat(sec.packets);
       if (!Number.isFinite(secPackets) || secPackets <= 0) return 0;
-      const secItem = inventory.find(x => x.id === sec.inventory_item_id);
-      if (!secItem || secItem.is_offcut) return 0;
       return Math.round(secPackets * ps);
     })();
     // Partial-issued jobs carry their remaining need on
@@ -24335,8 +24350,9 @@ let stationDraftValues = {};
 // whenever the pass count/job resets, same lifecycle as stationDraftValues.
 let stationPrintMult = {};
 let stationPinBuf   = '';     // digits entered on the PIN pad
-let stationView     = 'pin';  // 'pin' | 'queue' | 'update'
+let stationView     = 'pin';  // 'pin' | 'queue' | 'update' | 'papercut' | ...
 let stationJobId    = null;
+let stationPapercutRequests = null; // Paper Cutting screen: pending offcut requests from /api/station/offcut-requests
 let stationIdleTimer = null;
 let stationNotes    = [];     // incoming notes for this station's queue (prev stage → us)
 let stationRec      = null;   // active MediaRecorder while capturing a voice note
@@ -24367,6 +24383,7 @@ function stationLogout(silent) {
   stationPinBuf = '';
   stationView = 'pin';
   stationJobId = null;
+  stationPapercutRequests = null;
   stationPassCount = 1;
   stationJobPassKey = null;
   stationPrintMult = {};
@@ -24397,6 +24414,7 @@ function stationRender() {
   else if (stationView === 'stage-pick') root.innerHTML = stationStagePickHtml();
   else if (stationView === 'update' && stationJobId != null) root.innerHTML = stationUpdateHtml();
   else if (stationView === 'manager-queue') root.innerHTML = stationManagerQueueHtml();
+  else if (stationView === 'papercut') root.innerHTML = stationPapercutHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -24462,6 +24480,7 @@ async function stationPinSubmit() {
       stationRender();
       return;
     }
+    if (await stationRoutePapercut()) return;
     if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
     stationOperator.stage_index = stages[0];
     stationView = 'queue';
@@ -24492,6 +24511,7 @@ async function stationPickPerson(idx) {
     stationRender();
     return;
   }
+  if (await stationRoutePapercut()) return;
   const stages = stationOperator.stage_indices || [stationOperator.stage_index];
   if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
   stationOperator.stage_index = stages[0];
@@ -24575,6 +24595,7 @@ async function stationPickCustomPerson(idx) {
   if (!p) return;
   stationPerson = { name: p.name, name_ur: p.name_ur || '' };
   stationPersonPickView = 'own';
+  if (await stationRoutePapercut()) return;
   const stages = stationOperator.stage_indices || [stationOperator.stage_index];
   if (stages.length > 1) { stationView = 'stage-pick'; stationRender(); return; }
   stationOperator.stage_index = stages[0];
@@ -24597,12 +24618,16 @@ async function stationPickStage(idx) {
 }
 
 function stationStagePickHtml() {
-  const stages = stationOperator.stage_indices || [stationOperator.stage_index];
+  const stages = stationWorkStages();
   const buttons = stages.map(i => `
     <button class="station-job" onclick="stationPickStage(${i})" style="text-align:left;">
       <div class="sj-id">${i + 1}</div>
       <div class="sj-main"><div class="sj-name">${esc(STAGES[i] || ('Stage ' + i))}</div></div>
-    </button>`).join('');
+    </button>`).join('') + (stationHasPapercut() ? `
+    <button class="station-job" onclick="stationOpenPapercut()" style="text-align:left;">
+      <div class="sj-id">&#9986;</div>
+      <div class="sj-main"><div class="sj-name">Paper Cutting</div><div class="sj-sub">Pending offcut issuance</div></div>
+    </button>` : '');
   return `<div class="station-shell">
     <div class="station-topbar">
       <div class="station-who">Hi, <b>${esc((stationPerson && stationPerson.name) || stationOperator.name)}</b>${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div>
@@ -24613,6 +24638,119 @@ function stationStagePickHtml() {
       <div style="display:grid;gap:10px;">${buttons}</div>
     </div>
   </div>`;
+}
+
+// ── Paper Cutting station ─────────────────────────────────────
+// A machine PIN with the Paper Cutting role sees the pending offcut
+// issuance requests (offcut main paper or offcut 2nd paper that CTP has
+// forwarded to Pending Stock) and issues them with the blue Issue Stock
+// button. The list is computed server-side — operator logins never get
+// the inventory array.
+function stationWorkStages() {
+  return (stationOperator.stage_indices || [stationOperator.stage_index])
+    .filter(i => Number.isInteger(i) && i >= 0);
+}
+function stationHasPapercut() {
+  return !!(stationOperator && !stationOperator.is_manager
+    && Array.isArray(stationOperator.roles) && stationOperator.roles.includes('papercut'));
+}
+// Called once the person is known. Paper Cutting only → its list; Paper
+// Cutting plus production stages → the station picker (which offers both).
+async function stationRoutePapercut() {
+  if (!stationHasPapercut()) return false;
+  if (!stationWorkStages().length) { await stationOpenPapercut(); return true; }
+  stationView = 'stage-pick';
+  stationRender();
+  return true;
+}
+async function stationOpenPapercut() {
+  stationView = 'papercut';
+  stationPapercutRequests = null;
+  stationRender();
+  await stationLoadPapercut();
+}
+async function stationLoadPapercut() {
+  try {
+    stationPapercutRequests = await api('GET', '/api/station/offcut-requests');
+  } catch (e) {
+    stationPapercutRequests = [];
+    notify('Could not load offcut requests: ' + e.message);
+  }
+  if (stationView === 'papercut') stationRender();
+}
+function stationPapercutQty(n) {
+  return Number.isInteger(n) ? n.toLocaleString() : (+(+n).toFixed(2)).toLocaleString();
+}
+function stationPapercutHtml() {
+  const list = stationPapercutRequests;
+  const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
+  const whoUr = stationPerson && stationPerson.name_ur
+    ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : '';
+  const rows = list == null
+    ? '<div class="empty">Loading…</div>'
+    : !list.length
+      ? '<div class="empty">No offcut issuance pending right now.</div>'
+      : list.map(r => {
+          const enough = r.on_hand_sheets >= r.owed_sheets;
+          const ps = r.packet_size || 1;
+          const paper = [r.paper_type, r.size, r.gsm ? r.gsm + 'gsm' : ''].filter(Boolean).map(esc).join(' · ');
+          const urgent = r.priority && normalizePriority(r.priority) === 'Urgent'
+            ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : '';
+          const second = r.source === 'secondary'
+            ? '<span class="badge" style="background:#1e3a8a;color:#fff;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:3px 8px;">2ND PAPER</span>' : '';
+          return `
+          <div class="station-job" style="cursor:default;flex-wrap:wrap;border-left:4px solid #1e3a8a;">
+            <div class="station-job-number"><div class="sj-id">#${r.job_id}</div></div>
+            <div class="sj-main">
+              <div class="sj-name">${esc(r.name)}${second}${OFFCUT_PENDING_BADGE}${urgent}</div>
+              <div class="sj-sub">${r.client ? esc(r.client) + ' · ' : ''}${paper}${r.brand ? ' · ' + esc(r.brand) : ''}</div>
+              <div class="sj-sub"><b style="color:#1e3a8a;font-size:15px;">${stationPapercutQty(r.owed_packets)} ${esc(r.unit)} needed</b>
+                · on hand <b style="color:${enough ? 'var(--green-text)' : '#A32D2D'};">${stationPapercutQty(r.on_hand_sheets / ps)} ${esc(r.unit)}</b></div>
+            </div>
+            <div style="flex-basis:100%;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+              <button class="btn" style="${OFFCUT_BTN_STYLE}padding:10px 18px;font-size:15px;${enough ? '' : 'opacity:0.5;cursor:not-allowed;'}" ${enough ? '' : 'disabled'}
+                      onclick="stationPapercutIssue(${r.job_id}, '${r.source === 'secondary' ? 'secondary' : 'primary'}')">&#128230; Issue Stock</button>
+              ${enough ? '' : '<span style="color:#A32D2D;font-weight:600;">Not enough offcut on hand</span>'}
+            </div>
+          </div>`;
+        }).join('');
+  return `
+    <div class="station-head">
+      <div><div class="station-who">${who}${whoUr}</div><div class="station-where">&#9986; Paper Cutting &middot; Offcut Issuance${stationOperator.machine ? ' &middot; ' + esc(stationOperator.machine) : ''}</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;">
+      <button class="btn btn-sm" onclick="stationLoadPapercut()">&#8635; Refresh</button>
+      ${stationWorkStages().length ? `<button class="btn btn-sm" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button>` : ''}
+    </div>
+    <div class="station-queue">${rows}</div>`;
+}
+async function stationPapercutIssue(jobId, source) {
+  if (!stationOperator) return;
+  const r = (stationPapercutRequests || []).find(x => x.job_id === jobId && x.source === source);
+  if (!r) return;
+  const paper = [r.paper_type, r.size, r.gsm ? r.gsm + 'gsm' : ''].filter(Boolean).join(' · ');
+  const ok = await confirmDialog({
+    title: `Issue offcut for Job E-${jobId}?`,
+    message: `"${r.name}"${source === 'secondary' ? ' (2nd paper)' : ''}\n\n${stationPapercutQty(r.owed_packets)} ${r.unit} of ${paper} offcut will be deducted from stock.`,
+    confirmText: 'Issue Stock',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/papercut-issue-stock`, {
+      pin: stationOperator.pin,
+      source,
+      person_name: (stationPerson && stationPerson.name) || '',
+    });
+    const idx = jobs.findIndex(x => x.id === jobId);
+    if (idx >= 0) jobs[idx] = { ...jobs[idx], ...updated };
+    notify('Offcut stock issued');
+    await stationLoadPapercut();
+  } catch (e) {
+    notify('Error: ' + e.message);
+  }
+  showSaving(false);
 }
 
 // A big animated machine vignette for the operator's stage — so a worker who
