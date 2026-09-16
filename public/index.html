@@ -4281,6 +4281,13 @@ const OFFCUT_BTN_STYLE = 'background:#1e3a8a;border-color:#1e3a8a;color:#fff;fon
 // Same blue, see-through — offcut on hand is zero or short of what's needed.
 const OFFCUT_BTN_DISABLED_STYLE = 'background:rgba(30,58,138,0.3);border-color:rgba(30,58,138,0.3);color:#fff;font-weight:700;cursor:not-allowed;box-shadow:none;';
 const OFFCUT_PENDING_BADGE = '<span class="badge" style="background:#dbeafe;color:#1e3a8a;border:1px solid #93c5fd;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:2px 8px;">OFFCUT</span>';
+// Lighter/transparent blue — a TOP-UP: some of this offcut side was already
+// issued and this covers only the remaining shortfall. Used instead of the
+// solid OFFCUT_BTN_STYLE (a fresh request, nothing issued yet) on both
+// Pending Stock's "Issue More" and the Station's Paper Cutting list, so the
+// two cases read differently at a glance.
+const OFFCUT_BTN_LIGHT_STYLE = 'background:#dbeafe;border-color:#93c5fd;color:#1e3a8a;font-weight:700;';
+const OFFCUT_TOPUP_BADGE = '<span class="badge" style="background:#dbeafe;color:#1e3a8a;border:1px solid #93c5fd;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:2px 8px;">&#8593; TOP-UP</span>';
 // A job counts as offcut-based when its linked inventory item is an
 // offcut row. Used to swap the Issue Stock button to offcut blue on the
 // Pending Stock queue.
@@ -7047,22 +7054,24 @@ function renderInvPendingList() {
     const invPs = invIt ? packetSize(invIt.paper_type) : 100;
     const partialPkts = partial ? (partial / invPs) : 0;
     const partialPktsStr = partialPkts ? (Number.isInteger(partialPkts) ? String(partialPkts) : (+partialPkts.toFixed(2)).toString()) : '';
-    // Bigger, louder partial-issued badge — owner ask: same yellow-banner
-    // energy the over-issue callout used to have, with the leftover count
-    // spelled out so nobody misses it. Kept as a badge (not a full-width
-    // banner) because this tile already sits inside the Pending Stock
-    // list which is dense; the top-up button next to it is now yellow to
-    // reinforce the alert.
-    const partialBadge = partial
-      ? `<span class="badge" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`
-      : '';
-    const topupBtn = (partial && canIssueStock())
-      ? `<button class="btn btn-sm ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
-      : '';
     // Offcut jobs: the Issue Stock button is offcut blue (same blue as the
     // Offcut badges and + Add Offcut) so the row calls out "this pulls from
     // the offcut ledger". Paper Cutting can also issue these at the Station.
     const offcut = isOffcutJob(j);
+    // Bigger, louder partial-issued badge — owner ask: same banner energy
+    // the over-issue callout used to have, with the leftover count spelled
+    // out so nobody misses it. Kept as a badge (not a full-width banner)
+    // because this tile already sits inside the Pending Stock list which
+    // is dense. Yellow for fresh paper; offcut uses its own blue instead
+    // (matches the Station's light-blue treatment for the same top-up).
+    const partialBadge = partial
+      ? (offcut
+          ? `<span class="badge" style="background:#dbeafe;color:#1e3a8a;border:1px solid #93c5fd;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`
+          : `<span class="badge" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`)
+      : '';
+    const topupBtn = (partial && canIssueStock())
+      ? `<button class="btn btn-sm ceo-hide" style="${offcut ? OFFCUT_BTN_LIGHT_STYLE : 'background:#facc15;border-color:#eab308;color:#422006;font-weight:700;'}" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
+      : '';
     const offcutOk = !offcut || canIssueOffcutStock();
     const offcutStyle = offcut
       ? ` style="${OFFCUT_BTN_STYLE}"`
@@ -7077,7 +7086,7 @@ function renderInvPendingList() {
     // secondary tile below carries the entire request.
     const primaryStillNeeded = j.issuance_status === 'pending' || isPartialIssuance(j);
     const primaryTile = primaryStillNeeded ? `
-      <div class="inv-card inv-pending-row"${partial ? ' style="border-left:3px solid #F59E0B;"' : (offcut ? ' style="border-left:3px solid #1e3a8a;"' : '')}>
+      <div class="inv-card inv-pending-row"${offcut ? ' style="border-left:3px solid #1e3a8a;"' : (partial ? ' style="border-left:3px solid #F59E0B;"' : '')}>
         <div class="inv-main">
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
@@ -24724,16 +24733,22 @@ function stationPapercutRequestsHtml() {
             ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : '';
           const second = r.source === 'secondary'
             ? '<span class="badge" style="background:#1e3a8a;color:#fff;margin-left:8px;font-weight:800;font-size:11px;letter-spacing:0.04em;padding:3px 8px;">2ND PAPER</span>' : '';
+          // Top-up (some already issued, this is the remaining shortfall) vs
+          // a fresh request (nothing issued yet) — light blue vs dark blue,
+          // both border and button, so the two read differently at a glance.
+          const topup = !!r.is_partial;
+          const rowColor = topup ? '#93c5fd' : '#1e3a8a';
+          const btnStyle = enough ? (topup ? OFFCUT_BTN_LIGHT_STYLE : OFFCUT_BTN_STYLE) : OFFCUT_BTN_DISABLED_STYLE;
           return `
-          <div class="station-job" style="cursor:default;padding:10px 16px;gap:12px;border-left:4px solid #1e3a8a;">
+          <div class="station-job" style="cursor:default;padding:10px 16px;gap:12px;border-left:4px solid ${rowColor};">
             <div class="station-job-number"><div class="sj-id">#${r.job_id}</div></div>
             <div class="sj-main" style="flex:1;min-width:0;">
-              <div class="sj-name" style="font-size:16px;">${esc(r.name)}${second}${OFFCUT_PENDING_BADGE}${urgent}</div>
+              <div class="sj-name" style="font-size:16px;">${esc(r.name)}${second}${topup ? OFFCUT_TOPUP_BADGE : OFFCUT_PENDING_BADGE}${urgent}</div>
               <div class="sj-sub" style="margin-top:1px;">${r.client ? esc(r.client) + ' · ' : ''}${paper}${r.brand ? ' · ' + esc(r.brand) : ''}
                 · <b style="color:#1e3a8a;">${stationPapercutQty(r.owed_packets)} ${esc(r.unit)} needed</b>
                 · on hand <b style="color:${enough ? 'var(--green-text)' : '#A32D2D'};">${stationPapercutQty(r.on_hand_sheets / ps)} ${esc(r.unit)}</b></div>
             </div>
-            <button class="btn" style="flex-shrink:0;padding:9px 16px;font-size:14px;white-space:nowrap;${enough ? OFFCUT_BTN_STYLE : OFFCUT_BTN_DISABLED_STYLE}" ${enough ? '' : 'disabled title="Not enough offcut on hand"'}
+            <button class="btn" style="flex-shrink:0;padding:9px 16px;font-size:14px;white-space:nowrap;${btnStyle}" ${enough ? '' : 'disabled title="Not enough offcut on hand"'}
                     onclick="stationPapercutIssue(${r.job_id}, '${r.source === 'secondary' ? 'secondary' : 'primary'}')">&#128230; Issue Stock</button>
           </div>`;
         }).join('');

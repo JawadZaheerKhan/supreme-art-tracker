@@ -5442,12 +5442,16 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
       onHandByGroup.set(k, (onHandByGroup.get(k) || 0) + (parseFloat(it.current_balance) || 0));
     }
     const out = [];
-    const push = (job, source, item, owed) => {
+    const push = (job, source, item, owed, isPartial) => {
       const ps = packetSize(item.paper_type || '');
       out.push({
         job_id: job.id, jobcode: job.jobcode, name: job.name, client: job.client,
         deadline: job.deadline, priority: job.priority, stage_index: job.stage_index,
         source,
+        // Some of this side was already issued and this is the remaining
+        // top-up (vs. a fresh request where nothing has been issued yet) —
+        // the Station shows top-ups in a lighter blue tone.
+        is_partial: !!isPartial,
         paper_type: item.paper_type, size: item.size, gsm: item.gsm, brand: item.brand,
         unit: REAM_PAPERS.has(item.paper_type) ? 'reams' : 'packets',
         packet_size: ps,
@@ -5460,13 +5464,15 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
       const primaryItem = itemsById.get(job.inventory_item_id);
       if (primaryItem) {
         const owed = await primaryOwedSheets(sql, job, itemsById);
-        if (owed > 0) push(job, 'primary', primaryItem, owed);
+        // issuance_status === 'issued' with sheets still owed only happens
+        // via partial_pending_sheets — i.e. some was already issued.
+        if (owed > 0) push(job, 'primary', primaryItem, owed, job.issuance_status === 'issued');
       }
       const sec = (job.particulars || {}).secondary_paper;
       const secItem = sec && itemsById.get(sec.inventory_item_id);
       if (secItem) {
         const owed = secondaryOwedSheets(job, secItem);
-        if (owed > 0) push(job, 'secondary', secItem, owed);
+        if (owed > 0) push(job, 'secondary', secItem, owed, (parseInt(sec.issued_sheets, 10) || 0) > 0);
       }
     }
     res.json(out);
