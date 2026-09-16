@@ -5486,14 +5486,9 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
-    const pin = String(req.body.pin || '').trim();
-    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const ops = await sql`SELECT id, name, roles, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
-    const op = ops[0];
-    if (!op) return res.status(401).json({ error: 'PIN not recognized' });
-    if (!op.is_manager && !(Array.isArray(op.roles) && op.roles.includes('papercut'))) {
-      return res.status(403).json({ error: 'This PIN is not a Paper Cutting station.' });
-    }
+    const v = await verifyPapercutPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const op = v.operator;
     const source = req.body.source === 'secondary' ? 'secondary' : 'primary';
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -5538,6 +5533,113 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
       summary: `Job E-${id}: ${owed} sheets of offcut${source === 'secondary' ? ' (2nd paper)' : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
     });
     res.json(result.job);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// PIN must belong to an active machine with the Paper Cutting role, or be a
+// Manager PIN. Never trust the client's own role flag.
+async function verifyPapercutPin(sql, rawPin) {
+  const pin = String(rawPin || '').trim();
+  if (!validPin(pin)) return { status: 400, error: 'Enter a 3-digit PIN' };
+  const op = (await sql`SELECT id, name, roles, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+  if (!op) return { status: 401, error: 'PIN not recognized' };
+  if (!op.is_manager && !(Array.isArray(op.roles) && op.roles.includes('papercut'))) {
+    return { status: 403, error: 'This PIN is not a Paper Cutting station.' };
+  }
+  return { operator: op };
+}
+
+// Paper Cutting station's Offcut Inventory tab: every offcut item, plus
+// distinct values from all inventory for the add-item form's suggestions
+// (operator logins can't read /api/inventory).
+app.get('/api/station/offcut-items', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const items = await sql`
+      SELECT id, paper_type, size, gsm, brand, supplier, current_balance, cut_from_size
+      FROM inventory_items WHERE is_offcut = true
+      ORDER BY lower(paper_type), lower(COALESCE(size,'')), COALESCE(gsm,''), lower(COALESCE(brand,''))`;
+    const all = await sql`SELECT paper_type, size, gsm, brand, supplier FROM inventory_items`;
+    const distinct = (k) => [...new Set(all.map(r => String(r[k] || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    res.json({
+      items,
+      suggestions: { paper_types: distinct('paper_type'), sizes: distinct('size'), gsms: distinct('gsm'), brands: distinct('brand'), suppliers: distinct('supplier') },
+    });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Paper Cutting adds a new offcut item from the Station. Same normalisation
+// as POST /api/inventory (lowercase identifiers, no fresh-stock duplicate
+// check for offcuts).
+app.post('/api/station/offcut-items', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot change stock at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyPapercutPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const clean = (x) => { const s = String(x || '').trim().toLowerCase(); return s || null; };
+    const paperType = clean(req.body.paper_type);
+    const size = clean(req.body.size);
+    const gsm = String(req.body.gsm || '').trim() || null;
+    const brand = clean(req.body.brand);
+    const supplier = clean(req.body.supplier);
+    if (!paperType) return res.status(400).json({ error: 'Paper type is required' });
+    if (!size) return res.status(400).json({ error: 'Offcut size is required' });
+    const opening = parseSheets(req.body.opening_sheets);
+    if (opening < 0) return res.status(400).json({ error: 'Opening quantity cannot be negative' });
+    const who = `Paper Cutting ${v.operator.name}${req.body.person_name ? ' · ' + String(req.body.person_name).trim() : ''}`;
+    const item = (await sql`
+      INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier, is_offcut)
+      VALUES (${paperType}, ${size}, ${gsm}, ${brand}, 0, ${supplier}, true)
+      RETURNING *`)[0];
+    if (opening > 0) {
+      const note = String(req.body.notes || '').trim();
+      await applyInventoryChange(sql, {
+        itemId: item.id, change: +opening, reason: 'opening-balance', jobId: null,
+        notes: `Opening balance · added at Station by ${who}${note ? ' · ' + note : ''}`,
+        user: req.user,
+      });
+    }
+    const label = `${paperType} ${size}${gsm ? ' ' + gsm + 'gsm' : ''}${brand ? ' · ' + brand : ''}`;
+    await logAudit(sql, req, {
+      action: 'inventory.create', entityType: 'inventory', entityId: item.id,
+      summary: `Added offcut item from Station by ${who}: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}`,
+    });
+    res.json((await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`)[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Paper Cutting stocks in to an existing offcut item from the Station.
+// Recorded as a 'delivery' stock-in so it shows in Stock In reports and the
+// store keeper / admin can reverse it from History if it was a mistake.
+app.post('/api/station/offcut-items/:id/stock-in', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot change stock at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyPapercutPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const itemId = parseInt(req.params.id, 10);
+    const item = (await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`)[0];
+    if (!item) return res.status(404).json({ error: 'Offcut item not found' });
+    if (!item.is_offcut) return res.status(400).json({ error: 'Only offcut items can be stocked in from the Paper Cutting station.' });
+    const sheets = parseSheets(req.body.sheets);
+    if (!(sheets > 0)) return res.status(400).json({ error: 'Quantity must be a positive number of sheets' });
+    const who = `Paper Cutting ${v.operator.name}${req.body.person_name ? ' · ' + String(req.body.person_name).trim() : ''}`;
+    const note = String(req.body.notes || '').trim();
+    await applyInventoryChange(sql, {
+      itemId, change: +sheets, reason: 'delivery', jobId: null,
+      notes: `Offcut stock-in at Station by ${who}${note ? ' · ' + note : ''}`,
+      user: req.user,
+    });
+    const label = `${item.paper_type} ${item.size || ''}${item.gsm ? ' ' + item.gsm + 'gsm' : ''}${item.brand ? ' · ' + item.brand : ''}`;
+    await logAudit(sql, req, {
+      action: 'inventory.stock', entityType: 'inventory', entityId: itemId,
+      summary: `+${sheets.toLocaleString()} sheets offcut stock-in from Station by ${who}: ${label}`,
+    });
+    res.json((await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`)[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

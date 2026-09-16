@@ -24355,6 +24355,10 @@ let stationPinBuf   = '';     // digits entered on the PIN pad
 let stationView     = 'pin';  // 'pin' | 'queue' | 'update' | 'papercut' | ...
 let stationJobId    = null;
 let stationPapercutRequests = null; // Paper Cutting screen: pending offcut requests from /api/station/offcut-requests
+let stationPapercutTab = 'requests';  // Paper Cutting screen tab: 'requests' | 'inventory'
+let stationOffcutItems = null;         // Offcut Inventory tab: items from /api/station/offcut-items
+let stationOffcutSuggestions = {};     // distinct paper types / sizes / gsms / brands / suppliers for the add form
+let stationOffcutSearch = '';
 let stationIdleTimer = null;
 let stationNotes    = [];     // incoming notes for this station's queue (prev stage → us)
 let stationRec      = null;   // active MediaRecorder while capturing a voice note
@@ -24386,6 +24390,9 @@ function stationLogout(silent) {
   stationView = 'pin';
   stationJobId = null;
   stationPapercutRequests = null;
+  stationPapercutTab = 'requests';
+  stationOffcutItems = null;
+  stationOffcutSearch = '';
   stationPassCount = 1;
   stationJobPassKey = null;
   stationPrintMult = {};
@@ -24667,6 +24674,7 @@ async function stationRoutePapercut() {
 }
 async function stationOpenPapercut() {
   stationView = 'papercut';
+  stationPapercutTab = 'requests';
   stationPapercutRequests = null;
   stationRender();
   await stationLoadPapercut();
@@ -24684,10 +24692,26 @@ function stationPapercutQty(n) {
   return Number.isInteger(n) ? n.toLocaleString() : (+(+n).toFixed(2)).toLocaleString();
 }
 function stationPapercutHtml() {
-  const list = stationPapercutRequests;
   const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
   const whoUr = stationPerson && stationPerson.name_ur
     ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : '';
+  const onInv = stationPapercutTab === 'inventory';
+  const reqCount = Array.isArray(stationPapercutRequests) ? ` (${stationPapercutRequests.length})` : '';
+  const tabBtn = (id, label) => `<button class="btn${stationPapercutTab === id ? ' btn-primary' : ''}" style="padding:9px 16px;font-size:14px;${stationPapercutTab === id ? 'background:#1e3a8a;border-color:#1e3a8a;color:#fff;' : ''}" onclick="stationSetPapercutTab('${id}')">${label}</button>`;
+  return `
+    <div class="station-head">
+      <div><div class="station-who">${who}${whoUr}</div><div class="station-where">&#9986; Paper Cutting${stationOperator.machine ? ' &middot; ' + esc(stationOperator.machine) : ''}</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px 0;">
+      ${tabBtn('requests', '&#128230; Issue Requests' + reqCount)}
+      ${tabBtn('inventory', '&#128218; Offcut Inventory')}
+      ${stationWorkStages().length ? `<button class="btn btn-sm" style="margin-left:auto;" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button>` : ''}
+    </div>
+    ${onInv ? stationOffcutInventoryHtml() : stationPapercutRequestsHtml()}`;
+}
+function stationPapercutRequestsHtml() {
+  const list = stationPapercutRequests;
   const rows = list == null
     ? '<div class="empty">Loading…</div>'
     : !list.length
@@ -24714,15 +24738,203 @@ function stationPapercutHtml() {
           </div>`;
         }).join('');
   return `
-    <div class="station-head">
-      <div><div class="station-who">${who}${whoUr}</div><div class="station-where">&#9986; Paper Cutting &middot; Offcut Issuance${stationOperator.machine ? ' &middot; ' + esc(stationOperator.machine) : ''}</div></div>
-      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
-    </div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;">
       <button class="btn btn-sm" onclick="stationLoadPapercut()">&#8635; Refresh</button>
-      ${stationWorkStages().length ? `<button class="btn btn-sm" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button>` : ''}
     </div>
     <div class="station-queue">${rows}</div>`;
+}
+
+// ── Paper Cutting · Offcut Inventory tab ──
+// Every offcut item with its balance, a + Stock button per item, and a
+// + Offcut Item button to create a new one. Writes are PIN-verified
+// server-side (/api/station/offcut-items…).
+function stationSetPapercutTab(tab) {
+  stationPapercutTab = tab === 'inventory' ? 'inventory' : 'requests';
+  stationRender();
+  if (stationPapercutTab === 'inventory') stationLoadOffcutItems();
+  else stationLoadPapercut();
+}
+async function stationLoadOffcutItems() {
+  try {
+    const data = await api('GET', '/api/station/offcut-items');
+    stationOffcutItems = data.items || [];
+    stationOffcutSuggestions = data.suggestions || {};
+  } catch (e) {
+    stationOffcutItems = [];
+    notify('Could not load offcut inventory: ' + e.message);
+  }
+  if (stationView === 'papercut' && stationPapercutTab === 'inventory') stationRender();
+}
+function stationOffcutLabel(it) {
+  return [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' · ');
+}
+// Filters rows in place (no re-render) so the search box keeps focus.
+function stationOffcutFilter(q) {
+  stationOffcutSearch = q;
+  const needle = String(q || '').trim().toLowerCase();
+  let shown = 0;
+  document.querySelectorAll('#station-offcut-list [data-search]').forEach(row => {
+    const hit = !needle || row.dataset.search.includes(needle);
+    row.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  const none = document.getElementById('station-offcut-nomatch');
+  if (none) none.style.display = shown ? 'none' : '';
+}
+function stationOffcutInventoryHtml() {
+  const list = stationOffcutItems;
+  const needle = String(stationOffcutSearch || '').trim().toLowerCase();
+  const rows = list == null
+    ? '<div class="empty">Loading…</div>'
+    : !list.length
+      ? '<div class="empty">No offcut items yet. Use + Offcut Item to add one.</div>'
+      : list.map(it => {
+          const bal = parseInt(it.current_balance, 10) || 0;
+          const ps = packetSize(it.paper_type);
+          const unit = packetUnitLabel(it.paper_type).toLowerCase();
+          const search = [it.paper_type, it.size, it.gsm, it.brand, it.supplier].filter(Boolean).join(' ').toLowerCase();
+          const hidden = needle && !search.includes(needle);
+          return `
+          <div class="station-job" data-search="${esc(search)}" style="${hidden ? 'display:none;' : ''}cursor:default;padding:10px 16px;gap:12px;border-left:4px solid #1e3a8a;">
+            <div class="sj-main" style="flex:1;min-width:0;">
+              <div class="sj-name" style="font-size:16px;">${esc(stationOffcutLabel(it))}${OFFCUT_PENDING_BADGE}</div>
+              <div class="sj-sub" style="margin-top:1px;">${it.brand ? esc(it.brand) : '<i>no brand</i>'}${it.supplier ? ' · ' + esc(it.supplier) : ''}${it.cut_from_size ? ' · cut from ' + esc(it.cut_from_size) : ''}</div>
+            </div>
+            <div style="text-align:right;flex-shrink:0;">
+              <div style="font-size:16px;font-weight:800;color:${bal > 0 ? 'var(--green-text)' : '#A32D2D'};">${stationPapercutQty(ps ? bal / ps : bal)} ${esc(unit)}</div>
+              <div style="font-size:11px;color:var(--text2);">${bal.toLocaleString()} sheets</div>
+            </div>
+            <button class="btn" style="flex-shrink:0;padding:9px 16px;font-size:14px;white-space:nowrap;${OFFCUT_BTN_STYLE}" onclick="stationOpenOffcutStockIn(${it.id})">+ Stock</button>
+          </div>`;
+        }).join('') + '<div class="empty" id="station-offcut-nomatch" style="display:none;">No offcut items match.</div>';
+  return `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;align-items:center;">
+      <button class="btn" style="${OFFCUT_BTN_STYLE}padding:9px 16px;font-size:14px;" onclick="stationOpenAddOffcutItem()">+ Offcut Item</button>
+      <input type="text" placeholder="Search paper, size, gsm, brand…" value="${esc(stationOffcutSearch)}" oninput="stationOffcutFilter(this.value)"
+             style="flex:1;min-width:180px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+      <button class="btn btn-sm" onclick="stationLoadOffcutItems()">&#8635; Refresh</button>
+    </div>
+    <div class="station-queue" id="station-offcut-list">${rows}</div>`;
+}
+function stationOpenOffcutStockIn(id) {
+  const it = (stationOffcutItems || []).find(x => x.id === id);
+  if (!it) return;
+  const ps = packetSize(it.paper_type);
+  const unit = packetUnitLabel(it.paper_type);
+  const bal = parseInt(it.current_balance, 10) || 0;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2 style="color:#1e3a8a;">Add Offcut Stock</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text)">${esc(stationOffcutLabel(it))}${it.brand ? ' · ' + esc(it.brand) : ''}</b><br>Current: ${stationPapercutQty(ps ? bal / ps : bal)} ${unit.toLowerCase()} (${bal.toLocaleString()} sheets) · 1 ${unit.slice(0, -1).toLowerCase()} = ${ps} sheets</div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Quantity — ${unit}</label>
+        <input type="number" id="stock-packets" placeholder="0" min="0" step="any" inputmode="decimal" oninput="stockQtySync('packets', ${ps})"></div>
+      <div class="form-group"><label class="form-label">Quantity — Sheets *</label>
+        <input type="number" id="stock-qty" placeholder="0" min="1" inputmode="numeric" oninput="stockQtySync('sheets', ${ps})"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Leftover from job E-605"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" style="${OFFCUT_BTN_STYLE}" onclick="stationSaveOffcutStockIn(${it.id})">Add Stock</button>
+    </div>
+  </div>`);
+  setTimeout(() => document.getElementById('stock-packets')?.focus(), 50);
+}
+async function stationSaveOffcutStockIn(id) {
+  if (!stationOperator) return;
+  const sheets = Math.round(parseFloat(document.getElementById('stock-qty').value));
+  if (!Number.isFinite(sheets) || sheets <= 0) { await alertDialog({ title: 'Enter a quantity greater than zero', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    await api('POST', `/api/station/offcut-items/${id}/stock-in`, {
+      pin: stationOperator.pin,
+      sheets,
+      notes: document.getElementById('stock-notes').value.trim(),
+      person_name: (stationPerson && stationPerson.name) || '',
+    });
+    closeModal();
+    notify(`+${sheets.toLocaleString()} sheets added to offcut`);
+    await stationLoadOffcutItems();
+    stationOffcutFilter(stationOffcutSearch);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+function stationOpenAddOffcutItem() {
+  const sug = stationOffcutSuggestions || {};
+  const types = [...new Set([...PAPER_TYPES, ...(sug.paper_types || [])])];
+  const dl = (id, vals) => `<datalist id="${id}">${(vals || []).map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2 style="color:#1e3a8a;">Add Offcut Item</h2>
+    <div style="margin:-4px 0 12px;padding:8px 12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:8px;font-size:12px;color:#1e3a8a;">
+      Adds a new offcut line to inventory. Use + Stock on an existing item to top it up instead.
+    </div>
+    ${dl('pc-sizes', sug.sizes)}${dl('pc-gsms', sug.gsms)}${dl('pc-brands', sug.brands)}${dl('pc-suppliers', sug.suppliers)}
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Paper Type *</label>
+        <select id="pc-paper-type" onchange="stationOffcutOpeningSync()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;font-size:14px;font-family:var(--font);">${types.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}</select></div>
+      <div class="form-group"><label class="form-label">Brand</label><input type="text" id="pc-brand" list="pc-brands" placeholder="e.g. nivea"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Size (offcut) *</label><input type="text" id="pc-size" list="pc-sizes" placeholder="e.g. 20x15"></div>
+      <div class="form-group"><label class="form-label">GSM</label><input type="text" id="pc-gsm" list="pc-gsms" inputmode="numeric" placeholder="e.g. 300"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Supplier</label><input type="text" id="pc-supplier" list="pc-suppliers" placeholder="Optional"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label" id="pc-opening-packets-label">Opening — Packets</label>
+        <input type="number" id="pc-opening-packets" placeholder="0" min="0" step="any" inputmode="decimal" oninput="stationOffcutOpeningSync('packets')"></div>
+      <div class="form-group"><label class="form-label">Opening — Sheets</label>
+        <input type="number" id="pc-opening" placeholder="0" min="0" inputmode="numeric" oninput="stationOffcutOpeningSync('sheets')"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="pc-notes" placeholder="e.g. Leftover from job E-605"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" style="${OFFCUT_BTN_STYLE}" onclick="stationSaveAddOffcutItem()">Add Offcut</button>
+    </div>
+  </div>`);
+  stationOffcutOpeningSync();
+}
+// Packets ⇄ sheets for the opening quantity; packet size follows the picked
+// paper type (reams for ream papers).
+function stationOffcutOpeningSync(source) {
+  const type = document.getElementById('pc-paper-type')?.value || '';
+  const ps = packetSize(type);
+  const label = document.getElementById('pc-opening-packets-label');
+  if (label) label.textContent = `Opening — ${packetUnitLabel(type)}`;
+  const pk = document.getElementById('pc-opening-packets');
+  const sh = document.getElementById('pc-opening');
+  if (!pk || !sh) return;
+  if (source === 'sheets') {
+    const s = parseFloat(sh.value);
+    pk.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
+  } else {
+    const p = parseFloat(pk.value);
+    sh.value = isNaN(p) ? '' : Math.round(p * ps);
+  }
+}
+async function stationSaveAddOffcutItem() {
+  if (!stationOperator) return;
+  const val = (id) => (document.getElementById(id)?.value || '').trim();
+  const data = {
+    pin: stationOperator.pin,
+    paper_type: val('pc-paper-type'),
+    size: val('pc-size'),
+    gsm: val('pc-gsm'),
+    brand: val('pc-brand'),
+    supplier: val('pc-supplier'),
+    opening_sheets: Math.max(0, Math.round(parseFloat(val('pc-opening')) || 0)),
+    notes: val('pc-notes'),
+    person_name: (stationPerson && stationPerson.name) || '',
+  };
+  if (!data.paper_type) { await alertDialog({ title: 'Paper type is required', kind: 'warn' }); return; }
+  if (!data.size) { await alertDialog({ title: 'Offcut size is required', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    await api('POST', '/api/station/offcut-items', data);
+    closeModal();
+    notify('Offcut item added');
+    await stationLoadOffcutItems();
+    stationOffcutFilter(stationOffcutSearch);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 async function stationPapercutIssue(jobId, source) {
   if (!stationOperator) return;
