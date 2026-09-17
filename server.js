@@ -8891,10 +8891,22 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     }
 
     // Pasting → Ready: auto-fill delivered_cartons_qty from pasted_cartons_qty
-    // so the QC person at Ready just confirms and adds packets.
+    // so the QC person at Ready just confirms and adds packets (a separate
+    // field, ready_packets_qty, written directly by Pasting's own "Packets
+    // / Cartons" input — never touched here).
+    //
+    // Always overwrites, even if delivered_cartons_qty already holds
+    // something — this transition (curStage 5 -> stage_index 6) only ever
+    // fires once per job, so there's nothing later to clobber. The old
+    // guard (`!particulars.delivered_cartons_qty`) treated ANY pre-existing
+    // value as "already filled" and skipped the copy — including a stale
+    // object left over from someone opening the job card and typing into
+    // that row before Pasting was actually done. Pasting's real, final
+    // number is the authoritative source at the moment it finishes, so it
+    // should always win here.
     if (advance && curStage === 5 && stage_index === 6) {
       const pasted = particulars.pasted_cartons_qty;
-      if (pasted && !particulars.delivered_cartons_qty) {
+      if (pasted) {
         particulars.delivered_cartons_qty = {
           quantity: pasted.quantity || '',
           entries: Array.isArray(pasted.entries) ? JSON.parse(JSON.stringify(pasted.entries)) : undefined,
