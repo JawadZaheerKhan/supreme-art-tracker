@@ -205,6 +205,14 @@
   body.role-store-manager .sm-hide { display: none !important; }
   /* Manual Consumption report — Super Admin only (regular Admins excluded). */
   body.role-not-superadmin .superadmin-only-report { display: none !important; }
+  /* Finance features merged in from the Finance app, each gated by its own
+     Access Register row (see renderUserChip for the body classes). */
+  body.role-no-sale-report .sale-report-only { display: none !important; }
+  body.role-no-products-tab .products-tab-only { display: none !important; }
+  body.role-no-products-rate .products-rate-only { display: none !important; }
+  body.role-no-products-revenue .products-revenue-only { display: none !important; }
+  body.role-no-sale-totals .sale-totals-only { display: none !important; }
+  body.role-no-sale-company .sale-company-only { display: none !important; }
   body.role-lock-inventory #inventory-mode .ceo-hide,
   body.role-lock-inventory #imports-mode .ceo-hide { display: none !important; }
   /* Production Manager: in the Users tab they only see the Floor Operators
@@ -2835,6 +2843,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   </div>
   <div class="mode-switch" id="mode-switch">
     <button class="mode-btn active" data-mode="jobs" id="mode-jobs-btn" onclick="setMode('jobs')">Jobs</button>
+    <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="setMode('reports')">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
@@ -2949,6 +2958,46 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div class="inventory-list" id="inventory-list"></div>
 </div>
 
+<div class="main" id="products-mode" style="display:none;">
+  <div class="toolbar">
+    <div class="search-wrap">
+      <input type="text" id="products-search" placeholder="Search product or company..." oninput="setProductsSearch(this.value)">
+      <span class="search-icon">&#128269;</span>
+    </div>
+    <select class="filter" id="products-company-filter" onchange="setProductsCompanyFilter(this.value)"><option value="">All companies</option></select>
+    <select class="filter" id="products-type-filter" onchange="setProductsTypeFilter(this.value)">
+      <option value="">All types</option>
+      <option value="Syrup">Syrup</option>
+      <option value="Susp">Susp &mdash; Suspension</option>
+      <option value="Tab">Tab &mdash; Tablets</option>
+      <option value="Caps">Caps &mdash; Capsules</option>
+      <option value="Labels">Labels</option>
+      <option value="Leaflets">Leaflets</option>
+      <option value="Sachet">Sachet</option>
+      <option value="Sticker">Sticker</option>
+    </select>
+    <select class="filter" id="products-date-range" onchange="setProductsDateRange(this.value)">
+      <option value="">All time</option>
+      <option value="this-week">This week</option>
+      <option value="last-week">Last week</option>
+      <option value="past-7">Past 7 days</option>
+      <option value="this-month">This month</option>
+      <option value="last-month">Last month</option>
+      <option value="past-30">Past 30 days</option>
+      <option value="this-year">This year</option>
+      <option value="last-year">Last year</option>
+      <option value="custom">Custom range&hellip;</option>
+    </select>
+    <span id="products-date-custom" style="display:none;gap:6px;align-items:center;">
+      <input type="date" id="products-dfrom" class="filter" onchange="setProductsDateCustom()" style="padding:6px;">
+      <span style="color:var(--text2);font-size:12px;">to</span>
+      <input type="date" id="products-dto" class="filter" onchange="setProductsDateCustom()" style="padding:6px;">
+    </span>
+    <span id="products-count" style="margin-left:auto;font-size:12px;color:var(--text2);align-self:center;"></span>
+  </div>
+  <div id="products-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));gap:14px;padding:4px 2px;"></div>
+</div>
+
 <div class="main" id="reports-mode" style="display:none;">
   <!-- Landing: three clickable cards. Click one to enter its grouped view.
        Imports doesn't have sub-views so it opens its modal directly. -->
@@ -2965,6 +3014,11 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <div class="report-card-icon">&#128666;</div>
         <div class="report-card-title">Imports</div>
         <div class="report-card-desc">Booked-but-not-yet-arrived shipments. Track pending orders and mark them received to feed Stock Summary.</div>
+      </button>
+      <button class="report-card sale-report-only" onclick="openSaleReportPage()">
+        <div class="report-card-icon">&#128176;</div>
+        <div class="report-card-title">Sale Report</div>
+        <div class="report-card-desc">Every delivered job with full invoicing detail — PO/Batch/E-FBR/Invoice No., quantities, paper/machine/coatings, Rate, Sale Tax %, and Company/Destination/NTN. With totals row, print + Excel export.</div>
       </button>
       <button class="report-card sm-hide" onclick="openJobsReportPage()">
         <div class="report-card-icon">&#128196;</div>
@@ -3056,6 +3110,22 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <main class="reports-content">
         <div id="rt-jobs-report" class="rt-pane"></div>
         <div id="rt-prod-report" class="rt-pane" style="display:none;"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Sale Report group — single pane, no sub-tabs (same shape as Imports). -->
+  <div id="sale-report-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Sale Report</div>
+        <button class="rsb-item active" data-rt="sale-report">
+          <span class="rsb-icon">&#128176;</span> Sale Report
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-sale-report" class="rt-pane"></div>
       </main>
     </div>
   </div>
@@ -3597,6 +3667,9 @@ function particularsRowsFor(job) {
 }
 
 let jobs = [];
+let productRates = [];       // cached Product Rate table (finance feature), see loadProductRates()
+let productAliases = [];     // cached Product Aliases, see loadProductAliases()
+let companySettings = [];    // cached Company Settings (NTN, Destination), see loadCompanySettings()
 let inventory = [];          // cached inventory items (refreshed on load + after mutations)
 let stockGroups = [];        // cached stock groups entity (client/product/po_qty template shared across sub jobs)
 // Helper: look up a group entity by id — returns undefined if not
@@ -3913,6 +3986,41 @@ function readyCartonsTotal(j) {
   }
   return 0;
 }
+// "Cartons/Packets" as this app shows it: the finance-side override
+// (jobs.cartons_packets, set on the Record Delivery form) when one exists,
+// otherwise whatever the tracker's Pasting station recorded. The station's
+// own JSONB row is never overwritten — see the column's comment in
+// server.js for why.
+function cartonsPacketsFor(j) {
+  if (!j) return 0;
+  if (j.cartons_packets !== null && j.cartons_packets !== undefined && j.cartons_packets !== '') {
+    const n = Number(j.cartons_packets);
+    if (Number.isFinite(n)) return n;
+  }
+  return readyPacketsQtyTotal(j);
+}
+// "Cartons/Packets" — the ready_packets_qty field the Pasting operator (and
+// Ready to Deliver/QC) write in their own station entry, under "Packets /
+// Cartons". Distinct from Unit Cartons: this is a physical carton/packet
+// count, not the unit-carton production quantity. Same entries[]-or-
+// pipe-joined-quantity shape as readyCartonsTotal above, read-only here —
+// this app never writes to it, only displays what the tracker's stations
+// already recorded.
+function readyPacketsQtyTotal(j) {
+  if (!j) return 0;
+  const p = j.particulars && j.particulars.ready_packets_qty;
+  if (!p) return 0;
+  if (Array.isArray(p.entries) && p.entries.length) {
+    return p.entries.reduce((a, e) => {
+      const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
+      return a + (Number.isFinite(n) ? n : 0);
+    }, 0);
+  }
+  return String(p.quantity || '').split('|').reduce((a, s) => {
+    const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+    return a + (Number.isFinite(n) ? n : 0);
+  }, 0);
+}
 // ── Linked Jobs (pairwise) ────────────────────────────────────────
 // Resolve a job by id from whichever cache is loaded — the admin `jobs`
 // array (admin dashboard + admin's "Client View" preview) or the real
@@ -4004,6 +4112,93 @@ function dateRangeBounds(preset) {
     case 'last-year':  return { from: new Date(now.getFullYear()-1, 0, 1), to: new Date(now.getFullYear(), 0, 1) };
   }
   return null;
+}
+// Resolve a report's own {dateRange preset, custom dfrom, custom dto} into
+// millisecond bounds, reusing the same preset table dateRangeBounds()
+// already computes for the Jobs tab's own #date-filter — so "This month"
+// means the same window everywhere it appears. Returns null for "All
+// time" (no preset, no custom dates set).
+function resolveDateFilterBounds(preset, dfrom, dto) {
+  if (preset === 'custom') {
+    const from = dfrom ? new Date(dfrom + 'T00:00:00').getTime() : null;
+    const to   = dto   ? new Date(dto   + 'T23:59:59').getTime() : null;
+    if (from === null && to === null) return null;
+    return { from, to };
+  }
+  if (!preset) return null;
+  const b = dateRangeBounds(preset);
+  return b ? { from: b.from.getTime(), to: b.to.getTime() - 1 } : null;
+}
+// Human label for a {dateRange preset, dfrom, dto} triple — used on print
+// headers in place of raw From/To, since a preset (e.g. "This month")
+// leaves dfrom/dto empty.
+function dateRangeLabel(preset, dfrom, dto) {
+  if (!preset) return 'All time';
+  if (preset === 'custom') return `${fmtDMY(dfrom) || '(any)'} to ${fmtDMY(dto) || '(any)'}`;
+  const labels = { 'this-week':'This week', 'last-week':'Last week', 'past-7':'Past 7 days', 'this-month':'This month', 'last-month':'Last month', 'past-30':'Past 30 days', 'this-year':'This year', 'last-year':'Last year' };
+  return labels[preset] || preset;
+}
+// Shared "date filter" control markup — the same preset dropdown (All
+// time / This week / … / Custom range…) the Jobs tab's own #date-filter
+// uses, for a report that keeps its own state object instead of the
+// global filterDateRange/filterDateFrom/filterDateTo. idPrefix must be
+// unique per report (e.g. "sr" for Sale Report, "pr" for Products).
+function dateFilterToolbarHtml(idPrefix, preset, dfrom, dto, onPresetFn, onCustomFn) {
+  return `
+    <div>
+      <div class="dash-flbl">Date</div>
+      <select class="filter" id="${idPrefix}-date-range" onchange="${onPresetFn}(this.value)">
+        <option value="">All time</option>
+        <option value="this-week"${preset==='this-week'?' selected':''}>This week</option>
+        <option value="last-week"${preset==='last-week'?' selected':''}>Last week</option>
+        <option value="past-7"${preset==='past-7'?' selected':''}>Past 7 days</option>
+        <option value="this-month"${preset==='this-month'?' selected':''}>This month</option>
+        <option value="last-month"${preset==='last-month'?' selected':''}>Last month</option>
+        <option value="past-30"${preset==='past-30'?' selected':''}>Past 30 days</option>
+        <option value="this-year"${preset==='this-year'?' selected':''}>This year</option>
+        <option value="last-year"${preset==='last-year'?' selected':''}>Last year</option>
+        <option value="custom"${preset==='custom'?' selected':''}>Custom range&hellip;</option>
+      </select>
+    </div>
+    <span id="${idPrefix}-date-custom" style="display:${preset==='custom'?'inline-flex':'none'};gap:6px;align-items:center;">
+      <input type="date" id="${idPrefix}-dfrom" class="filter" value="${dfrom||''}" onchange="${onCustomFn}()" style="padding:6px;">
+      <span style="color:var(--text2);font-size:12px;">to</span>
+      <input type="date" id="${idPrefix}-dto" class="filter" value="${dto||''}" onchange="${onCustomFn}()" style="padding:6px;">
+    </span>`;
+}
+// Best available "when was this delivered" timestamp — the Delivered
+// stage's own stamp, falling back to the latest recorded shipment date.
+// Shared by the Sale Report and the Product Rate tab's date filter so
+// "This month" means the same window in both places.
+function jobDeliveredAnchorMs(j) {
+  const lastStageIdx = STAGES.length - 1;
+  const stageRec = j.stages && j.stages[lastStageIdx];
+  let refMs = NaN;
+  if (stageRec && stageRec.at) refMs = new Date(stageRec.at).getTime();
+  if (!isFinite(refMs) && stageRec && stageRec.time) {
+    const m = String(fmtStageTime(stageRec.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    if (m) refMs = new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0)).getTime();
+  }
+  const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
+  if (!isFinite(refMs) && deliveriesList.length) {
+    const stamps = deliveriesList.map(d => (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN)).filter(n => isFinite(n));
+    if (stamps.length) refMs = Math.max(...stamps);
+  }
+  return isFinite(refMs) ? refMs : null;
+}
+// Best-effort localStorage persistence for a report's own filter state —
+// so leaving a report (switching tabs, or a page reload) and coming back
+// doesn't reset whatever date range / search / sort was set. Wrapped in
+// try/catch since localStorage can throw (private browsing, quota, etc.).
+function loadPersistedFilters(key, defaults) {
+  try {
+    const raw = localStorage.getItem('fin-filters-' + key);
+    if (!raw) return { ...defaults };
+    return { ...defaults, ...JSON.parse(raw) };
+  } catch (e) { return { ...defaults }; }
+}
+function persistFilters(key, state) {
+  try { localStorage.setItem('fin-filters-' + key, JSON.stringify(state)); } catch (e) {}
 }
 function parseLocalDate(s) {
   if (!s) return null;
@@ -4593,6 +4788,13 @@ function renderUserChip() {
   // Wastage Adjustment and the Finalized tab (default: Super Admin only,
   // editable from the Access Register).
   document.body.classList.toggle('role-not-superadmin', !canWastageAdjust());
+  // Finance features: one Access Register row each.
+  document.body.classList.toggle('role-no-sale-report', !hasPerm('rpt_sale_report', 'view'));
+  document.body.classList.toggle('role-no-sale-totals', !hasPerm('rpt_sale_report_totals', 'view'));
+  document.body.classList.toggle('role-no-sale-company', !hasPerm('rpt_sale_report_company', 'view'));
+  document.body.classList.toggle('role-no-products-tab', !hasPerm('products_tab_access', 'view'));
+  document.body.classList.toggle('role-no-products-rate', !hasPerm('products_btn_rate', 'view'));
+  document.body.classList.toggle('role-no-products-revenue', !hasPerm('products_btn_revenue', 'view'));
   renderAppDate();
 }
 
@@ -4671,6 +4873,80 @@ async function loadJobs() {
   } catch(e) {
     notify('Error loading jobs: ' + e.message);
   }
+}
+
+// Product Rate table (Supreme Art Finance only) — Hamza's own product →
+// default-rate list. Loaded once at boot like inventory/printingMachines;
+// refreshed after any add/edit/delete on the Product Rate report.
+async function loadProductRates() {
+  try {
+    productRates = await api('GET', '/api/product-rates');
+  } catch (e) {
+    productRates = [];
+  }
+}
+// Product Aliases (Supreme Art Finance only) — folds a differently-named
+// job into an existing product tile (Product Rate tab's "+" button). See
+// resolveProductKey()/buildProductGroups(). Loaded once at boot; refreshed
+// after adding an alias.
+async function loadProductAliases() {
+  try {
+    productAliases = await api('GET', '/api/product-aliases');
+  } catch (e) {
+    productAliases = [];
+  }
+}
+// Case-insensitive lookup by product name — a job's own name IS the
+// product it's printing, so this is what a not-yet-priced job suggests.
+// Resolves through productAliases first, so a job folded into another
+// product (via the "+" button) suggests THAT product's rate, not its own
+// name's (usually nonexistent) rate row.
+function productRateFor(productName) {
+  const own = String(productName || '').trim().toLowerCase();
+  if (!own) return null;
+  const aliasRow = productAliases.find(a => a.alias === own);
+  const name = aliasRow ? String(aliasRow.canonical || '').trim().toLowerCase() : own;
+  const row = productRates.find(r => String(r.product || '').trim().toLowerCase() === name);
+  return row ? Number(row.rate) : null;
+}
+// What Rate to actually show/use for a job: its own saved rate once set
+// (fixed, per Hamza — "same until I change it"), else the Product Rate
+// table's current suggestion for a job with this name, else nothing.
+function effectiveRate(job) {
+  if (job && job.rate !== null && job.rate !== undefined && job.rate !== '') return { value: Number(job.rate), suggested: false };
+  const suggested = productRateFor(job && job.name);
+  return suggested !== null ? { value: suggested, suggested: true } : null;
+}
+// Company Settings (NTN, Destination) — Supreme Art Finance only. Loaded
+// once at boot like Product Rate; refreshed after any add/edit/delete on
+// the Company Settings modal (see openCompanySettings, Jobs toolbar).
+async function loadCompanySettings() {
+  try {
+    companySettings = await api('GET', '/api/company-settings');
+  } catch (e) {
+    companySettings = [];
+  }
+}
+// Case-insensitive lookup by company name — matches job.client.
+function companySettingsFor(company) {
+  const name = String(company || '').trim().toLowerCase();
+  if (!name) return null;
+  return companySettings.find(c => String(c.company || '').trim().toLowerCase() === name) || null;
+}
+// Rs 12.5, Rs 12 (no trailing zeros) — up to 2 decimal places.
+function fmtRate(n) { return 'Rs ' + Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+// Text for the top-of-tile Rate fact, shared by both tile renderers (each
+// wraps this in its own label markup — the two use different conventions).
+// Shows the job's own saved rate plainly; shows the Product Rate table's
+// current suggestion in a lighter, explicitly-labeled way so it's never
+// mistaken for a rate that's actually been set on this job.
+function rateFactText(job) {
+  if (!hasPerm('job_btn_pricing', 'view')) return '';
+  const r = effectiveRate(job);
+  if (!r) return '';
+  return r.suggested
+    ? `${fmtRate(r.value)} <span style="color:var(--text2);font-style:italic;">(suggested)</span>`
+    : fmtRate(r.value);
 }
 
 // Machine dropdown source for the Job Card. Falls back to the hardcoded
@@ -4819,10 +5095,15 @@ function setMode(m) {
   // a server-side reject on station-update for the ceo role). Finance
   // may enter to see the role-block-msg placeholder.
   if (m === 'station' && !canRunStation() && !isFinance()) m = 'jobs';
+  // Product Rate tab: its own Access Register row (products_tab_access).
+  if (m === 'products' && !hasPerm('products_tab_access', 'view')) m = 'jobs';
+  // Leaving Reports clears the Sale Report's per-column filters (session-scoped).
+  if (mode === 'reports' && m !== 'reports') srResetColFilters();
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
+  document.getElementById('products-mode').style.display  = m === 'products' ? 'block' : 'none';
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
   document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
@@ -4845,6 +5126,11 @@ function setMode(m) {
     if (refreshBtn) refreshBtn.style.display = '';
     render();
     loadDailyStats();   // fills the Daily Unit Carton Qty card
+  } else if (m === 'products') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    renderProductsTab();
   } else if (m === 'inventory') {
     addBtn.style.display = canWriteInventory() ? '' : 'none';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
@@ -5415,6 +5701,7 @@ function renderJobRowCompact(j, opts) {
                full production specifications remain in Edit / View. -->
           <div class="job-sub">${j.client?esc(j.client):''}${j.client && j.jobcode?' &middot; ':''}${j.jobcode?'<b>Code:</b> '+esc(j.jobcode):''}</div>
           <div class="job-facts">
+            ${(() => { const rt = rateFactText(j); return rt ? `<span><b>Rate:</b> ${rt}</span>` : ''; })()}
             ${milShipFacts
               ? `<span><b>PO Qty:</b> ${milShipFacts.qtyLine} pcs</span>`
               : (j.qty?`<span><b>${isGroupTile?'Mil':'PO'} Qty:</b> ${esc(j.qty)} pcs</span>`:'')}
@@ -5795,6 +6082,7 @@ function renderJobCard(j, opts) {
         j.deadline ? `<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Deadline</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
       ].filter(Boolean).join('')
     : [
+        (() => { const rt = rateFactText(j); return rt ? `<span><b>Rate</b> ${rt}</span>` : ''; })(),
         paperLabelT ? `<span><b>Paper</b> ${paperLabelT}</span>` : '',
         j.machine  ? `<span><b>M/C</b> ${esc(j.machine)}</span>` : '',
         j.deadline ? `<span style="color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};"><b>Due</b> ${esc(fmtDMY(j.deadline))}</span>` : '',
@@ -11437,9 +11725,9 @@ function openJobsReport() {
         </div>
       </div>
       <div style="min-width:160px;">
-        <div class="dash-flbl">Challan No. Search</div>
+        <div class="dash-flbl">Invoice No. Search</div>
         <div class="search-wrap">
-          <input type="text" id="jr-challan-search" value="${esc(jobsReportState.challanSearch)}" placeholder="Search Challan No…" oninput="setJrChallanSearch(this.value)">
+          <input type="text" id="jr-challan-search" value="${esc(jobsReportState.challanSearch)}" placeholder="Search Invoice No…" oninput="setJrChallanSearch(this.value)">
           <span class="search-icon">&#128269;</span>
         </div>
       </div>` : ''}
@@ -12036,7 +12324,7 @@ function renderJobsReport() {
           <th ${th}>Company</th>
           <th ${th}>PO No.</th>
           <th ${th}>Batch No.</th>
-          <th ${th}>Challan No.</th>
+          <th ${th}>Invoice No.</th>
           ${milMode ? `<th ${thR}>Mil Qty</th>` : ''}
           <th ${thR}>PO Qty</th>
           <th ${thR}>Unit Carton Qty</th>
@@ -12078,7 +12366,7 @@ async function exportJobsReport() {
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const milMode = !!jobsReportState.milOnly;
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Challan No.',
+  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
     'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
   const aoa = [header];
@@ -12180,7 +12468,7 @@ function printJobsReport() {
           <th ${tdL}>Company</th>
           <th ${tdL}>PO No.</th>
           <th ${tdL}>Batch No.</th>
-          <th ${tdL}>Challan No.</th>
+          <th ${tdL}>Invoice No.</th>
           ${milMode ? `<th ${tdR}>Mil Qty</th>` : ''}
           <th ${tdR}>PO Qty</th>
           <th ${tdR}>Unit Carton Qty</th>
@@ -12193,6 +12481,668 @@ function printJobsReport() {
           <th ${tdL}>Coatings</th>
         </tr>
         ${tableRows}
+      </table>
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
+// ── Sale Report (Supreme Art Finance only) ─────────────────────────
+// One row per delivered job with full invoicing detail — the Jobs Report's
+// columns (PO/Batch/quantities/paper/machine/coatings) plus E-FBR No.,
+// Rate, Sale Tax %, and Company/Destination/NTN. Deliberately independent
+// of buildJobsReportRows()/jobsReportState — same per-job computations,
+// but no Linked-Jobs / MIL-group row merging (each job keeps its own Rate
+// and company info, which a merged row can't cleanly represent) and no
+// bulk-select/created-mode toggle. Gated by rpt_sale_report, same as
+// Company Settings and the Product Rate tab — this is the one report that
+// shows pricing.
+const saleReportState = loadPersistedFilters('sale-report', { client: '', dateRange: '', dfrom: '', dto: '', q: '', type: '', sortBy: 'id', sortDir: 'asc', poSearch: '', challanSearch: '', milOnly: false, colFilters: { paper: [], machine: [], coatings: [], rate: [] } });
+// Column filters always start empty, whatever an older saved state holds —
+// they're session-scoped by design (see srResetColFilters), so a reload is
+// as much a fresh start as walking out of the report and back in.
+saleReportState.colFilters = { paper: [], machine: [], coatings: [], rate: [] };
+delete saleReportState.colFiltersSetAt; // from the earlier TTL approach, replaced by the reset-on-exit above
+// Column filters are deliberately NOT persisted and do not survive leaving
+// the report — Hamza wants a clean slate every time he walks back in, so a
+// filter he set an hour ago can't silently hide rows he's looking for. The
+// toolbar filters above (search, date, company…) still persist as before;
+// only these per-column pickers reset. Called from exitReportsGroup() and
+// from setMode() when leaving the Reports tab.
+function srResetColFilters() {
+  const had = Object.values(saleReportState.colFilters).some(v => v && v.length);
+  saleReportState.colFilters = { paper: [], machine: [], coatings: [], rate: [] };
+  if (had) _persistSr();
+}
+
+function openSaleReportPage() {
+  if (!hasPerm('rpt_sale_report', 'view')) { notify('Sale Report is not available for your role.'); return; }
+  openReportsGroup('sale-report-group');
+  openSaleReport();
+}
+function openSaleReport() {
+  const pane = document.getElementById('rt-sale-report');
+  if (!pane) return;
+  const lastStageIdx = STAGES.length - 1;
+  const scopeJobs = jobs.filter(j => (j.stage_index || 0) === lastStageIdx || (Array.isArray(j.deliveries) && j.deliveries.length));
+  const clients = [...new Set(scopeJobs.map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Sale Report</h2>
+      <span style="color:var(--text2);font-size:12px;">One row per shipment — every job with a delivery recorded, with Rate, Sale Tax %, and Company/Destination/NTN.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm sale-company-only" onclick="openCompanySettings()" title="Set NTN and Destination per company — feeds this report's Company/Destination/NTN columns">&#127970; Company Settings</button>
+        <button class="btn btn-sm" onclick="exportSaleReport()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printSaleReport()">&#128424; Print Report</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Search (Job No. / Name)</div>
+        <input class="filter" type="text" id="sr-q" value="${esc(saleReportState.q)}" placeholder="e.g. 59 or FENBRO" oninput="setSrQ(this.value)" style="min-width:180px;">
+      </div>
+      <div>
+        <div class="dash-flbl">PO No. Search</div>
+        <div class="search-wrap">
+          <input type="text" id="sr-po-search" value="${esc(saleReportState.poSearch)}" placeholder="Search PO No…" oninput="setSrPoSearch(this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
+      </div>
+      <div>
+        <div class="dash-flbl">Invoice No. Search</div>
+        <div class="search-wrap">
+          <input type="text" id="sr-challan-search" value="${esc(saleReportState.challanSearch)}" placeholder="Search Invoice No…" oninput="setSrChallanSearch(this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
+      </div>
+      ${dateFilterToolbarHtml('sr', saleReportState.dateRange, saleReportState.dfrom, saleReportState.dto, 'setSrDateRange', 'setSrDateCustom')}
+      <div>
+        <div class="dash-flbl">Company</div>
+        <select class="filter" id="sr-client" onchange="setSrClient(this.value)">
+          <option value="">All companies</option>
+          ${clients.map(c => `<option value="${esc(c)}"${saleReportState.client===c?' selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Type</div>
+        <select class="filter" id="sr-type" onchange="setSrType(this.value)">
+          <option value="">All types</option>
+          <option value="Syrup"${saleReportState.type==='Syrup'?' selected':''}>Syrup</option>
+          <option value="Susp"${saleReportState.type==='Susp'?' selected':''}>Susp &mdash; Suspension</option>
+          <option value="Tab"${saleReportState.type==='Tab'?' selected':''}>Tab &mdash; Tablets</option>
+          <option value="Caps"${saleReportState.type==='Caps'?' selected':''}>Caps &mdash; Capsules</option>
+          <option value="Labels"${saleReportState.type==='Labels'?' selected':''}>Labels</option>
+          <option value="Leaflets"${saleReportState.type==='Leaflets'?' selected':''}>Leaflets</option>
+          <option value="Sachet"${saleReportState.type==='Sachet'?' selected':''}>Sachet</option>
+          <option value="Sticker"${saleReportState.type==='Sticker'?' selected':''}>Sticker</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Sort by</div>
+        <select class="filter" id="sr-sort-by" onchange="setSrSortBy(this.value)">
+          <option value="id"${saleReportState.sortBy==='id'?' selected':''}>Job ID</option>
+          <option value="name"${saleReportState.sortBy==='name'?' selected':''}>Job Name</option>
+          <option value="delivered"${saleReportState.sortBy==='delivered'?' selected':''}>Delivered Date</option>
+          <option value="client"${saleReportState.sortBy==='client'?' selected':''}>Company</option>
+          <option value="deliveredQty"${saleReportState.sortBy==='deliveredQty'?' selected':''}>Delivered UC Qty</option>
+          <option value="amount"${saleReportState.sortBy==='amount'?' selected':''}>Rate w/ Sale Tax</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <button class="btn btn-sm" id="sr-sort-dir" onclick="toggleSrSortDir()" title="Toggle ascending/descending">${saleReportState.sortDir === 'asc' ? '&#8593; Asc' : '&#8595; Desc'}</button>
+      </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <label class="jr-mil-whole-toggle whole-toggle ${saleReportState.milOnly?'is-on':''}">
+          <input class="jr-mil-toggle-input" type="checkbox" id="sr-mil-only" ${saleReportState.milOnly ? 'checked' : ''} onchange="setSrMilOnly(this.checked)">
+          <span class="whole-toggle-text">MIL Products only</span>
+        </label>
+      </div>
+    </div>
+    <div id="sr-content" style="font-size:12px;"></div>
+  `;
+  renderSaleReport();
+}
+function _persistSr() { persistFilters('sale-report', saleReportState); }
+function setSrDateRange(v) {
+  saleReportState.dateRange = v;
+  const custom = document.getElementById('sr-date-custom');
+  if (custom) custom.style.display = v === 'custom' ? 'inline-flex' : 'none';
+  if (v !== 'custom') { saleReportState.dfrom = ''; saleReportState.dto = ''; }
+  _persistSr(); renderSaleReport();
+}
+function setSrDateCustom() {
+  saleReportState.dfrom = (document.getElementById('sr-dfrom') || {}).value || '';
+  saleReportState.dto   = (document.getElementById('sr-dto')   || {}).value || '';
+  _persistSr(); renderSaleReport();
+}
+function setSrQ(v)      { saleReportState.q = v;      _persistSr(); renderSaleReport(); }
+function setSrClient(v) { saleReportState.client = v; _persistSr(); renderSaleReport(); }
+function setSrType(v)   { saleReportState.type = v;   _persistSr(); renderSaleReport(); }
+function setSrSortBy(v) { saleReportState.sortBy = v; _persistSr(); renderSaleReport(); }
+function toggleSrSortDir() {
+  saleReportState.sortDir = saleReportState.sortDir === 'asc' ? 'desc' : 'asc';
+  const btn = document.getElementById('sr-sort-dir');
+  if (btn) btn.innerHTML = saleReportState.sortDir === 'asc' ? '&#8593; Asc' : '&#8595; Desc';
+  _persistSr(); renderSaleReport();
+}
+let _srPoSearchTimer = null;
+function setSrPoSearch(v) {
+  saleReportState.poSearch = String(v || '').trim();
+  _persistSr();
+  clearTimeout(_srPoSearchTimer);
+  _srPoSearchTimer = setTimeout(renderSaleReport, 200);
+}
+let _srChallanSearchTimer = null;
+function setSrChallanSearch(v) {
+  saleReportState.challanSearch = String(v || '').trim();
+  _persistSr();
+  clearTimeout(_srChallanSearchTimer);
+  _srChallanSearchTimer = setTimeout(renderSaleReport, 200);
+}
+function setSrMilOnly(v) {
+  saleReportState.milOnly = !!v;
+  document.getElementById('sr-mil-only')?.closest('.whole-toggle')?.classList.toggle('is-on', !!v);
+  _persistSr(); renderSaleReport();
+}
+
+// Build the rows — same shape/filters as buildJobsReportRows() (delivered
+// stage OR any recorded shipment, date range against the Delivered stage
+// timestamp), plus E-FBR No. (joined per shipment like Invoice No.) and
+// pricing: Rate/Unit from effectiveRate(), Sale Tax % from job.tax_pct
+// (defaults 18), and the two Amount columns computed against this job's
+// shipped cartons — "Rate w/o Sale Tax" / "Rate w/ Sale Tax" are really
+// the net/gross line totals, which is what makes them summable in the
+// totals row below.
+// One row per DELIVERY ENTRY (not per job) — MSI No./Invoice No./E-FBR No.
+// only make sense as editable fields when a row maps unambiguously to one
+// shipment. Includes every job with at least one recorded delivery,
+// regardless of current stage — "all jobs whose delivery is recorded",
+// not just fully-Delivered ones. Job-level figures (Wastage, Ready Qty,
+// Packets, Paper, Machine, Coatings, PO Qty, Rate/Tax, Company/
+// Destination/NTN) repeat identically across a job's several shipment
+// rows; only Cartons/Rate w/o & w/ Sale Tax are per-shipment amounts.
+function buildSaleReportRows() {
+  const { client, dateRange, dfrom, dto, q, type: typeFilter, sortBy, sortDir, poSearch, challanSearch, milOnly } = saleReportState;
+  const qNorm  = String(q || '').trim().toLowerCase();
+  const qId    = qNorm.replace(/^e-?/, '');
+  const qIsNum = /^\d+$/.test(qId);
+  const poSearchNorm      = String(poSearch      || '').trim().toLowerCase();
+  const challanSearchNorm = String(challanSearch || '').trim().toLowerCase();
+  const bounds = resolveDateFilterBounds(dateRange, dfrom, dto);
+  const out = [];
+  for (const j of jobs) {
+    if (j.is_shade_card) continue; // Shade cards don't get invoiced like Sale Report's other jobs — Hamza's call 2026-09-18.
+    const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
+    if (!deliveriesList.length) continue;
+    if (client && j.client !== client) continue;
+    if (milOnly && !j.stock_group_name) continue;
+    // Same Syrup/Susp/Tab/Caps/Labels/Leaflets/Sachet/Sticker glossary the
+    // Product Rate tab's Type filter uses (detectProductType).
+    const productType = detectProductType(j.name);
+    if (typeFilter && productType !== typeFilter) continue;
+    if (qNorm) {
+      const idHit   = qIsNum && String(j.id) === qId;
+      const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
+      if (!idHit && !nameHit) continue;
+    }
+    let packets = 0;
+    const pktFromForm = parseFloat(j.particulars && j.particulars.quantity_of_packets);
+    if (Number.isFinite(pktFromForm) && pktFromForm > 0) {
+      packets = pktFromForm;
+    } else {
+      const sheets = parseFloat(j.sheets) || 0;
+      const ps     = packetSize(j.paper || '');
+      if (sheets && ps) packets = sheets / ps;
+    }
+    const cartonQtyNum = parseFloat(j.cartonqty);
+    const readyForWastage = earlyReadyTotal(j);
+    const wastage = (Number.isFinite(cartonQtyNum) && readyForWastage > 0) ? (cartonQtyNum - readyForWastage) : null;
+    const readyQty = Math.max(0, (readyCartonsTotal(j) || 0) - (totalDeliveredCartons(j) || 0));
+    const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
+    const paper = invItem
+      ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
+      : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
+    const machineVal   = j.machine || '';
+    const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
+    const rEff = effectiveRate(j);
+    const rate = rEff ? rEff.value : null;
+    const rateLabel = rate !== null ? fmtRate(rate) : '';
+    const taxPct = (j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? Number(j.tax_pct) : 18;
+    // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
+    // array for a column means "no filter, show everything". Coatings is
+    // the odd one out: a job carries SEVERAL coatings, so the picker lists
+    // them individually (UV, Lamination, Emboss…) and a job matches when it
+    // has ANY of the picked ones, rather than matching the whole joined
+    // "Spot UV, Lacquer, Emboss" string as one option.
+    const cf = saleReportState.colFilters;
+    if (cf.paper.length    && !cf.paper.includes(paper))        continue;
+    if (cf.machine.length  && !cf.machine.includes(machineVal)) continue;
+    if (cf.rate.length     && !cf.rate.includes(rateLabel))     continue;
+    if (cf.coatings.length) {
+      const own = splitCoatings(j.coatings);
+      if (!own.some(c => cf.coatings.includes(c))) continue;
+    }
+    const cs = companySettingsFor(j.client);
+    const cartonsPackets = cartonsPacketsFor(j);
+    deliveriesList.forEach((d, idx) => {
+      const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
+      const batchNo = (d && d.batch_no ? String(d.batch_no).trim() : '') || (j.bno || '');
+      const fbrNo   = (d && d.fbr_no ? String(d.fbr_no).trim() : '');
+      const msiNo   = (d && d.msi_no ? String(d.msi_no).trim() : '');
+      const invoice = deliveryChallanText(d);
+      if (poSearchNorm      && !poNo.toLowerCase().includes(poSearchNorm))      return;
+      if (challanSearchNorm && !invoice.toLowerCase().includes(challanSearchNorm)) return;
+      const refMs = (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN);
+      const refMsOk = isFinite(refMs) ? refMs : null;
+      if (bounds) {
+        if (refMsOk === null) return;
+        if (bounds.from !== null && refMsOk < bounds.from) return;
+        if (bounds.to   !== null && refMsOk > bounds.to)   return;
+      }
+      const cartons = parseFloat(d && d.cartons) || 0;
+      const amountExTax  = rate !== null ? rate * cartons : null;
+      const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
+      out.push({
+        id: j.id, idDisplay: 'E-' + j.id, deliveryIndex: idx, name: j.name || '', type: productType,
+        deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: j.client || '',
+        poNo, batchNo, fbrNo, msiNo, challan: invoice,
+        poQty: j.qty || '', cartonQty: j.cartonqty || '', cartons, cartonsPackets,
+        wastage, readyQty, packets, paper,
+        machine: machineVal, coatings: coatingsVal,
+        isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
+        rate, taxPct, amountExTax, amountIncTax,
+        destination: (cs && cs.destination) || '', ntn: (cs && cs.ntn) || '',
+      });
+    });
+  }
+  // Sort by whichever field the "Sort by" dropdown picked, ascending or
+  // descending per the toggle. Rows with no comparable value (e.g. no
+  // parseable Delivered date) sort to the end either direction.
+  const dir = sortDir === 'desc' ? -1 : 1;
+  const keyFor = (r) => {
+    switch (sortBy) {
+      case 'name':         return String(r.name || '').toLowerCase();
+      case 'client':       return String(r.client || '').toLowerCase();
+      case 'delivered':    return r.deliveredAtRaw;
+      case 'deliveredQty': return +r.cartons || 0;
+      case 'amount':       return r.amountIncTax;
+      case 'id': default:  return r.id;
+    }
+  };
+  out.sort((a, b) => {
+    const ka = keyFor(a), kb = keyFor(b);
+    const aNil = ka === null || ka === undefined || ka === '';
+    const bNil = kb === null || kb === undefined || kb === '';
+    if (aNil && bNil) return 0;
+    if (aNil) return 1;
+    if (bNil) return -1;
+    if (typeof ka === 'string') return dir * ka.localeCompare(kb);
+    return dir * (ka - kb);
+  });
+  return out;
+}
+// ── Excel-style column filters (Paper/Machine/Coatings/Rate) ──────
+// Options always come from the FULL, unfiltered job set — not from
+// whatever the other filters currently narrow things to — so a column's
+// own picker never loses an option just because another filter is active
+// (a simpler, non-cascading version of Excel's autofilter).
+// A job's coatings, one per entry — `j.coatings` is an array, but an entry
+// can itself be a comma-joined string, so split those too. This is what
+// makes the Coatings filter list "UV", "Lamination", "Emboss" separately
+// instead of every combination a job happens to carry.
+function splitCoatings(coatings) {
+  if (!Array.isArray(coatings)) return [];
+  return [...new Set(coatings
+    .flatMap(c => String(c == null ? '' : c).split(','))
+    .map(c => c.trim())
+    .filter(Boolean))];
+}
+function saleReportColumnOptions(field) {
+  const set = new Set();
+  for (const j of jobs) {
+    if (j.is_shade_card) continue; // Sale Report excludes these, so its pickers must too.
+    if (!Array.isArray(j.deliveries) || !j.deliveries.length) continue;
+    if (field === 'coatings') { splitCoatings(j.coatings).forEach(c => set.add(c)); continue; }
+    let val = '';
+    if (field === 'paper') {
+      const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+      const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
+      val = invItem
+        ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
+        : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
+    } else if (field === 'machine') {
+      val = j.machine || '';
+    } else if (field === 'rate') {
+      const r = effectiveRate(j);
+      val = r ? fmtRate(r.value) : '';
+    }
+    if (val) set.add(val);
+  }
+  return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+const SALE_REPORT_COL_LABELS = { paper: 'Paper', machine: 'Machine', coatings: 'Coatings', rate: 'Rate / Unit Carton' };
+// Small Excel-style filter triangle next to a header's text — always
+// green so the column reads as filterable at a glance, and bolder/darker
+// while a filter is actually on.
+function saleReportColHeaderHtml(field, label) {
+  const active = (saleReportState.colFilters[field] || []).length > 0;
+  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); saleReportColFilterModal('${field}')" title="Filter ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '13px' : '11px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+}
+// Excel-style checkbox row — green background while checked, same "this
+// one's selected" signal as a spreadsheet's own filter picker.
+function _srcfRowHtml(o, checked) {
+  return `<label class="srcf-opt-row" data-text="${esc(o.toLowerCase())}" style="display:flex;align-items:center;gap:8px;padding:5px 6px;font-size:13px;border-radius:5px;cursor:pointer;${checked ? 'background:#bbf7d0;' : ''}">
+    <input type="checkbox" class="srcf-opt" value="${esc(o)}" ${checked ? 'checked' : ''} onchange="srColFilterOptChanged(this)">
+    ${esc(o)}
+  </label>`;
+}
+function saleReportColFilterModal(field) {
+  const options = saleReportColumnOptions(field);
+  const selected = saleReportState.colFilters[field] || [];
+  const label = SALE_REPORT_COL_LABELS[field] || field;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+    <h2 style="margin:0 0 10px;font-size:16px;">Filter: ${esc(label)}</h2>
+    ${options.length ? `
+      <input type="text" id="srcf-search" placeholder="Search ${esc(label)}..." oninput="srColFilterSearch(this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;margin-bottom:8px;font-size:13px;">
+      <div style="max-height:50vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;">
+        <label style="display:flex;align-items:center;gap:8px;padding:4px 0 6px;font-weight:700;border-bottom:1px solid var(--border);margin-bottom:4px;">
+          <input type="checkbox" id="srcf-all" ${options.length && selected.length === options.length ? 'checked' : ''} onchange="srColFilterToggleAll(this.checked)"> (Select All)
+        </label>
+        <div id="srcf-list">${options.map(o => _srcfRowHtml(o, selected.includes(o))).join('')}</div>
+        <div id="srcf-noresults" style="display:none;color:var(--text3);font-style:italic;padding:8px 0;">No matches.</div>
+      </div>` : `<div style="color:var(--text3);font-style:italic;padding:12px 0;">No values to filter yet.</div>`}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="srColFilterApply('${field}')">Apply</button>
+    </div>
+  </div>`);
+}
+function srColFilterSearch(q) {
+  const term = String(q || '').trim().toLowerCase();
+  let visible = 0;
+  document.querySelectorAll('.srcf-opt-row').forEach(row => {
+    const match = !term || (row.dataset.text || '').includes(term);
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  const none = document.getElementById('srcf-noresults');
+  if (none) none.style.display = visible ? 'none' : '';
+}
+function srColFilterToggleAll(checked) {
+  // Only touches rows the search box is currently showing, same as
+  // Excel's own "search + select all" combo.
+  document.querySelectorAll('.srcf-opt-row').forEach(row => {
+    if (row.style.display === 'none') return;
+    const cb = row.querySelector('.srcf-opt');
+    cb.checked = checked;
+    row.style.background = checked ? '#bbf7d0' : '';
+  });
+}
+function srColFilterOptChanged(cb) {
+  const row = cb.closest('.srcf-opt-row');
+  if (row) row.style.background = cb.checked ? '#bbf7d0' : '';
+  const all = [...document.querySelectorAll('.srcf-opt')];
+  const allEl = document.getElementById('srcf-all');
+  if (allEl) allEl.checked = all.every(el => el.checked);
+}
+function srColFilterApply(field) {
+  const all = [...document.querySelectorAll('.srcf-opt')];
+  const checked = all.filter(el => el.checked).map(el => el.value);
+  // The boxes mean literally "show me these". Picking none — or picking
+  // every one, which comes to the same thing — is no filter at all.
+  saleReportState.colFilters[field] = (checked.length === all.length) ? [] : checked;
+  closeModal();
+  renderSaleReport();
+}
+function renderSaleReport() {
+  const rows = buildSaleReportRows();
+  const el = document.getElementById('sr-content');
+  if (!el) return;
+  if (!rows.length) { el.innerHTML = '<div class="empty">No delivered jobs match these filters.</div>'; return; }
+  const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  const td  = 'style="padding:8px 10px;"';
+  const tdR = 'style="padding:8px 10px;text-align:right;"';
+  // poQty/cartonQty/wastage/readyQty/packets/cartonsPackets are all
+  // JOB-level figures that repeat identically on every shipment row for
+  // that job — only `cartons` and the two Amount columns are genuinely
+  // per-shipment. Count every job-level figure ONCE per job (its first
+  // row here), or a job split across N shipments would inflate them Nx.
+  const seenJobsForTotals = new Set();
+  const totals = rows.reduce((a, r) => {
+    const firstRowForJob = !seenJobsForTotals.has(r.id);
+    if (firstRowForJob) seenJobsForTotals.add(r.id);
+    const once = (v) => firstRowForJob ? (v || 0) : 0;
+    return {
+      poQty:          a.poQty          + once(parseFloat(String(r.poQty).replace(/[^0-9.\-]/g, ''))),
+      cartonQty:      a.cartonQty      + once(parseFloat(String(r.cartonQty).replace(/[^0-9.\-]/g, ''))),
+      cartons:        a.cartons        + (+r.cartons || 0),
+      cartonsPackets: a.cartonsPackets + once(+r.cartonsPackets),
+      wastage:        a.wastage        + once(r.wastage),
+      readyQty:       a.readyQty       + once(+r.readyQty),
+      packets:        a.packets        + once(+r.packets),
+      amountExTax:    a.amountExTax    + (r.amountExTax  || 0),
+      amountIncTax:   a.amountIncTax   + (r.amountIncTax || 0),
+    };
+  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, amountExTax: 0, amountIncTax: 0 });
+  const canEditRate   = hasPerm('products_btn_rate', 'yes');
+  const canEditFields = hasPerm('job_btn_pricing', 'yes');
+  // Inline-editable reference-field cell — same PATCH route the job
+  // card's Deliveries ledger uses (saveDeliveryEntryField), so a change
+  // here and a change there are the exact same write. stopPropagation
+  // keeps the click off the row's own "open job card" handler.
+  const editCell = (r, field, value, maxW) => canEditFields
+    ? `<input type="text" value="${esc(value)}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, '${field}', this.value)" style="width:100%;min-width:${maxW}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+    : `<span title="${esc(value)}">${esc(value)}</span>`;
+  const tbody = rows.map(r => {
+    const rateCell = canEditRate
+      ? `<input type="number" min="0" step="any" value="${r.rate !== null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveHistoryPricing(${r.id}, null, 'rate', this.value)" style="width:70px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">`
+      : (r.rate !== null ? fmtRate(r.rate) : '&mdash;');
+    const taxCell = canEditRate
+      ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveHistoryPricing(${r.id}, null, 'tax', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">`
+      : `${fmt(r.taxPct)}%`;
+    return `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="setMode('jobs'); setTimeout(()=>openEdit(${r.id}),50);" title="Open this job's card">
+      <td ${td}>${esc(r.idDisplay)}</td>
+      <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
+      <td ${td}>${esc(r.deliveredAt)}</td>
+      <td ${td}>${editCell(r, 'po_no', r.poNo, 90)}</td>
+      <td ${td}>${editCell(r, 'batch_no', r.batchNo, 80)}</td>
+      <td ${td}>${editCell(r, 'fbr_no', r.fbrNo, 100)}</td>
+      <td ${td}>${editCell(r, 'msi_no', r.msiNo, 90)}</td>
+      <td ${td}>${editCell(r, 'notes', r.challan, 90)}</td>
+      <td ${tdR}>${esc(r.poQty)}</td>
+      <td ${tdR}>${esc(r.cartonQty)}</td>
+      <td ${tdR}>${r.cartons.toLocaleString()}</td>
+      <td ${tdR}>${r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;'}</td>
+      <td ${tdR}>${r.wastage === null ? '&mdash;' : fmt(r.wastage)}</td>
+      <td style="padding:8px 10px;text-align:right;font-weight:600;color:${r.readyQty > 0 ? '#166534' : 'var(--text2)'};">${fmt(r.readyQty)}</td>
+      <td ${tdR}>${fmt(r.packets)}</td>
+      <td ${td}>${esc(r.paper)}</td>
+      <td ${td}>${esc(r.machine)}</td>
+      <td ${td}>${esc(r.coatings)}</td>
+      <td ${tdR}>${rateCell}</td>
+      <td ${tdR}>${r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;'}</td>
+      <td ${tdR}>${taxCell}</td>
+      <td ${tdR}>${r.amountIncTax !== null ? fmtRate(r.amountIncTax) : '&mdash;'}</td>
+      <td ${td}>${esc(r.client)}</td>
+      <td ${td}>${esc(r.destination)}</td>
+      <td ${td}>${esc(r.ntn)}</td>
+    </tr>`;
+  }).join('');
+  const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  el.innerHTML = `
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} shipment${rows.length===1?'':'s'} in window</div>
+    <div class="report-scroll-wrap">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+      <thead>
+        <tr style="background:var(--bg2);">
+          <th ${th}>Job ID</th>
+          <th ${th}>Job Name</th>
+          <th ${th}>Delivered</th>
+          <th ${th}>PO No.</th>
+          <th ${th}>Batch No.</th>
+          <th ${th}>E-FBR No.</th>
+          <th ${th}>MSI No.</th>
+          <th ${th}>Invoice No.</th>
+          <th ${thR}>PO Qty</th>
+          <th ${thR}>Unit Carton Qty</th>
+          <th ${thR}>Delivered UC Qty</th>
+          <th ${thR}>Cartons/Packets</th>
+          <th ${thR}>Wastage</th>
+          <th ${thR}>Ready Qty</th>
+          <th ${thR}>Packets</th>
+          <th ${th}>${saleReportColHeaderHtml('paper', 'Paper')}</th>
+          <th ${th}>${saleReportColHeaderHtml('machine', 'Machine')}</th>
+          <th ${th}>${saleReportColHeaderHtml('coatings', 'Coatings')}</th>
+          <th ${thR}>${saleReportColHeaderHtml('rate', 'Rate / Unit Carton')}</th>
+          <th ${thR}>Rate w/o Sale Tax</th>
+          <th ${thR}>Sale Tax %</th>
+          <th ${thR}>Rate w/ Sale Tax</th>
+          <th ${th}>Company</th>
+          <th ${th}>Destination</th>
+          <th ${th}>NTN</th>
+        </tr>
+      </thead>
+      <tbody>${tbody}</tbody>
+      ${hasPerm('rpt_sale_report_totals', 'view') ? `<tfoot>
+        <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+          <td colspan="2" style="padding:8px 10px;">${rows.length} shipment${rows.length===1?'':'s'}</td>
+          <td colspan="6" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartons)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonsPackets)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.readyQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.packets)}</td>
+          <td colspan="3"></td>
+          <td></td>
+          <td style="padding:8px 10px;text-align:right;">${fmtRate(totals.amountExTax)}</td>
+          <td></td>
+          <td style="padding:8px 10px;text-align:right;">${fmtRate(totals.amountIncTax)}</td>
+          <td colspan="3"></td>
+        </tr>
+      </tfoot>` : ''}
+    </table>
+    </div>`;
+}
+// Export the Sale Report to .xlsx.
+async function exportSaleReport() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const rows = buildSaleReportRows();
+  if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
+  const header = ['Job ID', 'Job Name', 'Delivered', 'PO No.', 'Batch No.', 'E-FBR No.', 'MSI No.', 'Invoice No.',
+    'PO Qty', 'Unit Carton Qty', 'Delivered UC Qty', 'Cartons/Packets', 'Wastage', 'Ready Qty', 'Packets Consumed', 'Paper', 'Machine', 'Coatings',
+    'Rate / Unit Carton', 'Rate w/o Sale Tax', 'Sale Tax %', 'Rate w/ Sale Tax', 'Company', 'Destination', 'NTN'];
+  const aoa = [header];
+  for (const r of rows) {
+    let cartonsCell = r.isShadeCard && r.cartons ? `${r.cartons} copies` : r.cartons;
+    if (r.isPartial) cartonsCell = `${cartonsCell} (PARTIAL)`;
+    const nameCell = r.isShadeCard ? `${r.name} (Shade Card)` : r.name;
+    aoa.push([
+      r.idDisplay, nameCell, r.deliveredAt, r.poNo, r.batchNo || '', r.fbrNo || '', r.msiNo || '', r.challan || '',
+      r.poQty, r.cartonQty, cartonsCell, r.cartonsPackets > 0 ? r.cartonsPackets : '', r.wastage === null ? '' : r.wastage, r.readyQty,
+      r.packets ? +r.packets.toFixed(2) : '', r.paper, r.machine, r.coatings,
+      r.rate === null ? '' : r.rate,
+      r.amountExTax === null ? '' : +r.amountExTax.toFixed(2),
+      r.taxPct,
+      r.amountIncTax === null ? '' : +r.amountIncTax.toFixed(2),
+      r.client, r.destination, r.ntn,
+    ]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sale Report');
+  const stamp = localDateISO();
+  const tag = saleReportState.client ? `-${saleReportState.client.replace(/\s+/g,'-').toLowerCase()}` : '';
+  XLSX.writeFile(wb, `supreme-art-sale-report${tag}-${stamp}.xlsx`);
+  notify('Exported!');
+}
+// Print the Sale Report — A4 landscape.
+function printSaleReport() {
+  const rows = buildSaleReportRows();
+  if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+  const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  const tableRows = rows.map(r => {
+    const cartonsStyle = r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '';
+    return `<tr>
+    <td ${tdL}>${esc(r.idDisplay)}</td>
+    <td ${tdL}>${esc(r.name)}${r.isShadeCard ? ' <b>(Shade Card)</b>' : ''}</td>
+    <td ${tdL}>${esc(r.deliveredAt)}</td>
+    <td ${tdL}>${esc(r.poNo)}</td>
+    <td ${tdL}>${esc(r.batchNo || '')}</td>
+    <td ${tdL}>${esc(r.fbrNo || '')}</td>
+    <td ${tdL}>${esc(r.msiNo || '')}</td>
+    <td ${tdL}>${esc(r.challan || '')}</td>
+    <td ${tdR}>${esc(r.poQty)}</td>
+    <td ${tdR}>${esc(r.cartonQty)}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;${cartonsStyle}">${r.cartons.toLocaleString()}${(r.isShadeCard && r.cartons) ? ' copies' : ''}</td>
+    <td ${tdR}>${r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '—'}</td>
+    <td ${tdR}>${r.wastage === null ? '—' : fmt(r.wastage)}</td>
+    <td ${tdR}>${fmt(r.readyQty)}</td>
+    <td ${tdR}>${fmt(r.packets)}</td>
+    <td ${tdL}>${esc(r.paper)}</td>
+    <td ${tdL}>${esc(r.machine)}</td>
+    <td ${tdL}>${esc(r.coatings)}</td>
+    <td ${tdR}>${r.rate !== null ? fmtRate(r.rate) : '—'}</td>
+    <td ${tdR}>${r.amountExTax !== null ? fmtRate(r.amountExTax) : '—'}</td>
+    <td ${tdR}>${fmt(r.taxPct)}%</td>
+    <td ${tdR}>${r.amountIncTax !== null ? fmtRate(r.amountIncTax) : '—'}</td>
+    <td ${tdL}>${esc(r.client)}</td>
+    <td ${tdL}>${esc(r.destination)}</td>
+    <td ${tdL}>${esc(r.ntn)}</td>
+  </tr>`;
+  }).join('');
+  const totals = rows.reduce((a, r) => ({
+    amountExTax:  a.amountExTax  + (r.amountExTax  || 0),
+    amountIncTax: a.amountIncTax + (r.amountIncTax || 0),
+  }), { amountExTax: 0, amountIncTax: 0 });
+  const html = `
+    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:10pt;">Sale Report</div>
+        </div>
+        <div style="margin-left:auto;font-size:8pt;text-align:right;">
+          <div><b>Period:</b> ${esc(dateRangeLabel(saleReportState.dateRange, saleReportState.dfrom, saleReportState.dto))}</div>
+          <div><b>Company:</b> ${esc(saleReportState.client || 'All')} &nbsp; <b>Shipments:</b> ${rows.length}</div>
+          <div>Generated: ${fmtDMYT(new Date())}</div>
+        </div>
+      </div>
+      <table style="width:100%;font-size:7pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#eee;">
+          <th ${tdL}>Job ID</th><th ${tdL}>Job Name</th><th ${tdL}>Delivered</th><th ${tdL}>PO No.</th><th ${tdL}>Batch No.</th><th ${tdL}>E-FBR No.</th><th ${tdL}>MSI No.</th><th ${tdL}>Invoice No.</th>
+          <th ${tdR}>PO Qty</th><th ${tdR}>Unit Carton Qty</th><th ${tdR}>Delivered UC Qty</th><th ${tdR}>Cartons/Packets</th><th ${tdR}>Wastage</th><th ${tdR}>Ready Qty</th><th ${tdR}>Packets</th>
+          <th ${tdL}>Paper</th><th ${tdL}>Machine</th><th ${tdL}>Coatings</th>
+          <th ${tdR}>Rate/Unit Carton</th><th ${tdR}>Rate w/o Tax</th><th ${tdR}>Tax %</th><th ${tdR}>Rate w/ Tax</th>
+          <th ${tdL}>Company</th><th ${tdL}>Destination</th><th ${tdL}>NTN</th>
+        </tr>
+        ${tableRows}
+        ${hasPerm('rpt_sale_report_totals', 'view') ? `<tr style="background:#eee;font-weight:bold;">
+          <td colspan="18" ${tdL} style="text-align:right;">Total</td>
+          <td ${tdR}></td>
+          <td ${tdR}>${fmtRate(totals.amountExTax)}</td>
+          <td ${tdR}></td>
+          <td ${tdR}>${fmtRate(totals.amountIncTax)}</td>
+          <td colspan="3" ${tdL}></td>
+        </tr>` : ''}
       </table>
     </div>`;
   const area = document.getElementById('print-area');
@@ -14040,6 +14990,7 @@ function openReportsGroup(groupId) {
 
 // Return to the 3-card landing — hides every group.
 function exitReportsGroup() {
+  srResetColFilters();
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'block';
   document.querySelectorAll('#reports-mode .reports-group').forEach(g => {
@@ -19560,6 +20511,8 @@ function jobForm(j={}, opts) {
 // since there's nothing to ship yet.
 function deliveriesSection(j, opts) {
   if (!j || !j.id) return '';
+  // Finance / CEO / Super Admin (job_btn_pricing) get the invoicing layout; everyone else keeps the classic table.
+  if (!(opts && opts.managerStationMode) && hasPerm('job_btn_pricing', 'view')) return deliveriesSectionFinance(j, opts);
   // Station Manager flow (see stationManagerOpenJobCard): the shared
   // Station terminal's browser session usually isn't logged in with a
   // delivery_write role, so canRecordDelivery() alone would hide this
@@ -19676,8 +20629,8 @@ function deliveriesSection(j, opts) {
           <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>`}
         <div style="min-width:0;">
-          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Challan No.'}</label>
-          <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. CH-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
+          <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
         </div>
         <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>
       </div>${j.linked_job_id ? `<div style="margin-top:8px;">
@@ -19711,7 +20664,7 @@ function deliveriesSection(j, opts) {
           <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">${countLabel}</th>
           ${isShadeCard ? '' : `<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>`}
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Challan No.</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Invoice No.</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border);"></th>
         </tr>
@@ -19726,6 +20679,689 @@ function deliveriesSection(j, opts) {
 // there are no deliveries so tiles for unshipped jobs stay unchanged.
 // Only rendered inside the client tile — inline admin tiles keep the
 // tighter layout and rely on the full ledger inside the job card modal.
+// Finance layout of the Deliveries box: yellow per-shipment cards with Cartons/Packets,
+// E-FBR / MSI / Invoice No., plus Rate & Sale Tax on the record form. Shown instead of the
+// classic table only to holders of job_btn_pricing (see deliveriesSection).
+function deliveriesSectionFinance(j, opts) {
+  if (!j || !j.id) return '';
+  // Station Manager flow (see stationManagerOpenJobCard): the shared
+  // Station terminal's browser session usually isn't logged in with a
+  // delivery_write role, so canRecordDelivery() alone would hide this
+  // form entirely — the line manager's PIN is the authority here instead
+  // (verified server-side on manager-deliver), same as Machine +
+  // Particulars saves. Still shade-card only, matching the endpoint's
+  // own restriction ("Only shade-card jobs can be delivered from the
+  // Station").
+  const managerMode = !!(opts && opts.managerStationMode);
+  // Shade cards ship without a PO/Batch — they're proofs, not a booked
+  // production order — and are counted in Copies rather than Unit
+  // Cartons. Same underlying delivery record (still stored as `cartons`,
+  // `po_no`, `batch_no`) — this only changes what the delivery form/table
+  // asks for and shows.
+  const isShadeCard = !!j.is_shade_card;
+  const countLabel = isShadeCard ? 'Copies' : 'Unit Cartons';
+  const countUnit  = isShadeCard ? 'copies' : 'unit cartons';
+  const list = Array.isArray(j.deliveries) ? j.deliveries : [];
+  const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shipped = totalDeliveredCartons(j);
+  const remaining = booked ? Math.max(0, booked - shipped) : 0;
+  // Fully delivered either the normal way (shipped covers booked) or via
+  // finalizeAsDelivered() deliberately waiving the rest — see its
+  // stages[7].finalized stamp and isPartialDelivery()'s matching check.
+  const isFinalized = !!(j.stages && j.stages[7] && j.stages[7].finalized);
+  const isDelivered = (booked && shipped >= booked) || isFinalized;
+  // Status-pill only: with no booked P.O. Qty there's no target to be
+  // "partial" against, so any recorded shipment reads as delivered
+  // outright instead of a misleading PARTIAL-against-zero badge. Doesn't
+  // affect isDelivered/canAddDelivery below — the form should still stay
+  // available to log more shipments later even once this shows green.
+  const showAsDelivered = isDelivered || (!booked && shipped > 0);
+  const stageIdx = j.stage_index || 0;
+  // Delivery is allowed from Ready to Deliver onward, and also from
+  // Pasting when the operator has recorded some pasted cartons but
+  // hasn't advanced yet — those cartons are physically ready to ship
+  // even though the job's still officially at Pasting.
+  const canAddDelivery = canDeliverNow(j) && !isDelivered && (
+    managerMode
+      ? !!j.is_shade_card
+      : (typeof canRecordDelivery === 'function' && canRecordDelivery())
+  );
+  const isAdminUser = typeof hasPerm === 'function' && hasPerm('delivery_delete');
+  // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
+  // Cartons Qty minus what's already been delivered) — same idea as PO
+  // No. / Batch No. pre-filling from the job card, still fully editable
+  // for a genuinely partial shipment. Blank (not 0) when there's nothing
+  // useful to suggest, so the placeholder shows instead.
+  const readyNotYetShipped = Math.max(0, (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(j) : 0) - shipped);
+  const cartonsPrefill = readyNotYetShipped > 0 ? readyNotYetShipped : '';
+  // Rate/Tax ride along with the delivery instead of a separate Save
+  // Pricing step — whoever records the shipment confirms (or overrides)
+  // the price at the same time. Pre-filled from the job's own saved rate,
+  // or — once one exists — the Product Rate table's suggestion, filled
+  // in as the actual value (not just a placeholder hint), so the
+  // product's Rate really does apply to every new delivery by default
+  // unless someone edits it here.
+  const rEff = effectiveRate(j);
+  const rateFieldPrefill = (j.rate !== null && j.rate !== undefined && j.rate !== '')
+    ? j.rate
+    : (rEff ? rEff.value : '');
+  const rateFieldPlaceholder = 'e.g. 12.50';
+  const taxFieldPrefill = (j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? j.tax_pct : 18;
+
+  // Every field, including Cartons, is inline-editable for whoever can
+  // record deliveries. Cartons drives delqty/stage-completion (see
+  // computeDeliveryUpdate), so PATCH /api/jobs/:id/deliveries/:index
+  // recomputes both server-side on a cartons edit — same forward/back
+  // stage rules the create/delete routes already use. Date stays fixed
+  // (nobody's asked for that one).
+  const canEditEntries = !managerMode && hasPerm('job_btn_pricing', 'yes');
+  const editCell = (i, field, value, opts2) => canEditEntries
+    ? `<input type="${field === 'cartons' ? 'number' : 'text'}" ${field === 'cartons' ? 'min="0.01" step="any"' : ''} value="${esc(value)}" onchange="saveDeliveryEntryField(${j.id}, ${i}, '${field}', this.value)" title="${esc((opts2&&opts2.title)||'')}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+    : `<span title="${esc(value)}">${esc(value)}</span>`;
+  // Cartons/Packets is a job-level figure (what the Pasting/Ready-to-
+  // Deliver station wrote), not per-delivery — same value shows on every
+  // card below, same way Rate/Company/etc. repeat per shipment row in the
+  // Sale Report.
+  const cartonsPackets = cartonsPacketsFor(j);
+  const fieldBox = (label, valueHtml) => `<div style="min-width:0;"><div style="font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:2px;">${label}</div><div style="font-size:12.5px;">${valueHtml}</div></div>`;
+  // Each recorded delivery gets its own yellow-tinted card (not a table
+  // row) — a table row packed 7+ tiny inputs into one squeezed line;
+  // cards give every field room to wrap onto its own line on a narrow
+  // job-card panel, and the yellow tint marks "this delivery is recorded"
+  // at a glance.
+  const rows = list.length
+    ? list.map((d, i) => {
+        const ctns = d.cartons  || '';
+        const dt   = d.date     || '';
+        const po   = d.po_no    || '';
+        const bat  = d.batch_no || '';
+        const fbr  = d.fbr_no   || '';
+        const msi  = d.msi_no   || '';
+        const nt   = deliveryChallanText(d);
+        const by   = d.by       || '';
+        // Linked-delivery tag — this shipment was recorded via "Deliver
+        // Linked Jobs" alongside the partner job, sharing this same
+        // challan/invoice. Shows which job it rode with.
+        const linkedTag = d.linked_job_id
+          ? ` <span title="Linked delivery with Job E-${d.linked_job_id} — shares this challan/invoice" style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:9px;font-weight:700;padding:1px 5px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#128279; E-${d.linked_job_id}</span>`
+          : '';
+        const delBtn = isAdminUser
+          ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
+          : '';
+        return `<div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:11px;color:var(--text2);">${esc(dt)} &middot; by <span style="color:var(--text);">${esc(by)}</span>${linkedTag}</span>
+            ${delBtn}
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(95px,1fr));gap:10px;">
+            ${fieldBox(countLabel, editCell(i, 'cartons', ctns, { title: 'Editing this changes Delivered Qty / stage — recompute is automatic.' }))}
+            ${fieldBox('Cartons/Packets', canEditEntries
+              ? `<input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="&mdash;" title="Job-level figure — editing it here changes it for every shipment on this job. Clear the box to fall back to the Pasting station's own number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+              : (cartonsPackets > 0 ? `<b>${cartonsPackets.toLocaleString()}</b>` : '&mdash;'))}
+            ${isShadeCard ? '' : fieldBox('PO No.', editCell(i, 'po_no', po))}
+            ${isShadeCard ? '' : fieldBox('Batch No.', editCell(i, 'batch_no', bat))}
+            ${fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
+            ${fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
+            ${fieldBox(isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.', isShadeCard ? `<span title="${esc(nt)}">${esc(nt)}</span>` : editCell(i, 'notes', nt))}
+          </div>
+        </div>`;
+      }).join('')
+    : `<div style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No deliveries recorded yet.</div>`;
+
+  // Ready-but-not-shipped chip — same figure the tile's own READY badge
+  // shows (Ready to Deliver Qty minus what's already shipped). Sits right
+  // next to the PARTIAL pill so it's obvious this isn't just "owed"
+  // cartons still in production — some of it is already sitting ready.
+  const readyChip = readyNotYetShipped > 0
+    ? ` <span style="background:#16a34a;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">READY &mdash; ${readyNotYetShipped.toLocaleString()}</span>`
+    : '';
+  const statusPill = showAsDelivered
+    ? `<span style="background:#166534;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">${isDelivered ? 'FULLY DELIVERED' : 'DELIVERED'}</span>`
+    : list.length
+      ? `<span style="background:#f59e0b;color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">PARTIAL${booked ? ' &mdash; ' + remaining.toLocaleString() + ' ' + countUnit.toUpperCase() + ' LEFT' : ''}</span>${readyChip}`
+      : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>${readyChip}`;
+
+  const summaryLine = booked
+    ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
+    : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
+
+  // Rate/Tax are only editable here for whoever actually holds
+  // delivery_write — the Station Manager flow (managerMode) reaches
+  // canAddDelivery via the shade-card carve-out alone, without that
+  // permission, and previously only ever saw pricing as read-only text
+  // (see pricingInfoLine below), never a live input. Keep it that way.
+  const showPricingFields = !managerMode && hasPerm('job_btn_pricing', 'yes');
+  const addForm = canAddDelivery
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;">
+        <div style="display:grid;grid-template-columns:${isShadeCard ? '1fr 1fr 1fr' : '1fr 1fr 1fr 1fr 1fr'};gap:8px;align-items:end;">
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${countLabel} *</label>
+            <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
+            <input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="${readyPacketsQtyTotal(j) > 0 ? readyPacketsQtyTotal(j) : 'e.g. 76'}" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saves on its own; clear the box to go back to the station's number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+          </div>
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
+            <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>
+          ${isShadeCard ? '' : `<div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
+            <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
+            <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>`}
+        </div>
+        <div style="display:grid;grid-template-columns:${showPricingFields ? '1fr 1fr 1fr 0.8fr 0.7fr auto' : '1fr 1fr 1fr auto'};gap:8px;align-items:end;margin-top:8px;">
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">E-FBR No.</label>
+            <input type="text" id="deliv-fbr" placeholder="e.g. 12345678901234" title="FBR electronic sales tax invoice number for this shipment." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">MSI No.</label>
+            <input type="text" id="deliv-msi" placeholder="e.g. MSI-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
+            <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
+          </div>
+          ${showPricingFields ? `<div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Rate / Carton</label>
+            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(rateFieldPrefill))}" placeholder="${esc(rateFieldPlaceholder)}" title="Pre-filled from the job's own rate, or the Product Rate tab's rate for this product. Edit it to override just this job — leave blank to keep following the Product Rate tab's current rate on future deliveries." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>
+          <div style="min-width:0;">
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Sale Tax %</label>
+            <input type="number" id="deliv-tax" min="0" step="any" value="${esc(String(taxFieldPrefill))}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          </div>` : ''}
+          <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>
+        </div>
+      </div>${j.linked_job_id ? `<div style="margin-top:8px;">
+        <button type="button" class="btn btn-sm" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>
+      </div>` : ''}`
+    : (stageIdx < 5
+        ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job hasn&rsquo;t reached &ldquo;Ready to Deliver&rdquo; yet &mdash; move it there before recording a shipment.</div>`
+        : stageIdx === 5
+          ? `<div style="margin-top:10px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:12px;">Job is at Pasting &mdash; record some pasted cartons on the Pasting station to enable partial shipping from here.</div>`
+          : '');
+
+  const pricingText = `Rate: <b>${rEff ? fmtRate(rEff.value) + (rEff.suggested ? ' <span style="font-weight:400;font-style:italic;color:var(--text2);">(suggested)</span>' : '') : '—'}</b> &middot; Sale Tax: <b>${esc(String(taxFieldPrefill))}%</b>`;
+
+  return `<div class="jc-deliveries ceo-hide-inner" style="margin-top:16px;padding:12px 14px;background:#fff;border:1px solid var(--border);border-radius:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Deliveries</div>
+      ${statusPill}
+    </div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${pricingText}</div>
+    <div>${rows}</div>
+    ${addForm}
+    ${companyInfoLine(j)}
+  </div>`;
+}
+
+// Company info (NTN, Destination) — read-only on every job card, sourced
+// from Company Settings by job.client (case-insensitive), same lookup
+// shape as productRateFor(). Never editable here; see openCompanySettings().
+function companyInfoLine(j) {
+  const c = companySettingsFor(j && j.client);
+  if (!c || (!c.ntn && !c.destination)) return '';
+  const parts = [];
+  if (c.ntn)         parts.push(`<b>NTN</b> ${esc(c.ntn)}`);
+  if (c.destination) parts.push(`<b>Destination</b> ${esc(c.destination)}`);
+  return `<div style="font-size:12px;color:var(--text);margin:10px 0;">${parts.join(' &middot; ')}</div>`;
+}
+// ── Products tab (Supreme Art Finance only) ────────────────────────
+// Replaces the old "Product Rate" Reports card. Groups every job in
+// memory by product name (same case-insensitive key productRateFor()
+// already uses, so a tile's Rate edit lands on exactly the row that
+// feeds effectiveRate() for that name — no separate aliasing/normalizing
+// scheme). Each tile shows Jobs / Cartons shipped / Revenue (shipped
+// cartons × each job's own effective rate) / Avg Rate, with the default
+// Rate editable inline for delivery_write holders. Click a tile for its
+// full shipment history across every job with that name.
+let productsFilter = loadPersistedFilters('products', { search: '', company: '', type: '', dateRange: '', dfrom: '', dto: '' });
+let __productGroupsAll = [];
+let __productGroupsCache = [];
+
+// Syrup/Susp/Tab/Caps/Labels/Leaflets/Sachet/Sticker — Hamza's actual
+// product categories, detected as whole tokens in the product name so
+// "cap" doesn't false-match inside another word. Purely a display/filter
+// convenience; never stored.
+function detectProductType(name) {
+  const tokens = String(name || '').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  if (tokens.some(t => t === 'syrup' || t === 'syrups')) return 'Syrup';
+  if (tokens.some(t => t === 'susp' || t === 'suspension' || t === 'suspensions')) return 'Susp';
+  if (tokens.some(t => t === 'tab' || t === 'tabs' || t === 'tablet' || t === 'tablets')) return 'Tab';
+  if (tokens.some(t => t === 'cap' || t === 'caps' || t === 'capsule' || t === 'capsules')) return 'Caps';
+  if (tokens.some(t => t === 'label' || t === 'labels')) return 'Labels';
+  if (tokens.some(t => t === 'leaflet' || t === 'leaflets')) return 'Leaflets';
+  if (tokens.some(t => t === 'sachet' || t === 'sachets')) return 'Sachet';
+  if (tokens.some(t => t === 'sticker' || t === 'stickers')) return 'Sticker';
+  return '';
+}
+// Date filter scopes which JOBS contribute to each product's totals — a
+// job outside the window is skipped entirely (same as it never existed
+// for this tile), rather than filtering product tiles by some aggregate
+// date. Anchored on the Delivered stamp when there is one, falling back
+// to the job's created date so a not-yet-delivered job can still be
+// scoped by "This month" etc.
+// Resolves a job's own name to the product it should group under: its own
+// name, unless an alias row (added via a tile's "+" button) folds it into
+// a different product's canonical name. Returns { key, name } — key is
+// what groups are keyed by (lowercase), name is the display name (the
+// canonical product's own name when aliased, so every folded-in job shows
+// under one consistent title rather than its own, possibly-different one).
+function resolveProductKey(jobName) {
+  const own = String(jobName || '').trim().toLowerCase();
+  const aliasRow = productAliases.find(a => a.alias === own);
+  if (aliasRow) {
+    const canonical = String(aliasRow.canonical || '').trim();
+    return { key: canonical.toLowerCase(), name: canonical };
+  }
+  return { key: own, name: String(jobName || '').trim() };
+}
+function buildProductGroups() {
+  const bounds = resolveDateFilterBounds(productsFilter.dateRange, productsFilter.dfrom, productsFilter.dto);
+  const groups = new Map();
+  for (const j of (jobs || [])) {
+    const name = String(j.name || '').trim();
+    if (!name) continue;
+    if (bounds) {
+      const anchor = jobDeliveredAnchorMs(j) ?? (j.created_at ? new Date(j.created_at).getTime() : null);
+      if (anchor === null) continue;
+      if (bounds.from !== null && anchor < bounds.from) continue;
+      if (bounds.to   !== null && anchor > bounds.to)   continue;
+    }
+    const resolved = resolveProductKey(name);
+    const key = resolved.key;
+    if (!groups.has(key)) {
+      groups.set(key, { key, name: resolved.name, companies: new Set(), jobs: [], cartons: 0, revenue: 0, type: detectProductType(resolved.name) });
+    }
+    const g = groups.get(key);
+    if (j.client) g.companies.add(String(j.client).trim());
+    g.jobs.push(j);
+    const shipped = totalDeliveredCartons(j);
+    g.cartons += shipped;
+    const r = effectiveRate(j);
+    if (r && shipped > 0) g.revenue += shipped * r.value;
+  }
+  return [...groups.values()];
+}
+function renderProductsTab() {
+  __productGroupsAll = buildProductGroups();
+  const companySel = document.getElementById('products-company-filter');
+  if (companySel) companySel.innerHTML = '<option value="">All companies</option>' + clientCompanyOptions(productsFilter.company);
+  const searchEl = document.getElementById('products-search');
+  if (searchEl && searchEl.value !== productsFilter.search) searchEl.value = productsFilter.search;
+  const typeSel = document.getElementById('products-type-filter');
+  if (typeSel) typeSel.value = productsFilter.type;
+  const dateSel = document.getElementById('products-date-range');
+  if (dateSel) dateSel.value = productsFilter.dateRange;
+  const dateCustom = document.getElementById('products-date-custom');
+  if (dateCustom) dateCustom.style.display = productsFilter.dateRange === 'custom' ? 'inline-flex' : 'none';
+  const dfromEl = document.getElementById('products-dfrom');
+  if (dfromEl) dfromEl.value = productsFilter.dfrom;
+  const dtoEl = document.getElementById('products-dto');
+  if (dtoEl) dtoEl.value = productsFilter.dto;
+  refilterProductsGrid();
+}
+function refilterProductsGrid() {
+  const search = (productsFilter.search || '').trim().toLowerCase();
+  const company = (productsFilter.company || '').trim().toLowerCase();
+  const type = productsFilter.type || '';
+  const filtered = __productGroupsAll.filter(g => {
+    if (type && g.type !== type) return false;
+    if (company && ![...g.companies].some(c => c.toLowerCase() === company)) return false;
+    if (search && !(g.name.toLowerCase().includes(search) || [...g.companies].some(c => c.toLowerCase().includes(search)))) return false;
+    return true;
+  });
+  filtered.sort((a, b) => b.revenue - a.revenue || b.cartons - a.cartons || a.name.localeCompare(b.name));
+  __productGroupsCache = filtered;
+  const grid = document.getElementById('products-grid');
+  if (grid) grid.innerHTML = filtered.length
+    ? filtered.map((g, i) => productTileHtml(g, i)).join('')
+    : `<div style="grid-column:1/-1;text-align:center;color:var(--text3);font-style:italic;padding:30px;">No products match.</div>`;
+  const countEl = document.getElementById('products-count');
+  if (countEl) countEl.textContent = filtered.length + (filtered.length !== __productGroupsAll.length ? ' of ' + __productGroupsAll.length : '');
+}
+function _persistProductsFilter() { persistFilters('products', productsFilter); }
+function setProductsSearch(v) { productsFilter.search = v; _persistProductsFilter(); refilterProductsGrid(); }
+function setProductsCompanyFilter(v) { productsFilter.company = v; _persistProductsFilter(); refilterProductsGrid(); }
+function setProductsTypeFilter(v) { productsFilter.type = v; _persistProductsFilter(); refilterProductsGrid(); }
+// Date range changes which JOBS feed the aggregation in the first place
+// (see buildProductGroups), so it needs a full rebuild, not just a
+// refilter of the already-built groups.
+function setProductsDateRange(v) {
+  productsFilter.dateRange = v;
+  const custom = document.getElementById('products-date-custom');
+  if (custom) custom.style.display = v === 'custom' ? 'inline-flex' : 'none';
+  if (v !== 'custom') { productsFilter.dfrom = ''; productsFilter.dto = ''; }
+  _persistProductsFilter();
+  __productGroupsAll = buildProductGroups();
+  refilterProductsGrid();
+}
+function setProductsDateCustom() {
+  productsFilter.dfrom = (document.getElementById('products-dfrom') || {}).value || '';
+  productsFilter.dto   = (document.getElementById('products-dto')   || {}).value || '';
+  _persistProductsFilter();
+  __productGroupsAll = buildProductGroups();
+  refilterProductsGrid();
+}
+function productTileHtml(g, i) {
+  const rateRow = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+  const savedRate = rateRow ? Number(rateRow.rate) : null;
+  const avgRate = g.cartons > 0 && g.revenue > 0 ? g.revenue / g.cartons : savedRate;
+  const companies = [...g.companies].sort().join(', ');
+  // Rate and Revenue/Avg Rate each have their own Access Register row
+  // (products_btn_rate / products_btn_revenue) — independent of Product
+  // Rate tab access itself, so Hamza can show the tile without its
+  // pricing to a role that shouldn't see it.
+  const canEditRate = hasPerm('products_btn_rate', 'yes');
+  const canSeeRate = hasPerm('products_btn_rate', 'view');
+  const canSeeRevenue = hasPerm('products_btn_revenue', 'view');
+  const statCols = canSeeRevenue ? 4 : 2;
+  return `<div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:#fff;cursor:pointer;" onclick="openProductHistoryModal(${i})" title="Click to view shipment history">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+      <div style="font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0;word-break:break-word;">${esc(g.name)}${g.type ? ` <span style="font-size:10px;font-weight:700;background:#eef2ff;color:#3730a3;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">${esc(g.type)}</span>` : ''}</div>
+      ${canSeeRate ? `<span onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2);white-space:nowrap;">
+        Rate
+        <input type="number" min="0" step="any" value="${savedRate !== null ? esc(String(savedRate)) : ''}" placeholder="&mdash;" ${canEditRate ? '' : 'disabled'} onchange="saveProductRateInline(${i}, this.value)" style="width:70px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">
+        ${canEditRate ? `<button type="button" onclick="event.stopPropagation(); openAddToProductModal(${i})" title="Add another product's jobs (past and future) into this one" style="width:20px;height:20px;line-height:1;padding:0;border:1px solid var(--border);border-radius:5px;background:#fff;color:var(--text2);font-weight:700;cursor:pointer;">&plus;</button>` : ''}
+      </span>` : ''}
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-top:4px;">${esc(companies) || '&mdash;'}</div>
+    <div style="display:grid;grid-template-columns:repeat(${statCols},1fr);gap:8px;margin-top:10px;font-size:12px;">
+      <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Jobs</div><div style="font-weight:700;">${g.jobs.length}</div></div>
+      <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Cartons</div><div style="font-weight:700;">${g.cartons.toLocaleString()}</div></div>
+      ${canSeeRevenue ? `<div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Revenue</div><div style="font-weight:700;">${g.revenue > 0 ? fmtRate(g.revenue) : '&mdash;'}</div></div>
+      <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Avg Rate</div><div style="font-weight:700;">${avgRate ? fmtRate(avgRate) : '&mdash;'}</div></div>` : ''}
+    </div>
+  </div>`;
+}
+async function saveProductRateInline(i, valueStr) {
+  const g = __productGroupsCache[i];
+  if (!g) return;
+  const val = String(valueStr || '').trim();
+  const rate = val === '' ? null : parseFloat(val);
+  if (rate !== null && (!Number.isFinite(rate) || rate < 0)) {
+    await alertDialog({ title: 'Enter a valid rate', kind: 'warn' });
+    refilterProductsGrid();
+    return;
+  }
+  showSaving(true);
+  try {
+    const existing = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+    if (rate === null) {
+      if (existing) await api('DELETE', `/api/product-rates/${existing.id}`);
+    } else if (existing) {
+      await api('PUT', `/api/product-rates/${existing.id}`, { product: g.name, rate });
+    } else {
+      await api('POST', '/api/product-rates', { product: g.name, rate });
+    }
+    await loadProductRates();
+    refilterProductsGrid();
+    notify('Product rate saved');
+  } catch (e) { notify('Error: ' + e.message); refilterProductsGrid(); }
+  showSaving(false);
+}
+// ── "+" — fold another product's jobs into this one ───────────────
+// Adds a finance.product_aliases row (alias = the OTHER product's own
+// name, canonical = this tile's name), so every job with that other name
+// — past AND future — groups, prices, and suggests-rate as THIS product
+// from now on. Candidates are index-based (not the raw name embedded in
+// onclick) so a product name with an apostrophe can't break the markup.
+let __addToProductCandidates = [];
+let __addToProductTargetKey = '';
+function openAddToProductModal(i) {
+  const target = __productGroupsCache[i];
+  if (!target) return;
+  __addToProductTargetKey = target.key;
+  __addToProductCandidates = __productGroupsAll
+    .filter(g => g.key !== target.key)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <h2 style="margin:0;font-size:17px;">&plus; Add product to ${esc(target.name)}</h2>
+      <button class="btn btn-sm" onclick="closeModal()" style="padding:2px 8px;font-size:14px;line-height:1;">&times;</button>
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick another product below to fold into <b>${esc(target.name)}</b> — every job with that name, past and future, will count as this product (and use its Rate) from now on.</div>
+    <input id="add-to-product-search" class="filter" placeholder="Search product name..." style="width:100%;box-sizing:border-box;margin-bottom:10px;" oninput="filterAddToProductList()">
+    <div id="add-to-product-list" style="max-height:50vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
+      ${__addToProductCandidates.length ? __addToProductCandidates.map((g, ci) => `
+        <div class="add-to-product-row" data-hay="${esc(g.name.toLowerCase())}" style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div style="min-width:0;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);">${esc(g.name)}${g.type ? ` <span style="font-size:9px;font-weight:700;background:#eef2ff;color:#3730a3;padding:1px 5px;border-radius:999px;vertical-align:middle;">${esc(g.type)}</span>` : ''}</div>
+            <div style="font-size:11px;color:var(--text2);">${esc([...g.companies].sort().join(', ')) || '&mdash;'} &middot; ${g.jobs.length} job${g.jobs.length===1?'':'s'}</div>
+          </div>
+          <button class="btn btn-sm btn-primary" onclick="addProductAlias(${ci})">Add</button>
+        </div>`).join('') : `<div style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No other products to add.</div>`}
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button></div>
+  </div>`);
+}
+function filterAddToProductList() {
+  const q = (document.getElementById('add-to-product-search') || {}).value || '';
+  const needle = q.trim().toLowerCase();
+  document.querySelectorAll('.add-to-product-row').forEach(row => {
+    const hay = row.getAttribute('data-hay') || '';
+    row.style.display = (!needle || hay.includes(needle)) ? '' : 'none';
+  });
+}
+async function addProductAlias(ci) {
+  const g = __addToProductCandidates[ci];
+  const target = __productGroupsAll.find(x => x.key === __addToProductTargetKey);
+  if (!g || !target) return;
+  showSaving(true);
+  try {
+    await api('POST', '/api/product-aliases', { alias: g.key, canonical: target.name });
+    await loadProductAliases();
+    closeModal();
+    renderProductsTab();
+    notify(`Added — "${g.name}" now folds into "${target.name}"`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Every shipment across every job sharing this product name, newest
+// first. Job number opens that job's own card (jumping back to Jobs).
+function openProductHistoryModal(i) {
+  const g = __productGroupsCache[i];
+  if (!g) return;
+  const canEdit = hasPerm('products_btn_rate', 'yes');
+  // The product's own standard Rate (top of the tile) — a shipment whose
+  // job rate was edited away from this reads amber/yellow below, so an
+  // override is obvious at a glance against the rest of the history.
+  const rateRow = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+  const defaultRate = rateRow ? Number(rateRow.rate) : null;
+  const rows = [];
+  for (const j of g.jobs) {
+    const list = Array.isArray(j.deliveries) ? j.deliveries : [];
+    const r = effectiveRate(j);
+    const rate = r ? r.value : null;
+    const taxPct = (j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? Number(j.tax_pct) : 18;
+    const overridden = defaultRate !== null && rate !== null && Math.abs(rate - defaultRate) > 0.0001;
+    list.forEach(d => {
+      const cartons = parseFloat(d && d.cartons) || 0;
+      rows.push({
+        jobId: j.id, client: j.client || '', date: (d && d.date) || '',
+        po: (d && d.po_no) || '', fbr: (d && d.fbr_no) || '',
+        invoice: deliveryChallanText(d), cartons, rate, taxPct, overridden,
+      });
+    });
+  }
+  rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const body = rows.length ? rows.map(r => {
+    const rateStyle = r.overridden ? 'color:#ca8a04;font-weight:700;' : '';
+    const rateCell = canEdit
+      ? `<input type="number" min="0" step="any" value="${r.rate != null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onchange="saveHistoryPricing(${r.jobId}, '${esc(g.key)}', 'rate', this.value)" style="width:70px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;${rateStyle}">`
+      : `<span style="${rateStyle}" title="${r.overridden ? 'Edited away from this product\'s standard rate (' + fmtRate(defaultRate) + ')' : ''}">${r.rate != null ? fmtRate(r.rate) : '&mdash;'}</span>`;
+    const taxCell = canEdit
+      ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onchange="saveHistoryPricing(${r.jobId}, '${esc(g.key)}', 'tax', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">`
+      : `${esc(String(r.taxPct))}%`;
+    return `<tr>
+    <td style="padding:6px 8px;">${esc(r.date)}</td>
+    <td style="padding:6px 8px;"><a href="#" onclick="event.preventDefault(); closeModal(); setMode('jobs'); setTimeout(()=>openEdit(${r.jobId}),50);">E-${r.jobId}</a></td>
+    <td style="padding:6px 8px;">${esc(r.client)}</td>
+    <td style="padding:6px 8px;">${esc(r.po)}</td>
+    <td style="padding:6px 8px;">${esc(r.fbr)}</td>
+    <td style="padding:6px 8px;">${esc(r.invoice)}</td>
+    <td style="text-align:right;padding:6px 8px;">${r.cartons.toLocaleString()}</td>
+    <td style="text-align:right;padding:6px 8px;">${rateCell}</td>
+    <td style="text-align:right;padding:6px 8px;">${taxCell}</td>
+    <td style="text-align:right;padding:6px 8px;">${r.rate != null ? fmtRate(r.cartons * r.rate) : '&mdash;'}</td>
+  </tr>`;
+  }).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No shipments recorded yet.</td></tr>`;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:960px;">
+    <h2 style="margin:0 0 4px;">${esc(g.name)}</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Every shipment across every job with this product name.${defaultRate !== null ? ' <span style="color:#ca8a04;font-weight:700;">Yellow</span> rate = edited away from this product\'s standard rate.' : ''}${canEdit ? ' Rate/Sale Tax % are editable per job — a change applies to every shipment on that job.' : ''}</div>
+    <div style="max-height:60vh;overflow:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead><tr style="background:#f3f4f6;">
+        <th style="text-align:left;padding:6px 8px;">Date</th>
+        <th style="text-align:left;padding:6px 8px;">Job</th>
+        <th style="text-align:left;padding:6px 8px;">Company</th>
+        <th style="text-align:left;padding:6px 8px;">PO No.</th>
+        <th style="text-align:left;padding:6px 8px;">E-FBR No.</th>
+        <th style="text-align:left;padding:6px 8px;">Invoice No.</th>
+        <th style="text-align:right;padding:6px 8px;">Cartons</th>
+        <th style="text-align:right;padding:6px 8px;">Rate</th>
+        <th style="text-align:right;padding:6px 8px;">Sale Tax %</th>
+        <th style="text-align:right;padding:6px 8px;">Revenue</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
+// Save a job's Rate/Sale Tax % from an editable row (Product Rate tab's
+// history modal, or the Sale Report table) via the same PATCH the old
+// standalone Pricing box used to call. Re-renders whichever view called
+// it — reopening the history modal at its (possibly shifted, since
+// editing a rate re-sorts tiles by revenue) new index for this product.
+async function saveHistoryPricing(jobId, groupKey, field, valueStr) {
+  const job = jobs.find(j => j.id === jobId);
+  if (!job) return;
+  const val = parseFloat(valueStr);
+  if (!Number.isFinite(val) || val < 0) { await alertDialog({ title: 'Enter a valid number', kind: 'warn' }); return; }
+  const curRate = (job.rate !== null && job.rate !== undefined && job.rate !== '') ? Number(job.rate) : (effectiveRate(job) ? effectiveRate(job).value : null);
+  const curTax  = (job.tax_pct !== null && job.tax_pct !== undefined && job.tax_pct !== '') ? Number(job.tax_pct) : 18;
+  const rate    = field === 'rate' ? val : curRate;
+  const taxPct  = field === 'tax'  ? val : curTax;
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/pricing`, { rate, tax_pct: taxPct });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    notify('Pricing updated');
+    if (document.getElementById('products-grid')) {
+      renderProductsTab();
+      const idx = __productGroupsCache.findIndex(g => g.key === groupKey);
+      if (idx >= 0) openProductHistoryModal(idx); else closeModal();
+    }
+    if (document.getElementById('sr-content')) renderSaleReport();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// ── Company Settings (Supreme Art Finance only) ────────────────────
+// NTN and Destination per company — triggered from the Jobs toolbar
+// button, not a Reports card. Auto-fills on every job card for that
+// company (companyInfoLine, matched by job.client).
+function openCompanySettings() {
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <h2>&#127970; Company Settings</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">NTN and Destination per company — auto-fills on every job card for that company (matched by name, case-insensitive).</div>
+    <div id="company-settings-list">Loading&hellip;</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Close</button>
+      ${hasPerm('rpt_sale_report_company', 'yes') ? '<button class="btn btn-primary" onclick="openCompanySettingRowModal()">+ Add Company</button>' : ''}
+    </div>
+  </div>`);
+  loadCompanySettings().then(renderCompanySettingsList);
+}
+function renderCompanySettingsList() {
+  const el = document.getElementById('company-settings-list');
+  if (!el) return; // modal already closed
+  const rows = [...companySettings].sort((a, b) => String(a.company).localeCompare(String(b.company)));
+  el.innerHTML = rows.length
+    ? `<table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead><tr style="background:#f3f4f6;">
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Company</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">NTN</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Destination</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border);"></th>
+        </tr></thead>
+        <tbody>${rows.map(c => `<tr>
+          <td style="padding:6px 8px;">${esc(c.company)}</td>
+          <td style="padding:6px 8px;">${esc(c.ntn || '')}</td>
+          <td style="padding:6px 8px;">${esc(c.destination || '')}</td>
+          <td style="padding:6px 8px;text-align:center;white-space:nowrap;">${hasPerm('rpt_sale_report_company', 'yes') ? `
+            <button class="btn btn-sm" onclick="openCompanySettingRowModal(${c.id})">Edit</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteCompanySetting(${c.id})">Delete</button>` : ''}
+          </td>
+        </tr>`).join('')}</tbody>
+      </table>`
+    : `<div style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No companies set up yet.</div>`;
+}
+function openCompanySettingRowModal(id) {
+  const row = id ? companySettings.find(c => c.id === id) : null;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>${row ? 'Edit' : 'Add'} Company Settings</h2>
+    <div class="form-group"><label class="form-label">Company Name *</label>
+      <select id="cs-modal-company-select" onchange="document.getElementById('cs-modal-company').value=this.value" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;margin-bottom:6px;">
+        <option value="">&mdash; Pick from existing companies, or type below &mdash;</option>
+        ${clientCompanyOptions('')}
+      </select>
+      <input type="text" id="cs-modal-company" value="${row ? esc(row.company) : ''}" placeholder="e.g. Fenbro">
+    </div>
+    <div class="form-group"><label class="form-label">NTN</label><input type="text" id="cs-modal-ntn" value="${row ? esc(row.ntn || '') : ''}" placeholder="e.g. 1234567-8"></div>
+    <div class="form-group"><label class="form-label">Destination</label><input type="text" id="cs-modal-destination" value="${row ? esc(row.destination || '') : ''}" placeholder="e.g. Karachi"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="openCompanySettings()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveCompanySetting(${id || 'null'})">${row ? 'Save' : 'Add'}</button>
+    </div>
+  </div>`);
+}
+async function saveCompanySetting(id) {
+  const company = ((document.getElementById('cs-modal-company')||{}).value || '').trim();
+  const ntn = ((document.getElementById('cs-modal-ntn')||{}).value || '').trim();
+  const destination = ((document.getElementById('cs-modal-destination')||{}).value || '').trim();
+  if (!company) { await alertDialog({ title: 'Enter a company name', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    if (id) await api('PUT', `/api/company-settings/${id}`, { company, ntn, destination });
+    else    await api('POST', '/api/company-settings', { company, ntn, destination });
+    await loadCompanySettings();
+    render();
+    if (document.getElementById('sr-content')) renderSaleReport();
+    notify('Company Settings saved');
+    openCompanySettings();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function deleteCompanySetting(id) {
+  const row = companySettings.find(c => c.id === id);
+  const ok = await confirmDialog({
+    title: `Delete settings for "${row ? row.company : 'this company'}"?`,
+    message: "NTN and Destination will stop showing on that company's job cards.",
+    danger: true, confirmText: 'Delete',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/company-settings/${id}`);
+    await loadCompanySettings();
+    render();
+    if (document.getElementById('sr-content')) renderSaleReport();
+    notify('Company Settings deleted');
+    openCompanySettings();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
 function clientDeliveriesBreakdown(j, clientPreview) {
   if (!clientPreview) return '';
   const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
@@ -19824,19 +21460,82 @@ async function recordDelivery(jobId) {
   const notes   = ((document.getElementById('deliv-notes')||{}).value || '').trim();
   const poNo    = ((document.getElementById('deliv-po')||{}).value    || '').trim();
   const batchNo = ((document.getElementById('deliv-batch')||{}).value || '').trim();
+  const fbrNo   = ((document.getElementById('deliv-fbr')||{}).value   || '').trim();
+  const msiNo   = ((document.getElementById('deliv-msi')||{}).value   || '').trim();
   const cartonsN = parseFloat(cartons);
   if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  // Rate / Sale Tax inputs only exist for holders of job_btn_pricing (see
+  // deliveriesSectionFinance); for everyone else these ride along undefined.
+  const rateEl = document.getElementById('deliv-rate');
+  const taxEl  = document.getElementById('deliv-tax');
+  let rate, taxPct;
+  if (rateEl || taxEl) {
+    const rateStr = ((rateEl||{}).value || '').trim();
+    const taxStr  = ((taxEl||{}).value  || '').trim();
+    rate = rateStr === '' ? null : parseFloat(rateStr);
+    if (rate !== null && (!Number.isFinite(rate) || rate < 0)) { await alertDialog({ title: 'Rate must be a non-negative number', kind: 'warn' }); return; }
+    taxPct = parseFloat(taxStr);
+    if (!Number.isFinite(taxPct) || taxPct < 0) { await alertDialog({ title: 'Sale Tax % must be a non-negative number', kind: 'warn' }); return; }
+  }
   showSaving(true);
   try {
     // Server keeps delqty in sync as the running sum of cartons. PO No.
     // and Batch No. ride per-entry so the Jobs Report can join every
     // shipment's PO / batch across a job that was split.
-    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, { cartons, date, notes, po_no: poNo, batch_no: batchNo });
+    const body = { cartons, date, notes, po_no: poNo, batch_no: batchNo, fbr_no: fbrNo, msi_no: msiNo };
+    if (rateEl || taxEl) { body.rate = rate; body.tax_pct = taxPct; }
+    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, body);
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     closeModal(); render(); notify('Delivery recorded');
     setTimeout(() => openEdit(jobId), 50);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+// Inline-edit one already-recorded delivery's field — PO No., Batch No.,
+// E-FBR No., MSI No., Invoice No., or Cartons — auto-saves on change, no
+// separate save step. Used by the job card's Deliveries ledger table and
+// the Sale Report table. A cartons edit recomputes delqty/stage on the
+// server (see the PATCH route), so the whole job can change shape, not
+// just this one field. Re-renders the job card in place so the edited
+// value + any dependent view (e.g. Sale Report row) stays in sync without
+// a full reload.
+// Save the job's Cartons/Packets override (blank clears it, falling back
+// to the Pasting station's own figure). Job-level, so it moves every
+// shipment row for this job at once — same shape as a Rate edit.
+async function saveCartonsPackets(jobId, valueStr) {
+  const raw = String(valueStr == null ? '' : valueStr).trim();
+  if (raw !== '') {
+    const n = parseFloat(raw.replace(/[^0-9.\-]/g, ''));
+    if (!Number.isFinite(n) || n < 0) { notify('Cartons/Packets must be a positive number'); render(); return; }
+  }
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/cartons-packets`, { cartons_packets: raw === '' ? null : raw });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    notify('Saved');
+    if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
+    if (document.getElementById('sr-content')) renderSaleReport();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+
+async function saveDeliveryEntryField(jobId, index, field, valueStr) {
+  if (field === 'cartons') {
+    const n = parseFloat(String(valueStr).replace(/[^0-9.\-]/g, ''));
+    if (!Number.isFinite(n) || n <= 0) { notify('Cartons must be a positive number'); render(); return; }
+  }
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/deliveries/${index}`, { field, value: valueStr });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;
+    notify('Saved');
+    if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
+    if (document.getElementById('sr-content')) renderSaleReport();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -19966,11 +21665,15 @@ function openDeliverLinkedModal(jobId) {
           <label class="form-label">Batch No.</label>
           <input type="text" id="${prefix}-batch" value="${esc(jb.bno || '')}">
         </div>
+        ${hasPerm('job_btn_pricing', 'yes') ? `<div class="form-group">
+          <label class="form-label">E-FBR No.</label>
+          <input type="text" id="${prefix}-fbr" placeholder="e.g. 12345678901234">
+        </div>` : ''}
       </div>
     </div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>&#128279; Deliver Linked Jobs</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">One challan / invoice, both jobs. Enter total unit cartons — they split automatically by ready qty (or unit carton qty).</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">One invoice, both jobs. Enter total unit cartons — they split automatically by ready qty (or unit carton qty).</div>
     <div style="margin-bottom:14px;">
       <label class="form-label" style="font-weight:700;font-size:13px;">Total Unit Cartons (both jobs) *</label>
       <input type="number" id="dl-total" min="1" step="any"
@@ -19981,7 +21684,7 @@ function openDeliverLinkedModal(jobId) {
     ${rowHtml(partner, 'dl-b')}
     <div class="form-row">
       <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dl-date" value="${new Date().toISOString().slice(0,10)}"></div>
-      <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(shared)</span></label><input type="text" id="dl-challan" placeholder="e.g. CH-042"></div>
+      <div class="form-group"><label class="form-label">Invoice No. <span style="font-weight:400;color:var(--text2);">(shared)</span></label><input type="text" id="dl-challan" placeholder="e.g. INV-042"></div>
     </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -19996,6 +21699,8 @@ async function submitDeliverLinked(jobId, partnerId) {
   const poB      = ((document.getElementById('dl-b-po')||{}).value || '').trim();
   const batchA   = ((document.getElementById('dl-a-batch')||{}).value || '').trim();
   const batchB   = ((document.getElementById('dl-b-batch')||{}).value || '').trim();
+  const fbrA     = ((document.getElementById('dl-a-fbr')||{}).value || '').trim();
+  const fbrB     = ((document.getElementById('dl-b-fbr')||{}).value || '').trim();
   const date     = ((document.getElementById('dl-date')||{}).value || '').trim();
   const challan  = ((document.getElementById('dl-challan')||{}).value || '').trim();
   if (!parseFloat(cartonsA) || parseFloat(cartonsA) <= 0) { await alertDialog({ title: `E-${jobId}: enter cartons`, kind: 'warn' }); return; }
@@ -20006,8 +21711,8 @@ async function submitDeliverLinked(jobId, partnerId) {
     await api('POST', `/api/jobs/${jobId}/deliver-linked`, {
       challan_no: challan, date,
       entries: [
-        { job_id: jobId,    cartons: cartonsA, po_no: poA, batch_no: batchA },
-        { job_id: partnerId, cartons: cartonsB, po_no: poB, batch_no: batchB },
+        { job_id: jobId,    cartons: cartonsA, po_no: poA, batch_no: batchA, fbr_no: fbrA },
+        { job_id: partnerId, cartons: cartonsB, po_no: poB, batch_no: batchB, fbr_no: fbrB },
       ],
     });
     await loadJobs();
@@ -20650,7 +22355,10 @@ function openDeliverGroupModal(groupName) {
       <div class="form-group"><label class="form-label">PO No.</label><input type="text" id="dg-po" placeholder="e.g. PO-2025-001"></div>
       <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="dg-batch" placeholder="e.g. B-101"></div>
     </div>
-    <div class="form-group"><label class="form-label">Challan No.</label><input type="text" id="dg-notes" placeholder="e.g. CH-042"></div>
+    <div class="form-row">
+      ${hasPerm('job_btn_pricing', 'yes') ? `<div class="form-group"><label class="form-label">E-FBR No.</label><input type="text" id="dg-fbr" placeholder="e.g. 12345678901234"></div>` : ''}
+      <div class="form-group"><label class="form-label">Invoice No.</label><input type="text" id="dg-notes" placeholder="e.g. INV-042"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" style="background:#5b21b6;border-color:#5b21b6;" onclick="submitGroupDelivery(${gName})">&#128230; Record Delivery</button>
@@ -20662,12 +22370,13 @@ async function submitGroupDelivery(groupName) {
   const date    = ((document.getElementById('dg-date')||{}).value||'').trim();
   const po      = ((document.getElementById('dg-po')||{}).value||'').trim();
   const batch   = ((document.getElementById('dg-batch')||{}).value||'').trim();
+  const fbr     = ((document.getElementById('dg-fbr')||{}).value||'').trim();
   const notes   = ((document.getElementById('dg-notes')||{}).value||'').trim();
   if (!parseFloat(cartons) || parseFloat(cartons) <= 0) { await alertDialog({ title: 'Enter cartons to deliver', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
   showSaving(true);
   try {
-    const result = await api('POST', '/api/groups/deliver', { group_name: groupName, cartons, date, po_no: po, batch_no: batch, notes });
+    const result = await api('POST', '/api/groups/deliver', { group_name: groupName, cartons, date, po_no: po, batch_no: batch, fbr_no: fbr, notes });
     await loadJobs();
     closeModal(); render();
     const parts = (result.deliveries_made || []).map(d => `E-${d.job_id}: ${Number(d.cartons).toLocaleString()} cartons`).join(', ');
@@ -26591,6 +28300,7 @@ async function setUsersSubTab(tab) {
 let _accRegTab = 'jobs';
 const ACC_REG_TABS = [
   ['jobs', 'Jobs'],
+  ['products', 'Products'],
   ['inventory', 'Inventory'],
   ['reports', 'Reports'],
   ['station', 'Station'],
@@ -26619,6 +28329,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_delete_delivery', type: 'button' },
   { key: 'job_btn_adjust',          type: 'button' },
   { key: 'job_btn_stickers',        type: 'button' },
+  { key: 'job_btn_pricing',         type: 'button' },
 ];
 // Inventory tab — Imports lives inside here too (per request), as its own
 // tab-level view/hidden row right under Inventory's own. 'button-30day' is
@@ -26653,6 +28364,15 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_daily_production_report',     type: 'tab' },
   { key: 'rpt_jobs_archive',                type: 'tab' },
   { key: 'rpt_imports_archive',             type: 'tab' },
+  { key: 'rpt_sale_report',                 type: 'tab' },
+  { key: 'rpt_sale_report_totals',          type: 'tab' },
+  { key: 'rpt_sale_report_company',         type: 'button' },
+];
+// Products tab (Product Rate), merged in from the Finance app.
+const ACC_PRODUCTS_TAB_ROWS = [
+  { key: 'products_tab_access',  type: 'tab' },
+  { key: 'products_btn_rate',    type: 'button' },
+  { key: 'products_btn_revenue', type: 'button' },
 ];
 // Users tab. user_accessregister_tab_access is special-cased in
 // accGroupRow: every role except super_admin renders as a locked HIDDEN
@@ -26675,7 +28395,7 @@ const ACC_USERS_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS };
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
@@ -27746,6 +29466,10 @@ async function init() {
     // Operators can't read inventory (403), so skip the call for them.
     // Everyone else loads jobs + inventory in parallel.
     const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster()];
+    // Finance reference data (Product Rate / aliases / Company Settings), only for roles that can see any of it.
+    if (hasPerm('products_tab_access', 'view') || hasPerm('rpt_sale_report', 'view') || hasPerm('job_btn_pricing', 'view')) {
+      loaders.push(loadProductRates(), loadProductAliases(), loadCompanySettings());
+    }
     if (!isOperator()) loaders.push(loadInventory());
     await Promise.all(loaders);
     // Route to the same landing tab the login flow uses so a refresh
