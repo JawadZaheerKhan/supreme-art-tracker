@@ -3372,12 +3372,12 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div class="tabs" id="users-subtabs" style="display:none;margin-bottom:1rem;"></div>
 
   <div id="users-team-section">
-    <div class="stats-row pm-hide" id="users-stats-row"></div>
-    <div class="toolbar pm-hide">
+    <div class="stats-row" id="users-stats-row"></div>
+    <div class="toolbar">
       <div style="font-size:14px;font-weight:600;color:var(--text);">Authorized Users</div>
       <button class="btn btn-sm btn-primary" id="invite-user-btn" style="margin-left:auto;display:none;" onclick="openInviteUser()">+ Invite User</button>
     </div>
-    <div class="inventory-list pm-hide" id="users-list"></div>
+    <div class="inventory-list" id="users-list"></div>
   </div>
 
   <!-- Shop-floor operators (PIN roster for the Station terminal). Admin + PM
@@ -4440,13 +4440,28 @@ function isClient()            { return hasRole('client'); }
 // role_permissions table independently — see canWriteJobs(user) etc. in
 // server.js — so these client checks are convenience/UI-dimming, not the
 // actual security boundary, exactly as before this was made editable.
-function canWriteJobs()      { return isSuperAdmin() || hasPerm('job_write'); }
+// Access Register wiring: every capability below reads its own per-button row (job_btn_* /
+// inv_btn_* / user_btn_*). The server enforces the same rows; these only decide what the UI shows.
+// canWriteJobs()/canWriteInventory() mean "holds Edit on ANY row of that group" so existing
+// write-area styling keeps working; each button then checks its own row.
+const JOB_WRITE_ROWS = ['job_btn_edit', 'job_btn_link', 'job_btn_block', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_forward'];
+const INV_WRITE_ROWS = ['inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import'];
+function canWriteJobs()      { return isSuperAdmin() || JOB_WRITE_ROWS.some(k => hasPerm(k)); }
+function canEditJob()        { return isSuperAdmin() || hasPerm('job_btn_edit'); }
+function canLinkJob()        { return isSuperAdmin() || hasPerm('job_btn_link'); }
+function canBlockJob()       { return isSuperAdmin() || hasPerm('job_btn_block'); }
+function canDuplicateJob()   { return isSuperAdmin() || hasPerm('job_btn_duplicate'); }
+function canCreateMil()      { return isSuperAdmin() || hasPerm('job_btn_create_mil'); }
+function canNewJob()         { return isSuperAdmin() || hasPerm('job_btn_new_job'); }
+function canStageForward()   { return isSuperAdmin() || hasPerm('job_btn_stage_forward'); }
+function canAddPaper()       { return isSuperAdmin() || hasPerm('inv_btn_add_paper'); }
+function canAddOffcut()      { return isSuperAdmin() || hasPerm('inv_btn_add_offcut'); }
 // Delivery ledger — admin, PM, or finance by default. Finance is the only
 // role that can write only this narrow slice of the job while being
 // otherwise read-only. Every delivery button / form uses this instead of
 // canWriteJobs.
-function canRecordDelivery() { return isSuperAdmin() || hasPerm('delivery_write'); }
-function canWriteInventory() { return isSuperAdmin() || hasPerm('inventory_write'); }
+function canRecordDelivery() { return isSuperAdmin() || hasPerm('job_btn_record_delivery'); }
+function canWriteInventory() { return isSuperAdmin() || INV_WRITE_ROWS.some(k => hasPerm(k)); }
 // Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
 // else with a PIN and sees the whole queue + update screens for that
 // station — but every WRITE control inside is tagged .ceo-hide so they
@@ -4465,7 +4480,7 @@ function canRunStation()     { return isSuperAdmin() || hasPerm('station_access'
 function canProcessStationClient() { return isSuperAdmin() || hasPerm('station_write'); }
 // Operator roster management (Users tab → Floor Operators section).
 // Admin and production manager can add / edit / remove operators by default.
-function canManageOperators() { return isSuperAdmin() || hasPerm('operator_admin'); }
+function canManageOperators() { return isSuperAdmin() || hasPerm('user_btn_operators'); }
 // Generic legacy helper — kept so widely-used .ceo-hide elements + existing
 // call sites don't need to change. Reads as "is this user allowed to mutate
 // anything at all" (anyone holding at least one write-capable role). Now
@@ -4475,7 +4490,7 @@ function canWrite() { return canWriteJobs() || canWriteInventory(); }
 // Anyone who can write inventory can issue stock. CEO + operator are blocked
 // unless they also hold a write role. Same underlying capability as
 // canWriteInventory() — kept as its own name for readability at call sites.
-function canIssueStock() { return canWriteInventory(); }
+function canIssueStock() { return isSuperAdmin() || hasPerm('inv_btn_stock_out'); }
 // Offcut-based jobs were meant to be hand-managed by the production side
 // (admin + PM) too, not just the store keeper — but both offcut and
 // fresh issuance actually go through the same POST /api/jobs/:id/issue-stock
@@ -4483,7 +4498,7 @@ function canIssueStock() { return canWriteInventory(); }
 // Kept as its own name for readability, but now literally the same check
 // so it can never drift from it the way it used to (PM used to see this
 // button and get a 403 with no warning).
-function canIssueOffcutStock() { return canWriteInventory(); }
+function canIssueOffcutStock() { return isSuperAdmin() || hasPerm('inv_btn_offcut_issuance'); }
 // Offcut issuance buttons/badges — one blue shared by Pending Stock and the
 // Station's Paper Cutting screen.
 const OFFCUT_BTN_STYLE = 'background:#1e3a8a;border-color:#1e3a8a;color:#fff;font-weight:700;';
@@ -4510,7 +4525,7 @@ function isOffcutJob(j) {
 // independent server enforcement of who can print (see the Access
 // Register's note on this row), so editing it changes who SEES the
 // button, not a real security boundary.
-function canPrintJobCard() { return isSuperAdmin() || hasPerm('job_print'); }
+function canPrintJobCard() { return isSuperAdmin() || hasPerm('job_btn_print', 'view'); }
 // Wastage Adjustment (adjust/un-adjust), the Finalized Jobs tab, and the
 // Manual Job Card Consumption report all share this one permission —
 // defaults to nobody but Super Admin, same as before this was editable,
@@ -4746,6 +4761,67 @@ function firstVisibleReportPane(groupId, fallback) {
   const hit = items.find(b => getComputedStyle(b).display !== 'none');
   return hit ? hit.dataset.rt : fallback;
 }
+// Buttons are found by the function their onclick calls. [row, minLevel]: below minLevel the
+// button is disabled (row = View) or removed (row = Hidden). 'view' = the action is read-only
+// (History, Print, opening the card), so View is enough for it to work.
+const BTN_FN_ROWS = {
+  // Jobs
+  openEdit: ['job_btn_edit', 'view'], openGroupEdit: ['job_btn_edit', 'view'], openAddToGroupModal: ['job_btn_edit', 'yes'], removeJobFromGroup: ['job_btn_edit', 'yes'], openPacketsTopup: ['job_btn_edit', 'yes'],
+  openHistory: ['job_btn_history', 'view'],
+  openLinkJobPicker: ['job_btn_link', 'yes'], unlinkJob: ['job_btn_link', 'yes'],
+  printJobCard: ['job_btn_print', 'view'], printSelectedJobs: ['job_btn_print', 'view'],
+  toggleBlock: ['job_btn_block', 'yes'],
+  deleteJob: ['job_btn_delete', 'yes'],
+  openDuplicateJob: ['job_btn_duplicate', 'yes'], duplicateGroupIntoJob: ['job_btn_duplicate', 'yes'], createNextJobInGroup: ['job_btn_duplicate', 'yes'],
+  openCreateGroupPicker: ['job_btn_create_mil', 'yes'], openCreateGroupModal: ['job_btn_create_mil', 'yes'],
+  processJobToCtp: ['job_btn_stage_forward', 'yes'], processJobFromCtp: ['job_btn_stage_forward', 'yes'], finalizeAsDelivered: ['job_btn_stage_forward', 'yes'],
+  moveJobToCtp: ['job_btn_stage_forward', 'yes'], moveJobToPendingStock: ['job_btn_stage_forward', 'yes'], moveToStage: ['job_btn_stage_forward', 'yes'],
+  openEditWithDelivery: ['job_btn_record_delivery', 'yes'], openDeliverLinkedModal: ['job_btn_record_delivery', 'yes'], openDeliverGroupModal: ['job_btn_record_delivery', 'yes'],
+  removeDelivery: ['job_btn_delete_delivery', 'yes'],
+  openAdjustModal: ['job_btn_adjust', 'yes'], removeAdjustment: ['job_btn_adjust', 'yes'],
+  // Inventory
+  openInvHistory: ['inv_btn_history', 'view'], openInvHistoryAt: ['inv_btn_history', 'view'],
+  openInvEdit: ['inv_btn_edit', 'yes'], invBalanceAdjust: ['inv_btn_edit', 'yes'],
+  deleteInvItem: ['inv_btn_delete', 'yes'],
+  openInvAddStock: ['inv_btn_stock_in', 'yes'], openBulkStockIn: ['inv_btn_stock_in', 'yes'], receiveImport: ['inv_btn_stock_in', 'yes'], bulkReceiveImports: ['inv_btn_stock_in', 'yes'],
+  openInvRemoveStock: ['inv_btn_stock_out', 'yes'], openBulkStockOut: ['inv_btn_stock_out', 'yes'],
+  openInvAddOffcut: ['inv_btn_add_offcut', 'yes'], openInvAdd: ['inv_btn_add_paper', 'yes'],
+  openImportAdd: ['inv_btn_add_import', 'yes'], editImport: ['inv_btn_add_import', 'yes'], cancelImport: ['inv_btn_add_import', 'yes'], bulkCancelImports: ['inv_btn_add_import', 'yes'],
+  // Users
+  openInviteUser: ['user_btn_invite', 'yes'], toggleUserBlock: ['user_btn_block', 'yes'], removeUser: ['user_btn_remove', 'yes'],
+  openUserActivity: ['user_btn_activity', 'view'], openUserSessions: ['user_btn_sessions', 'view'], revokeUserSession: ['user_btn_sessions', 'yes'],
+  openOperatorModal: ['user_btn_operators', 'yes'], removeOperator: ['user_btn_operators', 'yes'],
+};
+const _btnDecision = new Map();
+function btnDecision(onclickAttr) {
+  if (_btnDecision.has(onclickAttr)) return _btnDecision.get(onclickAttr);
+  let hit = null, m; const re = /([A-Za-z_$][\w$]*)\s*\(/g;
+  while ((m = re.exec(onclickAttr))) { if (BTN_FN_ROWS[m[1]]) { hit = BTN_FN_ROWS[m[1]]; break; } }
+  _btnDecision.set(onclickAttr, hit);
+  return hit;
+}
+function applyBtnAccess(root) {
+  if (!root || isSuperAdmin()) return;
+  const els = [];
+  if (root.matches && root.matches('[onclick]')) els.push(root);
+  if (root.querySelectorAll) els.push(...root.querySelectorAll('[onclick]'));
+  for (const el of els) {
+    const d = btnDecision(el.getAttribute('onclick'));
+    if (!d) continue;
+    const lvl = permLevel(d[0]);
+    if (lvl === 'hidden' || lvl === 'no') { el.style.display = 'none'; }
+    else if (d[1] === 'yes' && lvl === 'view') { el.disabled = true; el.title = 'View only \u2014 no edit access'; el.style.opacity = '0.5'; el.style.cursor = 'not-allowed'; }
+  }
+}
+let _btnObserver = null;
+function startBtnAccess() {
+  if (_btnObserver || isSuperAdmin() || typeof MutationObserver === 'undefined') return;
+  applyBtnAccess(document.body);
+  _btnObserver = new MutationObserver(muts => {
+    for (const mu of muts) for (const n of mu.addedNodes) if (n.nodeType === 1) applyBtnAccess(n);
+  });
+  _btnObserver.observe(document.body, { childList: true, subtree: true });
+}
 function tabAllowed(m) {
   if (isSuperAdmin()) return true;
   switch (m) {
@@ -4798,16 +4874,18 @@ function renderUserChip() {
   // Finance see it too even though the server never actually allowed
   // them in). Admin can act (restore / empty) via trash_admin; CEO
   // browses only.
+  startBtnAccess();       // hide / disable buttons by their Access Register row
   applyReportsAccess();   // Reports cards + sidebar items follow their Access Register rows (also sets the Archive card)
   // CEOs see a read-only version of the app — flip a body class so the CSS
   // rule below hides every element tagged .ceo-hide in one go. Store Manager
   // gets the same .ceo-hide treatment on Jobs (read-only for them too), and
   // Production Manager gets it on Inventory.
-  document.body.classList.toggle('role-ceo', isCeo());
+  const holdsWrites = canWriteJobs() || canWriteInventory();   // a CEO / Finance account granted Edit rows gets the writable UI
+  document.body.classList.toggle('role-ceo', isCeo() && !holdsWrites);
   document.body.classList.toggle('role-store-manager', sm);
   document.body.classList.toggle('role-production-manager', isProductionManager());
   document.body.classList.toggle('role-operator', op);
-  document.body.classList.toggle('role-finance', fin);
+  document.body.classList.toggle('role-finance', fin && !holdsWrites);
   if (fin) ensureRoleBlockMessages();
   // Capability-driven read-only locks — a user who holds BOTH a jobs-side
   // and inventory-side role keeps write access to both. Lock Jobs writes
@@ -5153,7 +5231,7 @@ function setMode(m) {
   // when it's the Inventory tab AND the user isn't the store keeper.
   if (offcutBtn) offcutBtn.style.display = 'none';
   if (m === 'jobs') {
-    addBtn.style.display = canWriteJobs() ? '' : 'none';
+    addBtn.style.display = canNewJob() ? '' : 'none';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
     exportBtn.style.display = '';
     if (refreshBtn) refreshBtn.style.display = '';
@@ -5165,14 +5243,14 @@ function setMode(m) {
     if (refreshBtn) refreshBtn.style.display = 'none';
     renderProductsTab();
   } else if (m === 'inventory') {
-    addBtn.style.display = canWriteInventory() ? '' : 'none';
+    addBtn.style.display = canAddPaper() ? '' : 'none';
     addBtn.textContent = '+ New Paper';   addBtn.onclick = openInvAdd;
     exportBtn.style.display = 'none';
     if (refreshBtn) refreshBtn.style.display = '';
     // Offcuts are visible to everyone with inventory write — admin, PM,
     // AND store keeper. Owner change: store keeper handles day-to-day
     // stock and now needs the offcut side too.
-    if (offcutBtn) offcutBtn.style.display = canWriteInventory() ? '' : 'none';
+    if (offcutBtn) offcutBtn.style.display = canAddOffcut() ? '' : 'none';
     renderInventory();
     loadDailyStats();   // fetch today's activity in the background
   } else if (m === 'reports') {
@@ -5748,18 +5826,18 @@ function renderJobRowCompact(j, opts) {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${isNew && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
-            ${isCtp && canWriteJobs() ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
-            ${partialDelv && canWriteJobs() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
+            ${isNew && canStageForward() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
+            ${isCtp && canStageForward() ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
+            ${partialDelv && canStageForward() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
-            ${(!_finalizedJobIds.has(j.id) && canWriteJobs()) ? (j.linked_job_id
+            ${(!_finalizedJobIds.has(j.id) && canLinkJob()) ? (j.linked_job_id
               ? `<button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Remove the link with Job E-${j.linked_job_id}">&#128279; Unlink</button>`
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
-            ${hasPerm('job_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+            ${hasPerm('job_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
             ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:rgba(120,120,120,0.08);border-color:rgba(120,120,120,0.25);color:var(--text2);font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
             ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
@@ -6135,11 +6213,11 @@ function renderJobCard(j, opts) {
   // CTP-queue job, surface "Process to Printing" so PM can bump plates
   // through when they're done. Both live on the tile so the PM doesn't
   // have to dig into the ⋯ menu.
-  const primary = clientPreview ? '' : (isNew && canWriteJobs())
+  const primary = clientPreview ? '' : (isNew && canStageForward())
     ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>`
-    : (isCtp && canWriteJobs())
+    : (isCtp && canStageForward())
       ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
-      : (partialDelv && canWriteJobs())
+      : (partialDelv && canStageForward())
         ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
         : '';
   const more = clientPreview ? '' : `
@@ -6149,11 +6227,11 @@ function renderJobCard(j, opts) {
         <button onclick="closeJobMore(this); openEdit(${j.id})">Edit / View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         ${!_finalizedJobIds.has(j.id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>` : ''}
-        ${(!_finalizedJobIds.has(j.id) && canWriteJobs()) ? (j.linked_job_id
+        ${(!_finalizedJobIds.has(j.id) && canLinkJob()) ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
-        ${canWriteJobs() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
-        ${canWriteJobs() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
+        ${canCreateMil() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
+        ${canEditJob() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
@@ -7108,7 +7186,7 @@ function renderInvCardHtml(it) {
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was manually corrected today. Open History to see the entry.') : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
-        ${hasPerm('inventory_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
+        ${hasPerm('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
     </div>`;
 }
@@ -7140,7 +7218,7 @@ function renderInvBrandRow(it) {
         <button class="btn btn-sm btn-primary ceo-hide" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
-        ${hasPerm('inventory_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
+        ${hasPerm('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
     </div>`;
 }
@@ -7828,7 +7906,7 @@ async function saveInvAdd() {
 // gsm / brand / supplier / opening) so the offcut ledger stays uniform
 // with the rest of inventory.
 function openInvAddOffcut() {
-  if (!canWriteInventory()) {
+  if (!canAddOffcut()) {
     notify('Only admin / store keeper can add offcuts.');
     return;
   }
@@ -8061,7 +8139,7 @@ async function saveInvEdit(id) {
 // the full stock-transaction history. Two-step confirm because there's no
 // undo button — the ledger goes with it.
 async function deleteInvItem(id) {
-  if (!hasPerm('inventory_delete')) return;
+  if (!hasPerm('inv_btn_delete')) return;
   const it = inventory.find(x => x.id === id);
   if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
@@ -9562,7 +9640,7 @@ async function renderInvHistory(id) {
       const canReverse =
         !isReversal &&
         !hasBeenReversed &&
-        (isAdmin() || (canWriteInventory() && withinWindow && REVERSIBLE.has(t.reason)));
+        (isSuperAdmin() || permLevel('inv_btn_reverse') === 'yes' || (permLevel('inv_btn_reverse') === '30-day' && withinWindow && REVERSIBLE.has(t.reason)));
       const reverseTooltip = t.change > 0
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
         : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
@@ -20591,7 +20669,7 @@ function deliveriesSection(j, opts) {
       ? !!j.is_shade_card
       : (typeof canRecordDelivery === 'function' && canRecordDelivery())
   );
-  const isAdminUser = typeof hasPerm === 'function' && hasPerm('delivery_delete');
+  const isAdminUser = typeof hasPerm === 'function' && hasPerm('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
   // No. / Batch No. pre-filling from the job card, still fully editable
@@ -20762,7 +20840,7 @@ function deliveriesSectionFinance(j, opts) {
       ? !!j.is_shade_card
       : (typeof canRecordDelivery === 'function' && canRecordDelivery())
   );
-  const isAdminUser = typeof hasPerm === 'function' && hasPerm('delivery_delete');
+  const isAdminUser = typeof hasPerm === 'function' && hasPerm('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
   // No. / Batch No. pre-filling from the job card, still fully editable
@@ -21631,7 +21709,7 @@ async function removeDelivery(jobId, index) {
 // together to save cost. Link is symmetric and one-off (a job can only
 // have ONE partner at a time).
 async function openLinkJobPicker(jobId) {
-  if (!canWriteJobs()) return;
+  if (!canLinkJob()) return;
   const val = await promptDialog({
     title: `Link Job E-${jobId} with…`,
     message: 'Enter the OTHER job\'s number (e.g. 85 or E-85). Both jobs must not already be linked to someone else.',
@@ -21999,7 +22077,7 @@ function renderGroupTileCompact(groupName, groupJobs) {
 // only the group row — existing sub jobs keep whatever they have.
 // Duplicate-into-job seeds a new sub job pre-filled from the group.
 function openGroupEdit(groupId) {
-  if (!canWriteJobs()) { notify('Only Admin / Production Manager can edit groups.'); return; }
+  if (!canEditJob()) { notify('Only Admin / Production Manager can edit groups.'); return; }
   const g = stockGroupById(groupId);
   if (!g) {
     // Bug 5 fix — group is missing from the loaded list (deleted, or
@@ -22054,7 +22132,7 @@ function openGroupEdit(groupId) {
     ${jobForm(synthetic).replace('<span class="jc-lbl">P.O. Qty</span>', '<span class="jc-lbl" style="color:#7c3aed;">MIL Qty</span>')}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      ${canWriteJobs() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
+      ${canEditJob() ? `<button class="btn btn-danger" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
       <button class="btn btn-primary" onclick="saveGroupEdit(${groupId})">Save Group</button>
     </div>
   </div>`);
@@ -22182,7 +22260,7 @@ async function deleteStockGroup(groupId) {
 // Nothing is saved until the user clicks Create & Print — cancelling
 // leaves no stray sub job behind (owner rule).
 function duplicateGroupIntoJob(groupId) {
-  if (!canWriteJobs()) { notify('Only Admin / Production Manager can create sub jobs.'); return; }
+  if (!canDuplicateJob()) { notify('Only Admin / Production Manager can create sub jobs.'); return; }
   const g = stockGroupById(groupId);
   if (!g) return;
   const tpl = (g.template && typeof g.template === 'object') ? g.template : {};
@@ -22249,7 +22327,7 @@ function duplicateGroupIntoJob(groupId) {
 }
 // Open a fresh Create Group modal with empty fields.
 function openGroupCreate() {
-  if (!canWriteJobs()) { notify('Only Admin / Production Manager can create groups.'); return; }
+  if (!canCreateMil()) { notify('Only Admin / Production Manager can create groups.'); return; }
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>New Group</h2>
     <div style="font-size:12px;color:var(--text2);margin:-4px 0 12px;">
@@ -22335,7 +22413,7 @@ function openGroupJobsModal(groupName) {
   const useCards = (typeof jobsView !== 'undefined' && jobsView === 'cards');
   const perJob = useCards ? renderJobCard : renderJobRowCompact;
   const tiles = groupJobs.map(j => {
-    const removeChip = canWriteJobs()
+    const removeChip = canEditJob()
       ? `<div style="display:flex;justify-content:flex-end;margin-bottom:-4px;">
           <button class="btn btn-sm ceo-hide" onclick="removeJobFromGroup(${j.id},${gName})" title="Take this job out of the group (job itself is not deleted)" style="background:#991b1b;color:#fff;border-color:#991b1b;">&minus; Remove from Group</button>
          </div>`
@@ -22354,7 +22432,7 @@ function openGroupJobsModal(groupName) {
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0;">
-        ${canWriteJobs() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
+        ${canEditJob() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
         <button class="btn btn-sm" onclick="closeModal()">Close</button>
       </div>
     </div>
@@ -22433,7 +22511,7 @@ async function submitGroupDelivery(groupName) {
 // wants a different name later they can rename via the group ⋯ menu
 // (add a rename entry only if this becomes a common ask).
 async function openCreateGroupModal(jobId) {
-  if (!canWriteJobs()) return;
+  if (!canCreateMil()) return;
   const j = jobs.find(x => x.id === jobId);
   if (!j) return;
   const baseName = String(j.name || '').trim() || `Job E-${jobId}`;
@@ -22461,7 +22539,7 @@ async function openCreateGroupModal(jobId) {
 // The group tile inherits all of the seed job's info via the shared
 // tile renderer.
 async function openCreateGroupPicker() {
-  if (!canWriteJobs()) return;
+  if (!canCreateMil()) return;
   const ungrouped = jobs
     .filter(j => j && !j.stock_group_name && !j.deleted_at)
     .sort((a, b) => b.id - a.id);
@@ -22513,7 +22591,7 @@ async function confirmCreateGroupPicker() {
 
 // ── Add job to existing Group ─────────────────────────────────────────
 async function openAddToGroupModal(jobId) {
-  if (!canWriteJobs()) return;
+  if (!canEditJob()) return;
   const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
   if (!groups.length) {
     await alertDialog({ title: 'No groups exist yet', message: 'Use "Create Mil Job" on a job card to start the first group.', kind: 'info' });
@@ -22553,7 +22631,7 @@ async function confirmAddToGroup(jobId) {
 
 // Add an existing job to a group from inside the group's modal.
 async function openAddExistingToGroupModal(groupName) {
-  if (!canWriteJobs()) return;
+  if (!canEditJob()) return;
   const val = await promptDialog({
     title: `Add existing job to group`,
     message: `Enter a job number to add to "${groupName}" (e.g. 85 or E-85).`,
@@ -22605,7 +22683,7 @@ async function removeJobFromGroup(jobId, groupName) {
 // Pending group to auto-assign after the new job is saved.
 let _pendingGroupName = null;
 function createNextJobInGroup(groupName, templateJobId) {
-  if (!canWriteJobs()) return;
+  if (!canDuplicateJob()) return;
   if (!templateJobId) { notify('No template job found.'); return; }
   _pendingGroupName = groupName;
   openDuplicateJob(templateJobId);
@@ -23933,6 +24011,8 @@ function openEdit(id, opts) {
   // "Save Adjustment" (a separate POST to the adjustment mirror) can save
   // anything while this flag is set.
   const adjustMode = !!(opts.particularsOpts && opts.particularsOpts.preview);
+  // Opening a job card needs View on Edit, or a delivery / invoicing row (Finance works from this card).
+  if (!managerMode && !adjustMode && !isSuperAdmin() && !(hasPerm('job_btn_edit', 'view') || canRecordDelivery() || hasPerm('job_btn_pricing', 'view'))) { notify('Not allowed'); return; }
   const j = jobs.find(x=>x.id===id);
   if (!j) return;
   // Lazy-load the machines/operators roster so the particulars-table
@@ -23943,11 +24023,11 @@ function openEdit(id, opts) {
   // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
   // both offered from inside the Edit modal so the PM can flip status
   // right after tweaking specs, without closing back to the list.
-  const processBtn = (managerMode || adjustMode) ? '' : (isNewJob(j) && canWriteJobs())
+  const processBtn = (adjustMode || managerMode) ? '' : (isNewJob(j) && canStageForward())
     ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
-    : (isCtpQueue(j) && canWriteJobs())
+    : (isCtpQueue(j) && canStageForward())
       ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
-      : (isPartialDelivery(j) && canWriteJobs())
+      : (isPartialDelivery(j) && canStageForward())
         ? `<button class="btn ceo-hide" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
         : '';
   const managerBanner = managerMode
@@ -23973,7 +24053,7 @@ function openEdit(id, opts) {
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">${managerMode ? 'Close' : 'Cancel'}</button>
       ${processBtn}
-      ${managerMode ? `<button class="btn btn-primary" onclick="stationManagerSaveJobCard(${j.id})">Save Machine &amp; Particulars</button>` : (adjustMode ? '' : '<button class="btn btn-primary ceo-hide" onclick="saveEdit(' + j.id + ')">Save Changes</button>')}
+      ${managerMode ? `<button class="btn btn-primary" onclick="stationManagerSaveJobCard(${j.id})">Save Machine &amp; Particulars</button>` : (adjustMode ? '' : (canEditJob() ? '<button class="btn btn-primary ceo-hide" onclick="saveEdit(' + j.id + ')">Save Changes</button>' : ''))}
     </div>
   </div>`);
   updateStockHint();
@@ -23986,16 +24066,19 @@ function openEdit(id, opts) {
   // and any form-internal button (coating toggles, specials editor,
   // add-package etc.) is disabled. Modal-actions buttons stay live so
   // Cancel still closes the modal.
-  if (isCeo()) {
+  if (!managerMode && !adjustMode && !canEditJob()) {
     const root = document.querySelector('.job-edit-modal');
     if (root) {
+      // The Deliveries box keeps working: recording a delivery / invoicing fields have their own rows.
+      const outsideDeliveries = el => !el.closest('.jc-deliveries');
       root.querySelectorAll('input, textarea').forEach(el => {
+        if (!outsideDeliveries(el)) return;
         if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
         else el.readOnly = true;
       });
-      root.querySelectorAll('select').forEach(el => { el.disabled = true; });
+      root.querySelectorAll('select').forEach(el => { if (outsideDeliveries(el)) el.disabled = true; });
       root.querySelectorAll('button').forEach(btn => {
-        if (!btn.closest('.modal-actions')) btn.disabled = true;
+        if (!btn.closest('.modal-actions') && outsideDeliveries(btn)) btn.disabled = true;
       });
     }
   }
@@ -24137,7 +24220,7 @@ async function moveToReadyAndEdit(id) {
 async function moveJobToCtp(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
+  if (!canStageForward()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
   if (j.issuance_status === 'ctp' || j.issuance_status === 'new') return;
   const ok = await confirmDialog({
     title: `Send Job E-${id} back to CTP?`,
@@ -24158,7 +24241,7 @@ async function moveJobToCtp(id) {
 async function moveJobToPendingStock(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can move jobs to Pending Stock.'); return; }
+  if (!canStageForward()) { notify('Only Production Manager / Admin can move jobs to Pending Stock.'); return; }
   if (j.issuance_status === 'new' || j.issuance_status === 'ctp') { notify('Job is at CTP — advance it to Printing first.'); return; }
   if (j.issuance_status === 'pending' && (j.stage_index || 0) === 1) return;
   const ok = await confirmDialog({
@@ -24184,13 +24267,13 @@ async function moveToStage(id, target) {
   // only the server (requireJobsWriter) actually rejects a non-writer's
   // move. Guard here too so a non-writer gets a clear message instead of
   // an unexplained failed request.
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can move a job between stages.'); return; }
+  if (!canStageForward()) { notify('Only Production Manager / Admin can move a job between stages.'); return; }
   // Special-case: from Pending Stock, allow moving BACK to CTP (undo an
   // accidental Process to Printing). Runs its own endpoint that flips
   // issuance_status back to 'ctp' AND clears the stale Printing stage
   // entry, so the job pops back into the CTP tab cleanly.
   if (target === 0 && j.issuance_status === 'pending' && (j.stage_index || 0) <= 1) {
-    if (!canWriteJobs()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
+    if (!canStageForward()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
     const ok = await confirmDialog({
       title: `Move Job E-${id} back to CTP?`,
       message: `"${j.name}" will leave Pending Stock and return to the CTP queue for more plate work.`,
@@ -24305,7 +24388,7 @@ async function openHistory(id) {
 // ledger keeps its rows (FK is ON DELETE SET NULL on inventory_transactions.job_id),
 // so historical consumption stays traceable even after the job is gone.
 async function deleteJob(id) {
-  if (!hasPerm('job_delete')) return;
+  if (!hasPerm('job_btn_delete')) return;
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   const ok = await confirmDialog({
@@ -24338,7 +24421,7 @@ async function deleteJob(id) {
 // Same green "Process" button style everywhere; confirmation includes
 // the remaining qty so the PM knows exactly what they're waiving.
 async function finalizeAsDelivered(id) {
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can finalize deliveries.'); return; }
+  if (!canStageForward()) { notify('Only Production Manager / Admin can finalize deliveries.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!isPartialDelivery(j)) { notify('This job is not a partial delivery.'); return; }
@@ -24381,7 +24464,7 @@ async function finalizeAsDelivered(id) {
 }
 
 async function processJobToCtp(id) {
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
+  if (!canStageForward()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j || !isNewJob(j)) return;
   const ok = await confirmDialog({
@@ -24409,7 +24492,7 @@ async function processJobToCtp(id) {
 // button on the CTP tab card. Advances the job past plate-making so the
 // store keeper can issue paper and the Printing operator can start.
 async function processJobFromCtp(id) {
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can process jobs out of CTP.'); return; }
+  if (!canStageForward()) { notify('Only Production Manager / Admin can process jobs out of CTP.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j || !isCtpQueue(j)) return;
   const ok = await confirmDialog({
@@ -24863,7 +24946,7 @@ async function toggleBlock(id) {
   // every role — only the server (requireJobsWriter, same /stage route)
   // rejects a non-writer. Guard here so they don't get prompted for a
   // reason only to have it fail server-side.
-  if (!canWriteJobs()) { notify('Only Production Manager / Admin can block or unblock a job.'); return; }
+  if (!canBlockJob()) { notify('Only Production Manager / Admin can block or unblock a job.'); return; }
   const si = j.stage_index || 0;
   const currentlyBlocked = isBlocked(j);
   const action = currentlyBlocked ? 'Unblock' : 'Block';
@@ -25733,28 +25816,23 @@ async function loadUsersAndAudit() {
     // PM only sees the Floor Operators section — skip the Authorized
     // Users + Recent Activity fetches entirely so the page is faster
     // and we don't paint data nobody will see.
-    const wantsUsersAndAudit = hasPerm('user_view', 'view');
+    const wantsUsers = hasPerm('user_team_tab_access', 'view');
+    const wantsAudit = hasPerm('user_activitylog_tab_access', 'view');
     const reqs = [];
-    if (wantsUsersAndAudit) {
-      reqs.push(api('GET', '/api/users'));
-      reqs.push(api('GET', `/api/audit?${auditFeedQueryParams()}`));
-    }
+    if (wantsUsers) reqs.push(api('GET', '/api/users'));
+    if (wantsAudit) reqs.push(api('GET', `/api/audit?${auditFeedQueryParams()}`));
     // Operators roster: admin (write), PM (write). CEO was included here
     // too (meant to be read-only), but the server route (requireOperatorAdmin)
     // has only ever accepted admin/PM — CEO's request 403'd, which failed
     // this WHOLE Promise.all and silently broke the rest of the Users tab
     // (Authorized Users + Recent Activity) for any CEO account. Matching
     // the server's real behavior: CEO no longer requests this at all.
-    const wantsOperators = hasPerm('operator_admin');
+    const wantsOperators = hasPerm('user_btn_operators', 'view');
     if (wantsOperators) reqs.push(api('GET', '/api/operators'));
     const results = await Promise.all(reqs);
     let i = 0;
-    if (wantsUsersAndAudit) {
-      usersList = results[i++];
-      auditList = results[i++];
-    } else {
-      usersList = []; auditList = [];
-    }
+    usersList = wantsUsers ? results[i++] : [];
+    auditList = wantsAudit ? results[i++] : [];
     operatorsList = wantsOperators ? (results[i++] || []) : [];
     renderUsersTab();
     renderOperators();
@@ -25772,7 +25850,7 @@ function renderOperators() {
   // showing an empty "No operators yet" state to CEO would be misleading
   // (see loadUsersAndAudit()'s wantsOperators, which no longer fetches
   // this for CEO at all).
-  if (!hasPerm('operator_admin')) { el.innerHTML = ''; return; }
+  if (!hasPerm('user_btn_operators', 'view')) { el.innerHTML = ''; return; }
   if (!operatorsList.length) {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
@@ -28193,7 +28271,7 @@ function clientCompanyOptions(current) {
 function renderUsersTab() {
   renderUsersSubtabs();
   const inviteBtn = document.getElementById('invite-user-btn');
-  if (inviteBtn) inviteBtn.style.display = hasPerm('user_admin') ? '' : 'none';
+  if (inviteBtn) inviteBtn.style.display = hasPerm('user_btn_invite', 'view') ? '' : 'none';   // View = shown but disabled (see applyBtnAccess)
   const stats = {
     total: usersList.length,
     admins: usersList.filter(u => userRolesOf(u).includes('admin')).length,
@@ -28221,7 +28299,7 @@ function renderUsersTab() {
         <div class="inv-sub">${esc(u.email)} · Last login: ${last} · ${devicesLabel}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
       </div>
       <div class="inv-balance">
-        ${!hasPerm('user_admin')
+        ${!hasPerm('user_btn_change_role')
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(visibleRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
@@ -28240,12 +28318,12 @@ function renderUsersTab() {
             </div>`}
       </div>
       <div class="inv-actions">
-        <button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>
-        <button class="btn btn-sm" onclick="openUserSessions(${u.id})">Sessions${sessCount?' ('+sessCount+')':''}</button>
-        ${(isMe || !hasPerm('user_admin')) ? '' : (u.blocked_at
+        ${hasPerm('user_btn_activity', 'view') ? `<button class="btn btn-sm" onclick="openUserActivity(${u.id})">Activity</button>` : ''}
+        ${hasPerm('user_btn_sessions', 'view') ? `<button class="btn btn-sm" onclick="openUserSessions(${u.id})">Sessions${sessCount?' ('+sessCount+')':''}</button>` : ''}
+        ${(isMe || !hasPerm('user_btn_block', 'view')) ? '' : (u.blocked_at
           ? `<button class="btn btn-sm btn-success" onclick="toggleUserBlock(${u.id}, false)">Unblock</button>`
           : `<button class="btn btn-sm" style="background:#b45309;border-color:#b45309;color:#fff;" onclick="toggleUserBlock(${u.id}, true)">Block</button>`)}
-        ${(isMe || !hasPerm('user_admin')) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
+        ${(isMe || !hasPerm('user_btn_remove', 'view')) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
       </div>
     </div>`;
   }).join('') || '<div class="empty">No users yet.</div>';
@@ -28298,7 +28376,9 @@ async function setUsersSubTab(tab) {
     // No subtab bar for anyone but Super Admin — keep the original flat
     // page everyone else has always had: Team + Operators + Activity all
     // stacked together, Access Register never shown.
-    teamEl.style.display = ''; opsEl.style.display = ''; actEl.style.display = '';
+    teamEl.style.display = hasPerm('user_team_tab_access', 'view') ? '' : 'none';
+    opsEl.style.display  = hasPerm('user_btn_operators', 'view') ? '' : 'none';
+    actEl.style.display  = hasPerm('user_activitylog_tab_access', 'view') ? '' : 'none';
     accEl.style.display = 'none';
     return;
   }

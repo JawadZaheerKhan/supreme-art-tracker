@@ -265,7 +265,10 @@ function getDb() {
 // rpt_sale_report*, products_*) — without the bump the fast-path skips the
 // defaults-fill loop and every one of those keys would sit at 'no' for every
 // role until someone edited them by hand.
-const SCHEMA_VERSION = 'v2026-09-19-finance-features';
+// Bumped again when the per-button Access Register rows became the live gates: seeds View on the
+// job card (job_btn_edit / job_btn_history) for CEO, Finance, Store Manager and Operator so they
+// keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
+const SCHEMA_VERSION = 'v2026-09-19-register-wired';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -312,6 +315,10 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_admin:           { label: "Invite/create a user, edit a user's roles, or block/unblock/delete a user", levels: { admin: 'yes' } },
   client_view_preview:  { label: 'Open the internal "Client View" preview', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
+  // NOTE (2026-09-19): every job_btn_* / inv_btn_* / user_btn_* / *_tab_access / rpt_* row below is now a LIVE gate:
+  // the routes use requirePermission / requireAnyBtn / userHasBtn and the client hides or disables the button. The
+  // "not wired into any gate yet" remarks in the older comments are out of date. The legacy groups above (job_write,
+  // inventory_write, delivery_write, ...) are kept only so old rows stay valid; nothing reads them for access any more.
   // Access Register rebuild (Jobs tab only so far — Inventory/Reports/
   // Station/Users/Client View still use the groups above until each gets
   // its own rebuilt tab). These 12 are NOT wired into any gate yet — they
@@ -323,8 +330,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // at all. Every job_btn_* is 3-state (yes=Edit / view=View, disabled /
   // hidden=not shown) — one row per button on the Jobs tab.
   job_tab_access:          { label: 'Jobs tab — view the job list and every status tab', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
-  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), and Add/Remove Job from Group', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_history:         { label: 'History button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', store_manager: 'view', finance: 'view' } },
+  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), and Add/Remove Job from Group', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', finance: 'view', store_manager: 'view', operator: 'view' } },
+  job_btn_history:         { label: 'History button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
   job_btn_link:            { label: 'Link Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_print:           { label: 'Print button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
   job_btn_block:           { label: 'Block button', levels: { admin: 'yes', production_manager: 'yes' } },
@@ -505,7 +512,7 @@ function effectiveLevelFor(user, key) {
 function reverseTierFor(user) {
   if (userHasRole(user, 'client')) return 'no';
   if (userHasRole(user, 'admin', 'super_admin')) return 'yes';
-  const group = ROLE_PERMS.inventory_reverse || ROLE_PERMISSION_DEFAULTS.inventory_reverse.levels;
+  const group = ROLE_PERMS.inv_btn_reverse || ROLE_PERMISSION_DEFAULTS.inv_btn_reverse.levels;
   const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
   let best = 'no';
   for (const r of roles) {
@@ -1600,14 +1607,21 @@ function requireSuperAdmin(req, res, next) {
 // these regardless of the table, the same way it always has (an account
 // short of the 'admin' role it's meant to hold alongside super_admin
 // should never lose baseline write access because of an editing mistake).
-function canWriteJobs(user)      { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'job_write'); }
-function canWriteInventory(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'inventory_write'); }
+// Access Register wiring: the per-button rows (job_btn_*, inv_btn_*, user_btn_*) are the
+// live gates. These "can write anything here" helpers are true if the user holds Edit on ANY
+// row of that group; every route then checks its own specific row on top (requirePermission /
+// requireAnyBtn), so Hidden / View on one button never blocks another.
+const JOB_WRITE_ROWS = ['job_btn_edit', 'job_btn_link', 'job_btn_block', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_forward'];
+const INV_WRITE_ROWS = ['inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import'];
+function userHasBtn(user, key, min = 'yes') { return userHasRole(user, 'super_admin') || roleHasPermission(user, key, min); }
+function canWriteJobs(user)      { return JOB_WRITE_ROWS.some(k => userHasBtn(user, k)); }
+function canWriteInventory(user) { return INV_WRITE_ROWS.some(k => userHasBtn(user, k)); }
 // 'view' is enough: the Access Register shows Station as a plain View/Hidden tab row.
 function canRunStation(user)     { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_access', 'view'); }
 // Delivery ledger — admin, PM, or the dedicated finance role by default.
 // Finance is otherwise fully read-only; recording shipments is the one
 // thing they own.
-function canRecordDelivery(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'delivery_write'); }
+function canRecordDelivery(user) { return userHasBtn(user, 'job_btn_record_delivery'); }
 // Station WRITE actions — Save / Advance / Skip / Notes. CEO can enter
 // the terminal (view-only) via canRunStation, but must never process a
 // job by default. Admin / PM / operator still write freely.
@@ -1615,7 +1629,7 @@ function canProcessStation(user) { return userHasRole(user, 'super_admin') || ro
 // Operator roster CRUD — admin or production manager by default. The PM
 // owns the floor and needs to add / edit / retire operators without an
 // admin having to be involved every time.
-function canManageOperators(user){ return userHasRole(user, 'super_admin') || roleHasPermission(user, 'operator_admin'); }
+function canManageOperators(user){ return userHasBtn(user, 'user_btn_operators'); }
 
 // Generic "not read-only" check. Used for cross-cutting endpoints (audit
 // metadata, profile edits, etc.) where any write-capable role is fine.
@@ -1704,6 +1718,35 @@ function requirePermission(key, min = 'yes') {
     }
     next();
   };
+}
+// Passes when the user holds at least min on ANY of the listed rows (Super Admin always).
+function requireAnyBtn(keys, min = 'yes') {
+  return function (req, res, next) {
+    if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+    if (!keys.some(k => userHasBtn(req.user, k, min))) return res.status(403).json({ error: 'Not allowed' });
+    next();
+  };
+}
+// Floor Operators roster: viewing needs View on the Operators row, changing it needs Edit.
+function requireOperatorViewer(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasBtn(req.user, 'user_btn_operators', 'view')) return res.status(403).json({ error: 'Not allowed — operator access required' });
+  next();
+}
+// PATCH /jobs/:id/stage carries both "Block / Unblock" (stage stays put) and a real stage move,
+// so the row that applies depends on whether stage_index actually changes.
+async function requireStageOrBlock(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT stage_index FROM jobs WHERE id = ${parseInt(req.params.id, 10)}`;
+    const cur = rows.length ? Number(rows[0].stage_index || 0) : null;
+    const target = Number(req.body && req.body.stage_index);
+    const key = (cur !== null && target === cur) ? 'job_btn_block' : 'job_btn_stage_forward';
+    if (!userHasBtn(req.user, key)) return res.status(403).json({ error: 'Not allowed' });
+    next();
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 }
 // Client portal — the only middleware that ADMITS 'client' role users.
 // requireAuth blocks them from everything else, so this is the sole gate
@@ -1948,7 +1991,7 @@ function parseRolesInput(body, actingUser) {
 // GET users — admin + ceo (CEO is read-only; mutation endpoints below stay
 // requireAdmin so role change / invite / remove are still locked down).
 app.get('/api/users', requireAuth, async (req, res) => {
-  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'user_view', 'view')) {
+  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'user_team_tab_access', 'view')) {
     return res.status(403).json({ error: 'Not allowed' });
   }
   try {
@@ -1967,7 +2010,7 @@ app.get('/api/users', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/users', requirePermission('user_admin'), async (req, res) => {
+app.post('/api/users', requirePermission('user_btn_invite'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -1996,7 +2039,7 @@ app.post('/api/users', requirePermission('user_admin'), async (req, res) => {
   }
 });
 
-app.put('/api/users/:id', requirePermission('user_admin'), async (req, res) => {
+app.put('/api/users/:id', requirePermission('user_btn_change_role'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2061,7 +2104,7 @@ app.put('/api/users/:id', requirePermission('user_admin'), async (req, res) => {
   }
 });
 
-app.delete('/api/users/:id', requirePermission('user_admin'), async (req, res) => {
+app.delete('/api/users/:id', requirePermission('user_btn_remove'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2084,8 +2127,8 @@ app.delete('/api/users/:id', requirePermission('user_admin'), async (req, res) =
 // rejected in real time on their very next request.
 
 app.get('/api/users/:id/sessions', requireAuth, async (req, res) => {
-  if (!userHasRole(req.user, 'admin', 'ceo')) {
-    return res.status(403).json({ error: 'Admin or CEO only' });
+  if (!userHasBtn(req.user, 'user_btn_sessions', 'view')) {
+    return res.status(403).json({ error: 'Not allowed' });
   }
   try {
     await dbReady;
@@ -2106,7 +2149,7 @@ app.get('/api/users/:id/sessions', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/users/:id/sessions/:sid/revoke', requireAdmin, async (req, res) => {
+app.post('/api/users/:id/sessions/:sid/revoke', requirePermission('user_btn_sessions'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2126,7 +2169,7 @@ app.post('/api/users/:id/sessions/:sid/revoke', requireAdmin, async (req, res) =
   }
 });
 
-app.post('/api/users/:id/block', requirePermission('user_admin'), async (req, res) => {
+app.post('/api/users/:id/block', requirePermission('user_btn_block'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2142,7 +2185,7 @@ app.post('/api/users/:id/block', requirePermission('user_admin'), async (req, re
   }
 });
 
-app.post('/api/users/:id/unblock', requirePermission('user_admin'), async (req, res) => {
+app.post('/api/users/:id/unblock', requirePermission('user_btn_block'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2223,7 +2266,7 @@ app.get('/api/role-permissions/effective', requireAuth, async (req, res) => {
     for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) {
       // inventory_reverse has its own tier logic (30-day) the generic
       // level-lookup doesn't know about.
-      effective[key] = key === 'inventory_reverse' ? reverseTierFor(req.user) : effectiveLevelFor(req.user, key);
+      effective[key] = (key === 'inventory_reverse' || key === 'inv_btn_reverse') ? reverseTierFor(req.user) : effectiveLevelFor(req.user, key);
     }
     res.json(effective);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -2319,7 +2362,7 @@ function sumPipeInts(s) {
   }, 0);
 }
 
-app.get('/api/operators', requireOperatorAdmin, async (req, res) => {
+app.get('/api/operators', requireOperatorViewer, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4025,7 +4068,7 @@ app.get('/api/admin/client-view', requireAuth, async (req, res) => {
 // can flip client_visible without opening the full job edit modal.
 // Admin / PM only — CEO is read-only, so the toggle isn't shown to
 // them client-side and the server rejects them here too.
-app.post('/api/jobs/:id/client-visible', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/client-visible', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4053,7 +4096,7 @@ app.post('/api/jobs/:id/client-visible', requireJobsWriter, async (req, res) => 
 // Group-level client visibility toggle. Sets stock_group_visible on ALL
 // members of the group at once (they must agree — the group is one
 // visibility unit). Independent from per-job client_visible.
-app.post('/api/groups/client-visible', requireJobsWriter, async (req, res) => {
+app.post('/api/groups/client-visible', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4185,7 +4228,7 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
 }
 
 // CREATE a job
-app.post('/api/jobs', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4240,7 +4283,7 @@ app.post('/api/jobs', requireJobsWriter, async (req, res) => {
 // now sits in its OWN tab so the CTP operator can pick it up and start
 // making plates BEFORE paper is ordered/issued. Only advances to Pending
 // Stock once CTP is done (see process-from-ctp / station-update below).
-app.post('/api/jobs/:id/process-to-ctp', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/process-to-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4270,7 +4313,7 @@ app.post('/api/jobs/:id/process-to-ctp', requireJobsWriter, async (req, res) => 
 // stage_index must be 1 (Printing, the stage process-from-ctp leaves it
 // at). Once paper is issued or the Printing operator has recorded anything
 // we refuse — reverting then would silently discard downstream state.
-app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/move-back-to-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4323,7 +4366,7 @@ app.post('/api/jobs/:id/move-back-to-ctp', requireJobsWriter, async (req, res) =
 // is a deliberate "reset back to CTP" action from anywhere in production.
 // Ledger untouched (mirrors paper-swap flow); store keeper handles any
 // physical paper return manually.
-app.post('/api/jobs/:id/move-to-ctp', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/move-to-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4374,7 +4417,7 @@ app.post('/api/jobs/:id/move-to-ctp', requireJobsWriter, async (req, res) => {
 // as move-to-ctp but stops one step further along the pipeline:
 // stage_index=1 (Printing), issuance_status='pending'. Used by the
 // Pending Stock pipeline pill on the job tile. Ledger untouched.
-app.post('/api/jobs/:id/move-to-pending-stock', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/move-to-pending-stock', requirePermission('job_btn_stage_forward'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4432,7 +4475,7 @@ app.post('/api/jobs/:id/move-to-pending-stock', requireJobsWriter, async (req, r
 //   * CTP operator at Station clicks Save & Done on the plate-making
 //     screen — that path lives inside /api/jobs/:id/station-update and
 //     applies the same status/stage flip when the source status is 'ctp'.
-app.post('/api/jobs/:id/process-from-ctp', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4500,7 +4543,7 @@ const PARTICULARS_LABELS = {
 };
 
 // UPDATE job details
-app.put('/api/jobs/:id', requireJobsWriter, async (req, res) => {
+app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5408,7 +5451,7 @@ async function performIssueStock(sql, req, id, body) {
   return { job: updated[0] };
 }
 
-app.post('/api/jobs/:id/issue-stock', requireInventoryWriter, async (req, res) => {
+app.post('/api/jobs/:id/issue-stock', requireAnyBtn(['inv_btn_stock_out', 'inv_btn_offcut_issuance']), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5850,7 +5893,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
 // stays 'issued' — this only appends a pending entry in particulars.packets_topups
 // so the store-keeper sees it in the Pending Stock queue and can Approve
 // (deducts extra) or Reject (no ledger change).
-app.post('/api/jobs/:id/packets-topup', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/packets-topup', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     // Tighter than requireJobsWriter (which also allows production_manager)
     // — extra-packet requests are admin / super admin only, per request.
@@ -5889,7 +5932,7 @@ app.post('/api/jobs/:id/packets-topup', requireJobsWriter, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/jobs/:id/packets-topup/:topupId/approve', requireInventoryWriter, async (req, res) => {
+app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_btn_stock_out'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5972,7 +6015,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requireInventoryWriter,
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, async (req, res) => {
+app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_btn_stock_out'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6015,7 +6058,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requireInventoryWriter, 
 //                return through the normal manual inventory tools.
 // The source item's original deduction stays untouched, so the inventory
 // report keeps recording the extra issuance exactly as it did before.
-app.post('/api/jobs/:id/over-issue/decide', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6394,7 +6437,7 @@ app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission(
 // job can only be linked to ONE partner at a time. Purpose: run one
 // joint delivery (1 challan, each job's own qty) and merge their rows in
 // the Jobs Report.
-app.post('/api/jobs/:id/link', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/link', requirePermission('job_btn_link'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6423,7 +6466,7 @@ app.post('/api/jobs/:id/link', requireJobsWriter, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/jobs/:id/unlink', requireJobsWriter, async (req, res) => {
+app.post('/api/jobs/:id/unlink', requirePermission('job_btn_link'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6450,7 +6493,7 @@ app.post('/api/jobs/:id/unlink', requireJobsWriter, async (req, res) => {
 // reprints). FIFO delivery deducts from oldest-id job first.
 
 // Set or clear a job's group tag. Send group_name=null to remove.
-app.patch('/api/jobs/:id/group', requireJobsWriter, async (req, res) => {
+app.patch('/api/jobs/:id/group', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -6916,7 +6959,7 @@ app.get('/api/stock-groups/:id', requireAuth, async (req, res) => {
 //      spec fields so Edit Group renders the same job-card layout.
 //      The seed job is added to the group (group_job_id set).
 //   2. Blank — pass explicit { client, product, po_qty, ... }.
-app.post('/api/stock-groups', requireJobsWriter, async (req, res) => {
+app.post('/api/stock-groups', requirePermission('job_btn_create_mil'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7008,7 +7051,7 @@ app.post('/api/stock-groups', requireJobsWriter, async (req, res) => {
 });
 
 // Update the group ONLY — never touches sub jobs (per owner rule).
-app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
+app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7073,7 +7116,7 @@ app.patch('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
 // sub jobs exist, the request is rejected with a count so the caller
 // can tell the user exactly how many need to be deleted or unlinked
 // first.
-app.delete('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
+app.delete('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7101,7 +7144,7 @@ app.delete('/api/stock-groups/:id', requireJobsWriter, async (req, res) => {
 // stamps group_job_id = :id so it aggregates under the same tile.
 // After create, the client opens the returned job's edit modal for
 // any per-sub tweaks (job_name, deadline, packets, etc.).
-app.post('/api/stock-groups/:id/duplicate-into-job', requireJobsWriter, async (req, res) => {
+app.post('/api/stock-groups/:id/duplicate-into-job', requirePermission('job_btn_duplicate'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7245,7 +7288,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
 // DELETE a specific delivery entry by index — admin only, for corrections.
 // If removing the last entry drops the job below full delivery, moves stage
 // back from Delivered (7) to Ready to Deliver (6).
-app.delete('/api/jobs/:id/deliveries/:index', requirePermission('delivery_delete'), async (req, res) => {
+app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_delivery'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7612,7 +7655,7 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
 // Also stamps a marker into job.log so the History modal's Stage Log shows
 // who moved it — audit_log INSERT is best-effort (errors swallowed), but the
 // stage log lives on the row itself and can never silently disappear.
-app.delete('/api/jobs/:id', requirePermission('job_delete'), async (req, res) => {
+app.delete('/api/jobs/:id', requirePermission('job_btn_delete'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7691,6 +7734,7 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
     let { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier, is_offcut } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
     const isOffcut = !!is_offcut;
+    if (!userHasBtn(req.user, isOffcut ? 'inv_btn_add_offcut' : 'inv_btn_add_paper')) return res.status(403).json({ error: 'Not allowed' });
     // Brand is stored uppercase for consistency — Ningbo / ningbo / NINGBO
     // all save as NINGBO. The case-insensitive duplicate check below still
     // catches dupes against the existing data even if old rows aren't
@@ -7767,7 +7811,7 @@ const INVENTORY_DIFF_FIELDS = [
   ['reorder_threshold', 'Reorder Threshold'], ['supplier', 'Supplier'],
 ];
 
-app.put('/api/inventory/:id', requireInventoryWriter, async (req, res) => {
+app.put('/api/inventory/:id', requirePermission('inv_btn_edit'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7928,7 +7972,7 @@ app.post('/api/inventory/dropdown/:field/:value/unhide', requireAdmin, async (re
 // losing the link would orphan them). Issued/in-progress/delivered jobs are
 // fine to lose the live link — their deductions already happened. Cascades
 // the full transaction history (intentional — admin saw the warning).
-app.delete('/api/inventory/:id', requirePermission('inventory_delete'), async (req, res) => {
+app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7988,6 +8032,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     const { change, reason, notes, job_card, challan_no } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
+    if (!userHasBtn(req.user, delta > 0 ? 'inv_btn_stock_in' : 'inv_btn_stock_out')) return res.status(403).json({ error: 'Not allowed' });
     const itemId = parseInt(id, 10);
     const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
     const sourceItem = itemRows[0];
@@ -8581,7 +8626,7 @@ app.get('/api/imports', requireAuth, async (req, res) => {
 // CREATE an import. Auto-links to a matching inventory_item if one exists
 // (same paper_type + size + gsm + brand). No match → leave the link NULL;
 // receiving the import later will create the item.
-app.post('/api/imports', requireInventoryWriter, async (req, res) => {
+app.post('/api/imports', requirePermission('inv_btn_add_import'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8616,7 +8661,7 @@ app.post('/api/imports', requireInventoryWriter, async (req, res) => {
 });
 
 // UPDATE import fields. Status changes go through /receive or /cancel below.
-app.put('/api/imports/:id', requireInventoryWriter, async (req, res) => {
+app.put('/api/imports/:id', requirePermission('inv_btn_add_import'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8638,7 +8683,7 @@ app.put('/api/imports/:id', requireInventoryWriter, async (req, res) => {
 });
 
 // CANCEL an import (status → cancelled, no inventory change).
-app.post('/api/imports/:id/cancel', requireInventoryWriter, async (req, res) => {
+app.post('/api/imports/:id/cancel', requirePermission('inv_btn_add_import'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8882,7 +8927,7 @@ app.delete('/api/imports/:id', requirePermission('trash_admin'), async (req, res
 // partial receives: if the received quantity (added to whatever was already
 // received on earlier deliveries) is less than the booked total, the import
 // stays at status='partial' instead of 'received' so it remains actionable.
-app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) => {
+app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8961,7 +9006,7 @@ app.post('/api/imports/:id/receive', requireInventoryWriter, async (req, res) =>
 });
 
 // UPDATE stage/status only
-app.patch('/api/jobs/:id/stage', requireJobsWriter, async (req, res) => {
+app.patch('/api/jobs/:id/stage', requireStageOrBlock, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
