@@ -302,7 +302,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   production_edit:      { label: 'Daily Production registers — edit', levels: { admin: 'yes', production_manager: 'yes', store_manager: 'yes' } },
   trash_view:           { label: 'Trash / Archive — view', levels: { admin: 'yes', ceo: 'yes' } },
   trash_admin:          { label: 'Trash / Archive — restore, purge, empty; delete/archive a transaction or import row', levels: { admin: 'yes' } },
-  station_access:       { label: 'Open the Station terminal & enter a PIN', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
+  station_access:       { label: 'Station tab — open the Station terminal (a PIN is still needed to process)', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
   station_write:        { label: 'Process a station — save / advance / skip / notes', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
   station_manager_pin:  { label: 'Attempt Manager-PIN actions (stage, machine, offcut, shade-card delivery) — a valid manager PIN is still required either way', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
   operator_admin:       { label: 'Manage (add/edit/remove) and view the Floor Operators PIN roster', levels: { admin: 'yes', production_manager: 'yes' } },
@@ -1602,7 +1602,8 @@ function requireSuperAdmin(req, res, next) {
 // should never lose baseline write access because of an editing mistake).
 function canWriteJobs(user)      { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'job_write'); }
 function canWriteInventory(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'inventory_write'); }
-function canRunStation(user)     { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_access'); }
+// 'view' is enough: the Access Register shows Station as a plain View/Hidden tab row.
+function canRunStation(user)     { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_access', 'view'); }
 // Delivery ledger — admin, PM, or the dedicated finance role by default.
 // Finance is otherwise fully read-only; recording shipments is the one
 // thing they own.
