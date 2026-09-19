@@ -22437,7 +22437,12 @@ function openDeliverGroupModal(groupName) {
     ? available.map(x => `<div style="font-size:11px;color:var(--text2);padding:1px 0;">E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></div>`).join('')
     : `<div style="font-size:11px;color:#dc2626;padding:1px 0;">No jobs at Ready to Deliver — advance a job there first.</div>`;
   const gName = jsStr(groupName);
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:440px;">
+  // Finance's invoicing fields (Cartons/Packets, E-FBR, MSI, Rate, Sale Tax) show only for holders of job_btn_pricing.
+  const showPricing = hasPerm('job_btn_pricing', 'yes');
+  const firstEff = available.length ? effectiveRate(available[0].j) : null;
+  const ratePrefill = firstEff ? firstEff.value : '';
+  const taxPrefill = (available.length && available[0].j.tax_pct !== null && available[0].j.tax_pct !== undefined && available[0].j.tax_pct !== '') ? available[0].j.tax_pct : 18;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
     <h2 style="margin:0 0 4px;">&#128230; Deliver from Group</h2>
     <div style="font-size:12px;color:#5b21b6;font-weight:600;margin-bottom:10px;">${esc(groupName)}</div>
     <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:8px 10px;margin-bottom:12px;">
@@ -22445,18 +22450,40 @@ function openDeliverGroupModal(groupName) {
       ${availRows}
       ${totalAvail > 0 ? `<div style="margin-top:4px;font-size:11px;font-weight:700;color:#166534;">Total available: ${totalAvail.toLocaleString()} unit cartons</div>` : ''}
     </div>
+    ${showPricing ? `
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Total Unit Cartons *</label><input type="number" id="dg-cartons" min="0" placeholder="e.g. 5000" style="width:100%;"></div>
+      <div class="form-group"><label class="form-label">Total Unit Cartons *</label><input type="number" id="dg-cartons" min="0" style="width:100%;"></div>
+      <div class="form-group"><label class="form-label">Cartons/Packets</label><input type="number" id="dg-cp" min="0" step="any" title="Total for this delivery — split across the jobs in proportion to the unit cartons each one ships." style="width:100%;"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dg-date" value="${new Date().toISOString().slice(0,10)}"></div>
+      <div class="form-group"><label class="form-label">Invoice No.</label><input type="text" id="dg-notes"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">PO No.</label><input type="text" id="dg-po"></div>
+      <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="dg-batch"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">E-FBR No.</label><input type="text" id="dg-fbr"></div>
+      <div class="form-group"><label class="form-label">MSI No.</label><input type="text" id="dg-msi"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Rate / Carton</label><input type="number" id="dg-rate" min="0" step="any" value="${esc(String(ratePrefill))}" title="Pre-filled from the first job's rate, or the Product Rate tab. Applies to every job in this delivery." style="width:100%;"></div>
+      <div class="form-group"><label class="form-label">Sale Tax %</label><input type="number" id="dg-tax" min="0" step="any" value="${esc(String(taxPrefill))}" style="width:100%;"></div>
+    </div>
+    ` : `
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Total Unit Cartons *</label><input type="number" id="dg-cartons" min="0" style="width:100%;"></div>
       <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dg-date" value="${new Date().toISOString().slice(0,10)}"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">PO No.</label><input type="text" id="dg-po" placeholder="e.g. PO-2025-001"></div>
-      <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="dg-batch" placeholder="e.g. B-101"></div>
+      <div class="form-group"><label class="form-label">PO No.</label><input type="text" id="dg-po"></div>
+      <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="dg-batch"></div>
     </div>
     <div class="form-row">
-      ${hasPerm('job_btn_pricing', 'yes') ? `<div class="form-group"><label class="form-label">E-FBR No.</label><input type="text" id="dg-fbr" placeholder="e.g. 12345678901234"></div>` : ''}
-      <div class="form-group"><label class="form-label">Invoice No.</label><input type="text" id="dg-notes" placeholder="e.g. INV-042"></div>
+      <div class="form-group"><label class="form-label">Invoice No.</label><input type="text" id="dg-notes"></div>
     </div>
+    `}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" style="background:#5b21b6;border-color:#5b21b6;" onclick="submitGroupDelivery(${gName})">&#128230; Record Delivery</button>
@@ -22469,12 +22496,28 @@ async function submitGroupDelivery(groupName) {
   const po      = ((document.getElementById('dg-po')||{}).value||'').trim();
   const batch   = ((document.getElementById('dg-batch')||{}).value||'').trim();
   const fbr     = ((document.getElementById('dg-fbr')||{}).value||'').trim();
+  const msi     = ((document.getElementById('dg-msi')||{}).value||'').trim();
+  const cp      = ((document.getElementById('dg-cp')||{}).value||'').trim();
   const notes   = ((document.getElementById('dg-notes')||{}).value||'').trim();
   if (!parseFloat(cartons) || parseFloat(cartons) <= 0) { await alertDialog({ title: 'Enter cartons to deliver', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  // Rate / Sale Tax inputs exist only for job_btn_pricing holders; for everyone else they're simply not sent.
+  const rateEl = document.getElementById('dg-rate');
+  const taxEl  = document.getElementById('dg-tax');
+  const body = { group_name: groupName, cartons, date, po_no: po, batch_no: batch, fbr_no: fbr, msi_no: msi, notes };
+  if (cp !== '') body.cartons_packets = cp;
+  if (rateEl || taxEl) {
+    const rateStr = ((rateEl||{}).value || '').trim();
+    const taxStr  = ((taxEl||{}).value  || '').trim();
+    const rate = rateStr === '' ? null : parseFloat(rateStr);
+    if (rate !== null && (!Number.isFinite(rate) || rate < 0)) { await alertDialog({ title: 'Rate must be a non-negative number', kind: 'warn' }); return; }
+    const taxPct = parseFloat(taxStr);
+    if (!Number.isFinite(taxPct) || taxPct < 0) { await alertDialog({ title: 'Sale Tax % must be a non-negative number', kind: 'warn' }); return; }
+    body.rate = rate; body.tax_pct = taxPct;
+  }
   showSaving(true);
   try {
-    const result = await api('POST', '/api/groups/deliver', { group_name: groupName, cartons, date, po_no: po, batch_no: batch, fbr_no: fbr, notes });
+    const result = await api('POST', '/api/groups/deliver', body);
     await loadJobs();
     closeModal(); render();
     const parts = (result.deliveries_made || []).map(d => `E-${d.job_id}: ${Number(d.cartons).toLocaleString()} cartons`).join(', ');
