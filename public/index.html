@@ -4093,6 +4093,7 @@ function dateRangeBounds(preset) {
   const weekStart = new Date(today); weekStart.setDate(today.getDate() - (dayMon - 1));
   const addDays = (d, n) => { const c = new Date(d); c.setDate(d.getDate() + n); return c; };
   switch (preset) {
+    case 'today':      return { from: today, to: addDays(today, 1) };
     case 'this-week':  return { from: weekStart, to: addDays(weekStart, 7) };
     case 'last-week':  return { from: addDays(weekStart, -7), to: weekStart };
     case 'past-7':     return { from: addDays(today, -6), to: addDays(today, 1) };
@@ -4126,7 +4127,7 @@ function resolveDateFilterBounds(preset, dfrom, dto) {
 function dateRangeLabel(preset, dfrom, dto) {
   if (!preset) return 'All time';
   if (preset === 'custom') return `${fmtDMY(dfrom) || '(any)'} to ${fmtDMY(dto) || '(any)'}`;
-  const labels = { 'this-week':'This week', 'last-week':'Last week', 'past-7':'Past 7 days', 'this-month':'This month', 'last-month':'Last month', 'past-30':'Past 30 days', 'this-year':'This year', 'last-year':'Last year' };
+  const labels = { 'today':'Today', 'this-week':'This week', 'last-week':'Last week', 'past-7':'Past 7 days', 'this-month':'This month', 'last-month':'Last month', 'past-30':'Past 30 days', 'this-year':'This year', 'last-year':'Last year' };
   return labels[preset] || preset;
 }
 // Shared "date filter" control markup — the same preset dropdown (All
@@ -4134,12 +4135,15 @@ function dateRangeLabel(preset, dfrom, dto) {
 // uses, for a report that keeps its own state object instead of the
 // global filterDateRange/filterDateFrom/filterDateTo. idPrefix must be
 // unique per report (e.g. "sr" for Sale Report, "pr" for Products).
-function dateFilterToolbarHtml(idPrefix, preset, dfrom, dto, onPresetFn, onCustomFn) {
+function dateFilterToolbarHtml(idPrefix, preset, dfrom, dto, onPresetFn, onCustomFn, simple) {
+  // simple = the standard report picker (Today / This Week / This Month / All Time / Custom range)
+  const simpleOpts = [['today','Today'],['this-week','This Week'],['this-month','This Month'],['','All Time'],['custom','Custom range\u2026']]
+    .map(([v, l]) => `<option value="${v}"${preset===v?' selected':''}>${l}</option>`).join('');
   return `
     <div>
-      <div class="dash-flbl">Date</div>
+      <div class="dash-flbl">${simple ? 'Period' : 'Date'}</div>
       <select class="filter" id="${idPrefix}-date-range" onchange="${onPresetFn}(this.value)">
-        <option value="">All time</option>
+        ${simple ? simpleOpts : `<option value="">All time</option>
         <option value="this-week"${preset==='this-week'?' selected':''}>This week</option>
         <option value="last-week"${preset==='last-week'?' selected':''}>Last week</option>
         <option value="past-7"${preset==='past-7'?' selected':''}>Past 7 days</option>
@@ -4148,7 +4152,7 @@ function dateFilterToolbarHtml(idPrefix, preset, dfrom, dto, onPresetFn, onCusto
         <option value="past-30"${preset==='past-30'?' selected':''}>Past 30 days</option>
         <option value="this-year"${preset==='this-year'?' selected':''}>This year</option>
         <option value="last-year"${preset==='last-year'?' selected':''}>Last year</option>
-        <option value="custom"${preset==='custom'?' selected':''}>Custom range&hellip;</option>
+        <option value="custom"${preset==='custom'?' selected':''}>Custom range&hellip;</option>`}
       </select>
     </div>
     <span id="${idPrefix}-date-custom" style="display:${preset==='custom'?'inline-flex':'none'};gap:6px;align-items:center;">
@@ -9969,7 +9973,7 @@ function printStockReport() {
   const rows = paperType ? stockReportState.rows.filter(t => t.paper_type === paperType) : stockReportState.rows;
   const { from, to } = stockReportDateRange(period);
   const dirLabel = direction === 'in' ? 'Stock In only' : direction === 'out' ? 'Stock Out only' : 'All movement';
-  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[period] || period;
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', all:'All Time', custom:'Custom range'})[period] || period;
 
   let totalIn = 0, totalOut = 0;
   for (const t of rows) {
@@ -10070,7 +10074,7 @@ function printStockReport() {
 // for opening balance, then IN/OUT/balance buckets across the chosen range
 // (monthly OR weekly), then totals (consumption, current stock, weight) and
 // projections (stock required next period, total imports).
-let stockSummaryState = { paperType: 'bleach board', search: '', period: 'custom', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+let stockSummaryState = { paperType: 'bleach board', search: '', period: 'today', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
 
 // Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
 // {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
@@ -10140,11 +10144,16 @@ function buildSummaryBuckets(from, to, granularity) {
 //   both     — one row per (brand, supplier) combination — both columns visible
 //   ignore   — collapse to paper/size/gsm/fresh-offcut only, NO brand/supplier columns
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
-let invReportState = { groupBy: 'ignore', paperType: '', search: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
+let invReportState = { period: '', groupBy: 'ignore', paperType: '', search: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
   if (!pane) return;
+  if (!invReportState.period) invReportState.period = 'today';           // first open: today's movement
+  if (invReportState.period !== 'custom') {                              // re-applied every open so "Today" stays today
+    const r = periodToDateRange(invReportState.period);
+    invReportState.from = r.from; invReportState.to = r.to;
+  }
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Current Balance Summary</h2>
@@ -10179,12 +10188,18 @@ function openInventoryReport() {
         </select>
       </div>
       <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="ir-from" value="${invReportState.from||''}" onchange="setIRFrom(this.value)">
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="ir-period" onchange="setIRPeriod(this.value)">${reportPeriodOptions(invReportState.period)}</select>
       </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="ir-to" value="${invReportState.to||''}" onchange="setIRTo(this.value)">
+      <div id="ir-custom-wrap" style="display:${invReportState.period==='custom'?'flex':'none'};gap:14px;">
+        <div>
+          <div class="dash-flbl">From</div>
+          <input class="filter" type="date" id="ir-from" value="${invReportState.from||''}" onchange="setIRFrom(this.value)">
+        </div>
+        <div>
+          <div class="dash-flbl">To</div>
+          <input class="filter" type="date" id="ir-to" value="${invReportState.to||''}" onchange="setIRTo(this.value)">
+        </div>
       </div>
       <label style="font-size:12px;color:var(--text2);display:inline-flex;align-items:center;gap:6px;padding-bottom:8px;">
         <input type="checkbox" id="ir-incl-offcuts" ${invReportState.includeOffcuts?'checked':''} onchange="setIRIncludeOffcuts(this.checked)">
@@ -10213,6 +10228,7 @@ function openInventoryReport() {
     <div id="ir-content"></div>
   `;
   renderInventoryReport();
+  refreshIRActiveItemIds().then(renderInventoryReport);   // narrow to items that moved in the chosen period
   loadIRPendingImports();
 }
 // Pending imports so the report can flag "this item has stock on the way"
@@ -10255,6 +10271,18 @@ async function fetchIRConsumption() {
     for (const r of rows) invReportState.consumption[r.item_id] = parseFloat(r.consumed) || 0;
   } catch (e) { console.error('IR consumption fetch failed', e); invReportState.consumption = {}; }
   renderInventoryReport();
+}
+async function setIRPeriod(v) {
+  invReportState.period = v;
+  const wrap = document.getElementById('ir-custom-wrap');
+  if (wrap) wrap.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') {
+    const r = periodToDateRange(v);
+    invReportState.from = r.from; invReportState.to = r.to;
+    const f = document.getElementById('ir-from'); if (f) f.value = r.from;
+    const t = document.getElementById('ir-to');   if (t) t.value = r.to;
+  }
+  await refreshIRActiveItemIds(); renderInventoryReport();
 }
 async function setIRFrom(v)      { invReportState.from = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
 async function setIRTo(v)        { invReportState.to   = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
@@ -10636,13 +10664,13 @@ function openStockSummary() {
   // missing sticker/local paper/off-white, see invDistinct below). Only
   // initialize date defaults on first open (from === '') — preserving
   // filters across tab switches keeps the user's context.
-  if (!stockSummaryState.from) {
-    const today = new Date();
-    const start = new Date(today.getFullYear(), today.getMonth() - 4, 1);
-    const iso = localDateISO;
-    stockSummaryState.from = iso(start);
-    stockSummaryState.to   = iso(today);
-    if (!stockSummaryState.paperType) stockSummaryState.paperType = invDistinct('paper_type')[0] || '';
+  if (!stockSummaryState.paperType) stockSummaryState.paperType = invDistinct('paper_type')[0] || '';
+  // The picked period is re-applied on every open, so "Today" is always today. (Custom keeps its own dates;
+  // All Time is worked out from the first transaction once the ledger has loaded.)
+  if (stockSummaryState.period !== 'custom') {
+    const r = periodToDateRange(stockSummaryState.period);
+    stockSummaryState.from = r.from || stockSummaryState.from || localDateISO();
+    stockSummaryState.to   = r.to   || stockSummaryState.to   || localDateISO();
   }
   const pane = document.getElementById('rt-summary');
   if (!pane) return;
@@ -10651,7 +10679,7 @@ function openStockSummary() {
   // sticker / local paper / off-white — items of those types silently never
   // had a way to be selected here. "All paper types" (value '') is new too.
   const paperOpts = invDistinct('paper_type').map(p => `<option value="${esc(p)}"${p===stockSummaryState.paperType?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${stockSummaryState.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
@@ -10752,6 +10780,11 @@ async function loadStockSummary() {
     stockSummaryState.txs     = allTxs.filter(t => !pt || t.paper_type === pt);
     stockSummaryState.items   = inventory.filter(i => (!pt || i.paper_type === pt) && !i.is_offcut);
     stockSummaryState.imports = imports.filter(i => !pt || i.paper_type === pt);
+    if (stockSummaryState.period === 'all') {
+      const times = stockSummaryState.txs.map(t => new Date(t.created_at).getTime()).filter(Number.isFinite);
+      stockSummaryState.from = localDateISO(new Date(times.length ? Math.min(...times) : Date.now()));
+      stockSummaryState.to   = localDateISO();
+    }
     renderStockSummary();
   } catch (e) {
     if (el) el.innerHTML = 'Error: ' + esc(e.message);
@@ -11764,7 +11797,7 @@ function printImports() {
 // q matches job number ("59" / "E-59") or job name.
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, sortBy: 'created', sortDir: 'asc' };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, period: 'all', sortBy: '', sortDir: 'asc' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -11773,9 +11806,14 @@ function openJobsReportPage() {
   openReportsGroup('jobs-group');
 }
 
+function jrSortKey() { return jobsReportState.sortBy || (jobsReportState.mode === 'created' ? 'created' : 'delivered'); }
 function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
+  if (jobsReportState.period !== 'custom') {   // re-applied every open so "Today" stays today
+    const r = periodToDateRange(jobsReportState.period);
+    jobsReportState.dfrom = r.from; jobsReportState.dto = r.to;
+  }
   // No default date range — show every job until the user explicitly
   // narrows the window with the From / To pickers.
   // Company filter sources from whichever set is currently shown. When
@@ -11830,12 +11868,18 @@ function openJobsReport() {
         </div>
       </div>` : ''}
       <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="jr-period" onchange="setJrPeriod(this.value)">${reportPeriodOptions(jobsReportState.period)}</select>
       </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="jr-dto" value="${jobsReportState.dto}" onchange="setJrDTo(this.value)">
+      <div id="jr-custom-wrap" style="display:${jobsReportState.period==='custom'?'flex':'none'};gap:14px;">
+        <div>
+          <div class="dash-flbl">From</div>
+          <input class="filter" type="date" id="jr-dfrom" value="${jobsReportState.dfrom}" onchange="setJrDFrom(this.value)">
+        </div>
+        <div>
+          <div class="dash-flbl">To</div>
+          <input class="filter" type="date" id="jr-dto" value="${jobsReportState.dto}" onchange="setJrDTo(this.value)">
+        </div>
       </div>
       <div>
         <div class="dash-flbl">Company</div>
@@ -11847,12 +11891,12 @@ function openJobsReport() {
       <div>
         <div class="dash-flbl">Sort by</div>
         <select class="filter" id="jr-sort-by" onchange="setJrSortBy(this.value)">
-          <option value="created"${jobsReportState.sortBy==='created'?' selected':''}>Created Date</option>
-          <option value="id"${jobsReportState.sortBy==='id'?' selected':''}>Job ID</option>
-          <option value="name"${jobsReportState.sortBy==='name'?' selected':''}>Job Name</option>
-          <option value="delivered"${jobsReportState.sortBy==='delivered'?' selected':''}>Delivered Date</option>
-          <option value="client"${jobsReportState.sortBy==='client'?' selected':''}>Company</option>
-          <option value="deliveredQty"${jobsReportState.sortBy==='deliveredQty'?' selected':''}>Delivered Qty</option>
+          <option value="created"${jrSortKey()==='created'?' selected':''}>Created Date</option>
+          <option value="id"${jrSortKey()==='id'?' selected':''}>Job ID</option>
+          <option value="name"${jrSortKey()==='name'?' selected':''}>Job Name</option>
+          <option value="delivered"${jrSortKey()==='delivered'?' selected':''}>Delivered Date</option>
+          <option value="client"${jrSortKey()==='client'?' selected':''}>Company</option>
+          <option value="deliveredQty"${jrSortKey()==='deliveredQty'?' selected':''}>Delivered Qty</option>
         </select>
       </div>
       <div>
@@ -11877,6 +11921,18 @@ function openJobsReport() {
     <div id="jr-content" style="font-size:12px;"></div>
   `;
   renderJobsReport();
+}
+function setJrPeriod(v) {
+  jobsReportState.period = v;
+  const wrap = document.getElementById('jr-custom-wrap');
+  if (wrap) wrap.style.display = v === 'custom' ? 'flex' : 'none';
+  if (v !== 'custom') {
+    const r = periodToDateRange(v);
+    jobsReportState.dfrom = r.from; jobsReportState.dto = r.to;
+    const f = document.getElementById('jr-dfrom'); if (f) f.value = r.from;
+    const t = document.getElementById('jr-dto');   if (t) t.value = r.to;
+  }
+  jobsReportSel.clear(); renderJobsReport();
 }
 function setJrSortBy(v) { jobsReportState.sortBy = v; renderJobsReport(); }
 function toggleJrSortDir() {
@@ -11918,6 +11974,7 @@ function setJrShadeOnly(v) {
 // Flip between Delivered-only and every Created job. Re-renders the whole
 // pane so the header/labels/company dropdown all reflect the new mode.
 function setJrMode(m) {
+  jobsReportState.sortBy = '';   // Sort by follows the mode again: Delivered Date for Delivered, Created Date for Created
   if (jobsReportState.mode === m) return;
   jobsReportState.mode = m;
   jobsReportSel.clear();
@@ -12328,7 +12385,7 @@ function buildJobsReportRows() {
   // value (e.g. no parseable date) always sort to the bottom, whichever direction is chosen.
   const jrDir = jobsReportState.sortDir === 'desc' ? -1 : 1;
   const jrKey = (r) => {
-    switch (jobsReportState.sortBy) {
+    switch (jrSortKey()) {
       case 'id':           return r.id;
       case 'name':         return String(r.name || '').toLowerCase();
       case 'client':       return String(r.client || '').toLowerCase();
@@ -12710,7 +12767,7 @@ function openSaleReport() {
           <span class="search-icon">&#128269;</span>
         </div>
       </div>
-      ${dateFilterToolbarHtml('sr', saleReportState.dateRange, saleReportState.dfrom, saleReportState.dto, 'setSrDateRange', 'setSrDateCustom')}
+      ${dateFilterToolbarHtml('sr', saleReportState.dateRange, saleReportState.dfrom, saleReportState.dto, 'setSrDateRange', 'setSrDateCustom', true)}
       <div>
         <div class="dash-flbl">Company</div>
         <select class="filter" id="sr-client" onchange="setSrClient(this.value)">
@@ -13295,24 +13352,32 @@ function printSaleReport() {
 // Data source: per-(date, machine) + per-(date, operator) totals from
 // the Daily Production register (sheets/waste/jobs from job logs +
 // coatings_done, hours from manager notes).
-const prodReportState = { from: '', to: '', view: 'machine', pick: '', section: '', data: null, loading: false };
+const prodReportState = { period: '', from: '', to: '', view: 'machine', pick: '', section: '', data: null, loading: false };
 
 function openProductionReport() {
   const pane = document.getElementById('rt-prod-report');
   if (!pane) return;
   // Default window: last 30 days through today on first open. Filters
   // otherwise persist across navigations.
-  if (!prodReportState.from) {
-    const today = new Date();
-    const start = new Date(today); start.setDate(today.getDate() - 29);
-    const iso = localDateISO;
-    prodReportState.from = iso(start);
-    prodReportState.to   = iso(today);
+  if (!prodReportState.period) prodReportState.period = 'today';
+  if (prodReportState.period !== 'custom') {
+    const r = prodPeriodRange(prodReportState.period);
+    prodReportState.from = r.from; prodReportState.to = r.to;
   }
   renderProductionReport();
   loadProductionReport();
 }
 
+// The report needs real dates, so "All Time" runs from an early start date to today.
+function prodPeriodRange(p) {
+  if (p === 'all') return { from: '2020-01-01', to: localDateISO() };
+  return periodToDateRange(p);
+}
+function setPrPeriod(v) {
+  prodReportState.period = v;
+  if (v !== 'custom') { const r = prodPeriodRange(v); prodReportState.from = r.from; prodReportState.to = r.to; }
+  renderProductionReport(); loadProductionReport();
+}
 function setPrFrom(v) { prodReportState.from = v; loadProductionReport(); }
 function setPrTo(v)   { prodReportState.to = v;   loadProductionReport(); }
 // Flip between summary-by-machine and summary-by-operator. Switching
@@ -13496,12 +13561,18 @@ function renderProductionReport() {
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
-        <div class="dash-flbl">From</div>
-        <input class="filter" type="date" id="pr-from" value="${s.from}" onchange="setPrFrom(this.value)">
+        <div class="dash-flbl">Period</div>
+        <select class="filter" id="pr-period" onchange="setPrPeriod(this.value)">${reportPeriodOptions(s.period)}</select>
       </div>
-      <div>
-        <div class="dash-flbl">To</div>
-        <input class="filter" type="date" id="pr-to" value="${s.to}" onchange="setPrTo(this.value)">
+      <div id="pr-custom-wrap" style="display:${s.period==='custom'?'flex':'none'};gap:14px;">
+        <div>
+          <div class="dash-flbl">From</div>
+          <input class="filter" type="date" id="pr-from" value="${s.from}" onchange="setPrFrom(this.value)">
+        </div>
+        <div>
+          <div class="dash-flbl">To</div>
+          <input class="filter" type="date" id="pr-to" value="${s.to}" onchange="setPrTo(this.value)">
+        </div>
       </div>
       <div>
         <div class="dash-flbl">View</div>
@@ -15173,8 +15244,8 @@ function setReportsTab(name) {
 // filter toggle inside Stock In / Stock Out so the two share one set of
 // paper-type/size/gsm/period/challan filters instead of two independent ones.
 const stockMovementStates = {
-  in:  { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
-  out: { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
+  in:  { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
+  out: { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
 };
 
 // Per-direction bulk selection. Independent sets so flipping tabs keeps the
@@ -15298,6 +15369,12 @@ async function bulkDeleteStockMovement(dir) {
 // Generic period-to-date-range helper, decoupled from any global state. Used
 // by both the inline panes (here) and the older Stock Summary code if it ever
 // wants to share.
+// The one period picker every report uses: Today / This Week / This Month / All Time / Custom range.
+// 'all' means no date limit (empty from/to); reports that need real dates for it work them out themselves.
+const REPORT_PERIODS = [['today', 'Today'], ['week', 'This Week'], ['month', 'This Month'], ['all', 'All Time'], ['custom', 'Custom range\u2026']];
+function reportPeriodOptions(cur) {
+  return REPORT_PERIODS.map(([v, l]) => `<option value="${v}"${cur === v ? ' selected' : ''}>${l}</option>`).join('');
+}
 function periodToDateRange(period, customFrom, customTo) {
   const now = new Date();
   const iso = localDateISO;
@@ -15320,7 +15397,7 @@ function openStockMovementPane(direction) {
   const pane  = document.getElementById('rt-stock-' + direction);
   const title = direction === 'in' ? 'Stock In' : 'Stock Out';
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
@@ -15925,7 +16002,7 @@ async function exportStockTotal(direction) {
 function printStockTotal(direction) {
   const { itemRows, from, to, total, totalKg } = computeStockTotalRows(direction);
   const state = stockTotalStates[direction];
-  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', all:'All Time', custom:'Custom range'})[state.period] || state.period;
   const color = direction === 'in' ? '#166534' : '#A32D2D';
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
@@ -16550,7 +16627,7 @@ async function saveWastageAdjSettings() {
 // item), so the store keeper can see how many packets went to off-system
 // jobs without hunting through
 // the full Stock Out ledger.
-const manualConsumptionState = { period: 'month', from: '', to: '', paperType: '', size: '', gsm: '', search: '', rows: [], selected: new Set() };
+const manualConsumptionState = { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', search: '', rows: [], selected: new Set() };
 
 function extractManualJobCardNo(notes) {
   const m = String(notes || '').match(/Job Card:\s*([^·]+)/i);
@@ -16574,7 +16651,7 @@ function openManualConsumptionPane() {
     return;
   }
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
@@ -16963,7 +17040,7 @@ async function exportManualConsumption() {
 function printManualConsumption() {
   const { rows, from, to, total, totalKg } = computeManualConsumptionRows();
   const state = manualConsumptionState;
-  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', all:'All Time', custom:'Custom range'})[state.period] || state.period;
   const color = '#A32D2D';
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
@@ -17023,13 +17100,13 @@ function printManualConsumption() {
 // ── Offcut Consumption ───────────────────────────────────────
 // Automatic offcut issues to tracked E-jobs. Kept separate from Manual
 // Consumption (offline job cards) and from normal fresh-stock movement.
-const offcutConsumptionState = { period: 'month', from: '', to: '', paperType: '', rows: [], selected: new Set() };
+const offcutConsumptionState = { period: 'all', from: '', to: '', paperType: '', rows: [], selected: new Set() };
 
 function openOffcutConsumptionPane() {
   const state = offcutConsumptionState;
   const pane = document.getElementById('rt-offcut-consumption');
   if (!pane) return;
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v,l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   pane.innerHTML = `
@@ -17258,7 +17335,7 @@ function printStockMovement(direction) {
   const { from, to } = periodToDateRange(state.period, state.from, state.to);
   const rows = stockMovementPrintRows(direction);
   const dirLabel = direction === 'in' ? 'Stock In (additions only)' : 'Stock Out (deductions only)';
-  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', custom:'Custom range'})[state.period] || state.period;
+  const periodLabel = ({today:'Today', week:'This Week', month:'This Month', all:'All Time', custom:'Custom range'})[state.period] || state.period;
   let total = 0;
   for (const t of rows) total += direction === 'in' ? t.change : -t.change;
   const color = direction === 'in' ? '#166534' : '#A32D2D';
