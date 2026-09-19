@@ -5037,6 +5037,20 @@ function effectiveRate(job) {
   const suggested = productRateFor(job && job.name);
   return suggested !== null ? { value: suggested, suggested: true } : null;
 }
+// The price of ONE shipment. Each delivery entry carries its own rate / tax_pct, and rate_override: true when its rate
+// differed from the product's standard rate at the moment it was set (stored by the server, never recomputed — so
+// changing the product's standard rate later doesn't turn old shipments yellow). Entries recorded before per-delivery
+// pricing existed have no rate of their own and simply follow the job's rate; they are never yellow.
+function shipmentPricing(j, d) {
+  const jr = effectiveRate(j);
+  const jobTax = (j && j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? Number(j.tax_pct) : 18;
+  return {
+    rate: (d && d.rate !== null && d.rate !== undefined && d.rate !== '') ? Number(d.rate) : (jr ? jr.value : null),
+    tax: (d && d.tax_pct !== null && d.tax_pct !== undefined && d.tax_pct !== '') ? Number(d.tax_pct) : jobTax,
+    override: !!(d && d.rate_override === true),
+  };
+}
+const RATE_OVERRIDE_STYLE = 'color:#ca8a04;font-weight:700;';
 // Company Settings (NTN, Destination) — Supreme Art Finance only. Loaded
 // once at boot like Product Rate; refreshed after any add/edit/delete on
 // the Company Settings modal (see openCompanySettings, Jobs toolbar).
@@ -12942,10 +12956,6 @@ function buildSaleReportRows() {
     const issuedKg       = (packets > 0 && packKg !== null) ? packets * packKg : null;
     const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
-    const rEff = effectiveRate(j);
-    const rate = rEff ? rEff.value : null;
-    const rateLabel = rate !== null ? fmtRate(rate) : '';
-    const taxPct = (j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? Number(j.tax_pct) : 18;
     // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
     // array for a column means "no filter, show everything". Coatings is
     // the odd one out: a job carries SEVERAL coatings, so the picker lists
@@ -12959,7 +12969,6 @@ function buildSaleReportRows() {
     if (cf.machine.length  && !cf.machine.includes(machineVal))  continue;
     if (cf.plates.length   && !cf.plates.includes(platesVal))    continue;
     if (cf.colors.length   && !cf.colors.includes(colorsVal))    continue;
-    if (cf.rate.length     && !cf.rate.includes(rateLabel))     continue;
     if (cf.coatings.length) {
       const own = splitCoatings(j.coatings);
       if (!own.some(c => cf.coatings.includes(c))) continue;
@@ -12981,6 +12990,8 @@ function buildSaleReportRows() {
         if (bounds.from !== null && refMsOk < bounds.from) return;
         if (bounds.to   !== null && refMsOk > bounds.to)   return;
       }
+      const { rate, tax: taxPct, override: rateOverride } = shipmentPricing(j, d);
+      if (cf.rate.length && !cf.rate.includes(rate !== null ? fmtRate(rate) : '')) return;
       const cartons = parseFloat(d && d.cartons) || 0;
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
@@ -12994,7 +13005,7 @@ function buildSaleReportRows() {
         wastageSheets, wastagePackets, wastageKg, issuedKg, packUnit,
         machine: machineVal, coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
-        rate, taxPct, amountExTax, amountIncTax,
+        rate, taxPct, rateOverride, amountExTax, amountIncTax,
         destination: (cs && cs.destination) || '', ntn: (cs && cs.ntn) || '',
       });
     });
@@ -13065,8 +13076,8 @@ function saleReportColumnOptions(field) {
     } else if (field === 'colors') {
       val = String((j.particulars && j.particulars.no_of_colors && j.particulars.no_of_colors.quantity) || '').trim();
     } else if (field === 'rate') {
-      const r = effectiveRate(j);
-      val = r ? fmtRate(r.value) : '';
+      for (const d of j.deliveries) { const p = shipmentPricing(j, d); if (p.rate !== null) set.add(fmtRate(p.rate)); }
+      continue;
     }
     if (val) set.add(val);
   }
@@ -13250,10 +13261,10 @@ function renderSaleReport() {
     ? `<input type="text" value="${esc(value)}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, '${field}', this.value)" style="width:100%;min-width:${maxW}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
     : `<span title="${esc(value)}">${esc(value)}</span>`;
   const rateCell = r => canEditRate
-    ? `<input type="number" min="0" step="any" value="${r.rate !== null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveHistoryPricing(${r.id}, null, 'rate', this.value)" style="width:75px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;">`
+    ? `<input type="number" min="0" step="any" value="${r.rate !== null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'rate', this.value)" title="${r.rateOverride ? 'Differs from the product\'s standard rate' : ''}" style="width:75px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${r.rateOverride ? RATE_OVERRIDE_STYLE : ''}">`
     : (r.rate !== null ? fmtRate(r.rate) : '&mdash;');
   const taxCell = r => canEditRate
-    ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveHistoryPricing(${r.id}, null, 'tax', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;">`
+    ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'tax_pct', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;">`
     : `${fmt(r.taxPct)}%`;
   const ctx = { editCell, rateCell, taxCell };
   const cols = saleReportCols();
@@ -20962,9 +20973,12 @@ function deliveriesSectionFinance(j, opts) {
   // product's Rate really does apply to every new delivery by default
   // unless someone edits it here.
   const rEff = effectiveRate(j);
-  const rateFieldPrefill = (j.rate !== null && j.rate !== undefined && j.rate !== '')
-    ? j.rate
-    : (rEff ? rEff.value : '');
+  // A NEW delivery starts at the product's standard rate (the tile on the Product Rate tab); only when the product has
+  // none does it fall back to the job's own latest rate. Typing a different rate here marks that one shipment yellow.
+  const stdRate = productRateFor(j.name);
+  const rateFieldPrefill = stdRate !== null
+    ? stdRate
+    : ((j.rate !== null && j.rate !== undefined && j.rate !== '') ? j.rate : (rEff ? rEff.value : ''));
   const rateFieldPlaceholder = 'e.g. 12.50';
   const taxFieldPrefill = (j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? j.tax_pct : 18;
 
@@ -20999,6 +21013,8 @@ function deliveriesSectionFinance(j, opts) {
         const msi  = d.msi_no   || '';
         const nt   = deliveryChallanText(d);
         const by   = d.by       || '';
+        const sp   = shipmentPricing(j, d);
+        const rateStyle = sp.override ? RATE_OVERRIDE_STYLE : '';
         // Linked-delivery tag — this shipment was recorded via "Deliver
         // Linked Jobs" alongside the partner job, sharing this same
         // challan/invoice. Shows which job it rode with.
@@ -21023,11 +21039,11 @@ function deliveriesSectionFinance(j, opts) {
             ${isShadeCard ? '' : fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
             ${isShadeCard ? '' : fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
             ${isShadeCard ? '' : fieldBox('Rate / Carton', canEditEntries
-              ? `<input type="number" min="0" step="any" value="${esc(String(rateFieldPrefill))}" title="Job-level figure \u2014 editing it changes the rate for every shipment on this job." onchange="saveHistoryPricing(${j.id}, null, 'rate', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
-              : (rEff ? fmtRate(rEff.value) : '&mdash;'))}
+              ? `<input type="number" min="0" step="any" value="${sp.rate !== null ? esc(String(sp.rate)) : ''}" title="${sp.override ? 'Differs from the product\'s standard rate. ' : ''}This shipment's own rate \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'rate', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${rateStyle}">`
+              : (sp.rate !== null ? `<span style="${rateStyle}">${fmtRate(sp.rate)}</span>` : '&mdash;'))}
             ${isShadeCard ? '' : fieldBox('Sale Tax %', canEditEntries
-              ? `<input type="number" min="0" step="any" value="${esc(String(taxFieldPrefill))}" title="Job-level figure \u2014 editing it changes the tax for every shipment on this job." onchange="saveHistoryPricing(${j.id}, null, 'tax', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
-              : esc(String(taxFieldPrefill)) + '%')}
+              ? `<input type="number" min="0" step="any" value="${esc(String(sp.tax))}" title="This shipment's own sale tax \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'tax_pct', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+              : esc(String(sp.tax)) + '%')}
             ${fieldBox(isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.', isShadeCard ? `<span title="${esc(nt)}">${esc(nt)}</span>` : editCell(i, 'notes', nt))}
           </div>
         </div>`;
@@ -21101,7 +21117,7 @@ function deliveriesSectionFinance(j, opts) {
           </div>
           ${showPricingFields ? `<div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Rate / Carton</label>
-            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(rateFieldPrefill))}" placeholder="" title="Pre-filled from the job's own rate, or the Product Rate tab's rate for this product. Edit it to override just this job — leave blank to keep following the Product Rate tab's current rate on future deliveries." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(rateFieldPrefill))}" placeholder="" title="Pre-filled from the Product Rate tab's rate for this product. Type a different rate for just this delivery and it shows yellow in the history — the product's own rate and every other shipment stay as they are." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Sale Tax %</label>
@@ -21216,8 +21232,11 @@ function buildProductGroups() {
     g.jobs.push(j);
     const shipped = totalDeliveredCartons(j);
     g.cartons += shipped;
-    const r = effectiveRate(j);
-    if (r && shipped > 0) g.revenue += shipped * r.value;
+    for (const d of (Array.isArray(j.deliveries) ? j.deliveries : [])) {
+      const p = shipmentPricing(j, d);
+      const c = parseFloat(d && d.cartons) || 0;
+      if (p.rate !== null && c > 0) g.revenue += c * p.rate;
+    }
   }
   return [...groups.values()];
 }
@@ -21409,14 +21428,11 @@ function openProductHistoryModal(i) {
   const rows = [];
   for (const j of g.jobs) {
     const list = Array.isArray(j.deliveries) ? j.deliveries : [];
-    const r = effectiveRate(j);
-    const rate = r ? r.value : null;
-    const taxPct = (j.tax_pct !== null && j.tax_pct !== undefined && j.tax_pct !== '') ? Number(j.tax_pct) : 18;
-    const overridden = defaultRate !== null && rate !== null && Math.abs(rate - defaultRate) > 0.0001;
-    list.forEach(d => {
+    list.forEach((d, di) => {
+      const { rate, tax: taxPct, override: overridden } = shipmentPricing(j, d);
       const cartons = parseFloat(d && d.cartons) || 0;
       rows.push({
-        jobId: j.id, client: j.client || '', date: (d && d.date) || '',
+        jobId: j.id, di, client: j.client || '', date: (d && d.date) || '',
         po: (d && d.po_no) || '', fbr: (d && d.fbr_no) || '',
         invoice: deliveryChallanText(d), cartons, rate, taxPct, overridden,
       });
@@ -21426,10 +21442,10 @@ function openProductHistoryModal(i) {
   const body = rows.length ? rows.map(r => {
     const rateStyle = r.overridden ? 'color:#ca8a04;font-weight:700;' : '';
     const rateCell = canEdit
-      ? `<input type="number" min="0" step="any" value="${r.rate != null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onchange="saveHistoryPricing(${r.jobId}, '${esc(g.key)}', 'rate', this.value)" style="width:70px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;${rateStyle}">`
+      ? `<input type="number" min="0" step="any" value="${r.rate != null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onchange="saveDeliveryEntryField(${r.jobId}, ${r.di}, 'rate', this.value)" style="width:70px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;${rateStyle}">`
       : `<span style="${rateStyle}" title="${r.overridden ? 'Edited away from this product\'s standard rate (' + fmtRate(defaultRate) + ')' : ''}">${r.rate != null ? fmtRate(r.rate) : '&mdash;'}</span>`;
     const taxCell = canEdit
-      ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onchange="saveHistoryPricing(${r.jobId}, '${esc(g.key)}', 'tax', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">`
+      ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onchange="saveDeliveryEntryField(${r.jobId}, ${r.di}, 'tax_pct', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">`
       : `${esc(String(r.taxPct))}%`;
     return `<tr>
     <td style="padding:6px 8px;">${esc(r.date)}</td>
@@ -21446,7 +21462,7 @@ function openProductHistoryModal(i) {
   }).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No shipments recorded yet.</td></tr>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:960px;">
     <h2 style="margin:0 0 4px;">${esc(g.name)}</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Every shipment across every job with this product name.${defaultRate !== null ? ' <span style="color:#ca8a04;font-weight:700;">Yellow</span> rate = edited away from this product\'s standard rate.' : ''}${canEdit ? ' Rate/Sale Tax % are editable per job — a change applies to every shipment on that job.' : ''}</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Every shipment across every job with this product name.${defaultRate !== null ? ' <span style="color:#ca8a04;font-weight:700;">Yellow</span> rate = this shipment was priced differently from the product\'s standard rate when it was recorded.' : ''}${canEdit ? ' Rate/Sale Tax % are editable per shipment — a change applies to that shipment only.' : ''}</div>
     <div style="max-height:60vh;overflow:auto;">
     <table style="width:100%;border-collapse:collapse;font-size:12px;">
       <thead><tr style="background:#f3f4f6;">
@@ -21760,6 +21776,14 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
     const n = parseFloat(String(valueStr).replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(n) || n <= 0) { notify('Cartons must be a positive number'); render(); return; }
   }
+  if (field === 'rate' || field === 'tax_pct') {
+    const t = String(valueStr).trim();
+    const n = t === '' ? null : Number(t);
+    if ((n !== null && (!Number.isFinite(n) || n < 0)) || (field === 'tax_pct' && n === null)) { await alertDialog({ title: 'Enter a valid number', kind: 'warn' }); return; }
+  }
+  const histKey = (field === 'rate' || field === 'tax_pct') && document.getElementById('products-grid') && __productGroupsCache.length
+    ? (() => { const jb = jobs.find(x => x.id === jobId); return jb ? resolveProductKey(String(jb.name || '').trim()).key : null; })()
+    : null;
   showSaving(true);
   try {
     const updated = await api('PATCH', `/api/jobs/${jobId}/deliveries/${index}`, { field, value: valueStr });
@@ -21767,6 +21791,11 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
     if (ix >= 0) jobs[ix] = updated;
     notify('Saved');
     if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
+    if (histKey) {
+      renderProductsTab();
+      const idx = __productGroupsCache.findIndex(g => g.key === histKey);
+      if (idx >= 0) openProductHistoryModal(idx); else closeModal();
+    }
     if (document.getElementById('sr-content')) renderSaleReport();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
@@ -22573,8 +22602,9 @@ function openDeliverGroupModal(groupName) {
   const gName = jsStr(groupName);
   // Finance's invoicing fields (Cartons/Packets, E-FBR, MSI, Rate, Sale Tax) show only for holders of job_btn_pricing.
   const showPricing = hasPerm('job_btn_pricing', 'yes');
+  const firstStd = available.length ? productRateFor(available[0].j.name) : null;
   const firstEff = available.length ? effectiveRate(available[0].j) : null;
-  const ratePrefill = firstEff ? firstEff.value : '';
+  const ratePrefill = firstStd !== null ? firstStd : (firstEff ? firstEff.value : '');
   const taxPrefill = (available.length && available[0].j.tax_pct !== null && available[0].j.tax_pct !== undefined && available[0].j.tax_pct !== '') ? available[0].j.tax_pct : 18;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
     <h2 style="margin:0 0 4px;">&#128230; Deliver from Group</h2>

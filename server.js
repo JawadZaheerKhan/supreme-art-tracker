@@ -6222,7 +6222,42 @@ async function nextShadeCardDcNumber(sql) {
 // delivery endpoint and the Linked-Jobs joint delivery endpoint so the
 // two never drift out of sync (auto-advance-to-Delivered logic identical
 // in both places).
-function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail }) {
+// ── Per-delivery pricing ──────────────────────────────────────────
+// Every delivery entry carries its OWN rate / tax_pct, plus rate_override: true when that rate differed from the
+// product's standard rate (Product Rate tab) at the moment it was set. The flag is stored, not recomputed, so later
+// changing the product's standard rate never turns old shipments yellow, and a shipment that was priced away from the
+// standard stays flagged. jobs.rate / jobs.tax_pct now mean "the latest rate on this job".
+const RATE_EPS = 0.0001;
+async function productStandardRate(sql, jobName) {
+  const own = String(jobName || '').trim().toLowerCase();
+  if (!own) return null;
+  const al = await sql`SELECT canonical FROM finance.product_aliases WHERE alias = ${own}`;
+  const key = al.length ? String(al[0].canonical || '').trim().toLowerCase() : own;
+  const rows = await sql`SELECT rate FROM finance.product_rates WHERE lower(btrim(product)) = ${key}`;
+  return rows.length ? Number(rows[0].rate) : null;
+}
+function isRateOverride(rate, standard) {
+  return standard !== null && standard !== undefined && rate !== null && rate !== undefined && Math.abs(Number(rate) - Number(standard)) > RATE_EPS;
+}
+// Entries recorded before this change carry no rate of their own (they simply followed the job's rate). Before anything
+// can change the job's rate, pin them to it so the old shipments keep the price they were shipped at.
+function freezeLegacyDeliveryRates(list, job) {
+  const jr = (job.rate === null || job.rate === undefined) ? null : Number(job.rate);
+  const jt = (job.tax_pct === null || job.tax_pct === undefined) ? null : Number(job.tax_pct);
+  return (Array.isArray(list) ? list : []).map(e => (e && typeof e === 'object' && e.rate === undefined)
+    ? { ...e, rate: jr, tax_pct: jt, rate_override: false } : e);
+}
+// Rate / tax a NEW delivery starts with: what the person typed (pricing holders), else the product's standard rate,
+// else the job's current rate.
+async function deliveryPricing(sql, job, { hasPricing, rate, taxPct }) {
+  const standard = job.is_shade_card ? null : await productStandardRate(sql, job.name);
+  const jr = (job.rate === null || job.rate === undefined) ? null : Number(job.rate);
+  const jt = (job.tax_pct === null || job.tax_pct === undefined) ? null : Number(job.tax_pct);
+  const r = (hasPricing && rate !== null) ? rate : (standard !== null ? standard : jr);
+  const t = hasPricing ? taxPct : jt;
+  return { rate: r, taxPct: t, override: isRateOverride(r, standard) };
+}
+function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing }) {
   const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const priorTotal = sumDeliveryCartons(job.deliveries);
   const nextTotal  = priorTotal + cartonsN;
@@ -6237,7 +6272,8 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
     at: new Date().toISOString(),
     linked_job_id: linkedJobId || null,
   };
-  const deliveries = [...(Array.isArray(job.deliveries) ? job.deliveries : []), entry];
+  if (pricing) { entry.rate = pricing.rate; entry.tax_pct = pricing.taxPct; entry.rate_override = !!pricing.override; }
+  const deliveries = [...freezeLegacyDeliveryRates(job.deliveries, job), entry];
   // Stage/log timestamps reflect the delivery's OWN date (what the store
   // keeper picked, possibly backdated) rather than the instant this API
   // call happens to run — so Job History, "Day in production", and any
@@ -6352,7 +6388,7 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // request). Recording reality is the priority; the tile just shows
     // the running total against the booked qty for context.
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
-      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email });
+      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }) });
     const nextRate   = hasPricing ? rate   : job.rate;
     const nextTaxPct = hasPricing ? taxPct : job.tax_pct;
     const updated = await sql`
@@ -6630,6 +6666,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       const { job, allocate } = plan[i];
       const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
         cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, msiNo, byEmail,
+        pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }),
       });
       const nextRate = hasPricing ? rate   : job.rate;
       const nextTax  = hasPricing ? taxPct : job.tax_pct;
@@ -6685,10 +6722,12 @@ app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (
     if (!Number.isFinite(taxPct) || taxPct < 0) {
       return res.status(400).json({ error: 'Tax % must be a non-negative number.' });
     }
-    const rows = await sql`SELECT id, name, rate, tax_pct FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    const rows = await sql`SELECT id, name, rate, tax_pct, deliveries FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    // pin the old shipments to the price they had before the job's rate changes
+    const pinned = freezeLegacyDeliveryRates(rows[0].deliveries, rows[0]);
     const updated = await sql`
-      UPDATE jobs SET rate = ${rate}, tax_pct = ${taxPct}
+      UPDATE jobs SET rate = ${rate}, tax_pct = ${taxPct}, deliveries = ${JSON.stringify(pinned)}
        WHERE id = ${id}
        RETURNING *
     `;
@@ -7302,6 +7341,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
       batchNo: String(eA.batch_no ?? '').trim() || null,
       fbrNo: canSetPricing(req.user) ? (String(eA.fbr_no ?? '').trim() || null) : null,
       linkedJobId: partnerId, byEmail,
+      pricing: await deliveryPricing(sql, jobA, { hasPricing: false }),
     });
     const updB = computeDeliveryUpdate(jobB, {
       cartonsN: cartonsB, date, notes: challanNo,
@@ -7309,6 +7349,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
       batchNo: String(eB.batch_no ?? '').trim() || null,
       fbrNo: canSetPricing(req.user) ? (String(eB.fbr_no ?? '').trim() || null) : null,
       linkedJobId: id, byEmail,
+      pricing: await deliveryPricing(sql, jobB, { hasPricing: false }),
     });
     const [rowA] = await sql`
       UPDATE jobs SET deliveries=${JSON.stringify(updA.deliveries)}, delqty=${updA.delqty},
@@ -7408,6 +7449,39 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
     const job = rows[0];
     const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
     if (ix < 0 || ix >= list.length) return res.status(400).json({ error: 'Delivery index out of range' });
+    // Rate / Sale Tax belong to THIS shipment. Editing a rate re-checks it against the product's standard rate right now
+    // (that is what turns it yellow or clears it); editing the latest shipment also updates the job's current rate.
+    if (req.body?.field === 'rate' || req.body?.field === 'tax_pct') {
+      const which = req.body.field;
+      const raw = req.body.value;
+      const num = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
+      if (num !== null && (!Number.isFinite(num) || num < 0)) return res.status(400).json({ error: (which === 'rate' ? 'Rate' : 'Sale Tax %') + ' must be a non-negative number.' });
+      if (which === 'tax_pct' && num === null) return res.status(400).json({ error: 'Sale Tax % is required.' });
+      const frozen = freezeLegacyDeliveryRates(list, job);
+      const prev = frozen[ix];
+      const entry = { ...prev };
+      if (which === 'rate') {
+        entry.rate = num;
+        const standard = job.is_shade_card ? null : await productStandardRate(sql, job.name);
+        entry.rate_override = isRateOverride(num, standard);
+      } else {
+        entry.tax_pct = num;
+      }
+      frozen[ix] = entry;
+      const isLatest = ix === frozen.length - 1;
+      const nextRate = (which === 'rate' && isLatest) ? num : job.rate;
+      const nextTax  = (which === 'tax_pct' && isLatest) ? num : job.tax_pct;
+      const upd = await sql`
+        UPDATE jobs SET deliveries = ${JSON.stringify(frozen)}, rate = ${nextRate}, tax_pct = ${nextTax}
+         WHERE id = ${id} RETURNING *
+      `;
+      await logAudit(sql, req, {
+        action: 'job.delivery.edit', entityType: 'job', entityId: id,
+        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}`,
+        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override },
+      });
+      return res.json(upd[0]);
+    }
     const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons' };
     const field = FIELDS[req.body?.field];
     if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons' });
