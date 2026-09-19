@@ -6561,7 +6561,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { group_name, cartons: cartonsRaw, date, notes, po_no, batch_no, fbr_no } = req.body || {};
+    const { group_name, cartons: cartonsRaw, date, notes, po_no, batch_no, fbr_no, msi_no } = req.body || {};
     if (!group_name || !String(group_name).trim()) return res.status(400).json({ error: 'group_name required' });
     const totalCartons = parseFloat(String(cartonsRaw || '').replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(totalCartons) || totalCartons <= 0) return res.status(400).json({ error: 'cartons must be a positive number' });
@@ -6569,7 +6569,27 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     const poNo     = String(po_no    || '').trim() || null;
     const batchNo  = String(batch_no || '').trim() || null;
     const notesStr = String(notes    || '').trim() || null;
-    const fbrNo    = canSetPricing(req.user) ? (String(fbr_no   || '').trim() || null) : null;
+    const canPrice = canSetPricing(req.user);
+    const fbrNo    = canPrice ? (String(fbr_no   || '').trim() || null) : null;
+    const msiNo    = canPrice ? (String(msi_no   || '').trim() || null) : null;
+    // Rate / Sale Tax apply to every job this delivery touches (same as a single delivery). Only for
+    // holders of job_btn_pricing; for anyone else these are ignored and pricing is left alone.
+    const hasPricing = canPrice && (Object.prototype.hasOwnProperty.call(req.body, 'rate') || Object.prototype.hasOwnProperty.call(req.body, 'tax_pct'));
+    let rate = null, taxPct = null;
+    if (hasPricing) {
+      const rateRaw = req.body.rate;
+      rate = (rateRaw === null || rateRaw === undefined || rateRaw === '') ? null : Number(rateRaw);
+      if (rate !== null && (!Number.isFinite(rate) || rate < 0)) return res.status(400).json({ error: 'Rate must be a non-negative number.' });
+      taxPct = Number(req.body.tax_pct);
+      if (!Number.isFinite(taxPct) || taxPct < 0) return res.status(400).json({ error: 'Sale Tax % must be a non-negative number.' });
+    }
+    // Cartons/Packets is a per-job figure; for a group delivery the total typed in is split across
+    // the jobs in proportion to the unit cartons each one ships.
+    let cpTotal = null;
+    if (canPrice && req.body.cartons_packets !== undefined && String(req.body.cartons_packets).trim() !== '') {
+      cpTotal = Number(req.body.cartons_packets);
+      if (!Number.isFinite(cpTotal) || cpTotal < 0) return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
+    }
     const byEmail  = req.user?.email || 'unknown';
     const groupJobs = await sql`
       SELECT * FROM jobs
@@ -6578,6 +6598,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     if (!groupJobs.length) return res.status(404).json({ error: 'No jobs found in this group' });
     let remaining = totalCartons;
     const deliveriesMade = [];
+    const plan = [];
     for (const job of groupJobs) {
       if (remaining <= 0) break;
       if (deliveryEligibilityError(job)) continue;
@@ -6589,16 +6610,33 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       if (available <= 0) continue;
       const allocate = Math.min(available, remaining);
       remaining -= allocate;
+      plan.push({ job, allocate });
+    }
+    const fulfilledCartons = totalCartons - remaining;
+    let cpLeft = cpTotal;
+    for (let i = 0; i < plan.length; i++) {
+      const { job, allocate } = plan[i];
       const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
-        cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, byEmail,
+        cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, msiNo, byEmail,
       });
+      const nextRate = hasPricing ? rate   : job.rate;
+      const nextTax  = hasPricing ? taxPct : job.tax_pct;
+      let nextCp = job.cartons_packets;
+      if (cpTotal !== null) {
+        const share = i === plan.length - 1 ? cpLeft : Math.round(cpTotal * allocate / fulfilledCartons);
+        cpLeft -= share;
+        nextCp = share;
+      }
       await sql`
         UPDATE jobs
            SET deliveries  = ${JSON.stringify(deliveries)},
                delqty      = ${delqty},
                stage_index = ${stage_index},
                stages      = ${JSON.stringify(stages)},
-               log         = ${JSON.stringify(log)}
+               log         = ${JSON.stringify(log)},
+               rate        = ${nextRate},
+               tax_pct     = ${nextTax},
+               cartons_packets = ${nextCp}
          WHERE id = ${job.id}`;
       deliveriesMade.push({ job_id: job.id, cartons: allocate });
     }
