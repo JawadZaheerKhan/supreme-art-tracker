@@ -3947,6 +3947,11 @@ function pastedCartonsTotal(j) {
 function earlyReadyTotal(j) {
   return readyCartonsTotal(j) || pastedCartonsTotal(j);
 }
+// The "good output" figure wastage is measured against: QC's Ready qty, else Pasting's, and if neither
+// was ever entered (the job went out without that step), the quantity actually delivered.
+function wastageGoodQty(j) {
+  return earlyReadyTotal(j) || totalDeliveredCartons(j) || 0;
+}
 function isPartialReady(j) {
   if (!j) return false;
   const stage = j.stage_index || 0;
@@ -4190,16 +4195,13 @@ function jobDeliveredAnchorMs(j) {
 // so leaving a report (switching tabs, or a page reload) and coming back
 // doesn't reset whatever date range / search / sort was set. Wrapped in
 // try/catch since localStorage can throw (private browsing, quota, etc.).
+// A report's search / filters / sort live in its state object for as long as the page is open (switching tabs or
+// reports keeps them) and reset when the page is refreshed - so nothing is written to localStorage any more.
 function loadPersistedFilters(key, defaults) {
-  try {
-    const raw = localStorage.getItem('fin-filters-' + key);
-    if (!raw) return { ...defaults };
-    return { ...defaults, ...JSON.parse(raw) };
-  } catch (e) { return { ...defaults }; }
+  try { localStorage.removeItem('fin-filters-' + key); } catch (e) {}   // drop values saved by older versions
+  return { ...defaults };
 }
-function persistFilters(key, state) {
-  try { localStorage.setItem('fin-filters-' + key, JSON.stringify(state)); } catch (e) {}
-}
+function persistFilters(key, state) { /* in-memory only */ }
 function parseLocalDate(s) {
   if (!s) return null;
   const [y, m, d] = s.split('-').map(Number);
@@ -11777,7 +11779,7 @@ function printImports() {
 // q matches job number ("59" / "E-59") or job name.
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, sortBy: 'created', sortDir: 'asc' };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -11858,6 +11860,21 @@ function openJobsReport() {
         </select>
       </div>
       <div>
+        <div class="dash-flbl">Sort by</div>
+        <select class="filter" id="jr-sort-by" onchange="setJrSortBy(this.value)">
+          <option value="created"${jobsReportState.sortBy==='created'?' selected':''}>Created Date</option>
+          <option value="id"${jobsReportState.sortBy==='id'?' selected':''}>Job ID</option>
+          <option value="name"${jobsReportState.sortBy==='name'?' selected':''}>Job Name</option>
+          <option value="delivered"${jobsReportState.sortBy==='delivered'?' selected':''}>Delivered Date</option>
+          <option value="client"${jobsReportState.sortBy==='client'?' selected':''}>Company</option>
+          <option value="deliveredQty"${jobsReportState.sortBy==='deliveredQty'?' selected':''}>Delivered Qty</option>
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <button class="btn btn-sm" id="jr-sort-dir" onclick="toggleJrSortDir()" title="Toggle ascending/descending">${jobsReportState.sortDir === 'asc' ? '&#8593; Asc' : '&#8595; Desc'}</button>
+      </div>
+      <div>
         <div class="dash-flbl">&nbsp;</div>
         <label class="jr-mil-whole-toggle whole-toggle ${jobsReportState.milOnly?'is-on':''}">
           <input class="jr-mil-toggle-input" type="checkbox" id="jr-mil-only" ${jobsReportState.milOnly ? 'checked' : ''} onchange="setJrMilOnly(this.checked)">
@@ -11874,6 +11891,13 @@ function openJobsReport() {
     </div>
     <div id="jr-content" style="font-size:12px;"></div>
   `;
+  renderJobsReport();
+}
+function setJrSortBy(v) { jobsReportState.sortBy = v; renderJobsReport(); }
+function toggleJrSortDir() {
+  jobsReportState.sortDir = jobsReportState.sortDir === 'asc' ? 'desc' : 'asc';
+  const btn = document.getElementById('jr-sort-dir');
+  if (btn) btn.innerHTML = jobsReportState.sortDir === 'asc' ? '&#8593; Asc' : '&#8595; Desc';
   renderJobsReport();
 }
 function setJrDFrom(v)   { jobsReportState.dfrom = v;   jobsReportSel.clear(); renderJobsReport(); }
@@ -12087,7 +12111,7 @@ function buildJobsReportRows() {
     // what's actually ready to ship). Cartons still sitting in Ready but
     // not yet delivered are NOT wastage — they're tracked separately below.
     const cartonQtyNum = parseFloat(j.cartonqty);
-    const readyForWastage = earlyReadyTotal(j);
+    const readyForWastage = wastageGoodQty(j);
     const wastage = (Number.isFinite(cartonQtyNum) && readyForWastage > 0)
       ? (cartonQtyNum - readyForWastage)
       : null;
@@ -12308,14 +12332,30 @@ function buildJobsReportRows() {
       withMilMerge.push(r);
     }
   }
-  // Oldest first, newest last (by created_at ish — using the parsed
-  // timestamp). Rows with no parseable date sort to the very bottom
-  // either way — there's no sensible "old" or "new" for those.
+  // "Sort by" picker + Asc/Desc. Default is Created Date, oldest first. Rows with no comparable
+  // value (e.g. no parseable date) always sort to the bottom, whichever direction is chosen.
+  const jrDir = jobsReportState.sortDir === 'desc' ? -1 : 1;
+  const jrKey = (r) => {
+    switch (jobsReportState.sortBy) {
+      case 'id':           return r.id;
+      case 'name':         return String(r.name || '').toLowerCase();
+      case 'client':       return String(r.client || '').toLowerCase();
+      case 'deliveredQty': return parseFloat(String(r.deliveredQty).replace(/[^0-9.\-]/g, '')) || 0;
+      case 'delivered': {
+        const m = String(r.deliveredAt || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+        return m ? new Date(+m[3], +m[2] - 1, +m[1]).getTime() : null;
+      }
+      case 'created': default: return r.createdAtRaw ? +r.createdAtRaw : null;
+    }
+  };
   withMilMerge.sort((a, b) => {
-    if (!a.createdAtRaw && !b.createdAtRaw) return 0;
-    if (!a.createdAtRaw) return 1;
-    if (!b.createdAtRaw) return -1;
-    return a.createdAtRaw - b.createdAtRaw;
+    const ka = jrKey(a), kb = jrKey(b);
+    const aNil = ka === null || ka === undefined || ka === '', bNil = kb === null || kb === undefined || kb === '';
+    if (aNil && bNil) return 0;
+    if (aNil) return 1;
+    if (bNil) return -1;
+    if (typeof ka === 'string') return jrDir * ka.localeCompare(kb);
+    return jrDir * (ka - kb);
   });
   return withMilMerge;
 }
@@ -12627,6 +12667,7 @@ delete saleReportState.colFiltersSetAt; // from the earlier TTL approach, replac
 // only these per-column pickers reset. Called from exitReportsGroup() and
 // from setMode() when leaving the Reports tab.
 function srResetColFilters() {
+  return;   // column filters now stay until the page is refreshed (see loadPersistedFilters)
   const had = Object.values(saleReportState.colFilters).some(v => v && v.length);
   saleReportState.colFilters = { paper: [], cutting: [], ups: [], plates: [], colors: [], machine: [], coatings: [], rate: [] };
   if (had) _persistSr();
@@ -12814,7 +12855,7 @@ function buildSaleReportRows() {
       if (sheets && ps) packets = sheets / ps;
     }
     const cartonQtyNum = parseFloat(j.cartonqty);
-    const readyForWastage = earlyReadyTotal(j);
+    const readyForWastage = wastageGoodQty(j);
     const wastage = (Number.isFinite(cartonQtyNum) && readyForWastage > 0) ? (cartonQtyNum - readyForWastage) : null;
     const readyQty = Math.max(0, (readyCartonsTotal(j) || 0) - (totalDeliveredCartons(j) || 0));
     const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -13082,12 +13123,12 @@ function saleReportCols() {
     { key: 'coatings', label: 'Coatings', filter: 'coatings', cell: r => esc(r.coatings), xl: r => r.coatings, pr: r => esc(r.coatings) },
     { key: 'cartonsPackets', label: 'Cartons/Packets', right: true, total: 'cartonsPackets',
       cell: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;', xl: r => r.cartonsPackets > 0 ? r.cartonsPackets : '', pr: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : dash },
-    // Wastage and Ready share one cell: "10+300" - the green part is the Ready Qty (produced, not yet shipped).
+    // Wastage and Ready share one cell, kept as two numbers: "20 + 430" - the green one is the Ready Qty (produced, not yet shipped).
     { key: 'wastage', label: 'Wastage', right: true, total: 'wastage',
-      cell: r => (r.wastage === null ? '&mdash;' : fmt(r.wastage)) + (r.readyQty > 0 ? '<span style="color:#166534;font-weight:700;">+' + fmt(r.readyQty) + '</span>' : ''),
-      totalCell: t => fmt(t.wastage) + (t.readyQty > 0 ? '<span style="color:#166534;font-weight:700;">+' + fmt(t.readyQty) + '</span>' : ''),
-      xl: r => r.wastage === null ? (r.readyQty > 0 ? '+' + r.readyQty : '') : (r.readyQty > 0 ? r.wastage + '+' + r.readyQty : r.wastage),
-      pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? '<span style="color:#166534;font-weight:bold;">+' + fmt(r.readyQty) + '</span>' : '') },
+      cell: r => (r.wastage === null ? '&mdash;' : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
+      totalCell: t => fmt(t.wastage) + (t.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(t.readyQty) + '</span>' : ''),
+      xl: r => (r.wastage === null ? '' : r.wastage) + (r.readyQty > 0 ? ' + ' + r.readyQty : ''),
+      pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:bold;">' + fmt(r.readyQty) + '</span>' : '') },
     { key: 'wastageSheets', label: 'Wastage Sheets', right: true,
       cell: r => sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) + ' sheets &middot; ' + d1(t.wastagePackets) + ' pkts' : '', xl: r => sheetsText(r), pr: r => sheetsText(r) },
     { key: 'wastageKg', label: 'Wastage Weight (kg)', right: true,
@@ -13169,6 +13210,8 @@ function renderSaleReport() {
         return i === 0 ? `<td style="padding:8px 10px;white-space:nowrap;">Total &middot; ${rows.length} shipment${rows.length===1?'':'s'}</td>` : '<td></td>';
       }).join('')}</tr></tfoot>`
     : '';
+  const _wrapPrev = el.querySelector('.report-scroll-wrap');
+  const _keepL = _wrapPrev ? _wrapPrev.scrollLeft : 0, _keepT = _wrapPrev ? _wrapPrev.scrollTop : 0;
   el.innerHTML = `
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} shipment${rows.length===1?'':'s'} in window</div>
     <div class="report-scroll-wrap">
@@ -13178,6 +13221,9 @@ function renderSaleReport() {
       ${tfoot}
     </table>
     </div>`;
+  // Re-rendering (a header filter, a search, a sort) must not throw the table back to the far left.
+  const _wrapNew = el.querySelector('.report-scroll-wrap');
+  if (_wrapNew) { _wrapNew.scrollLeft = _keepL; _wrapNew.scrollTop = _keepT; }
 }
 // Export the Sale Report to .xlsx.
 async function exportSaleReport() {
@@ -20895,6 +20941,12 @@ function deliveriesSectionFinance(j, opts) {
             ${isShadeCard ? '' : fieldBox('Batch No.', editCell(i, 'batch_no', bat))}
             ${isShadeCard ? '' : fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
             ${isShadeCard ? '' : fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
+            ${isShadeCard ? '' : fieldBox('Rate / Carton', canEditEntries
+              ? `<input type="number" min="0" step="any" value="${esc(String(rateFieldPrefill))}" title="Job-level figure \u2014 editing it changes the rate for every shipment on this job." onchange="saveHistoryPricing(${j.id}, null, 'rate', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+              : (rEff ? fmtRate(rEff.value) : '&mdash;'))}
+            ${isShadeCard ? '' : fieldBox('Sale Tax %', canEditEntries
+              ? `<input type="number" min="0" step="any" value="${esc(String(taxFieldPrefill))}" title="Job-level figure \u2014 editing it changes the tax for every shipment on this job." onchange="saveHistoryPricing(${j.id}, null, 'tax', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+              : esc(String(taxFieldPrefill)) + '%')}
             ${fieldBox(isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.', isShadeCard ? `<span title="${esc(nt)}">${esc(nt)}</span>` : editCell(i, 'notes', nt))}
           </div>
         </div>`;
@@ -21354,6 +21406,7 @@ async function saveHistoryPricing(jobId, groupKey, field, valueStr) {
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     notify('Pricing updated');
+    if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
     if (document.getElementById('products-grid')) {
       renderProductsTab();
       const idx = __productGroupsCache.findIndex(g => g.key === groupKey);
