@@ -259,7 +259,13 @@ function getDb() {
 // grew from 7 to 24 groups — a DB already stamped with the first,
 // smaller version would otherwise hit the fast-path and never seed the
 // new groups' rows at all.
-const SCHEMA_VERSION = 'v2026-09-13-role-permissions-v2';
+// Bumped again to bring in Supreme Art Finance's features (Rate / Sale Tax /
+// Cartons-Packets on jobs, finance.product_rates / product_aliases /
+// company_settings) and to seed their new Access Register keys (job_btn_pricing,
+// rpt_sale_report*, products_*) — without the bump the fast-path skips the
+// defaults-fill loop and every one of those keys would sit at 'no' for every
+// role until someone edited them by hand.
+const SCHEMA_VERSION = 'v2026-09-19-finance-features';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -340,6 +346,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   // but lives under this Jobs block in the register per request since it's
   // job-related. Single row, not split into sub-buttons: view = can open
   // the tab and look, edit = can also print.
+  // Finance's invoicing fields on the job card — Rate, Sale Tax %, E-FBR No.,
+  // MSI No., Cartons/Packets, and editing an already-recorded delivery entry.
+  // Server-enforced (canSetPricing / requirePermission). Finance + CEO (view)
+  // by default; Super Admin always.
+  job_btn_pricing:         { label: 'Invoicing fields — Rate, Sale Tax, E-FBR No., MSI No., Cartons/Packets, and editing recorded delivery entries', levels: { finance: 'yes', ceo: 'view' } },
   job_btn_stickers:        { label: 'Stickers tab — open & print', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
   // Access Register — Inventory tab (Imports lives inside this same tab,
@@ -381,6 +392,12 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_daily_production_report:     { label: 'Daily Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_jobs_archive:                { label: 'Jobs Archive', levels: { admin: 'view', ceo: 'view' } },
   rpt_imports_archive:             { label: 'Imports Archive', levels: { admin: 'view', ceo: 'view' } },
+  // Sale Report — delivered jobs with full invoicing detail. Finance + CEO only
+  // by default (Super Admin always). The totals row (summed Rate w/o & w/ Sale
+  // Tax) is CEO-only by default; Finance can be granted it from the register.
+  rpt_sale_report:                 { label: 'Sale Report — full invoicing detail (Rate, Sale Tax, Company / Destination / NTN)', levels: { ceo: 'view', finance: 'view' } },
+  rpt_sale_report_totals:          { label: 'Sale Report — totals row at the bottom (summed Rate w/o & w/ Sale Tax)', levels: { ceo: 'view' } },
+  rpt_sale_report_company:         { label: 'Sale Report — Company Settings button (NTN / Destination per company)', levels: { finance: 'yes', ceo: 'view' } },
 
   // Access Register — Users tab. Same "not wired into any gate yet" note
   // applies — user_view/user_admin/operator_admin keep enforcing exactly
@@ -400,6 +417,13 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_btn_operators:              { label: 'Operators — also covers every button in Floor Operators (add, edit, remove)', levels: { admin: 'yes', production_manager: 'yes' } },
   user_activitylog_tab_access:     { label: 'Activity Log — view the site-wide activity feed', levels: { admin: 'view', ceo: 'view' } },
   user_accessregister_tab_access:  { label: 'Access Register — Super Admin only; always locked hidden for every other role', levels: {} },
+
+  // Access Register — Products tab (Product Rate). Merged in from the Finance
+  // app; all three are live gates (setMode / productTileHtml / the
+  // /api/product-rates and /api/product-aliases routes read them directly).
+  products_tab_access:  { label: 'Product Rate tab — view jobs grouped by product', levels: { ceo: 'view', finance: 'view' } },
+  products_btn_rate:    { label: 'Rate — edit a Product Rate tile\'s default Rate, and use its "+" (fold another product in)', levels: { finance: 'yes', ceo: 'view' } },
+  products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -1373,6 +1397,45 @@ async function initDb() {
       }
     }
 
+    // ── Finance features (merged in from the Supreme Art Finance app) ──
+    // Pricing lives on the job itself; the reference tables stay in the
+    // 'finance' schema, where the standalone Finance deployment already
+    // keeps its data, so both read and write the same rows. Everything is
+    // additive and idempotent. rate/tax_pct: price per carton and Sale Tax %
+    // (18 = Pakistan's standard rate). cartons_packets: finance-side override
+    // of the station's ready_packets_qty (NULL = use the station figure).
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rate    NUMERIC`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tax_pct NUMERIC NOT NULL DEFAULT 18`;
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cartons_packets NUMERIC`;
+    await sql`CREATE SCHEMA IF NOT EXISTS finance`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.product_rates (
+        id          SERIAL PRIMARY KEY,
+        product     TEXT NOT NULL UNIQUE,
+        rate        NUMERIC NOT NULL,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.company_settings (
+        id          SERIAL PRIMARY KEY,
+        company     TEXT NOT NULL UNIQUE,
+        ntn         TEXT,
+        destination TEXT,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.product_aliases (
+        alias       TEXT PRIMARY KEY,
+        canonical   TEXT NOT NULL,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -1582,6 +1645,21 @@ function requireDeliveryWriter(req, res, next) {
   if (!canRecordDelivery(req.user)) {
     return res.status(403).json({ error: 'Not allowed — delivery write access required' });
   }
+  next();
+}
+// Finance's invoicing fields (Rate, Sale Tax, E-FBR/MSI No., Cartons/Packets,
+// editing recorded delivery entries) sit behind their own Access Register row
+// (job_btn_pricing) rather than delivery_write, so Admin/PM can keep recording
+// deliveries without ever seeing or touching pricing.
+function canSetPricing(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'job_btn_pricing'); }
+// Read access to the pricing reference tables (Product Rate, aliases,
+// Company Settings): anyone who can see the Product Rate tab, the Sale
+// Report or the job-card pricing fields.
+function requireFinanceView(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  const ok = userHasRole(req.user, 'super_admin')
+    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing'].some(k => roleHasPermission(req.user, k, 'view'));
+  if (!ok) return res.status(403).json({ error: 'Not allowed' });
   next();
 }
 // Inventory + imports writes — admin or store_manager.
@@ -6086,7 +6164,7 @@ async function nextShadeCardDcNumber(sql) {
 // delivery endpoint and the Linked-Jobs joint delivery endpoint so the
 // two never drift out of sync (auto-advance-to-Delivered logic identical
 // in both places).
-function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, linkedJobId, byEmail }) {
+function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail }) {
   const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const priorTotal = sumDeliveryCartons(job.deliveries);
   const nextTotal  = priorTotal + cartonsN;
@@ -6095,6 +6173,8 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, link
     date, notes,
     po_no: poNo,
     batch_no: batchNo,
+    fbr_no: fbrNo || null,
+    msi_no: msiNo || null,
     by: byEmail || 'unknown',
     at: new Date().toISOString(),
     linked_job_id: linkedJobId || null,
@@ -6157,9 +6237,33 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     let notes     = String(req.body.notes   ?? '').trim() || null;
     const poNo    = String(req.body.po_no    ?? '').trim() || null;
     const batchNo = String(req.body.batch_no ?? '').trim() || null;
+    // E-FBR / MSI / Rate / Sale Tax are Finance's fields: only a holder of
+    // job_btn_pricing may set them, anyone else's values are ignored (not
+    // rejected — the delivery itself still records).
+    const canPrice = canSetPricing(req.user);
+    const fbrNo   = canPrice ? (String(req.body.fbr_no   ?? '').trim() || null) : null;
+    const msiNo   = canPrice ? (String(req.body.msi_no   ?? '').trim() || null) : null;
     const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
       return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
+    }
+    // Rate/tax_pct optionally ride along with the delivery (the client's
+    // Rate/Tax fields only render for a delivery_write holder — see
+    // showPricingFields in deliveriesSection). Both keys must be present
+    // together for pricing to be touched at all, so a manager-deliver-
+    // style caller that never sends them leaves rate/tax_pct untouched.
+    const hasPricing = canPrice && (Object.prototype.hasOwnProperty.call(req.body, 'rate') || Object.prototype.hasOwnProperty.call(req.body, 'tax_pct'));
+    let rate = null, taxPct = null;
+    if (hasPricing) {
+      const rateRaw = req.body.rate;
+      rate = (rateRaw === null || rateRaw === undefined || rateRaw === '') ? null : Number(rateRaw);
+      if (rate !== null && (!Number.isFinite(rate) || rate < 0)) {
+        return res.status(400).json({ error: 'Rate must be a non-negative number.' });
+      }
+      taxPct = Number(req.body.tax_pct);
+      if (!Number.isFinite(taxPct) || taxPct < 0) {
+        return res.status(400).json({ error: 'Sale Tax % must be a non-negative number.' });
+      }
     }
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -6184,14 +6288,18 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // request). Recording reality is the priority; the tile just shows
     // the running total against the booked qty for context.
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
-      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, byEmail: req.user?.email });
+      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email });
+    const nextRate   = hasPricing ? rate   : job.rate;
+    const nextTaxPct = hasPricing ? taxPct : job.tax_pct;
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
              delqty      = ${delqty},
              stage_index = ${stage_index},
              stages      = ${JSON.stringify(stages)},
-             log         = ${JSON.stringify(log)}
+             log         = ${JSON.stringify(log)},
+             rate        = ${nextRate},
+             tax_pct     = ${nextTaxPct}
        WHERE id = ${id}
        RETURNING *
     `;
@@ -6199,8 +6307,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
       action: 'job.delivery.add',
       entityType: 'job',
       entityId: id,
-      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
-      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
+      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
+      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -6401,7 +6509,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { group_name, cartons: cartonsRaw, date, notes, po_no, batch_no } = req.body || {};
+    const { group_name, cartons: cartonsRaw, date, notes, po_no, batch_no, fbr_no } = req.body || {};
     if (!group_name || !String(group_name).trim()) return res.status(400).json({ error: 'group_name required' });
     const totalCartons = parseFloat(String(cartonsRaw || '').replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(totalCartons) || totalCartons <= 0) return res.status(400).json({ error: 'cartons must be a positive number' });
@@ -6409,6 +6517,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     const poNo     = String(po_no    || '').trim() || null;
     const batchNo  = String(batch_no || '').trim() || null;
     const notesStr = String(notes    || '').trim() || null;
+    const fbrNo    = canSetPricing(req.user) ? (String(fbr_no   || '').trim() || null) : null;
     const byEmail  = req.user?.email || 'unknown';
     const groupJobs = await sql`
       SELECT * FROM jobs
@@ -6429,7 +6538,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       const allocate = Math.min(available, remaining);
       remaining -= allocate;
       const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
-        cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, byEmail,
+        cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, byEmail,
       });
       await sql`
         UPDATE jobs
@@ -6448,6 +6557,280 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       summary: `FIFO delivery from group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
     });
     res.json({ ok: true, deliveries_made: deliveriesMade, unfulfilled: remaining });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Pricing (Supreme Art Finance only) ──────────────────────────
+// Rate (price per unit carton) and Tax % on a job — set once, stays fixed
+// until whoever can record deliveries changes it (same model as everything
+// else on the job card). Uses requireDeliveryWriter, same capability that
+// already gates recording a delivery, rather than a brand-new permission
+// key — the Access Register has no row wired to any key this app actually
+// checks (job_write/job_delete/delivery_write included), so a new key
+// would be permanently ungrantable until that's fixed separately.
+app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rateRaw = req.body?.rate;
+    const taxRaw  = req.body?.tax_pct;
+    const rate = (rateRaw === null || rateRaw === undefined || rateRaw === '') ? null : Number(rateRaw);
+    if (rate !== null && (!Number.isFinite(rate) || rate < 0)) {
+      return res.status(400).json({ error: 'Rate must be a non-negative number.' });
+    }
+    const taxPct = Number(taxRaw);
+    if (!Number.isFinite(taxPct) || taxPct < 0) {
+      return res.status(400).json({ error: 'Tax % must be a non-negative number.' });
+    }
+    const rows = await sql`SELECT id, name, rate, tax_pct FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const updated = await sql`
+      UPDATE jobs SET rate = ${rate}, tax_pct = ${taxPct}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.pricing.update',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%`,
+      metadata: { rate, tax_pct: taxPct, prior_rate: rows[0].rate, prior_tax_pct: rows[0].tax_pct },
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Cartons/Packets override for one job — the figure shown next to Unit
+// Cartons on the Record Delivery form. Blank/empty clears the override so
+// the display falls back to the Pasting station's own ready_packets_qty.
+// Job-level (not per-delivery), same as Rate: one job, one figure.
+app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const raw = req.body?.cartons_packets;
+    const value = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) {
+      return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
+    }
+    const rows = await sql`SELECT id, cartons_packets FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const updated = await sql`
+      UPDATE jobs SET cartons_packets = ${value}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.cartons_packets.update',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} Cartons/Packets set to ${value === null ? '— (station figure)' : value}`,
+      metadata: { cartons_packets: value, prior: rows[0].cartons_packets },
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Product Rate table (Supreme Art Finance only) ────────────────
+// Hamza's own list of product → default rate. A job whose rate hasn't
+// been set yet suggests the matching product's rate (by job name, case-
+// insensitive) — see the client's productRateFor(). Editing a product's
+// rate here never touches a job that's already been priced.
+app.get('/api/product-rates', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM finance.product_rates ORDER BY product ASC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/product-rates', requirePermission('products_btn_rate'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const product = String(req.body?.product ?? '').trim();
+    const rate = Number(req.body?.rate);
+    if (!product) return res.status(400).json({ error: 'Product name is required.' });
+    if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Rate must be a non-negative number.' });
+    const existing = await sql`SELECT id FROM finance.product_rates WHERE lower(product) = lower(${product})`;
+    if (existing.length) return res.status(409).json({ error: `"${product}" already has a rate — edit it instead of adding a duplicate.` });
+    const inserted = await sql`
+      INSERT INTO finance.product_rates (product, rate, updated_by, updated_at)
+      VALUES (${product}, ${rate}, ${req.user.email}, NOW())
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'product_rate.create', entityType: 'product_rate', entityId: inserted[0].id,
+      summary: `Product Rate added: "${product}" = ${rate}`,
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/product-rates/:id', requirePermission('products_btn_rate'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const product = String(req.body?.product ?? '').trim();
+    const rate = Number(req.body?.rate);
+    if (!product) return res.status(400).json({ error: 'Product name is required.' });
+    if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Rate must be a non-negative number.' });
+    const dupe = await sql`SELECT id FROM finance.product_rates WHERE lower(product) = lower(${product}) AND id != ${id}`;
+    if (dupe.length) return res.status(409).json({ error: `"${product}" already has a rate on a different row.` });
+    const updated = await sql`
+      UPDATE finance.product_rates
+         SET product = ${product}, rate = ${rate}, updated_by = ${req.user.email}, updated_at = NOW()
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Product Rate row not found' });
+    await logAudit(sql, req, {
+      action: 'product_rate.update', entityType: 'product_rate', entityId: id,
+      summary: `Product Rate updated: "${product}" = ${rate}`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/product-rates/:id', requirePermission('products_btn_rate'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM finance.product_rates WHERE id = ${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Product Rate row not found' });
+    await logAudit(sql, req, {
+      action: 'product_rate.delete', entityType: 'product_rate', entityId: id,
+      summary: `Product Rate removed: "${deleted[0].product}"`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Product Aliases (Supreme Art Finance only) ────────────────────
+// Folds a differently-named job into an existing product tile (the
+// Product Rate tab's "+" button). `alias` is a normalized product name
+// (what its own jobs would otherwise group under); `canonical` is the
+// target tile's display name. buildProductGroups() and productRateFor()
+// on the client both resolve through this table first.
+app.get('/api/product-aliases', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM finance.product_aliases ORDER BY alias ASC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/product-aliases', requirePermission('products_btn_rate'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const alias     = String(req.body?.alias     ?? '').trim().toLowerCase();
+    const canonical = String(req.body?.canonical ?? '').trim();
+    if (!alias)     return res.status(400).json({ error: 'Alias product name is required.' });
+    if (!canonical) return res.status(400).json({ error: 'Target product name is required.' });
+    if (alias === canonical.trim().toLowerCase()) {
+      return res.status(400).json({ error: 'A product cannot alias itself.' });
+    }
+    const inserted = await sql`
+      INSERT INTO finance.product_aliases (alias, canonical, updated_by, updated_at)
+      VALUES (${alias}, ${canonical}, ${req.user.email}, NOW())
+      ON CONFLICT (alias) DO UPDATE SET canonical = EXCLUDED.canonical, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'product_alias.create', entityType: 'product_alias', entityId: alias,
+      summary: `Product Alias added: "${alias}" now folds into "${canonical}"`,
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/product-aliases/:alias', requirePermission('products_btn_rate'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const alias = String(req.params.alias || '').trim().toLowerCase();
+    const deleted = await sql`DELETE FROM finance.product_aliases WHERE alias = ${alias} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Product Alias not found' });
+    await logAudit(sql, req, {
+      action: 'product_alias.delete', entityType: 'product_alias', entityId: alias,
+      summary: `Product Alias removed: "${alias}" no longer folds into "${deleted[0].canonical}"`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Company Settings (Supreme Art Finance only) ───────────────────
+// NTN and Destination per company, matched against jobs.client on the
+// job card (companyInfoLine on the client) — same shape as Product Rate.
+app.get('/api/company-settings', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM finance.company_settings ORDER BY company ASC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/company-settings', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const company = String(req.body?.company ?? '').trim();
+    const ntn = String(req.body?.ntn ?? '').trim() || null;
+    const destination = String(req.body?.destination ?? '').trim() || null;
+    if (!company) return res.status(400).json({ error: 'Company name is required.' });
+    const existing = await sql`SELECT id FROM finance.company_settings WHERE lower(company) = lower(${company})`;
+    if (existing.length) return res.status(409).json({ error: `"${company}" already has settings — edit it instead of adding a duplicate.` });
+    const inserted = await sql`
+      INSERT INTO finance.company_settings (company, ntn, destination, updated_by, updated_at)
+      VALUES (${company}, ${ntn}, ${destination}, ${req.user.email}, NOW())
+      RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'company_settings.create', entityType: 'company_settings', entityId: inserted[0].id,
+      summary: `Company Settings added: "${company}"`,
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/company-settings/:id', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const company = String(req.body?.company ?? '').trim();
+    const ntn = String(req.body?.ntn ?? '').trim() || null;
+    const destination = String(req.body?.destination ?? '').trim() || null;
+    if (!company) return res.status(400).json({ error: 'Company name is required.' });
+    const dupe = await sql`SELECT id FROM finance.company_settings WHERE lower(company) = lower(${company}) AND id != ${id}`;
+    if (dupe.length) return res.status(409).json({ error: `"${company}" already has settings on a different row.` });
+    const updated = await sql`
+      UPDATE finance.company_settings
+         SET company = ${company}, ntn = ${ntn}, destination = ${destination}, updated_by = ${req.user.email}, updated_at = NOW()
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    if (!updated.length) return res.status(404).json({ error: 'Company Settings row not found' });
+    await logAudit(sql, req, {
+      action: 'company_settings.update', entityType: 'company_settings', entityId: id,
+      summary: `Company Settings updated: "${company}"`,
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/company-settings/:id', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM finance.company_settings WHERE id = ${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Company Settings row not found' });
+    await logAudit(sql, req, {
+      action: 'company_settings.delete', entityType: 'company_settings', entityId: id,
+      summary: `Company Settings removed: "${deleted[0].company}"`,
+    });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -6815,12 +7198,14 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
       cartonsN: cartonsA, date, notes: challanNo,
       poNo: String(eA.po_no ?? '').trim() || null,
       batchNo: String(eA.batch_no ?? '').trim() || null,
+      fbrNo: canSetPricing(req.user) ? (String(eA.fbr_no ?? '').trim() || null) : null,
       linkedJobId: partnerId, byEmail,
     });
     const updB = computeDeliveryUpdate(jobB, {
       cartonsN: cartonsB, date, notes: challanNo,
       poNo: String(eB.po_no ?? '').trim() || null,
       batchNo: String(eB.batch_no ?? '').trim() || null,
+      fbrNo: canSetPricing(req.user) ? (String(eB.fbr_no ?? '').trim() || null) : null,
       linkedJobId: id, byEmail,
     });
     const [rowA] = await sql`
@@ -6898,6 +7283,98 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('delivery_delete
       entityId: id,
       summary: `Removed delivery entry #${ix + 1} from Job E-${id}`,
       metadata: { removed, remaining_total: totalCartons },
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Edit one already-recorded delivery entry's reference fields — PO No.,
+// Batch No., E-FBR No., Invoice No., MSI No. — or, per Hamza's follow-up
+// request, the cartons figure itself. Editing cartons re-runs the same
+// delqty/stage-completion recompute computeDeliveryUpdate does on create
+// (and the DELETE route does on removal), since the entry's own cartons
+// value is what those derive from. Used by both the job card's Deliveries
+// ledger (inline-editable) and the Sale Report table.
+app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const ix = parseInt(req.params.index, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
+    if (ix < 0 || ix >= list.length) return res.status(400).json({ error: 'Delivery index out of range' });
+    const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons' };
+    const field = FIELDS[req.body?.field];
+    if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons' });
+    const before = list[ix];
+
+    if (field === 'cartons') {
+      const cartonsN = parseFloat(String(req.body?.value ?? '').replace(/[^0-9.\-]/g, ''));
+      if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
+        return res.status(400).json({ error: 'Cartons must be a positive number.' });
+      }
+      list[ix] = { ...before, cartons: String(cartonsN) };
+      const totalCartons = sumDeliveryCartons(list);
+      const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      const nowIso = new Date().toISOString();
+      const time   = businessStamp();
+      const by     = req.user?.email || 'unknown';
+      let stage_index = job.stage_index || 0;
+      let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+      let log = Array.isArray(job.log) ? [...job.log] : [];
+      // Same forward/back rules as computeDeliveryUpdate (create) and the
+      // DELETE route (remove) — an edit can cross the completion threshold
+      // in either direction, so both are handled here.
+      const deliveryComplete = bookedQty ? totalCartons >= bookedQty : totalCartons > 0;
+      if (deliveryComplete && stage_index < 7) {
+        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+        stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
+        stage_index = 7;
+      } else if (!deliveryComplete && stage_index === 7) {
+        stages[7] = { ...(stages[7] || {}), status: 'active' };
+        stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
+        delete stages[7];
+        stage_index = 6;
+      }
+      log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+        notes: `Delivery entry #${ix + 1} cartons edited: ${before.cartons || '0'} → ${cartonsN}`,
+        by: `${by} (${STAGES[stage_index] || '?'})`, time });
+      const updated = await sql`
+        UPDATE jobs
+           SET deliveries  = ${JSON.stringify(list)},
+               delqty      = ${totalCartons ? String(totalCartons) : null},
+               stage_index = ${stage_index},
+               stages      = ${JSON.stringify(stages)},
+               log         = ${JSON.stringify(log)}
+         WHERE id = ${id}
+         RETURNING *
+      `;
+      await logAudit(sql, req, {
+        action: 'job.delivery.edit',
+        entityType: 'job',
+        entityId: id,
+        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"`,
+        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN) },
+      });
+      return res.json(updated[0]);
+    }
+
+    const value = String(req.body?.value ?? '').trim() || null;
+    list[ix] = { ...before, [field]: value };
+    const updated = await sql`
+      UPDATE jobs SET deliveries = ${JSON.stringify(list)}
+       WHERE id = ${id}
+       RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'job.delivery.edit',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} delivery #${ix + 1}: ${field} "${before[field] || ''}" → "${value || ''}"`,
+      metadata: { index: ix, field, before: before[field] || null, after: value },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
