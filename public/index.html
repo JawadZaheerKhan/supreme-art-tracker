@@ -12611,11 +12611,11 @@ function printJobsReport() {
 // bulk-select/created-mode toggle. Gated by rpt_sale_report, same as
 // Company Settings and the Product Rate tab — this is the one report that
 // shows pricing.
-const saleReportState = loadPersistedFilters('sale-report', { client: '', dateRange: '', dfrom: '', dto: '', q: '', type: '', sortBy: 'id', sortDir: 'asc', poSearch: '', challanSearch: '', milOnly: false, colFilters: { paper: [], coatings: [], plates: [], colors: [], rate: [] } });
+const saleReportState = loadPersistedFilters('sale-report', { client: '', dateRange: '', dfrom: '', dto: '', q: '', type: '', sortBy: 'id', sortDir: 'asc', poSearch: '', challanSearch: '', milOnly: false, colFilters: { paper: [], cutting: [], ups: [], plates: [], colors: [], machine: [], coatings: [], rate: [] } });
 // Column filters always start empty, whatever an older saved state holds —
 // they're session-scoped by design (see srResetColFilters), so a reload is
 // as much a fresh start as walking out of the report and back in.
-saleReportState.colFilters = { paper: [], coatings: [], plates: [], colors: [], rate: [] };
+saleReportState.colFilters = { paper: [], cutting: [], ups: [], plates: [], colors: [], machine: [], coatings: [], rate: [] };
 delete saleReportState.colFiltersSetAt; // from the earlier TTL approach, replaced by the reset-on-exit above
 // Column filters are deliberately NOT persisted and do not survive leaving
 // the report — Hamza wants a clean slate every time he walks back in, so a
@@ -12625,7 +12625,7 @@ delete saleReportState.colFiltersSetAt; // from the earlier TTL approach, replac
 // from setMode() when leaving the Reports tab.
 function srResetColFilters() {
   const had = Object.values(saleReportState.colFilters).some(v => v && v.length);
-  saleReportState.colFilters = { paper: [], coatings: [], plates: [], colors: [], rate: [] };
+  saleReportState.colFilters = { paper: [], cutting: [], ups: [], plates: [], colors: [], machine: [], coatings: [], rate: [] };
   if (had) _persistSr();
 }
 
@@ -12823,6 +12823,19 @@ function buildSaleReportRows() {
     const part         = j.particulars || {};
     const platesVal    = String((part.plates && part.plates.quantity) || '').trim();
     const colorsVal    = String((part.no_of_colors && part.no_of_colors.quantity) || '').trim();
+    const cuttingVal   = String(part.cutting_size_gsm || '').trim();
+    const upsVal       = String(j.ups == null ? '' : j.ups).trim();
+    // Wastage (in UPS pieces) -> sheets -> packets -> kg. sheets = wastage / ups; packets = sheets / sheets-per-packet;
+    // kg = packets x one packet's weight (packWeightKg: cards size x gsm / 15500, papers / 3100 - same as Stock Summary).
+    // Packets Issued Weight = packets consumed x the same packet weight.
+    const ptype        = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
+    const upsNum       = parseFloat(j.ups);
+    const packKg       = packWeightKg(ptype, invItem ? invItem.size : j.size, invItem ? invItem.gsm : j.gsm);
+    const wastageSheets  = (wastage !== null && upsNum > 0) ? wastage / upsNum : null;
+    const wastagePackets = wastageSheets !== null ? wastageSheets / packetSize(ptype) : null;
+    const wastageKg      = (wastagePackets !== null && packKg !== null) ? wastagePackets * packKg : null;
+    const issuedKg       = (packets > 0 && packKg !== null) ? packets * packKg : null;
+    const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
     const rEff = effectiveRate(j);
     const rate = rEff ? rEff.value : null;
@@ -12836,6 +12849,9 @@ function buildSaleReportRows() {
     // "Spot UV, Lacquer, Emboss" string as one option.
     const cf = saleReportState.colFilters;
     if (cf.paper.length    && !cf.paper.includes(paper))        continue;
+    if (cf.cutting.length  && !cf.cutting.includes(cuttingVal))  continue;
+    if (cf.ups.length      && !cf.ups.includes(upsVal))          continue;
+    if (cf.machine.length  && !cf.machine.includes(machineVal))  continue;
     if (cf.plates.length   && !cf.plates.includes(platesVal))    continue;
     if (cf.colors.length   && !cf.colors.includes(colorsVal))    continue;
     if (cf.rate.length     && !cf.rate.includes(rateLabel))     continue;
@@ -12869,7 +12885,8 @@ function buildSaleReportRows() {
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         poQty: j.qty || '', cartonQty: j.cartonqty || '', cartons, cartonsPackets,
         wastage, readyQty, packets, paper,
-        cuttingSize: String(part.cutting_size_gsm || '').trim(), ups: String(j.ups == null ? '' : j.ups).trim(), plates: platesVal, colors: colorsVal,
+        cuttingSize: cuttingVal, ups: upsVal, plates: platesVal, colors: colorsVal,
+        wastageSheets, wastagePackets, wastageKg, issuedKg, packUnit,
         machine: machineVal, coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
         rate, taxPct, amountExTax, amountIncTax,
@@ -12932,6 +12949,12 @@ function saleReportColumnOptions(field) {
       val = invItem
         ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
         : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
+    } else if (field === 'cutting') {
+      val = String((j.particulars && j.particulars.cutting_size_gsm) || '').trim();
+    } else if (field === 'ups') {
+      val = String(j.ups == null ? '' : j.ups).trim();
+    } else if (field === 'machine') {
+      val = j.machine || '';
     } else if (field === 'plates') {
       val = String((j.particulars && j.particulars.plates && j.particulars.plates.quantity) || '').trim();
     } else if (field === 'colors') {
@@ -12944,7 +12967,7 @@ function saleReportColumnOptions(field) {
   }
   return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
-const SALE_REPORT_COL_LABELS = { paper: 'Paper Size GSM', coatings: 'Coatings', plates: 'Plates', colors: 'Colors', rate: 'Rate per UC' };
+const SALE_REPORT_COL_LABELS = { paper: 'Paper Size GSM', cutting: 'Cutting Size', ups: 'UPS', machine: 'Machine', coatings: 'Coatings', plates: 'Plates', colors: 'Colors', rate: 'Rate per UC' };
 // Small Excel-style filter triangle next to a header's text — always
 // green so the column reads as filterable at a glance, and bolder/darker
 // while a filter is actually on.
@@ -13024,12 +13047,17 @@ function srColFilterApply(field) {
 function saleReportCols() {
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const dash = '\u2014';
+  const d1 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  const d2 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  // "1,500 sheets \u00b7 15 packets" (reams for papers) - wastage in sheets and packets in one cell
+  const sheetsText = r => r.wastageSheets === null ? '' : d1(r.wastageSheets) + ' sheets \u00b7 ' + d1(r.wastagePackets) + ' ' + r.packUnit;
   return [
     { key: 'delivered', label: 'Delivery Date', cell: r => esc(r.deliveredAt), xl: r => r.deliveredAt, pr: r => esc(r.deliveredAt) },
     { key: 'invoice', label: 'Invoice No.', cell: (r, c) => c.editCell(r, 'notes', r.challan, 90), xl: r => r.challan || '', pr: r => esc(r.challan || '') },
     { key: 'msi', label: 'MSI No.', cell: (r, c) => c.editCell(r, 'msi_no', r.msiNo, 90), xl: r => r.msiNo || '', pr: r => esc(r.msiNo || '') },
     { key: 'job', label: 'Job Card No.', cell: r => esc(r.idDisplay), xl: r => r.idDisplay, pr: r => esc(r.idDisplay) },
     { key: 'po', label: 'PO No.', cell: (r, c) => c.editCell(r, 'po_no', r.poNo, 90), xl: r => r.poNo, pr: r => esc(r.poNo) },
+    { key: 'batch', label: 'Batch No.', cell: (r, c) => c.editCell(r, 'batch_no', r.batchNo, 80), xl: r => r.batchNo || '', pr: r => esc(r.batchNo || '') },
     { key: 'fbr', label: 'E-FBR Invoice No.', cell: (r, c) => c.editCell(r, 'fbr_no', r.fbrNo, 100), xl: r => r.fbrNo || '', pr: r => esc(r.fbrNo || '') },
     { key: 'name', label: 'Job Name',
       cell: r => esc(r.name) + (r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;">Shade Card</span>' : ''),
@@ -13039,19 +13067,29 @@ function saleReportCols() {
       xl: r => { let v = r.isShadeCard && r.cartons ? r.cartons + ' copies' : r.cartons; return r.isPartial ? v + ' (PARTIAL)' : v; },
       pr: r => '<span style="' + (r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '') + '">' + r.cartons.toLocaleString() + ((r.isShadeCard && r.cartons) ? ' copies' : '') + '</span>' },
     { key: 'paper', label: 'Paper Size GSM', filter: 'paper', cell: r => esc(r.paper), xl: r => r.paper, pr: r => esc(r.paper) },
-    { key: 'cutting', label: 'Cutting Size', cell: r => esc(r.cuttingSize), xl: r => r.cuttingSize, pr: r => esc(r.cuttingSize) },
+    { key: 'cutting', label: 'Cutting Size', filter: 'cutting', cell: r => esc(r.cuttingSize), xl: r => r.cuttingSize, pr: r => esc(r.cuttingSize) },
     { key: 'packets', label: 'Packets', right: true, total: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
-    { key: 'ups', label: 'UPS', right: true, cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
+    { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty', cell: r => esc(r.cartonQty), xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
     { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
     { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => r.plates, pr: r => esc(r.plates) },
     { key: 'colors', label: 'Colors', filter: 'colors', cell: r => esc(r.colors), xl: r => r.colors, pr: r => esc(r.colors) },
+    { key: 'machine', label: 'Machine', filter: 'machine', cell: r => esc(r.machine), xl: r => r.machine, pr: r => esc(r.machine) },
     { key: 'coatings', label: 'Coatings', filter: 'coatings', cell: r => esc(r.coatings), xl: r => r.coatings, pr: r => esc(r.coatings) },
     { key: 'cartonsPackets', label: 'Cartons/Packets', right: true, total: 'cartonsPackets',
       cell: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;', xl: r => r.cartonsPackets > 0 ? r.cartonsPackets : '', pr: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : dash },
-    { key: 'wastage', label: 'Wastage', right: true, total: 'wastage', cell: r => r.wastage === null ? '&mdash;' : fmt(r.wastage), xl: r => r.wastage === null ? '' : r.wastage, pr: r => r.wastage === null ? dash : fmt(r.wastage) },
-    { key: 'ready', label: 'Ready', right: true, total: 'readyQty',
-      cell: r => '<span style="font-weight:600;color:' + (r.readyQty > 0 ? '#166534' : 'var(--text2)') + ';">' + fmt(r.readyQty) + '</span>', xl: r => r.readyQty, pr: r => fmt(r.readyQty) },
+    // Wastage and Ready share one cell: "10+300" - the green part is the Ready Qty (produced, not yet shipped).
+    { key: 'wastage', label: 'Wastage', right: true, total: 'wastage',
+      cell: r => (r.wastage === null ? '&mdash;' : fmt(r.wastage)) + (r.readyQty > 0 ? '<span style="color:#166534;font-weight:700;">+' + fmt(r.readyQty) + '</span>' : ''),
+      totalCell: t => fmt(t.wastage) + (t.readyQty > 0 ? '<span style="color:#166534;font-weight:700;">+' + fmt(t.readyQty) + '</span>' : ''),
+      xl: r => r.wastage === null ? (r.readyQty > 0 ? '+' + r.readyQty : '') : (r.readyQty > 0 ? r.wastage + '+' + r.readyQty : r.wastage),
+      pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? '<span style="color:#166534;font-weight:bold;">+' + fmt(r.readyQty) + '</span>' : '') },
+    { key: 'wastageSheets', label: 'Wastage Sheets', right: true,
+      cell: r => sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) + ' sheets &middot; ' + d1(t.wastagePackets) + ' pkts' : '', xl: r => sheetsText(r), pr: r => sheetsText(r) },
+    { key: 'wastageKg', label: 'Wastage Weight (kg)', right: true,
+      cell: r => r.wastageKg === null ? '&mdash;' : d2(r.wastageKg), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : +r.wastageKg.toFixed(2), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
+    { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
+      cell: r => r.issuedKg === null ? '&mdash;' : d2(r.issuedKg), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : +r.issuedKg.toFixed(2), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
     { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => r.rate === null ? '' : r.rate, pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
     { key: 'exTax', label: 'Rate Excl. Tax', right: true, total: 'amountExTax', totalPrint: true,
       cell: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;', xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
@@ -13089,10 +13127,14 @@ function renderSaleReport() {
       wastage:        a.wastage        + once(r.wastage),
       readyQty:       a.readyQty       + once(+r.readyQty),
       packets:        a.packets        + once(+r.packets),
+      wastageSheets:  a.wastageSheets  + once(r.wastageSheets),
+      wastagePackets: a.wastagePackets + once(r.wastagePackets),
+      wastageKg:      a.wastageKg      + once(r.wastageKg),
+      issuedKg:       a.issuedKg       + once(r.issuedKg),
       amountExTax:    a.amountExTax    + (r.amountExTax  || 0),
       amountIncTax:   a.amountIncTax   + (r.amountIncTax || 0),
     };
-  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, amountExTax: 0, amountIncTax: 0 });
+  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, wastageSheets: 0, wastagePackets: 0, wastageKg: 0, issuedKg: 0, amountExTax: 0, amountIncTax: 0 });
   const canEditRate   = hasPerm('job_btn_pricing', 'yes');   // per-job Rate / Sale Tax cells, saved via /pricing
   const canEditFields = hasPerm('job_btn_pricing', 'yes');
   // Inline-editable reference-field cell — same PATCH route the job
@@ -13118,6 +13160,7 @@ function renderSaleReport() {
   const thead = cols.map(c => `<th ${c.right ? thR : th}>${c.filter ? saleReportColHeaderHtml(c.filter, c.label) : esc(c.label)}</th>`).join('');
   const tfoot = hasPerm('rpt_sale_report_totals', 'view')
     ? `<tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">${cols.map((c, i) => {
+        if (c.totalCell) return `<td style="padding:8px 10px;text-align:right;">${c.totalCell(totals)}</td>`;
         if (c.total) return `<td style="padding:8px 10px;text-align:right;">${c.total === 'amountExTax' || c.total === 'amountIncTax' ? fmtRate(totals[c.total]) : fmt(totals[c.total])}</td>`;
         return i === 0 ? `<td style="padding:8px 10px;white-space:nowrap;">Total &middot; ${rows.length} shipment${rows.length===1?'':'s'}</td>` : '<td></td>';
       }).join('')}</tr></tfoot>`
