@@ -1655,11 +1655,13 @@ function canSetPricing(user) { return userHasRole(user, 'super_admin') || roleHa
 // Read access to the pricing reference tables (Product Rate, aliases,
 // Company Settings): anyone who can see the Product Rate tab, the Sale
 // Report or the job-card pricing fields.
+function canSeeFinanceData(user) {
+  return userHasRole(user, 'super_admin')
+    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing'].some(k => roleHasPermission(user, k, 'view'));
+}
 function requireFinanceView(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
-  const ok = userHasRole(req.user, 'super_admin')
-    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing'].some(k => roleHasPermission(req.user, k, 'view'));
-  if (!ok) return res.status(403).json({ error: 'Not allowed' });
+  if (!canSeeFinanceData(req.user)) return res.status(403).json({ error: 'Not allowed' });
   next();
 }
 // Inventory + imports writes — admin or store_manager.
@@ -3718,6 +3720,12 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
           SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
           FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
           WHERE j.deleted_at IS NULL ORDER BY j.id ASC`;
+    // Pricing columns are Finance's: strip them from the list for every role that
+    // can't see the Product Rate tab / Sale Report / invoicing fields, so they
+    // never reach an Admin, PM or Operator browser even via the network tab.
+    if (!canSeeFinanceData(req.user)) {
+      for (const j of jobs) { delete j.rate; delete j.tax_pct; delete j.cartons_packets; }
+    }
     res.json(jobs);
   } catch (err) {
     console.error(err);
