@@ -10397,6 +10397,15 @@ function computeSummaryRows() {
     if (reversedIds.has(t.id)) return false; // this row WAS reversed
     return true;
   };
+  // The stock column is the balance at the END of the chosen period, not
+  // always today's. When the period has already ended (e.g. 1–31 Aug viewed
+  // in September) the live current_balance would include everything that
+  // happened after 31 Aug, so undo every change dated after the period's
+  // last day. A period that includes today has nothing after it to undo, so
+  // it stays exactly the live balance, as before.
+  const asOfPast = !!to && to < localDateISO();
+  const dayAfterTo = new Date(to + 'T00:00:00');
+  dayAfterTo.setDate(dayAfterTo.getDate() + 1);
   const rows  = items.map(it => {
     // Packet/ream size and weight are properties of the ITEM's own paper
     // type, not the (possibly empty, "All paper types") filter — matters
@@ -10428,7 +10437,9 @@ function computeSummaryRows() {
     });
     // Total Consumption — sum of OUT across buckets.
     const totalOutSheets = periods.reduce((a, p) => a + p.out, 0);
-    const stockNowSheets = it.current_balance || 0;
+    let laterSheets = 0;
+    if (asOfPast) for (const t of itemTxs) if (new Date(t.created_at) >= dayAfterTo) laterSheets += t.change;
+    const stockNowSheets = (it.current_balance || 0) - laterSheets;
     const wPerPack = packWeightKg(it.paper_type, it.size, it.gsm);
     // Pending imports for this item. Prefer the inventory_item_id the
     // server stored at import time (most reliable), and fall back to a
@@ -10468,7 +10479,9 @@ function computeSummaryRows() {
     // is real. We surface it as a small red dot next to Stock Now so the
     // user knows that number reflects a correction (or post-period activity).
     const lastBucketBalSheets = periods.length ? periods[periods.length - 1].balance : openingSheets;
-    const balDiffPkts = (stockNowSheets - lastBucketBalSheets) / ps;
+    // Past-date view: the "correction happened today" dot is about the live
+    // balance, so it has no meaning next to a historical figure.
+    const balDiffPkts = asOfPast ? 0 : (stockNowSheets - lastBucketBalSheets) / ps;
     return {
       item: it,
       unit: packetUnitLabel(it.paper_type),
@@ -10480,7 +10493,7 @@ function computeSummaryRows() {
       // Recent-correction flag: only show the red dot for items where the
       // adjustment happened within the last 24h. Beyond that the dot stops
       // being noisy reminder and stale rows revert to clean.
-      hasRecentCorr: hasRecentCorrection(it),
+      hasRecentCorr: asOfPast ? false : hasRecentCorrection(it),
       weightKg:       wPerPack === null ? null : stockNowPkts * wPerPack,
       pendingImportPkts: pendingPkts,
       afterImportPkts,
@@ -10517,7 +10530,21 @@ function computeSummaryRows() {
   // what's on the inventory item. We list these under the table so the user
   // can edit the import (or add the matching inventory item).
   const orphanImports = (imports || []).filter(im => !claimedImportIds.has(im.id));
-  return { rows: groupedRows, buckets, orphanImports };
+  return { rows: groupedRows, buckets, orphanImports, asOfPast };
+}
+
+// Header for the stock column: "Stock Now" while the period includes today,
+// "Stock on 31/08/2026" once the period has ended, so nobody mistakes a
+// month-end balance for today's.
+function summaryStockLabel(asOfPast) {
+  return asOfPast ? `Stock on ${fmtDMY(stockSummaryState.to)}` : 'Stock Now';
+}
+// Pending imports are only known as "still pending today", not as of a past
+// date — say so whenever the balance is historical.
+function summaryAsOfNote(asOfPast) {
+  return asOfPast
+    ? `Stock is as of ${fmtDMY(stockSummaryState.to)} · Pending Import shows orders still pending today`
+    : '';
 }
 
 // Collapse per-item rows into one row per (paper_type, gsm, size, is_offcut)
@@ -10663,7 +10690,7 @@ function fmtSignedKg(n) {
 function renderStockSummary() {
   const { paperType } = stockSummaryState;
   const isAll = !paperType;
-  const { rows, buckets, orphanImports } = computeSummaryRows();
+  const { rows, buckets, orphanImports, asOfPast } = computeSummaryRows();
   const el = document.getElementById('ss-content');
   if (!el) return;
   if (!rows.length) {
@@ -10711,7 +10738,7 @@ function renderStockSummary() {
   const scopeLabel = isAll ? 'All paper types' : esc(paperType);
   const unitLabel = isAll ? 'units vary by row' : `units: ${esc(packetUnitLabel(paperType).toLowerCase())}`;
   el.innerHTML = `
-    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${scopeLabel} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · ${unitLabel}</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${scopeLabel} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · ${unitLabel}${asOfPast ? ' · <b>' + esc(summaryAsOfNote(asOfPast)) + '</b>' : ''}</div>
     <div class="report-scroll-wrap">
     <table class="ledger-table" style="font-size:12px;min-width:max-content;">
       <thead>
@@ -10724,7 +10751,7 @@ function renderStockSummary() {
           <th rowspan="2">Opening</th>
           ${periodHeaders}
           <th rowspan="2">Total Out</th>
-          <th rowspan="2">Stock Now</th>
+          <th rowspan="2">${esc(summaryStockLabel(asOfPast))}</th>
           <th rowspan="2">Weight (kg)</th>
           <th rowspan="2">Pending Import</th>
           <th rowspan="2">After Import</th>
@@ -10761,7 +10788,7 @@ function renderStockSummary() {
 function printStockSummary() {
   const { paperType, from, to, granularity } = stockSummaryState;
   const isAll = !paperType;
-  const { rows, buckets } = computeSummaryRows();
+  const { rows, buckets, asOfPast } = computeSummaryRows();
   const periodHeaders = buckets.map(b =>
     `<th colspan="3" style="border:1px solid #000;padding:3px;text-align:center;background:#eee;">${esc(b.label)}</th>`).join('');
   const periodSubHeaders = buckets.map(() =>
@@ -10807,6 +10834,7 @@ function printStockSummary() {
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
           <div><b>From:</b> ${esc(from)} &nbsp; <b>To:</b> ${esc(to)}</div>
           <div><b>Group by:</b> ${granularity}${isAll ? '' : ` &nbsp; <b>Units:</b> ${esc(packetUnitLabel(paperType))}`}</div>
+          ${asOfPast ? `<div><b>${esc(summaryAsOfNote(asOfPast))}</b></div>` : ''}
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
@@ -10821,7 +10849,7 @@ function printStockSummary() {
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Opening</th>
           ${periodHeaders}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Out</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Stock Now</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">${esc(summaryStockLabel(asOfPast))}</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Weight (kg)</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Pending Import</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">After Import</th>
@@ -10850,7 +10878,7 @@ async function exportStockSummary() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const { paperType, from, to, granularity } = stockSummaryState;
   const isAll = !paperType;
-  const { rows, buckets } = computeSummaryRows();
+  const { rows, buckets, asOfPast } = computeSummaryRows();
   if (!rows.length) { notify('Nothing to export — no items in this view.'); return; }
   // Single-type view keeps the unit baked into each header label (e.g.
   // "Opening (Packets)") same as always; "All paper types" mixes packet-
@@ -10862,7 +10890,7 @@ async function exportStockSummary() {
   for (const b of buckets) {
     header.push(`${b.label} IN`, `${b.label} OUT`, `${b.label} Bal`);
   }
-  header.push(qty('Total Out'), qty('Stock Now'), 'Weight (kg)',
+  header.push(qty('Total Out'), qty(summaryStockLabel(asOfPast)), 'Weight (kg)',
               qty('Pending Import'), qty('After Import'), 'Import (kg)',
               qty('Status'), 'Status (kg)');
   const aoa = [header];
