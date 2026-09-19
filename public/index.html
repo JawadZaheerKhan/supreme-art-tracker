@@ -20795,13 +20795,13 @@ function deliveriesSectionFinance(j, opts) {
           </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(95px,1fr));gap:10px;">
             ${fieldBox(countLabel, editCell(i, 'cartons', ctns, { title: 'Editing this changes Delivered Qty / stage — recompute is automatic.' }))}
-            ${fieldBox('Cartons/Packets', canEditEntries
+            ${isShadeCard ? '' : fieldBox('Cartons/Packets', canEditEntries
               ? `<input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="&mdash;" title="Job-level figure — editing it here changes it for every shipment on this job. Clear the box to fall back to the Pasting station's own number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
               : (cartonsPackets > 0 ? `<b>${cartonsPackets.toLocaleString()}</b>` : '&mdash;'))}
             ${isShadeCard ? '' : fieldBox('PO No.', editCell(i, 'po_no', po))}
             ${isShadeCard ? '' : fieldBox('Batch No.', editCell(i, 'batch_no', bat))}
-            ${fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
-            ${fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
+            ${isShadeCard ? '' : fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
+            ${isShadeCard ? '' : fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
             ${fieldBox(isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.', isShadeCard ? `<span title="${esc(nt)}">${esc(nt)}</span>` : editCell(i, 'notes', nt))}
           </div>
         </div>`;
@@ -20830,47 +20830,52 @@ function deliveriesSectionFinance(j, opts) {
   // canAddDelivery via the shade-card carve-out alone, without that
   // permission, and previously only ever saw pricing as read-only text
   // (see pricingInfoLine below), never a live input. Keep it that way.
-  const showPricingFields = !managerMode && hasPerm('job_btn_pricing', 'yes');
+  // Shade cards are proofs, not invoiced orders: none of the invoicing fields apply to them.
+  const showPricingFields = !managerMode && !isShadeCard && hasPerm('job_btn_pricing', 'yes');
   const addForm = canAddDelivery
     ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;">
-        <div style="display:grid;grid-template-columns:${isShadeCard ? '1fr 1fr 1fr' : '1fr 1fr 1fr 1fr 1fr'};gap:8px;align-items:end;">
+        <div style="display:grid;grid-template-columns:${isShadeCard ? '1fr 1fr' : '1fr 1fr 1fr 1fr 1fr'};gap:8px;align-items:end;">
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${countLabel} *</label>
-            <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
+          ${isShadeCard ? '' : `
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
-            <input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="${readyPacketsQtyTotal(j) > 0 ? readyPacketsQtyTotal(j) : 'e.g. 76'}" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saves on its own; clear the box to go back to the station's number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+            <input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saves on its own; clear the box to go back to the station's number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
           </div>
+          `}
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
             <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           ${isShadeCard ? '' : `<div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
-            <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
-            <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>`}
         </div>
-        <div style="display:grid;grid-template-columns:${showPricingFields ? '1fr 1fr 1fr 0.8fr 0.7fr auto' : '1fr 1fr 1fr auto'};gap:8px;align-items:end;margin-top:8px;">
+        <div style="display:grid;grid-template-columns:${isShadeCard ? '1fr auto' : (showPricingFields ? '1fr 1fr 1fr 0.8fr 0.7fr auto' : '1fr 1fr 1fr auto')};gap:8px;align-items:end;margin-top:8px;">
+          ${isShadeCard ? '' : `
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">E-FBR No.</label>
-            <input type="text" id="deliv-fbr" placeholder="e.g. 12345678901234" title="FBR electronic sales tax invoice number for this shipment." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-fbr" placeholder="" title="FBR electronic sales tax invoice number for this shipment." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">MSI No.</label>
-            <input type="text" id="deliv-msi" placeholder="e.g. MSI-042" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-msi" placeholder="" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
+          `}
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
-            <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
+            <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : ''}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
           </div>
           ${showPricingFields ? `<div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Rate / Carton</label>
-            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(rateFieldPrefill))}" placeholder="${esc(rateFieldPlaceholder)}" title="Pre-filled from the job's own rate, or the Product Rate tab's rate for this product. Edit it to override just this job — leave blank to keep following the Product Rate tab's current rate on future deliveries." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(rateFieldPrefill))}" placeholder="" title="Pre-filled from the job's own rate, or the Product Rate tab's rate for this product. Edit it to override just this job — leave blank to keep following the Product Rate tab's current rate on future deliveries." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Sale Tax %</label>
@@ -20895,7 +20900,7 @@ function deliveriesSectionFinance(j, opts) {
       ${statusPill}
     </div>
     <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
-    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${pricingText}</div>
+    ${isShadeCard ? '' : `<div style="font-size:12px;color:var(--text);margin-bottom:8px;">${pricingText}</div>`}
     <div>${rows}</div>
     ${addForm}
     ${companyInfoLine(j)}
