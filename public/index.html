@@ -4444,7 +4444,7 @@ function canWriteInventory() { return isSuperAdmin() || hasPerm('inventory_write
 // the Access Register changes real access before it changes what the
 // Station UI visually dims. Fails safe (server still rejects), just not
 // visually perfect yet.
-function canRunStation()     { return isSuperAdmin() || hasPerm('station_access'); }
+function canRunStation()     { return isSuperAdmin() || hasPerm('station_access', 'view'); }
 // Mirrors server's canProcessStation(user) — not yet wired into Station's
 // own CSS dimming (see the note on canRunStation above), but available for
 // any write-path that wants to ask "can I actually process, not just view."
@@ -4707,6 +4707,27 @@ function ensureRoleBlockMessages() {
     el.insertBefore(msg, el.firstChild);
   }
 }
+// Top-bar tabs and the Access Register row that governs each. A tab the user
+// isn't allowed is HIDDEN outright (not greyed out) and can't be reached via
+// setMode() either. Super Admin always sees everything, so the register itself
+// can never lock the owner out.
+function tabAllowed(m) {
+  if (isSuperAdmin()) return true;
+  switch (m) {
+    case 'jobs':        return hasPerm('job_tab_access', 'view');
+    case 'products':    return hasPerm('products_tab_access', 'view');
+    case 'inventory':   return hasPerm('inventory_tab_access', 'view');
+    case 'reports':     return hasPerm('reports_tab_access', 'view');
+    case 'stickers':    return hasPerm('job_btn_stickers', 'view');
+    case 'station':     return hasPerm('station_access', 'view');
+    case 'forms':       return hasPerm('forms_print', 'view');
+    case 'users':       return hasPerm('user_tab_access', 'view');
+    case 'client-view': return hasPerm('client_view_preview', 'view');
+    default:            return true;
+  }
+}
+const TAB_ORDER = ['jobs', 'products', 'inventory', 'reports', 'stickers', 'station', 'forms', 'users', 'client-view'];
+function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
   if (!currentUser) { chip.style.display = 'none'; return; }
@@ -4716,35 +4737,27 @@ function renderUserChip() {
   const pic = document.getElementById('user-pic');
   if (currentUser.picture) { pic.src = currentUser.picture; pic.style.display = 'block'; }
   else { pic.style.display = 'none'; }
-  // Tab gating by role. All tabs stay VISIBLE so everyone sees the full
-  // list — disallowed tabs are just locked (greyed + non-clickable) so
-  // people without permission can see the app's shape without entering.
-  const lockTab = (id, allowed) => {
+  // Tab gating: each top-bar tab follows its Access Register row (see tabAllowed).
+  // Not allowed = hidden, so "Hidden" in the register really means hidden.
+  const showTab = (id, m) => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.disabled = !allowed;
-    el.classList.toggle('mode-btn-locked', !allowed);
-    if (!allowed) el.title = 'Not allowed for your role';
-    else el.removeAttribute('title');
+    el.disabled = false;
+    el.classList.remove('mode-btn-locked');
+    el.removeAttribute('title');
+    el.style.display = tabAllowed(m) ? '' : 'none';
   };
-  // Operators get Station (default) + Jobs (read-only). Store Manager
-  // skips Station/Forms. Production Manager + Admin + CEO see everything
-  // (CEO is read-only via the .role-ceo body class below).
+  showTab('mode-jobs-btn', 'jobs');
+  showTab('mode-products-btn', 'products');
+  showTab('mode-inventory-btn', 'inventory');
+  showTab('mode-reports-btn', 'reports');
+  showTab('mode-stickers-btn', 'stickers');
+  showTab('mode-station-btn', 'station');
+  showTab('mode-forms-btn', 'forms');
+  showTab('mode-users-btn', 'users');
+  showTab('mode-client-view-btn', 'client-view');
+  if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   const op = isOperator(), sm = isStoreManager(), fin = isFinance();
-  lockTab('mode-jobs-btn',      true);
-  lockTab('mode-inventory-btn', !op);
-  lockTab('mode-reports-btn',   !op);
-  // Finance keeps every tab clickable — the blocked ones render a
-  // .role-block-msg overlay instead of the real content (see CSS above).
-  lockTab('mode-stickers-btn',  fin || hasPerm('stickers_print', 'view'));
-  lockTab('mode-station-btn',   fin || canRunStation());
-  lockTab('mode-forms-btn',     fin || hasPerm('forms_print', 'view'));
-  // Users tab — open to whoever can see the Authorized Users list
-  // (user_view) or manage Floor Operators (operator_admin — other
-  // sections tagged .pm-hide), and finance (sees the block-msg placeholder).
-  lockTab('mode-users-btn',     fin || hasPerm('user_view', 'view') || hasPerm('operator_admin'));
-  // Client View — preview access; finance sees the block-msg placeholder.
-  lockTab('mode-client-view-btn', fin || hasPerm('client_view_preview', 'view'));
   // Trash card — gated by trash_view (default admin/ceo, was previously
   // just "anyone who isn't an operator," which let PM/Store Manager/
   // Finance see it too even though the server never actually allowed
@@ -5081,8 +5094,8 @@ function setMode(m) {
   // a server-side reject on station-update for the ceo role). Finance
   // may enter to see the role-block-msg placeholder.
   if (m === 'station' && !canRunStation() && !isFinance()) m = 'jobs';
-  // Product Rate tab: its own Access Register row (products_tab_access).
-  if (m === 'products' && !hasPerm('products_tab_access', 'view')) m = 'jobs';
+  // Every tab follows its Access Register row; a hidden one can't be entered.
+  if (!tabAllowed(m)) m = firstAllowedTab();
   // Leaving Reports clears the Sale Report's per-column filters (session-scoped).
   if (mode === 'reports' && m !== 'reports') srResetColFilters();
   mode = m;
@@ -28340,6 +28353,10 @@ const ACC_PRODUCTS_TAB_ROWS = [
   { key: 'products_btn_rate',    type: 'button' },
   { key: 'products_btn_revenue', type: 'button' },
 ];
+// Station tab: one View/Hidden row for the whole tab.
+const ACC_STATION_TAB_ROWS = [
+  { key: 'station_access', type: 'tab' },
+];
 // Users tab. user_accessregister_tab_access is special-cased in
 // accGroupRow: every role except super_admin renders as a locked HIDDEN
 // cell for that one row, no matter what's saved — the Access Register
@@ -28361,7 +28378,7 @@ const ACC_USERS_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS };
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
@@ -28373,7 +28390,7 @@ function setAccRegTab(tab) {
 }
 
 const ACC_LEVEL_LABEL = { yes: 'EDIT', view: 'VIEW', hidden: 'HIDDEN', no: 'HIDDEN', '30-day': '30-DAY' };
-function nextAccLevelTab(current)    { return current === 'view' ? 'hidden' : 'view'; }
+function nextAccLevelTab(current)    { return (current === 'view' || current === 'yes') ? 'hidden' : 'view'; }
 function nextAccLevelButton(current) {
   const order = ['yes', 'view', 'hidden'];
   const idx = order.indexOf(current);
@@ -28437,7 +28454,8 @@ function accGroupRow(matrixData, key, rowType) {
     if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">${rowType === 'tab' ? 'VIEW' : 'EDIT'}</td>`;
     if (role === 'client') return `<td class="acc-cell deny locked" title="Client is not part of this system — see the Client View portal's own separate access">HIDDEN</td>`;
     if (ACC_SUPER_ADMIN_ONLY_ROWS.has(key)) return `<td class="acc-cell deny locked" title="Access Register is Super Admin only — this can't be changed">HIDDEN</td>`;
-    const level = group[role] || 'hidden';
+    let level = group[role] || 'hidden';
+    if (rowType === 'tab' && level === 'yes') level = 'view';   // older 'yes' rows (e.g. station_access) mean the tab is visible
     return `<td class="acc-cell ${cellClass(level)} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
   });
   return `<tr class="acc-group-row"><th class="acc-rowlabel">${label}</th>${cells.join('')}</tr>`;
