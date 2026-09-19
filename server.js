@@ -268,7 +268,8 @@ function getDb() {
 // Bumped again when the per-button Access Register rows became the live gates: seeds View on the
 // job card (job_btn_edit / job_btn_history) for CEO, Finance, Store Manager and Operator so they
 // keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
-const SCHEMA_VERSION = 'v2026-09-19-register-wired';
+// Bumped again to seed the Forms tab rows (forms_tab_access / forms_btn_transfer_note) from the old forms_print defaults.
+const SCHEMA_VERSION = 'v2026-09-19-forms-rows';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -423,6 +424,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_btn_invite:                 { label: 'Invite User button', levels: { admin: 'yes' } },
   user_btn_operators:              { label: 'Operators — also covers every button in Floor Operators (add, edit, remove)', levels: { admin: 'yes', production_manager: 'yes' } },
   user_activitylog_tab_access:     { label: 'Activity Log — view the site-wide activity feed', levels: { admin: 'view', ceo: 'view' } },
+  // Access Register - Forms tab. Both are live gates: the tab follows forms_tab_access (tabAllowed in the client), the
+  // Transfer Note card and its Save / Print buttons follow forms_btn_transfer_note, and POST /api/transfer-notes checks it
+  // (Edit needed). Defaults match the old forms_print group, which nothing reads any more.
+  forms_tab_access:                { label: 'Forms tab — view the Forms page', levels: { admin: 'view', production_manager: 'view', ceo: 'view', finance: 'view' } },
+  forms_btn_transfer_note:         { label: 'Transfer Note — open the form; Edit also lets them save and print a transfer note', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes', finance: 'yes' } },
   user_accessregister_tab_access:  { label: 'Access Register — Super Admin only; always locked hidden for every other role', levels: {} },
 
   // Access Register — Products tab (Product Rate). Merged in from the Finance
@@ -9786,7 +9792,7 @@ app.get('/api/transfer-notes/:id', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/transfer-notes', requirePermission('forms_print'), async (req, res) => {
+app.post('/api/transfer-notes', requirePermission('forms_btn_transfer_note'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
