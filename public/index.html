@@ -2870,7 +2870,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div class="toolbar">
     <div class="tabs" id="tabs-wrap"></div>
     <div class="search-wrap">
-      <input type="text" id="search-input" placeholder="Search job, client, or ID..." oninput="setFilter(this.value)">
+      <input type="text" id="search-input" placeholder="Search job, client, or ID..." oninput="setFilterDebounced(this.value)">
       <span class="search-icon">&#128269;</span>
     </div>
     <div class="jobs-filter-row">
@@ -2883,7 +2883,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <button id="shade-card-toggle" class="whole-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
         <span class="whole-toggle-text">&#127912; <span id="shade-card-toggle-label">Shade Cards</span></span>
       </button>
-      <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilter(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
+      <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilterDebounced(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
     </div>
     <div class="jobs-filter-row">
       <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)"><option value="">All stages</option></select>
@@ -5525,16 +5525,28 @@ function renderTabs() {
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
   const cf = document.getElementById('client-filter');
   const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
-  cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
+  const clientsKey = clients.join('\x00') + '\x01' + filterClient;
+  if (cf.dataset.ck !== clientsKey) {
+    cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
+    cf.dataset.ck = clientsKey;
+  }
   const mf = document.getElementById('machine-filter');
   if (mf) {
     const machines = [...new Set(jobs.map(j => j.machine).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    mf.innerHTML = `<option value="">All machines</option>` + machines.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
+    const machinesKey = machines.join('\x00') + '\x01' + filterMachine;
+    if (mf.dataset.ck !== machinesKey) {
+      mf.innerHTML = `<option value="">All machines</option>` + machines.map(m => `<option value="${esc(m)}" ${filterMachine===m?'selected':''}>${esc(m)}</option>`).join('');
+      mf.dataset.ck = machinesKey;
+    }
   }
   const gfl = document.getElementById('group-filter');
   if (gfl) {
     const groups = [...new Set(jobs.filter(j => j && j.stock_group_name).map(j => j.stock_group_name))].sort((a,b)=>a.localeCompare(b));
-    gfl.innerHTML = `<option value="">All groups</option>` + groups.map(g => `<option value="${esc(g)}" ${filterGroup===g?'selected':''}>${esc(g)}</option>`).join('');
+    const groupsKey = groups.join('\x00') + '\x01' + filterGroup;
+    if (gfl.dataset.ck !== groupsKey) {
+      gfl.innerHTML = `<option value="">All groups</option>` + groups.map(g => `<option value="${esc(g)}" ${filterGroup===g?'selected':''}>${esc(g)}</option>`).join('');
+      gfl.dataset.ck = groupsKey;
+    }
   }
 }
 
@@ -6971,7 +6983,8 @@ function setView(v) {
   // send stale ids that are no longer on screen.
   if (v !== 'new' && v !== 'ctp' && selectedNewJobIds.size) selectedNewJobIds.clear();
   if (v !== 'finalized' && selectedFinalizedJobIds.size) selectedFinalizedJobIds.clear();
-  view=v; render();
+  // Stats don't change on a tab switch — skip renderStats() for snappier response.
+  view=v; renderTabs(); renderJobs();
   // _manualPaperKeys (drives the Adjust button's bright/dim state) only
   // updates when loadWastageAdjData() runs — refresh it on entry to Delivered
   // /Finalized so newly-issued manual consumption is reflected without
@@ -7036,6 +7049,10 @@ function setPOFilter(v) {
   }
   renderJobs();
 }
+let _sfTimer = null, _poTimer = null;
+function setFilterDebounced(v)   { clearTimeout(_sfTimer);  _sfTimer  = setTimeout(() => setFilter(v),   120); }
+function setPOFilterDebounced(v) { clearTimeout(_poTimer);  _poTimer  = setTimeout(() => setPOFilter(v), 120); }
+
 // Shade Cards toggle: '' = show everything, 'only' = show shade-card jobs.
 // The dedicated toggle button in the toolbar drives this — one click ON,
 // second click OFF, mirroring the Pending Stock button in inventory.
