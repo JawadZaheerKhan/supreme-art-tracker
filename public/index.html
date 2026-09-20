@@ -6991,17 +6991,22 @@ function setClientFilter(v) { filterClient=v; renderJobs(); }
 function setMachineFilter(v) { filterMachine=v; renderJobs(); }
 function setPOFilter(v) {
   filterPO = v;
-  // Smart PO search: if searching for a PO, find that job across all stages and auto-switch to its stage
+  // Smart PO search: find that job across all stages and auto-switch the tab
   if (v && jobs.length) {
     const poLower = String(v).trim().toLowerCase();
-    const found = jobs.find(j => {
-      const poStr = String(j.ref || '').toLowerCase();
-      return poStr.includes(poLower);
-    });
+    const found = jobs.find(j => String(j.ref || '').toLowerCase().includes(poLower));
     if (found) {
-      // Auto-switch to the stage of the found job
-      const jobStage = STAGES[found.stage_index || 0];
-      if (jobStage) filterStage = jobStage;
+      // Map the job to its correct tab view id
+      let targetView = 'all';
+      if (isNewJob(found))               targetView = 'new';
+      else if (isCtpQueue(found))        targetView = 'ctp';
+      else if (found.issuance_status === 'pending') targetView = 'pending';
+      else if (isDone(found))            targetView = 'done';
+      else if (isBlocked(found))         targetView = 'blocked';
+      else if (isStorage(found))         targetView = 'storage';
+      else if (isPartialDelivery(found) && (found.stage_index || 0) >= 6) targetView = 'partial';
+      else                               targetView = 'active';
+      view = targetView;
     }
   }
   renderJobs();
