@@ -3460,25 +3460,6 @@ function ensureXlsx() {
   return _xlsxLoadPromise;
 }
 
-// ExcelJS is loaded only for exports that need a genuinely formatted
-// workbook (merged branded headers, cell styling, and an embedded logo).
-let _excelJsLoadPromise = null;
-function ensureExcelJs() {
-  if (typeof ExcelJS !== 'undefined') return Promise.resolve();
-  if (_excelJsLoadPromise) return _excelJsLoadPromise;
-  _excelJsLoadPromise = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
-    s.onload = () => resolve();
-    s.onerror = () => {
-      _excelJsLoadPromise = null;
-      reject(new Error('Failed to load the formatted Excel library — check your connection and try again.'));
-    };
-    document.head.appendChild(s);
-  });
-  return _excelJsLoadPromise;
-}
-
 const STAGES = ['CTP Plate Making','Printing','Coatings','Die Cutting','Sorting','Pasting','Ready to Deliver','Delivered'];
 // Printing-only "Nx" multiplier encoding: a pass qty string can be a plain
 // number ("1200") or "1200x3" meaning that qty was printed 3 times instead
@@ -10662,8 +10643,8 @@ function printInventoryReport() {
                   : showBrand                 ? 'By Brand'
                   : showSupplier              ? 'By Supplier'
                   :                             'Ignoring Brand & Supplier';
-  const tdL = 'style="border:1px solid #000;padding:2px;white-space:nowrap;line-height:1.05;"';
-  const tdR = 'style="border:1px solid #000;padding:2px;text-align:right;white-space:nowrap;line-height:1.05;"';
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const fmt = n => n === null || n === undefined ? '—' : (Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString());
   const tableRows = rows.map(r => {
     const brandTd    = showBrand    ? `<td ${tdL}>${esc(r.brand    || '—')}</td>` : '';
@@ -12644,14 +12625,14 @@ function renderJobsReport() {
 
 // Export the Jobs Report to .xlsx.
 async function exportJobsReport() {
-  try { await ensureExcelJs(); } catch (e) { notify(e.message); return; }
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const milMode = !!jobsReportState.milOnly;
   const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
     'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
-  const dataRows = [];
+  const aoa = [header];
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
     // spreadsheet reader can filter/sort them out without needing a
@@ -12660,7 +12641,7 @@ async function exportJobsReport() {
     let deliveredCell = r.isShadeCard && r.deliveredQty !== '' ? `${r.deliveredQty} copies` : r.deliveredQty;
     if (r.isPartial && r.deliveredQty) deliveredCell = `${deliveredCell} (PARTIAL)`;
     const nameCell = r.isShadeCard ? `${r.name} (Shade Card)` : r.name;
-    dataRows.push([
+    aoa.push([
       r.idDisplay || ('E-' + r.id),
       nameCell,
       r.createdAt,
@@ -12681,117 +12662,15 @@ async function exportJobsReport() {
       r.coatings,
     ]);
   }
-
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'Supreme Art Private Limited';
-  wb.created = new Date();
-  const ws = wb.addWorksheet('Jobs Report', {
-    views: [{ state: 'frozen', ySplit: 6 }],
-    pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 }
-  });
-  const colCount = header.length;
-  const rightStart = colCount - 2;
-  const centerEnd = rightStart - 1;
-  const modeLabel = jobsReportState.mode === 'created' ? 'CREATED JOBS' : 'DELIVERED JOBS';
-  const fromLabel = fmtDMY(jobsReportState.dfrom) || 'Any';
-  const toLabel = fmtDMY(jobsReportState.dto) || 'Any';
-  const companyLabel = jobsReportState.client || 'All Companies';
-
-  // Branded report block. The report-reference-code slot is intentionally
-  // omitted until the owner provides the exact code.
-  ws.mergeCells(1, 1, 2, 3);
-  ws.mergeCells(3, 1, 4, 3);
-  ws.mergeCells(1, 4, 2, centerEnd);
-  ws.mergeCells(3, 4, 3, centerEnd);
-  ws.mergeCells(4, 4, 4, centerEnd);
-  for (let r = 1; r <= 4; r++) ws.mergeCells(r, rightStart, r, colCount);
-
-  ws.getCell(1, 1).value = '';
-  ws.getCell(3, 1).value = 'SUPREME ART PRIVATE LIMITED';
-  ws.getCell(1, 4).value = 'JOBS REPORT';
-  ws.getCell(3, 4).value = `Date: ${fromLabel} to ${toLabel}`;
-  ws.getCell(4, 4).value = '';
-  ws.getCell(1, rightStart).value = `Report Type: ${modeLabel.replace(' JOBS', '')}`;
-  ws.getCell(2, rightStart).value = `Jobs: ${rows.length}`;
-  ws.getCell(3, rightStart).value = `Company: ${companyLabel}`;
-  ws.getCell(4, rightStart).value = jobsReportState.milOnly
-    ? 'Filter: MIL Products'
-    : (jobsReportState.shadeOnly ? 'Filter: Shade Cards' : 'Filter: All Jobs');
-
-  ws.getCell(1, 4).font = { name: 'Arial', size: 18, bold: true, color: { argb: 'FFA32D2D' } };
-  ws.getCell(3, 4).font = { name: 'Arial', size: 9, color: { argb: 'FF333333' } };
-  ws.getCell(4, 4).font = { name: 'Arial', size: 8, color: { argb: 'FF555555' } };
-  ws.getCell(3, 1).font = { name: 'Arial', size: 8, bold: true, color: { argb: 'FFA32D2D' } };
-  ws.getCell(3, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  [ws.getCell(1,4), ws.getCell(3,4), ws.getCell(4,4)].forEach(c => {
-    c.alignment = { horizontal: 'center', vertical: 'middle' };
-  });
-  for (let r = 1; r <= 4; r++) {
-    const c = ws.getCell(r, rightStart);
-    c.font = { name: 'Arial', size: 8, bold: r === 1 };
-    c.alignment = { horizontal: 'right', vertical: 'middle' };
-  }
-  for (let c = 1; c <= colCount; c++) {
-    ws.getCell(4, c).border = { bottom: { style: 'medium', color: { argb: 'FF222222' } } };
-  }
-  ws.getRow(1).height = 20; ws.getRow(2).height = 20;
-  ws.getRow(3).height = 16; ws.getRow(4).height = 12; ws.getRow(5).height = 4;
-
-  try {
-    const logoRes = await fetch('/logo.png');
-    if (logoRes.ok) {
-      const bytes = new Uint8Array(await logoRes.arrayBuffer());
-      let binary = '';
-      for (let i = 0; i < bytes.length; i += 0x8000) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-      }
-      const logoId = wb.addImage({ base64: `data:image/png;base64,${btoa(binary)}`, extension: 'png' });
-      ws.addImage(logoId, { tl: { col: .35, row: .08 }, ext: { width: 104, height: 40 } });
-    }
-  } catch (_) {
-    ws.getCell(1, 1).value = 'SUPREME ART';
-    ws.getCell(1, 1).font = { name: 'Arial', size: 14, bold: true, color: { argb: 'FFA32D2D' } };
-    ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
-  }
-
-  const headerRow = ws.getRow(6);
-  headerRow.values = header;
-  headerRow.height = 18;
-  headerRow.eachCell(cell => {
-    cell.font = { name: 'Arial', size: 8, bold: true };
-    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: false };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F0F0' } };
-    cell.border = {
-      top: { style: 'thin', color: { argb: 'FF777777' } },
-      left: { style: 'thin', color: { argb: 'FF777777' } },
-      bottom: { style: 'thin', color: { argb: 'FF777777' } },
-      right: { style: 'thin', color: { argb: 'FF777777' } }
-    };
-  });
-  dataRows.forEach(values => {
-    const row = ws.addRow(values);
-    row.height = 15;
-    row.eachCell(cell => {
-      cell.font = { name: 'Arial', size: 8 };
-      cell.alignment = { vertical: 'middle', wrapText: false, shrinkToFit: true };
-      cell.border = { bottom: { style: 'hair', color: { argb: 'FFD6D3D1' } } };
-    });
-  });
-  ws.columns.forEach((col, i) => {
-    const maxData = Math.max(header[i].length, ...dataRows.map(r => String(r[i] ?? '').length));
-    col.width = Math.min(22, Math.max(9, maxData + 1));
-  });
-  ws.autoFilter = { from: { row: 6, column: 1 }, to: { row: 6, column: colCount } };
-
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Jobs Report');
   const stamp = localDateISO();
   const tag = jobsReportState.client ? `-${jobsReportState.client.replace(/\s+/g,'-').toLowerCase()}` : '';
-  const buffer = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `supreme-art-jobs${tag}-${stamp}.xlsx`;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  XLSX.writeFile(wb, `supreme-art-jobs${tag}-${stamp}.xlsx`);
   notify('Exported!');
 }
 
@@ -12817,9 +12696,9 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.batchNo || '')}</td>
     <td ${tdL}>${esc(r.challan || '')}</td>
     ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
-    <td style="border:1px solid #000;padding:2px;text-align:right;white-space:nowrap;line-height:1.05;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}">${esc(r.poQty)}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}">${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
-    <td style="border:1px solid #000;padding:2px;text-align:right;white-space:nowrap;line-height:1.05;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${r.stockGroupName ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.readyQty)}</td>
     <td ${tdR}>${fmt(r.packets)}</td>
@@ -12829,38 +12708,21 @@ function printJobsReport() {
   </tr>`;
   }).join('');
   const html = `
-    <style>
-      @media print { @page { size: A4 landscape; margin: 0.3in; } }
-      .jr-print-brand { width:100%;border-collapse:collapse;border-bottom:2px solid #111;margin-bottom:5px;table-layout:fixed; }
-      .jr-print-brand td { border:0;padding:2px 5px;vertical-align:middle; }
-      .jr-print-title { color:#a32d2d;font-family:Georgia,serif;font-size:15pt;text-align:center;letter-spacing:.02em; }
-      .jr-print-meta { font-size:7pt;line-height:1.3; }
-      .jr-data { width:100%;font-size:6.2pt;border:1px solid #000;border-collapse:collapse;table-layout:auto; }
-      .jr-data td, .jr-data th { white-space:nowrap !important;line-height:1.05 !important;padding:2px !important;vertical-align:middle; }
-      .jr-data tr { height:14px;page-break-inside:avoid; }
-    </style>
+    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <table class="jr-print-brand">
-        <tr style="height:43px;">
-          <td rowspan="2" style="width:24%;text-align:left;">
-            <img src="/logo.png" style="height:36px;max-width:120px;object-fit:contain;display:block;margin-left:8px;" onerror="this.style.display='none'">
-            <div style="font-size:6.5pt;font-weight:800;color:#a32d2d;margin-top:1px;">SUPREME ART PRIVATE LIMITED</div>
-          </td>
-          <td rowspan="2" style="width:52%;text-align:center;">
-            <div class="jr-print-title">JOBS REPORT</div>
-            <div style="font-size:7pt;margin-top:5px;">Date: ${esc(fmtDMY(jobsReportState.dfrom) || 'Any')} to ${esc(fmtDMY(jobsReportState.dto) || 'Any')}</div>
-          </td>
-          <td class="jr-print-meta" style="width:24%;text-align:right;"><b>Report Type:</b> ${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'}</td>
-        </tr>
-        <tr>
-          <td class="jr-print-meta" style="text-align:right;">
-            <div><b>Company:</b> ${esc(jobsReportState.client || 'All Companies')}</div>
-            <div><b>Jobs:</b> ${rows.length}</div>
-            <div><b>Filter:</b> ${jobsReportState.milOnly ? 'MIL Products' : (jobsReportState.shadeOnly ? 'Shade Cards' : 'All Jobs')}</div>
-          </td>
-        </tr>
-      </table>
-      <table class="jr-data">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
+        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
+        <div>
+          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
+          <div style="font-size:10pt;">Jobs Report — ${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'}</div>
+        </div>
+        <div style="margin-left:auto;font-size:8pt;text-align:right;">
+          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.dfrom) || '(any)')} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto) || '(any)')}</div>
+          <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
+          <div>Generated: ${fmtDMYT(new Date())}</div>
+        </div>
+      </div>
+      <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#eee;">
           <th ${tdL}>Job ID</th>
           <th ${tdL}>Job Name</th>
