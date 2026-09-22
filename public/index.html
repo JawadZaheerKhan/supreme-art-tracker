@@ -10806,8 +10806,12 @@ function openStockSummary() {
   // initialize date defaults on first open (from === '') — preserving
   // filters across tab switches keeps the user's context.
   if (!stockSummaryState.paperType) stockSummaryState.paperType = invDistinct('paper_type')[0] || '';
-  // The picked period is re-applied on every open, so "Today" is always today. (Custom keeps its own dates;
-  // All Time is worked out from the first transaction once the ledger has loaded.)
+  // All Time is gone — over a few years it built a table hundreds of period
+  // columns wide, which no page could print. Anything still holding it (a tab
+  // left open from before) falls back to Today.
+  if (!stockSummaryState.period || stockSummaryState.period === 'all') stockSummaryState.period = 'today';
+  // The picked period is re-applied on every open, so "Today" is always today.
+  // Custom keeps its own dates.
   if (stockSummaryState.period !== 'custom') {
     const r = periodToDateRange(stockSummaryState.period);
     stockSummaryState.from = r.from || stockSummaryState.from || localDateISO();
@@ -10820,7 +10824,7 @@ function openStockSummary() {
   // sticker / local paper / off-white — items of those types silently never
   // had a way to be selected here. "All paper types" (value '') is new too.
   const paperOpts = invDistinct('paper_type').map(p => `<option value="${esc(p)}"${p===stockSummaryState.paperType?' selected':''}>${esc(p)}</option>`).join('');
-  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
+  const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${stockSummaryState.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
@@ -10926,11 +10930,6 @@ async function loadStockSummary() {
     stockSummaryState.txs     = allTxs.filter(t => !pt || t.paper_type === pt);
     stockSummaryState.items   = inventory.filter(i => (!pt || i.paper_type === pt) && !!i.is_offcut === offcutOnly);
     stockSummaryState.imports = offcutOnly ? [] : imports.filter(i => !pt || i.paper_type === pt);
-    if (stockSummaryState.period === 'all') {
-      const times = stockSummaryState.txs.map(t => new Date(t.created_at).getTime()).filter(Number.isFinite);
-      stockSummaryState.from = localDateISO(new Date(times.length ? Math.min(...times) : Date.now()));
-      stockSummaryState.to   = localDateISO();
-    }
     renderStockSummary();
   } catch (e) {
     if (el) el.innerHTML = 'Error: ' + esc(e.message);
