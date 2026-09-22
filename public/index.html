@@ -11345,14 +11345,10 @@ function printStockSummary() {
           </div>
           <div style="text-align:center;">
             <div style="font-size:14pt;color:#a32d2d;">STOCK SUMMARY REPORT</div>
+            <div style="font-size:8pt;margin-top:1px;">STR/QR/008/C</div>
             <div style="font-size:8pt;margin-top:1px;">${isAll ? 'All Paper Types' : esc(paperType)}</div>
           </div>
-          <div></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:5px;font-size:8pt;margin-top:1px;">
-          <div></div>
-          <div style="text-align:center;">Date: ${esc(from)} to ${esc(to)}</div>
-          <div style="text-align:right;">Group by: ${granularity}${isAll ? '' : ` · Units: ${esc(packetUnitLabel(paperType))}`}</div>
+          <div style="font-size:8pt;text-align:right;align-self:end;white-space:nowrap;">Date: ${esc(from)} to ${esc(to)}</div>
         </div>
         ${asOfPast ? `<div style="font-size:8pt;text-align:center;">${esc(summaryAsOfNote(asOfPast))}</div>` : ''}
       </div>
@@ -11412,9 +11408,9 @@ async function exportStockSummary() {
               qty('Pending Import'), qty('After Import'), 'Import (kg)',
               qty('Status'), 'Status (kg)');
   const title = 'STOCK SUMMARY REPORT';
-  const meta = `Date: ${from} to ${to} · Group by: ${granularity}${isAll ? '' : ' · Units: ' + unit}`;
+  const meta = `Date: ${from} to ${to}`;
   const scope = isAll ? 'All Paper Types' : paperType;
-  const aoa = [['SUPREME ART PRIVATE LIMITED', title], ['', scope + '\n' + meta], header];
+  const aoa = [['SUPREME ART PRIVATE LIMITED'], [], header];
   const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
   for (const r of rows) {
     const row = [...(isAll ? [r.item.paper_type || ''] : []), r.item.gsm || '', r.item.size || '', r.item.brand || '', ...(isAll ? [r.unit] : []), round2(r.openingPkts)];
@@ -11425,22 +11421,26 @@ async function exportStockSummary() {
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const midCol = Math.floor(header.length / 2);
-  ws['!merges'] = [
-    {s:{r:0,c:0},e:{r:0,c:midCol-1}}, {s:{r:0,c:midCol},e:{r:0,c:header.length-1}},
-    {s:{r:1,c:0},e:{r:1,c:midCol-1}}, {s:{r:1,c:midCol},e:{r:1,c:header.length-1}}
-  ];
+  const leftEnd = Math.max(1, Math.floor(header.length / 4) - 1);
+  const midCol = leftEnd + 1;
+  const rightCol = Math.ceil(header.length * 3 / 4);
+  ws['!merges'] = [];
   for (let r=0;r<2;r++) {
-    const value = r===0 ? title : scope + '\n' + meta;
-    ws[XLSX.utils.encode_cell({r,c:midCol})] = {t:'s',v:value};
-    if (midCol!==1) delete ws[XLSX.utils.encode_cell({r,c:1})];
-    for (let c=0;c<header.length;c++) {
-      const addr=XLSX.utils.encode_cell({r,c});
-      if (!ws[addr]) ws[addr]={t:'s',v:''};
-      ws[addr].s={fill:{patternType:'solid',fgColor:{rgb:'FAF8F3'}},
-        font:{name:'Arial',sz:r===0?11:8,bold:r===0,color:{rgb:r===0?'A32D2D':'222222'}},
-        alignment:{vertical:'center',horizontal:c>=midCol?'center':'left',wrapText:r===1}};
-    }
+    ws['!merges'].push(
+      {s:{r,c:0},e:{r,c:leftEnd}},
+      {s:{r,c:midCol},e:{r,c:rightCol-1}},
+      {s:{r,c:rightCol},e:{r,c:header.length-1}}
+    );
+  }
+  ws[XLSX.utils.encode_cell({r:0,c:midCol})] = {t:'s',v:title};
+  ws[XLSX.utils.encode_cell({r:1,c:midCol})] = {t:'s',v:'STR/QR/008/C\n' + scope};
+  ws[XLSX.utils.encode_cell({r:1,c:rightCol})] = {t:'s',v:meta};
+  for (let r=0;r<2;r++) for (let c=0;c<header.length;c++) {
+    const addr=XLSX.utils.encode_cell({r,c});
+    if (!ws[addr]) ws[addr]={t:'s',v:''};
+    ws[addr].s={fill:{patternType:'solid',fgColor:{rgb:'F3EEE4'}},
+      font:{name:'Arial',sz:r===0?11:8,bold:r===0,color:{rgb:r===0?'A32D2D':'222222'}},
+      alignment:{vertical:'center',horizontal:c>=midCol&&c<rightCol?'center':c>=rightCol?'right':'left',wrapText:r===1}};
   }
   ws['!rows']=[{hpt:28},{hpt:30},{hpt:30}];
   const pendingCol=header.findIndex(h=>h.startsWith('Pending Import'));
