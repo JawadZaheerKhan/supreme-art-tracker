@@ -592,7 +592,9 @@
        strips the background and it prints as a bare outline. */
     body.printing-register { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     @page { size: A4 portrait; margin: 12mm; }
-    .dp-print-page { font-family: var(--font); color: #000; }
+    /* Same reason as REPORT_PRINT_WRAP: grow with the widest table so the
+       heading block never ends short of the table under it. */
+    .dp-print-page { font-family: var(--font); color: #000; width: max-content; min-width: 100%; }
     /* Force a hard page break between the two stacks. */
     .dp-print-break { page-break-before: always; }
     .dp-print-hd {
@@ -10728,6 +10730,12 @@ async function exportInventoryReport() {
 // drift apart: company mark on the left, title / form code / scope centred,
 // date on the right. `formCode` is the controlled-document number — reports
 // that haven't been given one yet just leave it out and the line is dropped.
+// Wrapper for a printed report. The heading is a block-level div, so on its
+// own it spans only the page width — while a table with many columns overflows
+// past it, leaving the heading visibly short of the table it belongs to.
+// Sizing the wrapper to its widest child makes the two line up; min-width
+// keeps a narrow table's heading full-width.
+const REPORT_PRINT_WRAP = 'font-family:Arial,sans-serif;color:#000;width:max-content;min-width:100%;';
 function reportPrintHeading({ title, formCode, scope, dateText, note }) {
   return `
       <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
@@ -10842,7 +10850,7 @@ function printInventoryReport() {
   }).join('');
   const html = `
     <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'CURRENT BALANCE SUMMARY',
         scope: `${modeLabel} · Paper: ${paperType || 'All'} · Offcuts: ${includeOffcuts ? 'Included' : 'Excluded'}`,
@@ -11950,7 +11958,7 @@ async function exportImports() {
   const { list, filterLabel } = visibleImportsForExport();
   if (!list.length) { notify('Nothing to export — no imports in this view.'); return; }
   const header = ['Status', 'Paper Type', 'Size', 'GSM', 'Brand', 'Packets/Reams', 'Weight (kg)', 'Supplier', 'Added', 'Booked', 'Expected', 'Received At', 'Notes', 'New to Inventory'];
-  const aoa = [header];
+  const aoa = reportExcelAoa(header);
   for (const i of list) {
     aoa.push([
       i.status || '',
@@ -11970,9 +11978,12 @@ async function exportImports() {
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  applyReportExcelHeading(ws, header, {
+    title: 'IMPORTS REPORT',
+    scope: `${filterLabel} · ${list.length} shipment${list.length === 1 ? '' : 's'}`,
+    dateText: `Generated: ${fmtDMYT(new Date())}`,
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Imports');
   const stamp = localDateISO();
@@ -12005,21 +12016,15 @@ function printImports() {
   </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Imports — ${filterLabel.charAt(0).toUpperCase()+filterLabel.slice(1)}</div>
-        </div>
-        <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div>${list.length} import${list.length===1?'':'s'}</div>
-          <div>Generated: ${fmtDMYT(new Date())}</div>
-        </div>
-      </div>
+    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'IMPORTS REPORT',
+        scope: `${filterLabel.charAt(0).toUpperCase()+filterLabel.slice(1)} · ${list.length} import${list.length===1?'':'s'}`,
+        dateText: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#eee;">
+        <tr style="background:#f7f1ea;">
           <th ${tdL}>Status</th>
           <th ${tdL}>Paper Type</th>
           <th ${tdL}>Size</th>
@@ -12987,7 +12992,7 @@ function printJobsReport() {
   }).join('');
   const html = `
     <style>@media print { @page { size: A4 landscape; margin: 0.3in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'JOBS REPORT',
         scope: jobsReportScope(new Set(rows.map(r => r.id)).size, rows.length),
@@ -13815,10 +13820,18 @@ async function runSaleReportExport() {
     const tab  = SALE_REPORT_TABS.find(t => t.key === key);
     const cols = saleReportCols(key);
     const rows = buildSaleReportRows(key);
-    const aoa = [cols.map(c => c.label), ...rows.map(r => cols.map(c => c.xl(r)))];
+    const header = cols.map(c => c.label);
+    const aoa = reportExcelAoa(header).concat(rows.map(r => cols.map(c => c.xl(r))));
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = aoa[0].map((h, i) => ({
-      wch: Math.max(String(h).length, ...aoa.slice(1).map(r => String(r[i] ?? '').length), 6) + 2
+    // Each sheet names its own tab, since one workbook can hold several.
+    applyReportExcelHeading(ws, header, {
+      title: 'SALE REPORT',
+      scope: [tab ? tab.label : key, saleReportState.client || 'All companies',
+              `${rows.length} shipment${rows.length === 1 ? '' : 's'}`].join(' · '),
+      dateText: saleReportDateText(),
+    });
+    ws['!cols'] = header.map((hd, i) => ({
+      wch: Math.max(String(hd).length, ...aoa.slice(REPORT_XL_HEADER_ROWS).map(r => String(r[i] ?? '').length), 6) + 2
     }));
     // Excel sheet names: 31 chars max, and none of : \ / ? * [ ]
     XLSX.utils.book_append_sheet(wb, ws, String(tab ? tab.label : key).replace(/[:\\\/?*\[\]]/g, '-').slice(0, 31));
@@ -13829,6 +13842,21 @@ async function runSaleReportExport() {
   const tag = saleReportState.client ? `-${saleReportState.client.replace(/\s+/g,'-').toLowerCase()}` : '';
   XLSX.writeFile(wb, `supreme-art-sale-report${tag}-${stamp}.xlsx`);
   notify(`Exported ${sheets} sheet${sheets === 1 ? '' : 's'}!`);
+}
+// Scope / date lines shared by this report's print and Excel headings.
+function saleReportScope(shipmentCount) {
+  const s = saleReportState;
+  const tab = SALE_REPORT_TABS.find(t => t.key === (s.tab || 'all'));
+  return [
+    tab ? tab.label : 'All',
+    s.client || 'All companies',
+    s.milOnly ? 'MIL only' : '',
+    `${shipmentCount} shipment${shipmentCount === 1 ? '' : 's'}`,
+  ].filter(Boolean).join(' · ');
+}
+function saleReportDateText() {
+  const s = saleReportState;
+  return `Date: ${dateRangeLabel(s.dateRange, s.dfrom, s.dto)}`;
 }
 // Print the Sale Report — A4 landscape.
 function printSaleReport() {
@@ -13846,22 +13874,16 @@ function printSaleReport() {
     ? `<tr style="background:#eee;font-weight:bold;">${cols.map((c, i) => c.totalPrint ? `<td ${tdR}>${fmtRate(totals[c.total])}</td>` : (i === 0 ? `<td ${tdL}>Total</td>` : `<td ${tdL}></td>`)).join('')}</tr>`
     : '';
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Sale Report</div>
-        </div>
-        <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>Period:</b> ${esc(dateRangeLabel(saleReportState.dateRange, saleReportState.dfrom, saleReportState.dto))}</div>
-          <div><b>Company:</b> ${esc(saleReportState.client || 'All')} &nbsp; <b>Shipments:</b> ${rows.length}</div>
-          <div>Generated: ${fmtDMYT(new Date())}</div>
-        </div>
-      </div>
+    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'SALE REPORT',
+        scope: saleReportScope(rows.length),
+        dateText: saleReportDateText(),
+        note: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:7pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#eee;">${cols.map(c => `<th ${c.right ? tdR : tdL}>${esc(c.label)}</th>`).join('')}</tr>
+        <tr style="background:#f7f1ea;">${cols.map(c => `<th ${c.right ? tdR : tdL}>${esc(c.label)}</th>`).join('')}</tr>
         ${tableRows}
         ${totalsRow}
       </table>
@@ -14176,7 +14198,7 @@ function printProductionReport() {
     </tr>`).join('') || `<tr><td ${td} colspan="5" style="text-align:center;color:#666;font-style:italic;">No activity in window.</td></tr>`;
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;padding:6mm;">
+    <div style="${REPORT_PRINT_WRAP}padding:6mm;">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'PRODUCTION REPORT',
         scope: title,
@@ -16570,7 +16592,7 @@ function printStockTotal(direction) {
     </tr>`).join('');
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
         scope: `Totals · ${state.paperType || 'All paper types'} · ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
@@ -17623,7 +17645,7 @@ function printManualConsumption() {
     </tr>`).join('');
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'MANUAL JOB CARD CONSUMPTION REPORT',
         scope: `${periodLabel} · Total: ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
@@ -17893,7 +17915,7 @@ function printOffcutConsumption() {
   const body=rows.map(t=>`<tr><td ${td}>${esc(fmtDMYT(t.created_at))}</td><td ${td}>E-${t.job_id}</td><td ${td}>${esc(t.paper_type||'')}</td><td ${td}>${esc(t.item_size||'')}</td><td ${td}>${esc(t.item_gsm||'')}</td><td ${td}>${esc(t.item_brand||'')}</td><td ${td}>${Math.abs(t.change).toLocaleString()} sheets</td></tr>`).join('');
   const area=document.getElementById('print-area');area.innerHTML=`
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="${REPORT_PRINT_WRAP}">
     <div style="margin-bottom:8px;">${reportPrintHeading({
       title: 'OFFCUT CONSUMPTION REPORT',
       scope: offcutConsumptionScope(),
@@ -17960,7 +17982,7 @@ function printStockMovement(direction) {
   }).join('');
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
         scope: stockMovementScope(direction),
