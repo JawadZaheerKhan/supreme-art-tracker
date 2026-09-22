@@ -11335,16 +11335,22 @@ function printStockSummary() {
     </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;display:inline-block;width:max-content;min-width:100%;vertical-align:top;">
-      <div style="border:1px solid #555;background:#faf8f3;padding:2px 6px 1px;">
-        <div style="display:grid;grid-template-columns:1fr 2fr 1fr;align-items:center;gap:5px;">
-          <div style="display:flex;align-items:center;gap:4px;"><img src="/logo.png" style="height:30px;max-width:100px;object-fit:contain;mix-blend-mode:multiply;display:block;" onerror="this.style.display='none'"><div style="font-size:8pt;font-weight:bold;color:#a32d2d;line-height:1.1;">SUPREME ART PRIVATE LIMITED</div></div>
-          <div style="font-size:14pt;color:#a32d2d;text-align:center;">STOCK SUMMARY REPORT</div>
+    <style>@media print { @page { size: A4 landscape; margin: 0; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:100% !important; max-width:297mm; padding:3mm !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
+      <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
+        <div style="display:grid;grid-template-columns:150px 1fr 150px;align-items:center;gap:5px;">
+          <div style="text-align:center;">
+            <img src="/logo-urdu.png" style="height:30px;max-width:95px;object-fit:contain;display:block;margin:0 auto;" onerror="this.style.display='none'">
+            <div style="font-size:8pt;font-weight:bold;color:#a32d2d;white-space:nowrap;">SUPREME ART PRIVATE LIMITED</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-size:14pt;color:#a32d2d;">STOCK SUMMARY REPORT</div>
+            <div style="font-size:8pt;margin-top:1px;">${isAll ? 'All Paper Types' : esc(paperType)}</div>
+          </div>
           <div></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:5px;font-size:8pt;margin-top:1px;">
-          <div>${isAll ? 'All Paper Types' : esc(paperType)}</div>
+          <div></div>
           <div style="text-align:center;">Date: ${esc(from)} to ${esc(to)}</div>
           <div style="text-align:right;">Group by: ${granularity}${isAll ? '' : ` · Units: ${esc(packetUnitLabel(paperType))}`}</div>
         </div>
@@ -11352,7 +11358,7 @@ function printStockSummary() {
       </div>
       ${rows.length ? `
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
-        <tr>
+        <thead style="display:table-header-group;"><tr>
           ${typeTh}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">GSM</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Size (in)</th>
@@ -11369,8 +11375,8 @@ function printStockSummary() {
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Status</th>
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Status (kg)</th>
         </tr>
-        <tr>${periodSubHeaders}</tr>
-        ${body}
+        <tr>${periodSubHeaders}</tr></thead>
+        <tbody>${body}</tbody>
       </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
     </div>`;
   const area = document.getElementById('print-area');
@@ -11407,7 +11413,8 @@ async function exportStockSummary() {
               qty('Status'), 'Status (kg)');
   const title = 'STOCK SUMMARY REPORT';
   const meta = `Date: ${from} to ${to} · Group by: ${granularity}${isAll ? '' : ' · Units: ' + unit}`;
-  const aoa = [['SUPREME ART PRIVATE LIMITED', title], [isAll ? 'All Paper Types' : paperType, meta], header];
+  const scope = isAll ? 'All Paper Types' : paperType;
+  const aoa = [['SUPREME ART PRIVATE LIMITED', title], ['', scope + '\n' + meta], header];
   const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
   for (const r of rows) {
     const row = [...(isAll ? [r.item.paper_type || ''] : []), r.item.gsm || '', r.item.size || '', r.item.brand || '', ...(isAll ? [r.unit] : []), round2(r.openingPkts)];
@@ -11424,7 +11431,7 @@ async function exportStockSummary() {
     {s:{r:1,c:0},e:{r:1,c:midCol-1}}, {s:{r:1,c:midCol},e:{r:1,c:header.length-1}}
   ];
   for (let r=0;r<2;r++) {
-    const value = r===0 ? title : meta;
+    const value = r===0 ? title : scope + '\n' + meta;
     ws[XLSX.utils.encode_cell({r,c:midCol})] = {t:'s',v:value};
     if (midCol!==1) delete ws[XLSX.utils.encode_cell({r,c:1})];
     for (let c=0;c<header.length;c++) {
@@ -11432,10 +11439,10 @@ async function exportStockSummary() {
       if (!ws[addr]) ws[addr]={t:'s',v:''};
       ws[addr].s={fill:{patternType:'solid',fgColor:{rgb:'FAF8F3'}},
         font:{name:'Arial',sz:r===0?11:8,bold:r===0,color:{rgb:r===0?'A32D2D':'222222'}},
-        alignment:{vertical:'center',horizontal:c>=midCol?'center':'left'}};
+        alignment:{vertical:'center',horizontal:c>=midCol?'center':'left',wrapText:r===1}};
     }
   }
-  ws['!rows']=[{hpt:28},{hpt:20},{hpt:30}];
+  ws['!rows']=[{hpt:28},{hpt:30},{hpt:30}];
   const pendingCol=header.findIndex(h=>h.startsWith('Pending Import'));
   const statusCol=header.findIndex(h=>h.startsWith('Status'));
   for (let r=2;r<aoa.length;r++) for (let c=0;c<header.length;c++) {
