@@ -3172,6 +3172,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rt="dp-pasting" onclick="setReportsTab('dp-pasting')">
           <span class="rsb-icon">&#128193;</span> Pasting
         </button>
+        <button class="rsb-item" data-rt="dp-sorting" onclick="setReportsTab('dp-sorting')">
+          <span class="rsb-icon">&#128203;</span> Sorting
+        </button>
       </aside>
       <main class="reports-content">
         <div id="rt-dp-printing" class="rt-pane">
@@ -3238,6 +3241,19 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
           </div>
           <div id="dp-pasting-body"><div class="empty">Pick a date to see the day's pasting production.</div></div>
+        </div>
+        <div id="rt-dp-sorting" class="rt-pane" style="display:none;">
+          <div class="rt-head" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+            <h2 style="margin:0;font-size:20px;">Sorting &mdash; Daily Production</h2>
+            <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--text2);">
+              Date
+              <input type="date" id="dp-sorting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
+            </label>
+            <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" onclick="exportDailyRegister()">&#128202; Export to Excel</button>
+            <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print Register</button>
+          </div>
+          <div id="dp-sorting-body"><div class="empty">Pick a date, then use + to add the day's sorting entries.</div></div>
         </div>
       </main>
     </div>
@@ -14561,7 +14577,7 @@ function openDailyProduction() {
   // between Printing / Die / Coatings for the same day never makes the
   // user re-pick. Any picker drives the loader for whichever tab is
   // currently visible.
-  const ids = ['dp-date', 'dp-die-date', 'dp-coatings-date', 'dp-breaking-date', 'dp-pasting-date'];
+  const ids = ['dp-date', 'dp-die-date', 'dp-coatings-date', 'dp-breaking-date', 'dp-pasting-date', 'dp-sorting-date'];
   const els = ids.map(id => document.getElementById(id)).filter(Boolean);
   const seed = (els.find(e => e.value) || {}).value || today;
   els.forEach(e => { if (!e.value) e.value = seed; });
@@ -14576,6 +14592,7 @@ function openDailyProduction() {
 
 function dailyProductionActiveTab() {
   const visible = (id) => (document.getElementById(id) || {}).style?.display !== 'none';
+  if (visible('rt-dp-sorting'))  return 'sorting';
   if (visible('rt-dp-pasting'))  return 'pasting';
   if (visible('rt-dp-breaking')) return 'breaking';
   if (visible('rt-dp-coatings')) return 'coatings';
@@ -14588,6 +14605,7 @@ function loadDailyProductionForCurrentTab() {
   else if (t === 'die')      loadDailyProductionDie();
   else if (t === 'coatings') loadDailyProductionCoatings();
   else if (t === 'breaking') loadDailyProductionBreaking();
+  else if (t === 'sorting')  loadDailyProductionSorting();
   else                       loadDailyProductionPasting();
 }
 
@@ -14636,6 +14654,58 @@ async function loadDailyProductionCoatings() {
   }
 }
 
+// Sorting mirrors Breaking, minus the roster: nothing on the Job Card feeds
+// it, so the table starts empty and every row is one somebody added with +.
+async function loadDailyProductionSorting() {
+  const dateEl = document.getElementById('dp-sorting-date');
+  const body = document.getElementById('dp-sorting-body');
+  if (!dateEl || !body) return;
+  const date = dateEl.value;
+  if (!date) { body.innerHTML = '<div class="empty">Pick a date.</div>'; return; }
+  body.innerHTML = '<div class="empty">Loading&hellip;</div>';
+  try {
+    const rows = await api('GET', `/api/reports/daily-production/sorting/${encodeURIComponent(date)}`);
+    renderDailyProductionSorting(rows, date);
+  } catch (e) {
+    body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
+  }
+}
+function renderDailyProductionSorting(rows, date) {
+  const body = document.getElementById('dp-sorting-body');
+  if (!body) return;
+  const editable = hasPerm('production_edit');
+  const cellAttrs = editable ? '' : 'readonly disabled';
+  const field = (row, name, extra) => `
+      <td>
+        <input type="text" ${cellAttrs} class="dp-cell${name === 'remarks' ? ' dp-remarks' : ''}" data-machine="${esc(row.operator)}" data-section="sorting" data-field="${name}"
+               value="${esc(row[name] || '')}" placeholder="—" ${extra || ''}
+               onblur="saveDailyProductionCell(this)">
+      </td>`;
+  const r = rows.map(row => `
+    <tr>
+      <td class="dp-machine">${esc(row.operator)}</td>
+      ${field(row, 'sheets')}${field(row, 'hours', 'maxlength="6"')}${field(row, 'jobs')}${field(row, 'helper')}${field(row, 'remarks')}
+      ${dpActionCell(true)}
+    </tr>`).join('');
+  body.innerHTML = `
+    <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
+      ${esc(date)} &middot; ${rows.length} entr${rows.length === 1 ? 'y' : 'ies'} &middot; manual entry
+    </div>
+    <div class="dp-add-row-bar">
+      <button class="dp-add-corner" onclick="addCustomDailyProductionRow()" title="Add a sorting entry">+</button>
+    </div>
+    <div class="dp-table-wrap">
+      <table class="dp-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th>Operator</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+            <th>Helper</th><th>Remarks</th><th class="dp-action"></th>
+          </tr>
+        </thead>
+        <tbody>${r || `<tr><td colspan="7" class="empty" style="padding:18px;text-align:center;color:var(--text3);font-style:italic;">No sorting entries for this date. Use + to add one.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
 async function loadDailyProductionBreaking() {
   const dateEl = document.getElementById('dp-breaking-date');
   const body = document.getElementById('dp-breaking-body');
@@ -15177,7 +15247,7 @@ function renderDraftRowHtml(section, draftId) {
       ${dpActionCell(true)}
     </tr>`;
   }
-  if (section === 'breaking') {
+  if (section === 'breaking' || section === 'sorting') {
     return `<tr data-draft="${esc(draftId)}">
       ${cell('machine', { ph: 'Operator', cls: 'dp-cell-name' })}
       ${cell('sheets',  { ph: '0' })}
@@ -15240,28 +15310,30 @@ async function saveDailyProductionCell(input) {
   }
 }
 
-// One-shot Daily Production print: fetches the four sections in
-// parallel, lays them out across two pages (Printing + Die on page 1,
-// Coatings + Pasting on page 2), opens the browser print dialog, then
-// cleans up. Everything else on the page is hidden via @media print
-// while the dp-print-root is visible.
+// One-shot Daily Production print: fetches every section in parallel and
+// lays them out across three pages — Printing alone, Die Cutting alone, then
+// Coating, Breaking, Pasting and Sorting together — opens the browser print
+// dialog, then cleans up. Everything else on the page is hidden via
+// @media print while the dp-print-root is visible.
 async function printDailyRegister() {
   // Whichever date picker the user touched last — they're all kept in
   // sync, so any of them is fine.
   const date = (document.getElementById('dp-date')         || {}).value
             || (document.getElementById('dp-die-date')     || {}).value
             || (document.getElementById('dp-coatings-date')|| {}).value
-            || (document.getElementById('dp-pasting-date') || {}).value;
+            || (document.getElementById('dp-pasting-date') || {}).value
+            || (document.getElementById('dp-sorting-date') || {}).value;
   if (!date) { notify('Pick a date first'); return; }
   showSaving(true);
-  let printing, die, coatings, breaking, pasting;
+  let printing, die, coatings, breaking, pasting, sorting;
   try {
-    [printing, die, coatings, breaking, pasting] = await Promise.all([
+    [printing, die, coatings, breaking, pasting, sorting] = await Promise.all([
       api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/sorting/${encodeURIComponent(date)}`),
     ]);
   } catch (e) {
     notify('Could not load all sections: ' + e.message);
@@ -15273,12 +15345,13 @@ async function printDailyRegister() {
   // Breaking — saved cells come from the new endpoint. Pad up to a
   // minimum number of rows so the printed register always has space
   // for hand-written extras.
-  const BREAKING_MIN_ROWS = 5;
-  const breakingList = Array.isArray(breaking) ? breaking.slice() : [];
-  while (breakingList.length < BREAKING_MIN_ROWS) {
-    breakingList.push({ operator: '', operator_ur: '', sheets: '', hours: '', jobs: '', helper: '', remarks: '' });
-  }
-  const breakingRows = breakingList.map(p => `
+  const PERSON_MIN_ROWS = 5;
+  const personRows = (list) => {
+    const rows = Array.isArray(list) ? list.slice() : [];
+    while (rows.length < PERSON_MIN_ROWS) {
+      rows.push({ operator: '', operator_ur: '', sheets: '', hours: '', jobs: '', helper: '', remarks: '' });
+    }
+    return rows.map(p => `
       <tr>
         <td class="m">${esc(p.operator || '')}${p.operator_ur ? ` <span class="urdu" dir="rtl" lang="ur">${esc(p.operator_ur)}</span>` : ''}</td>
         <td class="n">${esc(p.sheets  || '')}</td>
@@ -15287,6 +15360,9 @@ async function printDailyRegister() {
         <td>${esc(p.helper  || '')}</td>
         <td>${esc(p.remarks || '')}</td>
       </tr>`).join('');
+  };
+  const breakingRows = personRows(breaking);
+  const sortingRows  = personRows(sorting);
 
   const dateNice = (() => {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
@@ -15338,8 +15414,9 @@ async function printDailyRegister() {
       <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="empty">No pasting activity.</td></tr>';
 
-  // Every printed sheet carries the letterhead, so the two pages each open
-  // with the block naming the sections on them.
+  // Every printed sheet carries the letterhead, so each page opens with the
+  // block naming the sections on it. Printing and Die Cutting get a page
+  // each; the four shorter sections share the third.
   const regHeading = (sections) => `<div style="margin-bottom:6mm;">${reportPrintHeading({
     title: 'DAILY PRODUCTION REGISTER',
     scope: sections,
@@ -15347,21 +15424,23 @@ async function printDailyRegister() {
   })}</div>`;
   const html = `
     <div class="dp-print-page">
-      ${regHeading('Printing · Die Cutting')}
+      ${regHeading('Printing')}
       <h3 class="dp-print-sec">PRINTING</h3>
       <table class="dp-print-tbl"><thead><tr>
         <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Colors</th><th>Plates</th><th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${printingRows}</tbody></table>
-
-      <h3 class="dp-print-sec">DIE</h3>
+    </div>
+    <div class="dp-print-page dp-print-break">
+      ${regHeading('Die Cutting')}
+      <h3 class="dp-print-sec">DIE CUTTING</h3>
       <table class="dp-print-tbl"><thead><tr>
         <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Make Ready</th><th>Settings</th><th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${dieRows}</tbody></table>
     </div>
     <div class="dp-print-page dp-print-break">
-      ${regHeading('Coating · Breaking · Pasting')}
+      ${regHeading('Coating · Breaking · Pasting · Sorting')}
       <h3 class="dp-print-sec">U.V — SPOT U.V (COATINGS)</h3>
       <table class="dp-print-tbl"><thead><tr>
         <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
@@ -15379,6 +15458,12 @@ async function printDailyRegister() {
         <th>Machine</th><th>Units</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
         <th>Operator</th><th>Remarks</th>
       </tr></thead><tbody>${pastingRows}</tbody></table>
+
+      <h3 class="dp-print-sec">SORTING</h3>
+      <table class="dp-print-tbl dp-print-tbl-empty"><thead><tr>
+        <th>Operator</th><th>Sheets</th><th>Hours</th><th>Jobs</th>
+        <th>Helper</th><th>Remarks</th>
+      </tr></thead><tbody>${sortingRows}</tbody></table>
     </div>`;
 
   let root = document.getElementById('dp-print-root');
@@ -15412,18 +15497,20 @@ async function exportDailyRegister() {
   const date = (document.getElementById('dp-date')         || {}).value
             || (document.getElementById('dp-die-date')     || {}).value
             || (document.getElementById('dp-coatings-date')|| {}).value
-            || (document.getElementById('dp-pasting-date') || {}).value;
+            || (document.getElementById('dp-pasting-date') || {}).value
+            || (document.getElementById('dp-sorting-date') || {}).value;
   if (!date) { notify('Pick a date first'); return; }
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
   showSaving(true);
-  let printing, die, coatings, breaking, pasting;
+  let printing, die, coatings, breaking, pasting, sorting;
   try {
-    [printing, die, coatings, breaking, pasting] = await Promise.all([
+    [printing, die, coatings, breaking, pasting, sorting] = await Promise.all([
       api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production/sorting/${encodeURIComponent(date)}`),
     ]);
   } catch (e) {
     notify('Could not load all sections: ' + e.message);
@@ -15469,13 +15556,13 @@ async function exportDailyRegister() {
   // Breaking rows use the saved data — sheets, hours, jobs, helper,
   // remarks per operator. Pad to a minimum of 5 rows so the exported
   // file always has space for hand-written extras after print.
-  const breakingList = Array.isArray(breaking) ? breaking.slice() : [];
-  while (breakingList.length < 5) {
-    breakingList.push({ operator: '', sheets: '', hours: '', jobs: '', helper: '', remarks: '' });
-  }
-  const breakingRows = breakingList.map(p => [
-    p.operator || '', p.sheets || '', p.hours || '', p.jobs || '', p.helper || '', p.remarks || '',
-  ]);
+  const personSheetRows = (list) => {
+    const rows = Array.isArray(list) ? list.slice() : [];
+    while (rows.length < 5) rows.push({ operator: '', sheets: '', hours: '', jobs: '', helper: '', remarks: '' });
+    return rows.map(p => [p.operator || '', p.sheets || '', p.hours || '', p.jobs || '', p.helper || '', p.remarks || '']);
+  };
+  const breakingRows = personSheetRows(breaking);
+  const sortingRows  = personSheetRows(sorting);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet(
@@ -15498,6 +15585,10 @@ async function exportDailyRegister() {
     ['Machine', 'Units', 'Wastage', 'Hours', 'Jobs', 'Operator', 'Remarks'],
     pastingRows, 'Pasting',
   ), 'Pasting');
+  XLSX.utils.book_append_sheet(wb, sheet(
+    ['Operator', 'Sheets', 'Hours', 'Jobs', 'Helper', 'Remarks'],
+    sortingRows, 'Sorting',
+  ), 'Sorting');
 
   XLSX.writeFile(wb, `supreme-art-daily-production-${date}.xlsx`);
   notify('Exported!');

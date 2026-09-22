@@ -2627,9 +2627,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
   // machine tagged 'embellish' but not 'diecut' (e.g. one used only for
   // embossing/foiling) still needs to show up here, since that's where
   // its embellish_sheets_qty/embellish_waste_sheets entries are credited.
+  // Managers hold a PIN against a section but are not machines — without
+  // excluding them, a "line manager" account appears as its own row in the
+  // register with nothing to report against it.
   const machineRows = stageLabel === 'Die Cutting'
-    ? await sql`SELECT name, persons FROM operators WHERE active AND (roles @> ARRAY['diecut']::text[] OR roles @> ARRAY['embellish']::text[]) ORDER BY name`
-    : await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
+    ? await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND (roles @> ARRAY['diecut']::text[] OR roles @> ARRAY['embellish']::text[]) ORDER BY name`
+    : await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
   const machines = machineRows.map(r => r.name).filter(Boolean);
   // Person-name → machine-name map for THIS section's operators only. Used
   // by the LEGACY (no-entries[]) fallback to credit "obaid" (typed on the
@@ -3227,7 +3230,8 @@ app.get('/api/reports/daily-production/breaking/:date', requirePermission('rpt_d
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
 
-    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY['break']::text[]`;
+    // Managers excluded: only the breaking crew belongs in this list.
+    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND roles @> ARRAY['break']::text[]`;
     // De-dupe by lowercase name so the same person appearing on two
     // machines only shows up once in the register.
     const seen = new Map();
@@ -3267,6 +3271,37 @@ app.get('/api/reports/daily-production/breaking/:date', requirePermission('rpt_d
         is_custom: !existingNames.has(op.name.toLowerCase()),
       };
     });
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily Production register — Sorting section. Same shape as Breaking, but
+// entirely hand-entered: nothing on the Job Card feeds it, so there is no
+// roster to derive and every row is one somebody added with the + button.
+// Rows live in daily_production_notes under section 'sorting', keyed by the
+// person's name in the `machine` column exactly as Breaking does.
+app.get('/api/reports/daily-production/sorting/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'sorting'`;
+    const out = notesRows
+      .filter(r => r.machine)
+      .sort((a, b) => String(a.machine).toLowerCase().localeCompare(String(b.machine).toLowerCase()))
+      .map(r => ({
+        operator: r.machine,
+        operator_ur: '',
+        sheets:  r.sheets  || '',
+        hours:   r.hours   || '',
+        jobs:    r.jobs    || '',
+        helper:  r.helper  || '',
+        remarks: r.remarks || '',
+        is_custom: true,
+      }));
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
