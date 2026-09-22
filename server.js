@@ -3027,9 +3027,11 @@ app.get('/api/reports/daily-production/coatings/:date', requirePermission('rpt_d
     // Coating machines = operators with the 'coatings' (wet) role.
     // Embellishment (Emboss/Hot Foiling/etc.) is reported under Die
     // Cutting instead — those are the machines that actually do it.
+    // Managers excluded for the same reason as every other section: they
+    // hold a PIN against the stage but are not machines.
     const machineRows = await sql`
       SELECT name FROM operators
-      WHERE active AND roles @> ARRAY['coatings']::text[]
+      WHERE active AND NOT is_manager AND roles @> ARRAY['coatings']::text[]
       ORDER BY name
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
