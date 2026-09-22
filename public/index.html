@@ -10193,13 +10193,24 @@ function buildSummaryBuckets(from, to, granularity) {
   const fromD = new Date(from + 'T00:00:00');
   const toD   = new Date(to   + 'T23:59:59');
   if (isNaN(fromD) || isNaN(toD) || fromD > toD) return buckets;
+  // Every bucket is clamped to the selected range. A 7-day week starting near
+  // the end of the range, or the calendar month around a part-month range,
+  // otherwise reaches past the dates the user picked and counts transactions
+  // from outside them — which made Weekly and Monthly disagree on Total Out.
+  const rangeEnd = new Date(to + 'T00:00:00');
+  rangeEnd.setDate(rangeEnd.getDate() + 1);
+  const clampEnd = d => (d > rangeEnd ? new Date(rangeEnd) : d);
   if (granularity === 'monthly') {
     let cur = new Date(fromD.getFullYear(), fromD.getMonth(), 1);
     const end = new Date(toD.getFullYear(), toD.getMonth(), 1);
     while (cur <= end) {
       const next = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
       const monthName = cur.toLocaleString('en-US', { month: 'short' });
-      buckets.push({ label: `${monthName} ${cur.getFullYear()}`, start: new Date(cur), end: next });
+      buckets.push({
+        label: `${monthName} ${cur.getFullYear()}`,
+        start: cur < fromD ? new Date(fromD) : new Date(cur),
+        end: clampEnd(next),
+      });
       cur = next;
     }
   } else { // weekly
@@ -10207,7 +10218,7 @@ function buildSummaryBuckets(from, to, granularity) {
     let n = 1;
     while (cur <= toD) {
       const next = new Date(cur); next.setDate(cur.getDate() + 7);
-      buckets.push({ label: `Week ${n}`, start: new Date(cur), end: next });
+      buckets.push({ label: `Week ${n}`, start: new Date(cur), end: clampEnd(next) });
       cur = next; n++;
     }
   }
