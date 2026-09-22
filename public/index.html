@@ -3452,7 +3452,7 @@ function ensureXlsx() {
   if (_xlsxLoadPromise) return _xlsxLoadPromise;
   _xlsxLoadPromise = new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js';
     s.onload  = () => resolve();
     s.onerror = () => { _xlsxLoadPromise = null; reject(new Error('Failed to load Excel library — check your connection and try again.')); };
     document.head.appendChild(s);
@@ -10166,13 +10166,24 @@ function buildSummaryBuckets(from, to, granularity) {
   const fromD = new Date(from + 'T00:00:00');
   const toD   = new Date(to   + 'T23:59:59');
   if (isNaN(fromD) || isNaN(toD) || fromD > toD) return buckets;
+  // Every bucket is clamped to the selected range. A 7-day week starting near
+  // the end of the range, or the calendar month around a part-month range,
+  // otherwise reaches past the dates the user picked and counts transactions
+  // from outside them — which made Weekly and Monthly disagree on Total Out.
+  const rangeEnd = new Date(to + 'T00:00:00');
+  rangeEnd.setDate(rangeEnd.getDate() + 1);
+  const clampEnd = d => (d > rangeEnd ? new Date(rangeEnd) : d);
   if (granularity === 'monthly') {
     let cur = new Date(fromD.getFullYear(), fromD.getMonth(), 1);
     const end = new Date(toD.getFullYear(), toD.getMonth(), 1);
     while (cur <= end) {
       const next = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
       const monthName = cur.toLocaleString('en-US', { month: 'short' });
-      buckets.push({ label: `${monthName} ${cur.getFullYear()}`, start: new Date(cur), end: next });
+      buckets.push({
+        label: `${monthName} ${cur.getFullYear()}`,
+        start: cur < fromD ? new Date(fromD) : new Date(cur),
+        end: clampEnd(next),
+      });
       cur = next;
     }
   } else { // weekly
@@ -10180,7 +10191,7 @@ function buildSummaryBuckets(from, to, granularity) {
     let n = 1;
     while (cur <= toD) {
       const next = new Date(cur); next.setDate(cur.getDate() + 7);
-      buckets.push({ label: `Week ${n}`, start: new Date(cur), end: next });
+      buckets.push({ label: `Week ${n}`, start: new Date(cur), end: clampEnd(next) });
       cur = next; n++;
     }
   }
@@ -11282,17 +11293,17 @@ function printStockSummary() {
   const isAll = !paperType;
   const { rows, buckets, asOfPast } = computeSummaryRows();
   const periodHeaders = buckets.map(b =>
-    `<th colspan="3" style="border:1px solid #000;padding:3px;text-align:center;background:#eee;">${esc(b.label)}</th>`).join('');
+    `<th colspan="3" style="border:1px solid #000;padding:3px;text-align:center;background:#f7f1ea;">${esc(b.label)}</th>`).join('');
   const periodSubHeaders = buckets.map(() =>
-    `<th style="border:1px solid #000;padding:3px;background:#eee;">IN</th>
-     <th style="border:1px solid #000;padding:3px;background:#eee;">OUT</th>
-     <th style="border:1px solid #000;padding:3px;background:#eee;">Bal</th>`).join('');
+    `<th style="border:1px solid #000;padding:3px;background:#f7f1ea;">IN</th>
+     <th style="border:1px solid #000;padding:3px;background:#f7f1ea;">OUT</th>
+     <th style="border:1px solid #000;padding:3px;background:#f7f1ea;">Bal</th>`).join('');
   const tdL = 'style="border:1px solid #000;padding:3px;"';
   const tdR = 'style="border:1px solid #000;padding:3px;text-align:right;"';
   const typeTd = (r) => isAll ? `<td ${tdL}>${esc(r.item.paper_type || '—')}</td>` : '';
   const unitTd = (r) => isAll ? `<td ${tdL}>${esc(r.unit)}</td>` : '';
-  const typeTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Paper Type</th>' : '';
-  const unitTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Unit</th>' : '';
+  const typeTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Paper Type</th>' : '';
+  const unitTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Unit</th>' : '';
   const body = rows.map(r => {
     const periodCells = r.periods.map(p =>
       `<td style="border:1px solid #000;padding:3px;text-align:right;color:#166534;"><b>${fmtPkts(p.in)}</b></td><td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(p.out)}</b></td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
@@ -11315,39 +11326,39 @@ function printStockSummary() {
     </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0; } }</style>
+    <style>@media print { @page { size: A4 landscape; margin: 0; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Stock Summary — ${isAll ? 'All Paper Types' : esc(paperType)}</div>
+      <div style="border:1px solid #555;background:#faf8f3;padding:7px 10px 5px;">
+        <div style="display:grid;grid-template-columns:1fr 2fr 1fr;align-items:center;gap:8px;">
+          <div><img src="/logo.png" style="height:42px;max-width:110px;object-fit:contain;" onerror="this.style.display='none'"><div style="font-size:8pt;font-weight:bold;color:#a32d2d;">SUPREME ART PRIVATE LIMITED</div></div>
+          <div style="font-size:14pt;color:#a32d2d;text-align:center;">STOCK SUMMARY REPORT</div>
+          <div></div>
         </div>
-        <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>From:</b> ${esc(from)} &nbsp; <b>To:</b> ${esc(to)}</div>
-          <div><b>Group by:</b> ${granularity}${isAll ? '' : ` &nbsp; <b>Units:</b> ${esc(packetUnitLabel(paperType))}`}</div>
-          ${asOfPast ? `<div><b>${esc(summaryAsOfNote(asOfPast))}</b></div>` : ''}
-          <div>Generated: ${fmtDMYT(new Date())}</div>
+        <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:8px;font-size:8pt;margin-top:3px;">
+          <div>${isAll ? 'All Paper Types' : esc(paperType)}</div>
+          <div style="text-align:center;">Date: ${esc(from)} to ${esc(to)}</div>
+          <div style="text-align:right;">Group by: ${granularity}${isAll ? '' : ` · Units: ${esc(packetUnitLabel(paperType))}`}</div>
         </div>
+        ${asOfPast ? `<div style="font-size:8pt;text-align:center;">${esc(summaryAsOfNote(asOfPast))}</div>` : ''}
       </div>
       ${rows.length ? `
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr>
           ${typeTh}
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">GSM</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Size (in)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Brand(s)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">GSM</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Size (in)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Brand(s)</th>
           ${unitTh}
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Opening</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Opening</th>
           ${periodHeaders}
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Total Out</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">${esc(summaryStockLabel(asOfPast))}</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Weight (kg)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Pending Import</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">After Import</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Import (kg)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Status</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#eee;">Status (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Total Out</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">${esc(summaryStockLabel(asOfPast))}</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Weight (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Pending Import</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">After Import</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Import (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Status</th>
+          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Status (kg)</th>
         </tr>
         <tr>${periodSubHeaders}</tr>
         ${body}
@@ -11385,7 +11396,9 @@ async function exportStockSummary() {
   header.push(qty('Total Out'), qty(summaryStockLabel(asOfPast)), 'Weight (kg)',
               qty('Pending Import'), qty('After Import'), 'Import (kg)',
               qty('Status'), 'Status (kg)');
-  const aoa = [header];
+  const title = 'STOCK SUMMARY REPORT';
+  const meta = `Date: ${from} to ${to} · Group by: ${granularity}${isAll ? '' : ' · Units: ' + unit}`;
+  const aoa = [['SUPREME ART PRIVATE LIMITED', title], [isAll ? 'All Paper Types' : paperType, meta], header];
   const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
   for (const r of rows) {
     const row = [...(isAll ? [r.item.paper_type || ''] : []), r.item.gsm || '', r.item.size || '', r.item.brand || '', ...(isAll ? [r.unit] : []), round2(r.openingPkts)];
@@ -11396,8 +11409,46 @@ async function exportStockSummary() {
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const midCol = Math.floor(header.length / 2);
+  ws['!merges'] = [
+    {s:{r:0,c:0},e:{r:0,c:midCol-1}}, {s:{r:0,c:midCol},e:{r:0,c:header.length-1}},
+    {s:{r:1,c:0},e:{r:1,c:midCol-1}}, {s:{r:1,c:midCol},e:{r:1,c:header.length-1}}
+  ];
+  for (let r=0;r<2;r++) {
+    const value = r===0 ? title : meta;
+    ws[XLSX.utils.encode_cell({r,c:midCol})] = {t:'s',v:value};
+    if (midCol!==1) delete ws[XLSX.utils.encode_cell({r,c:1})];
+    for (let c=0;c<header.length;c++) {
+      const addr=XLSX.utils.encode_cell({r,c});
+      if (!ws[addr]) ws[addr]={t:'s',v:''};
+      ws[addr].s={fill:{patternType:'solid',fgColor:{rgb:'FAF8F3'}},
+        font:{name:'Arial',sz:r===0?11:8,bold:r===0,color:{rgb:r===0?'A32D2D':'222222'}},
+        alignment:{vertical:'center',horizontal:c>=midCol?'center':'left'}};
+    }
+  }
+  ws['!rows']=[{hpt:28},{hpt:20},{hpt:30}];
+  const pendingCol=header.findIndex(h=>h.startsWith('Pending Import'));
+  const statusCol=header.findIndex(h=>h.startsWith('Status'));
+  for (let r=2;r<aoa.length;r++) for (let c=0;c<header.length;c++) {
+    const cell=ws[XLSX.utils.encode_cell({r,c})];
+    if (!cell) continue;
+    if (r===2) {
+      cell.s={fill:{patternType:'solid',fgColor:{rgb:'F3F4F6'}},
+        font:{name:'Arial',sz:8,bold:true,color:{rgb:'222222'}},
+        alignment:{wrapText:true,vertical:'center'}};
+      continue;
+    }
+    const n=Number(cell.v);
+    const isIn=/ IN$/.test(header[c]);
+    const isOut=/ OUT$/.test(header[c])||/^Total Out/.test(header[c]);
+    const status=c>=statusCol&&Number.isFinite(n);
+    const color=isIn||(status&&n<0)?'166534':isOut||(status&&n>0)?'A32D2D':'222222';
+    cell.s={font:{name:'Arial',sz:9,bold:isIn||isOut||status,color:{rgb:color}},
+      alignment:{vertical:'center',horizontal:cell.t==='n'?'right':'left'}};
+    if(c===pendingCol&&n>0) cell.s.fill={patternType:'solid',fgColor:{rgb:'FACC15'}};
+  }
   ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
+    wch: Math.max(h.length, ...aoa.slice(3).map(r => String(r[i] ?? '').length)) + 2
   }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Summary');
