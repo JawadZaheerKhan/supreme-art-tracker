@@ -5418,9 +5418,18 @@ function refreshCurrent() {
 
 // ── Filtering ─────────────────────────────────────────────────
 function getFiltered() {
+  const t = String(filterText || '').trim().toLowerCase();
+  // "E-350", "e350" and "350" all mean job 350 — that's how the id is shown
+  // everywhere in the app, so the search box has to accept it written that way.
+  const idNeedle = t.replace(/^e[-\s]?/, '');
+  const searching = !!t || !!String(filterPO || '').trim();
   return jobs.filter(j => {
-    const t = filterText.toLowerCase();
-    if (t && !j.name.toLowerCase().includes(t) && !j.client.toLowerCase().includes(t) && !String(j.id).includes(t)) return false;
+    if (t) {
+      const name   = String(j.name   || '').toLowerCase();
+      const client = String(j.client || '').toLowerCase();
+      const id     = String(j.id);
+      if (!name.includes(t) && !client.includes(t) && id !== idNeedle && !id.includes(idNeedle)) return false;
+    }
     if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
     if (filterClient && j.client !== filterClient) return false;
     if (filterPO) {
@@ -5432,6 +5441,11 @@ function getFiltered() {
     if (filterMachine && j.machine !== filterMachine) return false;
     if (filterGroup && j.stock_group_name !== filterGroup) return false;
     if (!inDateRange(j)) return false;
+    // A search looks across every stage. Otherwise the job had to already be
+    // in whichever tab you happened to be on, so searching a job number from
+    // In Progress found nothing when the job had moved to Ready to Deliver —
+    // the box looked broken even though the job was right there.
+    if (searching && view !== 'finalized') return true;
     if (view === 'new')     return isNewJob(j);
     if (view === 'ctp')     return isCtpQueue(j);
     // Only TRUE-pending (never issued) lives in the Pending Stock tab.
@@ -5449,9 +5463,10 @@ function getFiltered() {
     if (view === 'done')    return isDone(j);
     if (view === 'blocked') return isBlocked(j);
     if (view === 'finalized') return _finalizedJobIds.has(j.id);
-    // Default 'all' view — hide new / CTP-queue jobs so they don't clutter
-    // the main list; both have their own tab.
-    return !isNewJob(j) && !isCtpQueue(j);
+    // 'All' means all — New Jobs and the CTP queue used to be hidden here
+    // because they have their own tabs, which made a freshly created job
+    // look missing until you found the right tab.
+    return true;
   });
 }
 
