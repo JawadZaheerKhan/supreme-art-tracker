@@ -14178,31 +14178,41 @@ function printProductionReport() {
   const sectionLabels = { printing: 'Printing', coatings: 'Coating', diecut: 'Die Cutting', pasting: 'Pasting' };
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
+  // Each row carries its Nx-multiplied sheet total in slot 5 — printed as the
+  // same green bracket the on-screen table shows, and only when it differs
+  // from the base (Printing is the only stage that can run a job Nx).
   let rows, headers, title;
   if (s.pick) {
-    rows = dailyRows.filter(r => r[nameKey] === s.pick).map(r => [fmtDate(r.date), r.sheets, r.waste, r.hours, r.jobs]);
+    rows = dailyRows.filter(r => r[nameKey] === s.pick)
+      .map(r => [fmtDate(r.date), r.sheets, r.waste, r.hours, r.jobs, r.sheets_mult]);
     headers = ['Date', 'Sheets', 'Wastage', 'Hours', 'Jobs'];
     title = `Production — ${s.pick} (day-by-day)`;
   } else {
     const acc = new Map();
     for (const r of dailyRows) {
       const k = r[nameKey];
-      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, waste: 0, hours: 0, jobs: 0 });
+      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, sheetsMult: 0, waste: 0, hours: 0, jobs: 0 });
       const e = acc.get(k);
-      e.sheets += (+r.sheets || 0); e.waste += (+r.waste || 0);
+      e.sheets += (+r.sheets || 0); e.sheetsMult += (+r.sheets_mult || 0);
+      e.waste  += (+r.waste  || 0);
       e.hours  += (+r.hours  || 0); e.jobs  += (+r.jobs  || 0);
     }
     rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)))
-      .map(r => [r.name, r.sheets, r.waste, Math.round(r.hours * 100) / 100, r.jobs]);
+      .map(r => [r.name, r.sheets, r.waste, Math.round(r.hours * 100) / 100, r.jobs, r.sheetsMult]);
     headers = [nameLabel, 'Sheets', 'Wastage', 'Hours', 'Jobs'];
     title = `Production Report — By ${nameLabel}${s.section ? ' · ' + (sectionLabels[s.section] || s.section) : ''}`;
   }
+  const fmtSheets = (base, mult) => {
+    const b = +base || 0, m = +mult || 0;
+    return m > b ? `${fmt(b)} <span style="color:#166534;font-weight:bold;">(${fmt(m)})</span>` : fmt(b);
+  };
   const totals = rows.reduce((t, r) => ({
     sheets: t.sheets + (+r[1] || 0),
     waste:  t.waste  + (+r[2] || 0),
     hours:  t.hours  + (+r[3] || 0),
     jobs:   t.jobs   + (+r[4] || 0),
-  }), { sheets: 0, waste: 0, hours: 0, jobs: 0 });
+    sheetsMult: t.sheetsMult + (+r[5] || 0),
+  }), { sheets: 0, waste: 0, hours: 0, jobs: 0, sheetsMult: 0 });
   const th  = 'style="text-align:left;padding:6px 8px;border:1px solid #888;background:#f0f0f0;font-weight:700;font-size:11pt;"';
   const thR = 'style="text-align:right;padding:6px 8px;border:1px solid #888;background:#f0f0f0;font-weight:700;font-size:11pt;"';
   const td  = 'style="padding:5px 8px;border:1px solid #888;font-size:10.5pt;"';
@@ -14210,7 +14220,7 @@ function printProductionReport() {
   const body = rows.map(r => `
     <tr>
       <td ${td}>${esc(r[0])}</td>
-      <td ${tdR}>${fmt(r[1])}</td>
+      <td ${tdR}>${fmtSheets(r[1], r[5])}</td>
       <td ${tdR}>${fmt(r[2])}</td>
       <td ${tdR}>${fmt(r[3])}</td>
       <td ${tdR}>${fmt(r[4])}</td>
@@ -14237,7 +14247,7 @@ function printProductionReport() {
         <tfoot>
           <tr style="background:#f7eaea;font-weight:700;">
             <td ${td} style="padding:6px 8px;border:1px solid #888;font-weight:700;background:#f7eaea;font-size:10.5pt;">Total</td>
-            <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmt(totals.sheets)}</td>
+            <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmtSheets(totals.sheets, totals.sheetsMult)}</td>
             <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmt(totals.waste)}</td>
             <td ${tdR} style="font-weight:700;background:#f7eaea;">${Math.round(totals.hours * 100) / 100}</td>
             <td ${tdR} style="font-weight:700;background:#f7eaea;">${fmt(totals.jobs)}</td>
@@ -14264,34 +14274,39 @@ async function exportProductionReport() {
   const nameKey = isMachine ? 'machine' : 'operator';
   const nameLabel = isMachine ? 'Machine' : 'Operator';
   const fmtDate = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || ''); return m ? `${m[3]}/${m[2]}/${m[1]}` : (d || ''); };
+  // Sheets x N sits in its own column, as in the Daily Production workbook:
+  // bracketing it into the Sheets cell would turn that cell into text.
   let headers, rows, sheetName;
   if (s.pick) {
-    headers = ['Date', 'Sheets', 'Wastage', 'Hours', 'Jobs'];
+    headers = ['Date', 'Sheets', 'Sheets × N', 'Wastage', 'Hours', 'Jobs'];
     rows = dailyRows.filter(r => r[nameKey] === s.pick)
-      .map(r => [fmtDate(r.date), r.sheets, r.waste, r.hours, r.jobs]);
+      .map(r => [fmtDate(r.date), r.sheets, (+r.sheets_mult || 0) > (+r.sheets || 0) ? r.sheets_mult : '', r.waste, r.hours, r.jobs]);
     sheetName = String(s.pick).slice(0, 28);
   } else {
     const acc = new Map();
     for (const r of dailyRows) {
       const k = r[nameKey];
-      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, waste: 0, hours: 0, jobs: 0 });
+      if (!acc.has(k)) acc.set(k, { name: k, sheets: 0, sheetsMult: 0, waste: 0, hours: 0, jobs: 0 });
       const e = acc.get(k);
-      e.sheets += (+r.sheets || 0); e.waste += (+r.waste || 0);
+      e.sheets += (+r.sheets || 0); e.sheetsMult += (+r.sheets_mult || 0);
+      e.waste  += (+r.waste  || 0);
       e.hours  += (+r.hours  || 0); e.jobs  += (+r.jobs  || 0);
     }
-    headers = [nameLabel, 'Sheets', 'Wastage', 'Hours', 'Jobs'];
+    headers = [nameLabel, 'Sheets', 'Sheets × N', 'Wastage', 'Hours', 'Jobs'];
     rows = [...acc.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)))
-      .map(r => [r.name, r.sheets, r.waste, Math.round(r.hours * 100) / 100, r.jobs]);
+      .map(r => [r.name, r.sheets, r.sheetsMult > r.sheets ? r.sheetsMult : '', r.waste, Math.round(r.hours * 100) / 100, r.jobs]);
     sheetName = `By ${nameLabel}`;
   }
   // Total row
   const totals = rows.reduce((t, r) => ({
     sheets: t.sheets + (+r[1] || 0),
-    waste:  t.waste  + (+r[2] || 0),
-    hours:  t.hours  + (+r[3] || 0),
-    jobs:   t.jobs   + (+r[4] || 0),
-  }), { sheets: 0, waste: 0, hours: 0, jobs: 0 });
-  const aoa = reportExcelAoa(headers).concat(rows).concat([['Total', totals.sheets, totals.waste, Math.round(totals.hours * 100) / 100, totals.jobs]]);
+    mult:   t.mult   + (+r[2] || +r[1] || 0),
+    waste:  t.waste  + (+r[3] || 0),
+    hours:  t.hours  + (+r[4] || 0),
+    jobs:   t.jobs   + (+r[5] || 0),
+  }), { sheets: 0, mult: 0, waste: 0, hours: 0, jobs: 0 });
+  const aoa = reportExcelAoa(headers).concat(rows).concat([['Total', totals.sheets,
+    totals.mult > totals.sheets ? totals.mult : '', totals.waste, Math.round(totals.hours * 100) / 100, totals.jobs]]);
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, headers, {
     title: 'PRODUCTION REPORT',
@@ -14299,6 +14314,12 @@ async function exportProductionReport() {
     dateText: `Date: ${fmtDate(s.from)} to ${fmtDate(s.to)}`,
   });
   applyReportExcelCols(ws, headers, aoa);
+  // Green, matching the printed bracket and the on-screen figure.
+  for (let r = REPORT_XL_HEADER_ROWS; r < aoa.length; r++) {
+    const cell = ws[XLSX.utils.encode_cell({ r, c: 2 })];
+    if (cell) cell.s = { font: { name: 'Arial', sz: 9, bold: true, color: { rgb: '166534' } },
+                         alignment: { vertical: 'center', horizontal: 'right' } };
+  }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Production');
   const range = `${s.from}_${s.to}`;
