@@ -13361,25 +13361,28 @@ function srColFilterApply(field) {
 // the two fixed tax rates instead of the usual editable Sale Tax %.
 // Each entry maps to a finance.waste_board_sales column; `key` is that column
 // name, so a cell edit patches exactly the field it sits under.
+// The fourth value is the cell width, matching the widths the other tabs give
+// their equivalent columns — without it the table stretches these 14 columns
+// across the full width, where the other tabs have 34 to fill it with.
 const SALE_REPORT_WASTE_FIELDS = [
-  ['entry_date',     'Date'],
-  ['invoice_no',     'Invoice No.'],
-  ['msi_no',         'MSI No.'],
-  ['fbr_no',         'E-FBR Invoice No.'],
-  ['job_name',       'Job Name'],
-  ['qty',            'Delivered Qty',         true],
-  ['rate',           'Rate per UC',           true],
-  ['amount_ex_tax',  'Amount Excl. Tax',      true],
-  ['tax18',          'Sale Tax 18%',          true],
-  ['tax4',           'Sale Tax 4%',           true],
-  ['amount_inc_tax', 'Amount Incl. Sale Tax', true],
-  ['company',        'Company'],
-  ['ntn',            'NTN'],
-  ['destination',    'Destination'],
+  ['entry_date',     'Date',                  false, 90],
+  ['invoice_no',     'Invoice No.',           false, 90],
+  ['msi_no',         'MSI No.',               false, 85],
+  ['fbr_no',         'E-FBR Invoice No.',     false, 105],
+  ['job_name',       'Job Name',              false, 150],
+  ['qty',            'Delivered Qty',         true,  90],
+  ['rate',           'Rate per UC',           true,  85],
+  ['amount_ex_tax',  'Amount Excl. Tax',      true,  100],
+  ['tax18',          'Sale Tax 18%',          true,  90],
+  ['tax4',           'Sale Tax 4%',           true,  90],
+  ['amount_inc_tax', 'Amount Incl. Sale Tax', true,  110],
+  ['company',        'Company',               false, 120],
+  ['ntn',            'NTN',                   false, 100],
+  ['destination',    'Destination',           false, 110],
 ];
 function saleReportWasteCols() {
-  return SALE_REPORT_WASTE_FIELDS.map(([key, label, right]) => ({
-    key, label, right: !!right,
+  return SALE_REPORT_WASTE_FIELDS.map(([key, label, right, width]) => ({
+    key, label, right: !!right, width,
     cell: r => esc(r[key] || ''), xl: r => r[key] || '', pr: r => esc(r[key] || ''),
   }));
 }
@@ -13549,23 +13552,24 @@ async function loadWasteBoardSales() {
 function renderSaleReportWasteTab(el) {
   const cols = saleReportCols(SALE_REPORT_WASTE_TAB);
   const canEdit = hasPerm('rpt_sale_report_company', 'yes');
-  const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;white-space:nowrap;"';
-  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;white-space:nowrap;"';
+  const thStyle = c => `text-align:${c.right ? 'right' : 'left'};padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;white-space:nowrap;width:${c.width}px;`;
   const addTh = canEdit
-    ? `<th style="padding:6px 8px;text-align:center;width:1%;"><button class="btn btn-sm" onclick="addWasteBoardRow()" title="Add a row">&#43;</button></th>`
+    ? `<th style="padding:6px 8px;text-align:center;white-space:nowrap;"><button class="btn btn-sm" onclick="addWasteBoardRow()" title="Add a row">&#43;</button></th>`
     : '';
-  const thead = cols.map(c => `<th ${c.right ? thR : th}>${esc(c.label)}</th>`).join('') + addTh;
+  const thead = cols.map(c => `<th style="${thStyle(c)}">${esc(c.label)}</th>`).join('') + addTh;
   const body = wasteBoardRows.map(r => `<tr style="border-bottom:1px solid var(--border);">
       ${cols.map(c => `<td style="padding:4px 6px;">${canEdit
-        ? `<input type="text" value="${esc(r[c.key] || '')}" onchange="saveWasteBoardField(${r.id}, '${c.key}', this.value)" style="width:100%;min-width:${c.right ? 90 : 110}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${c.right ? 'text-align:right;' : ''}">`
+        ? `<input type="text" value="${esc(r[c.key] || '')}" onchange="saveWasteBoardField(${r.id}, '${c.key}', this.value)" style="width:${c.width}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${c.right ? 'text-align:right;' : ''}">`
         : esc(r[c.key] || '')}</td>`).join('')}
       ${canEdit ? `<td style="padding:4px 6px;text-align:center;"><button class="btn btn-sm btn-danger" onclick="deleteWasteBoardRow(${r.id})" title="Delete this row">&times;</button></td>` : ''}
     </tr>`).join('');
   const colCount = cols.length + (canEdit ? 1 : 0);
+  // width:auto, not 100% — with only 14 columns a full-width table would
+  // stretch each one far wider than the same column on the other tabs.
   el.innerHTML = `
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${wasteBoardRows.length} row${wasteBoardRows.length === 1 ? '' : 's'} &middot; board sold as waste isn't tracked as a job, so these are entered by hand${canEdit ? ' — click + to add one' : ''}.</div>
     <div class="report-scroll-wrap">
-    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+    <table class="ss-table" style="width:auto;border-collapse:collapse;font-size:13px;">
       <thead><tr style="background:var(--bg2);">${thead}</tr></thead>
       <tbody>${body || `<tr><td colspan="${colCount}" style="padding:18px;text-align:center;color:var(--text3);font-style:italic;">No rows yet.${canEdit ? ' Click + to add one.' : ''}</td></tr>`}</tbody>
     </table>
