@@ -269,7 +269,8 @@ function getDb() {
 // job card (job_btn_edit / job_btn_history) for CEO, Finance, Store Manager and Operator so they
 // keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
 // Bumped again to seed the Forms tab rows (forms_tab_access / forms_btn_transfer_note) from the old forms_print defaults.
-const SCHEMA_VERSION = 'v2026-09-19-forms-rows';
+// Bumped again to create finance.waste_board_sales, behind the Sale Report's Waste of Board tab.
+const SCHEMA_VERSION = 'v2026-09-22-waste-board-sales';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1438,6 +1439,30 @@ async function initDb() {
         destination TEXT,
         updated_by  TEXT,
         updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // Board sold as waste never goes through a job card, so the Sale Report's
+    // "Waste of Board" tab keeps its own hand-entered rows here. Every value
+    // is typed by the user — nothing is derived from jobs.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.waste_board_sales (
+        id             SERIAL PRIMARY KEY,
+        entry_date     TEXT,
+        invoice_no     TEXT,
+        msi_no         TEXT,
+        fbr_no         TEXT,
+        job_name       TEXT,
+        qty            TEXT,
+        rate           TEXT,
+        amount_ex_tax  TEXT,
+        tax18          TEXT,
+        tax4           TEXT,
+        amount_inc_tax TEXT,
+        company        TEXT,
+        ntn            TEXT,
+        destination    TEXT,
+        updated_by     TEXT,
+        updated_at     TIMESTAMPTZ DEFAULT NOW()
       )
     `;
     await sql`
@@ -6970,6 +6995,76 @@ app.delete('/api/company-settings/:id', requirePermission('rpt_sale_report_compa
     await logAudit(sql, req, {
       action: 'company_settings.delete', entityType: 'company_settings', entityId: id,
       summary: `Company Settings removed: "${deleted[0].company}"`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Waste of Board sales (Sale Report tab) ────────────────────────
+// Board sold as waste isn't a job, so these rows are typed by hand. Every
+// column is free text: the tab is a ledger the finance team fills in, and
+// forcing numeric types here would only reject part-filled rows mid-entry.
+const WASTE_BOARD_FIELDS = ['entry_date', 'invoice_no', 'msi_no', 'fbr_no', 'job_name', 'qty', 'rate',
+  'amount_ex_tax', 'tax18', 'tax4', 'amount_inc_tax', 'company', 'ntn', 'destination'];
+app.get('/api/waste-board-sales', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM finance.waste_board_sales ORDER BY id ASC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// The + button adds an empty row, which is then filled in cell by cell.
+app.post('/api/waste-board-sales', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const inserted = await sql`
+      INSERT INTO finance.waste_board_sales (updated_by, updated_at) VALUES (${req.user.email}, NOW()) RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'waste_board_sales.create', entityType: 'waste_board_sales', entityId: inserted[0].id,
+      summary: 'Waste of Board row added',
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// One field at a time from the table's inline inputs. The whole row is
+// rewritten from the body rather than patching a dynamically-named column,
+// so no column name ever reaches the query as interpolated text.
+app.patch('/api/waste-board-sales/:id', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const existing = await sql`SELECT * FROM finance.waste_board_sales WHERE id = ${id}`;
+    if (!existing.length) return res.status(404).json({ error: 'Waste of Board row not found' });
+    const field = String(req.body?.field ?? '');
+    if (!WASTE_BOARD_FIELDS.includes(field)) return res.status(400).json({ error: 'Unknown field' });
+    const v = { ...existing[0], [field]: String(req.body?.value ?? '').trim() || null };
+    const updated = await sql`
+      UPDATE finance.waste_board_sales SET
+        entry_date = ${v.entry_date}, invoice_no = ${v.invoice_no}, msi_no = ${v.msi_no},
+        fbr_no = ${v.fbr_no}, job_name = ${v.job_name}, qty = ${v.qty}, rate = ${v.rate},
+        amount_ex_tax = ${v.amount_ex_tax}, tax18 = ${v.tax18}, tax4 = ${v.tax4},
+        amount_inc_tax = ${v.amount_inc_tax}, company = ${v.company}, ntn = ${v.ntn},
+        destination = ${v.destination}, updated_by = ${req.user.email}, updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/waste-board-sales/:id', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM finance.waste_board_sales WHERE id = ${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Waste of Board row not found' });
+    await logAudit(sql, req, {
+      action: 'waste_board_sales.delete', entityType: 'waste_board_sales', entityId: id,
+      summary: 'Waste of Board row removed',
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
