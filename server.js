@@ -303,7 +303,6 @@ const ROLE_PERMISSION_DEFAULTS = {
   // silently hand Store Manager admin's unconditional bypass.
   inventory_reverse:    { label: 'Reverse a stock transaction', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
   inventory_reports:    { label: 'Stock/Total In & Out, Offcut Consumption, and Stock Summary & Inventory reports', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'yes', finance: 'yes' } },
-  production_reports:   { label: 'Jobs Report, Production Report, and Daily Production registers — view', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'hidden', finance: 'yes' } },
   production_edit:      { label: 'Daily Production registers — edit', levels: { admin: 'yes', production_manager: 'yes', store_manager: 'yes' } },
   trash_view:           { label: 'Trash / Archive — view', levels: { admin: 'yes', ceo: 'yes' } },
   trash_admin:          { label: 'Trash / Archive — restore, purge, empty; delete/archive a transaction or import row', levels: { admin: 'yes' } },
@@ -385,8 +384,11 @@ const ROLE_PERMISSION_DEFAULTS = {
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
   // read-only, there's no "edit" concept for any of them. Same "not wired
-  // into any gate yet" note applies — inventory_reports/production_reports/
-  // wastage_adjustment/trash_view keep enforcing exactly as before.
+  // into any gate yet" note applies — inventory_reports/wastage_adjustment/
+  // trash_view keep enforcing exactly as before. rpt_production_report and
+  // rpt_daily_production_report ARE live gates: they replaced the bundled
+  // production_reports key, which lumped the two together with the Jobs
+  // Report so neither could be granted on its own.
   reports_tab_access:              { label: 'Reports tab — view the Reports landing page', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   rpt_stock_in:                    { label: 'Stock In report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   rpt_stock_out:                   { label: 'Stock Out report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
@@ -2923,7 +2925,7 @@ function jobsDisplayPair(jobsMap) {
 // machine with sheets, jobs count, colors breakdown, plates and the
 // operator list. Hours + Remarks come from daily_production_notes so
 // admin can scribble what the auto-totals can't capture.
-app.get('/api/reports/daily-production/printing/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/printing/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3012,7 +3014,7 @@ function isoTsToDate(ts) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
   return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
 }
-app.get('/api/reports/daily-production/coatings/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/coatings/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3218,7 +3220,7 @@ app.get('/api/reports/daily-production/coatings/:date', requirePermission('produ
 // there's no workflow stage to aggregate from, so all numeric cells
 // are admin-entered. We pull the operator roster from anyone whose
 // machine has the 'break' role and serve their saved cells.
-app.get('/api/reports/daily-production/breaking/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/breaking/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3274,7 +3276,7 @@ app.get('/api/reports/daily-production/breaking/:date', requirePermission('produ
 // Daily Production register — Pasting section. Same byline-parsing
 // pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
 // per job per machine on the chosen date.
-app.get('/api/reports/daily-production/pasting/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/pasting/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3317,7 +3319,7 @@ app.get('/api/reports/daily-production/pasting/:date', requirePermission('produc
 // Printing endpoint but sheets come from die_cutting_sheets, the stage
 // label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
 // as admin-editable cells.
-app.get('/api/reports/daily-production/die/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/die/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3683,7 +3685,7 @@ async function aggregateProductionRange(sql, { from, to }) {
   return { byMachineDaily: byMachineDailyArr, byOperatorDaily: byOperatorDailyArr };
 }
 
-app.get('/api/reports/production', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/production', requirePermission('rpt_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
