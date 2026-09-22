@@ -11364,7 +11364,7 @@ function printStockSummary() {
         ${asOfPast ? `<div style="font-size:8pt;text-align:center;">${esc(summaryAsOfNote(asOfPast))}</div>` : ''}
       </div>`;
   const html = `
-    <style>@media print { .ss-print-num { display:inline-block; transform:scaleY(1.45); transform-origin:center center; white-space:nowrap; } @page { size: A4 landscape; margin: 0; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:100% !important; max-width:297mm; padding:3mm !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
+    <style>@media print { .ss-print-num { display:inline-block; transform:scaleY(1.45); transform-origin:center center; white-space:nowrap; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:auto !important; max-width:none !important; padding:0 !important; margin:0 !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
       ${rows.length ? `
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
@@ -11405,9 +11405,21 @@ function printStockSummary() {
   });
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  // A page rule inside #print-area can be ignored by Chrome. Add it to
+  // <head> for this print only, after the app's global portrait rule.
+  const pageStyle = document.createElement('style');
+  pageStyle.textContent = '@media print { @page { size: A4 landscape; margin: 0; } }';
+  document.head.appendChild(pageStyle);
+  const cleanup = () => {
+    window.removeEventListener('afterprint', cleanup);
+    pageStyle.remove();
+    area.innerHTML = '';
+  };
+  window.addEventListener('afterprint', cleanup, { once: true });
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
     window.print();
-    setTimeout(() => { area.innerHTML = ''; }, 500);
+    // Fallback for browsers that do not fire afterprint after canceling.
+    setTimeout(() => { if (pageStyle.isConnected) cleanup(); }, 30000);
   });
 }
 
