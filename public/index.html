@@ -1342,6 +1342,13 @@
     transition:color .25s ease;
   }
   .jr-mode-toggle-btn.is-selected { color:#fff; }
+  .ss-offcut-toggle {
+    display:inline-flex; align-items:center; gap:7px; min-height:34px; padding:7px 12px;
+    background:#dbeafe; border:1px solid #93c5fd; border-radius:8px; color:#1e3a8a;
+    font-size:13px; font-weight:800; cursor:pointer;
+  }
+  .ss-offcut-toggle.is-on { background:#1e3a8a; border-color:#1e3a8a; color:#fff; }
+  .ss-offcut-toggle input { accent-color:#1e3a8a; }
   .jr-mil-whole-toggle {
     display:inline-flex; align-items:center; min-height:34px; padding:7px 12px;
     background:#f3e8ff; border:1px solid #c084fc; border-radius:8px; color:#6b21a8;
@@ -10152,7 +10159,7 @@ function printStockReport() {
 // for opening balance, then IN/OUT/balance buckets across the chosen range
 // (monthly OR weekly), then totals (consumption, current stock, weight) and
 // projections (stock required next period, total imports).
-let stockSummaryState = { paperType: 'bleach board', search: '', period: 'today', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
+let stockSummaryState = { paperType: 'bleach board', offcutOnly: false, search: '', period: 'today', from: '', to: '', granularity: 'monthly', items: [], txs: [] };
 
 // Parse a free-text size string like "22x28", "22 x 28", or "22×28" into
 // {w, h} in inches. Returns null for anything we can't parse (e.g. "Custom",
@@ -10776,6 +10783,13 @@ function openStockSummary() {
           ${paperOpts}
         </select>
       </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <label class="ss-offcut-toggle ${stockSummaryState.offcutOnly?'is-on':''}">
+          <input type="checkbox" ${stockSummaryState.offcutOnly?'checked':''} onchange="setSummaryOffcutOnly(this.checked)">
+          <span>Offcut items only</span>
+        </label>
+      </div>
       <div style="min-width:220px;">
         <div class="dash-flbl">Search</div>
         <div class="search-wrap">
@@ -10811,6 +10825,7 @@ function openStockSummary() {
 }
 
 function setSummaryPaperType(v) { stockSummaryState.paperType = v; loadStockSummary(); }
+function setSummaryOffcutOnly(v) { stockSummaryState.offcutOnly = !!v; loadStockSummary(); }
 function setSummaryFrom(v)      { stockSummaryState.from = v; loadStockSummary(); }
 function setSummaryTo(v)        { stockSummaryState.to   = v; loadStockSummary(); }
 function setSummaryGranularity(v){stockSummaryState.granularity = v; renderStockSummary(); }
@@ -10847,17 +10862,14 @@ async function loadStockSummary() {
       api('GET', '/api/inventory/transactions?raw=1'),
       api('GET', '/api/imports?status=pending'),
     ]);
-    // Empty paperType ("All paper types") means no paper_type filter at all.
-    // Offcut items are excluded here — this report is about ordering more
-    // FRESH paper, which offcut isn't; its own movement already has a
-    // dedicated report (Offcut Consumption). Every fresh item of the
-    // selected type(s) is kept regardless of whether it has moved at all,
-    // so a paper that's never had a transaction still shows a zero row
-    // instead of silently not appearing.
+    // Fresh stock is the default; the Offcut toggle switches to offcut
+    // inventory rows of the selected paper type. Ledger rows are matched
+    // to item IDs below, so both modes keep their own movements.
     const pt = stockSummaryState.paperType;
+    const offcutOnly = stockSummaryState.offcutOnly;
     stockSummaryState.txs     = allTxs.filter(t => !pt || t.paper_type === pt);
-    stockSummaryState.items   = inventory.filter(i => (!pt || i.paper_type === pt) && !i.is_offcut);
-    stockSummaryState.imports = imports.filter(i => !pt || i.paper_type === pt);
+    stockSummaryState.items   = inventory.filter(i => (!pt || i.paper_type === pt) && !!i.is_offcut === offcutOnly);
+    stockSummaryState.imports = offcutOnly ? [] : imports.filter(i => !pt || i.paper_type === pt);
     if (stockSummaryState.period === 'all') {
       const times = stockSummaryState.txs.map(t => new Date(t.created_at).getTime()).filter(Number.isFinite);
       stockSummaryState.from = localDateISO(new Date(times.length ? Math.min(...times) : Date.now()));
@@ -11054,9 +11066,10 @@ function summaryStockLabel(asOfPast) {
 // Pending imports are only known as "still pending today", not as of a past
 // date — say so whenever the balance is historical.
 function summaryAsOfNote(asOfPast) {
-  return asOfPast
-    ? `Stock is as of ${fmtDMY(stockSummaryState.to)} · Pending Import shows orders still pending today`
-    : '';
+  if (!asOfPast) return '';
+  return stockSummaryState.offcutOnly
+    ? `Stock is as of ${fmtDMY(stockSummaryState.to)}`
+    : `Stock is as of ${fmtDMY(stockSummaryState.to)} · Pending Import shows orders still pending today`;
 }
 
 // Collapse per-item rows into one row per (paper_type, gsm, size, is_offcut)
@@ -11247,7 +11260,7 @@ function renderStockSummary() {
       <td style="text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
-  const scopeLabel = isAll ? 'All paper types' : esc(paperType);
+  const scopeLabel = (isAll ? 'All paper types' : esc(paperType)) + (stockSummaryState.offcutOnly ? ' · Offcut items only' : '');
   const unitLabel = isAll ? 'units vary by row' : `units: ${esc(packetUnitLabel(paperType).toLowerCase())}`;
   el.innerHTML = `
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${scopeLabel} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · ${unitLabel}${asOfPast ? ' · <b>' + esc(summaryAsOfNote(asOfPast)) + '</b>' : ''}</div>
@@ -11334,9 +11347,7 @@ function printStockSummary() {
       <td ${tdR} style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
-  const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:100% !important; max-width:297mm; padding:3mm !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
-    <div style="font-family:Arial,sans-serif;color:#000;">
+  const heading = `
       <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
         <div style="display:grid;grid-template-columns:150px 1fr 150px;align-items:center;gap:5px;">
           <div style="text-align:center;">
@@ -11346,14 +11357,18 @@ function printStockSummary() {
           <div style="text-align:center;">
             <div style="font-size:14pt;color:#a32d2d;">STOCK SUMMARY REPORT</div>
             <div style="font-size:8pt;margin-top:1px;">STR/QR/008/C</div>
-            <div style="font-size:8pt;margin-top:1px;">${isAll ? 'All Paper Types' : esc(paperType)}</div>
+            <div style="font-size:8pt;margin-top:1px;">${isAll ? 'All Paper Types' : esc(paperType)}${stockSummaryState.offcutOnly ? ' · Offcut items only' : ''}</div>
           </div>
           <div style="font-size:8pt;text-align:right;align-self:end;white-space:nowrap;">Date: ${esc(from)} to ${esc(to)}</div>
         </div>
         ${asOfPast ? `<div style="font-size:8pt;text-align:center;">${esc(summaryAsOfNote(asOfPast))}</div>` : ''}
-      </div>
+      </div>`;
+  const html = `
+    <style>@media print { @page { size: A4 landscape; margin: 0; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:100% !important; max-width:297mm; padding:3mm !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
       ${rows.length ? `
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
+        <caption style="caption-side:top;text-align:left;padding:0;">${heading}</caption>
         <thead style="display:table-header-group;"><tr>
           ${typeTh}
           <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">GSM</th>
@@ -11373,7 +11388,7 @@ function printStockSummary() {
         </tr>
         <tr>${periodSubHeaders}</tr></thead>
         <tbody>${body}</tbody>
-      </table>` : '<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>'}
+      </table>` : `${heading}<div style="font-size:11pt;text-align:center;padding:30px;border:1px dashed #000;">No items match this filter.</div>`}
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
@@ -11409,7 +11424,7 @@ async function exportStockSummary() {
               qty('Status'), 'Status (kg)');
   const title = 'STOCK SUMMARY REPORT';
   const meta = `Date: ${from} to ${to}`;
-  const scope = isAll ? 'All Paper Types' : paperType;
+  const scope = (isAll ? 'All Paper Types' : paperType) + (stockSummaryState.offcutOnly ? ' · Offcut items only' : '');
   const aoa = [['SUPREME ART PRIVATE LIMITED'], [], header];
   const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
   for (const r of rows) {
@@ -11469,7 +11484,7 @@ async function exportStockSummary() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Summary');
   const stamp = localDateISO();
-  const typeTag = isAll ? 'all' : paperType.replace(/\s+/g, '-').toLowerCase();
+  const typeTag = (isAll ? 'all' : paperType.replace(/\s+/g, '-').toLowerCase()) + (stockSummaryState.offcutOnly ? '-offcut' : '');
   XLSX.writeFile(wb, `supreme-art-summary-${typeTag}-${stamp}.xlsx`);
   notify('Exported!');
 }
