@@ -315,7 +315,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   forms_print:          { label: 'Forms — open & print Transfer Note', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes', finance: 'yes' } },
   user_view:            { label: 'View the Authorized Users list', levels: { admin: 'yes', ceo: 'view' } },
   user_admin:           { label: "Invite/create a user, edit a user's roles, or block/unblock/delete a user", levels: { admin: 'yes' } },
-  client_view_preview:  { label: 'Open the internal "Client View" preview', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
+  client_view_preview:  { label: 'Client View tab — open the internal preview of what a client sees', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
   // NOTE (2026-09-19): every job_btn_* / inv_btn_* / user_btn_* / *_tab_access / rpt_* row below is now a LIVE gate:
   // the routes use requirePermission / requireAnyBtn / userHasBtn and the client hides or disables the button. The
@@ -4077,7 +4077,10 @@ app.get('/api/client/jobs', requireClient, async (req, res) => {
 // default so the admin can't accidentally reveal the wrong client's
 // jobs from a saved link.
 app.get('/api/admin/client-view', requireAuth, async (req, res) => {
-  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'client_view_preview')) {
+  // 'view' is the minimum, matching canRunStation: this is a tab-visibility
+  // row in the Access Register, so setting it to VIEW there has to be enough
+  // server-side too, or the tab would show and then 403 on open.
+  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'client_view_preview', 'view')) {
     return res.status(403).json({ error: 'Not allowed' });
   }
   try {

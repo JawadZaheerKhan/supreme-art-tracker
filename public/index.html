@@ -21461,7 +21461,7 @@ function deliveriesSectionFinance(j, opts) {
           ${isShadeCard ? '' : `
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
-            <input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saves on its own; clear the box to go back to the station's number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+            <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saved when you press Record Delivery; clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
           </div>
           `}
           <div style="min-width:0;">
@@ -22087,9 +22087,15 @@ async function recordDelivery(jobId) {
   const batchNo = ((document.getElementById('deliv-batch')||{}).value || '').trim();
   const fbrNo   = ((document.getElementById('deliv-fbr')||{}).value   || '').trim();
   const msiNo   = ((document.getElementById('deliv-msi')||{}).value   || '').trim();
+  const cpEl    = document.getElementById('deliv-cartons-packets');
+  const cpStr   = ((cpEl||{}).value || '').trim();
   const cartonsN = parseFloat(cartons);
   if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  if (cpStr !== '') {
+    const cpN = parseFloat(cpStr);
+    if (!Number.isFinite(cpN) || cpN < 0) { await alertDialog({ title: 'Cartons/Packets must be a positive number', kind: 'warn' }); return; }
+  }
   // Rate / Sale Tax inputs only exist for holders of job_btn_pricing (see
   // deliveriesSectionFinance); for everyone else these ride along undefined.
   const rateEl = document.getElementById('deliv-rate');
@@ -22110,7 +22116,13 @@ async function recordDelivery(jobId) {
     // shipment's PO / batch across a job that was split.
     const body = { cartons, date, notes, po_no: poNo, batch_no: batchNo, fbr_no: fbrNo, msi_no: msiNo };
     if (rateEl || taxEl) { body.rate = rate; body.tax_pct = taxPct; }
-    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, body);
+    let updated = await api('POST', `/api/jobs/${jobId}/deliveries`, body);
+    // Cartons/Packets is a job-level figure, so it rides along here rather
+    // than saving the moment the box loses focus — doing that mid-entry used
+    // to reopen the card and wipe everything else already typed into this form.
+    if (cpEl && cpStr !== (cpEl.dataset.original || '')) {
+      updated = await api('PATCH', `/api/jobs/${jobId}/cartons-packets`, { cartons_packets: cpStr === '' ? null : cpStr });
+    }
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     closeModal(); render(); notify('Delivery recorded');
@@ -29085,11 +29097,17 @@ const ACC_USERS_TAB_ROWS = [
   { key: 'user_activitylog_tab_access',    type: 'tab' },
   { key: 'user_accessregister_tab_access', type: 'tab' },
 ];
+// Client View tab: one View/Hidden row for the whole tab. The gate itself
+// (client_view_preview) was already live on both sides — this only puts it
+// in the register so it can be changed without editing code.
+const ACC_CLIENT_VIEW_TAB_ROWS = [
+  { key: 'client_view_preview', type: 'tab' },
+];
 // Rows for every built tab, keyed by tab id. Add an entry here (and a
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, forms: ACC_FORMS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS };
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, forms: ACC_FORMS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
