@@ -8694,6 +8694,11 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
     // Offcut Consumption report only: include automatic E-job deductions
     // from offcut inventory while all other movement reports stay unchanged.
     const includeOffcutAuto = req.query.include_offcut_auto === '1';
+    // Manual Consumption only: hide rows it has archived. This used to ride
+    // on include_offcut_manual, but Stock In/Out started sending that flag
+    // too (for the offcut carve-out below), so archiving a row there made it
+    // vanish from Stock Out as well — which is exactly what it must not do.
+    const excludeArchived = req.query.exclude_archived === '1';
     // raw=1: return the TRUE ledger with NO exclusions — corrections,
     // reversals, and offcut rows all included. The Stock Summary needs
     // this to compute an accurate balance: 'correction' rows are real
@@ -8734,14 +8739,14 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
         AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
-        -- Archived (soft-deleted) rows drop out ONLY of Manual Consumption
-        -- (the one caller that sends include_offcut_manual=1) — Stock
-        -- In/Out/Totals deliberately keep showing them. Deleting a row from
-        -- Manual Consumption must not make it vanish from Stock Out too;
+        -- Archived (soft-deleted) rows drop out ONLY for the caller that asks
+        -- via exclude_archived=1, which is Manual Consumption alone. Stock
+        -- In/Out and Totals deliberately keep showing them: archiving a row
+        -- from Manual Consumption is not a claim the stock movement never
+        -- happened, so it must not vanish from Stock Out too.
         -- deleted_at is only ever set by Manual Consumption's own delete
-        -- (see DELETE /api/inventory/transactions/:id?scope=manual below),
-        -- so every other caller (and raw=1) simply ignores it.
-        AND (${raw} OR NOT ${includeOffcutManual} OR t.deleted_at IS NULL)
+        -- (see DELETE /api/inventory/transactions/:id?scope=manual below).
+        AND (${raw} OR NOT ${excludeArchived} OR t.deleted_at IS NULL)
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.

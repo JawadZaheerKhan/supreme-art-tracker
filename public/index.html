@@ -17491,10 +17491,12 @@ async function loadManualConsumption() {
   if (from) qs.set('from', from);
   if (to)   qs.set('to',   to);
   qs.set('direction', 'out');
-  // Manual Consumption is the one report that still wants offcut items'
-  // manual-job-card rows — every other report (Stock In/Out, Total
-  // In/Out, Stock Summary) keeps excluding offcut movement entirely.
+  // Manual Consumption wants offcut items' manual-job-card rows. Stock In/Out
+  // asks for the same carve-out, so this flag says nothing about archiving —
+  // hiding the rows this report has archived is exclude_archived's job, and
+  // only this report sends it.
   qs.set('include_offcut_manual', '1');
+  qs.set('exclude_archived', '1');
   try {
     const [txs, allocs] = await Promise.all([
       api('GET', `/api/inventory/transactions?${qs.toString()}`),
@@ -17759,7 +17761,7 @@ async function deleteSelectedManualConsumption() {
   if (!ids.length) return;
   const ok = await confirmDialog({
     title: `Move ${ids.length} selected transaction${ids.length===1?'':'s'} to Archive?`,
-    message: 'They will be removed from Manual Job Card Consumption and inventory history, kept in Archive for 30 days (restorable). Current physical stock balances will not change.',
+    message: "They will be removed from Manual Job Card Consumption and kept in Archive for 30 days (restorable). They'll keep showing in Stock In/Out and Total Stock In/Out — this only affects the Manual Job Card Consumption report. Current physical stock balances will not change.",
     confirmText: 'Move to Archive', danger: true,
   });
   if (!ok) return;
