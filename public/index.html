@@ -5078,24 +5078,47 @@ function companySettingsFor(company) {
   if (!name) return null;
   return companySettings.find(c => String(c.company || '').trim().toLowerCase() === name) || null;
 }
-// Job cards usually carry a short company name ("Bio Labs") while Company
-// Settings holds the full legal one ("Bio Labs Pvt Ltd"), so an exact match
-// alone leaves NTN and Destination blank. Fall back to one name being a
-// whole-word prefix of the other — "Bio Labs" matches "Bio Labs Pvt Ltd" but
-// not "Bio Laboratories". A short name that could match two different
-// companies resolves to nothing rather than guessing: putting the wrong NTN
-// on an invoice is far worse than leaving the column empty.
+// Job cards carry whatever the shop writes ("Shaigan Pharma", "Stanley")
+// while Company Settings holds the registered name ("Shaigan Pharmaceuticals
+// Pvt Ltd"), so names are compared as words, not as raw text: the same word
+// spelt long or short counts as one, and legal suffixes are ignored entirely.
+const COMPANY_WORD_SYNONYMS = {
+  pharmaceutical: 'pharma', pharmaceuticals: 'pharma', pharmaceutica: 'pharma',
+  laboratory: 'lab', laboratories: 'lab', labs: 'lab',
+  foods: 'food', industries: 'industry', intl: 'international',
+};
+const COMPANY_WORD_NOISE = new Set(['pvt', 'private', 'ltd', 'limited', 'co', 'company', 'inc', 'corp', 'corporation', 'the', 'and']);
+function companyTokens(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/)
+    .filter(Boolean)
+    .map(t => COMPANY_WORD_SYNONYMS[t] || t)
+    .filter(t => !COMPANY_WORD_NOISE.has(t));
+}
+const companyTokensPrefix = (long, short) => short.length <= long.length && short.every((t, i) => long[i] === t);
 function resolveCompanySettings(company) {
   const name = String(company || '').trim().toLowerCase();
   if (!name) return null;
   const exact = companySettings.find(c => String(c.company || '').trim().toLowerCase() === name);
   if (exact) return exact;
-  const isPrefix = (long, short) => long.startsWith(short) && (long.length === short.length || long[short.length] === ' ');
+  const want = companyTokens(company);
+  if (!want.length) return null;
   const hits = companySettings.filter(c => {
-    const full = String(c.company || '').trim().toLowerCase();
-    return full && (isPrefix(full, name) || isPrefix(name, full));
+    const have = companyTokens(c.company);
+    return have.length && (companyTokensPrefix(have, want) || companyTokensPrefix(want, have));
   });
-  return hits.length === 1 ? hits[0] : null;
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) {
+    // A bare "Stanley" or "Global" when both a pharma and a non-pharma company
+    // of that name are on file means the pharma one — that's the core business.
+    // A name that matches word for word still wins over that default.
+    const sameLength = hits.filter(c => companyTokens(c.company).length === want.length);
+    if (sameLength.length === 1) return sameLength[0];
+    const pharma = hits.filter(c => companyTokens(c.company).includes('pharma'));
+    if (pharma.length === 1) return pharma[0];
+  }
+  // Still ambiguous: leave it blank rather than put one company's NTN on
+  // another's invoice.
+  return null;
 }
 // Rs 12.5, Rs 12 (no trailing zeros) — up to 2 decimal places.
 function fmtRate(n) { return 'Rs ' + Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
@@ -13421,6 +13444,7 @@ function saleReportCols(tabOverride) {
   const d1 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
   const d2 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 2 });
   const sheetsText = r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : d1(r.wastageSheets);
+  const nameWithBatch = r => String(r.name || '') + (r.batchNo ? ' — ' + r.batchNo : '');
   const tab = tabOverride || saleReportState.tab || 'all';
   if (tab === SALE_REPORT_WASTE_TAB) return saleReportWasteCols();
   return [
@@ -13429,11 +13453,12 @@ function saleReportCols(tabOverride) {
     { key: 'msi', label: 'MSI No.', cell: (r, c) => c.editCell(r, 'msi_no', r.msiNo, 90), xl: r => r.msiNo || '', pr: r => esc(r.msiNo || '') },
     { key: 'job', label: 'Job Card No.', cell: r => esc(r.idDisplay), xl: r => r.idDisplay, pr: r => esc(r.idDisplay) },
     { key: 'po', label: 'PO No.', cell: (r, c) => c.editCell(r, 'po_no', r.poNo, 90), xl: r => r.poNo, pr: r => esc(r.poNo) },
-    { key: 'batch', label: 'Batch No.', cell: (r, c) => c.editCell(r, 'batch_no', r.batchNo, 80), xl: r => r.batchNo || '', pr: r => esc(r.batchNo || '') },
     { key: 'fbr', label: 'E-FBR Invoice No.', cell: (r, c) => c.editCell(r, 'fbr_no', r.fbrNo, 100), xl: r => r.fbrNo || '', pr: r => esc(r.fbrNo || '') },
+    // Batch No. has no column of its own — it reads as part of the job name.
     { key: 'name', label: 'Job Name',
-      cell: r => esc(r.name) + (r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;">Shade Card</span>' : ''),
-      xl: r => r.isShadeCard ? r.name + ' (Shade Card)' : r.name, pr: r => esc(r.name) + (r.isShadeCard ? ' <b>(Shade Card)</b>' : '') },
+      cell: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;">Shade Card</span>' : ''),
+      xl: r => r.isShadeCard ? nameWithBatch(r) + ' (Shade Card)' : nameWithBatch(r),
+      pr: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <b>(Shade Card)</b>' : '') },
     { key: 'cartons', label: 'Delivered UC Qty', right: true, total: 'cartons',
       cell: r => r.cartons.toLocaleString(),
       xl: r => { let v = r.isShadeCard && r.cartons ? r.cartons + ' copies' : r.cartons; return r.isPartial ? v + ' (PARTIAL)' : v; },
