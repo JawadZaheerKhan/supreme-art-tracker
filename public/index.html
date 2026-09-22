@@ -5078,6 +5078,25 @@ function companySettingsFor(company) {
   if (!name) return null;
   return companySettings.find(c => String(c.company || '').trim().toLowerCase() === name) || null;
 }
+// Job cards usually carry a short company name ("Bio Labs") while Company
+// Settings holds the full legal one ("Bio Labs Pvt Ltd"), so an exact match
+// alone leaves NTN and Destination blank. Fall back to one name being a
+// whole-word prefix of the other — "Bio Labs" matches "Bio Labs Pvt Ltd" but
+// not "Bio Laboratories". A short name that could match two different
+// companies resolves to nothing rather than guessing: putting the wrong NTN
+// on an invoice is far worse than leaving the column empty.
+function resolveCompanySettings(company) {
+  const name = String(company || '').trim().toLowerCase();
+  if (!name) return null;
+  const exact = companySettings.find(c => String(c.company || '').trim().toLowerCase() === name);
+  if (exact) return exact;
+  const isPrefix = (long, short) => long.startsWith(short) && (long.length === short.length || long[short.length] === ' ');
+  const hits = companySettings.filter(c => {
+    const full = String(c.company || '').trim().toLowerCase();
+    return full && (isPrefix(full, name) || isPrefix(name, full));
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
 // Rs 12.5, Rs 12 (no trailing zeros) — up to 2 decimal places.
 function fmtRate(n) { return 'Rs ' + Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
 // Text for the top-of-tile Rate fact, shared by both tile renderers (each
@@ -13146,7 +13165,10 @@ function buildSaleReportRows(tabOverride) {
       const own = splitCoatings(j.coatings);
       if (!own.some(c => cf.coatings.includes(c))) continue;
     }
-    const cs = companySettingsFor(j.client);
+    // Company/NTN/Destination all come from Company Settings, including the
+    // full registered name — the job card's shorter one is only the lookup key.
+    const cs = resolveCompanySettings(j.client);
+    const companyName = (cs && cs.company) || j.client || '';
     const cartonsPackets = cartonsPacketsFor(j);
     deliveriesList.forEach((d, idx) => {
       const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
@@ -13170,7 +13192,7 @@ function buildSaleReportRows(tabOverride) {
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       out.push({
         id: j.id, idDisplay: 'E-' + j.id, deliveryIndex: idx, name: j.name || '', type: productType,
-        deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: j.client || '',
+        deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: companyName,
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         poQty: j.qty || '', cartonQty: j.cartonqty || '', cartons, cartonsPackets,
         wastage, readyQty, packets,
@@ -13558,9 +13580,14 @@ function renderSaleReportWasteTab(el) {
     : '';
   const thead = cols.map(c => `<th style="${thStyle(c)}">${esc(c.label)}</th>`).join('') + addTh;
   const body = wasteBoardRows.map(r => `<tr style="border-bottom:1px solid var(--border);">
-      ${cols.map(c => `<td style="padding:4px 6px;">${canEdit
-        ? `<input type="text" value="${esc(r[c.key] || '')}" onchange="saveWasteBoardField(${r.id}, '${c.key}', this.value)" style="width:${c.width}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${c.right ? 'text-align:right;' : ''}">`
-        : esc(r[c.key] || '')}</td>`).join('')}
+      ${cols.map(c => `<td style="padding:4px 6px;">${!canEdit ? esc(r[c.key] || '')
+        : c.key === 'company'
+          // Picking a company here fills NTN and Destination from its settings.
+          ? `<select onchange="saveWasteBoardField(${r.id}, 'company', this.value)" style="width:${c.width}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;background:#fff;">
+               <option value="">&mdash;</option>
+               ${companySettings.map(cs => `<option value="${esc(cs.company)}"${String(r.company || '') === cs.company ? ' selected' : ''}>${esc(cs.company)}</option>`).join('')}
+             </select>`
+          : `<input type="text" value="${esc(r[c.key] || '')}" onchange="saveWasteBoardField(${r.id}, '${c.key}', this.value)" style="width:${c.width}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${c.right ? 'text-align:right;' : ''}">`}</td>`).join('')}
       ${canEdit ? `<td style="padding:4px 6px;text-align:center;"><button class="btn btn-sm btn-danger" onclick="deleteWasteBoardRow(${r.id})" title="Delete this row">&times;</button></td>` : ''}
     </tr>`).join('');
   const colCount = cols.length + (canEdit ? 1 : 0);
@@ -13587,20 +13614,19 @@ async function addWasteBoardRow() {
 async function saveWasteBoardField(id, field, value) {
   showSaving(true);
   try {
-    const updated = await api('PATCH', `/api/waste-board-sales/${id}`, { field, value });
-    const ix = wasteBoardRows.findIndex(r => r.id === id);
-    if (ix >= 0) wasteBoardRows[ix] = updated;
-    // Typing a company fills its NTN and Destination from Company Settings,
-    // the same source the rest of the report reads them from.
+    let row = await api('PATCH', `/api/waste-board-sales/${id}`, { field, value });
+    // Picking a company carries its NTN and Destination across, so the two
+    // never have to be typed by hand. Clearing it leaves them alone.
     if (field === 'company') {
       const cs = companySettingsFor(value);
-      if (cs && (cs.ntn || cs.destination)) {
-        if (cs.ntn)         await api('PATCH', `/api/waste-board-sales/${id}`, { field: 'ntn', value: cs.ntn });
-        if (cs.destination) wasteBoardRows[ix] = await api('PATCH', `/api/waste-board-sales/${id}`, { field: 'destination', value: cs.destination });
-        else if (cs.ntn)    wasteBoardRows[ix] = { ...wasteBoardRows[ix], ntn: cs.ntn };
-        renderSaleReport();
+      if (cs) {
+        row = await api('PATCH', `/api/waste-board-sales/${id}`, { field: 'ntn', value: cs.ntn || '' });
+        row = await api('PATCH', `/api/waste-board-sales/${id}`, { field: 'destination', value: cs.destination || '' });
       }
     }
+    const ix = wasteBoardRows.findIndex(r => r.id === id);
+    if (ix >= 0) wasteBoardRows[ix] = row;
+    if (field === 'company') renderSaleReport();
     notify('Saved');
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
