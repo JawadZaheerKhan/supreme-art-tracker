@@ -10686,7 +10686,7 @@ async function exportInventoryReport() {
   header.push('Items', 'Packets / Reams', 'Sheets', 'Weight (kg)');
   if (showConsumed) header.push('Consumed');
   header.push('Import (pending)');
-  const aoa = [header];
+  const aoa = reportExcelAoa(header);
   for (const r of rows) {
     const row = [r.paperType, r.size, r.gsm, r.isOffcut ? 'Offcut' : 'Fresh'];
     if (showBrand)    row.push(r.brand    || '');
@@ -10698,10 +10698,16 @@ async function exportInventoryReport() {
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  // Auto-width per column based on contents.
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  const modeLabel = showBrand && showSupplier ? 'By Brand & Supplier'
+                  : showBrand                 ? 'By Brand'
+                  : showSupplier              ? 'By Supplier'
+                  :                             'Ignoring Brand & Supplier';
+  applyReportExcelHeading(ws, header, {
+    title: 'CURRENT BALANCE SUMMARY',
+    scope: `${modeLabel} · Paper: ${invReportState.paperType || 'All'} · Offcuts: ${invReportState.includeOffcuts ? 'Included' : 'Excluded'}`,
+    dateText: `Generated: ${fmtDMYT(new Date())}`,
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
   const stamp = localDateISO();
@@ -10714,6 +10720,80 @@ async function exportInventoryReport() {
 
 // Print the Inventory Report — A4 landscape, same rows as on-screen. Brand
 // or Supplier column is shown based on the current grouping mode.
+// ── Shared report heading (print + Excel) ─────────────────────
+// One branded block for every report, so the Stock Summary and the rest can't
+// drift apart: company mark on the left, title / form code / scope centred,
+// date on the right. `formCode` is the controlled-document number — reports
+// that haven't been given one yet just leave it out and the line is dropped.
+function reportPrintHeading({ title, formCode, scope, dateText, note }) {
+  return `
+      <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
+        <div style="display:grid;grid-template-columns:150px 1fr 150px;align-items:center;gap:5px;">
+          <div style="text-align:center;">
+            <img src="/logo-urdu.png" style="height:30px;max-width:95px;object-fit:contain;display:block;margin:0 auto;" onerror="this.style.display='none'">
+            <div style="font-size:8pt;font-weight:bold;color:#a32d2d;white-space:nowrap;">SUPREME ART PRIVATE LIMITED</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-size:14pt;color:#a32d2d;">${esc(title || '')}</div>
+            ${formCode ? `<div style="font-size:8pt;margin-top:1px;">${esc(formCode)}</div>` : ''}
+            ${scope ? `<div style="font-size:8pt;margin-top:1px;">${esc(scope)}</div>` : ''}
+          </div>
+          <div style="font-size:8pt;text-align:right;align-self:end;white-space:nowrap;">${esc(dateText || '')}</div>
+        </div>
+        ${note ? `<div style="font-size:8pt;text-align:center;">${esc(note)}</div>` : ''}
+      </div>`;
+}
+// The same block as the first two rows of a worksheet, with the column header
+// on row 3. Call it with the sheet and the header array after aoa_to_sheet;
+// data must start at REPORT_XL_HEADER_ROWS.
+const REPORT_XL_HEADER_ROWS = 3;
+function reportExcelAoa(header) { return [['SUPREME ART PRIVATE LIMITED'], [], header]; }
+function applyReportExcelHeading(ws, header, { title, formCode, scope, dateText }) {
+  const last = header.length - 1;
+  if (last < 3) return;                       // too few columns to lay out three blocks
+  const leftEnd  = Math.min(Math.max(1, Math.floor(header.length / 4) - 1), last - 2);
+  const midCol   = leftEnd + 1;
+  let   rightCol = Math.ceil(header.length * 3 / 4);
+  if (rightCol <= midCol) rightCol = midCol + 1;
+  if (rightCol > last)    rightCol = last;
+  ws['!merges'] = ws['!merges'] || [];
+  for (let r = 0; r < 2; r++) {
+    ws['!merges'].push(
+      { s: { r, c: 0 },        e: { r, c: leftEnd } },
+      { s: { r, c: midCol },   e: { r, c: rightCol - 1 } },
+      { s: { r, c: rightCol }, e: { r, c: last } },
+    );
+  }
+  const put = (r, c, v) => { ws[XLSX.utils.encode_cell({ r, c })] = { t: 's', v }; };
+  put(0, midCol, title || '');
+  put(1, midCol, [formCode, scope].filter(Boolean).join('\n'));
+  put(1, rightCol, dateText || '');
+  for (let r = 0; r < 2; r++) for (let c = 0; c < header.length; c++) {
+    const addr = XLSX.utils.encode_cell({ r, c });
+    if (!ws[addr]) ws[addr] = { t: 's', v: '' };
+    ws[addr].s = {
+      fill: { patternType: 'solid', fgColor: { rgb: 'F3EEE4' } },
+      font: { name: 'Arial', sz: r === 0 ? 11 : 8, bold: r === 0, color: { rgb: r === 0 ? 'A32D2D' : '222222' } },
+      alignment: { vertical: 'center', wrapText: r === 1,
+        horizontal: c >= midCol && c < rightCol ? 'center' : c >= rightCol ? 'right' : 'left' },
+    };
+  }
+  for (let c = 0; c < header.length; c++) {
+    const addr = XLSX.utils.encode_cell({ r: 2, c });
+    if (!ws[addr]) continue;
+    ws[addr].s = { fill: { patternType: 'solid', fgColor: { rgb: 'F3F4F6' } },
+      font: { name: 'Arial', sz: 8, bold: true, color: { rgb: '222222' } },
+      alignment: { wrapText: true, vertical: 'center' } };
+  }
+  ws['!rows'] = [{ hpt: 28 }, { hpt: 30 }, { hpt: 30 }];
+}
+// Column widths measured over the data rows only, skipping the banner.
+function applyReportExcelCols(ws, header, aoa) {
+  ws['!cols'] = header.map((h, i) => ({
+    wch: Math.max(String(h).length, ...aoa.slice(REPORT_XL_HEADER_ROWS).map(r => String(r[i] ?? '').length), 6) + 2,
+  }));
+}
+
 function printInventoryReport() {
   const rows = buildInventoryReportRows();
   if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
@@ -10758,21 +10838,15 @@ function printInventoryReport() {
     </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } }</style>
+    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Current Balance Summary — ${modeLabel}</div>
-        </div>
-        <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>Paper:</b> ${paperType || 'All'} &nbsp; <b>Offcuts:</b> ${includeOffcuts ? 'Included' : 'Excluded'}</div>
-          <div>Generated: ${fmtDMYT(new Date())}</div>
-        </div>
-      </div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'CURRENT BALANCE SUMMARY',
+        scope: `${modeLabel} · Paper: ${paperType || 'All'} · Offcuts: ${includeOffcuts ? 'Included' : 'Excluded'}`,
+        dateText: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#eee;">
+        <tr style="background:#f7f1ea;">
           <th ${tdL}>Paper Type</th>
           <th ${tdL}>Size</th>
           <th ${tdL}>GSM</th>
@@ -11402,22 +11476,13 @@ function printStockSummary() {
       <td style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
-  const heading = `
-      <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
-        <div style="display:grid;grid-template-columns:150px 1fr 150px;align-items:center;gap:5px;">
-          <div style="text-align:center;">
-            <img src="/logo-urdu.png" style="height:30px;max-width:95px;object-fit:contain;display:block;margin:0 auto;" onerror="this.style.display='none'">
-            <div style="font-size:8pt;font-weight:bold;color:#a32d2d;white-space:nowrap;">SUPREME ART PRIVATE LIMITED</div>
-          </div>
-          <div style="text-align:center;">
-            <div style="font-size:14pt;color:#a32d2d;">STOCK SUMMARY REPORT</div>
-            <div style="font-size:8pt;margin-top:1px;">STR/QR/008/C</div>
-            <div style="font-size:8pt;margin-top:1px;">${isAll ? 'All Paper Types' : esc(paperType)}${stockSummaryState.offcutOnly ? ' · Offcut items only' : ''}</div>
-          </div>
-          <div style="font-size:8pt;text-align:right;align-self:end;white-space:nowrap;">Date: ${esc(fmtDMY(from))} to ${esc(fmtDMY(to))}</div>
-        </div>
-        ${asOfPast ? `<div style="font-size:8pt;text-align:center;">${esc(summaryAsOfNote(asOfPast))}</div>` : ''}
-      </div>`;
+  const heading = reportPrintHeading({
+    title: 'STOCK SUMMARY REPORT',
+    formCode: 'STR/QR/008/C',
+    scope: (isAll ? 'All Paper Types' : paperType) + (stockSummaryState.offcutOnly ? ' · Offcut items only' : ''),
+    dateText: `Date: ${fmtDMY(from)} to ${fmtDMY(to)}`,
+    note: asOfPast ? summaryAsOfNote(asOfPast) : '',
+  });
   const html = `
     <style>@media print { .ss-print-num { display:inline-block; transform:scaleY(1.45); transform-origin:center center; white-space:nowrap; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:auto !important; max-width:none !important; padding:0 !important; margin:0 !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
@@ -11500,10 +11565,8 @@ async function exportStockSummary() {
   header.push(qty('Total Out'), qty(summaryStockLabel(asOfPast)), 'Weight (kg)',
               qty('Pending Import'), qty('After Import'), 'Import (kg)',
               qty('Status'), 'Status (kg)');
-  const title = 'STOCK SUMMARY REPORT';
-  const meta = `Date: ${from} to ${to}`;
   const scope = (isAll ? 'All Paper Types' : paperType) + (stockSummaryState.offcutOnly ? ' · Offcut items only' : '');
-  const aoa = [['SUPREME ART PRIVATE LIMITED'], [], header];
+  const aoa = reportExcelAoa(header);
   const round2 = (n) => n === null || n === undefined ? '' : +n.toFixed(2);
   for (const r of rows) {
     const row = [...(isAll ? [r.item.paper_type || ''] : []), r.item.gsm || '', r.item.size || '', r.item.brand || '', ...(isAll ? [r.unit] : []), round2(r.openingPkts)];
@@ -11514,39 +11577,15 @@ async function exportStockSummary() {
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const leftEnd = Math.max(1, Math.floor(header.length / 4) - 1);
-  const midCol = leftEnd + 1;
-  const rightCol = Math.ceil(header.length * 3 / 4);
-  ws['!merges'] = [];
-  for (let r=0;r<2;r++) {
-    ws['!merges'].push(
-      {s:{r,c:0},e:{r,c:leftEnd}},
-      {s:{r,c:midCol},e:{r,c:rightCol-1}},
-      {s:{r,c:rightCol},e:{r,c:header.length-1}}
-    );
-  }
-  ws[XLSX.utils.encode_cell({r:0,c:midCol})] = {t:'s',v:title};
-  ws[XLSX.utils.encode_cell({r:1,c:midCol})] = {t:'s',v:'STR/QR/008/C\n' + scope};
-  ws[XLSX.utils.encode_cell({r:1,c:rightCol})] = {t:'s',v:meta};
-  for (let r=0;r<2;r++) for (let c=0;c<header.length;c++) {
-    const addr=XLSX.utils.encode_cell({r,c});
-    if (!ws[addr]) ws[addr]={t:'s',v:''};
-    ws[addr].s={fill:{patternType:'solid',fgColor:{rgb:'F3EEE4'}},
-      font:{name:'Arial',sz:r===0?11:8,bold:r===0,color:{rgb:r===0?'A32D2D':'222222'}},
-      alignment:{vertical:'center',horizontal:c>=midCol&&c<rightCol?'center':c>=rightCol?'right':'left',wrapText:r===1}};
-  }
-  ws['!rows']=[{hpt:28},{hpt:30},{hpt:30}];
+  applyReportExcelHeading(ws, header, {
+    title: 'STOCK SUMMARY REPORT', formCode: 'STR/QR/008/C', scope,
+    dateText: `Date: ${fmtDMY(from)} to ${fmtDMY(to)}`,
+  });
   const pendingCol=header.findIndex(h=>h.startsWith('Pending Import'));
   const statusCol=header.findIndex(h=>h.startsWith('Status'));
-  for (let r=2;r<aoa.length;r++) for (let c=0;c<header.length;c++) {
+  for (let r=REPORT_XL_HEADER_ROWS;r<aoa.length;r++) for (let c=0;c<header.length;c++) {
     const cell=ws[XLSX.utils.encode_cell({r,c})];
     if (!cell) continue;
-    if (r===2) {
-      cell.s={fill:{patternType:'solid',fgColor:{rgb:'F3F4F6'}},
-        font:{name:'Arial',sz:8,bold:true,color:{rgb:'222222'}},
-        alignment:{wrapText:true,vertical:'center'}};
-      continue;
-    }
     const n=Number(cell.v);
     const isIn=/ IN$/.test(header[c]);
     const isOut=/ OUT$/.test(header[c])||/^Total Out/.test(header[c]);
@@ -11556,9 +11595,7 @@ async function exportStockSummary() {
       alignment:{vertical:'center',horizontal:cell.t==='n'?'right':'left'}};
     if(c===pendingCol&&n>0) cell.s.fill={patternType:'solid',fgColor:{rgb:'FACC15'}};
   }
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(3).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Summary');
   const stamp = localDateISO();
@@ -17514,18 +17551,21 @@ async function deleteSelectedManualConsumption() {
 
 async function exportManualConsumption() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
-  const { rows } = computeManualConsumptionRows();
+  const { rows, from, to, total, totalKg } = computeManualConsumptionRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const header = ['Manual Job Card No.', 'Paper Type', 'Size', 'GSM', 'Brand(s)', 'Transactions', 'Consumed (packets/reams)', 'Consumed (sheets)', 'Latest Entry', 'Entered By'];
-  const aoa = [header];
+  const aoa = reportExcelAoa(header);
   for (const r of rows) {
     aoa.push([r.jobCardNo, r.paperType, r.size, r.gsm, r.brand, r.txCount,
       +r.totalPkts.toFixed(2), r.totalSheets, r.latestAt ? fmtDMYT(r.latestAt) : '', r.enteredBy]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  applyReportExcelHeading(ws, header, {
+    title: 'MANUAL JOB CARD CONSUMPTION REPORT',
+    scope: `Total: ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
+    dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Manual Job Card Consumption');
   const stamp = localDateISO();
@@ -17551,26 +17591,17 @@ function printManualConsumption() {
       <td ${tdL}>${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
     </tr>`).join('');
   const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:11pt;">Manual Job Card Consumption Report</div>
-        </div>
-        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
-      </div>
-      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
-        <tr>
-          <td style="padding:2px 8px 2px 0;"><b>Period:</b> ${periodLabel}</td>
-          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>Total:</b> ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg</td>
-        </tr>
-      </table>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'MANUAL JOB CARD CONSUMPTION REPORT',
+        scope: `${periodLabel} · Total: ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
+        dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
+        note: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       ${rows.length ? `
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#eee;">
+        <tr style="background:#f7f1ea;">
           <th style="border:1px solid #000;padding:4px;">Manual Job Card No.</th>
           <th style="border:1px solid #000;padding:4px;">Paper Type</th>
           <th style="border:1px solid #000;padding:4px;">Size</th>
@@ -17803,21 +17834,42 @@ async function deleteSelectedOffcutConsumption() {
 async function exportOffcutConsumption() {
   try { await ensureXlsx(); } catch(e) { notify(e.message); return; }
   const rows=offcutConsumptionRows(); if(!rows.length){notify('Nothing to export.');return;}
-  const aoa=[['When','E-Job No.','Paper Type','Size','GSM','Brand','Consumed Sheets','Consumed Packets/Reams','Issued By']];
+  const header=['When','E-Job No.','Paper Type','Size','GSM','Brand','Consumed Sheets','Consumed Packets/Reams','Issued By'];
+  const aoa=reportExcelAoa(header);
   rows.forEach(t=>aoa.push([fmtDMYT(t.created_at),`E-${t.job_id}`,t.paper_type||'',t.item_size||'',t.item_gsm||'',t.item_brand||'',Math.abs(t.change),+(Math.abs(t.change)/packetSize(t.paper_type||'')).toFixed(2),t.user_email||'']));
-  const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=aoa[0].map((h,i)=>({wch:Math.max(h.length,...aoa.slice(1).map(r=>String(r[i]??'').length))+2}));
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, header, {
+    title: 'OFFCUT CONSUMPTION REPORT',
+    scope: offcutConsumptionScope(),
+    dateText: offcutConsumptionDateText(),
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Offcut Consumption');XLSX.writeFile(wb,`supreme-art-offcut-consumption-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+// Scope / date lines shared by this report's print and Excel headings.
+function offcutConsumptionScope() {
+  const s = offcutConsumptionState;
+  return [s.paperType || 'All paper types', s.jobCard ? `Job ${s.jobCard}` : ''].filter(Boolean).join(' · ');
+}
+function offcutConsumptionDateText() {
+  const s = offcutConsumptionState;
+  const { from, to } = periodToDateRange(s.period, s.from, s.to);
+  return `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`;
 }
 function printOffcutConsumption() {
   const rows=offcutConsumptionRows(); const td='style="border:1px solid #000;padding:4px;"';
   const body=rows.map(t=>`<tr><td ${td}>${esc(fmtDMYT(t.created_at))}</td><td ${td}>E-${t.job_id}</td><td ${td}>${esc(t.paper_type||'')}</td><td ${td}>${esc(t.item_size||'')}</td><td ${td}>${esc(t.item_gsm||'')}</td><td ${td}>${esc(t.item_brand||'')}</td><td ${td}>${Math.abs(t.change).toLocaleString()} sheets</td></tr>`).join('');
-  const area=document.getElementById('print-area');area.innerHTML=`<div style="font-family:Arial,sans-serif;color:#000;">
-    <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-      <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-      <div><div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div><div style="font-size:11pt;">Offcut Consumption Report</div></div>
-      <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
-    </div>
-    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#eee;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No automatic offcut consumption in this period.</div>'}</div>`;window.print();setTimeout(()=>area.innerHTML='',500);
+  const area=document.getElementById('print-area');area.innerHTML=`
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="font-family:Arial,sans-serif;color:#000;">
+    <div style="margin-bottom:8px;">${reportPrintHeading({
+      title: 'OFFCUT CONSUMPTION REPORT',
+      scope: offcutConsumptionScope(),
+      dateText: offcutConsumptionDateText(),
+      note: `Generated: ${fmtDMYT(new Date())}`,
+    })}</div>
+    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#f7f1ea;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No automatic offcut consumption in this period.</div>'}</div>`;window.print();setTimeout(()=>area.innerHTML='',500);
 }
 
 // Rows for Print/Export: if the user has checked specific rows via the bulk
@@ -17876,26 +17928,16 @@ function printStockMovement(direction) {
     </tr>`;
   }).join('');
   const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:11pt;">${direction === 'in' ? 'Stock In Report' : 'Stock Out Report'}${stockMovementSel[direction].size ? ' — Selected rows only' : ''}</div>
-        </div>
-        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
-      </div>
-      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
-        <tr>
-          <td style="padding:2px 8px 2px 0;"><b>Direction:</b> ${dirLabel}</td>
-          <td style="padding:2px 8px;"><b>Paper Type:</b> ${stockMovementSel[direction].size ? `${stockMovementSel[direction].size} row(s) selected` : (state.paperType || 'All')}</td>
-          <td style="padding:2px 8px;"><b>Period:</b> ${periodLabel}</td>
-          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
-        </tr>
-      </table>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
+        scope: stockMovementScope(direction),
+        dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
+        note: `${dirLabel} · ${periodLabel} · Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:10pt;border:1px solid #000;border-collapse:collapse;margin-bottom:10px;">
-        <tr style="background:#eee;">
+        <tr style="background:#f7f1ea;">
           <td style="border:1px solid #000;padding:4px 8px;"><b>Total</b><br><span style="color:${color};font-size:13pt;font-weight:bold;">${total.toLocaleString()}</span> sheets</td>
           <td style="border:1px solid #000;padding:4px 8px;"><b>Transactions</b><br><span style="font-size:13pt;font-weight:bold;">${rows.length}</span></td>
         </tr>
@@ -17923,6 +17965,13 @@ function printStockMovement(direction) {
     setTimeout(() => { area.innerHTML = ''; }, 500);
   });
 }
+// Scope line shared by this report's print and Excel headings. Checked rows
+// win over the filters, same rule stockMovementPrintRows follows.
+function stockMovementScope(direction) {
+  const state = stockMovementStates[direction];
+  const picked = stockMovementSel[direction].size;
+  return picked ? `${picked} selected row${picked === 1 ? '' : 's'}` : (state.paperType || 'All paper types');
+}
 
 // Export the Stock In / Stock Out pane (whichever direction is open) to an
 // .xlsx file. Checked rows (if any) win outright, same as Print — otherwise
@@ -17935,7 +17984,7 @@ async function exportStockMovement(direction) {
   const txs = stockMovementPrintRows(direction);
   if (!txs.length) { notify('Nothing to export — empty filter result.'); return; }
   const header = ['When', 'Item', 'Change (Sheets)', 'Change (Packets/Reams)', 'Reason', 'Job', 'Entered by', 'Notes'];
-  const aoa = [header];
+  const aoa = reportExcelAoa(header);
   for (const t of txs) {
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code ? ' · ' + t.job_code : ''}` : '';
@@ -17953,9 +18002,13 @@ async function exportStockMovement(direction) {
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  const { from, to } = periodToDateRange(state.period, state.from, state.to);
+  applyReportExcelHeading(ws, header, {
+    title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
+    scope: stockMovementScope(direction),
+    dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   const sheetName = direction === 'in' ? 'Stock In' : 'Stock Out';
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
