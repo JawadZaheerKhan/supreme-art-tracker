@@ -588,6 +588,9 @@
        opted in via body.printing-register. Plain Ctrl+P prints normally. */
     body.printing-register > * { display: none !important; }
     body.printing-register > #dp-print-root { display: block !important; }
+    /* The branded heading block has a beige band — without this Chrome
+       strips the background and it prints as a bare outline. */
+    body.printing-register { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     @page { size: A4 portrait; margin: 12mm; }
     .dp-print-page { font-family: var(--font); color: #000; }
     /* Force a hard page break between the two stacks. */
@@ -12886,7 +12889,7 @@ async function exportJobsReport() {
   const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
     'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
-  const aoa = [header];
+  const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
     // spreadsheet reader can filter/sort them out without needing a
@@ -12917,9 +12920,12 @@ async function exportJobsReport() {
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  applyReportExcelHeading(ws, header, {
+    title: 'JOBS REPORT',
+    scope: jobsReportScope(new Set(rows.map(r => r.id)).size, rows.length),
+    dateText: jobsReportDateText(),
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Jobs Report');
   const stamp = localDateISO();
@@ -12929,6 +12935,24 @@ async function exportJobsReport() {
 }
 
 // Print the Jobs Report — A4 landscape.
+// Scope / date lines shared by this report's print and Excel headings. The
+// date line reads jobsReportState.dfrom/dto, which is exactly what
+// buildJobsReportRows filters on — a period picker writes those two fields
+// (setJrPeriod), so the heading can never claim a range the rows didn't use.
+function jobsReportScope(jobCount, rowCount) {
+  const s = jobsReportState;
+  return [
+    s.mode === 'created' ? 'Created' : 'Delivered',
+    s.client || 'All companies',
+    s.milOnly ? 'MIL only' : '',
+    s.shadeOnly ? 'Shade cards only' : '',
+    `${jobCount} job${jobCount === 1 ? '' : 's'} · ${rowCount} row${rowCount === 1 ? '' : 's'}`,
+  ].filter(Boolean).join(' · ');
+}
+function jobsReportDateText() {
+  const s = jobsReportState;
+  return `Date: ${fmtDMY(s.dfrom) || '(any)'} to ${fmtDMY(s.dto) || '(any)'}`;
+}
 function printJobsReport() {
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
@@ -12962,22 +12986,16 @@ function printJobsReport() {
   </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } }</style>
+    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:8px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:14pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:10pt;">Jobs Report — ${jobsReportState.mode === 'created' ? 'Created' : 'Delivered'}</div>
-        </div>
-        <div style="margin-left:auto;font-size:8pt;text-align:right;">
-          <div><b>From:</b> ${esc(fmtDMY(jobsReportState.dfrom) || '(any)')} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto) || '(any)')}</div>
-          <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${new Set(rows.map(r => r.id)).size} &nbsp; <b>Rows:</b> ${rows.length}</div>
-          <div>Generated: ${fmtDMYT(new Date())}</div>
-        </div>
-      </div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'JOBS REPORT',
+        scope: jobsReportScope(new Set(rows.map(r => r.id)).size, rows.length),
+        dateText: jobsReportDateText(),
+        note: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#eee;">
+        <tr style="background:#f7f1ea;">
           <th ${tdL}>Job ID</th>
           <th ${tdL}>Job Name</th>
           <th ${tdL}>Created</th>
@@ -14157,14 +14175,13 @@ function printProductionReport() {
       <td ${tdR}>${fmt(r[4])}</td>
     </tr>`).join('') || `<tr><td ${td} colspan="5" style="text-align:center;color:#666;font-style:italic;">No activity in window.</td></tr>`;
   const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;padding:6mm;">
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;border-bottom:2px solid #791F1F;padding-bottom:6px;">
-        <img src="/logo.png" style="height:54px;width:auto;" alt="Supreme Art">
-        <div>
-          <div style="font-size:16pt;font-weight:800;color:#791F1F;letter-spacing:0.04em;">${esc(title)}</div>
-          <div style="font-size:10pt;color:#444;margin-top:2px;">${esc(fmtDate(s.from))} &mdash; ${esc(fmtDate(s.to))}</div>
-        </div>
-      </div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'PRODUCTION REPORT',
+        scope: title,
+        dateText: `Date: ${fmtDate(s.from)} to ${fmtDate(s.to)}`,
+      })}</div>
       <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;">
         <thead>
           <tr>
@@ -14233,9 +14250,14 @@ async function exportProductionReport() {
     hours:  t.hours  + (+r[3] || 0),
     jobs:   t.jobs   + (+r[4] || 0),
   }), { sheets: 0, waste: 0, hours: 0, jobs: 0 });
-  const aoa = [headers].concat(rows).concat([['Total', totals.sheets, totals.waste, Math.round(totals.hours * 100) / 100, totals.jobs]]);
+  const aoa = reportExcelAoa(headers).concat(rows).concat([['Total', totals.sheets, totals.waste, Math.round(totals.hours * 100) / 100, totals.jobs]]);
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = headers.map((h, i) => ({ wch: Math.max(String(h).length, ...aoa.map(r => String(r[i] ?? '').length)) + 2 }));
+  applyReportExcelHeading(ws, headers, {
+    title: 'PRODUCTION REPORT',
+    scope: s.pick ? `${s.pick} (day-by-day)` : `By ${nameLabel}${s.section ? ' · ' + s.section : ''}`,
+    dateText: `Date: ${fmtDate(s.from)} to ${fmtDate(s.to)}`,
+  });
+  applyReportExcelCols(ws, headers, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Production');
   const range = `${s.from}_${s.to}`;
@@ -15269,9 +15291,16 @@ async function printDailyRegister() {
       <td>${cellText(r.operators)}</td><td>${cellText(r.remarks)}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="empty">No pasting activity.</td></tr>';
 
+  // Every printed sheet carries the letterhead, so the two pages each open
+  // with the block naming the sections on them.
+  const regHeading = (sections) => `<div style="margin-bottom:6mm;">${reportPrintHeading({
+    title: 'DAILY PRODUCTION REGISTER',
+    scope: sections,
+    dateText: `Date: ${dateNice}`,
+  })}</div>`;
   const html = `
     <div class="dp-print-page">
-      <div class="dp-print-hd">DATE ${esc(dateNice)}</div>
+      ${regHeading('Printing · Die Cutting')}
       <h3 class="dp-print-sec">PRINTING</h3>
       <table class="dp-print-tbl"><thead><tr>
         <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
@@ -15285,7 +15314,7 @@ async function printDailyRegister() {
       </tr></thead><tbody>${dieRows}</tbody></table>
     </div>
     <div class="dp-print-page dp-print-break">
-      <div class="dp-print-hd">DATE ${esc(dateNice)}</div>
+      ${regHeading('Coating · Breaking · Pasting')}
       <h3 class="dp-print-sec">U.V — SPOT U.V (COATINGS)</h3>
       <table class="dp-print-tbl"><thead><tr>
         <th>Machine</th><th>Sheets</th><th>Wastage</th><th>Hours</th><th>Jobs</th>
@@ -15356,14 +15385,21 @@ async function exportDailyRegister() {
   }
   showSaving(false);
 
-  // Sheet builder — accepts a header array and a row-of-arrays list,
-  // sizes columns to the widest cell value, and returns an XLSX sheet.
-  const sheet = (header, rows) => {
-    const aoa = [header].concat(rows);
+  const dateNice = (() => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : date;
+  })();
+  // Sheet builder — every section sheet opens with the same branded block
+  // the printed register carries, naming that section and the date.
+  const sheet = (header, rows, section) => {
+    const aoa = reportExcelAoa(header).concat(rows);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = header.map((h, i) => ({
-      wch: Math.max(String(h).length, ...rows.map(r => String(r[i] ?? '').length)) + 2,
-    }));
+    applyReportExcelHeading(ws, header, {
+      title: 'DAILY PRODUCTION REGISTER',
+      scope: section,
+      dateText: `Date: ${dateNice}`,
+    });
+    applyReportExcelCols(ws, header, aoa);
     return ws;
   };
 
@@ -15386,23 +15422,23 @@ async function exportDailyRegister() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet(
     ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Colors', 'Plates', 'Operator', 'Remarks'],
-    printingRows,
+    printingRows, 'Printing',
   ), 'Printing');
   XLSX.utils.book_append_sheet(wb, sheet(
     ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Make Ready', 'Settings', 'Operator', 'Remarks'],
-    dieRows,
+    dieRows, 'Die Cutting',
   ), 'Die Cutting');
   XLSX.utils.book_append_sheet(wb, sheet(
     ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Blankets', 'Operator', 'Remarks'],
-    coatingsRows,
+    coatingsRows, 'Coating',
   ), 'Coatings');
   XLSX.utils.book_append_sheet(wb, sheet(
     ['Operator', 'Sheets', 'Hours', 'Jobs', 'Helper', 'Remarks'],
-    breakingRows,
+    breakingRows, 'Breaking',
   ), 'Breaking');
   XLSX.utils.book_append_sheet(wb, sheet(
     ['Machine', 'Units', 'Wastage', 'Hours', 'Jobs', 'Operator', 'Remarks'],
-    pastingRows,
+    pastingRows, 'Pasting',
   ), 'Pasting');
 
   XLSX.writeFile(wb, `supreme-art-daily-production-${date}.xlsx`);
