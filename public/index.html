@@ -13279,20 +13279,24 @@ const SALE_REPORT_TABS = [
   { key: 'all',      label: 'All' },
   { key: 'box',      label: 'Box' },
   { key: 'labels',   label: 'Labels' },
-  { key: 'stickers', label: 'Stickers' },
   { key: 'leaflets', label: 'Leaflets' },
   { key: 'waste',    label: 'Waste of Board' },
 ];
 const SALE_REPORT_WASTE_TAB = 'waste';
+// Leaflets and labels are the only products named as such; everything else
+// printed here is a box, whether the name says so (syrup, tab/tablet,
+// cap/capsule, uc/unit carton) or carries no product word at all. So only
+// those two are matched, and Box is what's left over.
+// Order matters: "Tablet Leaflet" is a leaflet, not a box.
+const SALE_REPORT_TAB_WORDS = [
+  ['leaflets', ['leaf', 'leaflet', 'leaflets']],
+  ['labels',   ['label', 'labels', 'sticker', 'stickers']],
+];
 function saleReportTabFor(job) {
-  const type = detectProductType(job && job.name);
-  if (type === 'Labels')   return 'labels';
-  if (type === 'Sticker')  return 'stickers';
-  if (type === 'Leaflets') return 'leaflets';
-  if (type === 'Syrup' || type === 'Susp' || type === 'Tab' || type === 'Caps') return 'box';
-  const tokens = String((job && job.name) || '').toLowerCase().split(/[^a-z]+/).filter(Boolean);
-  if (tokens.some(t => t === 'uc')) return 'box';
-  return '';
+  const tokens = String((job && job.name) || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  for (const [tab, words] of SALE_REPORT_TAB_WORDS)
+    if (tokens.some(t => words.includes(t))) return tab;
+  return 'box';
 }
 function splitCoatings(coatings) {
   if (!Array.isArray(coatings)) return [];
