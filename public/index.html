@@ -12427,6 +12427,16 @@ function buildJobsReportRows() {
     // throwing off the pairing (e.g. 3 qty entries vs 2 PO numbers).
     const milFacts = j.stock_group_name ? milTileShipmentFacts(j) : null;
     const poNoJoined = milFacts ? milFacts.poLine : joinRefs('po_no', j.ref);
+    // Per-shipment detail, so the report can show one row per delivery the
+    // way the Sale Report does. The pipe-joined strings above are still what
+    // the searches and the two merges below work on.
+    const shipments = deliveriesList.map(d => ({
+      date:    (d && d.date) ? fmtDMY(d.date) : stampFromStage,
+      poNo:    (d && d.po_no    ? String(d.po_no).trim()    : '') || String(j.ref || '').trim(),
+      batchNo: (d && d.batch_no ? String(d.batch_no).trim() : '') || String(j.bno || '').trim(),
+      challan: deliveryChallanText(d).trim(),
+      cartons: parseFloat(d && d.cartons) || 0,
+    }));
     // Only enforced in Delivered mode — matches the toolbar, which hides
     // these two fields in Created mode. Without this guard, a leftover
     // search value from a prior Delivered-mode visit would keep silently
@@ -12478,10 +12488,32 @@ function buildJobsReportRows() {
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
       linkPartner,
+      shipments,
       stockGroupName: j.stock_group_name || null,
       isShadeCard: !!j.is_shade_card,
     });
   }
+  // Linked Jobs and MIL group deliveries record ONE physical shipment against
+  // several jobs, so concatenating their ledgers would show that shipment
+  // once per job. Entries sharing a challan and date collapse into one, with
+  // the cartons added up — the merged row already sums every other figure.
+  const combineShipments = (lists) => {
+    const out = [], byKey = new Map();
+    for (const s of [].concat(...lists)) {
+      const key = s.challan ? `${s.challan} ${s.date}` : null;
+      if (key && byKey.has(key)) {
+        const prev = byKey.get(key);
+        prev.cartons += s.cartons || 0;
+        if (s.batchNo && prev.batchNo !== s.batchNo) prev.batchNo = [prev.batchNo, s.batchNo].filter(Boolean).join(' | ');
+        if (s.poNo    && prev.poNo    !== s.poNo)    prev.poNo    = [prev.poNo, s.poNo].filter(Boolean).join(' | ');
+        continue;
+      }
+      const copy = { ...s };
+      out.push(copy);
+      if (key) byKey.set(key, copy);
+    }
+    return out;
+  };
   // Merge Linked-Jobs pairs into one combined row — only when BOTH rows
   // survived the filters above (same date range / client / search). IDs,
   // PO No., Batch No. are pipe-joined; Challan No. shown once (it's the
@@ -12526,6 +12558,7 @@ function buildJobsReportRows() {
         coatings: sameOrPipe(lo.coatings, hi.coatings),
         linkPartner: null,
         mergedPartnerId: hi.id,
+        shipments: combineShipments([lo.shipments, hi.shipments]),
         stockGroupName: (lo.stockGroupName && lo.stockGroupName === hi.stockGroupName) ? lo.stockGroupName : null,
         isShadeCard: !!(lo.isShadeCard || hi.isShadeCard),
       });
@@ -12586,6 +12619,7 @@ function buildJobsReportRows() {
         machine: dedupePipe(sorted.map(b => b.machine)),
         coatings: dedupePipe(sorted.map(b => b.coatings)),
         linkPartner: null,
+        shipments: combineShipments(sorted.map(b => b.shipments)),
         stockGroupName: sorted[0].stockGroupName,
         isShadeCard: sorted.some(b => b.isShadeCard),
       });
@@ -12618,7 +12652,30 @@ function buildJobsReportRows() {
     if (typeof ka === 'string') return jrDir * ka.localeCompare(kb);
     return jrDir * (ka - kb);
   });
-  return withMilMerge;
+  // One row per shipment, like the Sale Report: a job delivered eight times
+  // reads as eight rows instead of one row of pipe-joined dates and challans.
+  // Job-level figures (PO Qty, Unit Carton Qty, Wastage, Ready, Packets)
+  // repeat on each of a job's rows exactly as they do there — the footer
+  // counts them once per job, see renderJobsReport. Created mode has no
+  // shipments to speak of, and a job with none keeps its single row.
+  if (isCreatedMode) return withMilMerge;
+  const perShipment = [];
+  for (const r of withMilMerge) {
+    const list = Array.isArray(r.shipments) ? r.shipments : [];
+    if (list.length < 2) { perShipment.push(r); continue; }
+    list.forEach((s, i) => perShipment.push({
+      ...r,
+      deliveredAt:  s.date,
+      poNo:         r.stockGroupName ? r.poNo : (s.poNo || r.poNo),
+      batchNo:      s.batchNo,
+      challan:      s.challan,
+      deliveredQty: s.cartons,
+      poQty:        r.stockGroupName ? s.cartons : r.poQty,
+      shipmentIndex: i,
+      shipmentOfJob: list.length,
+    }));
+  }
+  return perShipment;
 }
 
 function renderJobsReport() {
@@ -12655,7 +12712,18 @@ function renderJobsReport() {
   // row like every other column would triple-count a group with 3 job
   // rows. Count each distinct group's Mil Qty exactly once instead.
   const seenMilGroups = new Set();
+  // Rows are per shipment now, so anything counting jobs counts distinct ids.
+  const jobCount = new Set(rows.map(r => r.id)).size;
+  // A job split across shipments now occupies one row per shipment. Only
+  // Delivered Qty is genuinely per-shipment; PO Qty, Unit Carton Qty,
+  // Wastage, Ready and Packets are job-level figures repeated on each of
+  // that job's rows, so they're counted on its first row only — otherwise a
+  // job delivered eight times would multiply them eightfold.
+  const seenJobsForTotals = new Set();
   const totals = rows.reduce((a, r) => {
+    const firstRowForJob = !seenJobsForTotals.has(r.id);
+    if (firstRowForJob) seenJobsForTotals.add(r.id);
+    const once = (v) => firstRowForJob ? (+v || 0) : 0;
     let milQtyAdd = 0;
     if (r.milQty != null) {
       const gk = r.stockGroupName || `row-${r.id}`;
@@ -12664,15 +12732,16 @@ function renderJobsReport() {
     // A MIL row's poQty can be a pipe-joined "10000 | 15000" display
     // string (multi-shipment) — +r.poQty would parse as NaN, so total
     // off the numeric deliveredQty instead (same figure, single number).
-    const poQtyAdd = r.stockGroupName ? (+r.deliveredQty || 0) : (+r.poQty || 0);
+    // That one IS per-shipment, so it isn't counted once-per-job.
+    const poQtyAdd = r.stockGroupName ? (+r.deliveredQty || 0) : once(r.poQty);
     return {
       poQty:        a.poQty        + poQtyAdd,
       milQty:       a.milQty       + milQtyAdd,
-      cartonQty:    a.cartonQty    + (+r.cartonQty || 0),
+      cartonQty:    a.cartonQty    + once(r.cartonQty),
       deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
-      wastage:      a.wastage      + ((r.wastage == null || r.stockGroupName) ? 0 : (+r.wastage || 0)),
-      readyQty:     a.readyQty     + (+r.readyQty || 0),
-      packets:      a.packets      + (+r.packets || 0),
+      wastage:      a.wastage      + ((r.wastage == null || r.stockGroupName) ? 0 : once(r.wastage)),
+      readyQty:     a.readyQty     + once(r.readyQty),
+      packets:      a.packets      + once(r.packets),
     };
   }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
   const tbody = rows.map(r => {
@@ -12696,7 +12765,7 @@ function renderJobsReport() {
     // clutter next to the number.
     const deliveredStyle = r.isPartial ? 'color:#ca8a04;font-weight:700;' : '';
     return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);" onclick="openEdit(${r.id})" title="Open this job's card">
-      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)"></td>
+      <td class="bulk-td">${r.shipmentIndex ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
       <td ${td}>${esc(r.idDisplay || 'E-' + r.id)}</td>
       <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
@@ -12723,7 +12792,7 @@ function renderJobsReport() {
   const someVisSel = !allVisSel && rows.some(r => jobsReportSel.has(r.id));
   el.innerHTML = `
     <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
-    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} delivered job${rows.length===1?'':'s'} in window</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${jobCount} delivered job${jobCount===1?'':'s'}${rows.length !== jobCount ? ` &middot; ${rows.length} shipment${rows.length===1?'':'s'}` : ''} in window</div>
     <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead>
@@ -12753,7 +12822,7 @@ function renderJobsReport() {
       <tfoot>
         <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
           <td></td>
-          <td style="padding:8px 10px;">${rows.length} job${rows.length===1?'':'s'}</td>
+          <td style="padding:8px 10px;">${jobCount} job${jobCount===1?'':'s'}</td>
           <td colspan="7" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           ${milMode ? `<td style="padding:8px 10px;text-align:right;">${fmt(totals.milQty)}</td>` : ''}
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
@@ -12867,7 +12936,7 @@ function printJobsReport() {
         </div>
         <div style="margin-left:auto;font-size:8pt;text-align:right;">
           <div><b>From:</b> ${esc(fmtDMY(jobsReportState.dfrom) || '(any)')} &nbsp; <b>To:</b> ${esc(fmtDMY(jobsReportState.dto) || '(any)')}</div>
-          <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${rows.length}</div>
+          <div><b>Company:</b> ${esc(jobsReportState.client || 'All')} &nbsp; <b>Jobs:</b> ${new Set(rows.map(r => r.id)).size} &nbsp; <b>Rows:</b> ${rows.length}</div>
           <div>Generated: ${fmtDMYT(new Date())}</div>
         </div>
       </div>
