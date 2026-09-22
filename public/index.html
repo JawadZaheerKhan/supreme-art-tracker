@@ -15041,6 +15041,21 @@ function renderDailyProductionPrinting(rows, date) {
 // register — lists exactly which entries made up that sum, each shown as
 // "base x multiplier" (a plain single entry shows "x1") so a 2000 total
 // made of one 1200x3 pass and one 800 pass reads as "1200 x 3" / "800 x 1".
+// Sheets actually run through the machine when a job was printed Nx. The
+// Sheets column counts each entry once (1,452); this counts it per pass
+// (1,452 x 2). Returns null when nothing on that machine had a multiplier,
+// so the second figure only shows where it says something different.
+function printedSheetsWithMultiplier(row) {
+  const list = Array.isArray(row && row.print_breakdown) ? row.print_breakdown : [];
+  if (!list.length) return null;
+  let total = 0, anyMult = false;
+  for (const e of list) {
+    const { base, mult } = parseQtyMult(e && e.qty);
+    total += base * mult;
+    if (mult > 1) anyMult = true;
+  }
+  return anyMult ? total : null;
+}
 function showPrintBreakdown(machine) {
   const entries = _dpPrintBreakdownByMachine[machine] || [];
   const rowsHtml = entries.length
@@ -15281,9 +15296,16 @@ async function printDailyRegister() {
   const cellText = v => (v === 0 || v) && String(v).length ? esc(String(v)) : '—';
   const numCell = v => (v && v !== 0) ? esc(Number(v).toLocaleString()) : '—';
 
+  // A machine that ran a job 2x/3x shows the run total under the plain sheet
+  // count, in the same green the on-screen breakdown dot uses.
+  const sheetsCell = (r) => {
+    const withMult = printedSheetsWithMultiplier(r);
+    return numCell(r.sheets) + (withMult !== null
+      ? `<div style="color:#166534;font-weight:700;">${Number(withMult).toLocaleString()}</div>` : '');
+  };
   const printingRows = printing.map(r => `
     <tr>
-      <td class="m">${esc(r.machine)}</td><td class="n">${numCell(r.sheets)}</td>
+      <td class="m">${esc(r.machine)}</td><td class="n">${sheetsCell(r)}</td>
       <td class="n">${numCell(r.waste)}</td>
       <td>${cellText(r.hours)}</td><td class="n">${cellText(r.jobs)}</td>
       <td>${cellText(r.colors)}</td><td class="n">${cellText(r.plates)}</td>
@@ -15416,7 +15438,9 @@ async function exportDailyRegister() {
   })();
   // Sheet builder — every section sheet opens with the same branded block
   // the printed register carries, naming that section and the date.
-  const sheet = (header, rows, section) => {
+  // greenCol, when given, is a column index rendered in green, matching the
+  // printed register's Nx run total.
+  const sheet = (header, rows, section, greenCol) => {
     const aoa = reportExcelAoa(header).concat(rows);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     applyReportExcelHeading(ws, header, {
@@ -15425,10 +15449,19 @@ async function exportDailyRegister() {
       dateText: `Date: ${dateNice}`,
     });
     applyReportExcelCols(ws, header, aoa);
+    if (greenCol !== undefined) {
+      for (let r = REPORT_XL_HEADER_ROWS; r < aoa.length; r++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c: greenCol })];
+        if (cell) cell.s = { font: { name: 'Arial', sz: 9, bold: true, color: { rgb: '166534' } },
+                             alignment: { vertical: 'center', horizontal: 'right' } };
+      }
+    }
     return ws;
   };
 
-  const printingRows = printing.map(r => [r.machine, r.sheets || '', r.waste || '', r.hours || '', r.jobs || '', r.colors || '', r.plates || '', r.operators || '', r.remarks || '']);
+  // Sheets x N gets its own column rather than sharing the Sheets cell — two
+  // numbers in one cell would turn it into text and stop it totalling.
+  const printingRows = printing.map(r => [r.machine, r.sheets || '', printedSheetsWithMultiplier(r) ?? '', r.waste || '', r.hours || '', r.jobs || '', r.colors || '', r.plates || '', r.operators || '', r.remarks || '']);
   const dieRows      = die.map(r      => [r.machine, r.sheets || '', r.waste || '', r.hours || '', r.jobs || '', r.make_ready || '', r.settings || '', r.operators || '', r.remarks || '']);
   const coatingsRows = coatings.map(r => [r.machine, r.sheets || '', r.waste || '', r.hours || '', r.jobs || '', r.blankets || '', r.operators || '', r.remarks || r.finishes || '']);
   const pastingRows  = pasting.map(r  => [r.machine, r.units  || '', r.waste || '', r.hours || '', r.jobs || '', r.operators || '', r.remarks || '']);
@@ -15446,8 +15479,8 @@ async function exportDailyRegister() {
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet(
-    ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Colors', 'Plates', 'Operator', 'Remarks'],
-    printingRows, 'Printing',
+    ['Machine', 'Sheets', 'Sheets × N', 'Wastage', 'Hours', 'Jobs', 'Colors', 'Plates', 'Operator', 'Remarks'],
+    printingRows, 'Printing', 2,
   ), 'Printing');
   XLSX.utils.book_append_sheet(wb, sheet(
     ['Machine', 'Sheets', 'Wastage', 'Hours', 'Jobs', 'Make Ready', 'Settings', 'Operator', 'Remarks'],
