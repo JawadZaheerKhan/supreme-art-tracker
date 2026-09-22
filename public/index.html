@@ -16531,16 +16531,20 @@ async function exportStockTotal(direction) {
   const { itemRows } = computeStockTotalRows(direction);
   if (!itemRows.length) { notify('Nothing to export — empty filter result.'); return; }
   const header = ['Paper Type', 'Size', 'GSM', 'Brand(s)', 'Transactions', `Total ${direction === 'in' ? 'In' : 'Out'} (packets/reams)`, `Total ${direction === 'in' ? 'In' : 'Out'} (sheets)`, 'Current Balance (packets/reams)', 'Current Balance (sheets)'];
-  const aoa = [header];
+  const aoa = reportExcelAoa(header);
   for (const r of itemRows) {
     aoa.push([r.paperType, r.size, r.gsm, r.brand, r.txCount,
       +r.totalPkts.toFixed(2), r.totalSheets,
       +r.balPkts.toFixed(2), r.balSheets]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = header.map((h, i) => ({
-    wch: Math.max(h.length, ...aoa.slice(1).map(r => String(r[i] ?? '').length)) + 2
-  }));
+  const { from, to, total, totalKg } = computeStockTotalRows(direction);
+  applyReportExcelHeading(ws, header, {
+    title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
+    scope: `Totals · ${stockTotalStates[direction].paperType || 'All paper types'} · ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
+    dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
+  });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, direction === 'in' ? 'Total Stock In' : 'Total Stock Out');
   const stamp = localDateISO();
@@ -16565,26 +16569,17 @@ function printStockTotal(direction) {
       <td ${tdR}>${fmtPkts(r.balPkts,{keepZero:true})} ${r.unit}</td>
     </tr>`).join('');
   const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
-      <div style="display:flex;align-items:center;gap:12px;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-        <img src="/logo.png" style="height:48px;" onerror="this.style.display='none'">
-        <div>
-          <div style="font-size:16pt;font-weight:bold;">Supreme Art.pvt</div>
-          <div style="font-size:11pt;">${direction === 'in' ? 'Total Stock In Report' : 'Total Stock Out Report'}</div>
-        </div>
-        <div style="margin-left:auto;font-size:9pt;text-align:right;">Generated: ${fmtDMYT(new Date())}</div>
-      </div>
-      <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
-        <tr>
-          <td style="padding:2px 8px 2px 0;"><b>Period:</b> ${periodLabel}</td>
-          <td style="padding:2px 8px;"><b>From:</b> ${from || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>To:</b> ${to || '(any)'}</td>
-          <td style="padding:2px 8px;"><b>Total:</b> ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg</td>
-        </tr>
-      </table>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
+        scope: `Totals · ${state.paperType || 'All paper types'} · ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
+        dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
+        note: `${periodLabel} · Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       ${itemRows.length ? `
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#eee;">
+        <tr style="background:#f7f1ea;">
           <th style="border:1px solid #000;padding:4px;">Paper Type</th>
           <th style="border:1px solid #000;padding:4px;">Size</th>
           <th style="border:1px solid #000;padding:4px;">GSM</th>
