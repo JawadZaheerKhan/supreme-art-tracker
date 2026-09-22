@@ -12865,7 +12865,7 @@ function printJobsReport() {
 // bulk-select/created-mode toggle. Gated by rpt_sale_report, same as
 // Company Settings and the Product Rate tab — this is the one report that
 // shows pricing.
-const saleReportState = loadPersistedFilters('sale-report', { client: '', dateRange: '', dfrom: '', dto: '', q: '', type: '', sortBy: 'id', sortDir: 'asc', poSearch: '', challanSearch: '', milOnly: false, colFilters: { paper: [], cutting: [], ups: [], plates: [], colors: [], machine: [], coatings: [], rate: [] } });
+const saleReportState = loadPersistedFilters('sale-report', { client: '', dateRange: '', dfrom: '', dto: '', q: '', type: '', sortBy: 'id', sortDir: 'asc', poSearch: '', challanSearch: '', milOnly: false, colFilters: { sheetSize: [], paperType: [], cutting: [], ups: [], plates: [], coatings: [], rate: [] } });
 // Column filters always start empty, whatever an older saved state holds —
 // they're session-scoped by design (see srResetColFilters), so a reload is
 // as much a fresh start as walking out of the report and back in.
@@ -13071,13 +13071,22 @@ function buildSaleReportRows() {
     const readyQty = Math.max(0, (readyCartonsTotal(j) || 0) - (totalDeliveredCartons(j) || 0));
     const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
     const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
-    const paper = invItem
-      ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
+    // Sheet size and gsm are four separate columns — the combined "20x30 230"
+    // to read at a glance, then length, width and gsm on their own so they can
+    // be filtered and arithmetic'd in Excel. Paper type sits on its own column
+    // further along, next to Plates.
+    const paperTypeVal = invItem
+      ? (invItem.paper_type || '')
       : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
-    const machineVal   = j.machine || '';
+    const sizeStr   = String((invItem ? invItem.size : j.size) || '').trim();
+    const gsmRaw    = invItem ? invItem.gsm : j.gsm;
+    const sheetGsm  = (gsmRaw === null || gsmRaw === undefined || gsmRaw === '') ? '' : String(gsmRaw).trim();
+    const sheetDim  = parseSizeInches(sizeStr);
+    const sheetL    = sheetDim ? sheetDim.w : '';
+    const sheetW    = sheetDim ? sheetDim.h : '';
+    const sheetSize = (sizeStr + (sheetGsm ? ' ' + sheetGsm : '')).trim();
     const part         = j.particulars || {};
     const platesVal    = String((part.plates && part.plates.quantity) || '').trim();
-    const colorsVal    = String((part.no_of_colors && part.no_of_colors.quantity) || '').trim();
     const cuttingVal   = String(part.cutting_size_gsm || '').trim();
     const upsVal       = String(j.ups == null ? '' : j.ups).trim();
     // In the Sale Report only, the Ready Qty counts as wastage too: (wastage + ready) in UPS pieces -> sheets -> packets -> kg. sheets = (wastage + ready) / ups; packets = sheets / sheets-per-packet;
@@ -13091,6 +13100,8 @@ function buildSaleReportRows() {
     const wastagePackets = wastageSheets !== null ? wastageSheets / packetSize(ptype) : null;
     const wastageKg      = (wastagePackets !== null && packKg !== null) ? wastagePackets * packKg : null;
     const issuedKg       = (packets > 0 && packKg !== null) ? packets * packKg : null;
+    // Wastage as a share of the paper actually issued for the job.
+    const wastageKgPct   = (wastageKg !== null && issuedKg !== null && issuedKg > 0) ? (wastageKg * 100 / issuedKg) : null;
     const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
     // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
@@ -13100,12 +13111,11 @@ function buildSaleReportRows() {
     // has ANY of the picked ones, rather than matching the whole joined
     // "Spot UV, Lacquer, Emboss" string as one option.
     const cf = saleReportState.colFilters;
-    if (cf.paper.length    && !cf.paper.includes(paper))        continue;
+    if ((cf.sheetSize || []).length && !cf.sheetSize.includes(sheetSize))   continue;
+    if ((cf.paperType || []).length && !cf.paperType.includes(paperTypeVal)) continue;
     if (cf.cutting.length  && !cf.cutting.includes(cuttingVal))  continue;
     if (cf.ups.length      && !cf.ups.includes(upsVal))          continue;
-    if (cf.machine.length  && !cf.machine.includes(machineVal))  continue;
     if (cf.plates.length   && !cf.plates.includes(platesVal))    continue;
-    if (cf.colors.length   && !cf.colors.includes(colorsVal))    continue;
     if (cf.coatings.length) {
       const own = splitCoatings(j.coatings);
       if (!own.some(c => cf.coatings.includes(c))) continue;
@@ -13137,10 +13147,11 @@ function buildSaleReportRows() {
         deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: j.client || '',
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         poQty: j.qty || '', cartonQty: j.cartonqty || '', cartons, cartonsPackets,
-        wastage, readyQty, packets, paper,
-        cuttingSize: cuttingVal, ups: upsVal, plates: platesVal, colors: colorsVal,
-        wastageSheets, wastagePackets, wastageKg, issuedKg, packUnit,
-        machine: machineVal, coatings: coatingsVal,
+        wastage, readyQty, packets,
+        sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
+        cuttingSize: cuttingVal, ups: upsVal, plates: platesVal,
+        wastageSheets, wastagePackets, wastageKg, wastageKgPct, issuedKg, packKg, packUnit,
+        coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
         rate, taxPct, rateOverride, amountExTax, amountIncTax,
         destination: (cs && cs.destination) || '', ntn: (cs && cs.ntn) || '',
@@ -13196,22 +13207,23 @@ function saleReportColumnOptions(field) {
     if (!Array.isArray(j.deliveries) || !j.deliveries.length) continue;
     if (field === 'coatings') { splitCoatings(j.coatings).forEach(c => set.add(c)); continue; }
     let val = '';
-    if (field === 'paper') {
+    if (field === 'sheetSize' || field === 'paperType') {
       const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
       const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
-      val = invItem
-        ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
-        : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
+      if (field === 'paperType') {
+        val = invItem ? (invItem.paper_type || '') : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
+      } else {
+        const sizeStr = String((invItem ? invItem.size : j.size) || '').trim();
+        const gsmRaw  = invItem ? invItem.gsm : j.gsm;
+        const gsmStr  = (gsmRaw === null || gsmRaw === undefined || gsmRaw === '') ? '' : String(gsmRaw).trim();
+        val = (sizeStr + (gsmStr ? ' ' + gsmStr : '')).trim();
+      }
     } else if (field === 'cutting') {
       val = String((j.particulars && j.particulars.cutting_size_gsm) || '').trim();
     } else if (field === 'ups') {
       val = String(j.ups == null ? '' : j.ups).trim();
-    } else if (field === 'machine') {
-      val = j.machine || '';
     } else if (field === 'plates') {
       val = String((j.particulars && j.particulars.plates && j.particulars.plates.quantity) || '').trim();
-    } else if (field === 'colors') {
-      val = String((j.particulars && j.particulars.no_of_colors && j.particulars.no_of_colors.quantity) || '').trim();
     } else if (field === 'rate') {
       for (const d of j.deliveries) { const p = shipmentPricing(j, d); if (p.rate !== null) set.add(fmtRate(p.rate)); }
       continue;
@@ -13220,7 +13232,7 @@ function saleReportColumnOptions(field) {
   }
   return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
-const SALE_REPORT_COL_LABELS = { paper: 'Paper Size GSM', cutting: 'Cutting Size', ups: 'UPS', machine: 'Machine', coatings: 'Coatings', plates: 'Plates', colors: 'Colors', rate: 'Rate per UC' };
+const SALE_REPORT_COL_LABELS = { sheetSize: 'Sheet Size', paperType: 'Paper Type', cutting: 'Cutting Size', ups: 'UPS', coatings: 'Coatings', plates: 'Plates', rate: 'Rate per UC' };
 // Small Excel-style filter triangle next to a header's text — always
 // green so the column reads as filterable at a glance, and bolder/darker
 // while a filter is actually on.
@@ -13319,18 +13331,24 @@ function saleReportCols() {
       cell: r => r.cartons.toLocaleString(),
       xl: r => { let v = r.isShadeCard && r.cartons ? r.cartons + ' copies' : r.cartons; return r.isPartial ? v + ' (PARTIAL)' : v; },
       pr: r => '<span style="' + (r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '') + '">' + r.cartons.toLocaleString() + ((r.isShadeCard && r.cartons) ? ' copies' : '') + '</span>' },
-    { key: 'paper', label: 'Paper Size GSM', filter: 'paper', cell: r => esc(r.paper), xl: r => r.paper, pr: r => esc(r.paper) },
+    { key: 'sheetSize', label: 'Sheet Size', filter: 'sheetSize', cell: r => esc(r.sheetSize), xl: r => r.sheetSize, pr: r => esc(r.sheetSize) },
+    { key: 'sheetL', label: 'Length', right: true, cell: r => esc(String(r.sheetL)), xl: r => r.sheetL === '' ? '' : r.sheetL, pr: r => esc(String(r.sheetL)) },
+    { key: 'sheetW', label: 'Width', right: true, cell: r => esc(String(r.sheetW)), xl: r => r.sheetW === '' ? '' : r.sheetW, pr: r => esc(String(r.sheetW)) },
+    { key: 'sheetGsm', label: 'GSM', right: true, cell: r => esc(r.sheetGsm), xl: r => r.sheetGsm === '' ? '' : (Number.isFinite(+r.sheetGsm) ? +r.sheetGsm : r.sheetGsm), pr: r => esc(r.sheetGsm) },
     { key: 'cutting', label: 'Cutting Size', filter: 'cutting', cell: r => esc(r.cuttingSize), xl: r => r.cuttingSize, pr: r => esc(r.cuttingSize) },
     { key: 'packets', label: 'Packets', right: true, total: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty', cell: r => esc(r.cartonQty), xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
     { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
     { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => r.plates, pr: r => esc(r.plates) },
-    { key: 'colors', label: 'Colors', filter: 'colors', cell: r => esc(r.colors), xl: r => r.colors, pr: r => esc(r.colors) },
-    { key: 'machine', label: 'Machine', filter: 'machine', cell: r => esc(r.machine), xl: r => r.machine, pr: r => esc(r.machine) },
+    { key: 'paperType', label: 'Paper Type', filter: 'paperType', cell: r => esc(r.paperType), xl: r => r.paperType, pr: r => esc(r.paperType) },
     { key: 'coatings', label: 'Coatings', filter: 'coatings', cell: r => esc(r.coatings), xl: r => r.coatings, pr: r => esc(r.coatings) },
     { key: 'cartonsPackets', label: 'Cartons/Packets', right: true, total: 'cartonsPackets',
       cell: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;', xl: r => r.cartonsPackets > 0 ? r.cartonsPackets : '', pr: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : dash },
+    // Weight of ONE packet: sheet length x width x gsm / 15500 (packWeightKg),
+    // the same figure Wastage Weight and Packets Issued Weight are built from.
+    { key: 'packetKg', label: 'Packet/KG', right: true,
+      cell: r => r.packKg === null || r.packKg === undefined ? '&mdash;' : d2(r.packKg), xl: r => r.packKg === null || r.packKg === undefined ? '' : +r.packKg.toFixed(2), pr: r => r.packKg === null || r.packKg === undefined ? dash : d2(r.packKg) },
     // Wastage and Ready share one cell, kept as two numbers: "20 + 430" - the green one is the Ready Qty (produced, not yet shipped).
     { key: 'wastage', label: 'Wastage', right: true, total: 'wastage',
       cell: r => (r.wastage === null ? '&mdash;' : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
@@ -13341,6 +13359,13 @@ function saleReportCols() {
       cell: r => sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) + ' sheets &middot; ' + d1(t.wastagePackets) + ' pkts' : '', xl: r => sheetsText(r), pr: r => sheetsText(r) },
     { key: 'wastageKg', label: 'Wastage Weight (kg)', right: true,
       cell: r => r.wastageKg === null ? '&mdash;' : d2(r.wastageKg), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : +r.wastageKg.toFixed(2), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
+    // Wastage weight as a share of the paper issued: wastage kg x 100 / issued kg.
+    // The total is the ratio of the two column totals, not a sum of percentages.
+    { key: 'wastageKgPct', label: 'Wastage KGs %', right: true,
+      cell: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '&mdash;' : d2(r.wastageKgPct) + '%',
+      totalCell: t => t.issuedKg > 0 ? d2(t.wastageKg * 100 / t.issuedKg) + '%' : '',
+      xl: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '' : +r.wastageKgPct.toFixed(2),
+      pr: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? dash : d2(r.wastageKgPct) + '%' },
     { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
       cell: r => r.issuedKg === null ? '&mdash;' : d2(r.issuedKg), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : +r.issuedKg.toFixed(2), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
     { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => r.rate === null ? '' : r.rate, pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
