@@ -5453,6 +5453,15 @@ function describeJobTrace(id, rows) {
   if (archived)  out += line(`Moved to the Archive ${at(archived)} by ${esc(who(archived))}.`);
   if (purged)    out += line(`<b style="color:#A32D2D;">Permanently deleted ${at(purged)} by ${esc(who(purged))}.</b>`);
   if (autoPurge) out += line(`<b style="color:#A32D2D;">Auto-purged ${at(autoPurge)}</b> - archived rows are destroyed after 30 days.`);
+  if (!purged && !autoPurge && archived) {
+    // The likeliest case for any job archived before 23/09/2026: the 30-day
+    // auto-purge destroyed it and wrote nothing down (fixed since - see
+    // purgeExpiredTrash). The archive date is the tell.
+    const days = Math.floor((Date.now() - new Date(archived.created_at).getTime()) / 86400000);
+    out += line(days >= 30
+      ? `No purge was recorded, but it was archived ${days} days ago and archived rows are destroyed after 30. Until 23/09/2026 that automatic deletion was not written down, so this is almost certainly what happened to it.`
+      : 'No purge was recorded and it is less than 30 days old, so it should still be in the Archive. If it is not there, the row is gone without a record - worth flagging.');
+  }
   if (!purged && !autoPurge && !archived) {
     out += line('It is not in the Archive either. Try Refresh; if it still does not appear, the row is gone without a purge being recorded.');
   }
