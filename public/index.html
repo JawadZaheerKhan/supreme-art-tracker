@@ -2938,6 +2938,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 </div>
 
 <div class="main" id="inventory-mode" style="display:none;">
+  <!-- Only filled when you arrive here by clicking a row in the Current
+       Balance Summary. Holds the way back to that report. -->
+  <div id="inv-return-bar" style="display:none;"></div>
   <div class="stats-row" id="inv-stats-row"></div>
   <div class="toolbar">
     <div class="search-wrap">
@@ -5314,6 +5317,9 @@ function setMode(m) {
   if (!tabAllowed(m)) m = firstAllowedTab();
   // Leaving Reports clears the Sale Report's per-column filters (session-scoped).
   if (mode === 'reports' && m !== 'reports') srResetColFilters();
+  // Leaving Inventory undoes the filters a report-row jump applied, however
+  // the user leaves — Back button, top-bar tab, or a bounce above.
+  if (m !== 'inventory') invClearReturn();
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
@@ -7149,6 +7155,81 @@ function toggleShadeCardFilter() {
   filterShadeCard = filterShadeCard === 'only' ? '' : 'only';
   renderJobs();
 }
+// ── Report row -> this item -> back ──────────────────────────
+// Set while the user is here because they clicked a row in the Current
+// Balance Summary. Holds the Inventory tab exactly as it was before the
+// jump: that jump sets the paper / size / gsm filters, and those are ours
+// to undo on the way out, not the user's to find later and wonder about.
+let invReturn = null;
+// Put the tab back the way we found it. Called both by the Back button and
+// by setMode() when the user leaves Inventory some other way, so a jump's
+// filters can never outlive the visit.
+function invClearReturn() {
+  if (!invReturn) return;
+  const f = invReturn.filters;
+  invFilterText = f.text; invFilterType = f.type; invFilterSize = f.size;
+  invFilterGsm  = f.gsm;  invFilterStock = f.stock; invFilterOffcut = f.offcut;
+  invViewMode = f.viewMode;
+  const box = document.getElementById('inv-search-input');
+  if (box) box.value = f.text;
+  invReturn = null;
+  renderInvReturnBar();
+}
+function renderInvReturnBar() {
+  const bar = document.getElementById('inv-return-bar');
+  if (!bar) return;
+  if (!invReturn) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  bar.style.display = 'block';
+  bar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
+      <button class="btn btn-sm" onclick="invReturnToReport()">&#8592; Back to ${esc(invReturn.reportLabel)}</button>
+      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(invReturn.label)}</b>, opened from that report.</span>
+    </div>`;
+}
+function invReturnToReport() {
+  const back = invReturn;
+  invClearReturn();                       // filters restored before we leave
+  if (!back) return;
+  setMode('reports');
+  openReportsGroup(back.group, back.pane);
+  // Put the report back where they were reading it, once it has redrawn.
+  requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
+}
+// Open one Current Balance Summary row in the Inventory tab: filter the tab
+// down to that exact paper (type + size + gsm + fresh/offcut, and the brand
+// too when the report is grouped by brand) so the card is the only thing on
+// screen, and leave a way back.
+function irOpenItem(i) {
+  const row = (invReportState._rows || [])[i];
+  if (!row || !tabAllowed('inventory')) return;
+  const byBrand = invReportState.groupBy === 'brand' || invReportState.groupBy === 'both';
+  invReturn = {
+    filters: { text: invFilterText, type: invFilterType, size: invFilterSize,
+               gsm: invFilterGsm, stock: invFilterStock, offcut: invFilterOffcut,
+               viewMode: invViewMode },
+    group: 'stocks-group', pane: 'inventory-report',
+    reportLabel: 'Current Balance Summary',
+    label: [row.paperType, row.size, row.gsm ? row.gsm + ' gsm' : '',
+            row.isOffcut ? 'offcut' : '', byBrand ? row.brand : ''].filter(Boolean).join(' \u00b7 '),
+    scrollY: window.scrollY || 0,
+  };
+  // The size / gsm values came off the item itself, so they match the
+  // dropdown options exactly. Brand has no filter of its own — the search
+  // box matches it, which is enough to isolate one brand of a paper.
+  invFilterText   = byBrand && row.brand ? row.brand : '';
+  invFilterType   = row.paperType || '';
+  invFilterSize   = row.size || '';
+  invFilterGsm    = row.gsm  || '';
+  invFilterOffcut = row.isOffcut ? 'offcut' : 'fresh';
+  invFilterStock  = '';
+  invViewMode     = 'items';              // not the Pending Stock queue
+  const box = document.getElementById('inv-search-input');
+  if (box) box.value = invFilterText;
+  setMode('inventory');
+  renderInvReturnBar();   // setMode's render draws it too; this keeps irOpenItem self-contained
+  window.scrollTo(0, 0);
+}
+
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
 function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
@@ -7459,6 +7540,7 @@ function renderInventoryList() {
   }).join('');
 }
 function renderInventory() {
+  renderInvReturnBar();
   renderInventoryStats();
   renderInventoryFilters();
   // Refresh the Pending Stock toggle button regardless of mode so the
@@ -10635,6 +10717,7 @@ function buildInventoryReportRows() {
 
 function renderInventoryReport() {
   const rows = buildInventoryReportRows();
+  invReportState._rows = rows;   // what a row click resolves against (see irOpenItem)
   const { groupBy } = invReportState;
   const el = document.getElementById('ir-content');
   if (!el) return;
@@ -10672,6 +10755,7 @@ function renderInventoryReport() {
     ? `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received">${importPill(r.importPkts)}</td>`
     : `<td style="padding:6px 8px;text-align:right;color:var(--text3);">—</td>`;
   const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
+  const canJump = tabAllowed('inventory');
   el.innerHTML = `
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">
       ${irAsOfText() ? `<span style="color:#A32D2D;font-weight:700;">${esc(irAsOfText())}</span> &middot; ` : ''}${rows.length} row${rows.length===1?'':'s'} &middot; ${total.items} item${total.items===1?'':'s'} &middot;
@@ -10695,11 +10779,17 @@ function renderInventoryReport() {
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => {
+        ${rows.map((r, i) => {
           const shortfall = showConsumed && r.consumedPkts > 0 && r.packets < r.consumedPkts;
           const rowBg = shortfall ? 'background:rgba(220,38,38,0.08);' : '';
+          // Click a row to open that paper in the Inventory tab. Only offered
+          // to users who may actually go there — otherwise the row stays a
+          // plain hover row rather than a click that bounces them elsewhere.
+          const jump = canJump
+            ? ` onclick="irOpenItem(${i})" title="Open this paper in Inventory"`
+            : '';
           return `
-          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);${rowBg}">
+          <tr class="${canJump ? 'cv-summary-row' : 'row-hover-red'}"${jump} style="border-bottom:1px solid var(--border);${rowBg}">
             <td style="padding:6px 8px;">${esc(r.paperType)}</td>
             <td style="padding:6px 8px;">${esc(r.size) || '—'}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm) || '—'}</td>
@@ -15932,7 +16022,10 @@ async function emptyTrash() {
 
 // Show one of the grouped views, hide the landing and other groups.
 // Pass the wrapper id (e.g. 'stocks-group', 'jobs-group', 'trash-group').
-function openReportsGroup(groupId) {
+// `pane` overrides the group's default landing pane — used when coming BACK
+// to a specific report (see invReturnToReport), so the return trip doesn't
+// detour through Stock In and refetch it on the way.
+function openReportsGroup(groupId, pane) {
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'none';
   document.querySelectorAll('#reports-mode .reports-group').forEach(g => {
@@ -15940,9 +16033,10 @@ function openReportsGroup(groupId) {
   });
   // Default each group to its first pane on entry so the user sees data
   // immediately rather than an empty sidebar+blank area.
-  if (groupId === 'stocks-group')   setReportsTab(firstVisibleReportPane(groupId, 'stock-in'));
-  if (groupId === 'jobs-group')     setReportsTab(firstVisibleReportPane(groupId, 'jobs-report'));
-  if (groupId === 'trash-group')    setReportsTab(firstVisibleReportPane(groupId, 'trash-jobs'));
+  if (pane)                         setReportsTab(pane);
+  else if (groupId === 'stocks-group')   setReportsTab(firstVisibleReportPane(groupId, 'stock-in'));
+  else if (groupId === 'jobs-group')     setReportsTab(firstVisibleReportPane(groupId, 'jobs-report'));
+  else if (groupId === 'trash-group')    setReportsTab(firstVisibleReportPane(groupId, 'trash-jobs'));
   requestAnimationFrame(syncReportsFlowIndicators);
 }
 
