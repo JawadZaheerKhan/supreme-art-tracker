@@ -15844,10 +15844,15 @@ function trashDaysLeft(deletedAt) {
 // Shared header chrome (title, count, Empty Trash button). Stays at the top
 // of both panes.
 function trashPaneHeader(label, count) {
+  // Jobs are kept indefinitely (see purgeExpiredTrash); everything else still
+  // ages out. The header must not promise a countdown that no longer runs.
+  const retention = label === 'Jobs'
+    ? 'kept permanently · a job number must always be accounted for'
+    : `auto-purges after ${trashCache.retention_days} days`;
   return `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Archive · ${label}</h2>
-      <span style="color:var(--text2);font-size:12px;">${count} item${count===1?'':'s'} · auto-purges after ${trashCache.retention_days} days</span>
+      <span style="color:var(--text2);font-size:12px;">${count} item${count===1?'':'s'} · ${retention}</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="refreshTrash()">&#8635; Refresh</button>
         <button class="btn btn-sm btn-danger ceo-hide" onclick="emptyTrash()">&#128465; Empty Archive</button>
@@ -15875,8 +15880,6 @@ function renderTrashJobs() {
   const tdL = 'style="padding:8px 10px;"';
   const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
   const body = rows.map(r => {
-    const left = trashDaysLeft(r.deleted_at);
-    const expiringSoon = left <= 3;
     return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
       <td ${tdL} style="padding:8px 10px;font-weight:700;color:#1d4ed8;">E-${r.id}</td>
       <td ${tdL}>${esc(r.jobcode || '')}</td>
@@ -15884,7 +15887,7 @@ function renderTrashJobs() {
       <td ${tdL}>${esc(r.client || '')}</td>
       <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
-      <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
+      <td ${tdN} style="font-weight:600;color:var(--text2);" title="Archived jobs are never deleted automatically - a job card number has to stay accounted for">Kept</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('job', ${r.id})">&#8635; Restore</button>
         <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('job', ${r.id})">&#128465; Delete Permanently</button>
@@ -15902,7 +15905,7 @@ function renderTrashJobs() {
         <th ${thL}>Company</th>
         <th ${thL}>Deleted</th>
         <th ${thL}>By</th>
-        <th ${thL}>Auto-purge</th>
+        <th ${thL}>Retention</th>
         <th ${thL}></th>
       </tr></thead>
       <tbody>${body}</tbody>
@@ -16054,7 +16057,9 @@ async function purgeTrash(type, id) {
   const label = type === 'job' ? `Job E-${id}` : type === 'import' ? `Import #${id}` : `Transaction #${id}`;
   const ok = await confirmDialog({
     title: `Permanently delete ${label}?`,
-    message: 'This wipes it from the database for good. Cannot be undone.',
+    message: type === 'job'
+      ? `This wipes Job E-${id} from the database for good, and job card number E-${id} is then gone from your numbering for ever \u2014 numbers are never reused, so an audit will show a hole there. The Archive keeps jobs indefinitely, so there is no need to do this to save space. Only the deletion itself is recorded, under your name.`
+      : 'This wipes it from the database for good. Cannot be undone.',
     danger: true,
     confirmText: 'Delete forever',
   });
@@ -16070,11 +16075,19 @@ async function purgeTrash(type, id) {
 
 async function emptyTrash() {
   if (!hasPerm('trash_admin')) return;
-  const total = (trashCache.jobs?.length || 0) + (trashCache.imports?.length || 0) + (trashCache.transactions?.length || 0);
-  if (!total) { notify('Archive is already empty.'); return; }
+  // Jobs are deliberately excluded: Empty Archive clears imports and stock
+  // transactions only, so no job number can be wiped out in bulk.
+  const jobCount = trashCache.jobs?.length || 0;
+  const total = (trashCache.imports?.length || 0) + (trashCache.transactions?.length || 0);
+  if (!total) {
+    notify(jobCount
+      ? `Nothing to empty \u2014 the ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept permanently.`
+      : 'Archive is already empty.');
+    return;
+  }
   const ok = await confirmDialog({
     title: `Empty Archive?`,
-    message: `Permanently delete all ${total} item${total===1?'':'s'} (${trashCache.jobs?.length || 0} job${(trashCache.jobs?.length||0)===1?'':'s'} + ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'} + ${trashCache.transactions?.length || 0} manual consumption entr${(trashCache.transactions?.length||0)===1?'y':'ies'}). Cannot be undone.`,
+    message: `Permanently delete ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'} + ${trashCache.transactions?.length || 0} manual consumption entr${(trashCache.transactions?.length||0)===1?'y':'ies'}. Cannot be undone.${jobCount ? ` The ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept \u2014 job numbers are never wiped in bulk. Use Delete Permanently on one job if you really mean it.` : ''}`,
     danger: true,
     confirmText: 'Empty Archive',
   });
@@ -16082,7 +16095,7 @@ async function emptyTrash() {
   showSaving(true);
   try {
     const r = await api('POST', '/api/trash/empty');
-    notify(`Archive emptied · ${r.jobs} job${r.jobs===1?'':'s'} + ${r.imports} import${r.imports===1?'':'s'} + ${r.transactions} transaction${r.transactions===1?'':'s'} deleted`);
+    notify(`Archive emptied · ${r.imports} import${r.imports===1?'':'s'} + ${r.transactions} transaction${r.transactions===1?'':'s'} deleted${jobCount ? ` · ${jobCount} job${jobCount===1?'':'s'} kept` : ''}`);
     refreshTrash();
   } catch (e) { notify('Empty failed: ' + e.message); }
   showSaving(false);

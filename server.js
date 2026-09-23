@@ -8979,26 +8979,25 @@ const TRASH_RETENTION_DAYS = 30;
 // Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
 // idempotent — safe to call on every list request.
 async function purgeExpiredTrash(sql) {
-  // Every purge is written to the audit log before this returns. A job card
-  // number that no longer exists is an audit problem - "was it deleted, or
-  // did the app lose it?" is not answerable from an empty table. This used
-  // to hard-delete silently, so a job that aged out of the Archive left
-  // job.create and job.delete behind but nothing saying it was destroyed.
-  // Logged as the system, since no user asked for it: the retention clock did.
-  const jobs = await sql`DELETE FROM jobs WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, name, client, deleted_at, deleted_by`;
-  for (const j of jobs) {
-    await logSystemAudit(sql, {
-      action: 'job.auto_purge', entityType: 'job', entityId: j.id,
-      summary: `Auto-purged Job E-${j.id}: ${j.name} (${j.client}) - archived ${j.deleted_at ? new Date(j.deleted_at).toISOString().slice(0, 10) : 'unknown'} by ${j.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
-      metadata: { deleted_at: j.deleted_at, deleted_by: j.deleted_by, retention_days: TRASH_RETENTION_DAYS },
-    });
-  }
+  // JOBS ARE NEVER AUTO-PURGED. They used to be, after 30 days, and silently:
+  // the row was hard-deleted and nothing was written down, so a job card
+  // number simply stopped existing with no way to say what had become of it.
+  // Job numbers come from a sequence that never reuses a value, so a destroyed
+  // job leaves a permanent hole in the numbering - which is an audit problem,
+  // not a housekeeping one. An archived job now stays in the Archive
+  // indefinitely; the only way one leaves is a deliberate, logged
+  // Delete Permanently by an admin. Jobs are small rows and there is no
+  // storage reason to destroy them.
+  //
+  // Imports and stock transactions keep the 30-day clock - neither carries a
+  // number anyone audits against - but each purge is written to the audit log
+  // below, since silent deletion was the actual defect here.
   const imports = await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, paper_type, deleted_at, deleted_by`;
   for (const im of imports) {
     await logSystemAudit(sql, {
       action: 'import.auto_purge', entityType: 'import', entityId: im.id,
       summary: `Auto-purged import #${im.id}: ${im.paper_type || ''} - archived by ${im.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
-      metadata: { deleted_at: im.deleted_at, deleted_by: im.deleted_by },
+      metadata: { deleted_at: im.deleted_at, deleted_by: im.deleted_by, retention_days: TRASH_RETENTION_DAYS },
     });
   }
   const txs = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, change, reason, deleted_at, deleted_by`;
@@ -9006,7 +9005,7 @@ async function purgeExpiredTrash(sql) {
     await logSystemAudit(sql, {
       action: 'transaction.auto_purge', entityType: 'transaction', entityId: t.id,
       summary: `Auto-purged stock transaction #${t.id}: ${t.change} (${t.reason || 'no reason'}) - archived by ${t.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
-      metadata: { deleted_at: t.deleted_at, deleted_by: t.deleted_by },
+      metadata: { deleted_at: t.deleted_at, deleted_by: t.deleted_by, retention_days: TRASH_RETENTION_DAYS },
     });
   }
 }
@@ -9039,7 +9038,9 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
        WHERE t.deleted_at IS NOT NULL
        ORDER BY t.deleted_at DESC
     `;
-    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS });
+    // jobs_retained: archived jobs are kept indefinitely, so the Archive can
+    // say so instead of counting down days that no longer run out.
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -9122,13 +9123,18 @@ app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req,
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes everything
-// currently in trash regardless of age.
+// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes the imports
+// and stock transactions currently in the Archive, regardless of age.
+// ARCHIVED JOBS ARE LEFT ALONE - see purgeExpiredTrash for why a job number
+// must not vanish. Destroying a job is still possible, but only one at a
+// time via Delete Permanently, which names the job in the audit log; a bulk
+// button that wipes a hundred job numbers in one click is not something an
+// audit can be reconstructed from.
 app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const jobsDel    = await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL RETURNING id`;
+    const jobsDel    = [];
     const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
     const txDel       = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL RETURNING id`;
     await logAudit(sql, req, {
