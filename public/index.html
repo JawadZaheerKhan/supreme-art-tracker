@@ -5423,6 +5423,57 @@ function refreshCurrent() {
 }
 
 // ── Filtering ─────────────────────────────────────────────────
+// A job row can be deleted; its audit trail cannot. So when a search for a
+// job NUMBER comes back empty, the app can still say what became of that
+// number instead of the flat "no jobs match", which reads as "the app lost
+// it". Job numbers come from a Postgres sequence that never goes backwards,
+// so there are two very different explanations for a gap and they should not
+// look the same to whoever is doing an audit.
+function describeJobTrace(id, rows) {
+  const at = (r) => fmtDMYT(r.created_at);
+  const who = (r) => r.user_email || 'unknown';
+  const find = (a) => (rows || []).find(r => r.action === a);
+  const created   = find('job.create');
+  const archived  = find('job.delete');
+  const restored  = find('job.restore');
+  const purged    = find('job.purge');
+  const autoPurge = find('job.auto_purge');
+  const line = (t) => `<div style="margin-top:4px;">${t}</div>`;
+  if (!rows || !rows.length) {
+    return `<div style="margin-top:10px;color:var(--text2);font-size:13px;line-height:1.5;">
+      <b style="color:#A32D2D;">No job card E-${id} was ever saved.</b>
+      ${line('Nothing was recorded against this number - not a creation, not a deletion. Job numbers come from a counter that never goes backwards, so a job card that failed or was cancelled while saving spends its number without leaving a job behind, the way a receipt book skips a spoiled page.')}
+    </div>`;
+  }
+  let out = `<div style="margin-top:10px;color:var(--text2);font-size:13px;line-height:1.5;text-align:left;display:inline-block;">`;
+  out += `<b style="color:var(--text);">What happened to E-${id}</b>`;
+  if (created)   out += line(`Created ${at(created)} by ${esc(who(created))}.`);
+  else           out += line('No creation was recorded, but there is other activity against this number - the audit log may predate it.');
+  if (restored)  out += line(`Restored from the Archive ${at(restored)} by ${esc(who(restored))}.`);
+  if (archived)  out += line(`Moved to the Archive ${at(archived)} by ${esc(who(archived))}.`);
+  if (purged)    out += line(`<b style="color:#A32D2D;">Permanently deleted ${at(purged)} by ${esc(who(purged))}.</b>`);
+  if (autoPurge) out += line(`<b style="color:#A32D2D;">Auto-purged ${at(autoPurge)}</b> - archived rows are destroyed after 30 days.`);
+  if (!purged && !autoPurge && !archived) {
+    out += line('It is not in the Archive either. Try Refresh; if it still does not appear, the row is gone without a purge being recorded.');
+  }
+  out += `<div style="margin-top:6px;">Full trail: Users tab &rarr; Activity Log &rarr; search ${id}.</div>`;
+  return out + '</div>';
+}
+// Fills in the explanation under an empty job search, without blocking the
+// render. Only fires for a search that is plainly a job number.
+async function explainMissingJob() {
+  const el = document.getElementById('job-missing-trace');
+  if (!el) return;
+  const m = /^e?[-\s]?(\d{1,7})$/.exec(String(filterText || '').trim().toLowerCase());
+  if (!m) return;
+  const id = parseInt(m[1], 10);
+  if (jobs.some(j => j && j.id === id)) return;   // it exists; some other filter hid it
+  try {
+    const rows = await api('GET', `/api/audit?entity_type=job&entity_id=${id}&limit=200`);
+    if (document.getElementById('job-missing-trace') === el) el.innerHTML = describeJobTrace(id, rows);
+  } catch (e) { /* leave the plain message - never break the list on this */ }
+}
+
 // True when either search box has something in it. A search is a request for
 // specific jobs, so both the stage tabs and the MIL group collapsing step
 // aside for it - see renderJobsCompact / renderJobsCards.
@@ -5767,7 +5818,8 @@ function renderJobsCompact() {
   const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
   if (!filtered.length) {
-    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
+    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}<div id="job-missing-trace"></div></div>`;
+    explainMissingJob();   // a searched-for job number gets an explanation, not a shrug
     return;
   }
   const seenGroupsC = new Set();
@@ -6017,7 +6069,8 @@ function renderJobsCards() {
   const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
   if (!filtered.length) {
-    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}</div>`;
+    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}<div id="job-missing-trace"></div></div>`;
+    explainMissingJob();   // a searched-for job number gets an explanation, not a shrug
     return;
   }
   const seenGroups = new Set();
@@ -26758,7 +26811,7 @@ let auditList = [];
 // week/month/custom pattern as the Stock Report. Defaults to a much higher
 // cap than the old fixed limit=50 so "All time" actually shows the history
 // instead of just the last few entries.
-let auditFeedState = { type: '', period: 'all', from: '', to: '', limit: 500 };
+let auditFeedState = { type: '', period: 'all', from: '', to: '', limit: 500, entityId: '' };
 const AUDIT_TYPE_OPTS = [
   ['', 'All Types'], ['job', 'Jobs'], ['inventory', 'Inventory'], ['user', 'Users'],
   ['operator', 'Operators'], ['group', 'Groups'], ['import', 'Imports'],
@@ -26786,6 +26839,11 @@ function auditFeedQueryParams() {
   const qs = new URLSearchParams();
   qs.set('limit', String(auditFeedState.limit));
   if (auditFeedState.type) qs.set('type', auditFeedState.type);
+  // A job number narrows the feed to that ONE job's whole history, including
+  // jobs that no longer exist - the point of an audit log. Dates are ignored
+  // for it on purpose: you are asking what became of E-666, not what happened
+  // this week.
+  if (auditFeedState.entityId) qs.set('entity_id', auditFeedState.entityId);
   if (from) qs.set('from', from);
   if (to)   qs.set('to', to);
   return qs.toString();
@@ -26795,6 +26853,11 @@ function auditFeedFilterBarHtml() {
     .map(([v, lbl]) => `<option value="${v}" ${auditFeedState.type === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('');
   return `
   <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:10px;">
+    <div>
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Job No.</div>
+      <input class="filter" id="audit-entity" style="width:120px;" value="${esc(auditFeedState.entityId || '')}" placeholder="e.g. 666"
+             oninput="setAuditFeedEntity(this.value)" title="Show everything ever recorded for one job number, including jobs that have since been deleted">
+    </div>
     <div>
       <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Type</div>
       <select class="filter" id="audit-type" onchange="setAuditFeedType(this.value)">${typeOpts}</select>
@@ -26833,6 +26896,13 @@ async function refreshAuditFeed() {
   } catch (e) {
     list.innerHTML = 'Error: ' + e.message;
   }
+}
+let _auditEntityTimer = null;
+function setAuditFeedEntity(v) {
+  // "E-666", "e666" and "666" all mean job 666, same as the Jobs search.
+  auditFeedState.entityId = String(v || '').trim().toLowerCase().replace(/^e[-\s]?/, '');
+  clearTimeout(_auditEntityTimer);
+  _auditEntityTimer = setTimeout(refreshAuditFeed, 250);
 }
 function setAuditFeedType(v) { auditFeedState.type = v; refreshAuditFeed(); }
 function setAuditFeedPeriod(v) {

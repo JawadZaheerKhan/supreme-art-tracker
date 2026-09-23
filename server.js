@@ -1803,6 +1803,20 @@ app.use(authMiddleware);
 
 // Write an action-level audit row. Called from every mutating handler after
 // the primary write succeeds, so the log only ever shows real changes.
+// Audit entry for something the app did on its own - no user, no request.
+// Kept separate from logAudit so that one can keep its "no user, no entry"
+// guard, which is what stops unauthenticated noise getting in.
+async function logSystemAudit(sql, { action, entityType, entityId, summary, metadata }) {
+  try {
+    await sql`
+      INSERT INTO audit_log (user_id, user_email, action, entity_type, entity_id, summary, metadata)
+      VALUES (NULL, 'system', ${action}, ${entityType || null}, ${entityId || null}, ${summary}, ${JSON.stringify(metadata || {})})
+    `;
+  } catch (e) {
+    console.error('System audit log write failed:', e.message);
+  }
+}
+
 async function logAudit(sql, req, { action, entityType, entityId, summary, metadata }) {
   if (!req.user) return;
   try {
@@ -8965,9 +8979,36 @@ const TRASH_RETENTION_DAYS = 30;
 // Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
 // idempotent — safe to call on every list request.
 async function purgeExpiredTrash(sql) {
-  await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
-  await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
-  await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  // Every purge is written to the audit log before this returns. A job card
+  // number that no longer exists is an audit problem - "was it deleted, or
+  // did the app lose it?" is not answerable from an empty table. This used
+  // to hard-delete silently, so a job that aged out of the Archive left
+  // job.create and job.delete behind but nothing saying it was destroyed.
+  // Logged as the system, since no user asked for it: the retention clock did.
+  const jobs = await sql`DELETE FROM jobs WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, name, client, deleted_at, deleted_by`;
+  for (const j of jobs) {
+    await logSystemAudit(sql, {
+      action: 'job.auto_purge', entityType: 'job', entityId: j.id,
+      summary: `Auto-purged Job E-${j.id}: ${j.name} (${j.client}) - archived ${j.deleted_at ? new Date(j.deleted_at).toISOString().slice(0, 10) : 'unknown'} by ${j.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
+      metadata: { deleted_at: j.deleted_at, deleted_by: j.deleted_by, retention_days: TRASH_RETENTION_DAYS },
+    });
+  }
+  const imports = await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, paper_type, deleted_at, deleted_by`;
+  for (const im of imports) {
+    await logSystemAudit(sql, {
+      action: 'import.auto_purge', entityType: 'import', entityId: im.id,
+      summary: `Auto-purged import #${im.id}: ${im.paper_type || ''} - archived by ${im.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
+      metadata: { deleted_at: im.deleted_at, deleted_by: im.deleted_by },
+    });
+  }
+  const txs = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, change, reason, deleted_at, deleted_by`;
+  for (const t of txs) {
+    await logSystemAudit(sql, {
+      action: 'transaction.auto_purge', entityType: 'transaction', entityId: t.id,
+      summary: `Auto-purged stock transaction #${t.id}: ${t.change} (${t.reason || 'no reason'}) - archived by ${t.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
+      metadata: { deleted_at: t.deleted_at, deleted_by: t.deleted_by },
+    });
+  }
 }
 
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
