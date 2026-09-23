@@ -693,6 +693,12 @@
   .ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .ledger-table th, .ledger-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   .ledger-table th { background: var(--bg2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); font-weight: 700; }
+  /* Compact variant for the inventory History modal — nine columns have to
+     fit the modal with no sideways scroll: tighter type and padding,
+     stacked date/time, wrapping notes. */
+  .ledger-compact { font-size: 12px; }
+  .ledger-compact th, .ledger-compact td { padding: 6px 6px; }
+  .ledger-compact td { word-break: break-word; vertical-align: top; }
   .ss-table th     { color: var(--text); font-weight: 700; }
   /* Compact "who did what" activity feed — used for Job audit log, Inventory
      audit log, and per-User activity. Grouped by day, one line per event:
@@ -9941,6 +9947,36 @@ function deliveryChallanText(d) {
 // specific transaction — used when a report row (Stock In/Out) is clicked
 // so the user lands on the exact entry they came from, not just the top
 // of that item's whole ledger.
+// Reverse gating — admin can reverse anytime; store keeper and production
+// manager can reverse within 30 days of the entry. CEO never sees it
+// (read-only). Works for both stock-in and stock-OUT (job consumption, job
+// edits, offcut returns, adjustments). Hidden if the row IS a reversal or
+// HAS been reversed. The server enforces the same allow-list of reasons,
+// so an unsupported row just won't expose the button client-side. Shared
+// by the History modal and the Stock In / Stock Out report rows.
+const REVERSIBLE_TX_REASONS = new Set([
+  'delivery', 'adjustment', 'opening',
+  'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
+  'job-issuance-reversed',
+  // Manual stock-out reasons. 'sample' kept reversible for old rows
+  // even though it's no longer a selectable reason going forward.
+  'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
+]);
+function canReverseTx(t) {
+  if (!t || t.reverses_tx_id || t.has_been_reversed) return false;
+  // Rolling 30-day window — reversible while the tx is at most a month old.
+  // Admin can reverse ANY reason at any time — no reason allow-list, no
+  // time window. Everyone else is bound by both AND must actually pass the
+  // server's own gate on this route (requireInventoryWriter =
+  // canWriteInventory(), admin/store_manager only) — canWrite() also
+  // includes production_manager, who was shown this button and then
+  // rejected server-side before the window/reason check even ran.
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  const withinWindow = (Date.now() - new Date(t.created_at).getTime()) <= THIRTY_DAYS_MS;
+  return isSuperAdmin() || permLevel('inv_btn_reverse') === 'yes'
+    || (permLevel('inv_btn_reverse') === '30-day' && withinWindow && REVERSIBLE_TX_REASONS.has(t.reason));
+}
+
 async function openInvHistoryAt(itemId, txId) {
   if (!itemId) return;
   await openInvHistory(itemId);
@@ -10031,7 +10067,8 @@ async function renderInvHistory(id) {
       const balanceAfterSheets = runningAfter;
       runningAfter -= t.change;     // becomes "after" of the next older row
       const balanceAfterPkts = fmtPackets(balanceAfterSheets);
-      const date = fmtDMYT12(t.created_at);
+      // Date over time, two small lines — half the width of one long line.
+      const date = `${fmtDMY(t.created_at)}<div style="font-size:10px;color:var(--text3);">${fmtTime12(t.created_at)}</div>`;
       const isReversal      = !!t.reverses_tx_id;
       const hasBeenReversed = !!t.has_been_reversed;
       // Color: positive=green, negative=red, reversal row=orange tint
@@ -10048,46 +10085,20 @@ async function renderInvHistory(id) {
         ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
         : esc(t.reason || '') + historySplitBadge;
 
-      // Reverse button — admin can reverse anytime; store keeper and
-      // production manager can reverse within 30 days of the entry.
-      // CEO never sees it (read-only). Works for both stock-in and
-      // stock-OUT (job consumption, job edits, offcut returns, adjustments).
-      // Hidden if this row IS a reversal or HAS been reversed. The server
-      // enforces the same allow-list of reasons, so an unsupported row
-      // just won't expose the button client-side.
-      const REVERSIBLE = new Set([
-        'delivery', 'adjustment', 'opening',
-        'job-consumed', 'job-edit-apply', 'job-edit-revert', 'job-offcut',
-        'job-issuance-reversed',
-        // Manual stock-out reasons. 'sample' kept reversible for old rows
-        // even though it's no longer a selectable reason going forward.
-        'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
-      ]);
-      // Rolling 30-day window — reversible while the tx is at most a month
-      // old. Simpler and more forgiving than the previous same-calendar-day
-      // rule, and doesn't need business-timezone math.
-      const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-      const withinWindow = (Date.now() - new Date(t.created_at).getTime()) <= THIRTY_DAYS_MS;
-      // Admin can reverse ANY reason at any time — no reason allow-list,
-      // no time window. Everyone else is bound by both AND must actually
-      // pass the server's own gate on this route (requireInventoryWriter =
-      // canWriteInventory(), admin/store_manager only) — canWrite() also
-      // includes production_manager, who was shown this button and then
-      // rejected server-side before the window/reason check even ran.
-      const canReverse =
-        !isReversal &&
-        !hasBeenReversed &&
-        (isSuperAdmin() || permLevel('inv_btn_reverse') === 'yes' || (permLevel('inv_btn_reverse') === '30-day' && withinWindow && REVERSIBLE.has(t.reason)));
+      // Gating shared with the Stock In/Out report — see canReverseTx above.
+      const canReverse = canReverseTx(t);
       const reverseTooltip = t.change > 0
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
         : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
       const reverseBtn = canReverse
-        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;" onclick="reverseStockTxGroup([${t._tx_ids.join(',')}], ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
+        ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;padding:3px 8px;font-size:11px;white-space:nowrap;" onclick="reverseStockTxGroup([${t._tx_ids.join(',')}], ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
         : (hasBeenReversed
             ? `<span style="font-size:10px;color:#ea580c;font-weight:700;">REVERSED</span>`
             : '');
 
-      const by = t.user_email ? esc(t.user_email) : '—';
+      // Emails are the widest thing in the table — show the part before
+      // the @ and keep the full address on hover.
+      const by = t.user_email ? `<span title="${esc(t.user_email)}">${esc(String(t.user_email).split('@')[0])}</span>` : '—';
       // Faded look for the original row that has been undone, so the eye
       // immediately reads "this didn't actually count".
       const rowStyle = hasBeenReversed
@@ -10099,7 +10110,7 @@ async function renderInvHistory(id) {
         : '';
       const notes = splitSources || txDisplayNotes(t);
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" class="row-hover-red" style="${rowStyle}">
-        <td>${date}</td>
+        <td style="white-space:nowrap;">${date}</td>
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
         <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
         <td>${reasonHtml}</td>
@@ -10116,8 +10127,8 @@ async function renderInvHistory(id) {
     const box = document.getElementById('ledger-content');
     if (!box) return;
     box.innerHTML = txs.length
-      ? `<table class="ledger-table">
-           <tr><th>When</th><th>Change (${unit})</th><th>Balance After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
+      ? `<table class="ledger-table ledger-compact">
+           <tr><th>When</th><th>Change (${unit})</th><th title="Balance after this transaction">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
@@ -10175,6 +10186,16 @@ async function loadInvAuditContent(id) {
   }
 }
 
+// Re-fetch whichever Stock In / Stock Out pane is on screen, so a Reverse
+// clicked on the report itself makes the row disappear immediately (the
+// endpoint hides reversed pairs). No-op when the panes aren't visible.
+function refreshVisibleStockMovement() {
+  for (const d of ['in', 'out']) {
+    const pane = document.getElementById('rt-stock-' + d);
+    if (pane && pane.offsetParent !== null) loadStockMovement(d);
+  }
+}
+
 // Reverse a wrong stock-in entry. Confirms, hits the server, then reloads
 // inventory (balance changed) and re-renders the History modal in place.
 async function reverseStockTx(txId, itemId) {
@@ -10198,7 +10219,8 @@ async function reverseStockTx(txId, itemId) {
       // queue picks it up and the badge updates.
       if (result && result.job_reverted) await loadJobs();
       // Re-render the History modal only if it survived the re-render.
-      if (document.getElementById('ledger-content')) await renderInvHistory(itemId);
+      if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
+      refreshVisibleStockMovement();
     } catch (uiErr) {
       console.error('Post-reverse UI refresh failed (reversal itself succeeded):', uiErr);
     }
@@ -10227,7 +10249,8 @@ async function reverseStockTxGroup(txIds, itemId) {
     }
     await loadInventory();
     if (jobReverted) await loadJobs();
-    if (document.getElementById('ledger-content')) await renderInvHistory(itemId);
+    if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
+    refreshVisibleStockMovement();
     notify(jobReverted ? 'Combined entry reversed · job moved to Pending Stock' : 'Combined entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
@@ -17241,6 +17264,16 @@ function renderStockMovement(direction, from, to) {
     // openInvHistoryAt finds and flashes the merged row by underlying TX id.
     const historyItemId = isGroup ? t.history_item_id : t.item_id;
     const rowClick = historyItemId ? ` onclick="openInvHistoryAt(${historyItemId}, ${t.id})" title="Open this issuance in History"` : '';
+    // Same Reverse the History modal has, right on the report row. The
+    // endpoint already hides reversal rows and reversed originals, so
+    // every visible row is a candidate; canReverseTx applies the same
+    // permission / 30-day / reason rule as the modal.
+    const revCall = isGroup
+      ? `reverseStockTxGroup([${t.group_ids.join(',')}], ${historyItemId || 'null'})`
+      : `reverseStockTx(${t.id}, ${t.item_id || 'null'})`;
+    const reverseCell = canReverseTx(t)
+      ? `<button class="btn btn-sm" style="background:#ea580c;color:#fff;border-color:#ea580c;font-weight:600;padding:3px 8px;font-size:11px;white-space:nowrap;" onclick="event.stopPropagation(); ${revCall}" title="${t.change > 0 ? 'Undo this stock-in entry' : 'Refund this stock-out entry'} — adds a correction that cancels it out">&#8634; Reverse</button>`
+      : '';
     return `<tr data-sm-row="${direction}-${t.id}" class="row-hover-red ${historyItemId ? 'cv-summary-row' : ''} ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);"${rowClick}>
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); ${clickHandler}"></td>
       <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
@@ -17252,6 +17285,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${job}</td>
       <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
       <td style="padding:8px 10px;">${esc(t.split_note || txDisplayNotes(t))}</td>
+      <td style="padding:8px 10px;">${reverseCell}</td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -17268,7 +17302,7 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Challan No.</th><th ${th}>Notes</th>
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
