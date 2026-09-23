@@ -5423,12 +5423,18 @@ function refreshCurrent() {
 }
 
 // ── Filtering ─────────────────────────────────────────────────
+// True when either search box has something in it. A search is a request for
+// specific jobs, so both the stage tabs and the MIL group collapsing step
+// aside for it - see renderJobsCompact / renderJobsCards.
+function jobsSearchActive() {
+  return !!String(filterText || '').trim() || !!String(filterPO || '').trim();
+}
 function getFiltered() {
   const t = String(filterText || '').trim().toLowerCase();
-  // "E-350", "e350" and "350" all mean job 350 — that's how the id is shown
+  // "E-350", "e350" and "350" all mean job 350 - that's how the id is shown
   // everywhere in the app, so the search box has to accept it written that way.
   const idNeedle = t.replace(/^e[-\s]?/, '');
-  const searching = !!t || !!String(filterPO || '').trim();
+  const searching = jobsSearchActive();
   return jobs.filter(j => {
     if (t) {
       const name   = String(j.name   || '').toLowerCase();
@@ -5765,8 +5771,15 @@ function renderJobsCompact() {
     return;
   }
   const seenGroupsC = new Set();
+  // A MIL group normally collapses to ONE tile carrying the group's oldest
+  // in-progress job (groupRepresentative), and its other members render as
+  // nothing at all. That makes a member impossible to find by its own
+  // number: searching E-667 drew the group tile under, say, E-640, so the
+  // job asked for never appeared and read as missing. A search overrides
+  // the collapsing and shows the matched jobs as themselves.
+  const searching = jobsSearchActive();
   el.innerHTML = filtered.map(j => {
-    if (j.stock_group_name) {
+    if (j.stock_group_name && !searching) {
       if (seenGroupsC.has(j.stock_group_name)) return '';
       seenGroupsC.add(j.stock_group_name);
       const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
@@ -6008,8 +6021,9 @@ function renderJobsCards() {
     return;
   }
   const seenGroups = new Set();
+  const searching = jobsSearchActive();   // see renderJobsCompact
   el.innerHTML = filtered.map(j => {
-    if (j.stock_group_name) {
+    if (j.stock_group_name && !searching) {
       if (seenGroups.has(j.stock_group_name)) return '';
       seenGroups.add(j.stock_group_name);
       const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
