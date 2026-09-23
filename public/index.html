@@ -7457,6 +7457,103 @@ function impReturnToReport() {
   openReportsGroup('stocks-group', 'inventory-report');
   requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
 }
+// ── Stock Summary cell jumps ─────────────────────────────────
+// A summary cell is a number with a story elsewhere: an IN figure lives in
+// the Stock In report, an OUT figure in Stock Out, a balance in the Current
+// Balance Summary. Clicking the cell opens that report narrowed to the SAME
+// item and the SAME dates the cell covered - one bucket's range for a
+// period cell, the summary's whole window for Total Out / Stock Now - with
+// a bar back to the summary. The target report's own filters are
+// snapshotted and restored on the way out, like every other jump here.
+let ssReturn = null;
+function ssIsoDay(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// bi >= 0: that bucket's clamped range (end is exclusive - step back a day).
+// bi < 0: the summary's whole From/To window.
+function ssRangeFor(bi) {
+  const b = (stockSummaryState._buckets || [])[bi];
+  if (bi < 0 || !b) return { from: stockSummaryState.from, to: stockSummaryState.to };
+  return { from: ssIsoDay(b.start), to: ssIsoDay(new Date(b.end.getTime() - 86400000)) };
+}
+function ssClearReturn() {
+  if (!ssReturn) return;
+  const r = ssReturn;
+  ssReturn = null;
+  if (r.direction) Object.assign(stockMovementStates[r.direction], r.restore);
+  else Object.assign(invReportState, r.restore);
+  renderSsReturnBars();
+}
+function renderSsReturnBars() {
+  for (const id of ['sm-in-return', 'sm-out-return', 'ir-return-bar']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const mine = !!ssReturn && ssReturn.barId === id;
+    el.style.display = mine ? 'block' : 'none';
+    el.innerHTML = mine ? `
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
+        <button class="btn btn-sm" onclick="ssReturnToSummary()">&#8592; Back to Stock Summary</button>
+        <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(ssReturn.label)}</b> &middot; ${esc(ssReturn.rangeText)}, opened from that report.</span>
+      </div>` : '';
+  }
+}
+function ssReturnToSummary() {
+  const back = ssReturn;
+  ssClearReturn();                        // filters restored before we leave
+  if (!back) return;
+  setReportsTab('summary');
+  requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
+}
+function ssJumpMovement(direction, ri, bi) {
+  const row = (stockSummaryState._rows || [])[ri];
+  if (!row || !hasPerm(direction === 'in' ? 'rpt_stock_in' : 'rpt_stock_out', 'view')) return;
+  ssClearReturn();                        // a second jump replaces the first cleanly
+  const { from, to } = ssRangeFor(bi);
+  const st = stockMovementStates[direction];
+  ssReturn = {
+    direction, barId: `sm-${direction}-return`, pane: 'stock-' + direction,
+    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType,
+               size: st.size, gsm: st.gsm, challan: st.challan, jobCard: st.jobCard, viewMode: st.viewMode },
+    label: [row.item.paper_type, row.item.size, row.item.gsm ? row.item.gsm + ' gsm' : '', row.item.brand]
+      .filter(Boolean).join(' \u00b7 '),
+    rangeText: `${fmtDMY(from)} to ${fmtDMY(to)}`,
+    scrollY: window.scrollY || 0,
+  };
+  Object.assign(st, { period: 'custom', from, to,
+    paperType: row.item.paper_type || '', size: row.item.size || '',
+    gsm: row.item.gsm != null && row.item.gsm !== '' ? String(row.item.gsm) : '',
+    challan: '', jobCard: '', viewMode: 'list' });
+  setReportsTab('stock-' + direction);    // rebuilds the pane from state + fetches
+  renderSsReturnBars();
+  window.scrollTo(0, 0);
+}
+function ssJumpBalance(ri, bi) {
+  const row = (stockSummaryState._rows || [])[ri];
+  if (!row || !hasPerm('rpt_current_balance', 'view')) return;
+  ssClearReturn();
+  const { from, to } = ssRangeFor(bi);
+  const s = invReportState;
+  ssReturn = {
+    barId: 'ir-return-bar', pane: 'inventory-report',
+    restore: { period: s.period, from: s.from, to: s.to, paperType: s.paperType,
+               search: s.search, includeOffcuts: s.includeOffcuts, stockLevel: s.stockLevel },
+    label: [row.item.paper_type, row.item.size, row.item.gsm ? row.item.gsm + ' gsm' : '', row.item.brand]
+      .filter(Boolean).join(' \u00b7 '),
+    rangeText: `${fmtDMY(from)} to ${fmtDMY(to)}`,
+    scrollY: window.scrollY || 0,
+  };
+  // Search takes the size (the CB search matches one field at a time), the
+  // paper-type filter the type - together they isolate the item's rows.
+  // Custom range = balance as at the range end, which is exactly what the
+  // clicked cell showed (a range ending today reads the live balance).
+  Object.assign(s, { period: 'custom', from, to,
+    paperType: row.item.paper_type || '', search: row.item.size || '',
+    includeOffcuts: true, stockLevel: '' });
+  setReportsTab('inventory-report');      // openInventoryReport rebuilds + rewinds balances
+  renderSsReturnBars();
+  window.scrollTo(0, 0);
+}
+
 function irOpenImports(i) {
   const row = (invReportState._rows || [])[i];
   const ids = (row && row.importIds) || [];
@@ -7470,6 +7567,7 @@ function irOpenImports(i) {
   };
   // Narrow the page to where those rows live: the actionable statuses and
   // that paper type, date filters off. impClearReturn puts it all back.
+  // (Stock Summary's own jumps live further below: ssJumpMovement / ssJumpBalance.)
   importsPageState.status = 'pending';
   importsPageState.paperType = row.paperType || '';
   importsPageState.expectedDate = '';
@@ -10714,6 +10812,7 @@ function openInventoryReport() {
     invReportState.from = ''; invReportState.to = '';
   }
   pane.innerHTML = `
+    <div id="ir-return-bar" style="display:none;"></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Current Balance Summary</h2>
       <span style="color:var(--text2);font-size:12px;">Current stock position grouped by paper type, size, and gsm.</span>
@@ -10786,6 +10885,7 @@ function openInventoryReport() {
     </div>
     <div id="ir-content"></div>
   `;
+  renderSsReturnBars();
   renderInventoryReport();
   refreshIRAsOfBalances().then(renderInventoryReport);    // rewind balances when a past range is selected
   loadIRPendingImports();
@@ -11795,6 +11895,8 @@ function renderStockSummary() {
   const { rows, buckets, orphanImports, asOfPast } = computeSummaryRows();
   const el = document.getElementById('ss-content');
   if (!el) return;
+  stockSummaryState._rows = rows;         // what a cell click resolves against
+  stockSummaryState._buckets = buckets;
   if (!rows.length) {
     const scope = isAll ? 'items' : `"${esc(paperType)}" items`;
     el.innerHTML = stockSummaryState.search
@@ -11814,11 +11916,17 @@ function renderStockSummary() {
   const unitCell = (r) => isAll ? `<td>${esc(r.unit)}</td>` : '';
   const typeTh = isAll ? '<th rowspan="2">Paper Type</th>' : '';
   const unitTh = isAll ? '<th rowspan="2">Unit</th>' : '';
-  const tbody = rows.map(r => {
-    const periodCells = r.periods.map(p =>
-      `<td style="text-align:right;color:#166534;font-weight:600;">${fmtPkts(p.in)}</td>
-       <td style="text-align:right;color:#A32D2D;font-weight:600;">${fmtPkts(p.out)}</td>
-       <td style="text-align:right;font-weight:600;">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+  // Each figure clicks through to the report it came from (see ssJumpMovement /
+  // ssJumpBalance) - only for users who may open that report.
+  const canIn  = hasPerm('rpt_stock_in', 'view');
+  const canOut = hasPerm('rpt_stock_out', 'view');
+  const canBal = hasPerm('rpt_current_balance', 'view');
+  const jumpTd = (allowed, call, tip) => allowed ? ` onclick="${call}" title="${tip}" ` : ' ';
+  const tbody = rows.map((r, ri) => {
+    const periodCells = r.periods.map((p, bi) =>
+      `<td${jumpTd(canIn, `ssJumpMovement('in', ${ri}, ${bi})`, 'Open this period&#39;s stock-in in the Stock In report')}style="text-align:right;color:#166534;font-weight:600;${canIn ? 'cursor:pointer;' : ''}">${fmtPkts(p.in)}</td>
+       <td${jumpTd(canOut, `ssJumpMovement('out', ${ri}, ${bi})`, 'Open this period&#39;s issuance in the Stock Out report')}style="text-align:right;color:#A32D2D;font-weight:600;${canOut ? 'cursor:pointer;' : ''}">${fmtPkts(p.out)}</td>
+       <td${jumpTd(canBal, `ssJumpBalance(${ri}, ${bi})`, 'Open the Current Balance Summary as at this period&#39;s end')}style="text-align:right;font-weight:600;${canBal ? 'cursor:pointer;' : ''}">${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
     return `<tr class="row-hover-red">
       ${typeCell(r)}
       <td>${esc(r.item.gsm || '—')}</td>
@@ -11827,8 +11935,8 @@ function renderStockSummary() {
       ${unitCell(r)}
       <td style="text-align:right;">${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
-      <td style="text-align:right;font-weight:600;color:#A32D2D;">${fmtPkts(r.totalOutPkts)}</td>
-      <td style="text-align:right;font-weight:600;">${fmtPkts(r.stockNowPkts, {keepZero:true})}${r.hasRecentCorr ? correctionDot(r.balDiffPkts) : ''}</td>
+      <td${jumpTd(canOut, `ssJumpMovement('out', ${ri}, -1)`, 'Open the whole window&#39;s issuance in the Stock Out report')}style="text-align:right;font-weight:600;color:#A32D2D;${canOut ? 'cursor:pointer;' : ''}">${fmtPkts(r.totalOutPkts)}</td>
+      <td${jumpTd(canBal, `ssJumpBalance(${ri}, -1)`, 'Open the Current Balance Summary for this window')}style="text-align:right;font-weight:600;${canBal ? 'cursor:pointer;' : ''}">${fmtPkts(r.stockNowPkts, {keepZero:true})}${r.hasRecentCorr ? correctionDot(r.balDiffPkts) : ''}</td>
       <td style="text-align:right;">${fmtKg(r.weightKg)}</td>
       <td style="text-align:right;">${r.pendingImportPkts ? `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:700;padding:2px 8px;border-radius:10px;">${fmtPkts(r.pendingImportPkts)}</span>` : ''}</td>
       <td style="text-align:right;font-weight:600;">${fmtPkts(r.afterImportPkts, {keepZero:true})}</td>
@@ -16719,6 +16827,7 @@ async function emptyTrash() {
 function openReportsGroup(groupId, pane) {
   // A jump's import-page filters must not outlive the visit.
   if (groupId !== 'imports-group') impClearReturn();
+  if (groupId !== 'stocks-group') ssClearReturn();
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'none';
   document.querySelectorAll('#reports-mode .reports-group').forEach(g => {
@@ -16736,6 +16845,7 @@ function openReportsGroup(groupId, pane) {
 // Return to the 3-card landing — hides every group.
 function exitReportsGroup() {
   impClearReturn();
+  ssClearReturn();
   srResetColFilters();
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'block';
@@ -16749,6 +16859,8 @@ function exitReportsGroup() {
 // All report views render inline now (no modals), so every tab name maps
 // to a #rt-<name> div and an open<Name>() builder.
 function setReportsTab(name) {
+  // A Stock Summary jump's filters must not outlive the visit to its target pane.
+  if (ssReturn && name !== ssReturn.pane) ssClearReturn();
   // A pane whose sidebar entry is hidden (Access Register) can't be opened by name either.
   const _item = document.querySelector('.rsb-item[data-rt="' + name + '"]');
   if (_item && getComputedStyle(_item).display === 'none') return;
@@ -16944,6 +17056,7 @@ function openStockMovementPane(direction) {
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
+    <div id="sm-${direction}-return" style="display:none;"></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">${title}</h2>
       <span style="color:var(--text2);font-size:12px;">${direction === 'in' ? 'Every stock addition (deliveries, imports received, opening balances).' : 'Every stock deduction (job consumption, manual adjustments).'}</span>
@@ -17009,6 +17122,7 @@ function openStockMovementPane(direction) {
       <div id="st-${direction}-content" style="font-size:13px;color:var(--text);">Loading…</div>
     </div>
   `;
+  renderSsReturnBars();
   loadStockMovement(direction);
   if (state.viewMode === 'total') syncStockTotalFromMovement(direction);
 }
