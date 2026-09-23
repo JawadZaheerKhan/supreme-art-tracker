@@ -7337,7 +7337,8 @@ function invReturnToReport() {
   invClearReturn();                       // filters restored before we leave
   if (!back) return;
   setMode('reports');
-  openReportsGroup(back.group, back.pane);
+  if (back.reopen) back.reopen();         // a page that rebuilds itself (Imports)
+  else openReportsGroup(back.group, back.pane);
   // Put the report back where they were reading it, once it has redrawn.
   requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
 }
@@ -7373,6 +7374,46 @@ function irOpenItem(i) {
   if (box) box.value = invFilterText;
   setMode('inventory');
   renderInvReturnBar();   // setMode's render draws it too; this keeps irOpenItem self-contained
+  window.scrollTo(0, 0);
+}
+// Open one Imports row's paper in the Inventory tab - the same jump the
+// Current Balance Summary rows have, with the same Back bar out. Yellow
+// (new-to-inventory) rows never call this: there is no item to land on.
+function importOpenItem(id) {
+  const im = (importsCache || []).find(x => x.id === id);
+  if (!im || !tabAllowed('inventory')) return;
+  const norm = s => String(s || '').trim().toLowerCase();
+  const item = (im.inventory_item_id != null && inventory.find(it => it.id === im.inventory_item_id))
+    || inventory.find(it =>
+         norm(it.paper_type) === norm(im.paper_type)
+      && norm(it.size)  === norm(im.size)
+      && norm(it.gsm)   === norm(im.gsm)
+      && norm(it.brand) === norm(im.brand)) || null;
+  if (!item) { notify('No inventory item matches this import yet.'); return; }
+  invReturn = {
+    filters: { text: invFilterText, type: invFilterType, size: invFilterSize,
+               gsm: invFilterGsm, stock: invFilterStock, offcut: invFilterOffcut,
+               viewMode: invViewMode },
+    reopen: () => openImportsPage(),
+    reportLabel: 'Imports',
+    label: [item.paper_type, item.size, item.gsm ? item.gsm + ' gsm' : '', item.brand]
+      .filter(Boolean).join(' \u00b7 '),
+    scrollY: window.scrollY || 0,
+  };
+  // The values come off the matched item itself, so they line up with the
+  // dropdown options exactly. Brand has no filter of its own - the search
+  // box matches it, which is enough to isolate one brand of a paper.
+  invFilterText   = item.brand || '';
+  invFilterType   = item.paper_type || '';
+  invFilterSize   = item.size || '';
+  invFilterGsm    = item.gsm  || '';
+  invFilterOffcut = item.is_offcut ? 'offcut' : 'fresh';
+  invFilterStock  = '';
+  invViewMode     = 'items';              // not the Pending Stock queue
+  const box = document.getElementById('inv-search-input');
+  if (box) box.value = invFilterText;
+  setMode('inventory');
+  renderInvReturnBar();
   window.scrollTo(0, 0);
 }
 
@@ -12167,9 +12208,9 @@ function renderImportsTable() {
       ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Received</span>'
       : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Cancelled</span>';
     const actions = (i.status === 'pending' || i.status === 'partial')
-      ? `<button class="btn btn-sm ceo-hide" onclick="receiveImport(${i.id})">Receive</button>
-         <button class="btn btn-sm ceo-hide" onclick="editImport(${i.id})">Edit</button>
-         <button class="btn btn-sm ceo-hide" onclick="cancelImport(${i.id})">Cancel</button>`
+      ? `<button class="btn btn-sm ceo-hide" onclick="event.stopPropagation(); receiveImport(${i.id})">Receive</button>
+         <button class="btn btn-sm ceo-hide" onclick="event.stopPropagation(); editImport(${i.id})">Edit</button>
+         <button class="btn btn-sm ceo-hide" onclick="event.stopPropagation(); cancelImport(${i.id})">Cancel</button>`
       : '';
     const unit = packetUnitLabel(i.paper_type).toLowerCase();
     const weight = (i.weight_kg === null || i.weight_kg === undefined || i.weight_kg === '')
@@ -12191,8 +12232,8 @@ function renderImportsTable() {
     const rowStyle = isNew
       ? 'border-bottom:1px solid var(--border);background:#fef9c3;'
       : 'border-bottom:1px solid var(--border);';
-    return `<tr data-imp-row="${i.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="${rowStyle}"${isNew ? ' title="New to inventory — no existing item matches this paper type/size/gsm/brand yet"' : ''}>
-      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="toggleImportRow(${i.id}, this.checked)"></td>
+    return `<tr data-imp-row="${i.id}" class="row-hover-red ${isSel?'bulk-row-selected':''}" style="${rowStyle}${isNew ? '' : 'cursor:pointer;'}"${isNew ? ' title="New to inventory — no existing item matches this paper type/size/gsm/brand yet"' : ` onclick="importOpenItem(${i.id})" title="Open this paper in Inventory"`}>
+      <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleImportRow(${i.id}, this.checked)"></td>
       <td style="padding:8px 10px;">${status}</td>
       <td style="padding:8px 10px;font-weight:500;">${esc(i.paper_type || '—')}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(i.size || '—')}</td>
