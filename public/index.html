@@ -155,6 +155,13 @@
   body.role-finance #client-view-mode > *:not(.role-block-msg),
   body.role-finance #stickers-mode > *:not(.role-block-msg) { display: none !important; }
   body.role-finance .role-block-msg { display: flex !important; }
+  /* Job-card Operator Entry (the green/yellow dot): the jump sets this
+     body class so a permitted user reaches the Station entry even when
+     their role's own Station tab (and its action buttons) are blocked.
+     Removed again by stationLogout / Back to Job Card. */
+  body.station-jobcard-entry #station-mode > *:not(.role-block-msg) { display: revert !important; }
+  body.station-jobcard-entry #station-mode .role-block-msg { display: none !important; }
+  body.station-jobcard-entry #station-mode .ceo-hide { display: revert !important; }
   .role-block-msg {
     display: none;
     flex-direction: column;
@@ -22085,10 +22092,17 @@ function particularsTable(p, job, opts) {
       machines.map(m => `<option value="${esc(m.name)}"></option>`).join('')
     }</datalist>`;
   }).join('');
+  // Green/yellow dot beside a stage row's label — a click-through to that
+  // stage's Station entry (no PIN) for holders of the job_btn_operator_entry
+  // Access Register row. Not in preview mode (finalized view is read-only).
+  const canEntryDot = !opts.preview && job.id && hasPerm('job_btn_operator_entry');
   const rows = jobParticularsRows
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
     .map(r => {
       const stage = PARTICULARS_STAGE_MAP[r.key];
+      const entryDot = (canEntryDot && stage)
+        ? ` <span onclick="openStationEntryFromJob(${job.id}, '${r.key}')" title="Open the ${esc(stage)} operator entry at the Station — edit this quantity there and come straight back" style="display:inline-block;width:11px;height:11px;background:linear-gradient(135deg,#22c55e 55%,#facc15 45%);border:1px solid #16a34a;border-radius:50%;margin-left:6px;vertical-align:middle;cursor:pointer;"></span>`
+        : '';
       const op = logOperatorForStage(log, stage);
       // Only fill Name/Signature once the operator has actually submitted at
       // this stage. No pre-fill from the top-of-card MACHINE NAME field —
@@ -22151,7 +22165,7 @@ function particularsTable(p, job, opts) {
           : '';
       return `
     <tr>
-      <td class="jc-row-label">${r.label}</td>
+      <td class="jc-row-label">${r.label}${entryDot}</td>
       <td class="jc-details-cell">
         <input type="text" id="p-${r.key}-details" value="${detailsVal}">
         <button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>
@@ -28450,15 +28464,61 @@ function enterStation() {
   stationLogout(true);  // always start fresh at the PIN pad
 }
 
+// ── Job-card Operator Entry (the green/yellow dot) ───────────
+// Set while the user is at the Station because they clicked a particulars
+// row's dot on a Job Card. Holds the way back; the Station shows a
+// "Back to Job Card" button instead of its queue navigation.
+let stationJobCardReturn = null;
+async function openStationEntryFromJob(jobId, key) {
+  if (!hasPerm('job_btn_operator_entry')) return;
+  const stageName = PARTICULARS_STAGE_MAP[key];
+  const stageIdx = STAGES.indexOf(stageName);
+  if (stageIdx < 0) return;
+  // The row's recorded machine (first when pipe-joined) steers which
+  // machine the entry acts as; coatings vs embellish is disambiguated by
+  // role since both share stage 2.
+  const nameEl = document.getElementById(`p-${key}-name`);
+  const machineName = nameEl ? String(nameEl.value || '').split('|')[0].trim() : '';
+  const preferRole = (key === EMBELLISH_SHEETS_KEY || key === EMBELLISH_WASTE_KEY)
+    ? 'embellish' : (stageIdx === 2 ? 'coatings' : '');
+  showSaving(true);
+  try {
+    const machine = await api('POST', '/api/station/job-card-context',
+      { stage_index: stageIdx, machine_name: machineName, prefer_role: preferRole });
+    const stages = (machine.stage_indices && machine.stage_indices.length) ? machine.stage_indices : [machine.stage_index];
+    closeModal();
+    setMode('station');                     // enterStation() wipes to the PIN pad first
+    stationOperator = { ...machine, pin: null, viaJobCard: true, stage_indices: stages, machine: machine.name, stage_index: stageIdx };
+    stationPerson = { name: (currentUser && (currentUser.name || currentUser.email)) || 'App user' };
+    stationJobCardReturn = { jobId };
+    document.body.classList.add('station-jobcard-entry');
+    stationOpenJob(jobId);
+  } catch (e) {
+    notify(e.message || 'Could not open the station entry');
+  }
+  showSaving(false);
+}
+function stationReturnToJobCard() {
+  const back = stationJobCardReturn;
+  stationLogout(true);                      // clears the entry session + body class
+  if (!back) return;
+  setMode('jobs');
+  setTimeout(() => openEdit(back.jobId), 50);
+}
+
 // Reset the inactivity timer — after 90s of no interaction, log the operator
 // out so the next person must re-enter their PIN.
 function stationResetIdle() {
   if (stationIdleTimer) clearTimeout(stationIdleTimer);
-  if (!stationOperator) return;
+  // A job-card entry is the signed-in app user, not a shared tablet —
+  // no 90s PIN-pad kick-out.
+  if (!stationOperator || stationOperator.viaJobCard) return;
   stationIdleTimer = setTimeout(() => { if (mode === 'station') stationLogout(); }, 90000);
 }
 
 function stationLogout(silent) {
+  stationJobCardReturn = null;
+  document.body.classList.remove('station-jobcard-entry');
   stationOperator = null;
   stationPerson = null;
   stationPersonPickView = 'own';
@@ -29782,7 +29842,9 @@ function stationUpdateHtml() {
         ${(j.stock_group_name || j.group_job_id) ? '<div class="su-mil-banner">MIL</div>' : ''}
         ${j.is_shade_card ? '<div class="su-shade-banner">&#127912; Shade Card</div>' : ''}
       </div>
-      <button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>
+      ${stationOperator.viaJobCard
+        ? `<button class="btn station-logout" onclick="stationReturnToJobCard()">‹ Back to Job Card</button>`
+        : `<button class="btn station-logout" onclick="stationBackToQueue()">‹ Back</button>`}
     </div>
     <div class="station-update">
       <div class="su-job">#${j.id} · ${esc(j.name)}</div>
@@ -29798,7 +29860,9 @@ function stationUpdateHtml() {
            these endpoints for CEO too — .ceo-hide is UX; the server is
            the authoritative gate. See canProcessStation() on the server. -->
       <div class="station-actions-row ceo-hide">
-        ${stIdx === 6
+        ${stationOperator.viaJobCard
+          ? (fields.length ? `<button class="btn station-primary" onclick="stationSubmit(false)">Save numbers</button>` : '')
+          : stIdx === 6
           ? (fields.length ? `<button class="btn station-primary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : '')
           : `<button class="btn station-primary" onclick="stationSubmit(true)">${advanceLabel}</button>
              ${fields.length ? `<button class="btn station-secondary" onclick="stationSubmit(false)">Save numbers (stay here)</button>` : ''}
@@ -29807,7 +29871,7 @@ function stationUpdateHtml() {
       <div class="station-viewonly ceo-only-block" style="margin-top:14px;padding:12px 16px;background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:10px;font-weight:600;font-size:14px;">
         &#128065; View-only — your role can see the queue and numbers, but can't advance or save.
       </div>
-      <div class="ceo-hide">${addNote}</div>
+      ${stationOperator.viaJobCard ? '' : `<div class="ceo-hide">${addNote}</div>`}
     </div>`;
 }
 function stationBackToQueue() {
@@ -30403,19 +30467,21 @@ async function stationSubmit(advance, skipTo) {
   showSaving(true);
   try {
     const noteWho = stationPerson && stationPerson.name ? stationPerson.name : undefined;
-    if (pendingText) {
+    if (pendingText && !stationOperator.viaJobCard) {
       await api('POST', `/api/jobs/${j.id}/station-notes`, {
         pin: stationOperator.pin, kind: 'text', body: pendingText, person_name: noteWho,
       });
     }
-    for (const clip of pendingClips) {
+    for (const clip of (stationOperator.viaJobCard ? [] : pendingClips)) {
       await api('POST', `/api/jobs/${j.id}/station-notes`, {
         pin: stationOperator.pin, kind: 'voice', body: '',
         audio: clip.dataUrl, mime: clip.mime, duration_s: clip.duration, person_name: noteWho,
       });
     }
     stationRecBlobs = [];
-    const stationBody = { pin: stationOperator.pin, particulars_patch: patch, advance };
+    const stationBody = stationOperator.viaJobCard
+      ? { via_job_card: true, machine_name: stationOperator.machine, stage_index: stationOperator.stage_index, particulars_patch: patch, advance: false }
+      : { pin: stationOperator.pin, particulars_patch: patch, advance };
     if (stationPerson && stationPerson.name) stationBody.person_name = stationPerson.name;
     if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
     if (finishKind) {
@@ -30682,6 +30748,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_stage_forward',   type: 'button' },
   { key: 'job_btn_record_delivery', type: 'button' },
   { key: 'job_btn_delivery_details', type: 'button' },
+  { key: 'job_btn_operator_entry',  type: 'button' },
   { key: 'job_btn_delete_delivery', type: 'button' },
   { key: 'job_btn_adjust',          type: 'button' },
   { key: 'job_btn_stickers',        type: 'button' },

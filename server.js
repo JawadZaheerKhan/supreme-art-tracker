@@ -347,6 +347,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   // turns it into an actual delivery. Defaults match the button's own roles,
   // so nothing changes until someone takes the button away from a role.
   job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Cartons/Packets, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  // The green/yellow dot beside a Job Card particulars row. Opens that
+  // stage's Station entry with no station PIN asked, so the holder can fix
+  // an operator's quantity from the job card. The entry can only edit the
+  // numbers — advancing/skipping the stage stays PIN-only.
+  job_btn_operator_entry:  { label: 'Operator Entry dot — open a particulars row\'s Station entry from the Job Card (no station PIN) to edit its quantities', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
   // Distinct from the existing wastage_adjustment group above (which also
@@ -1686,6 +1691,31 @@ function canRecordDelivery(user) { return userHasBtn(user, 'job_btn_record_deliv
 // the terminal (view-only) via canRunStation, but must never process a
 // job by default. Admin / PM / operator still write freely.
 function canProcessStation(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_write'); }
+// The green/yellow dot on a Job Card particulars row: holders may open a
+// stage's Station entry from the job card without the station PIN. The
+// entry can never advance the job — it only edits that stage's numbers.
+function canOperatorEntryFromJobCard(user) {
+  return userHasRole(user, 'super_admin') || roleHasPermission(user, 'job_btn_operator_entry');
+}
+// Which machine a job-card entry acts as: by name when the particulars row
+// names one, else by preferred role (coatings vs embellish share stage 2),
+// else the first active machine covering the stage.
+async function resolveJobCardMachine(sql, body) {
+  const stageIdx = parseInt(body.stage_index, 10);
+  if (!Number.isFinite(stageIdx)) return null;
+  const wantName = String(body.machine_name || '').trim().toLowerCase();
+  const preferRole = String(body.prefer_role || '').trim();
+  const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE active`;
+  const covers = rows.filter(o => {
+    const idxs = (o.stage_indices && o.stage_indices.length) ? o.stage_indices : [o.stage_index];
+    return idxs.includes(stageIdx);
+  });
+  if (!covers.length) return null;
+  const effRoles = o => (Array.isArray(o.roles) && o.roles.length) ? o.roles : rolesOf(o);
+  let hit = wantName ? covers.find(o => String(o.name || '').trim().toLowerCase() === wantName) : null;
+  if (!hit && preferRole) hit = covers.find(o => effRoles(o).includes(preferRole));
+  return hit || covers[0];
+}
 // Operator roster CRUD — admin or production manager by default. The PM
 // owns the floor and needs to add / edit / retire operators without an
 // admin having to be involved every time.
@@ -2591,6 +2621,27 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
+    if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
+    if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
+    if (!Array.isArray(op.persons)) op.persons = [];
+    res.json(op);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Job-card Operator Entry: hand the client the machine it will act as,
+// WITHOUT any PIN — gated by the job_btn_operator_entry Access Register
+// row. Same shape /api/operators/verify returns (PINs never selected).
+app.post('/api/station/job-card-context', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    if (!canOperatorEntryFromJobCard(req.user)) {
+      return res.status(403).json({ error: 'Not allowed — Operator Entry access required' });
+    }
+    const op = await resolveJobCardMachine(sql, req.body);
+    if (!op) return res.status(404).json({ error: 'No active station machine covers this stage yet — add one under Users → Operators.' });
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
     if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
     if (!Array.isArray(op.persons)) op.persons = [];
@@ -9743,7 +9794,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
   try {
     // CEO can enter the terminal to observe, but every write action is
     // blocked here so a dev-tools POST can't sneak past the hidden UI.
-    if (!canProcessStation(req.user)) {
+    // Job-card entries (the green/yellow dot) pass on their own permission
+    // instead — a finance user may hold the dot without station_write.
+    const viaJobCard = req.body.via_job_card === true;
+    if (viaJobCard && !canOperatorEntryFromJobCard(req.user)) {
+      return res.status(403).json({ error: 'Not allowed — Operator Entry access required' });
+    }
+    if (!viaJobCard && !canProcessStation(req.user)) {
       return res.status(403).json({ error: 'View-only: your role cannot process jobs at the station.' });
     }
     await dbReady;
@@ -9752,20 +9809,29 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const pin = String(req.body.pin || '').trim();
     const particularsPatch = req.body.particulars_patch && typeof req.body.particulars_patch === 'object'
       ? req.body.particulars_patch : {};
-    const advance = req.body.advance === true;
+    const advance = req.body.advance === true && !viaJobCard;   // a job-card entry can never advance the stage
     // Optional skip target. When the operator uses 'Skip to stage', they
     // pick a downstream stage index; we mark every stage between current
     // and target as done and jump straight there. Must be > curStage and
     // within the STAGES array; anything else falls back to the regular
     // single-step advance below.
     const skipToRaw = req.body.skip_to;
-    const skipTo = Number.isFinite(parseInt(skipToRaw, 10)) ? parseInt(skipToRaw, 10) : null;
+    const skipTo = (!viaJobCard && Number.isFinite(parseInt(skipToRaw, 10))) ? parseInt(skipToRaw, 10) : null;
 
-    // 1) Identify the operator by PIN (server-side — never trust the client).
-    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
-    if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
-    const machine = ops[0];
+    // 1) Identify the machine. Normal path: the operator's PIN (server-side
+    // — never trust the client). Job-card path: no PIN — the machine is
+    // resolved by name/stage, gated above by job_btn_operator_entry, and
+    // the write is attributed to the signed-in app user below.
+    let machine;
+    if (viaJobCard) {
+      machine = await resolveJobCardMachine(sql, req.body);
+      if (!machine) return res.status(404).json({ error: 'No active station machine covers this stage.' });
+    } else {
+      if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
+      const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+      if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+      machine = ops[0];
+    }
     const opStages = (machine.stage_indices && machine.stage_indices.length) ? machine.stage_indices : [machine.stage_index];
     const allowedFinishes = allowedFinishesForOperator(machine);
     // Pick the actual person doing this update from the machine's persons
@@ -9775,7 +9841,10 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const reqPersonName = String(req.body.person_name || '').trim();
     let person = null;
     let personIsCustom = false;
-    if (personsList.length === 1 && !reqPersonName) person = personsList[0];
+    if (viaJobCard) {
+      // Attributed to the signed-in app user, not one of the machine's people.
+      person = { name: reqPersonName || req.user.name || req.user.email || 'App user' };
+    } else if (personsList.length === 1 && !reqPersonName) person = personsList[0];
     else if (reqPersonName) {
       person = personsList.find(p => p && p.name === reqPersonName) || null;
       // Custom fallback — operator working on a machine that isn't their
@@ -9795,7 +9864,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // keeps working without rewiring everything to a separate person object.
     const operator = {
       id: machine.id,
-      name: person.name + (personIsCustom ? ' (custom)' : ''),
+      name: person.name + (viaJobCard ? ' (job card)' : personIsCustom ? ' (custom)' : ''),
       name_ur: person.name_ur || '',
       stage_index: machine.stage_index,
       stage_indices: machine.stage_indices,
@@ -9831,7 +9900,12 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // un-advanced position; curStage is where THIS operator's work is
     // actually happening (identical to dbStage outside of a peek).
     let curStage = dbStage;
-    if (!opStages.includes(dbStage)) {
+    if (viaJobCard) {
+      // The dot edits ONE stage's numbers wherever the job now sits — a
+      // printed qty stays editable after the job moved on to Pasting.
+      const reqStage = parseInt(req.body.stage_index, 10);
+      if (Number.isFinite(reqStage)) curStage = reqStage;
+    } else if (!opStages.includes(dbStage)) {
       const peekCandidates = opStages
         .filter(s => s > dbStage && stageDoneQtyServer(job, s - 1) > 0)
         .sort((a, b) => a - b);
