@@ -4332,6 +4332,39 @@ function fmtDMYT(d) {
   return `${dd}/${mm}/${dt.getFullYear()} ${HH}:${MM}`;
 }
 
+// A stage-log time, shown on a 12-hour clock. The stored string stays as it is
+// (parseStageTime and the reports read it back), this only re-reads the HH:MM
+// on the end of the normalized value.
+function fmtStageTime12(sVal) {
+  const norm = fmtStageTime(sVal);
+  const m = String(norm).match(/^(\d{2}\/\d{2}\/\d{4})\s+(\d{2}):(\d{2})$/);
+  if (!m) return norm;
+  const h24 = parseInt(m[2], 10);
+  const h = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${m[1]} ${String(h).padStart(2, '0')}:${m[3]} ${h24 < 12 ? 'AM' : 'PM'}`;
+}
+
+// Same as fmtDMYT, on a 12-hour clock: "23/09/2026 04:39 PM". For the log
+// screens - the Activity Log and the History panels - which people read as a
+// record of when someone did something, and read that in am/pm.
+function fmtDMYT12(d) {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt)) return String(d);
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}/${dt.getFullYear()} ${fmtTime12(dt)}`;
+}
+// "04:39 PM". Midnight reads 12:00 AM and noon 12:00 PM, not 00:00 / 12:00.
+function fmtTime12(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return '';
+  const h24 = dt.getHours();
+  const h = h24 % 12 === 0 ? 12 : h24 % 12;
+  const MM = String(dt.getMinutes()).padStart(2, '0');
+  return `${String(h).padStart(2, '0')}:${MM} ${h24 < 12 ? 'AM' : 'PM'}`;
+}
+
 // Normalize a stage-time string for display. New entries write dd/mm/yyyy HH:MM
 // via fmtDMYT, but old (delivered before the format change) jobs have strings
 // like "05/05/2026, 3:53:00 pm" from the en-PK locale formatter. We detect
@@ -4616,9 +4649,32 @@ function isNewJob(j) { return j && j.issuance_status === 'new'; }
 // CTP tab card) advances it to 'pending'.
 function isCtpQueue(j) { return j && j.issuance_status === 'ctp'; }
 
+// Sheets already issued against the MAIN paper. issued_items rows are tagged
+// with their source; rows from before that tagging existed are primary.
+function issuedPrimarySheets(j) {
+  const rows = (j && Array.isArray(j.issued_items)) ? j.issued_items : [];
+  return rows.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+}
+// partial_pending_sheets is a SNAPSHOT: it was worked out when the last
+// issuance ran and is never revisited, so it goes stale the moment the job's
+// paper requirement changes. Adding a 2nd paper afterwards is exactly that -
+// E-489 had 46,350 of 54,500 sheets issued (8,150 owed), then 40 packets were
+// moved onto an offcut 2nd paper, leaving 50,500 on the main paper and 4,150
+// genuinely owed - but the card kept asking for the old 8,150.
+//
+// So the marker is treated as a ceiling, not as truth: what is really owed is
+// the requirement as it stands now, less what has already been issued. Taking
+// the lower of the two means a job whose issued_items predate that tagging
+// (nothing recorded, so "issued" reads as 0) still falls back to the marker
+// rather than suddenly asking for the whole job again.
 function partialPendingSheets(j) {
-  const n = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  const raw = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
+  const marker = Number.isFinite(raw) && raw > 0 ? raw : 0;
+  if (!marker) return 0;
+  const need = jobFreshNeedSheets(j);
+  if (!need) return marker;                       // cannot recompute - trust the marker
+  const owed = Math.max(0, need - issuedPrimarySheets(j));
+  return Math.min(marker, owed);
 }
 function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
 // True when the 2nd paper was silently auto-consumed on CTP forward — the
@@ -9439,11 +9495,16 @@ function bulkOutToggleChip(chip, idx) {
 // sheets) instead of the full original — bulk stock-out chips need the
 // outstanding amount, not the total.
 function jobDeductionSheetsClient(j) {
-  // Partial marker is already reduced — it reflects prior deductions
-  // including any offcut pre-consumed / fresh 2nd paper carve-outs
-  // recorded when the last issue-stock ran.
-  const partial = parseInt((j.particulars || {}).partial_pending_sheets, 10);
-  if (Number.isFinite(partial) && partial > 0) return partial;
+  // A partial-issued job owes whatever partialPendingSheets works out - which
+  // is the marker capped by the live requirement (see there).
+  const partial = partialPendingSheets(j);
+  if (partial > 0) return partial;
+  return jobFreshNeedSheets(j);
+}
+// The job's main-paper requirement as it stands right now, ignoring anything
+// already issued: packets x packet size, less offcut pre-consumed on CTP
+// forward, less whatever the 2nd paper covers.
+function jobFreshNeedSheets(j) {
   const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   if (!invIt) return 0;
   const ps = packetSize(invIt.paper_type);
@@ -9463,9 +9524,12 @@ function jobDeductionSheetsClient(j) {
     if (!sec || !sec.inventory_item_id) return 0;
     const secPackets = parseFloat(sec.packets);
     if (!Number.isFinite(secPackets) || secPackets <= 0) return 0;
-    const secItem = (typeof inventory !== 'undefined' && Array.isArray(inventory))
-      ? inventory.find(x => x.id === sec.inventory_item_id) : null;
-    if (!secItem || secItem.is_offcut) return 0;
+    // Offcut and fresh alike: both are issued from the 2nd paper's own
+    // request, so both come off the primary's. The one exception is a legacy
+    // job whose 2nd paper was silently auto-consumed on CTP forward - that
+    // one is already inside offcut_pre_consumed above, and subtracting it
+    // here as well would ask for 40 packets fewer than the job needs.
+    if (secondaryInPreConsumed(j)) return 0;
     return Math.round(secPackets * ps);
   })();
   return Math.max(0, totalSheets - preConsumed - secSheets);
@@ -9922,7 +9986,7 @@ async function renderInvHistory(id) {
       const balanceAfterSheets = runningAfter;
       runningAfter -= t.change;     // becomes "after" of the next older row
       const balanceAfterPkts = fmtPackets(balanceAfterSheets);
-      const date = fmtDMYT(t.created_at);
+      const date = fmtDMYT12(t.created_at);
       const isReversal      = !!t.reverses_tx_id;
       const hasBeenReversed = !!t.has_been_reversed;
       // Color: positive=green, negative=red, reversal row=orange tint
@@ -10034,7 +10098,7 @@ function renderAuditFeed(rows) {
     curArr.push(a);
   });
   const dayHeader = d => d.toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase();
-  const timeOf = t => new Date(t).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: false });
+  const timeOf = t => fmtTime12(t);
   return `<div class="audit-feed">${groups.map(g => `
     <div class="audit-day">
       <div class="audit-day-header">${esc(dayHeader(g.date))}</div>
@@ -21741,13 +21805,21 @@ function jobForm(j={}, opts) {
           const secPkts  = sec ? (parseFloat(sec.packets) || 0) : 0;
           const totalPk  = parseFloat(partsP.quantity_of_packets) || 0;
           const primPk   = Math.max(0, totalPk - secPkts);
-          const secSh    = Math.round(secPkts * psForm * jobCutPieces(j));
+          const secSh    = Math.round(secPkts * psForm * secondaryCutPieces(j));
           const totalSh  = parseFloat(j.sheets) || 0;
           const primSh   = Math.max(0, totalSh - secSh);
           const sheetsPrimVal  = hasSecond ? (primSh || '') : (j.sheets != null ? j.sheets : '');
           const packetsPrimVal = hasSecond ? (primPk || '') : (partsP.quantity_of_packets || '');
-          const cutOptions = ['1/1','1/2','1/3','1/4','1/6','1/8'].map(c => {
+          const CUTS = ['1/1','1/2','1/3','1/4','1/6','1/8'];
+          const cutOptions = CUTS.map(c => {
             const sel = (partsP.sheet_cut || '1/1') === c ? ' selected' : '';
+            return `<option value="${c}"${sel}>${c}</option>`;
+          }).join('');
+          // The 2nd paper is usually a different size to the main one, so it
+          // gets cut differently - it needs its own factor, not the main
+          // paper's. Kept on secondary_paper.sheet_cut.
+          const cutOptions2 = CUTS.map(c => {
+            const sel = ((sec && sec.sheet_cut) || '1/1') === c ? ' selected' : '';
             return `<option value="${c}"${sel}>${c}</option>`;
           }).join('');
           // Request Extra Packets: restricted to admin / super admin only
@@ -21785,8 +21857,13 @@ function jobForm(j={}, opts) {
             <!-- Row 2: the packet numbers, full width. -->
             <div style="display:flex;gap:6px;align-items:center;">
               <input type="text" id="f-packets" value="${esc(String(packetsPrimVal))}" placeholder="e.g. 50" oninput="jobPrimaryPacketsEdited()" style="flex:1 1 0;min-width:0;${hasSecond ? 'text-align:center;' : ''}">
-              <span id="packets-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:6px;align-items:center;flex:1 1 0;min-width:0;">
+              <span id="packets-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:4px;align-items:center;flex:1 1 0;min-width:0;">
                 <span style="font-weight:700;color:var(--text2);flex:0 0 auto;">+</span>
+                <select id="f-sheet-cut-2" title="2nd paper's cut — pieces per sheet of THAT paper"
+                        onchange="jobSecondaryCutChanged()"
+                        style="width:52px;padding:4px 2px;border:1px solid var(--border);border-radius:4px;font-size:13px;flex:0 0 auto;">
+                  ${cutOptions2}
+                </select>
                 <input type="number" id="f-packets-2" min="0" step="any" value="${esc(hasSecond ? String(secPkts || '') : '')}" placeholder="e.g. 5" oninput="jobSecondaryPacketsEdited()" style="flex:1 1 0;min-width:0;text-align:center;">
               </span>
             </div>
@@ -24503,9 +24580,11 @@ function collectParticulars() {
     // to a genuinely different paper item correctly resets it to fresh.
     const priorSec = priorParticularsCP.secondary_paper;
     const sameSecondaryItem = priorSec && priorSec.inventory_item_id === secondId;
+    const secondCut = ((document.getElementById('f-sheet-cut-2')||{}).value || '1/1');
     out.secondary_paper = {
       inventory_item_id: secondId,
       packets: secondPkts,
+      sheet_cut: secondCut,
       ...(sameSecondaryItem && priorSec.issued_sheets != null ? { issued_sheets: priorSec.issued_sheets } : {}),
     };
   } else {
@@ -25005,8 +25084,23 @@ function jobSheetsPrimaryEdited() {
 // Secondary PACKETS edited — mirror to secondary sheets, and apply the mode:
 //   pending  → hold the total fixed, so primary shrinks (10 → 5+5).
 //   issued   → primary stays locked, total grows (10 → 10+5).
+// Pieces per sheet for the 2nd paper: the form's own picker while the card is
+// open, else whatever was saved on it. Falls back to 1/1, never to the main
+// paper's cut - the two papers are cut independently.
+function secondaryCutPieces(j) {
+  const el = document.getElementById('f-sheet-cut-2');
+  const raw = (el && el.value)
+    || (j && j.particulars && j.particulars.secondary_paper && j.particulars.secondary_paper.sheet_cut)
+    || '1/1';
+  return parseInt(String(raw).split('/')[1], 10) || 1;
+}
+// Changing the 2nd paper's cut re-derives its sheets from its packets, the
+// same way the main paper's picker does.
+function jobSecondaryCutChanged() {
+  jobSecondaryPacketsEdited();
+}
 function jobSecondaryPacketsEdited() {
-  const ps = jobFormPs();
+  const ps = jobFormPs() * secondaryCutPieces();
   const secPk = parseFloat((document.getElementById('f-packets-2')||{}).value) || 0;
   const secSh = secPk > 0 ? Math.round(secPk * ps) : 0;
   const sh2 = document.getElementById('f-sheets-2');
@@ -25027,7 +25121,7 @@ function jobSecondaryPacketsEdited() {
 // Secondary SHEETS edited — back-compute secondary packets, then run the
 // same mode logic via the packets handler.
 function jobSecondarySheetsEdited() {
-  const ps = jobFormPs();
+  const ps = jobFormPs() * secondaryCutPieces();
   const secSh = parseFloat((document.getElementById('f-sheets-2')||{}).value) || 0;
   const pk2 = document.getElementById('f-packets-2');
   if (pk2) pk2.value = (secSh > 0 && ps > 0) ? String(+(secSh / ps).toFixed(2)) : '';
@@ -25813,7 +25907,7 @@ async function openHistory(id) {
       <div style="margin-top:4px;">Wastage split: Printing ${adj.printing_pct}% &middot; Die ${adj.die_pct}% &middot; Coating ${adj.coating_pct}% &middot; Pasting ${adj.pasting_pct}% &middot; Sorting ${adj.sorting_pct}%</div>
       ${adjRefs && adjRefs.size ? `<div style="margin-top:4px;">From manual job card${adjRefs.size>1?'s':''}: <b>${[...adjRefs].map(r=>esc(r)).join(', ')}</b></div>` : ''}
       ${adj.notes ? `<div style="margin-top:4px;font-style:italic;">"${esc(adj.notes)}"</div>` : ''}
-      <div style="margin-top:4px;color:var(--text2);">By ${esc(adj.adjusted_by || 'unknown')} &middot; ${adj.adjusted_at ? fmtDMYT(adj.adjusted_at) : ''}${adj.posted ? ' &middot; <span style="color:#166534;font-weight:700;">&#10004; Posted</span>' : ''}</div>
+      <div style="margin-top:4px;color:var(--text2);">By ${esc(adj.adjusted_by || 'unknown')} &middot; ${adj.adjusted_at ? fmtDMYT12(adj.adjusted_at) : ''}${adj.posted ? ' &middot; <span style="color:#166534;font-weight:700;">&#10004; Posted</span>' : ''}</div>
     </div>` : '';
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>History — #${j.id}</h2>
@@ -25829,7 +25923,7 @@ async function openHistory(id) {
         ${l.by?`<span style="margin:0 5px;color:#c0bdb4">&bull;</span><span style="color:#6b6960">${esc(l.by)}</span>`:''}
         ${l.notes?`<div class="h-note">${esc(l.notes)}</div>`:''}
       </div>
-      <div class="h-time">${esc(fmtStageTime(l.time))}</div>
+      <div class="h-time">${esc(fmtStageTime12(l.time))}</div>
     </div>`).join('')}
     <div style="font-size:12px;color:var(--text2);margin:14px 0 6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Floor Notes</div>
     <div id="job-floor-notes" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -25844,7 +25938,7 @@ async function openHistory(id) {
     if (!el) return;
     el.innerHTML = notes.length ? notes.map(n => `
       <div class="hist-floor-note">
-        <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} ${esc(STAGES[n.stage_index] || 'Stage ' + n.stage_index)} → ${esc(STAGES[n.stage_index + 1] || 'next')} · ${esc(n.operator_name || '')} · ${fmtDMYT(n.created_at)}${n.heard_at ? ' · ✓ heard' : ''}</div>
+        <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} ${esc(STAGES[n.stage_index] || 'Stage ' + n.stage_index)} → ${esc(STAGES[n.stage_index + 1] || 'next')} · ${esc(n.operator_name || '')} · ${fmtDMYT12(n.created_at)}${n.heard_at ? ' · ✓ heard' : ''}</div>
       ${n.body ? `<div class="sn-body">${esc(n.body)}</div>` : ''}
         ${n.kind === 'voice' ? (n.audio ? `<audio controls preload="metadata" src="${n.audio}"></audio>` : '<div style="font-style:italic;font-size:12px;">(voice note expired — audio kept 30 days)</div>') : ''}
       </div>`).join('') : '<div class="empty">No notes between stations on this job.</div>';

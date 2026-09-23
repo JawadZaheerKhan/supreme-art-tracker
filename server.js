@@ -4402,6 +4402,21 @@ function parseSheets(v) {
 // Returns 0 if packets is missing/zero; caller must surface a clear error.
 const REAM_PAPERS = new Set(['art paper', 'off-white', 'offset paper']);
 function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
+// Reams for art/offset paper, packets for board - the words the shop uses.
+function packetUnitLabelSrv(paperType) { return REAM_PAPERS.has(paperType) ? 'reams' : 'packets'; }
+// Packets, exactly as they are - trailing zeros trimmed, nothing rounded.
+// 46,350 sheets of a 100-sheet board is 463.5 packets, and it must say so.
+function fmtPackets(sheets, ps) {
+  const p = (Number(ps) > 0) ? (Number(sheets) / Number(ps)) : 0;
+  if (!Number.isFinite(p)) return '0';
+  return Number.isInteger(p) ? String(p) : String(parseFloat(p.toFixed(6)));
+}
+// "463.5 packets (46,350 sheets)" - the unit people work in first, the raw
+// count second. unitLabel comes from the paper type: reams for art/offset.
+function packetsWithSheets(sheets, ps, unitLabel) {
+  const unit = unitLabel || (Number(ps) === 500 ? 'reams' : 'packets');
+  return `${fmtPackets(sheets, ps)} ${unit} (${Number(sheets).toLocaleString()} sheets)`;
+}
 function jobDeductionSheets({ paperType, particulars }) {
   const ps      = packetSize(paperType || '');
   const packets = parseFloat((particulars || {}).quantity_of_packets);
@@ -5525,11 +5540,16 @@ async function performIssueStock(sql, req, id, body) {
     // initialization" (temporal dead zone). Both equal packetSize(paperType).
     return Math.round(packets * psForNeed);
   })();
+  const freshNeed = Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary);
+  // Same ceiling rule as primaryOwedSheets: the marker caps it, but what is
+  // really owed is the current requirement less what has already been issued.
+  const issuedPrimary = (Array.isArray(job.issued_items) ? job.issued_items : [])
+    .reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
   const needSheets = isSecondary
     ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
     : (partialPending > 0
-        ? partialPending
-        : Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary));
+        ? Math.min(partialPending, Math.max(0, freshNeed - issuedPrimary))
+        : freshNeed);
   if (needSheets <= 0) {
     // Full coverage but the job somehow stayed in Pending Stock (edge
     // case where the CTP-forward path didn't flip status — e.g. a job
@@ -5771,7 +5791,9 @@ async function performIssueStock(sql, req, id, body) {
     action: 'job.issue_stock',
     entityType: 'job',
     entityId: id,
-    summary: `Issued ${totalIssued} sheets for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${remaining} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${totalIssued} sheets of ${job.offcut_size} offcut returned` : ''}`,
+    // Issued amount in packets first; what is still NEEDED stays in sheets as
+    // well, since that is the figure the rest of the app quotes back.
+    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}`,
   });
   return { job: updated[0] };
 }
@@ -5835,13 +5857,12 @@ async function primaryOwedSheets(sql, job, itemsById) {
   const p = job.particulars || {};
   const partialRaw = parseInt(p.partial_pending_sheets, 10);
   const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
-  if (job.issuance_status === 'issued') return partial;
-  if (job.issuance_status !== 'pending') return 0;
-  if (partial > 0) return partial;
+  if (job.issuance_status !== 'issued' && job.issuance_status !== 'pending') return 0;
+  if (job.issuance_status === 'issued' && !partial) return 0;
   const item = itemsById
     ? itemsById.get(job.inventory_item_id)
     : (await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`)[0];
-  if (!item) return 0;
+  if (!item) return partial;            // cannot recompute - trust the marker
   const paperType = item.paper_type || '';
   const ps = packetSize(paperType);
   const total = jobDeductionSheets({ paperType, particulars: p });
@@ -5854,7 +5875,18 @@ async function primaryOwedSheets(sql, job, itemsById) {
     const inPre = pre && Array.isArray(pre.items) && pre.items.some(it => it && it.item_id === sec.inventory_item_id);
     if (Number.isFinite(packets) && packets > 0 && !inPre) secSheets = Math.round(packets * ps);
   }
-  return Math.max(0, total - preSheets - secSheets);
+  const need = Math.max(0, total - preSheets - secSheets);
+  // The partial marker is a snapshot from the last issuance and goes stale as
+  // soon as the requirement changes (a 2nd paper added afterwards, packets
+  // edited). Take it as a ceiling and work the rest out from what the job
+  // needs now less what has already gone out - see partialPendingSheets on
+  // the client for the same rule and the case that forced it.
+  if (partial > 0) {
+    const issued = (Array.isArray(job.issued_items) ? job.issued_items : [])
+      .reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    return Math.min(partial, Math.max(0, need - issued));
+  }
+  return need;
 }
 
 // Sheets still owed on a job's 2nd paper. Legacy jobs whose 2nd paper was
@@ -8736,7 +8768,9 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         action: 'inventory.stock',
         entityType: 'inventory',
         entityId: it.id,
-        summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${finalReason})${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${partialRemaining} sheets still needed)`) : ''}`,
+        // Same rule on the inventory side: packets lead, sheets follow.
+        summary: `${sign}${fmtPackets(Math.abs(delta), packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} (${sign}${delta.toLocaleString()} sheets) · ${label} (${finalReason})${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${fmtPackets(partialRemaining, packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} / ${partialRemaining.toLocaleString()} sheets still needed)`) : ''}`,
+
       });
     }
     res.json({
