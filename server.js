@@ -346,7 +346,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // What is typed saves itself into the job's delivery_draft; only the button
   // turns it into an actual delivery. Defaults match the button's own roles,
   // so nothing changes until someone takes the button away from a role.
-  job_btn_delivery_details: { label: 'Delivery details — fill in the Record Delivery fields (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Cartons/Packets, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
   // Distinct from the existing wastage_adjustment group above (which also
@@ -364,7 +364,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // MSI No., Cartons/Packets, and editing an already-recorded delivery entry.
   // Server-enforced (canSetPricing / requirePermission). Finance + CEO (view)
   // by default; Super Admin always.
-  job_btn_pricing:         { label: 'Invoicing fields — Rate, Sale Tax, E-FBR No., MSI No., Cartons/Packets, and editing recorded delivery entries', levels: { finance: 'yes', ceo: 'view' } },
+  job_btn_pricing:         { label: 'Invoicing fields — every delivery field plus E-FBR No., MSI No., Rate and Sale Tax, and editing recorded delivery entries', levels: { finance: 'yes', ceo: 'view' } },
   job_btn_stickers:        { label: 'Stickers tab — open & print', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
   // Access Register — Inventory tab (Imports lives inside this same tab,
@@ -4021,7 +4021,7 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
     // can't see the Product Rate tab / Sale Report / invoicing fields, so they
     // never reach an Admin, PM or Operator browser even via the network tab.
     if (!canSeeFinanceData(req.user)) {
-      for (const j of jobs) { delete j.rate; delete j.tax_pct; delete j.cartons_packets; }
+      for (const j of jobs) { delete j.rate; delete j.tax_pct; }
     }
     res.json(jobs);
   } catch (err) {
@@ -6672,7 +6672,7 @@ app.patch('/api/jobs/:id/delivery-draft', requireDeliveryDetailsWriter, async (r
       : await sql`UPDATE jobs SET delivery_draft = COALESCE(delivery_draft, '{}'::jsonb) || jsonb_build_object(${field}::text, ${text}::text) WHERE id = ${id} AND deleted_at IS NULL RETURNING *`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    if (!canSeeFinanceData(req.user)) { delete job.rate; delete job.tax_pct; delete job.cartons_packets; }
+    if (!canSeeFinanceData(req.user)) { delete job.rate; delete job.tax_pct; }
     res.json(job);
   } catch (err) {
     console.error(err);
@@ -6988,7 +6988,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     // Cartons/Packets is a per-job figure; for a group delivery the total typed in is split across
     // the jobs in proportion to the unit cartons each one ships.
     let cpTotal = null;
-    if (canPrice && req.body.cartons_packets !== undefined && String(req.body.cartons_packets).trim() !== '') {
+    if (req.body.cartons_packets !== undefined && String(req.body.cartons_packets).trim() !== '') {
       cpTotal = Number(req.body.cartons_packets);
       if (!Number.isFinite(cpTotal) || cpTotal < 0) return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
     }

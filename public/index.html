@@ -21915,11 +21915,13 @@ function deliveriesSection(j, opts) {
   // Pasting when the operator has recorded some pasted cartons but
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
-  const canAddDelivery = canDeliverNow(j) && !isDelivered && (
-    managerMode
-      ? !!j.is_shade_card
-      : (typeof canRecordDelivery === 'function' && canRecordDelivery())
-  );
+  // Filling the form and recording the shipment are separate rights - see
+  // deliveriesSectionFinance for the same split.
+  const canRecordNow = managerMode
+    ? !!j.is_shade_card
+    : (typeof canRecordDelivery === 'function' && canRecordDelivery());
+  const canFillNow = !managerMode && typeof canFillDeliveryDetails === 'function' && canFillDeliveryDetails();
+  const canAddDelivery = canDeliverNow(j) && !isDelivered && (canRecordNow || canFillNow);
   const isAdminUser = typeof hasPerm === 'function' && hasPerm('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
@@ -21975,30 +21977,49 @@ function deliveriesSection(j, opts) {
     ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
     : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
 
+  // Same self-saving draft as the invoicing form: finance may have filled this
+  // shipment in there, and whoever records it sees that work here. Not on the
+  // Station's shade-card form, which posts through its own PIN-verified route.
+  const _draft = (!managerMode && j && j.delivery_draft && typeof j.delivery_draft === 'object') ? j.delivery_draft : {};
+  const draftVal = (key, fallback) => (_draft[key] !== undefined && _draft[key] !== null && _draft[key] !== '')
+    ? _draft[key] : fallback;
+  const draftSave = (key) => managerMode ? '' : ` onchange="saveDeliveryDraft(${j.id}, '${key}', this.value)"`;
+  // Cartons/Packets belongs to the delivery, not to invoicing: it is what went
+  // out, and whoever records the shipment is the one who knows it.
+  const cartonsPackets = cartonsPacketsFor(j);
   const addForm = canAddDelivery
-    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:${isShadeCard ? '0.7fr 1fr 1fr auto' : '0.7fr 1fr 0.9fr 0.9fr 1fr auto'};gap:8px;align-items:end;">
+    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:${isShadeCard ? '0.7fr 1fr 1fr auto' : '0.7fr 0.8fr 1fr 0.9fr 0.9fr 1fr auto'};gap:8px;align-items:end;">
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${countLabel} *</label>
-          <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="number" id="deliv-cartons" min="1" step="any" value="${esc(String(draftVal('cartons', cartonsPrefill)))}"${draftSave('cartons')} placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
+        ${isShadeCard ? '' : `<div style="min-width:0;">
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
+          <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', cartonsPackets > 0 ? cartonsPackets : '')))}"${draftSave('cartons_packets')} data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it. Clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+        </div>`}
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
-          <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="date" id="deliv-date" value="${esc(String(draftVal('date', localDateISO())))}"${draftSave('date')} style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         ${isShadeCard ? '' : `<div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
-          <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="text" id="deliv-po" value="${esc(String(draftVal('po_no', j.ref || '')))}"${draftSave('po_no')} placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
-          <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="text" id="deliv-batch" value="${esc(String(draftVal('batch_no', j.bno || '')))}"${draftSave('batch_no')} placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>`}
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
-          <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
+          <input type="text" id="deliv-notes" value="${esc(String(isShadeCard ? '' : draftVal('invoice_no', '')))}"${isShadeCard ? '' : draftSave('invoice_no')} ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
         </div>
-        <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>
-      </div>${j.linked_job_id ? `<div style="margin-top:8px;">
+        <div style="min-width:0;">
+          ${canRecordNow
+            ? `<button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>`
+            : `<div style="font-size:11px;color:var(--text2);line-height:1.35;">Saved as you type.<br>Recording the delivery is done by whoever holds that button.</div>`}
+          <div id="deliv-draft-state" style="font-size:11px;font-weight:700;margin-top:4px;opacity:0;transition:opacity 0.25s;">&nbsp;</div>
+        </div>
+      </div>${(j.linked_job_id && canRecordNow) ? `<div style="margin-top:8px;">
         <button type="button" class="btn btn-sm" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>
       </div>` : ''}`
     : (stageIdx < 5
