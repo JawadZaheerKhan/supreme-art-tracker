@@ -22118,7 +22118,7 @@ function deliveriesSectionFinance(j, opts) {
   // (nobody's asked for that one).
   const canEditEntries = !managerMode && hasPerm('job_btn_pricing', 'yes');
   const editCell = (i, field, value, opts2) => canEditEntries
-    ? `<input type="${field === 'cartons' ? 'number' : 'text'}" ${field === 'cartons' ? 'min="0.01" step="any"' : ''} value="${esc(value)}" onchange="saveDeliveryEntryField(${j.id}, ${i}, '${field}', this.value)" title="${esc((opts2&&opts2.title)||'')}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+    ? `<input type="${field === 'cartons' ? 'number' : 'text'}" ${field === 'cartons' ? 'min="0.01" step="any"' : ''} data-dk="${i}:${field}" value="${esc(value)}" onchange="saveDeliveryEntryField(${j.id}, ${i}, '${field}', this.value)" title="${esc((opts2&&opts2.title)||'')}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
     : `<span title="${esc(value)}">${esc(value)}</span>`;
   // Cartons/Packets is a job-level figure (what the Pasting/Ready-to-
   // Deliver station wrote), not per-delivery — same value shows on every
@@ -22167,10 +22167,10 @@ function deliveriesSectionFinance(j, opts) {
             ${isShadeCard ? '' : fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
             ${isShadeCard ? '' : fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
             ${isShadeCard ? '' : fieldBox('Rate / Carton', canEditEntries
-              ? `<input type="number" min="0" step="any" value="${sp.rate !== null ? esc(String(sp.rate)) : ''}" title="${sp.override ? 'Differs from the product\'s standard rate. ' : ''}This shipment's own rate \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'rate', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${rateStyle}">`
+              ? `<input type="number" min="0" step="any" data-dk="${i}:rate" value="${sp.rate !== null ? esc(String(sp.rate)) : ''}" title="${sp.override ? 'Differs from the product\'s standard rate. ' : ''}This shipment's own rate \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'rate', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${rateStyle}">`
               : (sp.rate !== null ? `<span style="${rateStyle}">${fmtRate(sp.rate)}</span>` : '&mdash;'))}
             ${isShadeCard ? '' : fieldBox('Sale Tax %', canEditEntries
-              ? `<input type="number" min="0" step="any" value="${esc(String(sp.tax))}" title="This shipment's own sale tax \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'tax_pct', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+              ? `<input type="number" min="0" step="any" data-dk="${i}:tax_pct" value="${esc(String(sp.tax))}" title="This shipment's own sale tax \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'tax_pct', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
               : esc(String(sp.tax)) + '%')}
             ${fieldBox(isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.', isShadeCard ? `<span title="${esc(nt)}">${esc(nt)}</span>` : editCell(i, 'notes', nt))}
           </div>
@@ -22631,7 +22631,11 @@ async function saveHistoryPricing(jobId, groupKey, field, valueStr) {
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     notify('Pricing updated');
-    if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
+    if (document.querySelector('.job-edit-modal')) {
+      const place = captureJobEditPlace();
+      render();
+      setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
+    }
     if (document.getElementById('products-grid')) {
       renderProductsTab();
       const idx = __productGroupsCache.findIndex(g => g.key === groupKey);
@@ -22876,8 +22880,9 @@ async function recordDelivery(jobId) {
     }
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
+    const place = captureJobEditPlace();
     closeModal(); render(); notify('Delivery recorded');
-    setTimeout(() => openEdit(jobId), 50);
+    setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -22905,10 +22910,50 @@ async function saveCartonsPackets(jobId, valueStr) {
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     notify('Saved');
-    if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
+    if (document.querySelector('.job-edit-modal')) {
+      const place = captureJobEditPlace();
+      render();
+      setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
+    }
     if (document.getElementById('sr-content')) renderSaleReport();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// Saving one field of a recorded delivery rebuilds the whole job card -
+// cartons drive the running total, the stage and every money figure, so the
+// card genuinely has to be redrawn. But a rebuilt card starts scrolled to the
+// top with nothing focused, so tabbing out of a field threw the user back to
+// the top of a long card and they had to scroll down and find their place
+// again. Capture where they were, put it back after the rebuild.
+function captureJobEditPlace() {
+  const modal = document.querySelector('.job-edit-modal');
+  if (!modal) return null;
+  const overlay = document.getElementById('overlay');
+  const a = document.activeElement;
+  return {
+    top: modal.scrollTop,                       // .modal is the scroller (max-height:90vh)
+    overlayTop: overlay ? overlay.scrollTop : 0, // .overlay scrolls too in the Adjust layout
+    key: (a && a.dataset && a.dataset.dk) || null,
+    sel: (a && typeof a.selectionStart === 'number') ? [a.selectionStart, a.selectionEnd] : null,
+  };
+}
+function restoreJobEditPlace(p) {
+  if (!p) return;
+  const modal = document.querySelector('.job-edit-modal');
+  if (!modal) return;
+  modal.scrollTop = p.top;
+  const overlay = document.getElementById('overlay');
+  if (overlay) overlay.scrollTop = p.overlayTop;
+  if (!p.key) return;
+  // Same field, in the rebuilt card. data-dk is "<delivery index>:<field>".
+  const el = modal.querySelector('[data-dk="' + p.key + '"]');
+  if (!el) return;
+  // preventScroll: focusing must not undo the scroll position just restored.
+  try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+  if (p.sel && typeof el.setSelectionRange === 'function') {
+    try { el.setSelectionRange(p.sel[0], p.sel[1]); } catch (e) { /* number inputs refuse */ }
+  }
 }
 
 async function saveDeliveryEntryField(jobId, index, field, valueStr) {
@@ -22930,7 +22975,11 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     notify('Saved');
-    if (document.querySelector('.job-edit-modal')) { render(); setTimeout(() => openEdit(jobId), 50); }
+    if (document.querySelector('.job-edit-modal')) {
+      const place = captureJobEditPlace();
+      render();
+      setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
+    }
     if (histKey) {
       renderProductsTab();
       const idx = __productGroupsCache.findIndex(g => g.key === histKey);
@@ -22980,8 +23029,9 @@ async function removeDelivery(jobId, index) {
     const updated = await api('DELETE', `/api/jobs/${jobId}/deliveries/${index}`);
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
+    const place = captureJobEditPlace();
     closeModal(); render(); notify('Delivery entry removed');
-    setTimeout(() => openEdit(jobId), 50);
+    setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -23117,10 +23167,11 @@ async function submitDeliverLinked(jobId, partnerId) {
       ],
     });
     await loadJobs();
+    const place = captureJobEditPlace();
     closeModal();
     render();
     notify('Joint delivery recorded for both jobs');
-    setTimeout(() => openEdit(jobId), 50);
+    setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
