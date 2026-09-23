@@ -4662,19 +4662,21 @@ function issuedPrimarySheets(j) {
 // moved onto an offcut 2nd paper, leaving 50,500 on the main paper and 4,150
 // genuinely owed - but the card kept asking for the old 8,150.
 //
-// So the marker is treated as a ceiling, not as truth: what is really owed is
-// the requirement as it stands now, less what has already been issued. Taking
-// the lower of the two means a job whose issued_items predate that tagging
-// (nothing recorded, so "issued" reads as 0) still falls back to the marker
-// rather than suddenly asking for the whole job again.
+// So what is really owed is the requirement as it stands now, less what has
+// already been issued - in either direction, since a requirement can be raised
+// as easily as lowered. The marker is only a fallback, for a job with no
+// issuance recorded against it (rows predating that tracking, or a paper that
+// is not in the loaded inventory): there, recomputing would read "issued 0"
+// and ask for the whole job again, so the marker stands.
 function partialPendingSheets(j) {
   const raw = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
   const marker = Number.isFinite(raw) && raw > 0 ? raw : 0;
   if (!marker) return 0;
+  const rows = (j && Array.isArray(j.issued_items)) ? j.issued_items : [];
+  if (!rows.length) return marker;                // nothing recorded to reckon from
   const need = jobFreshNeedSheets(j);
-  if (!need) return marker;                       // cannot recompute - trust the marker
-  const owed = Math.max(0, need - issuedPrimarySheets(j));
-  return Math.min(marker, owed);
+  if (!need) return marker;                       // paper not loaded - cannot recompute
+  return Math.max(0, need - issuedPrimarySheets(j));
 }
 function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
 // True when the 2nd paper was silently auto-consumed on CTP forward — the
@@ -7868,7 +7870,7 @@ function renderInvPendingList() {
           : `<span class="badge" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`)
       : '';
     const topupBtn = (partial && canIssueStock())
-      ? `<button class="btn btn-sm ceo-hide" style="${offcut ? OFFCUT_BTN_LIGHT_STYLE : 'background:#facc15;border-color:#eab308;color:#422006;font-weight:700;'}" onclick="openInvRemoveStock(${invIt ? invIt.id : 'null'}, { jobCard: 'E-${j.id}', preqty: ${partial} })" title="Manually issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
+      ? `<button class="btn btn-sm ceo-hide" style="${offcut ? OFFCUT_BTN_LIGHT_STYLE : 'background:#facc15;border-color:#eab308;color:#422006;font-weight:700;'}" onclick="issueStock(${j.id})" title="Issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job — from any brand in this paper group">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
       : '';
     const offcutOk = !offcut || canIssueOffcutStock();
     const offcutStyle = offcut
@@ -26145,10 +26147,10 @@ async function issueStock(id, source) {
       return Math.round(secPackets * ps);
     })();
     // Partial-issued jobs carry their remaining need on
-    // partial_pending_sheets — that already accounts for prior
-    // subtractions, so trust it when present.
-    const partialRaw = parseInt((j.particulars || {}).partial_pending_sheets, 10);
-    const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
+    // partial_pending_sheets, but that is a snapshot from the last issuance
+    // and goes stale when the job's paper requirement changes - so read it
+    // through partialPendingSheets(), which caps it by what is really owed.
+    const partial = partialPendingSheets(j);
     needSheets = partial > 0
       ? partial
       : Math.max(0, totalNeedSheets - preConsumedSheets - freshSecSheets);

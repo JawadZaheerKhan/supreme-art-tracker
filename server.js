@@ -5545,10 +5545,11 @@ async function performIssueStock(sql, req, id, body) {
   // really owed is the current requirement less what has already been issued.
   const issuedPrimary = (Array.isArray(job.issued_items) ? job.issued_items : [])
     .reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+  const issuedRows = Array.isArray(job.issued_items) ? job.issued_items : [];
   const needSheets = isSecondary
     ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
     : (partialPending > 0
-        ? Math.min(partialPending, Math.max(0, freshNeed - issuedPrimary))
+        ? (issuedRows.length ? Math.max(0, freshNeed - issuedPrimary) : partialPending)
         : freshNeed);
   if (needSheets <= 0) {
     // Full coverage but the job somehow stayed in Pending Stock (edge
@@ -5572,7 +5573,7 @@ async function performIssueStock(sql, req, id, body) {
     await logAudit(sql, req, {
       action: 'job.issue_stock_auto',
       entityType: 'job', entityId: id,
-      summary: `Job E-${id}: auto-issued — fully covered by ${preConsumedSheets} sheets of offcut pre-consumed on CTP forward.`,
+      summary: `Job E-${id}: auto-issued — fully covered by ${packetsWithSheets(preConsumedSheets, psForNeed, packetUnitLabelSrv(paperType))} of offcut pre-consumed on CTP forward.`,
     });
     return { job: flipped[0] };
   }
@@ -5878,13 +5879,15 @@ async function primaryOwedSheets(sql, job, itemsById) {
   const need = Math.max(0, total - preSheets - secSheets);
   // The partial marker is a snapshot from the last issuance and goes stale as
   // soon as the requirement changes (a 2nd paper added afterwards, packets
-  // edited). Take it as a ceiling and work the rest out from what the job
-  // needs now less what has already gone out - see partialPendingSheets on
-  // the client for the same rule and the case that forced it.
+  // edited up or down). What is owed is the requirement as it stands now less
+  // what has already gone out; the marker is only the fallback for a job with
+  // no issuance recorded to reckon from - see partialPendingSheets on the
+  // client for the same rule and the case that forced it.
   if (partial > 0) {
-    const issued = (Array.isArray(job.issued_items) ? job.issued_items : [])
-      .reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
-    return Math.min(partial, Math.max(0, need - issued));
+    const rows = Array.isArray(job.issued_items) ? job.issued_items : [];
+    if (!rows.length) return partial;
+    const issued = rows.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    return Math.max(0, need - issued);
   }
   return need;
 }
@@ -6023,7 +6026,7 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
       action: 'job.papercut_issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id}: ${owed} sheets of offcut${source === 'secondary' ? ' (2nd paper)' : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
+      summary: `Job E-${id}: ${packetsWithSheets(owed, packetSize(anchor.paper_type || ''), packetUnitLabelSrv(anchor.paper_type || ''))} of offcut${source === 'secondary' ? ' (2nd paper)' : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
     });
     res.json(result.job);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
