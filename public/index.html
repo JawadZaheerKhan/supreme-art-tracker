@@ -18290,14 +18290,14 @@ function computeManualConsumptionRows() {
       });
     }
     const g = groups.get(key);
-    if (t.id) g.txIds.push(t.id);
+    if (t.id) g.txIds.push(t.id);   // once — a second unconditional push used to duplicate every id
     if (t.item_brand) g.brands.add(t.item_brand);
     g.totalSheets += amt;
     g.txCount++;
-    g.txIds.push(t.id);
     if (t.user_email) g.enteredBy.add(t.user_email);
     const ms = t.created_at ? new Date(t.created_at).getTime() : null;
-    if (ms != null && (g.latestMs == null || ms > g.latestMs)) { g.latestMs = ms; g.latestRaw = t.created_at; }
+    // The latest tx doubles as the row's click target in the item History.
+    if (ms != null && (g.latestMs == null || ms > g.latestMs)) { g.latestMs = ms; g.latestRaw = t.created_at; g.latestTxId = t.id; g.latestItemId = t.item_id; }
   }
   const allocs = state.allocations || {};
   const rows = [...groups.values()].map(g => {
@@ -18319,6 +18319,7 @@ function computeManualConsumptionRows() {
       txIds: g.txIds,
       totalSheets: g.totalSheets, totalPkts: g.totalSheets / ps,
       latestAt: g.latestRaw, enteredBy: [...g.enteredBy].join(', '),
+      latestTxId: g.latestTxId || null, latestItemId: g.latestItemId || null,
       allocatedSheets, allocPct, linkedJobIds: [...linkedJobs],
     };
   }).sort((a, b) => {
@@ -18387,9 +18388,12 @@ function renderManualConsumption() {
             const jobRefs = r.linkedJobIds && r.linkedJobIds.length
               ? `<div style="font-size:10px;color:var(--text2);margin-top:1px;">→ E-${r.linkedJobIds.join(', E-')}</div>`
               : '';
+            const rowClick = (r.latestItemId && r.latestTxId)
+              ? ` onclick="openInvHistoryAt(${r.latestItemId}, ${r.latestTxId})" title="Open this consumption in the item's History"`
+              : '';
             return `
-          <tr class="row-hover-red" style="border-bottom:1px solid var(--border);${fillBg}">
-            <td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${(r.txIds||[]).every(id=>manualConsumptionState.selected.has(id))?'checked':''} onchange="toggleManualConsumptionRow([${(r.txIds||[]).join(',')}], this.checked)"></td>
+          <tr class="row-hover-red${rowClick ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);${fillBg}"${rowClick}>
+            <td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${(r.txIds||[]).every(id=>manualConsumptionState.selected.has(id))?'checked':''} onclick="event.stopPropagation()" onchange="toggleManualConsumptionRow([${(r.txIds||[]).join(',')}], this.checked)"></td>
             <td style="padding:6px 8px;font-weight:700;">${esc(r.jobCardNo)}${allocBadge}${jobRefs}</td>
             <td style="padding:6px 8px;">${esc(r.paperType || '—')}</td>
             <td style="padding:6px 8px;">${esc(r.size || '—')}</td>
@@ -18398,7 +18402,7 @@ function renderManualConsumption() {
             <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.txCount}</td>
             <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
             <td style="padding:6px 8px;white-space:nowrap;">${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
-            <td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="deleteManualConsumptionRows([${(r.txIds||[]).join(',')}])">Delete</button></td>
+            <td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteManualConsumptionRows([${(r.txIds||[]).join(',')}])">Delete</button></td>
           </tr>`;
           }).join('')}
         </tbody>
@@ -18702,8 +18706,9 @@ function renderOffcutConsumption() {
       <tbody>${rows.map(t => {
         const ps = packetSize(t.paper_type || '');
         const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
-        return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
-          ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
+        const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this issuance in the item's History"` : '';
+        return `<tr class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);"${rowClick}>
+          ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
           <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT(t.created_at))}</td>
           <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">E-${t.job_id}</td>
           <td style="padding:6px 8px;">${esc(t.paper_type || '—')}</td>
@@ -18712,7 +18717,7 @@ function renderOffcutConsumption() {
           <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
           <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
           <td style="padding:6px 8px;white-space:nowrap;">${esc(t.user_email || '—')}</td>
-          ${canDelete ? `<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="deleteOffcutConsumptionRows([${t.id}])">Delete</button></td>` : ''}
+          ${canDelete ? `<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button></td>` : ''}
         </tr>`;
       }).join('')}</tbody>
     </table>
