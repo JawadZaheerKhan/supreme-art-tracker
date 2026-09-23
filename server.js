@@ -3736,6 +3736,37 @@ async function aggregateProductionRange(sql, { from, to }) {
   return { byMachineDaily: byMachineDailyArr, byOperatorDaily: byOperatorDailyArr };
 }
 
+// May job card number `id` be issued to a new job?
+//
+// A number that NEVER reached a job card can be reused safely: nothing was
+// ever printed, delivered, invoiced or reported under it, so handing it to a
+// new job creates no ambiguity. A number that DID belong to a job cannot,
+// even if that job was deleted - a printed job card may be on the floor, and
+// old deliveries and reports still refer to it. Two different jobs sharing
+// one number is a worse audit problem than a gap, which is the whole reason
+// gaps were being chased in the first place.
+//
+// So the test is "was this number ever a job", and it is answered from the
+// audit log, which outlives the job row:
+//   - any audit entry other than job.create_failed => it was a job. Never.
+//   - a job.create_failed entry                    => provably burned. Reusable.
+//   - no entries at all                            => only trustworthy ABOVE the
+//     watermark, the lowest number the audit log has ever recorded a creation
+//     for. Below that, silence proves nothing: the log did not exist yet, so a
+//     real job may have lived there and been purged without a trace.
+// The number must also already have been issued (at or below the sequence
+// top); handing out a higher one would skip the numbers in between and open
+// a fresh gap.
+function jobNumberReusable(id, { hasRow, actions, watermark, seqTop }) {
+  if (hasRow) return false;
+  if (!Number.isFinite(watermark)) return false;          // no audit history: trust nothing
+  if (!(id > 0) || id > seqTop) return false;
+  const real = (actions || []).filter(a => a !== 'job.create_failed');
+  if (real.length) return false;                          // it was a job once
+  if ((actions || []).includes('job.create_failed')) return true;
+  return id > watermark;
+}
+
 // JOB NUMBER REGISTER - one row per job card number ever issued, from E-1 to
 // the highest the sequence has handed out, each one accounted for. Job numbers
 // come from a Postgres sequence: it never reuses a value and never gives one
@@ -3769,6 +3800,11 @@ app.get('/api/reports/job-numbers', requirePermission('rpt_jobs_report', 'view')
       trail.get(a.entity_id)[a.action] = a;     // last one of each kind wins
     }
     const seqTop = seq && seq[0] ? parseInt(seq[0].last_value, 10) : 0;
+    // Watermark: the lowest number the audit log has a creation for. Silence
+    // below it is meaningless - see jobNumberReusable.
+    let watermark = Infinity;
+    for (const a of audit) if (a.action === 'job.create' && a.entity_id < watermark) watermark = a.entity_id;
+    if (!Number.isFinite(watermark)) watermark = null;
     const maxRow = rows.length ? rows[rows.length - 1].id : 0;
     const highest = Math.max(seqTop || 0, maxRow);
     const out = [];
@@ -3819,13 +3855,17 @@ app.get('/api/reports/job-numbers', requirePermission('rpt_jobs_report', 'view')
         });
         continue;
       }
+      const reusable = jobNumberReusable(id, {
+        hasRow: false, actions: Object.keys(t), watermark, seqTop,
+      });
       out.push({
-        id, status: 'unused',
+        id, status: 'unused', reusable,
         name: '', client: '', jobcode: '',
         created_at: null, created_by: null, ended_at: failed ? failed.created_at : null, ended_by: null,
-        note: failed
+        note: (failed
           ? `Job card failed to save - ${failed.summary || 'no reason recorded'}`
-          : 'No job card ever held this number',
+          : 'No job card ever held this number')
+          + (reusable ? ' - can be issued to a new job' : ''),
       });
     }
     res.json({ highest, rows: out });
@@ -4415,6 +4455,7 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
 
 // CREATE a job
 app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), async (req, res) => {
+  let reuseId = null;            // visible to the catch below
   try {
     await dbReady;
     const sql = getDb();
@@ -4449,6 +4490,29 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     // nothing. (See the catch below for the case an INSERT still fails.)
     if (!name)   return res.status(400).json({ error: 'Job name is required.' });
     if (!client) return res.status(400).json({ error: 'Company is required.' });
+    // Optional: issue this job a number that was spent but never used (from
+    // the Job Number Register's Reuse button). Re-checked here rather than
+    // trusted from the client - this is the one place a number can be given
+    // to a second job, so the rule is enforced at the point of writing.
+    if (req.body.reuse_number !== undefined && req.body.reuse_number !== null && req.body.reuse_number !== '') {
+      reuseId = parseInt(req.body.reuse_number, 10);
+      if (!Number.isFinite(reuseId) || reuseId <= 0) return res.status(400).json({ error: 'Invalid job number.' });
+      const [held, trail, seq, firstCreate] = await Promise.all([
+        sql`SELECT 1 FROM jobs WHERE id = ${reuseId}`,
+        sql`SELECT DISTINCT action FROM audit_log WHERE entity_type = 'job' AND entity_id = ${reuseId}`,
+        sql`SELECT last_value FROM jobs_id_seq`,
+        sql`SELECT MIN(entity_id) AS lowest FROM audit_log WHERE entity_type = 'job' AND action = 'job.create'`,
+      ]);
+      const okToReuse = jobNumberReusable(reuseId, {
+        hasRow: held.length > 0,
+        actions: trail.map(r => r.action),
+        watermark: firstCreate.length && firstCreate[0].lowest !== null ? parseInt(firstCreate[0].lowest, 10) : NaN,
+        seqTop: seq && seq[0] ? parseInt(seq[0].last_value, 10) : 0,
+      });
+      if (!okToReuse) {
+        return res.status(409).json({ error: `E-${reuseId} cannot be reused - it already belonged to a job, or there is no record proving it never did.` });
+      }
+    }
     // Newly-created jobs land in issuance_status='new' — they show up
     // in the "New Jobs" tab for the Production Manager (or Admin) to
     // review, and are NOT visible to the store keeper yet. Clicking
@@ -4456,12 +4520,20 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     // store keeper's Pending Stock queue picks them up. Stock is only
     // deducted after that, via POST /api/jobs/:id/issue-stock.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id, stock_group_name, stock_group_visible, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible || stockGroupVisibleFromGroup}, ${groupIdInt}, ${stockGroupName}, ${stockGroupVisibleFromGroup}, 'new')
+      INSERT INTO jobs (id, name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id, stock_group_name, stock_group_visible, issuance_status)
+      -- COALESCE short-circuits in Postgres, so nextval() is NOT called when a
+      -- number is being reclaimed: reusing E-5 must not also spend E-702.
+      -- With no reuseId this is exactly what the column default would have done.
+      VALUES (COALESCE(${reuseId}::int, nextval('jobs_id_seq')), ${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible || stockGroupVisibleFromGroup}, ${groupIdInt}, ${stockGroupName}, ${stockGroupVisibleFromGroup}, 'new')
       RETURNING *
     `;
     const job = result[0];
-    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — new job (awaiting Process to CTP)` });
+    await logAudit(sql, req, {
+      action: 'job.create', entityType: 'job', entityId: job.id,
+      summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — new job (awaiting Process to CTP)`
+        + (reuseId ? ` — issued on reclaimed number E-${reuseId}, which had never been used` : ''),
+      metadata: reuseId ? { reused_number: reuseId } : {},
+    });
     res.json(job);
   } catch (err) {
     console.error(err);
@@ -4470,7 +4542,12 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     // again. Nothing can give it back, but it must not vanish unexplained:
     // read which number was taken and, if no job holds it, write that down.
     // Guarded so a failure in here can never mask the original error.
-    try { await recordBurnedJobNumber(getDb(), req, err); } catch (e2) { console.error('Burned-number log failed:', e2.message); }
+    // Only when the sequence was actually used. A reclaimed number goes in as
+    // a literal, so nothing was drawn from the sequence and nothing is burned -
+    // reading last_value here would blame an unrelated number.
+    if (!reuseId) {
+      try { await recordBurnedJobNumber(getDb(), req, err); } catch (e2) { console.error('Burned-number log failed:', e2.message); }
+    }
     res.status(500).json({ error: err.message });
   }
 });

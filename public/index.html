@@ -12376,6 +12376,9 @@ function jobNumbersTableHtml() {
       <td ${td}>${r.ended_at ? fmtDMYT(r.ended_at) : '\u2014'}</td>
       <td ${td}>${esc(r.ended_by || '') || '\u2014'}</td>
       <td ${td} style="padding:6px 8px;color:var(--text2);">${esc(r.note || '')}</td>
+      <td ${td}>${r.reusable && canNewJob()
+        ? `<button class="btn btn-sm" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="reuseJobNumber(${r.id})" title="Create the next job card on this number instead of a new one">&#8634; Reuse</button>`
+        : ''}</td>
     </tr>`;
   }).join('');
   return `
@@ -12384,11 +12387,27 @@ function jobNumbersTableHtml() {
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead><tr style="background:var(--bg2);">
         <th ${th}>Job No.</th><th ${th}>Status</th><th ${th}>Name</th><th ${th}>Company</th>
-        <th ${th}>Created</th><th ${th}>Created By</th><th ${th}>Ended</th><th ${th}>Ended By</th><th ${th}>What happened</th>
+        <th ${th}>Created</th><th ${th}>Created By</th><th ${th}>Ended</th><th ${th}>Ended By</th><th ${th}>What happened</th><th ${th}></th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table>
     </div>`;
+}
+// Set while a New Job card is being filled in on a reclaimed number. Only a
+// number the register offered can get here, and the server checks the rule
+// again before writing - this is the convenience, not the guard.
+let _pendingJobNumber = null;
+async function reuseJobNumber(id) {
+  const row = (jobNumbersState.rows || []).find(r => r.id === id);
+  if (!row || !row.reusable) { notify(`E-${id} cannot be reused.`); return; }
+  const ok = await confirmDialog({
+    title: `Create a job card on E-${id}?`,
+    message: `E-${id} was issued but no job card was ever saved on it, so nothing has been printed, delivered or invoiced under that number. The next job you create will take it, and the gap closes. Numbers that DID belong to a job are never offered here.`,
+    confirmText: `Use E-${id}`,
+  });
+  if (!ok) return;
+  _pendingJobNumber = id;
+  openAdd();
 }
 // Labels shared by the screen, the print-out and the spreadsheet so the three
 // can never tell an auditor different things.
@@ -25011,11 +25030,19 @@ function openAdd() {
   // previously-cancelled "Duplicate into group" flow, so this unrelated
   // job doesn't silently PATCH itself into that group on save.
   _pendingGroupName = null;
+  // Reclaimed number (Job Number Register → Reuse). Shown on the card so
+  // nobody fills one in believing it will get the next number in sequence.
+  const reuseBanner = _pendingJobNumber
+    ? `<div style="background:rgba(22,101,52,0.10);border:1px solid #166534;color:#166534;border-radius:var(--radius);padding:8px 12px;margin-bottom:10px;font-size:13px;font-weight:600;text-align:center;">
+         This job card will be numbered <b>E-${_pendingJobNumber}</b> — a number that was issued but never used.
+       </div>`
+    : '';
   openModal(`<div class="modal modal-card" onclick="event.stopPropagation()">
     <h2 style="text-align:center;letter-spacing:1px;">NEW JOB CARD</h2>
+    ${reuseBanner}
     ${jobForm()}
     <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="_pendingJobNumber = null; closeModal();">Cancel</button>
       <button class="btn btn-primary" onclick="saveAdd()">Create &amp; Print</button>
     </div>
   </div>`);
@@ -25129,6 +25156,7 @@ async function saveAdd() {
   // New job — never pre-populate the legacy delivered-qty scalar (see
   // getFormData()). It's not delivered yet.
   data.delqty = '';
+  if (_pendingJobNumber) data.reuse_number = _pendingJobNumber;
   if (!data.name || !data.client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
   if (!(await checkStockBeforeSave(data))) return;
   showSaving(true);
@@ -25149,10 +25177,14 @@ async function saveAdd() {
     } else {
       notify('Job created!');
     }
+    _pendingJobNumber = null;
     closeModal(); render();
+    // The register is showing a gap that has just been filled.
+    if (document.getElementById('rt-job-numbers') && document.getElementById('rt-job-numbers').style.display !== 'none') openJobNumbers();
     setTimeout(() => printJobCard(newJob.id), 100);
   } catch(e) {
     _pendingGroupName = null;
+    _pendingJobNumber = null;   // a refused number must not cling to the next attempt
     notify('Error: ' + e.message);
   }
   showSaving(false);
