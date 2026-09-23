@@ -26609,12 +26609,27 @@ function buildPrintCard(j) {
   // secondary count is a slice of the total (5 offcut of a 10-packet job
   // means "5 primary | 5 secondary", NOT "10 | 5"). Primary yellow-under
   // when primary paper is offcut, secondary yellow-under when it is.
+  // The two papers can be cut differently now. When they share a cut, the
+  // printed card says it once at the end, as it always has ("20 + 30 · 1/2").
+  // When they differ, each quantity carries its own ("20 1/2 + 30 1/1") - one
+  // trailing figure would otherwise be read as applying to both, and the man
+  // on the machine cuts from this sheet of paper.
+  const cutMain = p.sheet_cut || '1/1';
+  const cutSec  = (secRefPrint && secRefPrint.sheet_cut) || '1/1';
+  const sameCut = cutMain === cutSec;
+  const cutTag  = (c) => `<span class="pc-cut">${esc(c)}</span>`;
   const packetsCellHtml = (() => {
     // Finalized print: the adjusted total replaces the original outright.
     // packetsDisplay already carries the "primary + secondary" split when
     // the job has a 2nd paper — same rule as the wastage rows.
     if (topOverlay) {
-      return topOverlay.packetsDisplay + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+      // packetsDisplay is already a built string here, so the differing case
+      // names both cuts after it rather than inside it.
+      const tail = !p.sheet_cut ? ''
+        : secondaryPaperLabel && !sameCut
+          ? ` &middot; ${cutTag(cutMain)} + ${cutTag(cutSec)}`
+          : ` &middot; ${cutTag(cutMain)}`;
+      return topOverlay.packetsDisplay + tail;
     }
     const totalPkts = parseFloat(p.quantity_of_packets);
     const secPkts   = secRefPrint ? (parseFloat(secRefPrint.packets) || 0) : 0;
@@ -26629,7 +26644,10 @@ function buildPrintCard(j) {
     const secondaryPart = secondaryIsOffcutP
       ? `<span style="${offcutStylePrint}">${secPkts}</span>`
       : String(secPkts);
-    return `${primaryPart} + ${secondaryPart}` + (p.sheet_cut ? ` &middot; <span class="pc-cut">${esc(p.sheet_cut)}</span>` : '');
+    if (!p.sheet_cut) return `${primaryPart} + ${secondaryPart}`;
+    return sameCut
+      ? `${primaryPart} + ${secondaryPart} &middot; ${cutTag(cutMain)}`
+      : `${primaryPart} ${cutTag(cutMain)} + ${secondaryPart} ${cutTag(cutSec)}`;
   })();
   const coatLabel = name => {
     const label = name === 'Color Seal' ? 'Colour Seal' : name;
