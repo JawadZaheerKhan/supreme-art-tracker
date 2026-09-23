@@ -3128,7 +3128,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rpt="rpt_production_report" data-rt="prod-report" onclick="setReportsTab('prod-report')">
           <span class="rsb-icon">&#128202;</span> Production Report
         </button>
-        <button class="rsb-item" data-rpt="rpt_jobs_report" data-rt="job-numbers" onclick="setReportsTab('job-numbers')">
+        <button class="rsb-item" data-rpt="rpt_job_number_register" data-rt="job-numbers" onclick="setReportsTab('job-numbers')">
           <span class="rsb-icon">&#128290;</span> Job Number Register
         </button>
       </aside>
@@ -27629,6 +27629,11 @@ let stationRecFlushResolve = null; // promise resolver set by stationSubmit when
                                    // it needs to wait for an in-progress
                                    // recording's blob to land in the queue
 
+// Which tab the operator's own queue screen is on, and what they have typed
+// there. Cleared by stationLogout with the rest of the station state.
+let stationQueueTab = 'queue';      // 'queue' | 'search'
+let stationQueueSearch = '';
+
 function enterStation() {
   stationLogout(true);  // always start fresh at the PIN pad
 }
@@ -27648,6 +27653,8 @@ function stationLogout(silent) {
   stationCustomPersons = null;
   stationPinBuf = '';
   stationView = 'pin';
+  stationQueueTab = 'queue';
+  stationQueueSearch = '';
   stationJobId = null;
   stationPapercutRequests = null;
   stationPapercutTab = 'requests';
@@ -28299,6 +28306,26 @@ function stationQueueHtml() {
     });
   }
   queue = queue.reverse();
+  // Job No. tab: the same queue, narrowed to one job number. Numbers only -
+  // the operator is holding a printed job card and typing the number off it,
+  // and a numeric keypad is far quicker on a tablet than a full keyboard.
+  // Scope is unchanged: this searches what the operator can already work on,
+  // so it cannot open a job their stage has no business in.
+  const searching = stationQueueTab === 'search';
+  const sq = String(stationQueueSearch || '').replace(/\D/g, '');
+  if (searching) queue = sq ? queue.filter(j => String(j.id).includes(sq)) : [];
+  // A number that is real but not in this queue would otherwise look like a
+  // broken search, so say where it actually is. Read-only: no way in from here.
+  const elsewhere = (searching && sq && !queue.length)
+    ? jobs.find(j => String(j.id) === sq)
+    : null;
+  const emptyMsg = !searching
+    ? `Nothing waiting at ${esc(stageName)} right now.`
+    : !sq
+      ? 'Type a job number.'
+      : elsewhere
+        ? `Job #${elsewhere.id} \u2014 ${esc(elsewhere.name || '')} \u2014 is not in your queue. It is at ${esc(STAGES[elsewhere.stage_index || 0] || '')}.`
+        : `No job #${esc(sq)} in your queue.`;
   const rows = queue.length ? queue.map(j => {
     // Unheard notes get a loud badge so the operator opens that job first.
     const notes = stationNotes.filter(n => n.job_id === j.id);
@@ -28342,14 +28369,52 @@ function stationQueueHtml() {
       </div>
       <div class="sj-go">›</div>
     </button>`;
-  }).join('') : `<div class="empty">Nothing waiting at ${esc(stageName)} right now.</div>`;
+  }).join('') : `<div class="empty">${emptyMsg}</div>`;
+  const tabs = `
+    <div style="display:flex;gap:8px;padding:10px 16px 0;">
+      <button class="btn btn-sm${!searching ? ' btn-primary' : ''}" onclick="stationQueueSetTab('queue')">${esc(stageName)}</button>
+      <button class="btn btn-sm${searching ? ' btn-primary' : ''}" onclick="stationQueueSetTab('search')">&#128269; Job No.</button>
+    </div>`;
+  // inputmode="numeric" is what makes a tablet open its number keypad instead
+  // of the full keyboard; type stays "text" so no spinner or scroll-to-change.
+  const searchBox = searching ? `
+    <div style="padding:12px 16px;">
+      <input type="text" id="station-queue-search-input" inputmode="numeric" pattern="[0-9]*"
+             value="${esc(stationQueueSearch)}" placeholder="Job number\u2026"
+             oninput="stationQueueSearchInput(this.value)"
+             style="width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-size:20px;font-weight:700;letter-spacing:0.05em;text-align:center;">
+    </div>` : '';
   return `
     <div class="station-head">
       <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stationStageBanner(stIdx)}
+    ${tabs}
+    ${searchBox}
     <div class="station-queue">${rows}</div>`;
+}
+function stationQueueSetTab(t) {
+  stationQueueTab = t;
+  if (t !== 'search') stationQueueSearch = '';
+  stationRender();
+  if (t === 'search') stationQueueFocusSearch();
+}
+function stationQueueSearchInput(v) {
+  // Digits only, whatever the device sends - a stray letter would just make
+  // the search fail silently.
+  stationQueueSearch = String(v || '').replace(/\D/g, '');
+  stationRender();
+  stationQueueFocusSearch();
+}
+// stationRender() replaces the whole screen, so the box has to be re-focused
+// after every keystroke or the keypad closes on the first digit.
+function stationQueueFocusSearch() {
+  const el = document.getElementById('station-queue-search-input');
+  if (!el) return;
+  el.focus();
+  const len = el.value.length;
+  try { el.setSelectionRange(len, len); } catch (e) { /* some mobile keyboards refuse */ }
 }
 
 // Manager station screen — not scoped to a stage. Tabs across every
@@ -29839,6 +29904,7 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_manual_job_card_consumption', type: 'tab' },
   { key: 'rpt_jobs_report',                 type: 'tab' },
   { key: 'rpt_production_report',           type: 'tab' },
+  { key: 'rpt_job_number_register',         type: 'tab' },
   { key: 'rpt_daily_production_report',     type: 'tab' },
   { key: 'rpt_jobs_archive',                type: 'tab' },
   { key: 'rpt_imports_archive',             type: 'tab' },

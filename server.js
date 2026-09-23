@@ -400,6 +400,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
   rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_production_report:           { label: 'Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  // Its own row rather than riding on the Jobs Report: this one accounts for
+  // deleted and never-used job numbers, which is an audit question, not a
+  // production one. Starts matching the Jobs Report so nobody loses access on
+  // upgrade; tighten it from the Access Register if it should be narrower.
+  rpt_job_number_register:         { label: 'Job Number Register — every job card number and what became of it', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_daily_production_report:     { label: 'Daily Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_jobs_archive:                { label: 'Jobs Archive', levels: { admin: 'view', ceo: 'view' } },
   rpt_imports_archive:             { label: 'Imports Archive', levels: { admin: 'view', ceo: 'view' } },
@@ -3777,7 +3782,7 @@ function jobNumberReusable(id, { hasRow, actions, watermark, seqTop }) {
 //   gone     - the job existed and was destroyed (who and when, from the audit log)
 //   unused   - no job ever held this number (a creation that failed, or one
 //              from before the audit log; the failure reason when we have it)
-app.get('/api/reports/job-numbers', requirePermission('rpt_jobs_report', 'view'), async (req, res) => {
+app.get('/api/reports/job-numbers', requirePermission('rpt_job_number_register', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
