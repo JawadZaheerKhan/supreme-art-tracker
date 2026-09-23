@@ -7428,6 +7428,72 @@ function importOpenItem(id) {
   window.scrollTo(0, 0);
 }
 
+// The reverse hop: the Current Balance Summary's yellow Import pill opens
+// the Imports page showing exactly those booked shipments, flashed, with a
+// bar back to the report - the mirror image of the report-to-Inventory
+// jump above. impReturn holds the Imports page's own filters so Back (or
+// wandering off to another report group) puts them back untouched.
+let impReturn = null;
+function impClearReturn() {
+  if (!impReturn) return;
+  Object.assign(importsPageState, impReturn.filters);
+  impReturn = null;
+}
+function renderImpReturnBar() {
+  const bar = document.getElementById('imp-return-bar');
+  if (!bar) return;
+  if (!impReturn) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  bar.style.display = 'block';
+  bar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
+      <button class="btn btn-sm" onclick="impReturnToReport()">&#8592; Back to Current Balance Summary</button>
+      <span style="font-size:12px;color:var(--text2);">Showing the pending import${impReturn.ids.length === 1 ? '' : 's'} for <b style="color:var(--text);">${esc(impReturn.label)}</b>, opened from that report.</span>
+    </div>`;
+}
+function impReturnToReport() {
+  const back = impReturn;
+  impClearReturn();                       // filters restored before we leave
+  if (!back) return;
+  openReportsGroup('stocks-group', 'inventory-report');
+  requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
+}
+function irOpenImports(i) {
+  const row = (invReportState._rows || [])[i];
+  const ids = (row && row.importIds) || [];
+  if (!ids.length || !hasPerm('imports_tab_access', 'view')) return;
+  impReturn = {
+    filters: { ...importsPageState },
+    ids: ids.slice(),
+    label: [row.paperType, row.size, row.gsm ? row.gsm + ' gsm' : '', row.isOffcut ? 'offcut' : '', row.brand]
+      .filter(Boolean).join(' \u00b7 '),
+    scrollY: window.scrollY || 0,
+  };
+  // Narrow the page to where those rows live: the actionable statuses and
+  // that paper type, date filters off. impClearReturn puts it all back.
+  importsPageState.status = 'pending';
+  importsPageState.paperType = row.paperType || '';
+  importsPageState.expectedDate = '';
+  importsPageState.bookedDate = '';
+  openReportsGroup('imports-group');
+  renderImportsPage();
+  loadImports().then(() => {
+    renderImportsTable();
+    // Flash every matched row and bring the first into view.
+    let first = null;
+    for (const id of ids) {
+      const el = document.querySelector(`tr[data-imp-row="${id}"]`);
+      if (!el) continue;
+      if (!first) first = el;
+      el.classList.remove('cv-tile-jump-flash');
+      void el.offsetWidth;
+      el.classList.add('cv-tile-jump-flash');
+      setTimeout(() => el.classList.remove('cv-tile-jump-flash'), 1600);
+    }
+    if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  window.scrollTo(0, 0);
+}
+
 function setInvFilter(v)      { invFilterText  = v; renderInventory(); }
 function setInvTypeFilter(v)   { invFilterType   = v; renderInventory(); }
 function setInvSizeFilter(v)   { invFilterSize   = v; renderInventory(); }
@@ -10912,6 +10978,7 @@ function buildInventoryReportRows() {
       unit:       packetUnitLabel(g.rep.paper_type),
       consumedPkts: g.consumedSheets / ps,
       importPkts,
+      importIds: matchedImports.map(im => im.id),   // the pill's click targets
     };
   });
   // Sort: paper type → gsm (numeric) → size (numeric) → fresh-before-offcut → brand/supplier.
@@ -10974,8 +11041,11 @@ function renderInventoryReport() {
   // lemon-yellow pill as the Record Delivery button, so "incoming stock"
   // reads as one consistent color language across the app.
   const importPill = (n) => `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:700;padding:2px 8px;border-radius:10px;">${fmtPkts(n, {keepZero:true})}</span>`;
-  const importCell   = (r) => r.importPkts
-    ? `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received">${importPill(r.importPkts)}</td>`
+  const canJumpImports = hasPerm('imports_tab_access', 'view');
+  const importCell   = (r, i) => r.importPkts
+    ? ((canJumpImports && (r.importIds || []).length)
+        ? `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received. Click to open it on the Imports page."><span onclick="event.stopPropagation(); irOpenImports(${i})" style="cursor:pointer;">${importPill(r.importPkts)}</span></td>`
+        : `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received">${importPill(r.importPkts)}</td>`)
     : `<td style="padding:6px 8px;text-align:right;color:var(--text3);">—</td>`;
   const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
   const canJump = tabAllowed('inventory');
@@ -11023,7 +11093,7 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
             <td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>
             ${consumedCell(r)}
-            ${importCell(r)}
+            ${importCell(r, i)}
           </tr>`;
         }).join('')}
       </tbody>
@@ -12026,6 +12096,7 @@ function renderImportsPage() {
   if (!pane) return;
   const paperOpts  = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   pane.innerHTML = `
+    <div id="imp-return-bar" style="display:none;"></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Imports</h2>
       <span style="color:var(--text2);font-size:12px;">Booked-but-not-arrived shipments.</span>
@@ -12064,6 +12135,7 @@ function renderImportsPage() {
     </div>
     <div id="imports-table" style="font-size:13px;color:var(--text2);">Loading…</div>
   `;
+  renderImpReturnBar();
 }
 
 function setImportsFilter(key, value) {
@@ -16645,6 +16717,8 @@ async function emptyTrash() {
 // to a specific report (see invReturnToReport), so the return trip doesn't
 // detour through Stock In and refetch it on the way.
 function openReportsGroup(groupId, pane) {
+  // A jump's import-page filters must not outlive the visit.
+  if (groupId !== 'imports-group') impClearReturn();
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'none';
   document.querySelectorAll('#reports-mode .reports-group').forEach(g => {
@@ -16661,6 +16735,7 @@ function openReportsGroup(groupId, pane) {
 
 // Return to the 3-card landing — hides every group.
 function exitReportsGroup() {
+  impClearReturn();
   srResetColFilters();
   const landing = document.getElementById('reports-landing');
   if (landing) landing.style.display = 'block';
