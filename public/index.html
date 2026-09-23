@@ -10324,15 +10324,23 @@ function buildSummaryBuckets(from, to, granularity) {
 //   both     — one row per (brand, supplier) combination — both columns visible
 //   ignore   — collapse to paper/size/gsm/fresh-offcut only, NO brand/supplier columns
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
-let invReportState = { period: '', groupBy: 'ignore', paperType: '', search: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
+let invReportState = { period: 'all', groupBy: 'ignore', paperType: '', search: '', includeOffcuts: true, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
+// This report gets its own period picker instead of the shared
+// reportPeriodOptions list. A stock position is only ever "now" or "as at a
+// past date": Today / This Week / This Month described a movement window,
+// which here just hid every paper that happened not to move in it.
+//   all    - the live balance, every item
+//   custom - the balance as it stood at the END of the chosen range
+const IR_PERIODS = [['all', 'All Time'], ['custom', 'Custom range\u2026']];
+const irPeriodOptions = (cur) => IR_PERIODS
+  .map(([v, l]) => `<option value="${v}"${cur === v ? ' selected' : ''}>${l}</option>`).join('');
 
 function openInventoryReport() {
   const pane = document.getElementById('rt-inventory-report');
   if (!pane) return;
-  if (!invReportState.period) invReportState.period = 'today';           // first open: today's movement
-  if (invReportState.period !== 'custom') {                              // re-applied every open so "Today" stays today
-    const r = periodToDateRange(invReportState.period);
-    invReportState.from = r.from; invReportState.to = r.to;
+  if (invReportState.period !== 'custom') {                              // All Time - live balance, no dates
+    invReportState.period = 'all';
+    invReportState.from = ''; invReportState.to = '';
   }
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
@@ -10369,7 +10377,7 @@ function openInventoryReport() {
       </div>
       <div>
         <div class="dash-flbl">Period</div>
-        <select class="filter" id="ir-period" onchange="setIRPeriod(this.value)">${reportPeriodOptions(invReportState.period)}</select>
+        <select class="filter" id="ir-period" onchange="setIRPeriod(this.value)">${irPeriodOptions(invReportState.period)}</select>
       </div>
       <div id="ir-custom-wrap" style="display:${invReportState.period==='custom'?'flex':'none'};gap:14px;">
         <div>
@@ -10408,7 +10416,7 @@ function openInventoryReport() {
     <div id="ir-content"></div>
   `;
   renderInventoryReport();
-  refreshIRActiveItemIds().then(renderInventoryReport);   // narrow to items that moved in the chosen period
+  refreshIRAsOfBalances().then(renderInventoryReport);    // rewind balances when a past range is selected
   loadIRPendingImports();
 }
 // Pending imports so the report can flag "this item has stock on the way"
@@ -10456,40 +10464,54 @@ async function setIRPeriod(v) {
   invReportState.period = v;
   const wrap = document.getElementById('ir-custom-wrap');
   if (wrap) wrap.style.display = v === 'custom' ? 'flex' : 'none';
-  if (v !== 'custom') {
-    const r = periodToDateRange(v);
-    invReportState.from = r.from; invReportState.to = r.to;
-    const f = document.getElementById('ir-from'); if (f) f.value = r.from;
-    const t = document.getElementById('ir-to');   if (t) t.value = r.to;
+  if (v !== 'custom') {                                  // All Time - back to the live balance
+    invReportState.from = ''; invReportState.to = '';
+    const f = document.getElementById('ir-from'); if (f) f.value = '';
+    const t = document.getElementById('ir-to');   if (t) t.value = '';
   }
-  await refreshIRActiveItemIds(); renderInventoryReport();
+  await refreshIRAsOfBalances(); renderInventoryReport();
 }
-async function setIRFrom(v)      { invReportState.from = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
-async function setIRTo(v)        { invReportState.to   = v || '';     await refreshIRActiveItemIds(); renderInventoryReport(); }
-// When a date range is set, fetch transactions in that window once and
-// cache the set of item ids that had any movement in the period.
-// Report rendering then narrows the inventory to that set. Cleared when
-// both fields are empty so the report defaults back to showing every item.
-async function refreshIRActiveItemIds() {
-  const { from, to } = invReportState;
-  if (!from && !to) { invReportState._activeItemIds = null; return; }
-  const params = new URLSearchParams();
-  if (from) params.set('from', from);
-  if (to)   params.set('to',   to);
+async function setIRFrom(v)      { invReportState.from = v || '';     await refreshIRAsOfBalances(); renderInventoryReport(); }
+async function setIRTo(v)        { invReportState.to   = v || '';     await refreshIRAsOfBalances(); renderInventoryReport(); }
+// A custom range asks for the balance as it stood at the END of that range,
+// not today's. current_balance is live, so fetch every ledger row dated
+// AFTER the range and rewind each item by its own net change - the same way
+// the Stock Summary works out a past period's closing stock. raw=1 because a
+// BALANCE has to count corrections and reversals too, not just material
+// movement. Left null for All Time (and for a range ending today or later),
+// where the live balance is already the answer.
+async function refreshIRAsOfBalances() {
+  const { period, to } = invReportState;
+  invReportState._asOf = null;
+  invReportState._laterByItem = null;
+  if (period !== 'custom' || !to || to >= localDateISO()) return;
+  const after = new Date(to + 'T00:00:00');
+  after.setDate(after.getDate() + 1);
   try {
-    const txs = await api('GET', '/api/inventory/transactions?' + params.toString());
-    invReportState._activeItemIds = new Set((txs || []).map(t => t.item_id));
+    const txs = await api('GET', '/api/inventory/transactions?raw=1&from=' + localDateISO(after));
+    const later = new Map();
+    for (const t of (txs || [])) later.set(t.item_id, (later.get(t.item_id) || 0) + (parseFloat(t.change) || 0));
+    invReportState._laterByItem = later;
+    invReportState._asOf = to;   // set only on success, so the heading never claims a date it didn't apply
   } catch (e) {
-    console.error('Inventory Report range fetch failed:', e);
-    invReportState._activeItemIds = new Set();
+    console.error('Inventory Report as-at fetch failed:', e);
   }
+}
+// Heading / on-screen note for a past range. All Time has nothing to say -
+// the balance is simply today's.
+function irAsOfText() {
+  return invReportState._asOf ? 'Balance as at ' + fmtDMY(invReportState._asOf) : '';
 }
 
 // Build report rows from the cached `inventory` list. Groups by the key
 // implied by groupBy. is_offcut is always part of the key — fresh and
 // offcut of the same dimensions stay separate so users can see them apart.
 function buildInventoryReportRows() {
-  const { groupBy, paperType, search, includeOffcuts, _activeItemIds, stockLevel, consumption, pendingImports } = invReportState;
+  const { groupBy, paperType, search, includeOffcuts, _laterByItem, stockLevel, consumption, pendingImports } = invReportState;
+  // Every figure below - packets, sheets, weight, out-of-stock, low stock -
+  // is derived from this one balance: live, or rewound to the end of a past
+  // range (see refreshIRAsOfBalances).
+  const balanceOf = (i) => (i.current_balance || 0) - (_laterByItem ? (_laterByItem.get(i.id) || 0) : 0);
   let items = paperType ? inventory.filter(i => i.paper_type === paperType) : inventory.slice();
   if (!includeOffcuts) items = items.filter(i => !i.is_offcut);
   // Free-text search — narrows to a single item (or handful) so the user
@@ -10506,12 +10528,10 @@ function buildInventoryReportRows() {
       String(i.supplier   || '').toLowerCase().includes(q)
     );
   }
-  // Date range narrows to items with at least one movement in [from, to].
-  if (_activeItemIds instanceof Set) items = items.filter(i => _activeItemIds.has(i.id));
-  if (stockLevel === 'out') items = items.filter(i => (i.current_balance || 0) <= 0);
+  if (stockLevel === 'out') items = items.filter(i => balanceOf(i) <= 0);
   if (stockLevel === 'low') items = items.filter(i => {
     const consumed = consumption[i.id] || 0;
-    return consumed > 0 && (i.current_balance || 0) < consumed;
+    return consumed > 0 && balanceOf(i) < consumed;
   });
   const keyOf = (i) => {
     const parts = [i.paper_type, i.size || '', i.gsm || '', i.is_offcut ? 'offcut' : 'fresh'];
@@ -10528,7 +10548,7 @@ function buildInventoryReportRows() {
     const k = keyOf(i);
     if (!groups.has(k)) groups.set(k, { rep: i, totalSheets: 0, consumedSheets: 0, itemCount: 0, brands: new Set(), suppliers: new Set(), itemIds: [] });
     const g = groups.get(k);
-    g.totalSheets += (i.current_balance || 0);
+    g.totalSheets += balanceOf(i);
     g.consumedSheets += (consumption[i.id] || 0);
     g.itemCount++;
     g.itemIds.push(i.id);
@@ -10654,7 +10674,7 @@ function renderInventoryReport() {
   const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
   el.innerHTML = `
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">
-      ${rows.length} row${rows.length===1?'':'s'} &middot; ${total.items} item${total.items===1?'':'s'} &middot;
+      ${irAsOfText() ? `<span style="color:#A32D2D;font-weight:700;">${esc(irAsOfText())}</span> &middot; ` : ''}${rows.length} row${rows.length===1?'':'s'} &middot; ${total.items} item${total.items===1?'':'s'} &middot;
       ${total.sheets.toLocaleString()} sheets total &middot; ${fmtKg(total.weight)} kg total
     </div>
     <div class="report-scroll-wrap">
@@ -10743,7 +10763,7 @@ async function exportInventoryReport() {
                   :                             'Ignoring Brand & Supplier';
   applyReportExcelHeading(ws, header, {
     title: 'CURRENT BALANCE SUMMARY',
-    scope: `${modeLabel} · Paper: ${invReportState.paperType || 'All'} · Offcuts: ${invReportState.includeOffcuts ? 'Included' : 'Excluded'}`,
+    scope: `${modeLabel} · Paper: ${invReportState.paperType || 'All'} · Offcuts: ${invReportState.includeOffcuts ? 'Included' : 'Excluded'}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
     dateText: `Generated: ${fmtDMYT(new Date())}`,
   });
   applyReportExcelCols(ws, header, aoa);
@@ -10887,7 +10907,7 @@ function printInventoryReport() {
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'CURRENT BALANCE SUMMARY',
-        scope: `${modeLabel} · Paper: ${paperType || 'All'} · Offcuts: ${includeOffcuts ? 'Included' : 'Excluded'}`,
+        scope: `${modeLabel} · Paper: ${paperType || 'All'} · Offcuts: ${includeOffcuts ? 'Included' : 'Excluded'}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
         dateText: `Generated: ${fmtDMYT(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
