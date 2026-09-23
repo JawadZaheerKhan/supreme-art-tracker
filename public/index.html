@@ -3128,10 +3128,14 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rpt="rpt_production_report" data-rt="prod-report" onclick="setReportsTab('prod-report')">
           <span class="rsb-icon">&#128202;</span> Production Report
         </button>
+        <button class="rsb-item" data-rpt="rpt_jobs_report" data-rt="job-numbers" onclick="setReportsTab('job-numbers')">
+          <span class="rsb-icon">&#128290;</span> Job Number Register
+        </button>
       </aside>
       <main class="reports-content">
         <div id="rt-jobs-report" class="rt-pane"></div>
         <div id="rt-prod-report" class="rt-pane" style="display:none;"></div>
+        <div id="rt-job-numbers" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -12284,6 +12288,176 @@ const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', c
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
+// ── Job Number Register ──────────────────────────────────────
+// Every job card number ever issued, each accounted for. Job numbers come
+// from a database sequence: it never reuses a value and never gives one back,
+// so a number with no job behind it is normal - what matters is being able to
+// say WHY. This is the sheet to hand an auditor who asks about a gap.
+let jobNumbersState = { rows: [], highest: 0, filter: 'all', loading: false, error: '' };
+const JOB_NUMBER_STATUS = {
+  live:     { label: 'Live',     color: '#166534', bg: 'rgba(22,101,52,0.10)' },
+  archived: { label: 'Archived', color: '#b45309', bg: 'rgba(180,83,9,0.10)' },
+  gone:     { label: 'Deleted',  color: '#A32D2D', bg: 'rgba(163,45,45,0.10)' },
+  unused:   { label: 'Unused',   color: '#6b7280', bg: 'rgba(107,114,128,0.10)' },
+};
+async function openJobNumbers() {
+  const pane = document.getElementById('rt-job-numbers');
+  if (!pane) return;
+  jobNumbersState.loading = true;
+  jobNumbersState.error = '';
+  renderJobNumbers();
+  try {
+    const out = await api('GET', '/api/reports/job-numbers');
+    jobNumbersState.rows = out.rows || [];
+    jobNumbersState.highest = out.highest || 0;
+  } catch (e) {
+    jobNumbersState.error = e.message;
+    jobNumbersState.rows = [];
+  }
+  jobNumbersState.loading = false;
+  renderJobNumbers();
+}
+function setJobNumbersFilter(v) { jobNumbersState.filter = v; renderJobNumbers(); }
+function jobNumbersVisible() {
+  const { rows, filter } = jobNumbersState;
+  if (filter === 'gaps')     return rows.filter(r => r.status === 'gone' || r.status === 'unused');
+  if (filter === 'unused')   return rows.filter(r => r.status === 'unused');
+  if (filter === 'gone')     return rows.filter(r => r.status === 'gone');
+  if (filter === 'archived') return rows.filter(r => r.status === 'archived');
+  return rows;
+}
+function jobNumbersCounts() {
+  const c = { live: 0, archived: 0, gone: 0, unused: 0 };
+  for (const r of jobNumbersState.rows) c[r.status] = (c[r.status] || 0) + 1;
+  return c;
+}
+function renderJobNumbers() {
+  const pane = document.getElementById('rt-job-numbers');
+  if (!pane) return;
+  const { loading, error, highest, filter } = jobNumbersState;
+  const c = jobNumbersCounts();
+  const gaps = c.gone + c.unused;
+  const chip = (key, count) => {
+    const st = JOB_NUMBER_STATUS[key];
+    return `<span style="display:inline-flex;align-items:center;gap:6px;background:${st.bg};color:${st.color};font-weight:700;padding:3px 10px;border-radius:12px;font-size:12px;">${st.label} ${count.toLocaleString()}</span>`;
+  };
+  const filterBtn = (v, label) => `<button class="btn btn-sm${filter === v ? ' btn-primary' : ''}" onclick="setJobNumbersFilter('${v}')">${label}</button>`;
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Job Number Register</h2>
+      <span style="color:var(--text2);font-size:12px;">Every job card number from E-1 to E-${highest || '?'}, and what became of it.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportJobNumbers()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printJobNumbers()">&#128424; Print Report</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+      ${chip('live', c.live)} ${chip('archived', c.archived)} ${chip('gone', c.gone)} ${chip('unused', c.unused)}
+      <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+        ${filterBtn('all', 'All numbers')}${filterBtn('gaps', `Gaps only (${gaps})`)}${filterBtn('gone', 'Deleted')}${filterBtn('unused', 'Unused')}${filterBtn('archived', 'Archived')}
+      </span>
+    </div>
+    <div id="jn-content">${loading ? 'Loading\u2026' : error ? 'Error: ' + esc(error) : jobNumbersTableHtml()}</div>`;
+}
+function jobNumbersTableHtml() {
+  const rows = jobNumbersVisible();
+  if (!rows.length) return '<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">No numbers in this view.</div>';
+  const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
+  const td = 'style="padding:6px 8px;"';
+  const body = rows.map(r => {
+    const st = JOB_NUMBER_STATUS[r.status];
+    return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+      <td ${td} style="padding:6px 8px;font-weight:700;color:#1d4ed8;">E-${r.id}</td>
+      <td ${td}><span style="background:${st.bg};color:${st.color};font-weight:700;padding:2px 9px;border-radius:10px;font-size:12px;">${st.label}</span></td>
+      <td ${td}>${esc(r.name) || '\u2014'}</td>
+      <td ${td}>${esc(r.client) || '\u2014'}</td>
+      <td ${td}>${r.created_at ? fmtDMYT(r.created_at) : '\u2014'}</td>
+      <td ${td}>${esc(r.created_by || '') || '\u2014'}</td>
+      <td ${td}>${r.ended_at ? fmtDMYT(r.ended_at) : '\u2014'}</td>
+      <td ${td}>${esc(r.ended_by || '') || '\u2014'}</td>
+      <td ${td} style="padding:6px 8px;color:var(--text2);">${esc(r.note || '')}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length.toLocaleString()} number${rows.length===1?'':'s'} shown</div>
+    <div class="report-scroll-wrap">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);">
+        <th ${th}>Job No.</th><th ${th}>Status</th><th ${th}>Name</th><th ${th}>Company</th>
+        <th ${th}>Created</th><th ${th}>Created By</th><th ${th}>Ended</th><th ${th}>Ended By</th><th ${th}>What happened</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    </div>`;
+}
+// Labels shared by the screen, the print-out and the spreadsheet so the three
+// can never tell an auditor different things.
+const JOB_NUMBER_HEADER = ['Job No.', 'Status', 'Name', 'Company', 'Created', 'Created By', 'Ended', 'Ended By', 'What happened'];
+function jobNumbersScope() {
+  const c = jobNumbersCounts();
+  const f = { all: 'All numbers', gaps: 'Gaps only', gone: 'Deleted only', unused: 'Unused only', archived: 'Archived only' }[jobNumbersState.filter] || 'All numbers';
+  return `${f} \u00b7 Live: ${c.live} \u00b7 Archived: ${c.archived} \u00b7 Deleted: ${c.gone} \u00b7 Unused: ${c.unused}`;
+}
+function jobNumbersRow(r) {
+  return ['E-' + r.id, JOB_NUMBER_STATUS[r.status].label, r.name || '', r.client || '',
+          r.created_at ? fmtDMYT(r.created_at) : '', r.created_by || '',
+          r.ended_at ? fmtDMYT(r.ended_at) : '', r.ended_by || '', r.note || ''];
+}
+async function exportJobNumbers() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const rows = jobNumbersVisible();
+  if (!rows.length) { notify('Nothing to export.'); return; }
+  const aoa = reportExcelAoa(JOB_NUMBER_HEADER);
+  for (const r of rows) aoa.push(jobNumbersRow(r));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, JOB_NUMBER_HEADER, {
+    title: 'JOB NUMBER REGISTER',
+    scope: jobNumbersScope(),
+    dateText: `Generated: ${fmtDMYT(new Date())}`,
+  });
+  applyReportExcelCols(ws, JOB_NUMBER_HEADER, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Job Numbers');
+  XLSX.writeFile(wb, `supreme-art-job-numbers-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+function printJobNumbers() {
+  const rows = jobNumbersVisible();
+  if (!rows.length) { notify('Nothing to print.'); return; }
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const body = rows.map(r => {
+    const st = JOB_NUMBER_STATUS[r.status];
+    const cells = jobNumbersRow(r).map((v, i) => i === 1
+      ? `<td ${tdL}><span style="color:${st.color};font-weight:bold;">${esc(v)}</span></td>`
+      : `<td ${tdL}>${esc(v) || '\u2014'}</td>`).join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  const html = `
+    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'JOB NUMBER REGISTER',
+        scope: jobNumbersScope(),
+        dateText: `Generated: ${fmtDMYT(new Date())}`,
+        note: 'Job numbers are issued in sequence and are never reused. A number with no job card behind it is accounted for below.',
+      })}</div>
+      <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#f7f1ea;">${JOB_NUMBER_HEADER.map(h => `<th ${tdL}>${esc(h)}</th>`).join('')}</tr>
+        ${body}
+      </table>
+    </div>`;
+  // Same print path every other report uses: render into #print-area, let the
+  // logo load, then print.
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+
 function openJobsReportPage() {
   if (!rptAllowed('rpt_jobs_report|rpt_production_report')) { notify('Jobs Report is not available for your role.'); return; }
   openReportsGroup('jobs-group');
@@ -16149,7 +16323,7 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -16162,6 +16336,7 @@ function setReportsTab(name) {
   if (name === 'inventory-report') openInventoryReport();
   if (name === 'jobs-report')     openJobsReport();
   if (name === 'prod-report')     openProductionReport();
+  if (name === 'job-numbers')     openJobNumbers();
   if (name === 'trash-jobs')         loadTrashAndRender('jobs');
   if (name === 'trash-imports')      loadTrashAndRender('imports');
   if (name === 'trash-transactions') loadTrashAndRender('transactions');

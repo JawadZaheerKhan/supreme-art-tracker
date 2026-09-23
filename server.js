@@ -3736,6 +3736,105 @@ async function aggregateProductionRange(sql, { from, to }) {
   return { byMachineDaily: byMachineDailyArr, byOperatorDaily: byOperatorDailyArr };
 }
 
+// JOB NUMBER REGISTER - one row per job card number ever issued, from E-1 to
+// the highest the sequence has handed out, each one accounted for. Job numbers
+// come from a Postgres sequence: it never reuses a value and never gives one
+// back, so the only way to prove nothing has gone astray is to be able to say
+// what became of every number. Four outcomes:
+//   live     - the job exists
+//   archived - the job exists, in the Archive, restorable
+//   gone     - the job existed and was destroyed (who and when, from the audit log)
+//   unused   - no job ever held this number (a creation that failed, or one
+//              from before the audit log; the failure reason when we have it)
+app.get('/api/reports/job-numbers', requirePermission('rpt_jobs_report', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT id, name, client, jobcode, created_at, deleted_at, deleted_by FROM jobs ORDER BY id ASC`;
+    // The sequence knows about numbers that no longer have a row - that is
+    // the whole point. Without it the register would stop at the highest
+    // SURVIVING job and quietly hide a gap at the very top.
+    const seq = await sql`SELECT last_value FROM jobs_id_seq`;
+    const audit = await sql`
+      SELECT entity_id, action, user_email, created_at, summary
+      FROM audit_log
+      WHERE entity_type = 'job'
+        AND action IN ('job.create', 'job.delete', 'job.restore', 'job.purge', 'job.auto_purge', 'job.create_failed')
+      ORDER BY id ASC`;
+    const byId = new Map();
+    for (const j of rows) byId.set(j.id, j);
+    const trail = new Map();
+    for (const a of audit) {
+      if (!trail.has(a.entity_id)) trail.set(a.entity_id, {});
+      trail.get(a.entity_id)[a.action] = a;     // last one of each kind wins
+    }
+    const seqTop = seq && seq[0] ? parseInt(seq[0].last_value, 10) : 0;
+    const maxRow = rows.length ? rows[rows.length - 1].id : 0;
+    const highest = Math.max(seqTop || 0, maxRow);
+    const out = [];
+    for (let id = 1; id <= highest; id++) {
+      const job = byId.get(id);
+      const t = trail.get(id) || {};
+      const created = t['job.create'];
+      if (job) {
+        out.push({
+          id, status: job.deleted_at ? 'archived' : 'live',
+          name: job.name || '', client: job.client || '', jobcode: job.jobcode || '',
+          created_at: job.created_at || (created ? created.created_at : null),
+          created_by: created ? created.user_email : null,
+          ended_at: job.deleted_at || null, ended_by: job.deleted_by || null,
+          note: job.deleted_at ? 'In the Archive - can be restored' : '',
+        });
+        continue;
+      }
+      const purged = t['job.purge'], auto = t['job.auto_purge'], failed = t['job.create_failed'];
+      const archived = t['job.delete'];
+      if (created || purged || auto) {
+        const end = purged || auto || null;
+        // No purge recorded is the normal shape for anything destroyed before
+        // 23/09/2026, when the auto-purge started writing entries. If it was
+        // archived more than the retention window ago, that purge is what
+        // happened to it and the register should say so rather than imply the
+        // app lost the row. Inside the window, it really is unexplained.
+        const archivedDaysAgo = archived
+          ? Math.floor((Date.now() - new Date(archived.created_at).getTime()) / 86400000)
+          : null;
+        const inferredAutoPurge = !end && archivedDaysAgo !== null && archivedDaysAgo >= TRASH_RETENTION_DAYS;
+        out.push({
+          id, status: 'gone',
+          name: '', client: '', jobcode: '',
+          created_at: created ? created.created_at : null,
+          created_by: created ? created.user_email : null,
+          ended_at: end ? end.created_at : (archived ? archived.created_at : null),
+          ended_by: end
+            ? (auto && !purged ? 'system (30-day purge)' : end.user_email)
+            : (archived ? archived.user_email : null),
+          note: end
+            ? (purged ? 'Permanently deleted' : `Auto-purged after ${TRASH_RETENTION_DAYS} days`)
+            : inferredAutoPurge
+              ? `Archived ${archivedDaysAgo} days ago, then auto-purged - purges were not recorded before 23/09/2026`
+              : archived
+                ? 'Archived, and the row is gone although the retention window has not passed - worth investigating'
+                : 'The job row is gone but no deletion was recorded - worth investigating',
+        });
+        continue;
+      }
+      out.push({
+        id, status: 'unused',
+        name: '', client: '', jobcode: '',
+        created_at: null, created_by: null, ended_at: failed ? failed.created_at : null, ended_by: null,
+        note: failed
+          ? `Job card failed to save - ${failed.summary || 'no reason recorded'}`
+          : 'No job card ever held this number',
+      });
+    }
+    res.json({ highest, rows: out });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/reports/production', requirePermission('rpt_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
@@ -4343,6 +4442,13 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
         }
       }
     }
+    // Validate BEFORE the INSERT. name and client are NOT NULL, so a blank
+    // one used to reach Postgres and fail there - and by then the job number
+    // had already been handed out by the sequence and could never be given
+    // back. Rejecting here costs the caller a 400 and costs the numbering
+    // nothing. (See the catch below for the case an INSERT still fails.)
+    if (!name)   return res.status(400).json({ error: 'Job name is required.' });
+    if (!client) return res.status(400).json({ error: 'Company is required.' });
     // Newly-created jobs land in issuance_status='new' — they show up
     // in the "New Jobs" tab for the Production Manager (or Admin) to
     // review, and are NOT visible to the store keeper yet. Clicking
@@ -4359,9 +4465,34 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     res.json(job);
   } catch (err) {
     console.error(err);
+    // A failed INSERT still consumes its sequence value - Postgres sequences
+    // are not transactional, so the number is spent and can never be issued
+    // again. Nothing can give it back, but it must not vanish unexplained:
+    // read which number was taken and, if no job holds it, write that down.
+    // Guarded so a failure in here can never mask the original error.
+    try { await recordBurnedJobNumber(getDb(), req, err); } catch (e2) { console.error('Burned-number log failed:', e2.message); }
     res.status(500).json({ error: err.message });
   }
 });
+
+// Which job number did a failed creation consume, and did it really consume
+// one? last_value is the most recent value the sequence handed out; if a job
+// already holds it then the failure happened BEFORE nextval (a validation
+// error, say) and no number was burned, so nothing is written.
+async function recordBurnedJobNumber(sql, req, err) {
+  const seq = await sql`SELECT last_value FROM jobs_id_seq`;
+  const burned = seq && seq[0] ? parseInt(seq[0].last_value, 10) : null;
+  if (!Number.isFinite(burned)) return;
+  const held = await sql`SELECT 1 FROM jobs WHERE id = ${burned}`;
+  if (held.length) return;                    // the sequence never advanced
+  const already = await sql`SELECT 1 FROM audit_log WHERE entity_type = 'job' AND entity_id = ${burned} AND action = 'job.create_failed'`;
+  if (already.length) return;                 // one entry per number is enough
+  await logAudit(sql, req, {
+    action: 'job.create_failed', entityType: 'job', entityId: burned,
+    summary: `Job creation failed - number E-${burned} was consumed and can never be used. Reason: ${err && err.message ? err.message : 'unknown'}`,
+    metadata: { error: err && err.message ? err.message : null },
+  });
+}
 
 // Flip a job from New Jobs into the production queue. Only meaningful
 // for status='new'; anything else is idempotent-refused. After this
