@@ -14583,7 +14583,17 @@ function prodDayDetailBlock(sec, row) {
   // sheets beside the base count, when any entry carries a multiplier.
   const mult = (typeof printedSheetsWithMultiplier === 'function') ? printedSheetsWithMultiplier(row) : null;
   const sheetsVal = row.units !== undefined ? fmtN(row.units) : fmtN(row.sheets);
-  const sheetsHtml = sheetsVal + (mult ? ` <span style="color:#166534;font-weight:700;">(${mult.toLocaleString()})</span>` : '');
+  // When the green figure shows, spell out how it was reached - the same
+  // per-job lines the green dot's popup gives on the Daily Production tab:
+  // each entry as "base x mult (E-nnn, total ...)", plain passes as "x 1".
+  let multLines = '';
+  if (mult && Array.isArray(row.print_breakdown) && row.print_breakdown.length) {
+    multLines = row.print_breakdown.map(e => {
+      const { base, mult: m } = parseQtyMult(e && e.qty);
+      return `<div style="font-size:12px;color:var(--text2);margin-top:2px;"><b style="color:var(--text);">${base.toLocaleString()}</b> &times; ${m} <span>(E-${esc(String(e.job_id))}${m > 1 ? `, total ${(base * m).toLocaleString()}` : ''})</span></div>`;
+    }).join('');
+  }
+  const sheetsHtml = sheetsVal + (mult ? ` <span style="color:#166534;font-weight:700;">(${mult.toLocaleString()})</span>` : '') + multLines;
   const jobsHtml = row.jobs ? esc(String(row.jobs)) + (row.jobs_count ? ` <span style="color:var(--text2);">(${row.jobs_count} job${row.jobs_count === 1 ? '' : 's'})</span>` : '') : '';
   const fields = [
     ['Operators', esc(String(row.operators || ''))],
