@@ -4509,6 +4509,12 @@ function canAddOffcut()      { return isSuperAdmin() || hasPerm('inv_btn_add_off
 // otherwise read-only. Every delivery button / form uses this instead of
 // canWriteJobs.
 function canRecordDelivery() { return isSuperAdmin() || hasPerm('job_btn_record_delivery'); }
+// Filling the Record Delivery form is a lesser right than pressing the button:
+// finance types the invoicing detail, the PM records the shipment later. Anyone
+// who can record can obviously also type into the form.
+function canFillDeliveryDetails() {
+  return isSuperAdmin() || hasPerm('job_btn_delivery_details') || canRecordDelivery();
+}
 function canWriteInventory() { return isSuperAdmin() || INV_WRITE_ROWS.some(k => hasPerm(k)); }
 // Station is a PIN-gated shop-floor terminal. CEO gets in like everyone
 // else with a PIN and sees the whole queue + update screens for that
@@ -22042,6 +22048,13 @@ function deliveriesSection(j, opts) {
 // E-FBR / MSI / Invoice No., plus Rate & Sale Tax on the record form. Shown instead of the
 // classic table only to holders of job_btn_pricing (see deliveriesSection).
 function deliveriesSectionFinance(j, opts) {
+  // What has already been typed into this job's form but not yet recorded.
+  // A draft value always wins over the normal prefill - it is what a person
+  // put there on purpose.
+  const _draft = (j && j.delivery_draft && typeof j.delivery_draft === 'object') ? j.delivery_draft : {};
+  const draftVal = (key, fallback) => (_draft[key] !== undefined && _draft[key] !== null && _draft[key] !== '')
+    ? _draft[key] : fallback;
+  const draftSave = (key) => ` onchange="saveDeliveryDraft(${j.id}, '${key}', this.value)"`;
   if (!j || !j.id) return '';
   // Station Manager flow (see stationManagerOpenJobCard): the shared
   // Station terminal's browser session usually isn't logged in with a
@@ -22080,11 +22093,13 @@ function deliveriesSectionFinance(j, opts) {
   // Pasting when the operator has recorded some pasted cartons but
   // hasn't advanced yet — those cartons are physically ready to ship
   // even though the job's still officially at Pasting.
-  const canAddDelivery = canDeliverNow(j) && !isDelivered && (
-    managerMode
-      ? !!j.is_shade_card
-      : (typeof canRecordDelivery === 'function' && canRecordDelivery())
-  );
+  // The form and the button are separate rights now: finance fills in the
+  // invoicing detail and it saves itself, the PM presses Record Delivery.
+  const canRecordNow = managerMode
+    ? !!j.is_shade_card
+    : (typeof canRecordDelivery === 'function' && canRecordDelivery());
+  const canFillNow = !managerMode && typeof canFillDeliveryDetails === 'function' && canFillDeliveryDetails();
+  const canAddDelivery = canDeliverNow(j) && !isDelivered && (canRecordNow || canFillNow);
   const isAdminUser = typeof hasPerm === 'function' && hasPerm('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
@@ -22207,53 +22222,56 @@ function deliveriesSectionFinance(j, opts) {
         <div style="display:grid;grid-template-columns:${isShadeCard ? '1fr 1fr' : '1fr 1fr 1fr 1fr 1fr'};gap:8px;align-items:end;">
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${countLabel} *</label>
-            <input type="number" id="deliv-cartons" min="1" step="any" value="${cartonsPrefill}" placeholder="" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="number" id="deliv-cartons" min="1" step="any" value="${esc(String(draftVal('cartons', cartonsPrefill)))}"${draftSave('cartons')} placeholder="" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           ${isShadeCard ? '' : `
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
-            <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saved when you press Record Delivery; clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+            <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', cartonsPackets > 0 ? cartonsPackets : '')))}"${draftSave('cartons_packets')} data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saved when you press Record Delivery; clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
           </div>
           `}
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
-            <input type="date" id="deliv-date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="date" id="deliv-date" value="${esc(String(draftVal('date', localDateISO())))}"${draftSave('date')} style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           ${isShadeCard ? '' : `<div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
-            <input type="text" id="deliv-po" value="${esc(j.ref || '')}" placeholder="" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-po" value="${esc(String(draftVal('po_no', j.ref || '')))}"${draftSave('po_no')} placeholder="" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
-            <input type="text" id="deliv-batch" value="${esc(j.bno || '')}" placeholder="" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-batch" value="${esc(String(draftVal('batch_no', j.bno || '')))}"${draftSave('batch_no')} placeholder="" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>`}
         </div>
         <div style="display:grid;grid-template-columns:${isShadeCard ? '1fr auto' : (showPricingFields ? '1fr 1fr 1fr 0.8fr 0.7fr auto' : '1fr 1fr 1fr auto')};gap:8px;align-items:end;margin-top:8px;">
           ${isShadeCard ? '' : `
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">E-FBR No.</label>
-            <input type="text" id="deliv-fbr" placeholder="" title="FBR electronic sales tax invoice number for this shipment." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-fbr" value="${esc(String(draftVal('efbr_no', '')))}"${draftSave('efbr_no')} placeholder="" title="FBR electronic sales tax invoice number for this shipment." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">MSI No.</label>
-            <input type="text" id="deliv-msi" placeholder="" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="text" id="deliv-msi" value="${esc(String(draftVal('msi_no', '')))}"${draftSave('msi_no')} placeholder="" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           `}
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
-            <input type="text" id="deliv-notes" ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : ''}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
+            <input type="text" id="deliv-notes" value="${esc(String(isShadeCard ? '' : draftVal('invoice_no', '')))}"${isShadeCard ? '' : draftSave('invoice_no')} ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : ''}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
           </div>
           ${showPricingFields ? `<div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Rate / Carton</label>
-            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(rateFieldPrefill))}" placeholder="" title="Pre-filled from the Product Rate tab's rate for this product. Type a different rate for just this delivery and it shows yellow in the history — the product's own rate and every other shipment stay as they are." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="number" id="deliv-rate" min="0" step="any" value="${esc(String(draftVal('rate', rateFieldPrefill)))}"${draftSave('rate')} placeholder="" title="Pre-filled from the Product Rate tab's rate for this product. Type a different rate for just this delivery and it shows yellow in the history — the product's own rate and every other shipment stay as they are." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Sale Tax %</label>
-            <input type="number" id="deliv-tax" min="0" step="any" value="${esc(String(taxFieldPrefill))}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+            <input type="number" id="deliv-tax" min="0" step="any" value="${esc(String(draftVal('tax_pct', taxFieldPrefill)))}"${draftSave('tax_pct')} style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
           </div>` : ''}
-          <button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>
+          ${canRecordNow
+            ? `<button type="button" class="btn btn-primary" style="background:#166534;border-color:#166534;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>`
+            : `<div style="font-size:11px;color:var(--text2);line-height:1.35;">Saved as you type.<br>Recording the delivery is done by whoever holds that button.</div>`}
+          <div id="deliv-draft-state" style="font-size:11px;font-weight:700;margin-top:4px;opacity:0;transition:opacity 0.25s;">&nbsp;</div>
         </div>
-      </div>${j.linked_job_id ? `<div style="margin-top:8px;">
+      </div>${(j.linked_job_id && canRecordNow) ? `<div style="margin-top:8px;">
         <button type="button" class="btn btn-sm" style="background:#5b21b6;border-color:#5b21b6;color:#fff;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>
       </div>` : ''}`
     : (stageIdx < 5
@@ -22988,6 +23006,53 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
     if (document.getElementById('sr-content')) renderSaleReport();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// The Record Delivery form saves itself. Whoever fills it in never presses
+// anything: every field writes straight to the job's delivery_draft, so the
+// half-filled form survives closing the card, and the person who actually
+// records the shipment opens it already filled in.
+//
+// Deliberately does NOT re-render the card. A draft changes no total, no stage
+// and no money figure, so there is nothing on the card to redraw - and a
+// rebuild here would throw the typist back to the top of the card between
+// every field, which is exactly the thing that had to be fixed for the
+// recorded-delivery rows.
+const DELIVERY_DRAFT_INPUTS = [
+  ['deliv-cartons',         'cartons'],
+  ['deliv-cartons-packets', 'cartons_packets'],
+  ['deliv-date',            'date'],
+  ['deliv-po',              'po_no'],
+  ['deliv-batch',           'batch_no'],
+  ['deliv-fbr',             'efbr_no'],
+  ['deliv-msi',             'msi_no'],
+  ['deliv-notes',           'invoice_no'],
+  ['deliv-rate',            'rate'],
+  ['deliv-tax',             'tax_pct'],
+];
+async function saveDeliveryDraft(jobId, field, value) {
+  try {
+    const updated = await api('PATCH', `/api/jobs/${jobId}/delivery-draft`, { field, value });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0) jobs[ix] = updated;   // kept in memory; the card is NOT redrawn
+    flashDeliveryDraftSaved('saved');
+  } catch (e) {
+    flashDeliveryDraftSaved('failed: ' + e.message);
+  }
+}
+// A quiet line under the form rather than a toast: this fires on every field,
+// and ten toasts while filling one shipment would be noise.
+let _deliveryDraftFlash = null;
+function flashDeliveryDraftSaved(state) {
+  const el = document.getElementById('deliv-draft-state');
+  if (!el) return;
+  const failed = state !== 'saved';
+  el.textContent = failed ? 'Not saved \u2014 ' + state : 'Saved';
+  el.style.color = failed ? '#A32D2D' : '#166534';
+  el.style.opacity = '1';
+  clearTimeout(_deliveryDraftFlash);
+  // A failure stays up; a success fades, having served its purpose.
+  if (!failed) _deliveryDraftFlash = setTimeout(() => { el.style.opacity = '0'; }, 2000);
 }
 
 // Station Manager equivalent of recordDelivery() — same form (see
@@ -29920,6 +29985,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_new_job',         type: 'button' },
   { key: 'job_btn_stage_forward',   type: 'button' },
   { key: 'job_btn_record_delivery', type: 'button' },
+  { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_delete_delivery', type: 'button' },
   { key: 'job_btn_adjust',          type: 'button' },
   { key: 'job_btn_stickers',        type: 'button' },

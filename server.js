@@ -270,7 +270,7 @@ function getDb() {
 // keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
 // Bumped again to seed the Forms tab rows (forms_tab_access / forms_btn_transfer_note) from the old forms_print defaults.
 // Bumped again to create finance.waste_board_sales, behind the Sale Report's Waste of Board tab.
-const SCHEMA_VERSION = 'v2026-09-22-waste-board-sales';
+const SCHEMA_VERSION = 'v2026-09-23-delivery-draft';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -341,6 +341,12 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing and Finalize as Delivered', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  // Filling the Record Delivery form is separated from pressing the button, so
+  // finance can enter the invoicing detail on a shipment the PM then records.
+  // What is typed saves itself into the job's delivery_draft; only the button
+  // turns it into an actual delivery. Defaults match the button's own roles,
+  // so nothing changes until someone takes the button away from a role.
+  job_btn_delivery_details: { label: 'Delivery details — fill in the Record Delivery fields (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
   // Distinct from the existing wastage_adjustment group above (which also
@@ -1428,6 +1434,11 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rate    NUMERIC`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tax_pct NUMERIC NOT NULL DEFAULT 18`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cartons_packets NUMERIC`;
+    // delivery_draft: what has been typed into the Record Delivery form but
+    // not yet recorded. Finance fills the invoicing detail, the PM presses the
+    // button later - possibly on another machine - so the half-filled form has
+    // to outlive the browser tab. Cleared the moment the delivery is recorded.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS delivery_draft JSONB NOT NULL DEFAULT '{}'::jsonb`;
     await sql`CREATE SCHEMA IF NOT EXISTS finance`;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_rates (
@@ -1697,6 +1708,20 @@ function requireDeliveryWriter(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   if (!canRecordDelivery(req.user)) {
     return res.status(403).json({ error: 'Not allowed — delivery write access required' });
+  }
+  next();
+}
+// Filling in the delivery form is a lesser right than recording the delivery:
+// anyone who can record can obviously also type into the form.
+function canFillDeliveryDetails(user) {
+  return userHasRole(user, 'super_admin')
+      || roleHasPermission(user, 'job_btn_delivery_details')
+      || canRecordDelivery(user);
+}
+function requireDeliveryDetailsWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canFillDeliveryDetails(req.user)) {
+    return res.status(403).json({ error: 'Not allowed — delivery details access required' });
   }
   next();
 }
@@ -6621,6 +6646,40 @@ app.get('/api/shade-card-dc/peek', requireAuth, async (req, res) => {
 // used for deliveries in this shop (1 carton == 1 piece per the owner).
 // delqty stays in sync as the running sum of cartons so the tile's
 // "Delivered Qty" and the client view keep working with no pieces math.
+// One field of the not-yet-recorded delivery form. Saved on every change so
+// whoever fills the form never has to press anything, and whoever records the
+// shipment later opens the card to find it already filled in.
+//
+// A draft is NOT a delivery: it moves no stock, changes no stage and appears
+// in no report. It is only what is sitting in the form.
+const DELIVERY_DRAFT_FIELDS = new Set([
+  'cartons', 'cartons_packets', 'date', 'po_no', 'batch_no',
+  'efbr_no', 'msi_no', 'invoice_no', 'rate', 'tax_pct',
+]);
+app.patch('/api/jobs/:id/delivery-draft', requireDeliveryDetailsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid job id' });
+    const { field, value } = req.body || {};
+    if (!DELIVERY_DRAFT_FIELDS.has(field)) return res.status(400).json({ error: 'Unknown field: ' + field });
+    const text = value === null || value === undefined ? '' : String(value);
+    // An emptied box drops out of the draft rather than storing "", so the
+    // form falls back to its normal prefill instead of showing a blank.
+    const rows = text === ''
+      ? await sql`UPDATE jobs SET delivery_draft = COALESCE(delivery_draft, '{}'::jsonb) - ${field}::text WHERE id = ${id} AND deleted_at IS NULL RETURNING *`
+      : await sql`UPDATE jobs SET delivery_draft = COALESCE(delivery_draft, '{}'::jsonb) || jsonb_build_object(${field}::text, ${text}::text) WHERE id = ${id} AND deleted_at IS NULL RETURNING *`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (!canSeeFinanceData(req.user)) { delete job.rate; delete job.tax_pct; delete job.cartons_packets; }
+    res.json(job);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
@@ -6693,7 +6752,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
              stages      = ${JSON.stringify(stages)},
              log         = ${JSON.stringify(log)},
              rate        = ${nextRate},
-             tax_pct     = ${nextTaxPct}
+             tax_pct     = ${nextTaxPct},
+             delivery_draft = '{}'::jsonb
        WHERE id = ${id}
        RETURNING *
     `;
