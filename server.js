@@ -270,7 +270,7 @@ function getDb() {
 // keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
 // Bumped again to seed the Forms tab rows (forms_tab_access / forms_btn_transfer_note) from the old forms_print defaults.
 // Bumped again to create finance.waste_board_sales, behind the Sale Report's Waste of Board tab.
-const SCHEMA_VERSION = 'v2026-09-23-delivery-draft';
+const SCHEMA_VERSION = 'v2026-09-23-link-sets';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -663,6 +663,17 @@ async function initDb() {
     // joint delivery (1 challan, both jobs' own qty) and to merge their
     // rows in the Jobs Report.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS linked_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL`;
+    // link_group_id: jobs that ship together share one number, so a set can
+    // hold three or four jobs instead of the two a single partner field
+    // allowed. linked_job_id stays alongside it, pointing at one other
+    // member, so everything that already reads it keeps working.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS link_group_id INTEGER`;
+    await sql`CREATE INDEX IF NOT EXISTS jobs_link_group_idx ON jobs(link_group_id)`;
+    // Every existing pair becomes a set of two, named after the lower of the
+    // two ids. Deterministic, so re-running it changes nothing.
+    await sql`
+      UPDATE jobs SET link_group_id = LEAST(id, linked_job_id)
+       WHERE linked_job_id IS NOT NULL AND link_group_id IS NULL`;
     // Stock Groups — named tag shared by multiple job cards for the same
     // product (ongoing reprints). FIFO delivery deducts from oldest first.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stock_group_name TEXT`;
@@ -6882,20 +6893,55 @@ app.post('/api/jobs/:id/link', requirePermission('job_btn_link'), async (req, re
     const target = rows.find(r => r.id === targetId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (!target) return res.status(404).json({ error: 'Target job not found' });
-    if (job.linked_job_id) return res.status(400).json({ error: `Job E-${id} is already linked to E-${job.linked_job_id}. Unlink it first.` });
-    if (target.linked_job_id) return res.status(400).json({ error: `Job E-${targetId} is already linked to E-${target.linked_job_id}. Unlink it first.` });
-    await sql`UPDATE jobs SET linked_job_id = ${targetId} WHERE id = ${id}`;
-    await sql`UPDATE jobs SET linked_job_id = ${id} WHERE id = ${targetId}`;
+    // Linking joins the two jobs' sets together rather than refusing when
+    // either is already linked - that refusal was what capped a set at two.
+    // Whichever set number is lower wins, so linking A to B and B to A land
+    // in the same place and re-linking is harmless.
+    const groupA = job.link_group_id || (job.linked_job_id ? Math.min(job.id, job.linked_job_id) : null);
+    const groupB = target.link_group_id || (target.linked_job_id ? Math.min(target.id, target.linked_job_id) : null);
+    const group = Math.min(...[groupA, groupB, id, targetId].filter(x => Number.isFinite(x) && x > 0));
+    if (groupA && groupB && groupA === groupB) {
+      return res.status(400).json({ error: `Job E-${id} and Job E-${targetId} are already in the same link set.` });
+    }
+    // Pull in every member of both sets, not just the two jobs clicked.
+    await sql`
+      UPDATE jobs SET link_group_id = ${group}
+       WHERE deleted_at IS NULL
+         AND (id = ${id} OR id = ${targetId}
+              OR (${groupA}::int IS NOT NULL AND link_group_id = ${groupA})
+              OR (${groupB}::int IS NOT NULL AND link_group_id = ${groupB}))`;
+    // linked_job_id is kept pointing at one other member so the existing
+    // "linked to E-x" chip and Deliver Linked keep working on a set of two.
+    await syncLinkedJobIds(sql, group);
+    const members = await sql`SELECT id FROM jobs WHERE link_group_id = ${group} AND deleted_at IS NULL ORDER BY id`;
     await logAudit(sql, req, {
       action: 'job.link',
       entityType: 'job',
       entityId: id,
-      summary: `Linked Job E-${id} with Job E-${targetId}`,
+      summary: `Linked Job E-${id} with Job E-${targetId}${members.length > 2 ? ` — link set is now ${members.map(m => 'E-' + m.id).join(', ')}` : ''}`,
+      metadata: { link_group_id: group, members: members.map(m => m.id) },
     });
     const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+
+// Point every member of a set at one other member, so the parts of the app
+// that still read linked_job_id (the "linked to E-x" chip, Deliver Linked)
+// keep working. In a set of two they point at each other, as they always did;
+// in a bigger set each points at the next one round, which is enough for a
+// chip and never claims a set is only two jobs.
+async function syncLinkedJobIds(sql, group) {
+  const members = await sql`SELECT id FROM jobs WHERE link_group_id = ${group} AND deleted_at IS NULL ORDER BY id`;
+  if (members.length < 2) {
+    if (members.length === 1) await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${members[0].id}`;
+    return;
+  }
+  for (let i = 0; i < members.length; i++) {
+    const partner = members[(i + 1) % members.length].id;
+    await sql`UPDATE jobs SET linked_job_id = ${partner} WHERE id = ${members[i].id}`;
+  }
+}
 
 app.post('/api/jobs/:id/unlink', requirePermission('job_btn_link'), async (req, res) => {
   try {
@@ -6905,14 +6951,27 @@ app.post('/api/jobs/:id/unlink', requirePermission('job_btn_link'), async (req, 
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    const partnerId = job.linked_job_id;
-    await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${id}`;
-    if (partnerId) await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${partnerId}`;
+    // Leaving a set takes this job out and leaves the others linked to each
+    // other. A set of two collapses on its own: one member left is not a set.
+    const group = job.link_group_id || null;
+    await sql`UPDATE jobs SET linked_job_id = NULL, link_group_id = NULL WHERE id = ${id}`;
+    let remaining = [];
+    if (group) {
+      remaining = await sql`SELECT id FROM jobs WHERE link_group_id = ${group} AND deleted_at IS NULL ORDER BY id`;
+      if (remaining.length < 2) {
+        await sql`UPDATE jobs SET linked_job_id = NULL, link_group_id = NULL WHERE link_group_id = ${group}`;
+        remaining = [];
+      } else {
+        await syncLinkedJobIds(sql, group);
+      }
+    } else if (job.linked_job_id) {
+      await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${job.linked_job_id}`;
+    }
     await logAudit(sql, req, {
       action: 'job.unlink',
       entityType: 'job',
       entityId: id,
-      summary: `Unlinked Job E-${id}${partnerId ? ' from Job E-' + partnerId : ''}`,
+      summary: `Unlinked Job E-${id}${remaining.length ? ` — link set is now ${remaining.map(m => 'E-' + m.id).join(', ')}` : (job.linked_job_id ? ' from Job E-' + job.linked_job_id : '')}`,
     });
     const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
     res.json(updated[0]);

@@ -6112,7 +6112,8 @@ function renderJobRowCompact(j, opts) {
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
             ${(!_finalizedJobIds.has(j.id) && canLinkJob()) ? (j.linked_job_id
-              ? `<button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Remove the link with Job E-${j.linked_job_id}">&#128279; Unlink</button>`
+              ? `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Add another job to this link set (${esc(linkSetLabel(j))})">&#128279; + Link</button>
+                 <button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Take E-${j.id} out of the link set (${esc(linkSetLabel(j))}) — the others stay linked">&#128279; Unlink</button>`
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
@@ -6511,6 +6512,7 @@ function renderJobCard(j, opts) {
         ${(!_finalizedJobIds.has(j.id) && canLinkJob()) ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
+        ${(!_finalizedJobIds.has(j.id) && canLinkJob() && j.linked_job_id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Add to Link Set</button>` : ''}
         ${canCreateMil() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
         ${canEditJob() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
@@ -12989,6 +12991,7 @@ function buildJobsReportRows() {
     out.push({
       id: j.id,
       idDisplay: 'E-' + j.id,
+      linkGroup: j.link_group_id || null,
       name: j.name || '',
       createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
@@ -13043,58 +13046,14 @@ function buildJobsReportRows() {
     }
     return out;
   };
-  // Merge Linked-Jobs pairs into one combined row — only when BOTH rows
-  // survived the filters above (same date range / client / search). IDs,
-  // PO No., Batch No. are pipe-joined; Challan No. shown once (it's the
-  // whole point — one invoice); PO Qty is ALSO pipe-joined (each job kept
-  // its own PO Qty); Unit Carton Qty / Delivered Qty / Wastage / Packets
-  // are summed; Paper / Machine / Coatings shown once when identical,
-  // pipe-joined when they differ.
-  const byId = new Map(out.map(r => [r.id, r]));
-  const consumed = new Set();
-  const merged = [];
-  const sameOrPipe = (a, b) => (String(a || '') === String(b || '')) ? (a || '') : [a, b].filter(Boolean).join(' | ');
-  for (const r of out) {
-    if (consumed.has(r.id)) continue;
-    const partner = r.linkPartner ? byId.get(r.linkPartner) : null;
-    if (partner && partner.linkPartner === r.id && !consumed.has(partner.id)) {
-      const [lo, hi] = [r, partner].sort((a, b) => a.id - b.id);
-      consumed.add(lo.id); consumed.add(hi.id);
-      merged.push({
-        id: lo.id,
-        idDisplay: `E-${lo.id} | E-${hi.id}`,
-        name: sameOrPipe(lo.name, hi.name),
-        createdAt: lo.createdAt,
-        createdAtRaw: lo.createdAtRaw && hi.createdAtRaw
-          ? (lo.createdAtRaw > hi.createdAtRaw ? lo.createdAtRaw : hi.createdAtRaw)
-          : (lo.createdAtRaw || hi.createdAtRaw),
-        deliveredAt: sameOrPipe(lo.deliveredAt, hi.deliveredAt) || lo.deliveredAt,
-        client: sameOrPipe(lo.client, hi.client),
-        poNo: [lo.poNo, hi.poNo].filter(Boolean).join(' | '),
-        batchNo: [lo.batchNo, hi.batchNo].filter(Boolean).join(' | '),
-        poQty: [lo.poQty, hi.poQty].filter(v => v !== '' && v != null).join(' | '),
-        cartonQty: (+lo.cartonQty || 0) + (+hi.cartonQty || 0),
-        deliveredQty: (+lo.deliveredQty || 0) + (+hi.deliveredQty || 0),
-        challan: sameOrPipe(lo.challan, hi.challan),
-        isPartial: !!(lo.isPartial || hi.isPartial),
-        isLate: !!(lo.isLate || hi.isLate),
-        wastage: (lo.wastage == null && hi.wastage == null) ? null : ((lo.wastage || 0) + (hi.wastage || 0)),
-        readyQty: (+lo.readyQty || 0) + (+hi.readyQty || 0),
-        milQty: (lo.milQty != null && lo.milQty === hi.milQty) ? lo.milQty : null,
-        packets: (+lo.packets || 0) + (+hi.packets || 0),
-        paper: sameOrPipe(lo.paper, hi.paper),
-        machine: sameOrPipe(lo.machine, hi.machine),
-        coatings: sameOrPipe(lo.coatings, hi.coatings),
-        linkPartner: null,
-        mergedPartnerId: hi.id,
-        shipments: combineShipments([lo.shipments, hi.shipments]),
-        stockGroupName: (lo.stockGroupName && lo.stockGroupName === hi.stockGroupName) ? lo.stockGroupName : null,
-        isShadeCard: !!(lo.isShadeCard || hi.isShadeCard),
-      });
-    } else {
-      merged.push(r);
-    }
-  }
+  // Linked jobs used to be merged here, at job level, whenever both rows
+  // survived the filters - regardless of which invoice they shipped on, and
+  // only ever two of them. Both are wrong now: a set can hold three or four
+  // jobs, and two linked jobs that went out on DIFFERENT invoices are two
+  // shipments and belong on two rows. The merge happens further down instead,
+  // once the rows are one-per-shipment, where the invoice is known - see
+  // mergeLinkedShipmentRows, the same rule the Sale Report uses.
+  const merged = out;
   // Merge Mill (stock group) rows that share the same delivery — same
   // group, same PO No., same Challan No. means they were all paid out by
   // one "Record Delivery" FIFO click on the group, so they're really one
@@ -13204,8 +13163,19 @@ function buildJobsReportRows() {
       shipmentOfJob: list.length,
     }));
   }
-  return perShipment;
+  // Linked jobs that went out on one invoice are one shipment, so one row -
+  // the same rule, and the same code, as the Sale Report. Worked out here
+  // rather than when the delivery was recorded, so a delivery entered first
+  // and invoiced afterwards joins up the moment the numbers match.
+  return mergeLinkedShipmentRows(perShipment, JOBS_REPORT_MERGE);
 }
+// The Jobs Report's own quantity columns. Everything not named here follows
+// the general rule: shown once when the members agree, space-separated when
+// they do not.
+const JOBS_REPORT_MERGE = {
+  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'packets', 'milQty'],
+  amount: [],
+};
 
 function renderJobsReport() {
   const rows = buildJobsReportRows();
@@ -13250,9 +13220,15 @@ function renderJobsReport() {
   // job delivered eight times would multiply them eightfold.
   const seenJobsForTotals = new Set();
   const totals = rows.reduce((a, r) => {
-    const firstRowForJob = !seenJobsForTotals.has(r.id);
-    if (firstRowForJob) seenJobsForTotals.add(r.id);
-    const once = (v) => firstRowForJob ? (+v || 0) : 0;
+    const memberIds = r._merged || [r.id];
+    const fresh = memberIds.map((id, i) => i).filter(i => !seenJobsForTotals.has(memberIds[i]));
+    memberIds.forEach(id => seenJobsForTotals.add(id));
+    const once = (v, key) => {
+      if (!fresh.length) return 0;
+      const p = key && r._parts && r._parts[key];
+      if (!p || !r._merged) return +v || 0;
+      return fresh.reduce((sum, i) => sum + (+p[i] || 0), 0);
+    };
     let milQtyAdd = 0;
     if (r.milQty != null) {
       const gk = r.stockGroupName || `row-${r.id}`;
@@ -13262,15 +13238,15 @@ function renderJobsReport() {
     // string (multi-shipment) — +r.poQty would parse as NaN, so total
     // off the numeric deliveredQty instead (same figure, single number).
     // That one IS per-shipment, so it isn't counted once-per-job.
-    const poQtyAdd = r.stockGroupName ? (+r.deliveredQty || 0) : once(r.poQty);
+    const poQtyAdd = r.stockGroupName ? (+r.deliveredQty || 0) : once(r.poQty, 'poQty');
     return {
       poQty:        a.poQty        + poQtyAdd,
       milQty:       a.milQty       + milQtyAdd,
-      cartonQty:    a.cartonQty    + once(r.cartonQty),
+      cartonQty:    a.cartonQty    + once(r.cartonQty, 'cartonQty'),
       deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
-      wastage:      a.wastage      + ((r.wastage == null || r.stockGroupName) ? 0 : once(r.wastage)),
-      readyQty:     a.readyQty     + once(r.readyQty),
-      packets:      a.packets      + once(r.packets),
+      wastage:      a.wastage      + ((r.wastage == null || r.stockGroupName) ? 0 : once(r.wastage, 'wastage')),
+      readyQty:     a.readyQty     + once(r.readyQty, 'readyQty'),
+      packets:      a.packets      + once(r.packets, 'packets'),
     };
   }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
   const tbody = rows.map(r => {
@@ -13813,6 +13789,7 @@ function buildSaleReportRows(tabOverride) {
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       out.push({
         id: j.id, idDisplay: 'E-' + j.id, deliveryIndex: idx, name: j.name || '',
+        linkGroup: j.link_group_id || null,
         deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: companyName,
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         poQty: j.qty || '', cartonQty: j.cartonqty || '', cartons, cartonsPackets,
@@ -13827,6 +13804,9 @@ function buildSaleReportRows(tabOverride) {
       });
     });
   }
+  const merged = mergeLinkedShipmentRows(out);
+  out.length = 0;
+  out.push(...merged);
   // Sort by whichever field the "Sort by" dropdown picked, ascending or
   // descending per the toggle. Rows with no comparable value (e.g. no
   // parseable Delivered date) sort to the end either direction.
@@ -13853,6 +13833,104 @@ function buildSaleReportRows(tabOverride) {
   });
   return out;
 }
+// ── Linked jobs on one invoice read as one shipment ──────────────
+// Jobs that went out together on one DC are one line on that DC, so they are
+// one line here. Two conditions, both required: the jobs are in the same link
+// set, AND the shipments carry the same invoice number. Same invoice without
+// a link is a coincidence - two separate jobs that happened to share a number
+// - and stays two rows, by explicit instruction.
+//
+// It is worked out here, at read time, rather than when the delivery is
+// recorded. That is what makes the late case work: ship first, type the
+// invoice numbers in afterwards, and the rows join themselves the moment the
+// two numbers match.
+//
+// Quantities add up. Everything else shows once if the members agree and
+// space-separated if they do not ("290 320"), so a difference is never
+// hidden. The job name is the exception: the newest job's name is used, since
+// slight wording changes between reprints are not worth printing twice.
+const SALE_MERGE_ADDITIVE = [
+  'cartons', 'cartonQty', 'poQty', 'cartonsPackets', 'wastage', 'readyQty',
+  'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'amountIncTax',
+];
+const SALE_REPORT_MERGE = { additive: SALE_MERGE_ADDITIVE, perUnit: true };
+function mergeLinkedShipmentRows(rows, cfg) {
+  const conf = cfg || SALE_REPORT_MERGE;
+  const groups = new Map();
+  const order = [];
+  for (const r of rows) {
+    const inv = String(r.challan || '').trim().toLowerCase();
+    // No link set, or no invoice number yet: nothing to merge against.
+    const key = (r.linkGroup && inv) ? 'g' + r.linkGroup + '|' + inv : null;
+    if (!key) { order.push({ single: r }); continue; }
+    if (!groups.has(key)) { const g = { key, rows: [] }; groups.set(key, g); order.push({ group: g }); }
+    groups.get(key).rows.push(r);
+  }
+  return order.map(entry => entry.single ? entry.single : mergeShipmentGroup(entry.group.rows, conf));
+}
+function mergeShipmentGroup(rows, conf) {
+  if (rows.length === 1) return rows[0];
+  const additive = (conf && conf.additive) || SALE_MERGE_ADDITIVE;
+  // Newest job first for the name; everything else reads in job order.
+  const byId = [...rows].sort((a, b) => a.id - b.id);
+  const newest = byId[byId.length - 1];
+  const out = { ...byId[0] };
+  const num = (v) => { const x = parseFloat(v); return Number.isFinite(x) ? x : 0; };
+  const parts = {};
+  for (const key of additive) {
+    const vals = byId.map(r => r[key]);
+    // A column every member left blank stays blank rather than becoming 0.
+    if (vals.every(v => v === null || v === undefined || v === '')) { out[key] = vals[0]; continue; }
+    out[key] = vals.reduce((a, v) => a + num(v), 0);
+    parts[key] = vals.map(v => (v === null || v === undefined || v === '') ? 0 : num(v));
+  }
+  // Per-unit figures are not quantities: adding the weight of one packet
+  // twice, or two percentages, would both be nonsense.
+  //   Packet/KG - one figure when the papers match, both when they differ.
+  //   Wastage KGs % - recomputed from the merged weights, the same way the
+  //   report's own Total row does it.
+  if (conf && conf.perUnit) {
+    const packKgs = byId.map(r => r.packKg).filter(v => v !== null && v !== undefined);
+    const samePackKg = packKgs.length && packKgs.every(v => Math.abs(v - packKgs[0]) < 0.0001);
+    out.packKg = packKgs.length ? packKgs[0] : null;
+    if (packKgs.length && !samePackKg) parts.packKg = packKgs.slice();
+    out.wastageKgPct = (out.issuedKg > 0 && out.wastageKg !== null && out.wastageKg !== undefined)
+      ? (out.wastageKg * 100 / out.issuedKg)
+      : null;
+  }
+  // Everything else: once when they agree, space-separated when they differ.
+  const SKIP = new Set([...additive, 'packKg', 'wastageKgPct', 'name', 'id',
+                        'deliveredAtRaw', 'deliveryIndex', 'linkGroup',
+                        'createdAtRaw', 'shipments', 'shipmentIndex', 'shipmentOfJob']);
+  for (const key of Object.keys(byId[0])) {
+    if (SKIP.has(key)) continue;
+    const seen = [];
+    for (const r of byId) {
+      const v = r[key];
+      if (typeof v === 'boolean') { if (!seen.length) seen.push(v); else seen[0] = seen[0] || v; continue; }
+      const str = (v === null || v === undefined) ? '' : String(v);
+      if (str !== '' && !seen.includes(str)) seen.push(str);
+    }
+    if (typeof byId[0][key] === 'boolean') { out[key] = seen[0] === true; continue; }
+    out[key] = seen.length <= 1 ? (seen[0] === undefined ? byId[0][key] : seen[0]) : seen.join(' ');
+  }
+  out.name = newest.name || byId[0].name || '';
+  out.batchNo = [...new Set(byId.map(r => String(r.batchNo || '').trim()).filter(Boolean))].join(' ');
+  out.id = newest.id;                 // sorting and "open the job card" use the newest
+  out.idDisplay = byId.map(r => 'E-' + r.id).join(' ');
+  out.deliveredAtRaw = Math.max(...byId.map(r => r.deliveredAtRaw || 0));
+  // Jobs Report only: keep the newest created date and every shipment behind
+  // the row, so its own sorting and footer still work.
+  if ('createdAtRaw' in byId[0]) {
+    out.createdAtRaw = byId.reduce((acc, r) => (!acc || (r.createdAtRaw && r.createdAtRaw > acc)) ? r.createdAtRaw : acc, null);
+    out.createdAt = newest.createdAt;
+  }
+  if (Array.isArray(byId[0].shipments)) out.shipments = [].concat(...byId.map(r => r.shipments || []));
+  out._merged = byId.map(r => r.id);
+  out._parts = parts;
+  return out;
+}
+
 // ── Excel-style column filters (Paper/Machine/Coatings/Rate) ──────
 // Options always come from the FULL, unfiltered job set — not from
 // whatever the other filters currently narrow things to — so a column's
@@ -14038,6 +14116,16 @@ function saleReportWasteCols() {
 // total: which totals figure sits under the column (screen totals row, shown with the totals permission).
 function saleReportCols(tabOverride) {
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  // A merged row shows what each job contributed - "24,000 + 105,700" - so
+  // whoever reads the screen can see where the figure came from. The export
+  // and the print-out get the single total instead: a spreadsheet has to be
+  // able to add the column up, and "24,000 + 105,700" is text, not a number.
+  // Returns null when the row is not merged, so each cell falls through to
+  // its normal rendering.
+  const partsOf = (r, key, fmtOne) => {
+    const p = r && r._parts && r._parts[key];
+    return (p && p.length > 1) ? p.map(fmtOne).join(' + ') : null;
+  };
   const dash = '\u2014';
   const d1 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
   const d2 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -14058,7 +14146,7 @@ function saleReportCols(tabOverride) {
       xl: r => r.isShadeCard ? nameWithBatch(r) + ' (Shade Card)' : nameWithBatch(r),
       pr: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <b>(Shade Card)</b>' : '') },
     { key: 'cartons', label: 'Delivered UC Qty', right: true, total: 'cartons',
-      cell: r => r.cartons.toLocaleString(),
+      cell: r => partsOf(r, 'cartons', v => (+v).toLocaleString()) || r.cartons.toLocaleString(),
       xl: r => { let v = r.isShadeCard && r.cartons ? r.cartons + ' copies' : r.cartons; return r.isPartial ? v + ' (PARTIAL)' : v; },
       pr: r => '<span style="' + (r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '') + '">' + r.cartons.toLocaleString() + ((r.isShadeCard && r.cartons) ? ' copies' : '') + '</span>' },
     { key: 'sheetSize', label: 'Sheet Size', filter: 'sheetSize', cell: r => esc(r.sheetSize), xl: r => r.sheetSize, pr: r => esc(r.sheetSize) },
@@ -14067,28 +14155,28 @@ function saleReportCols(tabOverride) {
     { key: 'sheetGsm', label: 'GSM', right: true, cell: r => esc(r.sheetGsm), xl: r => r.sheetGsm === '' ? '' : (Number.isFinite(+r.sheetGsm) ? +r.sheetGsm : r.sheetGsm), pr: r => esc(r.sheetGsm) },
     { key: 'packets', label: 'Packets', right: true, total: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
-    { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty', cell: r => esc(r.cartonQty), xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
-    { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
+    { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty', cell: r => partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || esc(r.cartonQty), xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
+    { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => partsOf(r, 'poQty', v => (+v).toLocaleString()) || esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
     { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => r.plates, pr: r => esc(r.plates) },
     { key: 'paperType', label: 'Paper Type', filter: 'paperType', cell: r => esc(r.paperType), xl: r => r.paperType, pr: r => esc(r.paperType) },
     { key: 'coatings', label: 'Coatings', filter: 'coatings', cell: r => esc(r.coatings), xl: r => r.coatings, pr: r => esc(r.coatings) },
     { key: 'cartonsPackets', label: 'Cartons/Packets', right: true, total: 'cartonsPackets',
-      cell: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;', xl: r => r.cartonsPackets > 0 ? r.cartonsPackets : '', pr: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : dash },
+      cell: r => partsOf(r, 'cartonsPackets', v => (+v).toLocaleString()) || (r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;'), xl: r => r.cartonsPackets > 0 ? r.cartonsPackets : '', pr: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : dash },
     // Weight of ONE packet: sheet length x width x gsm / 15500 (packWeightKg),
     // the same figure Wastage Weight and Packets Issued Weight are built from.
     { key: 'packetKg', label: 'Packet/KG', right: true,
-      cell: r => r.packKg === null || r.packKg === undefined ? '&mdash;' : d2(r.packKg), xl: r => r.packKg === null || r.packKg === undefined ? '' : +r.packKg.toFixed(2), pr: r => r.packKg === null || r.packKg === undefined ? dash : d2(r.packKg) },
+      cell: r => partsOf(r, 'packKg', v => d2(v)) || (r.packKg === null || r.packKg === undefined ? '&mdash;' : d2(r.packKg)), xl: r => r.packKg === null || r.packKg === undefined ? '' : +r.packKg.toFixed(2), pr: r => r.packKg === null || r.packKg === undefined ? dash : d2(r.packKg) },
     // Wastage and Ready share one cell, kept as two numbers: "20 + 430" - the green one is the Ready Qty (produced, not yet shipped).
     { key: 'wastage', label: 'Wastage', right: true, total: 'wastage',
-      cell: r => (r.wastage === null ? '&mdash;' : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
+      cell: r => (partsOf(r, 'wastage', v => fmt(v)) || (r.wastage === null ? '&mdash;' : fmt(r.wastage))) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
       totalCell: t => fmt(t.wastage) + (t.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(t.readyQty) + '</span>' : ''),
       xl: r => (r.wastage === null ? '' : r.wastage) + (r.readyQty > 0 ? ' + ' + r.readyQty : ''),
       pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:bold;">' + fmt(r.readyQty) + '</span>' : '') },
     { key: 'wastageSheets', label: 'Wastage Sheets', right: true,
-      cell: r => sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) : '',
+      cell: r => partsOf(r, 'wastageSheets', v => d1(v)) || sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) : '',
       xl: r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : +r.wastageSheets.toFixed(1), pr: r => sheetsText(r) },
     { key: 'wastageKg', label: 'Wastage Weight (kg)', right: true,
-      cell: r => r.wastageKg === null ? '&mdash;' : d2(r.wastageKg), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : +r.wastageKg.toFixed(2), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
+      cell: r => partsOf(r, 'wastageKg', v => d2(v)) || (r.wastageKg === null ? '&mdash;' : d2(r.wastageKg)), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : +r.wastageKg.toFixed(2), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
     // Wastage weight as a share of the paper issued: wastage kg x 100 / issued kg.
     // The total is the ratio of the two column totals, not a sum of percentages.
     { key: 'wastageKgPct', label: 'Wastage KGs %', right: true,
@@ -14097,13 +14185,13 @@ function saleReportCols(tabOverride) {
       xl: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '' : +r.wastageKgPct.toFixed(2),
       pr: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? dash : d2(r.wastageKgPct) + '%' },
     { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
-      cell: r => r.issuedKg === null ? '&mdash;' : d2(r.issuedKg), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : +r.issuedKg.toFixed(2), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
+      cell: r => partsOf(r, 'issuedKg', v => d2(v)) || (r.issuedKg === null ? '&mdash;' : d2(r.issuedKg)), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : +r.issuedKg.toFixed(2), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
     { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => r.rate === null ? '' : r.rate, pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
     { key: 'exTax', label: 'Rate Excl. Tax', right: true, total: 'amountExTax', totalPrint: true,
-      cell: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;', xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
+      cell: r => partsOf(r, 'amountExTax', v => fmtRate(v)) || (r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;'), xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
     { key: 'taxPct', label: 'Sale Tax %', right: true, cell: (r, c) => c.taxCell(r), xl: r => r.taxPct, pr: r => fmt(r.taxPct) + '%' },
     { key: 'incTax', label: 'Rate Incl. Tax', right: true, total: 'amountIncTax', totalPrint: true,
-      cell: r => r.amountIncTax !== null ? fmtRate(r.amountIncTax) : '&mdash;', xl: r => r.amountIncTax === null ? '' : +r.amountIncTax.toFixed(2), pr: r => r.amountIncTax !== null ? fmtRate(r.amountIncTax) : dash },
+      cell: r => partsOf(r, 'amountIncTax', v => fmtRate(v)) || (r.amountIncTax !== null ? fmtRate(r.amountIncTax) : '&mdash;'), xl: r => r.amountIncTax === null ? '' : +r.amountIncTax.toFixed(2), pr: r => r.amountIncTax !== null ? fmtRate(r.amountIncTax) : dash },
     { key: 'client', label: 'Company', cell: r => esc(r.client), xl: r => r.client, pr: r => esc(r.client) },
     { key: 'ntn', label: 'NTN', cell: r => esc(r.ntn), xl: r => r.ntn, pr: r => esc(r.ntn) },
     { key: 'destination', label: 'Destination', cell: r => esc(r.destination), xl: r => r.destination, pr: r => esc(r.destination) },
@@ -14125,21 +14213,30 @@ function renderSaleReport() {
   // row here), or a job split across N shipments would inflate them Nx.
   const seenJobsForTotals = new Set();
   const totals = rows.reduce((a, r) => {
-    const firstRowForJob = !seenJobsForTotals.has(r.id);
-    if (firstRowForJob) seenJobsForTotals.add(r.id);
-    const once = (v) => firstRowForJob ? (v || 0) : 0;
+    const ids = r._merged || [r.id];
+    const fresh = ids.map((id, i) => i).filter(i => !seenJobsForTotals.has(ids[i]));
+    ids.forEach(id => seenJobsForTotals.add(id));
+    // once(): a job-level figure counted for the members of this row that
+    // have not been counted yet. On a plain row that is the old behaviour -
+    // the whole value the first time the job appears, nothing after.
+    const once = (key, v) => {
+      if (!fresh.length) return 0;
+      const p = r._parts && r._parts[key];
+      if (!p || !r._merged) return fresh.length ? (v || 0) : 0;
+      return fresh.reduce((sum, i) => sum + (+p[i] || 0), 0);
+    };
     return {
-      poQty:          a.poQty          + once(parseFloat(String(r.poQty).replace(/[^0-9.\-]/g, ''))),
-      cartonQty:      a.cartonQty      + once(parseFloat(String(r.cartonQty).replace(/[^0-9.\-]/g, ''))),
+      poQty:          a.poQty          + once('poQty', parseFloat(String(r.poQty).replace(/[^0-9.\-]/g, ''))),
+      cartonQty:      a.cartonQty      + once('cartonQty', parseFloat(String(r.cartonQty).replace(/[^0-9.\-]/g, ''))),
       cartons:        a.cartons        + (+r.cartons || 0),
-      cartonsPackets: a.cartonsPackets + once(+r.cartonsPackets),
-      wastage:        a.wastage        + once(r.wastage),
-      readyQty:       a.readyQty       + once(+r.readyQty),
-      packets:        a.packets        + once(+r.packets),
-      wastageSheets:  a.wastageSheets  + once(r.wastageSheets),
-      wastagePackets: a.wastagePackets + once(r.wastagePackets),
-      wastageKg:      a.wastageKg      + once(r.wastageKg),
-      issuedKg:       a.issuedKg       + once(r.issuedKg),
+      cartonsPackets: a.cartonsPackets + once('cartonsPackets', +r.cartonsPackets),
+      wastage:        a.wastage        + once('wastage', r.wastage),
+      readyQty:       a.readyQty       + once('readyQty', +r.readyQty),
+      packets:        a.packets        + once('packets', +r.packets),
+      wastageSheets:  a.wastageSheets  + once('wastageSheets', r.wastageSheets),
+      wastagePackets: a.wastagePackets + once('wastagePackets', r.wastagePackets),
+      wastageKg:      a.wastageKg      + once('wastageKg', r.wastageKg),
+      issuedKg:       a.issuedKg       + once('issuedKg', r.issuedKg),
       amountExTax:    a.amountExTax    + (r.amountExTax  || 0),
       amountIncTax:   a.amountIncTax   + (r.amountIncTax || 0),
     };
@@ -14150,13 +14247,13 @@ function renderSaleReport() {
   // card's Deliveries ledger uses (saveDeliveryEntryField), so a change
   // here and a change there are the exact same write. stopPropagation
   // keeps the click off the row's own "open job card" handler.
-  const editCell = (r, field, value, maxW) => canEditFields
+  const editCell = (r, field, value, maxW) => (canEditFields && !r._merged)
     ? `<input type="text" value="${esc(value)}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, '${field}', this.value)" style="width:100%;min-width:${maxW}px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
     : `<span title="${esc(value)}">${esc(value)}</span>`;
-  const rateCell = r => canEditRate
+  const rateCell = r => (canEditRate && !r._merged)
     ? `<input type="number" min="0" step="any" value="${r.rate !== null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'rate', this.value)" title="${r.rateOverride ? 'Differs from the product\'s standard rate' : ''}" style="width:75px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${r.rateOverride ? RATE_OVERRIDE_STYLE : ''}">`
     : (r.rate !== null ? fmtRate(r.rate) : '&mdash;');
-  const taxCell = r => canEditRate
+  const taxCell = r => (canEditRate && !r._merged)
     ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'tax_pct', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;">`
     : `${fmt(r.taxPct)}%`;
   const ctx = { editCell, rateCell, taxCell };
@@ -23208,13 +23305,32 @@ async function removeDelivery(jobId, index) {
 // Two job cards for the same product placed at different times, printed
 // together to save cost. Link is symmetric and one-off (a job can only
 // have ONE partner at a time).
+function linkSetMembers(j) {
+  if (!j) return [];
+  if (j.link_group_id) {
+    return (jobs || []).filter(x => x && x.link_group_id === j.link_group_id).sort((a, b) => a.id - b.id);
+  }
+  if (j.linked_job_id) {
+    const partner = (jobs || []).find(x => x && x.id === j.linked_job_id);
+    return partner ? [j, partner].sort((a, b) => a.id - b.id) : [j];
+  }
+  return [];
+}
+function linkSetLabel(j) {
+  const m = linkSetMembers(j);
+  return m.length ? m.map(x => 'E-' + x.id).join(', ') : '';
+}
 async function openLinkJobPicker(jobId) {
   if (!canLinkJob()) return;
+  const me = (jobs || []).find(x => x && x.id === jobId);
+  const set = linkSetMembers(me);
   const val = await promptDialog({
-    title: `Link Job E-${jobId} with…`,
-    message: 'Enter the OTHER job\'s number (e.g. 85 or E-85). Both jobs must not already be linked to someone else.',
+    title: set.length ? `Add a job to this link set` : `Link Job E-${jobId} with…`,
+    message: set.length
+      ? `This set is ${linkSetLabel(me)}. Enter the number of the job to add (e.g. 85 or E-85) — it joins the same set, and they ship on one invoice.`
+      : 'Enter the OTHER job\'s number (e.g. 85 or E-85). If that job is already in a set, this one joins it.',
     placeholder: 'e.g. 85',
-    confirmText: 'Link',
+    confirmText: set.length ? 'Add to set' : 'Link',
   });
   if (val === null) return;
   const m = String(val).match(/(\d+)/);
@@ -23227,14 +23343,21 @@ async function openLinkJobPicker(jobId) {
     await loadJobs();
     closeModal();
     render();
-    notify(`Linked E-${jobId} with E-${targetId}`);
+    const after = linkSetLabel((jobs || []).find(x => x && x.id === jobId));
+    notify(after ? `Link set: ${after}` : `Linked E-${jobId} with E-${targetId}`);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
 async function unlinkJob(jobId) {
   const ok = await confirmDialog({
     title: 'Unlink this job?',
-    message: 'Removes the connection between both linked job cards. Delivery history already recorded stays intact.',
+    message: (() => {
+      const me = (jobs || []).find(x => x && x.id === jobId);
+      const set = linkSetMembers(me);
+      return set.length > 2
+        ? `Takes E-${jobId} out of the link set (${linkSetLabel(me)}). The other jobs stay linked to each other. Delivery history already recorded stays intact.`
+        : 'Removes the connection between both linked job cards. Delivery history already recorded stays intact.';
+    })(),
     confirmText: 'Unlink',
   });
   if (!ok) return;
