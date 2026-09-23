@@ -14527,6 +14527,85 @@ function setPrTo(v)   { prodReportState.to = v;   loadProductionReport(); }
 function setPrView(v) { prodReportState.view = v; prodReportState.pick = ''; renderProductionReport(); }
 // Pick a specific machine/operator to drill into. Empty = summary.
 function setPrPick(v) { prodReportState.pick = v; renderProductionReport(); }
+
+// One day of one machine (or operator), in full: the same entry the Daily
+// Production register holds for that date - operators, jobs, sheets, waste,
+// hours, remarks - opened as a modal over the Production Report, the way a
+// row in the Jobs Report opens its job card. The row's own `sections` say
+// which register pages to ask; a row with none (breaking/sorting machines
+// are people, not machines) falls back to trying all four.
+const PROD_DAY_SECTIONS = {
+  printing: { path: 'printing', label: 'Printing' },
+  diecut:   { path: 'die',      label: 'Die Cutting' },
+  coatings: { path: 'coatings', label: 'Coating' },
+  pasting:  { path: 'pasting',  label: 'Pasting' },
+};
+async function openProdDayDetail(date, sectionsCsv) {
+  const s = prodReportState;
+  const name = s.pick;
+  if (!name || !date) return;
+  const isMachine = s.view === 'machine';
+  const wanted = String(sectionsCsv || '').split(',').filter(k => PROD_DAY_SECTIONS[k]);
+  const secs = wanted.length ? wanted : Object.keys(PROD_DAY_SECTIONS);
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <h2 style="margin:0 0 4px;font-size:18px;">${esc(name)} <span style="font-weight:400;color:var(--text2);">&middot; ${esc(fmtDMY(date))}</span></h2>
+    <div id="prod-day-detail" style="padding:24px 0;color:var(--text2);">Loading the day's entry…</div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+  const found = [];
+  for (const key of secs) {
+    const sec = PROD_DAY_SECTIONS[key];
+    try {
+      const rows = await api('GET', `/api/reports/daily-production/${sec.path}/${encodeURIComponent(date)}`);
+      for (const row of (rows || [])) {
+        const hit = isMachine
+          ? String(row.machine || '').trim().toLowerCase() === String(name).trim().toLowerCase()
+          : String(row.operators || '').toLowerCase().includes(String(name).trim().toLowerCase());
+        if (hit) found.push({ sec, row });
+      }
+    } catch (e) { /* a section that fails to load just contributes nothing */ }
+  }
+  const box = document.getElementById('prod-day-detail');
+  if (!box) return;   // modal was closed while loading
+  if (!found.length) {
+    box.innerHTML = `No Daily Production entry for <b>${esc(name)}</b> on ${esc(fmtDMY(date))}. The register may hold this day under a different machine name — check the Daily Production tab for ${esc(fmtDMY(date))}.`;
+    return;
+  }
+  box.style.padding = '0';
+  box.style.color = '';
+  box.innerHTML = found.map(({ sec, row }) => prodDayDetailBlock(sec, row)).join('');
+}
+// One section's entry as label / value rows. Empty fields are left out
+// rather than printed as dashes - the point is what DID happen that day.
+function prodDayDetailBlock(sec, row) {
+  const fmtN = v => (v === '' || v === null || v === undefined) ? '' : (+v || +v === 0 ? (+v).toLocaleString() : String(v));
+  // Same green figure the Daily Production tab shows: the Nx multiplied
+  // sheets beside the base count, when any entry carries a multiplier.
+  const mult = (typeof printedSheetsWithMultiplier === 'function') ? printedSheetsWithMultiplier(row) : null;
+  const sheetsVal = row.units !== undefined ? fmtN(row.units) : fmtN(row.sheets);
+  const sheetsHtml = sheetsVal + (mult ? ` <span style="color:#166534;font-weight:700;">(${mult.toLocaleString()})</span>` : '');
+  const jobsHtml = row.jobs ? esc(String(row.jobs)) + (row.jobs_count ? ` <span style="color:var(--text2);">(${row.jobs_count} job${row.jobs_count === 1 ? '' : 's'})</span>` : '') : '';
+  const fields = [
+    ['Operators', esc(String(row.operators || ''))],
+    ['Jobs', jobsHtml],
+    [row.units !== undefined ? 'Units' : 'Sheets', sheetsHtml],
+    ['Colors', esc(String(row.colors || ''))],
+    ['Plates', esc(String(row.plates || ''))],
+    ['Wastage', fmtN(row.waste)],
+    ['Hours', esc(String(row.hours || ''))],
+    ['Remarks', esc(String(row.remarks || ''))],
+  ].filter(([, v]) => v !== '' && v !== null && v !== undefined);
+  return `
+    <div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:10px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#A32D2D;margin-bottom:8px;">${esc(sec.label)} &middot; ${esc(String(row.machine || ''))}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        ${fields.map(([k, v]) => `<tr>
+          <td style="padding:4px 10px 4px 0;color:var(--text2);white-space:nowrap;vertical-align:top;width:90px;">${k}</td>
+          <td style="padding:4px 0;word-break:break-word;">${v}</td>
+        </tr>`).join('')}
+      </table>
+    </div>`;
+}
 // Section filter — Printing / Coating / Die Cutting / Pasting, sourced
 // from each machine's (or operator's) roles on the Users → Operators
 // roster (server-tagged onto every row as `sections`). Empty = all
@@ -14593,7 +14672,7 @@ function renderProductionReport() {
   const buildDailyTable = () => {
     const rows = dailyRows.filter(r => r[nameKey] === s.pick);
     const body = rows.map(r => `
-      <tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+      <tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="openProdDayDetail('${esc(r.date)}', '${esc((r.sections || []).join(','))}')" title="Open this day's Daily Production entry — who worked and on which jobs">
         <td ${td}>${fmtDate(r.date)}</td>
         <td ${tdR}>${fmtSheets(r.sheets, r.sheets_mult)}</td>
         <td ${tdR}>${fmt(r.waste)}</td>
@@ -14603,7 +14682,7 @@ function renderProductionReport() {
     const totals = { sheets: sum(rows, 'sheets'), sheetsMult: sum(rows, 'sheets_mult'), waste: sum(rows, 'waste'), hours: sum(rows, 'hours'), jobs: sum(rows, 'jobs') };
     return `
       <div style="margin-top:18px;">
-        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">${esc(s.pick)} <span style="font-weight:400;color:var(--text2);">— day-by-day, ${rows.length} day${rows.length===1?'':'s'} with activity</span></div>
+        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;">${esc(s.pick)} <span style="font-weight:400;color:var(--text2);">— day-by-day, ${rows.length} day${rows.length===1?'':'s'} with activity &middot; click a day for its full entry</span></div>
         <div class="report-scroll-wrap">
         <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="background:var(--bg2);">
