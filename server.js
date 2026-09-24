@@ -402,6 +402,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // within the last 30 days — same tier the existing inventory_reverse
   // group already uses, kept as this row's own extra level too.
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
+  inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
   // read-only, there's no "edit" concept for any of them. Same "not wired
@@ -426,6 +427,9 @@ const ROLE_PERMISSION_DEFAULTS = {
   // production one. Starts matching the Jobs Report so nobody loses access on
   // upgrade; tighten it from the Access Register if it should be narrower.
   rpt_job_number_register:         { label: 'Job Number Register — every job card number and what became of it', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  // Reuse is a job-CREATION power (the next card takes the spent number),
+  // so it needs this row AND the New Job row — either alone is not enough.
+  rpt_job_number_reuse:            { label: 'Job Number Register — Reuse button (create the next job card on a spent, never-used number; also needs New Job)', levels: { admin: 'yes', production_manager: 'yes' } },
   rpt_daily_production_report:     { label: 'Daily Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_jobs_archive:                { label: 'Jobs Archive', levels: { admin: 'view', ceo: 'view' } },
   rpt_imports_archive:             { label: 'Imports Archive', levels: { admin: 'view', ceo: 'view' } },
@@ -4614,6 +4618,9 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     if (req.body.reuse_number !== undefined && req.body.reuse_number !== null && req.body.reuse_number !== '') {
       reuseId = parseInt(req.body.reuse_number, 10);
       if (!Number.isFinite(reuseId) || reuseId <= 0) return res.status(400).json({ error: 'Invalid job number.' });
+      if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'rpt_job_number_reuse')) {
+        return res.status(403).json({ error: 'Not allowed — Job Number Reuse access required' });
+      }
       const [held, trail, seq, firstCreate] = await Promise.all([
         sql`SELECT 1 FROM jobs WHERE id = ${reuseId}`,
         sql`SELECT DISTINCT action FROM audit_log WHERE entity_type = 'job' AND entity_id = ${reuseId}`,
@@ -5484,7 +5491,7 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 // Dismiss pending stock for a delivered job. Admin-only. Clears the
 // issuance_status to 'issued' and removes any partial_pending_sheets
 // so the job drops out of the pending queue.
-app.post('/api/jobs/:id/dismiss-pending', requireAdmin, async (req, res) => {
+app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pending'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
