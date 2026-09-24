@@ -4,15 +4,14 @@ const { neon } = require('@neondatabase/serverless');
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
-const compression = require('compression');
 
 const app = express();
-// Compress every response before it leaves the function. Vercel bills "Fast
-// Origin Transfer" on the bytes WE send to its CDN — without this, Express
-// ships raw bytes and the CDN compresses them only on the way to the browser,
-// so we paid for ~4x the HTML and ~10x the JSON that users actually received.
-// Must be registered first so it wraps every route below it.
-app.use(compression());
+// Do NOT add the `compression` middleware. It was tried (Sep 2026) to cut
+// Vercel's Fast Origin Transfer and worked perfectly locally, but on Vercel
+// full-size responses stalled mid-stream and were cut off at the 60s function
+// limit (e.g. 437 KB of the 483 KB shell, then nothing). Its streaming relies
+// on the response emitting 'drain', which Vercel's wrapped response does not
+// reliably do. Vercel's CDN already compresses on the way to the browser.
 // 6mb limit: station voice notes arrive as base64 audio (~1MB for 60s of
 // opus). Default 100kb would 413 them. Vercel itself caps bodies at 4.5MB.
 app.use(express.json({ limit: '6mb' }));
