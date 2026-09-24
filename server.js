@@ -5943,8 +5943,16 @@ async function primaryOwedSheets(sql, job, itemsById) {
   const p = job.particulars || {};
   const partialRaw = parseInt(p.partial_pending_sheets, 10);
   const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
-  if (job.issuance_status !== 'issued' && job.issuance_status !== 'pending') return 0;
+  if (job.issuance_status !== 'issued' && job.issuance_status !== 'pending' && job.issuance_status !== 'ctp') return 0;
   if (job.issuance_status === 'issued' && !partial) return 0;
+  // At CTP the main paper may already have been issued early (status stays
+  // 'ctp' by design) — then nothing more is owed unless a partial marker
+  // says otherwise. A fresh CTP job owes its full need, like 'pending'.
+  if (job.issuance_status === 'ctp' && !partial) {
+    const rowsCtp = Array.isArray(job.issued_items) ? job.issued_items : [];
+    const issuedCtp = rowsCtp.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    if (issuedCtp > 0) return 0;
+  }
   const item = itemsById
     ? itemsById.get(job.inventory_item_id)
     : (await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`)[0];
@@ -6007,7 +6015,7 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
     const jobs = await sql`
       SELECT * FROM jobs
       WHERE deleted_at IS NULL
-        AND issuance_status IN ('pending', 'issued')
+        AND issuance_status IN ('pending', 'issued', 'ctp')
       ORDER BY id ASC`;
     const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true`;
     const itemsById = new Map(offcuts.map(it => [it.id, it]));
