@@ -4666,6 +4666,13 @@ function isNewJob(j) { return j && j.issuance_status === 'new'; }
 // station operator (or a PM using the Process to Printing button on the
 // CTP tab card) advances it to 'pending'.
 function isCtpQueue(j) { return j && j.issuance_status === 'ctp'; }
+// A CTP-queue job whose MAIN paper has not been issued yet. It shows in
+// two queues at once: the CTP tab (plates being made) and the store
+// keeper's Pending Stock (paper can be issued in parallel). The moment
+// stock is issued the tile disappears, and when CTP finishes the job goes
+// straight to Printing instead of Pending Stock (server routes by
+// issued_items). issuedPrimarySheets is the same record the server reads.
+function ctpAwaitingStock(j) { return isCtpQueue(j) && issuedPrimarySheets(j) <= 0; }
 
 // Sheets already issued against the MAIN paper. issued_items rows are tagged
 // with their source; rows from before that tagging existed are primary.
@@ -4729,7 +4736,7 @@ function hasSecondaryPending(j) { return secondaryPendingSheets(j) > 0; }
 // only some of its needed sheets have been issued so far. Partial jobs
 // stay visible in the queue so the store keeper knows to keep topping up,
 // even though the shop floor can already start processing them.
-function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || isPartialIssuance(j) || hasSecondaryPending(j)); }
+function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || ctpAwaitingStock(j) || isPartialIssuance(j) || hasSecondaryPending(j)); }
 
 // Packets top-up helpers. An issued job may have extra packets requested
 // after issuance; each entry lives in particulars.packets_topups with a
@@ -5991,7 +5998,7 @@ function renderJobRowCompact(j, opts) {
       : '&#128230; READY TO DELIVER';
     const badge0 = partialDelv ? partialPill :
       isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
-      isCtp ? `<span class="badge badge-ctp">CTP</span>` :
+      isCtp ? `<span class="badge badge-ctp">CTP</span>${ctpAwaitingStock(j) ? ' ' + jobStockBadge(j) : ''}` :
       pending ? jobStockBadge(j) :
       done ? `<span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#128230; DELIVERED${shippedCartons ? ' - ' + shippedCartons.toLocaleString() : ''}</span>` :
       blocked ? `<span class="badge badge-blocked">Blocked</span>` :
@@ -6337,7 +6344,7 @@ function renderJobCard(j, opts) {
     : '&#128230; READY TO DELIVER';
   const badge0 = partialDelv ? partialPill :
     isNew ? `<span class="badge badge-new">&#128196; New Job</span>` :
-    isCtp ? `<span class="badge badge-ctp">CTP</span>` :
+    isCtp ? `<span class="badge badge-ctp">CTP</span>${ctpAwaitingStock(j) ? ' <span class="badge badge-pending">⏳ Pending Stock</span>' : ''}` :
     pending ? `<span class="badge badge-pending">⏳ Pending Stock</span>` :
     done ? `<span class="badge" style="background:#facc15;color:#422006;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#128230; DELIVERED${shippedCartons ? ' - ' + shippedCartons.toLocaleString() : ''}</span>` :
     blocked ? `<span class="badge badge-blocked">Blocked</span>` :
@@ -8133,13 +8140,14 @@ function renderInvPendingList() {
     // stock. When the job is in the pending queue solely because its
     // fresh secondary is still owed, skip the primary tile — the
     // secondary tile below carries the entire request.
-    const primaryStillNeeded = j.issuance_status === 'pending' || isPartialIssuance(j);
+    const primaryStillNeeded = j.issuance_status === 'pending' || ctpAwaitingStock(j) || isPartialIssuance(j);
     const primaryTile = primaryStillNeeded ? `
       <div class="inv-card inv-pending-row"${offcut ? ' style="border-left:3px solid #1e3a8a;"' : (partial ? ' style="border-left:3px solid #F59E0B;"' : '')}>
         <div class="inv-main">
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
             ${offcutBadge}
+            ${isCtpQueue(j) ? '<span class="badge badge-ctp" style="margin-left:8px;" title="Plates are still being made at CTP. Stock can be issued now — the job will then go straight to Printing when CTP finishes.">AT CTP</span>' : ''}
             ${j.priority && normalizePriority(j.priority) === 'Urgent' ? '<span class="badge badge-urgent" style="margin-left:8px;">URGENT</span>' : ''}
             ${partialBadge}
           </div>
@@ -31375,7 +31383,7 @@ function renderClientSummary(rows, containerId) {
     if (isDone(j)) return 'Delivered';
     if (isBlocked(j)) return 'Blocked';
     if (isNewJob(j)) return 'New Job';
-    if (isCtpQueue(j)) return 'CTP';
+    if (isCtpQueue(j)) return ctpAwaitingStock(j) ? 'CTP · Pending Stock' : 'CTP';
     if (j.issuance_status === 'pending') return 'Pending Stock';
     return STAGES[j.stage_index || 0] || '—';
   };

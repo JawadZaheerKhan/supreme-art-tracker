@@ -4893,15 +4893,20 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
     const time = businessStamp();
     const nowIso = new Date().toISOString();
     const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
+    // Stock may have been issued EARLY, while the job still sat at CTP
+    // (issued_items carries primary rows). Then Pending Stock is already
+    // behind us — go straight to Printing as an issued job.
+    const stockDone = Array.isArray(job.issued_items)
+      && job.issued_items.some(x => x && x.source !== 'secondary');
     stages[0] = { ...(stages[0] || {}), status: 'done', by, time, at: nowIso, notes: 'CTP plates finished (marked by manager)' };
     stages[1] = { ...(stages[1] || {}), status: 'active', by, time, at: nowIso };
-    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to Pending Stock / Printing`, by, time });
+    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to ${stockDone ? 'Printing (stock already issued)' : 'Pending Stock'}`, by, time });
     // Offcut paper is no longer auto-consumed here — offcut jobs go to
     // Pending Stock like fresh paper and are issued there, or by a Paper
     // Cutting PIN at the Station (see /api/jobs/:id/papercut-issue-stock).
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status = 'pending',
+         SET issuance_status = ${stockDone ? 'issued' : 'pending'},
              stage_index     = 1,
              stages          = ${JSON.stringify(stages)},
              log             = ${JSON.stringify(log)}
@@ -4912,7 +4917,7 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
       action: 'job.process_from_ctp',
       entityType: 'job',
       entityId: id,
-      summary: `CTP done for Job E-${id}: ${job.name} — moved to Pending Stock / Printing`,
+      summary: `CTP done for Job E-${id}: ${job.name} — moved to ${stockDone ? 'Printing (stock already issued)' : 'Pending Stock'}`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -5829,10 +5834,28 @@ async function performIssueStock(sql, req, id, body) {
     job.issuance_status === 'new' || job.issuance_status === 'ctp' ||
     (job.issuance_status === 'pending' && (await primaryOwedSheets(sql, job)) > 0)
   );
+  // Early issuance: the store keeper may issue while the job is still in
+  // the CTP queue (it shows there AND in Pending Stock in parallel). The
+  // stock moves now, but the job STAYS with CTP — status and stage are
+  // untouched, so plate-making carries on undisturbed. issued_at +
+  // issued_items record that stock is done; the CTP-done transition reads
+  // them and routes the job straight to Printing instead of Pending Stock.
+  const stayAtCtp = !isSecondary && job.issuance_status === 'ctp';
   const updated = primaryStillOwed
     ? await sql`
         UPDATE jobs
            SET particulars = ${JSON.stringify(nextParticulars)},
+               issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItemsTagged)}::jsonb)
+         WHERE id = ${id}
+         RETURNING *
+      `
+    : stayAtCtp
+    ? await sql`
+        UPDATE jobs
+           SET issued_at = COALESCE(issued_at, NOW()),
+               issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
+               inventory_item_id = ${nextInvItemId},
+               particulars = ${JSON.stringify(nextParticulars)},
                issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItemsTagged)}::jsonb)
          WHERE id = ${id}
          RETURNING *
@@ -5856,7 +5879,7 @@ async function performIssueStock(sql, req, id, body) {
     entityId: id,
     // Issued amount in packets first; what is still NEEDED stays in sheets as
     // well, since that is the figure the rest of the app quotes back.
-    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}`,
+    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
   });
   return { job: updated[0] };
 }
@@ -6215,7 +6238,10 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    if (job.issuance_status !== 'issued') {
+    // An early issue made while the job still sits at CTP (status stays
+    // 'ctp', issued_at set) is just as reversible as a normal one.
+    const earlyAtCtp = job.issuance_status === 'ctp' && job.issued_at;
+    if (job.issuance_status !== 'issued' && !earlyAtCtp) {
       return res.status(400).json({ error: 'Stock was not issued for this job' });
     }
     if ((job.stage_index || 0) > 0) {
@@ -6290,7 +6316,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     }
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status = 'pending',
+         SET issuance_status = ${earlyAtCtp ? 'ctp' : 'pending'},
              issued_at = NULL,
              issued_by_id = NULL,
              particulars = ${JSON.stringify(cleanParticulars)},
@@ -9061,6 +9087,29 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
            WHERE id = ${tx.job_id}
         `;
         jobReverted = true;
+      } else if (job && job.issuance_status === 'ctp' && job.issued_at) {
+        // Early issuance (made while the job still sat at CTP) reversed:
+        // the job STAYS in the CTP queue, but returns to the not-yet-
+        // issued state — its Pending Stock tile re-appears and CTP-done
+        // routes to Pending Stock again instead of Printing.
+        const cleanParticulars = { ...(job.particulars || {}) };
+        delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.over_issue_pending;
+        delete cleanParticulars.over_issue_decisions;
+        if (Array.isArray(cleanParticulars.packets_topups)) {
+          cleanParticulars.packets_topups = cleanParticulars.packets_topups
+            .filter(t => !t || t.source !== 'over-issue-reconcile');
+          if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
+        }
+        await sql`
+          UPDATE jobs
+             SET issued_at = NULL,
+                 issued_by_id = NULL,
+                 issued_items = '[]'::jsonb,
+                 particulars = ${JSON.stringify(cleanParticulars)}
+           WHERE id = ${tx.job_id}
+        `;
+        jobReverted = true;
       }
       // Cascade-reverse every unreversed job-offcut row for this same
       // job. Without this, the paired offcut credits (cut-size return
@@ -10209,8 +10258,12 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // pops into Pending Stock for the store keeper to issue paper. Every
     // other transition leaves issuance_status alone. Offcut paper takes the
     // same route — no auto-consumption here (must match process-from-ctp).
-    const nextStatus = (job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0)
-      ? 'pending' : job.issuance_status;
+    const ctpForward = job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0;
+    // Early-issued jobs (stock issued while still at CTP) skip Pending
+    // Stock entirely — plates done + paper in hand = straight to Printing.
+    const ctpStockDone = ctpForward && Array.isArray(job.issued_items)
+      && job.issued_items.some(x => x && x.source !== 'secondary');
+    const nextStatus = ctpForward ? (ctpStockDone ? 'issued' : 'pending') : job.issuance_status;
     const updated = await sql`
       UPDATE jobs
          SET particulars     = ${JSON.stringify(particulars)},
