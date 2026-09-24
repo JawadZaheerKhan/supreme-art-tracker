@@ -5206,26 +5206,78 @@ const COMPANY_WORD_SYNONYMS = {
   pharmaceutical: 'pharma', pharmaceuticals: 'pharma', pharmaceutica: 'pharma',
   laboratory: 'lab', laboratories: 'lab', labs: 'lab',
   foods: 'food', industries: 'industry', intl: 'international',
+  pak: 'pakistan',
 };
-const COMPANY_WORD_NOISE = new Set(['pvt', 'private', 'ltd', 'limited', 'co', 'company', 'inc', 'corp', 'corporation', 'the', 'and']);
+// 'lt' is a truncated 'ltd' ("Herbion Pakistan Pvt Lt").
+const COMPANY_WORD_NOISE = new Set(['pvt', 'private', 'ltd', 'lt', 'limited', 'co', 'company', 'inc', 'corp', 'corporation', 'the', 'and']);
+// Trade words that shops drop or swap freely — "Herbion Pharma" and
+// "Herbion Pakistan" are one company. Only consulted as a FALLBACK when a
+// full-word match finds nothing, and never allowed to empty a name.
+const COMPANY_GENERIC_WORDS = new Set(['pharma', 'lab', 'food', 'industry', 'international', 'pakistan', 'group']);
+const coreCompanyTokens = (toks) => {
+  const core = toks.filter(t => !COMPANY_GENERIC_WORDS.has(t));
+  return core.length ? core : toks;
+};
+// One side's words all present in the other, in ANY order — so the
+// registered name's extra middle words ("Global PHARMACEUTICAL Pakistan")
+// don't break a shorter job-card spelling ("Global Pakistan").
+const companyTokenSubset = (a, b) => a.length > 0 && b.length > 0 &&
+  (a.every(t => b.includes(t)) || b.every(t => a.includes(t)));
+// Spacing and punctuation never decide a match: "GlobalPak" = "Global Pak".
+const companySquash = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+// Every space-free spelling a name could reasonably take: each generic
+// word optionally dropped, each word optionally in its short form. So
+// "Global Pharmaceutical Pakistan" also answers to "globalpakistan" and
+// "globalpak" written as one word.
+const COMPANY_SHORT_FORMS = { pakistan: 'pak' };
+function companyJoinedVariants(toks) {
+  let acc = [''];
+  for (const t of toks) {
+    const opts = new Set([t]);
+    if (COMPANY_SHORT_FORMS[t]) opts.add(COMPANY_SHORT_FORMS[t]);
+    if (COMPANY_GENERIC_WORDS.has(t)) opts.add('');
+    const next = [];
+    for (const a of acc) for (const o of opts) next.push(a + o);
+    acc = next;
+  }
+  return new Set(acc.filter(Boolean));
+}
 function companyTokens(name) {
   return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/)
     .filter(Boolean)
     .map(t => COMPANY_WORD_SYNONYMS[t] || t)
     .filter(t => !COMPANY_WORD_NOISE.has(t));
 }
-const companyTokensPrefix = (long, short) => short.length <= long.length && short.every((t, i) => long[i] === t);
 function resolveCompanySettings(company) {
   const name = String(company || '').trim().toLowerCase();
   if (!name) return null;
   const exact = companySettings.find(c => String(c.company || '').trim().toLowerCase() === name);
   if (exact) return exact;
+  // Same letters, different spacing/punctuation → same company.
+  const squashed = companySquash(company);
+  const spaceFree = squashed && companySettings.find(c => companySquash(c.company) === squashed);
+  if (spaceFree) return spaceFree;
   const want = companyTokens(company);
   if (!want.length) return null;
-  const hits = companySettings.filter(c => {
-    const have = companyTokens(c.company);
-    return have.length && (companyTokensPrefix(have, want) || companyTokensPrefix(want, have));
-  });
+  // Graded matching, strictest first; stop at the first grade with hits:
+  //   1) every word of one side appears in the other (any order) —
+  //      "Global Pakistan" ⊆ "Global Pharmaceutical Pakistan".
+  //   2) the same after dropping generic trade words from both sides —
+  //      "Herbion Pharma" → "herbion" vs "Herbion Pakistan" → "herbion".
+  //   3) those core words squashed together — catches one-word spellings.
+  const grades = [
+    (a, b) => companyTokenSubset(a, b),
+    (a, b) => companyTokenSubset(coreCompanyTokens(a), coreCompanyTokens(b)),
+    (a, b) => { const va = companyJoinedVariants(a); return [...companyJoinedVariants(b)].some(v => va.has(v)); },
+  ];
+  let hits = [];
+  for (const match of grades) {
+    hits = companySettings.filter(c => {
+      const have = companyTokens(c.company);
+      return have.length && match(want, have);
+    });
+    if (hits.length) break;
+  }
   if (hits.length === 1) return hits[0];
   if (hits.length > 1) {
     // A bare "Stanley" or "Global" when both a pharma and a non-pharma company
@@ -22953,7 +23005,7 @@ function deliveriesSectionFinance(j, opts) {
 // from Company Settings by job.client (case-insensitive), same lookup
 // shape as productRateFor(). Never editable here; see openCompanySettings().
 function companyInfoLine(j) {
-  const c = companySettingsFor(j && j.client);
+  const c = resolveCompanySettings(j && j.client);
   if (!c || (!c.ntn && !c.destination)) return '';
   const parts = [];
   if (c.ntn)         parts.push(`<b>NTN</b> ${esc(c.ntn)}`);
