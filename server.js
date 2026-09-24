@@ -4,8 +4,15 @@ const { neon } = require('@neondatabase/serverless');
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const compression = require('compression');
 
 const app = express();
+// Compress every response before it leaves the function. Vercel bills "Fast
+// Origin Transfer" on the bytes WE send to its CDN — without this, Express
+// ships raw bytes and the CDN compresses them only on the way to the browser,
+// so we paid for ~4x the HTML and ~10x the JSON that users actually received.
+// Must be registered first so it wraps every route below it.
+app.use(compression());
 // 6mb limit: station voice notes arrive as base64 audio (~1MB for 60s of
 // opus). Default 100kb would 413 them. Vercel itself caps bodies at 4.5MB.
 app.use(express.json({ limit: '6mb' }));
@@ -223,12 +230,16 @@ app.get('/config.js', (req, res) => {
 // The logo effectively never changes, so the CDN caches it for a year; a
 // deploy purges Vercel's cache anyway, so a replaced asset still ships
 // immediately. Browsers re-check daily as a safety valve.
-// index.html is the exception: it must NEVER be cached, because that's what
-// guarantees everyone picks up the newest deploy right away.
+// index.html is the exception: the browser must check with us on EVERY load,
+// because that's what guarantees everyone picks up the newest deploy right
+// away. That is exactly what `no-cache` means ("store it, but revalidate
+// before each use"). Do NOT add `no-store`: it forbids keeping a copy, so the
+// browser can never send If-None-Match and every load re-downloads the whole
+// ~1.7 MB shell instead of getting a zero-byte 304 when nothing changed.
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.html')) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Cache-Control', 'no-cache');
     } else {
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
     }
@@ -10811,9 +10822,9 @@ app.get('/favicon.ico', (req, res) => {
 
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app
-  // shell. Same rule as above: never cache it, or users end up running an
-  // old build against the live API.
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  // shell. Same rule as above: always revalidate (never serve a stale copy),
+  // or users end up running an old build against the live API.
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
