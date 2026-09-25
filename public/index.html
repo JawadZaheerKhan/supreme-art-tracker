@@ -3169,12 +3169,16 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <aside class="reports-sidebar">
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
         <div class="rsb-section">Sale Report</div>
-        <button class="rsb-item active" data-rt="sale-report">
+        <button class="rsb-item active" data-rt="sale-report" onclick="setReportsTab('sale-report')">
           <span class="rsb-icon">&#128176;</span> Sale Report
+        </button>
+        <button class="rsb-item" data-rpt="rpt_party_ledger" data-rt="party-ledger" onclick="setReportsTab('party-ledger')">
+          <span class="rsb-icon">&#128210;</span> Party Ledger
         </button>
       </aside>
       <main class="reports-content">
         <div id="rt-sale-report" class="rt-pane"></div>
+        <div id="rt-party-ledger" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -14255,10 +14259,474 @@ function resetReportFilters(kind) {
   if (isSale) openSaleReport(); else openJobsReport();
 }
 
+// ── Party Ledger ─────────────────────────────────────────────────
+// Each company's account, the way the accounts system prints it: invoices
+// (Debit) come live from the Sale Report - every invoice no. with its amount
+// incl. tax, linked jobs on one invoice as one line, plus Waste of Board
+// sales - and finance types what comes in (Credit): bank receipts, cheques,
+// cash, tax deducted (JV), credit notes (and debit notes, which add).
+// One opening balance per company lets the ledger start where the accounts
+// system already is. Running balance only - receipts are not allocated to
+// particular invoices.
+const partyLedgerState = { company: '', period: 'month', from: '', to: '', data: null, loading: false, companies: [] };
+const PARTY_KIND_LABELS = { bank: 'Bank Receipt', cheque: 'Cheque', cash: 'Cash', jv: 'Tax deducted (JV)', credit_note: 'Credit Note', debit_note: 'Debit Note' };
+const PARTY_DEBIT_KINDS = new Set(['debit_note']);
+function partyKey(c) { return String(c || '').trim().toLowerCase(); }
+function plMoney(n) { return (+n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+function plBalance(b) {
+  const v = Math.round((+b || 0) * 100) / 100;
+  return v === 0 ? '0' : plMoney(Math.abs(v)) + (v > 0 ? ' Dr' : ' Cr');
+}
+// Waste of Board dates are typed by hand: accept 2026-09-25 and 25/09/2026.
+function partyParseDate(v) {
+  const s = String(v || '').trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/.exec(s);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return '';
+}
+async function loadPartyLedgerData() {
+  partyLedgerState.loading = true;
+  try {
+    const tasks = [api('GET', '/api/party-ledger')];
+    if (!__wasteBoardLoaded) { __wasteBoardLoaded = true; tasks.push(loadWasteBoardSales()); }
+    const [d] = await Promise.all(tasks);
+    partyLedgerState.data = d || { receipts: [], openings: [] };
+  } catch (e) {
+    partyLedgerState.data = { receipts: [], openings: [], error: e.message };
+  }
+  partyLedgerState.loading = false;
+}
+// Every Sale Report row, with none of the Sale Report's own filters.
+function partyLedgerSaleRowsAll() {
+  const saved = JSON.parse(JSON.stringify(saleReportState));
+  Object.assign(saleReportState, { client: '', dateRange: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', milOnly: false, colSearch: {} });
+  saleReportState.colFilters = Object.fromEntries(Object.keys(saved.colFilters || {}).map(k => [k, []]));
+  try { return buildSaleReportRows('all'); }
+  finally {
+    for (const k of Object.keys(saleReportState)) if (!(k in saved)) delete saleReportState[k];
+    Object.assign(saleReportState, saved);
+  }
+}
+// Invoice lines: one per (company, invoice no.). A delivery with no invoice
+// no. yet is still money owed, so it gets its own line with a "—" V-No.
+function partyLedgerInvoices() {
+  const groups = new Map();
+  const put = (key, init) => { if (!groups.has(key)) groups.set(key, { jobIds: new Set(), names: new Set(), debit: 0, missingRate: false, ...init }); return groups.get(key); };
+  for (const r of partyLedgerSaleRowsAll()) {
+    const company = String(r.client || '').trim();
+    if (!company) continue;
+    const invText = String(r.challan || '').trim();
+    const invKey = invoiceMatchKey(invText);
+    const date = r.deliveredAtRaw ? localDateISO(new Date(r.deliveredAtRaw)) : '';
+    const g = put(invKey ? 'i|' + partyKey(company) + '|' + invKey : 'd|' + r.id + '|' + r.deliveryIndex,
+      { source: 'sale', company, invoice: invText, noInvoice: !invKey, date });
+    if (date && (!g.date || date < g.date)) g.date = date;
+    (r._merged || [r.id]).forEach(id => g.jobIds.add(id));
+    if (r.name) g.names.add(r.name);
+    if (r.amountIncTax === null || r.amountIncTax === undefined) g.missingRate = true;
+    else g.debit += +r.amountIncTax || 0;
+  }
+  for (const w of (wasteBoardRows || [])) {
+    const company = String(w.company || '').trim();
+    const amt = parseFloat(String(w.amount_inc_tax || '').replace(/,/g, ''));
+    if (!company || !(amt > 0)) continue;
+    const invText = String(w.invoice_no || '').trim();
+    const invKey = invoiceMatchKey(invText);
+    const date = partyParseDate(w.entry_date);
+    const g = put(invKey ? 'i|' + partyKey(company) + '|' + invKey : 'w|' + w.id,
+      { source: 'waste', company, invoice: invText, noInvoice: !invKey, date });
+    if (date && (!g.date || date < g.date)) g.date = date;
+    g.names.add(String(w.job_name || '').trim() || 'Waste of Board');
+    g.debit += amt;
+  }
+  return [...groups.values()].map(g => ({ ...g, jobIds: [...g.jobIds].sort((a, b) => a - b), names: [...g.names] }));
+}
+function partyLedgerCompanyList(invoices) {
+  const d = partyLedgerState.data || {};
+  const m = new Map();
+  const add = (c) => { const t = String(c || '').trim(); if (t && !m.has(partyKey(t))) m.set(partyKey(t), t); };
+  (typeof companySettings !== 'undefined' ? companySettings : []).forEach(c => add(c.company));
+  invoices.forEach(l => add(l.company));
+  (d.receipts || []).forEach(r => add(r.company));
+  (d.openings || []).forEach(o => add(o.company));
+  return [...m.values()].sort((a, b) => a.localeCompare(b));
+}
+// One company's ledger for [from, to] (either may be blank = open-ended).
+// With an opening balance "as of" A, entries dated before A are already
+// inside that figure and are left out; the opening line then carries it
+// forward through anything between A and the period start.
+function partyLedgerFor(company, invoices, from, to) {
+  const d = partyLedgerState.data || {};
+  const k = partyKey(company);
+  const opening = (d.openings || []).find(o => partyKey(o.company) === k) || null;
+  const asOf = opening ? String(opening.as_of || '') : '';
+  const entries = [];
+  const undated = [];
+  for (const l of invoices) {
+    if (partyKey(l.company) !== k) continue;
+    if (!l.date) { undated.push(l); continue; }
+    entries.push({ type: 'inv', date: l.date, vno: l.noInvoice ? '—' : 'INV-' + l.invoice, debit: l.debit, credit: 0, line: l });
+  }
+  for (const r of (d.receipts || [])) {
+    if (partyKey(r.company) !== k) continue;
+    const amt = +r.amount || 0;
+    const isDr = PARTY_DEBIT_KINDS.has(r.kind);
+    entries.push({ type: 'rcpt', date: String(r.entry_date || ''), vno: r.voucher_no || '—', debit: isDr ? amt : 0, credit: isDr ? 0 : amt, receipt: r });
+  }
+  const inOpening = asOf ? entries.filter(e => e.date < asOf).length : 0;
+  const counted = entries.filter(e => !asOf || e.date >= asOf);
+  counted.sort((a, b) => a.date.localeCompare(b.date)
+    || (a.type !== b.type ? (a.type === 'inv' ? -1 : 1)
+        : a.type === 'inv' ? String(a.vno).localeCompare(String(b.vno), undefined, { numeric: true }) : a.receipt.id - b.receipt.id));
+  const net = (e) => (e.debit || 0) - (e.credit || 0);
+  let bal = (opening ? (+opening.amount || 0) : 0) + counted.filter(e => from && e.date < from).reduce((a, e) => a + net(e), 0);
+  const openingBal = bal;
+  const openingDate = (from && (!asOf || from > asOf)) ? from : (asOf || from || '');
+  let totalDr = 0, totalCr = 0;
+  const lines = counted.filter(e => (!from || e.date >= from) && (!to || e.date <= to)).map(e => {
+    bal += net(e); totalDr += e.debit || 0; totalCr += e.credit || 0;
+    return { ...e, balance: bal };
+  });
+  const missingRate = lines.filter(e => e.type === 'inv' && e.line.missingRate);
+  return { company, opening, openingBal, openingDate, lines, closing: bal, totalDr, totalCr, inOpening, undated, missingRate };
+}
+function plCanEnter() { return hasPerm('rpt_party_ledger_entry', 'yes'); }
+function openPartyLedger() {
+  const pane = document.getElementById('rt-party-ledger');
+  if (!pane) return;
+  pane.innerHTML = `<div style="font-size:13px;color:var(--text2);padding:18px 0;">Loading the ledger…</div>`;
+  loadPartyLedgerData().then(renderPartyLedger);
+}
+function setPlCompanyIdx(i) { partyLedgerState.company = i < 0 ? '' : (partyLedgerState.companies[i] || ''); renderPartyLedger(); }
+function setPlPeriod(v) { partyLedgerState.period = v; renderPartyLedger(); }
+function setPlCustom() {
+  partyLedgerState.from = (document.getElementById('pl-from') || {}).value || '';
+  partyLedgerState.to   = (document.getElementById('pl-to')   || {}).value || '';
+  renderPartyLedger();
+}
+function renderPartyLedger() {
+  const pane = document.getElementById('rt-party-ledger');
+  if (!pane) return;
+  const s = partyLedgerState;
+  const d = s.data || {};
+  const invoices = partyLedgerInvoices();
+  s.companies = partyLedgerCompanyList(invoices);
+  if (s.company && !s.companies.some(c => partyKey(c) === partyKey(s.company))) s.companies.push(s.company);
+  const { from, to } = periodToDateRange(s.period, s.from, s.to);
+  const canEnter = plCanEnter();
+  const selIdx = s.companies.findIndex(c => partyKey(c) === partyKey(s.company));
+  const toolbar = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Party Ledger</h2>
+      <span style="color:var(--text2);font-size:12px;">Invoices from the Sale Report, receipts entered by finance, running balance per company.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+        ${canEnter ? `<button class="btn btn-sm btn-primary" onclick="openPartyReceiptModal(0)">+ Receipt</button>` : ''}
+        ${canEnter && s.company ? `<button class="btn btn-sm" onclick="openPartyOpeningModal()">Opening Balance</button>` : ''}
+        <button class="btn btn-sm" onclick="exportPartyLedger()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printPartyLedger()">&#128424; Print</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Company</div>
+        <select class="filter" onchange="setPlCompanyIdx(parseInt(this.value, 10))" style="min-width:240px;">
+          <option value="-1"${selIdx < 0 ? ' selected' : ''}>All companies (summary)</option>
+          ${s.companies.map((c, i) => `<option value="${i}"${i === selIdx ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">Period</div>
+        <select class="filter" onchange="setPlPeriod(this.value)">${reportPeriodOptions(s.period)}</select>
+      </div>
+      <div style="display:${s.period === 'custom' ? 'flex' : 'none'};gap:14px;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="pl-from" value="${esc(s.from)}" onchange="setPlCustom()"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="pl-to" value="${esc(s.to)}" onchange="setPlCustom()"></div>
+      </div>
+    </div>`;
+  if (d.error) { pane.innerHTML = toolbar + `<div class="empty">Could not load the ledger: ${esc(d.error)}</div>`; return; }
+  pane.innerHTML = toolbar + (s.company ? partyLedgerCompanyHtml(s.company, invoices, from, to) : partyLedgerSummaryHtml(invoices, from, to));
+}
+function partyLedgerSummaryRows(invoices, from, to) {
+  return partyLedgerState.companies.map((c, i) => ({ idx: i, ...partyLedgerFor(c, invoices, from, to) }))
+    .filter(r => r.lines.length || Math.abs(r.closing) > 0.004 || r.opening);
+}
+function partyLedgerSummaryHtml(invoices, from, to) {
+  const rows = partyLedgerSummaryRows(invoices, from, to);
+  if (!rows.length) return `<div class="empty">No invoices, receipts or opening balances yet.</div>`;
+  const t = rows.reduce((a, r) => ({ o: a.o + r.openingBal, dr: a.dr + r.totalDr, cr: a.cr + r.totalCr, c: a.c + r.closing }), { o: 0, dr: 0, cr: 0, c: 0 });
+  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = th.replace('text-align:left', 'text-align:right');
+  const td = 'style="padding:8px 10px;text-align:right;white-space:nowrap;"';
+  return `<div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} compan${rows.length === 1 ? 'y' : 'ies'} &middot; click one to open its ledger</div>
+    <div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);"><th ${th}>Company</th><th ${thR}>Opening</th><th ${thR}>Invoiced (Dr)</th><th ${thR}>Received (Cr)</th><th ${thR}>Closing Balance</th></tr></thead>
+      <tbody>${rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="setPlCompanyIdx(${r.idx})">
+        <td style="padding:8px 10px;font-weight:600;">${esc(r.company)}${r.missingRate.length ? ` <span title="Invoices without a rate - their amounts are missing" style="background:#fee2e2;color:#991b1b;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;">${r.missingRate.length} no rate</span>` : ''}</td>
+        <td ${td}>${plBalance(r.openingBal)}</td>
+        <td ${td}>${plMoney(r.totalDr)}</td>
+        <td ${td}>${plMoney(r.totalCr)}</td>
+        <td ${td}><b>${plBalance(r.closing)}</b></td>
+      </tr>`).join('')}</tbody>
+      <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+        <td style="padding:8px 10px;">Total</td><td ${td}>${plBalance(t.o)}</td><td ${td}>${plMoney(t.dr)}</td><td ${td}>${plMoney(t.cr)}</td><td ${td}>${plBalance(t.c)}</td>
+      </tr></tfoot>
+    </table></div>`;
+}
+function plParticularsHtml(e) {
+  if (e.type === 'rcpt') {
+    const r = e.receipt;
+    return `${esc(PARTY_KIND_LABELS[r.kind] || r.kind)}${r.reference ? ' &middot; ' + esc(r.reference) : ''}${r.notes ? `<div style="font-size:11px;color:var(--text2);">${esc(r.notes)}</div>` : ''}`;
+  }
+  const l = e.line;
+  const jobs = l.jobIds.map(id => `<span onclick="event.stopPropagation(); openEdit(${id})" title="Open Job E-${id}" style="cursor:pointer;color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">E-${id}</span>`).join(' ');
+  const head = l.noInvoice ? 'delivery (no invoice no. yet)' : `invoice no = ${esc(l.invoice)}`;
+  const sub = [jobs, esc(l.names.join(' / '))].filter(Boolean).join(' &middot; ');
+  return `${head}${l.source === 'waste' ? ' <span style="font-size:10px;color:var(--text2);">(Waste of Board)</span>' : ''}${l.missingRate ? ' <span title="A delivery on this invoice has no rate, so its amount is missing" style="background:#fee2e2;color:#991b1b;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;">no rate</span>' : ''}${sub ? `<div style="font-size:11px;color:var(--text2);">${sub}</div>` : ''}`;
+}
+function partyLedgerCompanyHtml(company, invoices, from, to) {
+  const L = partyLedgerFor(company, invoices, from, to);
+  const canEnter = plCanEnter();
+  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = th.replace('text-align:left', 'text-align:right');
+  const tdR = 'style="padding:7px 10px;text-align:right;white-space:nowrap;"';
+  const notes = [];
+  if (L.opening) notes.push(`Opening balance <b>${plBalance(+L.opening.amount)}</b> as of ${esc(fmtDMY(L.opening.as_of))}${L.inOpening ? ` &middot; ${L.inOpening} earlier entr${L.inOpening === 1 ? 'y is' : 'ies are'} already inside it` : ''}.`);
+  else notes.push(`No opening balance set${canEnter ? ' — use <b>Opening Balance</b> to start from the accounts system\'s figure' : ''}.`);
+  if (L.missingRate.length) notes.push(`<span style="color:#991b1b;">${L.missingRate.length} invoice${L.missingRate.length === 1 ? ' has' : 's have'} a delivery with no rate — set it in the Sale Report or the balance is short.</span>`);
+  if (L.undated.length) notes.push(`<span style="color:#991b1b;">${L.undated.length} Waste of Board sale${L.undated.length === 1 ? '' : 's'} with no readable date left out.</span>`);
+  const body = L.lines.map(e => {
+    const click = e.type === 'rcpt'
+      ? (canEnter ? ` onclick="openPartyReceiptModal(${e.receipt.id})" title="Edit this receipt" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`)
+      : (e.line.jobIds.length ? ` onclick="openEdit(${e.line.jobIds[e.line.jobIds.length - 1]})" title="Open the job" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`);
+    return `<tr class="row-hover-red${click.includes('onclick') ? ' cv-summary-row' : ''}"${click}>
+      <td style="padding:7px 10px;white-space:nowrap;font-weight:600;">${esc(e.vno)}</td>
+      <td style="padding:7px 10px;white-space:nowrap;">${esc(fmtDMY(e.date))}</td>
+      <td style="padding:7px 10px;">${plParticularsHtml(e)}</td>
+      <td ${tdR}>${e.debit ? plMoney(e.debit) : (e.type === 'inv' && e.line.missingRate ? '<span style="color:#991b1b;">?</span>' : '&mdash;')}</td>
+      <td ${tdR}>${e.credit ? plMoney(e.credit) : '&mdash;'}</td>
+      <td ${tdR}><b>${plBalance(e.balance)}</b></td>
+    </tr>`;
+  }).join('');
+  return `<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+      <div style="font-size:17px;font-weight:700;">${esc(company)}</div>
+      <div style="font-size:12px;color:var(--text2);">${from || to ? `${esc(fmtDMY(from) || '(start)')} to ${esc(fmtDMY(to) || '(today)')}` : 'All time'} &middot; ${L.lines.length} entr${L.lines.length === 1 ? 'y' : 'ies'}</div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="setPlCompanyIdx(-1)">&larr; All companies</button>
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6;">${notes.join('<br>')}</div>
+    <div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);"><th ${th}>V-No</th><th ${th}>Date</th><th ${th}>Particulars</th><th ${thR}>Debit</th><th ${thR}>Credit</th><th ${thR}>Balance</th></tr></thead>
+      <tbody>
+        <tr style="background:#f8fafc;border-bottom:1px solid var(--border);">
+          <td style="padding:7px 10px;"></td><td style="padding:7px 10px;white-space:nowrap;">${esc(fmtDMY(L.openingDate))}</td>
+          <td style="padding:7px 10px;font-weight:700;">Opening balance</td><td ${tdR}></td><td ${tdR}></td><td ${tdR}><b>${plBalance(L.openingBal)}</b></td>
+        </tr>
+        ${body || `<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--text3);font-style:italic;">No invoices or receipts in this period.</td></tr>`}
+      </tbody>
+      <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+        <td colspan="3" style="padding:8px 10px;text-align:right;">Total &middot; closing balance</td>
+        <td ${tdR}>${plMoney(L.totalDr)}</td><td ${tdR}>${plMoney(L.totalCr)}</td><td ${tdR}>${plBalance(L.closing)}</td>
+      </tr></tfoot>
+    </table></div>`;
+}
+// ── Receipt entry ──
+function openPartyReceiptModal(id) {
+  if (!plCanEnter()) return;
+  const d = partyLedgerState.data || {};
+  const r = id ? (d.receipts || []).find(x => x.id === id) : null;
+  const companies = partyLedgerState.companies.length ? partyLedgerState.companies : partyLedgerCompanyList(partyLedgerInvoices());
+  const cur = r ? r.company : partyLedgerState.company;
+  const today = localDateISO();
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
+    <h2>${r ? 'Edit Receipt' : 'Add Receipt'}</h2>
+    <div class="form-group"><label class="form-label">Company *</label>
+      <select id="plr-company"><option value="">Pick the company…</option>
+        ${companies.map(c => `<option value="${esc(c)}"${partyKey(c) === partyKey(cur) ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+      </select></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="plr-date" value="${esc(r ? r.entry_date : today)}" max="${today}"></div>
+      <div class="form-group"><label class="form-label">Type *</label>
+        <select id="plr-kind">${Object.entries(PARTY_KIND_LABELS).map(([k, l]) => `<option value="${k}"${(r ? r.kind : 'bank') === k ? ' selected' : ''}>${esc(l)}${PARTY_DEBIT_KINDS.has(k) ? ' (adds to balance)' : ''}</option>`).join('')}</select></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">V-No <span style="font-weight:400;color:var(--text2);">(as in the accounts system)</span></label><input type="text" id="plr-vno" value="${esc(r ? (r.voucher_no || '') : '')}" placeholder="e.g. BRV-27-0046"></div>
+      <div class="form-group"><label class="form-label">Amount (Rs) *</label><input type="number" id="plr-amount" min="0" step="any" value="${r ? esc(String(+r.amount)) : ''}" placeholder="0"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Reference <span style="font-weight:400;color:var(--text2);">(cheque no., bank, CPR no.)</span></label><input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="e.g. 2 CHQS Faysal Bank"></div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="plr-notes" value="${esc(r ? (r.notes || '') : '')}"></div>
+    <div class="modal-actions">
+      ${r ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deletePartyReceipt(${r.id})">Delete</button>` : ''}
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="savePartyReceipt(${r ? r.id : 0})">Save</button>
+    </div>
+  </div>`);
+}
+async function savePartyReceipt(id) {
+  const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
+  const body = { company: val('plr-company'), entry_date: val('plr-date'), kind: val('plr-kind'),
+    voucher_no: val('plr-vno'), amount: val('plr-amount'), reference: val('plr-ref'), notes: val('plr-notes') };
+  if (!body.company) { await alertDialog({ title: 'Pick the company', kind: 'warn' }); return; }
+  if (!body.entry_date) { await alertDialog({ title: 'Pick the date', kind: 'warn' }); return; }
+  if (body.entry_date > localDateISO()) { await alertDialog({ title: 'The date is in the future', kind: 'warn' }); return; }
+  const amt = Number(String(body.amount).replace(/,/g, ''));
+  if (!Number.isFinite(amt) || amt <= 0) { await alertDialog({ title: 'Enter the amount', message: 'A number above 0.', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    if (id) await api('PUT', `/api/party-receipts/${id}`, body);
+    else    await api('POST', '/api/party-receipts', body);
+    await loadPartyLedgerData();
+    closeModal();
+    renderPartyLedger();
+    notify(id ? 'Receipt updated' : 'Receipt added');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function deletePartyReceipt(id) {
+  const ok = await confirmDialog({ title: 'Delete this receipt?', message: 'It comes off the company\'s ledger. The deletion is kept in the audit log.', danger: true, confirmText: 'Delete' });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/party-receipts/${id}`);
+    await loadPartyLedgerData();
+    closeModal();
+    renderPartyLedger();
+    notify('Receipt deleted');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// ── Opening balance ──
+function openPartyOpeningModal() {
+  const company = partyLedgerState.company;
+  if (!plCanEnter() || !company) return;
+  const o = ((partyLedgerState.data || {}).openings || []).find(x => partyKey(x.company) === partyKey(company)) || null;
+  const amt = o ? +o.amount : 0;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
+    <h2>Opening Balance</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text);">${esc(company)}</b><br>The balance at the START of the date below, as your accounts system shows it. Entries dated before it are treated as already inside this figure.</div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">As of *</label><input type="date" id="plo-date" value="${esc(o ? o.as_of : localDateISO())}"></div>
+      <div class="form-group"><label class="form-label">Amount (Rs) *</label><input type="number" id="plo-amount" min="0" step="any" value="${o ? esc(String(Math.abs(amt))) : ''}"></div>
+      <div class="form-group"><label class="form-label">Side</label>
+        <select id="plo-side"><option value="dr"${amt >= 0 ? ' selected' : ''}>Dr (they owe us)</option><option value="cr"${amt < 0 ? ' selected' : ''}>Cr (we owe them)</option></select></div>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="plo-notes" value="${esc(o ? (o.notes || '') : '')}"></div>
+    <div class="modal-actions">
+      ${o ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="savePartyOpening(true)">Remove</button>` : ''}
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="savePartyOpening(false)">Save</button>
+    </div>
+  </div>`);
+}
+async function savePartyOpening(remove) {
+  const company = partyLedgerState.company;
+  const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
+  let body;
+  if (remove) {
+    const ok = await confirmDialog({ title: 'Remove the opening balance?', message: 'The ledger will start from zero again.', danger: true, confirmText: 'Remove' });
+    if (!ok) return;
+    body = { company, amount: '' };
+  } else {
+    const n = Number(val('plo-amount').replace(/,/g, ''));
+    if (!val('plo-date')) { await alertDialog({ title: 'Pick the as-of date', kind: 'warn' }); return; }
+    if (!Number.isFinite(n) || val('plo-amount') === '') { await alertDialog({ title: 'Enter the amount', kind: 'warn' }); return; }
+    body = { company, as_of: val('plo-date'), amount: val('plo-side') === 'cr' ? -Math.abs(n) : Math.abs(n), notes: val('plo-notes') };
+  }
+  showSaving(true);
+  try {
+    await api('PUT', '/api/party-openings', body);
+    await loadPartyLedgerData();
+    closeModal();
+    renderPartyLedger();
+    notify(remove ? 'Opening balance removed' : 'Opening balance saved');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// ── Print / Excel ──
+function partyLedgerPeriodText(from, to) {
+  return (from || to) ? `Period from : ${fmtDMY(from) || '(start)'} To ${fmtDMY(to) || fmtDMY(localDateISO())}` : 'Period : All time';
+}
+function plPlainParticulars(e) {
+  if (e.type === 'rcpt') {
+    const r = e.receipt;
+    return [PARTY_KIND_LABELS[r.kind] || r.kind, r.reference, r.notes].filter(Boolean).join(' · ');
+  }
+  const l = e.line;
+  return [l.noInvoice ? 'delivery (no invoice no. yet)' : `invoice no = ${l.invoice}`,
+          l.jobIds.map(id => 'E-' + id).join(' '), l.missingRate ? 'NO RATE - amount missing' : ''].filter(Boolean).join(' · ');
+}
+function printPartyLedger() {
+  const s = partyLedgerState;
+  const invoices = partyLedgerInvoices();
+  const { from, to } = periodToDateRange(s.period, s.from, s.to);
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;white-space:nowrap;"';
+  let table, scope;
+  if (s.company) {
+    const L = partyLedgerFor(s.company, invoices, from, to);
+    scope = `Party ledger · ${s.company}`;
+    table = `<table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
+      <tr style="background:#f7f1ea;"><th ${tdL}>V-No</th><th ${tdL}>Date</th><th ${tdL}>Particulars</th><th ${tdR}>Debit</th><th ${tdR}>Credit</th><th ${tdR}>Balance</th></tr>
+      <tr><td ${tdL}></td><td ${tdL}>${esc(fmtDMY(L.openingDate))}</td><td ${tdL}><b>Opening balance</b></td><td ${tdR}></td><td ${tdR}></td><td ${tdR}><b>${plBalance(L.openingBal)}</b></td></tr>
+      ${L.lines.map(e => `<tr><td ${tdL}>${esc(e.vno)}</td><td ${tdL}>${esc(fmtDMY(e.date))}</td><td ${tdL}>${esc(plPlainParticulars(e))}</td><td ${tdR}>${e.debit ? plMoney(e.debit) : '-'}</td><td ${tdR}>${e.credit ? plMoney(e.credit) : '-'}</td><td ${tdR}>${plBalance(e.balance)}</td></tr>`).join('')}
+      <tr style="background:#eee;font-weight:bold;"><td ${tdL} colspan="3">Total · closing balance</td><td ${tdR}>${plMoney(L.totalDr)}</td><td ${tdR}>${plMoney(L.totalCr)}</td><td ${tdR}>${plBalance(L.closing)}</td></tr>
+    </table>`;
+  } else {
+    const rows = partyLedgerSummaryRows(invoices, from, to);
+    if (!rows.length) { notify('Nothing to print.'); return; }
+    scope = 'Party ledger · all companies';
+    table = `<table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
+      <tr style="background:#f7f1ea;"><th ${tdL}>Company</th><th ${tdR}>Opening</th><th ${tdR}>Invoiced (Dr)</th><th ${tdR}>Received (Cr)</th><th ${tdR}>Closing Balance</th></tr>
+      ${rows.map(r => `<tr><td ${tdL}>${esc(r.company)}</td><td ${tdR}>${plBalance(r.openingBal)}</td><td ${tdR}>${plMoney(r.totalDr)}</td><td ${tdR}>${plMoney(r.totalCr)}</td><td ${tdR}>${plBalance(r.closing)}</td></tr>`).join('')}
+    </table>`;
+  }
+  const area = document.getElementById('print-area');
+  area.innerHTML = `
+    <style>@media print { @page { size: A4 portrait; margin: 0.35in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'LEDGER REPORT', scope, dateText: partyLedgerPeriodText(from, to), note: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      ${table}
+    </div>`;
+  setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 300);
+}
+async function exportPartyLedger() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const s = partyLedgerState;
+  const invoices = partyLedgerInvoices();
+  const { from, to } = periodToDateRange(s.period, s.from, s.to);
+  let header, aoa, scope, sheet;
+  if (s.company) {
+    const L = partyLedgerFor(s.company, invoices, from, to);
+    header = ['V-No', 'Date', 'Particulars', 'Debit', 'Credit', 'Balance', 'Dr/Cr'];
+    aoa = reportExcelAoa(header);
+    const r2 = (n) => Math.round((+n || 0) * 100) / 100;
+    aoa.push(['', fmtDMY(L.openingDate), 'Opening balance', '', '', r2(Math.abs(L.openingBal)), L.openingBal >= 0 ? 'Dr' : 'Cr']);
+    L.lines.forEach(e => aoa.push([e.vno, fmtDMY(e.date), plPlainParticulars(e), e.debit ? r2(e.debit) : '', e.credit ? r2(e.credit) : '', r2(Math.abs(e.balance)), e.balance >= 0 ? 'Dr' : 'Cr']));
+    aoa.push(['', '', 'Total · closing balance', r2(L.totalDr), r2(L.totalCr), r2(Math.abs(L.closing)), L.closing >= 0 ? 'Dr' : 'Cr']);
+    scope = `Party ledger · ${s.company}`;
+    sheet = s.company;
+  } else {
+    const rows = partyLedgerSummaryRows(invoices, from, to);
+    if (!rows.length) { notify('Nothing to export.'); return; }
+    header = ['Company', 'Opening', 'Invoiced (Dr)', 'Received (Cr)', 'Closing Balance', 'Dr/Cr'];
+    aoa = reportExcelAoa(header);
+    rows.forEach(r => aoa.push([r.company, Math.round(r.openingBal * 100) / 100, Math.round(r.totalDr * 100) / 100, Math.round(r.totalCr * 100) / 100, Math.round(Math.abs(r.closing) * 100) / 100, r.closing >= 0 ? 'Dr' : 'Cr']));
+    scope = 'Party ledger · all companies';
+    sheet = 'All companies';
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, header, { title: 'LEDGER REPORT', scope, dateText: partyLedgerPeriodText(from, to) });
+  applyReportExcelCols(ws, header, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, String(sheet).replace(/[:\\\/?*\[\]]/g, '-').slice(0, 31));
+  XLSX.writeFile(wb, `supreme-art-ledger-${String(sheet).replace(/\s+/g, '-').toLowerCase()}-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+
 function openSaleReportPage() {
   if (!hasPerm('rpt_sale_report', 'view')) { notify('Sale Report is not available for your role.'); return; }
   openReportsGroup('sale-report-group');
-  openSaleReport();
+  setReportsTab('sale-report');
 }
 function openSaleReport() {
   const pane = document.getElementById('rt-sale-report');
@@ -17669,11 +18137,13 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['sale-report', 'party-ledger', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
+  if (name === 'sale-report')     openSaleReport();
+  if (name === 'party-ledger')    openPartyLedger();
   if (name === 'stock-in')        openStockMovementPane('in');
   if (name === 'stock-out')       openStockMovementPane('out');
   if (name === 'manual-consumption') openManualConsumptionPane();
@@ -31558,6 +32028,8 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_sale_report',                 type: 'tab' },
   { key: 'rpt_sale_report_totals',          type: 'tab' },
   { key: 'rpt_sale_report_company',         type: 'button' },
+  { key: 'rpt_party_ledger',                type: 'tab' },
+  { key: 'rpt_party_ledger_entry',          type: 'button' },
 ];
 // Products tab (Product Rate), merged in from the Finance app.
 const ACC_PRODUCTS_TAB_ROWS = [

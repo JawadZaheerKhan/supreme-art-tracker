@@ -282,7 +282,9 @@ function getDb() {
 // Bumped again to create finance.waste_board_sales, behind the Sale Report's Waste of Board tab.
 // Bumped again to add inventory_transactions.recorded_at (stock Entry Date) - without it the
 // fast-path skipped the ALTER and every stock-ledger INSERT failed on the missing column.
-const SCHEMA_VERSION = 'v2026-09-25-stock-entry-date';
+// Bumped again for the Party Ledger: finance.party_receipts / party_openings
+// and the rpt_party_ledger* Access Register rows.
+const SCHEMA_VERSION = 'v2026-09-25-party-ledger';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -441,6 +443,10 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_sale_report:                 { label: 'Sale Report — full invoicing detail (Rate, Sale Tax, Company / Destination / NTN)', levels: { ceo: 'view', finance: 'view' } },
   rpt_sale_report_totals:          { label: 'Sale Report — totals row at the bottom (summed Rate w/o & w/ Sale Tax)', levels: { ceo: 'view' } },
   rpt_sale_report_company:         { label: 'Sale Report — Company Settings button (NTN / Destination per company)', levels: { finance: 'yes', ceo: 'view' } },
+  // Party Ledger — each company's invoices (from the Sale Report), receipts
+  // and running balance. Viewing and entering are separate rows.
+  rpt_party_ledger:                { label: 'Party Ledger — view each company\'s invoices, receipts and running balance', levels: { ceo: 'view', finance: 'view' } },
+  rpt_party_ledger_entry:          { label: 'Party Ledger — enter / edit / delete receipts and opening balances', levels: { finance: 'yes' } },
 
   // Access Register — Users tab. Same "not wired into any gate yet" note
   // applies — user_view/user_admin/operator_admin keep enforcing exactly
@@ -1520,6 +1526,42 @@ async function initDb() {
         updated_at     TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Party Ledger. Invoices are NOT stored - they come live from the Sale
+    // Report (every delivery's invoice no. and amount incl. tax). What IS
+    // stored is what finance types: money received (and the odd debit
+    // note) per company, and one opening balance per company so the ledger
+    // starts where the accounts system is, without re-typing history.
+    // Dates are TEXT 'YYYY-MM-DD' (validated) - business dates, no timezone.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.party_receipts (
+        id          SERIAL PRIMARY KEY,
+        company     TEXT NOT NULL,
+        entry_date  TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        voucher_no  TEXT,
+        reference   TEXT,
+        amount      NUMERIC NOT NULL,
+        notes       TEXT,
+        created_by  TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at  TIMESTAMPTZ,
+        deleted_by  TEXT
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.party_openings (
+        id          SERIAL PRIMARY KEY,
+        company     TEXT NOT NULL,
+        as_of       TEXT NOT NULL,
+        amount      NUMERIC NOT NULL,
+        notes       TEXT,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS party_openings_company_uq ON finance.party_openings (lower(company))`;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_aliases (
         alias       TEXT PRIMARY KEY,
@@ -1797,7 +1839,7 @@ function canSetPricing(user) { return userHasRole(user, 'super_admin') || roleHa
 // Report or the job-card pricing fields.
 function canSeeFinanceData(user) {
   return userHasRole(user, 'super_admin')
-    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing'].some(k => roleHasPermission(user, k, 'view'));
+    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing', 'rpt_party_ledger'].some(k => roleHasPermission(user, k, 'view'));
 }
 function requireFinanceView(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
@@ -7594,6 +7636,137 @@ app.delete('/api/company-settings/:id', requirePermission('rpt_sale_report_compa
       summary: `Company Settings removed: "${deleted[0].company}"`,
     });
     res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Party Ledger ──────────────────────────────────────────────────
+// kind decides the side: everything reduces what the company owes (Credit)
+// except a debit note, which adds to it.
+const PARTY_RECEIPT_KINDS = {
+  bank:        { label: 'Bank Receipt',      side: 'cr' },
+  cheque:      { label: 'Cheque',            side: 'cr' },
+  cash:        { label: 'Cash',              side: 'cr' },
+  jv:          { label: 'Tax deducted (JV)', side: 'cr' },
+  credit_note: { label: 'Credit Note',       side: 'cr' },
+  debit_note:  { label: 'Debit Note',        side: 'dr' },
+};
+function partyDateOk(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+  return !!m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
+}
+// Validates + normalises a receipt body. Returns { row } or { error }.
+function partyReceiptFromBody(b) {
+  const company = String((b && b.company) || '').trim();
+  if (!company) return { error: 'Pick the company.' };
+  const entry_date = String((b && b.entry_date) || '').trim();
+  if (!partyDateOk(entry_date)) return { error: 'Date must be a valid date (YYYY-MM-DD).' };
+  if (entry_date > businessDateISO()) return { error: 'Date cannot be in the future.' };
+  const kind = String((b && b.kind) || '').trim();
+  if (!PARTY_RECEIPT_KINDS[kind]) return { error: 'Pick a type (Bank Receipt, Cheque, Cash, Tax deducted, Credit Note or Debit Note).' };
+  const amount = Number(String((b && b.amount) ?? '').replace(/,/g, '').trim());
+  if (!Number.isFinite(amount) || amount <= 0) return { error: 'Amount must be a number above 0.' };
+  const clean = (v, max) => { const t = String(v == null ? '' : v).trim(); return t ? t.slice(0, max) : null; };
+  return { row: { company, entry_date, kind, amount,
+    voucher_no: clean(b.voucher_no, 60), reference: clean(b.reference, 200), notes: clean(b.notes, 500) } };
+}
+app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const receipts = await sql`SELECT * FROM finance.party_receipts WHERE deleted_at IS NULL ORDER BY entry_date ASC, id ASC`;
+    const openings = await sql`SELECT * FROM finance.party_openings ORDER BY company ASC`;
+    res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { row, error } = partyReceiptFromBody(req.body || {});
+    if (error) return res.status(400).json({ error });
+    const ins = await sql`
+      INSERT INTO finance.party_receipts (company, entry_date, kind, voucher_no, reference, amount, notes, created_by, updated_by)
+      VALUES (${row.company}, ${row.entry_date}, ${row.kind}, ${row.voucher_no}, ${row.reference}, ${row.amount}, ${row.notes}, ${req.user.email}, ${req.user.email})
+      RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'party_receipt.create', entityType: 'party_receipt', entityId: ins[0].id,
+      summary: `${PARTY_RECEIPT_KINDS[row.kind].label} ${row.voucher_no ? row.voucher_no + ' ' : ''}· ${row.company} · ${row.amount.toLocaleString()} on ${row.entry_date}`,
+      metadata: row,
+    });
+    res.json(ins[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const prev = (await sql`SELECT * FROM finance.party_receipts WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    if (!prev) return res.status(404).json({ error: 'Receipt not found' });
+    const { row, error } = partyReceiptFromBody(req.body || {});
+    if (error) return res.status(400).json({ error });
+    const upd = await sql`
+      UPDATE finance.party_receipts SET company = ${row.company}, entry_date = ${row.entry_date}, kind = ${row.kind},
+             voucher_no = ${row.voucher_no}, reference = ${row.reference}, amount = ${row.amount}, notes = ${row.notes},
+             updated_by = ${req.user.email}, updated_at = NOW()
+       WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'party_receipt.edit', entityType: 'party_receipt', entityId: id,
+      summary: `Edited receipt ${prev.voucher_no || '#' + id} · ${row.company}: ${Number(prev.amount).toLocaleString()} on ${prev.entry_date} -> ${row.amount.toLocaleString()} on ${row.entry_date}`,
+      metadata: { before: prev, after: row },
+    });
+    res.json(upd[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const del = await sql`
+      UPDATE finance.party_receipts SET deleted_at = NOW(), deleted_by = ${req.user.email}
+       WHERE id = ${id} AND deleted_at IS NULL RETURNING *`;
+    if (!del.length) return res.status(404).json({ error: 'Receipt not found' });
+    await logAudit(sql, req, {
+      action: 'party_receipt.delete', entityType: 'party_receipt', entityId: id,
+      summary: `Deleted receipt ${del[0].voucher_no || '#' + id} · ${del[0].company} · ${Number(del[0].amount).toLocaleString()} on ${del[0].entry_date}`,
+      metadata: del[0],
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// One opening balance per company: the balance at the START of as_of.
+// amount > 0 = Dr (they owe us), < 0 = Cr. Blank amount removes it.
+app.put('/api/party-openings', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const company = String((req.body && req.body.company) || '').trim();
+    if (!company) return res.status(400).json({ error: 'Pick the company.' });
+    const prev = (await sql`SELECT * FROM finance.party_openings WHERE lower(company) = lower(${company})`)[0] || null;
+    const rawAmt = String((req.body && req.body.amount) ?? '').replace(/,/g, '').trim();
+    if (rawAmt === '') {
+      await sql`DELETE FROM finance.party_openings WHERE lower(company) = lower(${company})`;
+      await logAudit(sql, req, { action: 'party_opening.delete', entityType: 'party_opening', entityId: prev ? prev.id : null,
+        summary: `Removed opening balance for ${company}`, metadata: { before: prev } });
+      return res.json({ ok: true, removed: true });
+    }
+    const amount = Number(rawAmt);
+    if (!Number.isFinite(amount)) return res.status(400).json({ error: 'Opening balance must be a number (negative for a Cr balance).' });
+    const as_of = String((req.body && req.body.as_of) || '').trim();
+    if (!partyDateOk(as_of)) return res.status(400).json({ error: 'As-of date must be a valid date (YYYY-MM-DD).' });
+    const notes = String((req.body && req.body.notes) || '').trim().slice(0, 500) || null;
+    const row = prev
+      ? (await sql`UPDATE finance.party_openings SET company = ${company}, as_of = ${as_of}, amount = ${amount}, notes = ${notes},
+                     updated_by = ${req.user.email}, updated_at = NOW() WHERE id = ${prev.id} RETURNING *`)[0]
+      : (await sql`INSERT INTO finance.party_openings (company, as_of, amount, notes, updated_by)
+                   VALUES (${company}, ${as_of}, ${amount}, ${notes}, ${req.user.email}) RETURNING *`)[0];
+    await logAudit(sql, req, {
+      action: 'party_opening.set', entityType: 'party_opening', entityId: row.id,
+      summary: `Opening balance ${company}: ${prev ? Number(prev.amount).toLocaleString() + ' (' + prev.as_of + ')' : 'none'} -> ${amount.toLocaleString()} (${as_of})`,
+      metadata: { before: prev, after: row },
+    });
+    res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
