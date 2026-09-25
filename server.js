@@ -956,6 +956,11 @@ async function initDb() {
     // the Stock In / Stock Out reports. Nullable — single-item entries
     // and pre-existing rows leave it blank.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS challan_no TEXT`;
+    // Entry Date: a missed stock entry can be recorded on the day it really
+    // happened. created_at then carries THAT day (so every report, balance
+    // and summary files it correctly) and recorded_at keeps the real moment
+    // it was typed in - the audit trail. NULL = entered on the day itself.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_challan_idx ON inventory_transactions(challan_no) WHERE challan_no IS NOT NULL`;
     // Soft delete: "Delete from history" (Manual Consumption, Stock In/Out
     // bulk delete) moves a row to the Archive instead of wiping it outright,
@@ -4505,7 +4510,22 @@ function jobDeductionSheets({ paperType, particulars }) {
 // in the same UPDATE so balance always matches the sum of ledger changes.
 // user / reversesTxId are optional metadata used by the History UI to show
 // who entered the row and to link reversals to their originals.
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo }) {
+// Optional Entry Date (YYYY-MM-DD, business-local) sent by the stock forms.
+// Blank or today = an ordinary entry. An earlier day = a missed entry filed
+// on that day, at the current clock time. Future dates are refused.
+function stockEntryInstant(rawDate) {
+  const v = String(rawDate == null ? '' : rawDate).trim();
+  if (!v) return { at: null };
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m || isNaN(Date.UTC(+m[1], +m[2] - 1, +m[3])) || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > 31) {
+    return { error: 'Entry date must be a valid date (YYYY-MM-DD).' };
+  }
+  const today = businessDateISO();
+  if (v > today) return { error: 'Entry date cannot be in the future.' };
+  if (v === today) return { at: null };
+  return { at: businessInstantForDate(v), date: v };
+}
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt }) {
   if (!itemId || !change) return null;
   if (change < 0) {
     const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
@@ -4515,9 +4535,13 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   const userId    = user && user.id    ? user.id    : null;
   const userEmail = user && user.email ? user.email : null;
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
+  // Backdated (occurredAt): created_at = that day, recorded_at = now.
+  const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan})
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan},
+            COALESCE(${occurredIso}::timestamptz, NOW()),
+            CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
     RETURNING id
   `;
   await sql`
@@ -5567,6 +5591,11 @@ async function performIssueStock(sql, req, id, body) {
   const challanNo = (body && typeof body.challan_no === 'string')
     ? (body.challan_no.trim() || null)
     : null;
+  const entry = stockEntryInstant(body && body.entry_date);
+  if (entry.error) return { status: 400, error: entry.error };
+  const occurredAt = entry.at;
+  // The job's own issued_at follows the entry date too.
+  const issuedAtIso = occurredAt ? occurredAt.toISOString() : null;
   // Resolve the paper GROUP from either the primary or secondary
   // inventory item, depending on source. Every accepted split must
   // live in the resolved anchor's paper group.
@@ -5648,7 +5677,7 @@ async function performIssueStock(sql, req, id, body) {
       UPDATE jobs
          SET issuance_status = 'issued',
              stage_index     = ${bumpedStage},
-             issued_at       = COALESCE(issued_at, NOW()),
+             issued_at       = COALESCE(issued_at, ${issuedAtIso}::timestamptz, NOW()),
              issued_by_id    = COALESCE(issued_by_id, ${req.user.id || null}),
              particulars     = ${JSON.stringify(cleanP)}
        WHERE id = ${id}
@@ -5750,6 +5779,7 @@ async function performIssueStock(sql, req, id, body) {
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${fmtPack(packs)} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}${overNote}`,
       user: req.user,
       challanNo,
+      occurredAt,
     });
     if (job.cut_size && job.offcut_size) {
       const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
@@ -5761,6 +5791,7 @@ async function performIssueStock(sql, req, id, body) {
         notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
         user: req.user,
         challanNo,
+        occurredAt,
       });
     }
     // Over-issuance handling — the auto-offcut credit that used to run
@@ -5869,7 +5900,7 @@ async function performIssueStock(sql, req, id, body) {
     : stayAtCtp
     ? await sql`
         UPDATE jobs
-           SET issued_at = COALESCE(issued_at, NOW()),
+           SET issued_at = COALESCE(issued_at, ${issuedAtIso}::timestamptz, NOW()),
                issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
                inventory_item_id = ${nextInvItemId},
                particulars = ${JSON.stringify(nextParticulars)},
@@ -5880,7 +5911,7 @@ async function performIssueStock(sql, req, id, body) {
     : await sql`
         UPDATE jobs
            SET issuance_status = 'issued',
-               issued_at = COALESCE(issued_at, NOW()),
+               issued_at = COALESCE(issued_at, ${issuedAtIso}::timestamptz, NOW()),
                issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
                inventory_item_id = ${nextInvItemId},
                stage_index = ${bumpedStage},
@@ -6441,6 +6472,9 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     const splitItems = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
     const byId = new Map(splitItems.map(x => [x.id, x]));
     const challanNo = req.body && req.body.challan_no ? String(req.body.challan_no).trim() || null : null;
+    const entry = stockEntryInstant(req.body && req.body.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const occurredAt = entry.at;
     for (const s of splits) {
       const splitItem = byId.get(s.item_id);
       if (!splitItem) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
@@ -6458,6 +6492,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
         notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${s.sheets / ps} ${unit} (${s.sheets} sheets) top-up from ${splitItem.brand || 'no brand'} issued by ${req.user.email}`,
         user: req.user,
         challanNo,
+        occurredAt,
       });
     }
     if (job.cut_size && job.offcut_size && sourceItem) {
@@ -6472,6 +6507,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
           notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${splitItem.brand || 'no brand'}) returned to stock (top-up)`,
         user: req.user,
           challanNo,
+          occurredAt,
       });
       }
     }
@@ -8810,9 +8846,12 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { change, reason, notes, job_card, challan_no } = req.body;
+    const { change, reason, notes, job_card, challan_no, entry_date } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
+    const entry = stockEntryInstant(entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const occurredAt = entry.at;
     if (!userHasBtn(req.user, delta > 0 ? 'inv_btn_stock_in' : 'inv_btn_stock_out')) return res.status(403).json({ error: 'Not allowed' });
     const itemId = parseInt(id, 10);
     const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
@@ -8924,6 +8963,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       notes: finalNotes,
       user: req.user,
       challanNo: challan_no,
+      occurredAt,
     });
 
     let offcutItem = null;
@@ -8941,6 +8981,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         user: req.user,
         pairedTxId: sourceTxId,
         challanNo: challan_no,
+        occurredAt,
       });
     }
 
@@ -8958,7 +8999,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       await sql`
         UPDATE jobs
            SET issuance_status='issued',
-               issued_at = COALESCE(issued_at, NOW()),
+               issued_at = COALESCE(issued_at, ${occurredAt ? occurredAt.toISOString() : null}::timestamptz, NOW()),
                issued_by_id = COALESCE(issued_by_id, ${req.user?.id || null}),
                particulars = ${JSON.stringify(nextParticulars)}
          WHERE id=${jobRow.id}
@@ -8976,7 +9017,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         entityType: 'inventory',
         entityId: it.id,
         // Same rule on the inventory side: packets lead, sheets follow.
-        summary: `${sign}${fmtPackets(Math.abs(delta), packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} (${sign}${delta.toLocaleString()} sheets) · ${label} (${finalReason})${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${fmtPackets(partialRemaining, packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} / ${partialRemaining.toLocaleString()} sheets still needed)`) : ''}`,
+        summary: `${sign}${fmtPackets(Math.abs(delta), packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} (${sign}${delta.toLocaleString()} sheets) · ${label} (${finalReason})${entry.date ? ` · dated ${entry.date} (late entry)` : ''}${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${fmtPackets(partialRemaining, packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} / ${partialRemaining.toLocaleString()} sheets still needed)`) : ''}`,
 
       });
     }
@@ -9060,7 +9101,9 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     // keep the audit trail intact.
     if (reverseTier === '30-day') {
       const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-      const withinWindow = (Date.now() - new Date(tx.created_at).getTime()) <= THIRTY_DAYS_MS;
+      // Counted from when the row was ENTERED - a missed entry filed today
+      // for last month is still reversible for the usual 30 days.
+      const withinWindow = (Date.now() - new Date(tx.recorded_at || tx.created_at).getTime()) <= THIRTY_DAYS_MS;
       if (!withinWindow) {
         return res.status(403).json({ error: 'You can only reverse entries created in the last 30 days. Ask an admin to reverse older entries.' });
       }
@@ -9333,7 +9376,7 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
         AND (${challanQ} = '' OR t.challan_no ILIKE ${'%' + challanQ + '%'})
-      ORDER BY t.id DESC
+      ORDER BY t.created_at DESC, t.id DESC
     `;
     res.json(txs);
   } catch (err) {
@@ -9396,7 +9439,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN jobs j ON j.id = t.job_id
       WHERE t.item_id = ANY(${memberIds})
-      ORDER BY t.id DESC
+      ORDER BY t.created_at DESC, t.id DESC
     `;
     if (!grouped) return res.json(txs);
     const currentBalance = members.reduce((sum, x) => sum + (parseFloat(x.current_balance) || 0), 0);
@@ -9779,6 +9822,9 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
     const overridePackets = parseFloat(req.body?.packets);
     const challanNo = req.body?.challan_no;
     const receiveNotes = req.body?.notes;
+    const entry = stockEntryInstant(req.body?.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const occurredAt = entry.at;
     const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id} AND deleted_at IS NULL`)[0];
     if (!imp) return res.status(404).json({ error: 'Import not found' });
     if (imp.status !== 'pending' && imp.status !== 'partial') {
@@ -9832,6 +9878,7 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
       notes: notesParts.join(' · '),
       user: req.user,
       challanNo,
+      occurredAt,
     });
 
     const newReceivedTotal = (parseFloat(imp.received_packets) || 0) + receivedPackets;
@@ -9840,7 +9887,7 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
     const updated = await sql`
       UPDATE inventory_imports SET
         status=${newStatus},
-        received_at=NOW(),
+        received_at=COALESCE(${occurredAt ? occurredAt.toISOString() : null}::timestamptz, NOW()),
         inventory_item_id=${itemId},
         received_packets=${newReceivedTotal}
       WHERE id=${id} RETURNING *

@@ -8905,6 +8905,7 @@ function openInvAddStock(id) {
         </select>
       </div>
     </div>
+    ${stockEntryDateHtml('stock-date')}
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -8928,8 +8929,11 @@ function stockQtySync(source, ps) {
 async function saveInvAddStock(id) {
   const qty = parseInt(document.getElementById('stock-qty').value, 10);
   if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
+  const entryDate = await readStockEntryDate('stock-date');
+  if (entryDate === false) return;
   const data = {
     change: qty,
+    entry_date: entryDate,
     reason: document.getElementById('stock-reason').value,
     notes:  document.getElementById('stock-notes').value.trim(),
     challan_no: (document.getElementById('stock-challan').value || '').trim() || null,
@@ -8986,6 +8990,7 @@ function openInvRemoveStock(id, opts) {
         </select>
       </div>
     </div>
+    ${stockEntryDateHtml('stockout-date')}
     <div id="stockout-jobchips-wrap" style="margin-bottom:8px;"></div>
     <div id="stockout-manual-wrap" style="display:none;margin-bottom:8px;">
       <div class="form-group"><label class="form-label">Manual Job Card No.</label><input type="text" id="stockout-jobcard" value="${esc(preJobCard)}" placeholder="e.g. any offline reference — 11729, ABC-42"></div>
@@ -9146,6 +9151,8 @@ async function saveInvRemoveStock(id) {
   if (qty > have) { await alertDialog({ title: 'Not enough stock', message: `On hand is ${have.toLocaleString()} sheets. Requested ${qty.toLocaleString()}. Reconcile the count first (Edit → Adjust by).`, kind: 'warn' }); return; }
   const reason = document.getElementById('stockout-reason').value;
   const challanNo = (document.getElementById('stockout-challan').value || '').trim() || null;
+  const entryDate = await readStockEntryDate('stockout-date');
+  if (entryDate === false) return;
   const notes = document.getElementById('stockout-notes').value.trim();
 
   // Job Card (pending) reason — route through /api/jobs/:id/issue-stock
@@ -9203,6 +9210,7 @@ async function saveInvRemoveStock(id) {
           const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
             splits: [{ item_id: id, sheets: share }],
             challan_no: challanNo,
+            entry_date: entryDate,
             source: j.source || 'primary',
           });
           remaining -= share;
@@ -9239,6 +9247,7 @@ async function saveInvRemoveStock(id) {
     notes,
     job_card: jobCard,
     challan_no: challanNo,
+    entry_date: entryDate,
   };
   showSaving(true);
   try {
@@ -9454,7 +9463,10 @@ function openBulkStockIn() {
   const rows = [0, 1, 2].map(() => bulkRowHtml(bulkRowSeq++)).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Stock In · Bulk</h2>
-    <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. CH-2026-042"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="bulk-ref" placeholder="e.g. CH-2026-042"></div>
+      ${stockEntryDateHtml('bulk-date')}
+    </div>
     <div class="form-group"><label class="form-label">Shipment Notes</label><input type="text" id="bulk-notes" placeholder="Optional notes applied to every row"></div>
     <table class="bulk-table" id="bulk-table">
       <thead>
@@ -9497,6 +9509,8 @@ async function saveBulkStockIn() {
   if (!tbody) return;
   const ref      = document.getElementById('bulk-ref').value.trim();
   const notesIn  = document.getElementById('bulk-notes').value.trim();
+  const entryDate = await readStockEntryDate('bulk-date');
+  if (entryDate === false) return;
   // Challan No. now goes on its own column, so keep the notes text free
   // of the "Ref: XYZ" prefix — the report displays challan_no separately.
   const sharedNote = notesIn || null;
@@ -9521,7 +9535,7 @@ async function saveBulkStockIn() {
   for (const r of rows) {
     try {
       await api('POST', `/api/inventory/${r.itemId}/transactions`, {
-        change: r.qty, reason: 'delivery', notes: sharedNote, challan_no: ref || null,
+        change: r.qty, reason: 'delivery', notes: sharedNote, challan_no: ref || null, entry_date: entryDate,
       });
       saved++;
     } catch (e) {
@@ -9922,7 +9936,10 @@ function openBulkStockOut() {
   const rows = [0, 1, 2].map(() => bulkOutRowHtml(bulkOutRowSeq++)).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2 style="color:#991B1B;">Stock Out · Bulk</h2>
-    <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="bulkout-ref" placeholder="e.g. CH-2026-042"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="bulkout-ref" placeholder="e.g. CH-2026-042"></div>
+      ${stockEntryDateHtml('bulkout-date')}
+    </div>
     <div class="form-group"><label class="form-label">Notes (applied to every row)</label><input type="text" id="bulkout-notes" placeholder="Optional shared notes"></div>
     <table class="bulk-table" id="bulkout-table">
       <thead>
@@ -9991,6 +10008,8 @@ async function saveBulkStockOut() {
   if (!tbody) return;
   const ref     = document.getElementById('bulkout-ref').value.trim();
   const notesIn = document.getElementById('bulkout-notes').value.trim();
+  const entryDate = await readStockEntryDate('bulkout-date');
+  if (entryDate === false) return;
   // Challan No. lives on its own column now, so don't prepend it into notes.
   const sharedNote = notesIn || null;
 
@@ -10132,8 +10151,8 @@ async function saveBulkStockOut() {
             jobSplits = [{ item_id: p.match.id, sheets: jobShare }];
           }
           const result = j.source === 'topup'
-            ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, { splits: jobSplits, challan_no: ref || null })
-            : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits, challan_no: ref || null, source: j.source || 'primary' });
+            ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, { splits: jobSplits, challan_no: ref || null, entry_date: entryDate })
+            : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits, challan_no: ref || null, entry_date: entryDate, source: j.source || 'primary' });
           remainingRow -= jobShare;
           if (result) {
             if (j.source === 'topup') topupsApproved++;
@@ -10162,6 +10181,7 @@ async function saveBulkStockOut() {
             notes: sharedNote,
             job_card: p.jobCard || null,
             challan_no: ref || null,
+            entry_date: entryDate,
           });
         }
         saved++;
@@ -10244,6 +10264,39 @@ const REVERSIBLE_TX_REASONS = new Set([
   // even though it's no longer a selectable reason going forward.
   'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
 ]);
+// ── Entry Date on every stock form ──
+// Defaults to today. Pick an earlier day to record a missed entry ON the
+// day it really happened - the server files the ledger row there (reports,
+// balances, Stock Summary all follow) and keeps the real typing time as
+// recorded_at for the audit trail.
+function stockEntryDateHtml(id) {
+  const today = localDateISO();
+  return `<div class="form-group"><label class="form-label">Entry Date <span style="font-weight:400;color:var(--text2);">(change it for a missed entry)</span></label><input type="date" id="${id}" value="${today}" max="${today}"></div>`;
+}
+// null = today (an ordinary entry), 'YYYY-MM-DD' = an earlier day,
+// false = refused (future date) after telling the user.
+async function readStockEntryDate(id) {
+  const el = document.getElementById(id);
+  const v = el ? String(el.value || '').trim() : '';
+  const today = localDateISO();
+  if (!v || v === today) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    await alertDialog({ title: 'Entry date is not a valid date', message: 'Pick the day from the calendar, or leave it on today.', kind: 'warn' });
+    return false;
+  }
+  if (v > today) {
+    await alertDialog({ title: 'Entry date is in the future', message: 'Pick today or an earlier day.', kind: 'warn' });
+    return false;
+  }
+  return v;
+}
+// Small amber tag on a late entry, so a backdated row never passes for one
+// typed on the day.
+function lateEntryTagHtml(t) {
+  if (!t || !t.recorded_at) return '';
+  const tip = `Late entry — filed on ${fmtDMY(t.created_at)}, actually entered ${fmtDMY(t.recorded_at)} ${fmtTime12(t.recorded_at)}${t.user_email ? ' by ' + t.user_email : ''}`;
+  return `<div title="${esc(tip)}" style="display:inline-block;margin-top:2px;background:#fef3c7;color:#92400e;font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:999px;white-space:nowrap;">LATE &middot; entered ${esc(fmtDMY(t.recorded_at))}</div>`;
+}
 function canReverseTx(t) {
   if (!t || t.reverses_tx_id || t.has_been_reversed) return false;
   // Rolling 30-day window — reversible while the tx is at most a month old.
@@ -10254,7 +10307,7 @@ function canReverseTx(t) {
   // includes production_manager, who was shown this button and then
   // rejected server-side before the window/reason check even ran.
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-  const withinWindow = (Date.now() - new Date(t.created_at).getTime()) <= THIRTY_DAYS_MS;
+  const withinWindow = (Date.now() - new Date(t.recorded_at || t.created_at).getTime()) <= THIRTY_DAYS_MS;
   return isSuperAdmin() || permLevel('inv_btn_reverse') === 'yes'
     || (permLevel('inv_btn_reverse') === '30-day' && withinWindow && REVERSIBLE_TX_REASONS.has(t.reason));
 }
@@ -10365,7 +10418,7 @@ async function renderInvHistory(id) {
       runningAfter -= t.change;     // becomes "after" of the next older row
       const balanceAfterPkts = fmtPackets(balanceAfterSheets);
       // Date over time, two small lines — half the width of one long line.
-      const date = `${fmtDMY(t.created_at)}<div style="font-size:10px;color:var(--text3);">${fmtTime12(t.created_at)}</div>`;
+      const date = `${fmtDMY(t.created_at)}<div style="font-size:10px;color:var(--text3);">${fmtTime12(t.created_at)}</div>${lateEntryTagHtml(t)}`;
       const isReversal      = !!t.reverses_tx_id;
       const hasBeenReversed = !!t.has_been_reversed;
       // Color: positive=green, negative=red, reversal row=orange tint
@@ -16114,6 +16167,7 @@ function receiveImport(id) {
       <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="recvimp-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Notes</label><input type="text" id="recvimp-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
     </div>
+    ${stockEntryDateHtml('recvimp-date')}
     <div class="form-group" style="margin-top:4px;">
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;cursor:pointer;">
         <input type="checkbox" id="recvimp-final" style="width:auto;">
@@ -16145,8 +16199,11 @@ async function saveReceiveImport(id) {
   const sheets = parseFloat(document.getElementById('recvimp-qty').value);
   if (!sheets || sheets <= 0) { notify('Quantity must be > 0'); return; }
   const packets = +(sheets / ps).toFixed(2);
+  const entryDate = await readStockEntryDate('recvimp-date');
+  if (entryDate === false) return;
   const body = {
     packets,
+    entry_date: entryDate,
     challan_no: (document.getElementById('recvimp-challan').value || '').trim() || null,
     notes:      (document.getElementById('recvimp-notes').value   || '').trim() || null,
     final_delivery: document.getElementById('recvimp-final').checked,
@@ -18187,7 +18244,7 @@ function renderStockMovement(direction, from, to) {
       : '';
     return `<tr data-sm-row="${direction}-${t.id}" class="row-hover-red ${historyItemId ? 'cv-summary-row' : ''} ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);"${rowClick}>
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); ${clickHandler}"></td>
-      <td style="padding:8px 10px;white-space:nowrap;">${date}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${date}${lateEntryTagHtml(t)}</td>
       <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
       <td style="padding:8px 10px;font-weight:600;" class="${cls}">${fmt(Math.abs(pkts))} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
       <td style="padding:8px 10px;">${balCell}</td>
@@ -21281,6 +21338,8 @@ function bulkRecvConfirm(count) {
     out.push(el ? el.value : '');
   }
   window._bulkRecvQtys = out;
+  const dEl = document.getElementById('recv-bulk-date');
+  window._bulkRecvDate = dEl ? String(dEl.value || '').trim() : '';
   dlgClose(true);
 }
 
@@ -21312,6 +21371,7 @@ async function bulkReceiveImports() {
       </tbody>
     </table>
     <div style="margin-top:8px;font-size:12px;color:var(--text2);">Edit any quantity to match what actually arrived. Set to 0 to skip a row. Rows left short of their booked total stay marked Partial.</div>
+    <div style="margin-top:10px;text-align:left;">${stockEntryDateHtml('recv-bulk-date')}</div>
   `;
   const buttons = `
     <button class="btn" onclick="dlgClose(false)">Cancel</button>
@@ -21330,13 +21390,21 @@ async function bulkReceiveImports() {
   if (!confirmed) return;
   const finalQtys = (window._bulkRecvQtys || []).slice();
   window._bulkRecvQtys = null;
+  const pickedDate = window._bulkRecvDate || '';
+  window._bulkRecvDate = null;
+  const todayIso = localDateISO();
+  if (pickedDate && pickedDate > todayIso) {
+    await alertDialog({ title: 'Entry date is in the future', message: 'Nothing was received. Pick today or an earlier day.', kind: 'warn' });
+    return;
+  }
+  const bulkEntryDate = (pickedDate && pickedDate !== todayIso) ? pickedDate : null;
   let ok = 0, failed = 0;
   showSaving(true);
   for (let i = 0; i < rows.length; i++) {
     const qty = parseFloat(finalQtys[i]);
     if (!Number.isFinite(qty) || qty <= 0) continue; // skip
     try {
-      await api('POST', `/api/imports/${rows[i].id}/receive`, { packets: qty });
+      await api('POST', `/api/imports/${rows[i].id}/receive`, { packets: qty, entry_date: bulkEntryDate });
       ok++;
     } catch (e) { failed++; console.error('Receive failed for', rows[i].id, e); }
   }
@@ -27393,10 +27461,11 @@ async function issueStock(id, source) {
 
 // Fire the /issue-stock POST with a splits payload and refresh state.
 // Shared by the single-brand fast path and the split popup's Save button.
-async function sendIssueStock(id, splits, challanNo, source) {
+async function sendIssueStock(id, splits, challanNo, source, entryDate) {
   showSaving(true);
   try {
     const body = { splits, challan_no: challanNo || null };
+    if (entryDate) body.entry_date = entryDate;
     if (source === 'secondary') body.source = 'secondary';
     const updated = await api('POST', `/api/jobs/${id}/issue-stock`, body);
     const idx = jobs.findIndex(x => x.id === id);
@@ -27483,6 +27552,7 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
         <label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
         <input type="text" id="split-challan" placeholder="e.g. CH-2026-042" style="width:100%;box-sizing:border-box;">
       </div>
+      ${stockEntryDateHtml('split-date')}
       <table class="split-table"
              data-need-packets="${needPackets}"
              data-packet-size="${ps}"
@@ -27603,9 +27673,11 @@ async function saveSplitIssue(jobId) {
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
   const chIn = document.getElementById('split-challan');
   const challanNo = chIn ? ((chIn.value || '').trim() || null) : null;
+  const entryDate = await readStockEntryDate('split-date');
+  if (entryDate === false) return;
   const source = table.dataset.source === 'secondary' ? 'secondary' : 'primary';
   closeModal();
-  await sendIssueStock(jobId, splits, challanNo, source);
+  await sendIssueStock(jobId, splits, challanNo, source, entryDate);
 }
 
 // Request extra packets for an already-issued job. The job stays in its
