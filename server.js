@@ -9370,7 +9370,11 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
           -- this condition previously only let 'job-consumed' through,
           -- so every auto-consumed job (e.g. E-514, E-544) never reached
           -- the client at all, regardless of any client-side filtering.
-          OR (${includeOffcutAuto} AND t.reason IN ('job-consumed', 'job-auto-offcut') AND t.job_id IS NOT NULL)
+          -- ...and every OTHER stock-out from an offcut item too (Sold,
+          -- Damaged, Adjustment, Manual Job Card): taking offcut out of
+          -- stock for any reason is offcut issuance, and those rows used to
+          -- show in no movement report at all.
+          OR (${includeOffcutAuto} AND t.change < 0)
         )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
