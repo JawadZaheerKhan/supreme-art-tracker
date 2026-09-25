@@ -13408,6 +13408,8 @@ function buildJobsReportRows() {
       isLate: isDeadlinePassed(j),
       wastage,
       readyQty,
+      readyNow: readyQty,          // current remainder - the footer's figure
+      readyTotalAll: readyTotalJR, // produced total - per-shipment math below
       milQty,
       packets,
       packetsTotal: packets,
@@ -13557,21 +13559,32 @@ function buildJobsReportRows() {
       });
       continue;
     }
-    list.forEach((s, i) => perShipment.push({
-      ...r,
-      deliveredAt:  s.date,
-      poNo:         r.stockGroupName ? r.poNo : (s.poNo || r.poNo),
-      batchNo:      s.batchNo,
-      challan:      s.challan,
-      deliveredQty: s.cartons,
-      poQty:        r.stockGroupName ? s.cartons : r.poQty,
-      // Wastage belongs to the job ONCE, on its last delivery row.
-      wastage:      i === list.length - 1 ? r.wastage : null,
-      packets:      r.perUnitPk > 0 ? numQty(s.cartons) * r.perUnitPk : r.packets,
-      packetsSlash: r.perUnitPk > 0,
-      shipmentIndex: i,
-      shipmentOfJob: list.length,
-    }));
+    let cumDelivered = 0;
+    list.forEach((s, i) => {
+      cumDelivered += numQty(s.cartons);
+      perShipment.push({
+        ...r,
+        deliveredAt:  s.date,
+        // Each PO rides ITS OWN delivery row - MIL jobs included (they
+        // used to repeat the whole joined "po1 | po2" string on every row).
+        poNo:         s.poNo || r.poNo,
+        batchNo:      s.batchNo,
+        challan:      s.challan,
+        deliveredQty: s.cartons,
+        poQty:        r.stockGroupName ? s.cartons : r.poQty,
+        // Wastage belongs to the job ONCE, on its last delivery row.
+        wastage:      i === list.length - 1 ? r.wastage : null,
+        // Ready Qty AS OF that delivery: produced total minus everything
+        // delivered up to and including this row (E-146: 24,400 − 6,000 =
+        // 18,400 on the first row, then 10,900) - not today's remainder
+        // repeated on every row.
+        readyQty:     Math.max(0, (+r.readyTotalAll || 0) - cumDelivered),
+        packets:      r.perUnitPk > 0 ? numQty(s.cartons) * r.perUnitPk : r.packets,
+        packetsSlash: r.perUnitPk > 0,
+        shipmentIndex: i,
+        shipmentOfJob: list.length,
+      });
+    });
   }
   // Linked jobs that went out on one invoice are one shipment, so one row -
   // the same rule, and the same code, as the Sale Report. Worked out here
@@ -13657,7 +13670,9 @@ function renderJobsReport() {
       // Wastage sits on exactly one row per job now (its last delivery),
       // MIL included - a plain per-row sum is the honest total.
       wastage:      a.wastage      + (+r.wastage || 0),
-      readyQty:     a.readyQty     + once(r.readyQty, 'readyQty'),
+      // Per-shipment rows carry the HISTORIC remainder; the footer wants
+      // what is on the shelf now, counted once per job.
+      readyQty:     a.readyQty     + once(r.readyNow != null ? r.readyNow : r.readyQty),
       packets:      a.packets      + (r.packetsSlash ? (+r.packets || 0) : once(r.packets, 'packets')),
     };
   }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
