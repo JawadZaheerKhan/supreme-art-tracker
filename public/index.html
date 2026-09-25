@@ -14546,9 +14546,12 @@ function buildSaleReportRows(tabOverride) {
     // Hand-set Sale Report figures (per delivery; blank = calculated).
     const ovNum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
     const ucBase = deliveriesList.map(d => { const o = ovNum(d && d.uc_qty); return o !== null ? o : (parseFloat(d && d.cartons) || 0); });
-    // Once ANY delivery of the job has a typed wastage, the typed figures
-    // replace the calculation for the whole job (no double counting).
-    const wastageTyped = deliveriesList.some(d => ovNum(d && d.wastage_qty) !== null);
+    // Wastage typed on deliveries (estimates for a partial / MIL job, say).
+    // Same rule as the Unit Carton Qty column: once the job's real wastage
+    // is known, the LAST delivery carries what is left of it after the
+    // typed rows - so the column always totals the real wastage, and the
+    // estimates already exported stay as they were.
+    const wastageTypedArr = deliveriesList.map(d => ovNum(d && d.wastage_qty));
     deliveriesList.forEach((d, idx) => {
       const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
       const batchNo = (d && d.batch_no ? String(d.batch_no).trim() : '') || (j.bno || '');
@@ -14582,12 +14585,13 @@ function buildSaleReportRows(tabOverride) {
       const ucCalc = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum))
         ? cartonQtyNum - othersUc
         : cartons;
-      const wastageCalc = isLastDelivery ? jobWastageAll : null;
+      const typedWastageOthers = wastageTypedArr.reduce((a, v, k) => a + (k === idx || v === null ? 0 : v), 0);
+      const wastageCalc = (isLastDelivery && jobWastageAll !== null) ? jobWastageAll - typedWastageOthers : null;
       // ...then anything typed into the report wins.
       const ucTyped = ovNum(d && d.uc_qty);
       const wTyped  = ovNum(d && d.wastage_qty);
       const rowCartonQty = ucTyped !== null ? ucTyped : ucCalc;
-      const rowWastage = wTyped !== null ? wTyped : (wastageTyped ? null : wastageCalc);
+      const rowWastage = wTyped !== null ? wTyped : wastageCalc;
       // No ups / packet size on file: share the job's own packet count out
       // by the row's UC instead of showing 0.
       const rowPackets = pkPerUnit > 0
