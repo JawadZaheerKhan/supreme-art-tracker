@@ -6812,6 +6812,13 @@ app.patch('/api/jobs/:id/delivery-draft', requireDeliveryDetailsWriter, async (r
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid job id' });
     const { field, value } = req.body || {};
     if (!DELIVERY_DRAFT_FIELDS.has(field)) return res.status(400).json({ error: 'Unknown field: ' + field });
+    // The pricing fields in the draft are consumed by Record now (see
+    // /deliveries), so they must be gated exactly like typing them on the
+    // record form itself: invoicing access only. The other draft fields
+    // stay open to every delivery-details holder.
+    if (['efbr_no', 'msi_no', 'rate', 'tax_pct'].includes(field) && !canSetPricing(req.user)) {
+      return res.status(403).json({ error: 'Not allowed — invoicing access required for this field' });
+    }
     const text = value === null || value === undefined ? '' : String(value);
     // An emptied box drops out of the draft rather than storing "", so the
     // form falls back to its normal prefill instead of showing a blank.
@@ -6842,8 +6849,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // job_btn_pricing may set them, anyone else's values are ignored (not
     // rejected — the delivery itself still records).
     const canPrice = canSetPricing(req.user);
-    const fbrNo   = canPrice ? (String(req.body.fbr_no   ?? '').trim() || null) : null;
-    const msiNo   = canPrice ? (String(req.body.msi_no   ?? '').trim() || null) : null;
+    let fbrNo   = canPrice ? (String(req.body.fbr_no   ?? '').trim() || null) : null;
+    let msiNo   = canPrice ? (String(req.body.msi_no   ?? '').trim() || null) : null;
     const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
       return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
@@ -6853,8 +6860,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // showPricingFields in deliveriesSection). Both keys must be present
     // together for pricing to be touched at all, so a manager-deliver-
     // style caller that never sends them leaves rate/tax_pct untouched.
-    const hasPricing = canPrice && (Object.prototype.hasOwnProperty.call(req.body, 'rate') || Object.prototype.hasOwnProperty.call(req.body, 'tax_pct'));
-    let rate = null, taxPct = null;
+    let hasPricing = canPrice && (Object.prototype.hasOwnProperty.call(req.body, 'rate') || Object.prototype.hasOwnProperty.call(req.body, 'tax_pct'));
+    let rate = null, taxPct = null, pricingFromDraft = false;
     if (hasPricing) {
       const rateRaw = req.body.rate;
       rate = (rateRaw === null || rateRaw === undefined || rateRaw === '') ? null : Number(rateRaw);
@@ -6871,6 +6878,32 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     const job = rows[0];
     const eligErr = deliveryEligibilityError(job);
     if (eligErr) return res.status(400).json({ error: eligErr });
+    // The whole point of the delivery draft is that FINANCE types the
+    // invoicing fields and someone WITHOUT the pricing row presses Record.
+    // The old code only ever CLEARED the draft - the finance Rate / Sale
+    // Tax / E-FBR / MSI evaporated whenever the presser was not a pricing
+    // holder, and every such shipment then read the default 18% in the
+    // Sale Report. Any finance field the request itself did not carry now
+    // falls back to what is sitting in the job's draft; each value was
+    // permission-checked when it was typed there (see /delivery-draft).
+    const draft = (job.delivery_draft && typeof job.delivery_draft === 'object') ? job.delivery_draft : {};
+    if (fbrNo === null && String(draft.efbr_no ?? '').trim()) fbrNo = String(draft.efbr_no).trim();
+    if (msiNo === null && String(draft.msi_no ?? '').trim()) msiNo = String(draft.msi_no).trim();
+    if (!hasPricing) {
+      const dRate = String(draft.rate ?? '').trim();
+      const dTax  = String(draft.tax_pct ?? '').trim();
+      const dRateN = (dRate !== '' && Number.isFinite(Number(dRate)) && Number(dRate) >= 0) ? Number(dRate) : null;
+      const dTaxN  = (dTax  !== '' && Number.isFinite(Number(dTax))  && Number(dTax)  >= 0) ? Number(dTax)  : null;
+      if (dRateN !== null || dTaxN !== null) {
+        rate   = dRateN;
+        // A draft that set only the rate must not blank the tax: keep the
+        // job's own tax in that case.
+        taxPct = dTaxN !== null ? dTaxN
+          : ((job.tax_pct === null || job.tax_pct === undefined) ? null : Number(job.tax_pct));
+        hasPricing = true;
+        pricingFromDraft = true;
+      }
+    }
     // Shade cards don't get a challan from a customer PO — they ship
     // against an internally-numbered Delivery Challan (DC-01, DC-02, …)
     // that the store also writes into the physical DC register by hand.
@@ -6890,8 +6923,9 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // the running total against the booked qty for context.
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
       computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }) });
-    const nextRate   = hasPricing ? rate   : job.rate;
-    const nextTaxPct = hasPricing ? taxPct : job.tax_pct;
+    // Draft-sourced pricing never CLEARS a job-level value it did not set.
+    const nextRate   = hasPricing ? ((pricingFromDraft && rate   === null) ? job.rate    : rate)   : job.rate;
+    const nextTaxPct = hasPricing ? ((pricingFromDraft && taxPct === null) ? job.tax_pct : taxPct) : job.tax_pct;
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
