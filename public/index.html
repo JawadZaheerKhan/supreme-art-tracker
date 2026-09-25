@@ -13279,14 +13279,21 @@ function buildJobsReportRows() {
       const ps     = packetSize(j.paper || '');
       if (sheets && ps) packets = sheets / ps;
     }
-    // Wastage = Unit Carton Qty − Ready Qty (how much was produced beyond
-    // what's actually ready to ship). Cartons still sitting in Ready but
-    // not yet delivered are NOT wastage — they're tracked separately below.
-    const cartonQtyNum = parseFloat(j.cartonqty);
-    const readyForWastage = wastageGoodQty(j);
-    const wastage = (Number.isFinite(cartonQtyNum) && readyForWastage > 0)
-      ? (cartonQtyNum - readyForWastage)
-      : null;
+    // Wastage = Unit Carton Qty − Ready Qty, shown only once it is KNOWN
+    // (owner spec, E-489): while some qty is still in process the field
+    // stays empty - each new delivery would otherwise keep rewriting a
+    // wrong number. A normal job knows its wastage when production is
+    // finished (job at Ready or beyond); a MIL job only when it is FULLY
+    // delivered. The figure then sits on the job's LAST delivery row
+    // (see the per-shipment split below).
+    const cartonQtyNum   = parseFloat(j.cartonqty);
+    const readyTotalJR   = readyCartonsTotal(j) || 0;
+    const deliveredJR    = totalDeliveredCartons(j) || 0;
+    const productionDone = (j.stage_index || 0) >= 6;
+    const wastageKnown   = j.stock_group_name
+      ? (readyTotalJR > 0 && deliveredJR >= readyTotalJR)
+      : (productionDone && readyTotalJR > 0);
+    const wastage = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalJR) : null;
     // Ready Qty — unshipped ready-to-deliver stock for this job, straight
     // from the production entries[] (same source groupStats()/tiles use),
     // not the legacy cartonqty field wastage relies on. Always shown as its
@@ -13311,6 +13318,13 @@ function buildJobsReportRows() {
     const paper = invItem
       ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
       : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
+    // Packets-per-carton factor for the per-delivery packets figure
+    // ("10/42"): cartons ÷ ups = cut sheets, ÷ (packet size × cut pieces)
+    // = raw packets. 0 when ups or packet size are unknown - such rows
+    // fall back to the whole-job packet count, displayed plain.
+    const upsJR = parseFloat(j.ups);
+    const psJR  = packetSize((invItem && invItem.paper_type) || j.paper || '');
+    const perUnitPk = (upsJR > 0 && psJR > 0) ? 1 / (upsJR * psJR * jobCutPieces(j)) : 0;
     // Job creation timestamp — used for sorting and the Created At column.
     // Previously computed above the date-range filter; now inlined per-row
     // since the range logic reads created_at directly for Created mode.
@@ -13396,6 +13410,8 @@ function buildJobsReportRows() {
       readyQty,
       milQty,
       packets,
+      packetsTotal: packets,
+      perUnitPk,
       paper,
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
@@ -13527,10 +13543,20 @@ function buildJobsReportRows() {
   // counts them once per job, see renderJobsReport. Created mode has no
   // shipments to speak of, and a job with none keeps its single row.
   if (isCreatedMode) return withMilMerge;
+  const numQty = (v) => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
   const perShipment = [];
   for (const r of withMilMerge) {
     const list = Array.isArray(r.shipments) ? r.shipments : [];
-    if (list.length < 2) { perShipment.push(r); continue; }
+    if (list.length < 2) {
+      // One shipment: this row IS the job's last delivery. Its packets
+      // read per-delivery too ("10/42") when the factor is known.
+      perShipment.push({
+        ...r,
+        packets: r.perUnitPk > 0 ? numQty(r.deliveredQty) * r.perUnitPk : r.packets,
+        packetsSlash: r.perUnitPk > 0,
+      });
+      continue;
+    }
     list.forEach((s, i) => perShipment.push({
       ...r,
       deliveredAt:  s.date,
@@ -13539,6 +13565,10 @@ function buildJobsReportRows() {
       challan:      s.challan,
       deliveredQty: s.cartons,
       poQty:        r.stockGroupName ? s.cartons : r.poQty,
+      // Wastage belongs to the job ONCE, on its last delivery row.
+      wastage:      i === list.length - 1 ? r.wastage : null,
+      packets:      r.perUnitPk > 0 ? numQty(s.cartons) * r.perUnitPk : r.packets,
+      packetsSlash: r.perUnitPk > 0,
       shipmentIndex: i,
       shipmentOfJob: list.length,
     }));
@@ -13553,7 +13583,7 @@ function buildJobsReportRows() {
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
 const JOBS_REPORT_MERGE = {
-  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'packets', 'milQty'],
+  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'packets', 'packetsTotal', 'milQty'],
   amount: [],
 };
 
@@ -13624,9 +13654,11 @@ function renderJobsReport() {
       milQty:       a.milQty       + milQtyAdd,
       cartonQty:    a.cartonQty    + once(r.cartonQty, 'cartonQty'),
       deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
-      wastage:      a.wastage      + ((r.wastage == null || r.stockGroupName) ? 0 : once(r.wastage, 'wastage')),
+      // Wastage sits on exactly one row per job now (its last delivery),
+      // MIL included - a plain per-row sum is the honest total.
+      wastage:      a.wastage      + (+r.wastage || 0),
       readyQty:     a.readyQty     + once(r.readyQty, 'readyQty'),
-      packets:      a.packets      + once(r.packets, 'packets'),
+      packets:      a.packets      + (r.packetsSlash ? (+r.packets || 0) : once(r.packets, 'packets')),
     };
   }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
   const tbody = rows.map(r => {
@@ -13637,7 +13669,7 @@ function renderJobsReport() {
     // figure, so it just reads "MIL" there instead of a misleading number.
     // Ready Qty is its own always-visible column — never folded into
     // Wastage, even once a job is finalized as delivered.
-    const wastageCell = r.stockGroupName
+    const wastageCell = (r.stockGroupName && r.wastage === null)
       ? `<td style="padding:8px 10px;text-align:right;font-weight:800;color:#dc2626;">MIL</td>`
       : (r.wastage === null
           ? '<td ' + tdR + '>—</td>'
@@ -13671,7 +13703,7 @@ function renderJobsReport() {
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
       ${readyCell}
-      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}</td>
+      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}${r.packetsSlash ? '<span style="font-weight:500;color:var(--text2);">/' + fmt(r.packetsTotal) + '</span>' : ''}</td>
       <td ${td}>${esc(r.paper)}</td>
       <td ${td}>${esc(r.machine)}</td>
       <td ${td}>${esc(r.coatings)}</td>
@@ -13763,9 +13795,9 @@ async function exportJobsReport() {
       r.poQty,
       r.cartonQty,
       deliveredCell,
-      r.stockGroupName ? 'MIL' : (r.wastage === null ? '' : r.wastage),
+      r.wastage === null ? (r.stockGroupName ? 'MIL' : '') : r.wastage,
       r.readyQty,
-      r.packets ? +r.packets.toFixed(2) : '',
+      r.packetsSlash ? `${+(+r.packets).toFixed(2)}/${+(+r.packetsTotal).toFixed(2)}` : (r.packets ? +r.packets.toFixed(2) : ''),
       r.paper,
       r.machine,
       r.coatings,
@@ -13829,9 +13861,9 @@ function printJobsReport() {
     <td style="border:1px solid #000;padding:4px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}">${esc(r.poQty)}</td>
     <td ${tdR}>${esc(r.cartonQty)}</td>
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
-    <td ${tdR}>${r.stockGroupName ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
+    <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.readyQty)}</td>
-    <td ${tdR}>${fmt(r.packets)}</td>
+    <td ${tdR}>${fmt(r.packets)}${r.packetsSlash ? '/' + fmt(r.packetsTotal) : ''}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
