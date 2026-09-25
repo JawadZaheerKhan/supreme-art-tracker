@@ -8136,10 +8136,19 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       });
       return res.json(upd[0]);
     }
-    const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons' };
+    const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons', date: 'date' };
     const field = FIELDS[req.body?.field];
-    if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons' });
+    if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons, date' });
     const before = list[ix];
+    // The delivery date is editable after the fact (owner ask) - but it
+    // must stay a real date: the Sale Report's date filters and the
+    // Delivered column parse it.
+    if (field === 'date') {
+      const v = String(req.body?.value ?? '').trim();
+      if (!/^d{4}-d{2}-d{2}$/.test(v) || isNaN(new Date(v + 'T00:00:00'))) {
+        return res.status(400).json({ error: 'Date must be a valid date (YYYY-MM-DD).' });
+      }
+    }
 
     if (field === 'cartons') {
       const cartonsN = parseFloat(String(req.body?.value ?? '').replace(/[^0-9.\-]/g, ''));
