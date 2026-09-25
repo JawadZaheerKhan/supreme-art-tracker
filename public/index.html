@@ -3895,6 +3895,20 @@ function isStorage(j) { return !isDone(j) && !isPartialDelivery(j) && (j.stage_i
 // can see everything that needs another shipment at a glance. Cartons is
 // the only unit tracked — booked qty (j.qty) and delivered totals live
 // in the same unit so no derivation is needed anywhere.
+// When a recorded delivery happened, in ms. The DATE is what people see
+// and can now edit after the fact, so it wins; the entry's own `at` stamp
+// only lends its time of day while the two still agree (an unedited entry).
+// Before this, report date filters read `at` first - an edited date moved
+// the Delivery Date column but not the filters.
+function deliveryEntryMs(d) {
+  if (!d) return NaN;
+  const atMs   = d.at ? new Date(d.at).getTime() : NaN;
+  const dateMs = d.date ? new Date(String(d.date).slice(0, 10) + 'T12:00:00').getTime() : NaN;
+  if (isFinite(dateMs)) {
+    return (isFinite(atMs) && localDateISO(new Date(atMs)) === String(d.date).slice(0, 10)) ? atMs : dateMs;
+  }
+  return atMs;
+}
 function totalDeliveredCartons(j) {
   const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
   return list.reduce((a, d) => {
@@ -4256,7 +4270,7 @@ function jobDeliveredAnchorMs(j) {
   }
   const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
   if (!isFinite(refMs) && deliveriesList.length) {
-    const stamps = deliveriesList.map(d => (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN)).filter(n => isFinite(n));
+    const stamps = deliveriesList.map(deliveryEntryMs).filter(n => isFinite(n));
     if (stamps.length) refMs = Math.max(...stamps);
   }
   return isFinite(refMs) ? refMs : null;
@@ -13329,6 +13343,10 @@ function buildJobsReportRows() {
   // reference is enough to surface the job.
   const poSearchNorm      = String(poSearch      || '').trim().toLowerCase();
   const challanSearchNorm = String(challanSearch || '').trim().toLowerCase();
+  // The date window, as a test on one delivery's timestamp.
+  const jrLo = dfrom ? new Date(dfrom + 'T00:00:00').getTime() : -Infinity;
+  const jrHi = dto   ? new Date(dto   + 'T23:59:59').getTime() :  Infinity;
+  const jrInRange = (ms) => isFinite(ms) && ms >= jrLo && ms <= jrHi;
   const out = [];
   for (const j of jobs) {
     // Delivered mode now surfaces every job that has any shipment on the
@@ -13366,6 +13384,15 @@ function buildJobsReportRows() {
       let refMs = NaN;
       if (isCreatedMode) {
         if (j.created_at) refMs = new Date(j.created_at).getTime();
+      } else if (deliveriesList.some(d => isFinite(deliveryEntryMs(d)))) {
+        // Rows are per SHIPMENT: the job is in the window when ANY of its
+        // deliveries is, and the split below drops the shipments dated
+        // outside it. (Reading the Delivered-stage stamp instead hid an
+        // August shipment from August when the job finished in September,
+        // and showed it in September.)
+        const hit = deliveriesList.map(deliveryEntryMs).find(jrInRange);
+        if (hit === undefined) continue;
+        refMs = hit;
       } else {
         if (stageRec && stageRec.at) refMs = new Date(stageRec.at).getTime();
         if (!isFinite(refMs) && stageRec && stageRec.time) {
@@ -13377,7 +13404,7 @@ function buildJobsReportRows() {
         // ledger so date-range filters still surface them.
         if (!isFinite(refMs) && deliveriesList.length) {
           const stamps = deliveriesList
-            .map(d => (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN))
+            .map(deliveryEntryMs)
             .filter(n => isFinite(n));
           if (stamps.length) refMs = Math.max(...stamps);
         }
@@ -13409,8 +13436,9 @@ function buildJobsReportRows() {
     const readyTotalJR   = readyCartonsTotal(j) || 0;
     const deliveredJR    = totalDeliveredCartons(j) || 0;
     const productionDone = (j.stage_index || 0) >= 6;
+    const finalizedJR    = !!(j.stages && j.stages[7] && j.stages[7].finalized);
     const wastageKnown   = j.stock_group_name
-      ? (readyTotalJR > 0 && deliveredJR >= readyTotalJR)
+      ? (readyTotalJR > 0 && (deliveredJR >= readyTotalJR || (finalizedJR && deliveredJR > 0)))
       : (productionDone && readyTotalJR > 0);
     const wastage = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalJR) : null;
     // Ready Qty — unshipped ready-to-deliver stock for this job, straight
@@ -13480,6 +13508,7 @@ function buildJobsReportRows() {
       batchNo: (d && d.batch_no ? String(d.batch_no).trim() : '') || String(j.bno || '').trim(),
       challan: deliveryChallanText(d).trim(),
       cartons: parseFloat(d && d.cartons) || 0,
+      ms:      deliveryEntryMs(d),
     }));
     // Only enforced in Delivered mode — matches the toolbar, which hides
     // these two fields in Created mode. Without this guard, a leftover
@@ -13497,8 +13526,8 @@ function buildJobsReportRows() {
     const isPartial = isPartialDelivery(j);
     // Yellow shade only while deliveries are OPEN: gone once everything
     // produced has shipped (MIL or a job at Ready+) or it was finalized.
-    const allDeliveredJR = readyTotalJR > 0 && deliveredJR >= readyTotalJR
-      && (j.stock_group_name ? true : productionDone);
+    const allDeliveredJR = (finalizedJR && deliveredJR > 0) || (readyTotalJR > 0 && deliveredJR >= readyTotalJR
+      && (j.stock_group_name ? true : productionDone));
     const shadeOpen = isPartial && !allDeliveredJR;
     // Linked-delivery partner — set on any delivery entry recorded via
     // "Deliver Linked Jobs". Used below to merge this job's row with its
@@ -13626,6 +13655,15 @@ function buildJobsReportRows() {
         readyQty: sorted.reduce((s, b) => s + (+b.readyQty || 0), 0),
         milQty: sorted[0].milQty,
         packets: sorted.reduce((s, b) => s + (+b.packets || 0), 0),
+        // The per-delivery machinery below needs these too - without them a
+        // merged MIL row read Ready 0 on every shipment, lost its "10/42"
+        // packets and its yellow shade.
+        packetsTotal: sorted.reduce((s, b) => s + (+b.packetsTotal || 0), 0),
+        readyNow: sorted.reduce((s, b) => s + (+b.readyNow || 0), 0),
+        readyTotalAll: sorted.reduce((s, b) => s + (+b.readyTotalAll || 0), 0),
+        perUnitPk: sorted.every(b => b.perUnitPk > 0 && Math.abs(b.perUnitPk - sorted[0].perUnitPk) < 1e-12) ? sorted[0].perUnitPk : 0,
+        shadeOpen: sorted.some(b => b.shadeOpen),
+        linkGroup: null,
         paper: dedupePipe(sorted.map(b => b.paper)),
         machine: dedupePipe(sorted.map(b => b.machine)),
         coatings: dedupePipe(sorted.map(b => b.coatings)),
@@ -13677,17 +13715,27 @@ function buildJobsReportRows() {
     if (list.length < 2) {
       // One shipment: this row IS the job's last delivery. Its packets
       // read per-delivery too ("10/42") when the factor is known.
+      // Its packets come from the ledger's own figure when there is one
+      // (delqty is the legacy typed field and can disagree).
+      const oneQty = list.length === 1 ? numQty(list[0].cartons) : numQty(r.deliveredQty);
       perShipment.push({
         ...r,
-        packets: r.perUnitPk > 0 ? numQty(r.deliveredQty) * r.perUnitPk : r.packets,
+        packets: r.perUnitPk > 0 ? oneQty * r.perUnitPk : r.packets,
         packetsSlash: r.perUnitPk > 0,
       });
       continue;
     }
     let cumDelivered = 0;
+    let shownAny = false;
     list.forEach((s, i) => {
       cumDelivered += numQty(s.cartons);
+      // Outside the date window: skipped, but still counted in the running
+      // total so later rows' Ready-as-of stays right.
+      if ((dfrom || dto) && isFinite(s.ms) && !jrInRange(s.ms)) return;
+      const firstOfJob = !shownAny;
+      shownAny = true;
       perShipment.push({
+        firstOfJob,
         ...r,
         deliveredAt:  s.date,
         // Each PO rides ITS OWN delivery row - MIL jobs included (they
@@ -13721,7 +13769,7 @@ function buildJobsReportRows() {
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
 const JOBS_REPORT_MERGE = {
-  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'packets', 'packetsTotal', 'milQty'],
+  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'readyNow', 'packets', 'packetsTotal', 'milQty'],
   amount: [],
 };
 
@@ -13797,7 +13845,7 @@ function renderJobsReport() {
       wastage:      a.wastage      + (+r.wastage || 0),
       // Per-shipment rows carry the HISTORIC remainder; the footer wants
       // what is on the shelf now, counted once per job.
-      readyQty:     a.readyQty     + once(r.readyNow != null ? r.readyNow : r.readyQty),
+      readyQty:     a.readyQty     + once(r.readyNow != null ? r.readyNow : r.readyQty, 'readyNow'),
       packets:      a.packets      + (r.packetsSlash ? (+r.packets || 0) : once(r.packets, 'packets')),
     };
   }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
@@ -13828,7 +13876,7 @@ function renderJobsReport() {
       ? `Open the newest job (E-${r.id}) — or click a job number to open that one`
       : `Open this job's card`;
     return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
-      <td class="bulk-td">${r.shipmentIndex ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
+      <td class="bulk-td">${(r.shipmentIndex && !r.firstOfJob) ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
       <td ${td}>${idCell}</td>
       <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
@@ -14285,8 +14333,12 @@ function buildSaleReportRows(tabOverride) {
     const deliveredTotal = totalDeliveredCartons(j) || 0;
     const readyTotalAll  = readyCartonsTotal(j) || 0;
     const productionDone = (j.stage_index || 0) >= 6;
-    const allDelivered   = readyTotalAll > 0 && deliveredTotal >= readyTotalAll && (isMilJob || productionDone);
-    const wastageKnown   = isMilJob ? allDelivered : (productionDone && readyTotalAll > 0);
+    // A job the PM FINALIZED as delivered (remainder waived) is finished
+    // too - its deliveries are over even though they fall short of Ready.
+    const finalized      = !!(j.stages && j.stages[7] && j.stages[7].finalized);
+    const allDelivered   = (finalized && deliveredTotal > 0)
+      || (readyTotalAll > 0 && deliveredTotal >= readyTotalAll && (isMilJob || productionDone));
+    const wastageKnown   = readyTotalAll > 0 && (isMilJob ? allDelivered : productionDone);
     const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
     const readyQty = 0;   // never rides in the Wastage column any more
     const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
@@ -14321,6 +14373,16 @@ function buildSaleReportRows(tabOverride) {
     const upsNum       = parseFloat(j.ups);
     const packKg       = packWeightKg(ptype, invItem ? invItem.size : j.size, invItem ? invItem.gsm : j.gsm);
     // (The whole kg chain is computed per shipment row below.)
+    // Raw packets per Unit Carton: UC ÷ ups = printed (cut) sheets, ÷ cut
+    // pieces = raw sheets, ÷ packet size = packets. The SAME factor turns
+    // wastage into packets/kg - it used to skip the cut, doubling the
+    // wastage weight of every 1/2-cut job.
+    const psJob       = packetSize(ptype);
+    const cutPieces   = jobCutPieces(j);
+    const pkPerUnit   = (upsNum > 0 && psJob > 0) ? 1 / (upsNum * psJob * cutPieces) : 0;
+    // Paper issued for the WHOLE job - what its wastage is a share of.
+    const jobIssuedKg = (pkPerUnit > 0 && packKg !== null && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0)
+      ? cartonQtyNum * pkPerUnit * packKg : null;
     const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
     // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
@@ -14351,7 +14413,7 @@ function buildSaleReportRows(tabOverride) {
       const invoice = deliveryChallanText(d);
       if (poSearchNorm      && !poNo.toLowerCase().includes(poSearchNorm))      return;
       if (challanSearchNorm && !invoice.toLowerCase().includes(challanSearchNorm)) return;
-      const refMs = (d && d.at) ? new Date(d.at).getTime() : (d && d.date ? new Date(d.date + 'T12:00:00').getTime() : NaN);
+      const refMs = deliveryEntryMs(d);
       const refMsOk = isFinite(refMs) ? refMs : null;
       if (bounds) {
         if (refMsOk === null) return;
@@ -14374,13 +14436,19 @@ function buildSaleReportRows(tabOverride) {
         ? cartonQtyNum - (deliveredTotal - cartons)
         : cartons;
       const rowWastage = isLastDelivery ? jobWastageAll : null;
-      const rowPackets = (upsNum > 0 && packetSize(ptype) > 0)
-        ? rowCartonQty / upsNum / (packetSize(ptype) * jobCutPieces(j)) : 0;
+      // No ups / packet size on file: share the job's own packet count out
+      // by the row's UC instead of showing 0.
+      const rowPackets = pkPerUnit > 0
+        ? rowCartonQty * pkPerUnit
+        : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * rowCartonQty / cartonQtyNum : 0);
       const rowIssuedKg = (rowPackets > 0 && packKg !== null) ? rowPackets * packKg : null;
       const rowWastageSheets  = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
-      const rowWastagePackets = rowWastageSheets !== null ? rowWastageSheets / packetSize(ptype) : null;
+      const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? rowWastageSheets / (psJob * cutPieces) : null;
       const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
-      const rowWastageKgPct   = (rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null;
+      // The wastage is the whole JOB's, so its % is of the whole job's
+      // paper - not of the last delivery's slice (that overstated it 3-4x).
+      const pctBase           = jobIssuedKg !== null ? jobIssuedKg : rowIssuedKg;
+      const rowWastageKgPct   = (rowWastageKg !== null && pctBase !== null && pctBase > 0) ? rowWastageKg * 100 / pctBase : null;
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       // The tax VALUE itself - 18% of a 2,000 base is Rs 360. The report
@@ -14457,6 +14525,9 @@ function buildSaleReportRows(tabOverride) {
 const SALE_MERGE_ADDITIVE = [
   'cartons', 'cartonQty', 'poQty', 'cartonsPackets', 'wastage', 'readyQty',
   'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'taxAmt', 'amountIncTax',
+  // Per-delivery now, so they add like the rest - left out, two jobs'
+  // packets were joined as text ("10 12.5") and the cell read NaN.
+  'packets', 'wastagePackets',
 ];
 const SALE_REPORT_MERGE = { additive: SALE_MERGE_ADDITIVE, perUnit: true };
 function mergeLinkedShipmentRows(rows, cfg) {
