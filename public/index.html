@@ -22928,6 +22928,10 @@ function deliveriesSection(j, opts) {
   const readyNotYetShipped = Math.max(0, (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(j) : 0) - shipped);
   const cartonsPrefill = readyNotYetShipped > 0 ? readyNotYetShipped : '';
 
+  // Same yellow card the finance layout gives each recorded shipment, so
+  // the box reads identically for every role - only the invoicing fields
+  // (E-FBR / MSI / Rate / Sale Tax) stay finance-only.
+  const fieldBox = (label, valueHtml) => `<div style="min-width:0;"><div style="font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:2px;">${label}</div><div style="font-size:12.5px;font-weight:600;word-break:break-word;">${valueHtml}</div></div>`;
   const rows = list.length
     ? list.map((d, i) => {
         const ctns = d.cartons  || '';
@@ -22936,26 +22940,28 @@ function deliveriesSection(j, opts) {
         const bat  = d.batch_no || '';
         const nt   = deliveryChallanText(d);
         const by   = d.by       || '';
-        // Linked-delivery tag — this shipment was recorded via "Deliver
-        // Linked Jobs" alongside the partner job, sharing this same
-        // challan/invoice. Shows which job it rode with.
         const linkedTag = d.linked_job_id
           ? ` <span title="Linked delivery with Job E-${d.linked_job_id} — shares this challan/invoice" style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:9px;font-weight:700;padding:1px 5px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#128279; E-${d.linked_job_id}</span>`
           : '';
         const delBtn = isAdminUser
           ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
           : '';
-        return `<tr>
-          <td style="padding:6px 8px;white-space:nowrap;">${esc(dt)}</td>
-          <td style="text-align:right;font-weight:600;padding:6px 8px;white-space:nowrap;">${esc(ctns)}</td>
-          ${isShadeCard ? '' : `<td style="padding:6px 8px;word-break:break-all;" title="${esc(po)}">${esc(po)}</td>
-          <td style="padding:6px 8px;word-break:break-all;" title="${esc(bat)}">${esc(bat)}</td>`}
-          <td style="padding:6px 8px;word-break:break-all;" title="${esc(nt)}">${esc(nt)}${linkedTag}</td>
-          <td style="font-size:11px;color:var(--text2);padding:6px 8px;word-break:break-all;" title="${esc(by)}">${esc(by)}</td>
-          <td style="text-align:center;padding:6px 4px;">${delBtn}</td>
-        </tr>`;
+        const shipper = String(cartonsPacketsFor(j) ?? '').trim();
+        return `<div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
+            <div style="font-size:11px;color:var(--text2);">${esc(dt)}${by ? ' &middot; by ' + esc(by) : ''}${linkedTag}</div>
+            ${delBtn}
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(105px, 1fr));gap:8px;">
+            ${fieldBox(countLabel, esc(ctns) || '&mdash;')}
+            ${isShadeCard ? '' : fieldBox('Carton Shipper', esc(shipper) || '&mdash;')}
+            ${isShadeCard ? '' : fieldBox('PO No.', esc(po) || '&mdash;')}
+            ${isShadeCard ? '' : fieldBox('Batch No.', esc(bat) || '&mdash;')}
+            ${fieldBox('Invoice No.', esc(nt) || '&mdash;')}
+          </div>
+        </div>`;
       }).join('')
-    : `<tr><td colspan="${isShadeCard ? 5 : 7}" style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</td></tr>`;
+    : `<div style="text-align:center;color:var(--text3);font-style:italic;padding:12px;">No deliveries recorded yet.</div>`;
 
   // Ready-but-not-shipped chip — same figure the tile's own READY badge
   // shows (Ready to Deliver Qty minus what's already shipped). Sits right
@@ -23031,29 +23037,7 @@ function deliveriesSection(j, opts) {
       ${statusPill}
     </div>
     <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
-    <table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">
-      <colgroup>
-        <col style="width:12%;">
-        <col style="width:10%;">
-        ${isShadeCard ? '' : `<col style="width:15%;">
-        <col style="width:12%;">`}
-        <col style="width:14%;">
-        <col style="width:auto;">
-        <col style="width:36px;">
-      </colgroup>
-      <thead>
-        <tr style="background:#f3f4f6;">
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Date</th>
-          <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">${countLabel}</th>
-          ${isShadeCard ? '' : `<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">PO No.</th>
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Batch No.</th>`}
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">Invoice No.</th>
-          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);">By</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border);"></th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <div>${rows}</div>
     ${addForm}
   </div>`;
 }
