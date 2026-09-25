@@ -12738,7 +12738,12 @@ function printImports() {
 // q matches job number ("59" / "E-59") or job name.
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
-const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, period: 'all', sortBy: '', sortDir: 'desc' };
+const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, period: 'all', sortBy: '', sortDir: 'desc',
+  // Excel-style column filters, same machinery as the Sale Report:
+  // dropdown pickers for the low-cardinality columns, a search box for
+  // the near-unique ones.
+  colFilters: { client: [], paper: [], machine: [], coatings: [] },
+  colSearch: {} };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
 // route through openReportsGroup so the sidebar/back/etc. all work.
@@ -13197,6 +13202,118 @@ async function bulkDeleteJobsReport() {
 
 // Compute the rows shown in the Jobs Report. Returns an array of plain row
 // objects so render/print/export all share the same data shape.
+// ── Jobs Report column filters (same shapes as the Sale Report's) ──
+const JR_COL_SEARCH_FIELDS = {
+  job:       { label: 'Job ID',      get: r => r.idDisplay || ('E-' + r.id) },
+  name:      { label: 'Job Name',    get: r => r.name },
+  created:   { label: 'Created',     get: r => r.createdAt },
+  delivered: { label: 'Delivered',   get: r => r.deliveredAt },
+  po:        { label: 'PO No.',      get: r => r.poNo },
+  batch:     { label: 'Batch No.',   get: r => r.batchNo },
+  invoice:   { label: 'Invoice No.', get: r => r.challan },
+};
+const JR_COL_DROPDOWN_FIELDS = {
+  client:   { label: 'Company',  get: r => r.client },
+  paper:    { label: 'Paper',    get: r => r.paper },
+  machine:  { label: 'Machine',  get: r => r.machine },
+  coatings: { label: 'Coatings', get: r => r.coatings, multi: true },
+};
+function jrRowPassesColFilters(r) {
+  const cf = jobsReportState.colFilters || {};
+  const cs = jobsReportState.colSearch || {};
+  for (const [f, def] of Object.entries(JR_COL_DROPDOWN_FIELDS)) {
+    const picks = cf[f] || [];
+    if (!picks.length) continue;
+    if (def.multi) {
+      const own = String(def.get(r) || '').split(',').map(x => x.trim()).filter(Boolean);
+      if (!own.some(v => picks.includes(v))) return false;
+    } else if (!picks.includes(String(def.get(r) ?? '').trim())) return false;
+  }
+  for (const [f, def] of Object.entries(JR_COL_SEARCH_FIELDS)) {
+    const q = String(cs[f] || '').trim().toLowerCase();
+    if (q && !String(def.get(r) ?? '').toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+// Options from the rows themselves, with this one column's own filter
+// lifted - the same Excel rule the Sale Report follows.
+function jrColumnOptions(field) {
+  const saved = jobsReportState.colFilters[field] || [];
+  jobsReportState.colFilters[field] = [];
+  let rows = [];
+  try { rows = buildJobsReportRows(); } finally { jobsReportState.colFilters[field] = saved; }
+  const def = JR_COL_DROPDOWN_FIELDS[field];
+  const set = new Set();
+  for (const r of rows) {
+    const v = def.get(r);
+    if (def.multi) String(v || '').split(',').map(x => x.trim()).filter(Boolean).forEach(x => set.add(x));
+    else if (String(v ?? '').trim()) set.add(String(v).trim());
+  }
+  return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+function jrColHeaderHtml(field, label) {
+  const active = (jobsReportState.colFilters[field] || []).length > 0;
+  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); jrColFilterModal('${field}')" title="Filter ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+}
+function jrColSearchHeaderHtml(field, label) {
+  const active = String((jobsReportState.colSearch || {})[field] || '').trim() !== '';
+  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); jrColSearchModal('${field}')" title="Search ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+}
+// The dropdown modal reuses the Sale Report's row/search/toggle helpers
+// (they only touch the DOM) - just its own options source and apply.
+function jrColFilterModal(field) {
+  const options = jrColumnOptions(field);
+  const selected = jobsReportState.colFilters[field] || [];
+  const label = (JR_COL_DROPDOWN_FIELDS[field] || {}).label || field;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+    <h2 style="margin:0 0 10px;font-size:16px;">Filter: ${esc(label)}</h2>
+    ${options.length ? `
+      <input type="text" id="srcf-search" placeholder="Search ${esc(label)}..." oninput="srColFilterSearch(this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;margin-bottom:8px;font-size:13px;">
+      <div style="max-height:50vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;">
+        <label style="display:flex;align-items:center;gap:8px;padding:4px 0 6px;font-weight:700;border-bottom:1px solid var(--border);margin-bottom:4px;">
+          <input type="checkbox" id="srcf-all" ${options.length && selected.length === options.length ? 'checked' : ''} onchange="srColFilterToggleAll(this.checked)"> (Select All)
+        </label>
+        <div id="srcf-list">${options.map(o => _srcfRowHtml(o, selected.includes(o))).join('')}</div>
+        <div id="srcf-noresults" style="display:none;color:var(--text3);font-style:italic;padding:8px 0;">No matches.</div>
+      </div>` : `<div style="color:var(--text3);font-style:italic;padding:12px 0;">No values to filter yet.</div>`}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="jrColFilterApply('${field}')">Apply</button>
+    </div>
+  </div>`);
+}
+function jrColFilterApply(field) {
+  const all = [...document.querySelectorAll('.srcf-opt')];
+  const checked = all.filter(el => el.checked).map(el => el.value);
+  jobsReportState.colFilters[field] = (checked.length === all.length) ? [] : checked;
+  closeModal();
+  renderJobsReport();
+}
+function jrColSearchModal(field) {
+  const def = JR_COL_SEARCH_FIELDS[field];
+  if (!def) return;
+  const cur = String((jobsReportState.colSearch || {})[field] || '');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+    <h2 style="margin:0 0 10px;font-size:16px;">Search: ${esc(def.label)}</h2>
+    <input type="text" id="srcs-input" value="${esc(cur)}" placeholder="Type part of the ${esc(def.label)}..." onkeydown="if (event.key === 'Enter') jrColSearchApply('${field}')" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
+    <div class="modal-actions">
+      <button class="btn" onclick="jrColSearchApply('${field}', '')">Clear</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="jrColSearchApply('${field}')">Apply</button>
+    </div>
+  </div>`);
+  const el = document.getElementById('srcs-input');
+  if (el) { el.focus(); el.select(); }
+}
+function jrColSearchApply(field, forced) {
+  const el = document.getElementById('srcs-input');
+  const v = forced !== undefined ? forced : (el ? el.value : '');
+  if (!jobsReportState.colSearch) jobsReportState.colSearch = {};
+  jobsReportState.colSearch[field] = String(v || '').trim();
+  closeModal();
+  renderJobsReport();
+}
+
 function buildJobsReportRows() {
   const { client, dfrom, dto, q, poSearch, challanSearch, mode, milOnly, shadeOnly } = jobsReportState;
   const isCreatedMode = mode === 'created';
@@ -13544,7 +13661,7 @@ function buildJobsReportRows() {
   // repeat on each of a job's rows exactly as they do there — the footer
   // counts them once per job, see renderJobsReport. Created mode has no
   // shipments to speak of, and a job with none keeps its single row.
-  if (isCreatedMode) return withMilMerge;
+  if (isCreatedMode) return withMilMerge.filter(jrRowPassesColFilters);
   const numQty = (v) => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
   const perShipment = [];
   for (const r of withMilMerge) {
@@ -13590,7 +13707,7 @@ function buildJobsReportRows() {
   // the same rule, and the same code, as the Sale Report. Worked out here
   // rather than when the delivery was recorded, so a delivery entered first
   // and invoiced afterwards joins up the moment the numbers match.
-  return mergeLinkedShipmentRows(perShipment, JOBS_REPORT_MERGE);
+  return mergeLinkedShipmentRows(perShipment, JOBS_REPORT_MERGE).filter(jrRowPassesColFilters);
 }
 // The Jobs Report's own quantity columns. Everything not named here follows
 // the general rule: shown once when the members agree, space-separated when
@@ -13736,14 +13853,14 @@ function renderJobsReport() {
       <thead>
         <tr style="background:var(--bg2);">
           <th class="bulk-th"><input type="checkbox" id="jr-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleJobsReportAll(this.checked)" title="Select all visible"></th>
-          <th ${th}>Job ID</th>
-          <th ${th}>Job Name</th>
-          <th ${th}>Created</th>
-          <th ${th}>Delivered</th>
-          <th ${th}>Company</th>
-          <th ${th}>PO No.</th>
-          <th ${th}>Batch No.</th>
-          <th ${th}>Invoice No.</th>
+          <th ${th}>${jrColSearchHeaderHtml('job', 'Job ID')}</th>
+          <th ${th}>${jrColSearchHeaderHtml('name', 'Job Name')}</th>
+          <th ${th}>${jrColSearchHeaderHtml('created', 'Created')}</th>
+          <th ${th}>${jrColSearchHeaderHtml('delivered', 'Delivered')}</th>
+          <th ${th}>${jrColHeaderHtml('client', 'Company')}</th>
+          <th ${th}>${jrColSearchHeaderHtml('po', 'PO No.')}</th>
+          <th ${th}>${jrColSearchHeaderHtml('batch', 'Batch No.')}</th>
+          <th ${th}>${jrColSearchHeaderHtml('invoice', 'Invoice No.')}</th>
           ${milMode ? `<th ${thR}>Mil Qty</th>` : ''}
           <th ${thR}>PO Qty</th>
           <th ${thR}>Unit Carton Qty</th>
@@ -13751,9 +13868,9 @@ function renderJobsReport() {
           <th ${thR}>Wastage</th>
           <th ${thR}>Ready Qty</th>
           <th ${thR}>Packets</th>
-          <th ${th}>Paper</th>
-          <th ${th}>Machine</th>
-          <th ${th}>Coatings</th>
+          <th ${th}>${jrColHeaderHtml('paper', 'Paper')}</th>
+          <th ${th}>${jrColHeaderHtml('machine', 'Machine')}</th>
+          <th ${th}>${jrColHeaderHtml('coatings', 'Coatings')}</th>
         </tr>
       </thead>
       <tbody>${tbody}</tbody>
@@ -13941,7 +14058,8 @@ const saleReportState = loadPersistedFilters('sale-report', { client: '', dateRa
 // Column filters always start empty, whatever an older saved state holds —
 // they're session-scoped by design (see srResetColFilters), so a reload is
 // as much a fresh start as walking out of the report and back in.
-saleReportState.colFilters = { sheetSize: [], paperType: [], ups: [], plates: [], coatings: [], rate: [] };
+saleReportState.colFilters = { sheetSize: [], paperType: [], ups: [], plates: [], coatings: [], rate: [], sheetL: [], sheetW: [], sheetGsm: [], packets: [], client: [], ntn: [], destination: [] };
+saleReportState.colSearch = {};   // per-column text searches (Delivery Date, Invoice No., ...)
 delete saleReportState.colFiltersSetAt; // from the earlier TTL approach, replaced by the reset-on-exit above
 // Column filters are deliberately NOT persisted and do not survive leaving
 // the report — Hamza wants a clean slate every time he walks back in, so a
@@ -14281,7 +14399,7 @@ function buildSaleReportRows(tabOverride) {
   }
   const merged = mergeLinkedShipmentRows(out);
   out.length = 0;
-  out.push(...merged);
+  out.push(...merged.filter(saleReportRowPassesNewFilters));
   // Sort by whichever field the "Sort by" dropdown picked, ascending or
   // descending per the toggle. Rows with no comparable value (e.g. no
   // parseable Delivered date) sort to the end either direction.
@@ -14452,43 +14570,110 @@ function splitCoatings(coatings) {
     .map(c => c.trim())
     .filter(Boolean))];
 }
+// One place that turns a report ROW into the string a column filter deals
+// in - the dropdown options and the row matching both read it, so they can
+// never disagree.
+function saleReportColValue(field, r) {
+  const num = (v) => (v === '' || v === null || v === undefined) ? ''
+    : (Number.isInteger(+v) ? (+v).toLocaleString() : (+v).toFixed(2));
+  switch (field) {
+    case 'sheetSize':   return String(r.sheetSize || '');
+    case 'paperType':   return String(r.paperType || '');
+    case 'ups':         return String(r.ups ?? '').trim();
+    case 'plates':      return String(r.plates ?? '').trim();
+    case 'rate':        return r.rate !== null && r.rate !== undefined ? fmtRate(r.rate) : '';
+    case 'sheetL':      return String(r.sheetL ?? '').trim();
+    case 'sheetW':      return String(r.sheetW ?? '').trim();
+    case 'sheetGsm':    return String(r.sheetGsm ?? '').trim();
+    case 'packets':     return num(r.packets);
+    case 'client':      return String(r.client || '').trim();
+    case 'ntn':         return String(r.ntn || '').trim();
+    case 'destination': return String(r.destination || '').trim();
+    default:            return '';
+  }
+}
+// Dropdown options come from the rows THEMSELVES, with this one column's
+// own filter lifted (Excel's rule) - so per-shipment figures like Packets
+// list exactly the values on screen.
 function saleReportColumnOptions(field) {
+  const saved = saleReportState.colFilters[field] || [];
+  saleReportState.colFilters[field] = [];
+  let rows = [];
+  try { rows = buildSaleReportRows(); } finally { saleReportState.colFilters[field] = saved; }
   const set = new Set();
-  for (const j of jobs) {
-    if (j.is_shade_card) continue; // Sale Report excludes these, so its pickers must too.
-    if (!Array.isArray(j.deliveries) || !j.deliveries.length) continue;
-    if (field === 'coatings') { splitCoatings(j.coatings).forEach(c => set.add(c)); continue; }
-    let val = '';
-    if (field === 'sheetSize' || field === 'paperType') {
-      const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
-      const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
-      if (field === 'paperType') {
-        val = invItem ? (invItem.paper_type || '') : (paperTypesArr.length ? paperTypesArr.join(', ') : (j.paper || ''));
-      } else {
-        const sizeStr = String((invItem ? invItem.size : j.size) || '').trim();
-        const gsmRaw  = invItem ? invItem.gsm : j.gsm;
-        const gsmStr  = (gsmRaw === null || gsmRaw === undefined || gsmRaw === '') ? '' : String(gsmRaw).trim();
-        val = (sizeStr + (gsmStr ? ' ' + gsmStr : '')).trim();
-      }
-    } else if (field === 'ups') {
-      val = String(j.ups == null ? '' : j.ups).trim();
-    } else if (field === 'plates') {
-      val = String((j.particulars && j.particulars.plates && j.particulars.plates.quantity) || '').trim();
-    } else if (field === 'rate') {
-      for (const d of j.deliveries) { const p = shipmentPricing(j, d); if (p.rate !== null) set.add(fmtRate(p.rate)); }
+  for (const r of rows) {
+    if (field === 'coatings') {
+      String(r.coatings || '').split(',').map(x => x.trim()).filter(Boolean).forEach(c => set.add(c));
       continue;
     }
-    if (val) set.add(val);
+    const v = saleReportColValue(field, r);
+    if (v) set.add(v);
   }
   return [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
-const SALE_REPORT_COL_LABELS = { sheetSize: 'Sheet Size', paperType: 'Paper Type', ups: 'UPS', coatings: 'Coatings', plates: 'Plates', rate: 'Rate per UC' };
+const SALE_REPORT_COL_LABELS = { sheetSize: 'Sheet Size', paperType: 'Paper Type', ups: 'UPS', coatings: 'Coatings', plates: 'Plates', rate: 'Rate per UC',
+  sheetL: 'Length', sheetW: 'Width', sheetGsm: 'GSM', packets: 'Packets', client: 'Company', ntn: 'NTN', destination: 'Destination' };
+// Search-only columns: clicking their green arrow opens a single search
+// box, no dropdown - these hold near-unique values (dates, invoice and PO
+// numbers, names) where a checkbox list would be as long as the report.
+const SALE_COL_SEARCH_FIELDS = {
+  delivered: { label: 'Delivery Date',     get: r => r.deliveredAt },
+  invoice:   { label: 'Invoice No.',       get: r => r.challan },
+  msi:       { label: 'MSI No.',           get: r => r.msiNo },
+  job:       { label: 'Job Card No.',      get: r => r.idDisplay || ('E-' + r.id) },
+  po:        { label: 'PO No.',            get: r => r.poNo },
+  fbr:       { label: 'E-FBR Invoice No.', get: r => r.fbrNo },
+  name:      { label: 'Job Name',          get: r => r.name },
+};
+const SALE_COL_DROPDOWN_NEW = ['sheetL', 'sheetW', 'sheetGsm', 'packets', 'client', 'ntn', 'destination'];
+function saleReportRowPassesNewFilters(r) {
+  const cf = saleReportState.colFilters || {};
+  const cs = saleReportState.colSearch || {};
+  for (const f of SALE_COL_DROPDOWN_NEW) {
+    const picks = cf[f] || [];
+    if (picks.length && !picks.includes(saleReportColValue(f, r))) return false;
+  }
+  for (const [f, def] of Object.entries(SALE_COL_SEARCH_FIELDS)) {
+    const q = String(cs[f] || '').trim().toLowerCase();
+    if (q && !String(def.get(r) ?? '').toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
 // Small Excel-style filter triangle next to a header's text — always
 // green so the column reads as filterable at a glance, and bolder/darker
 // while a filter is actually on.
 function saleReportColHeaderHtml(field, label) {
   const active = (saleReportState.colFilters[field] || []).length > 0;
-  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); saleReportColFilterModal('${field}')" title="Filter ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '13px' : '11px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); saleReportColFilterModal('${field}')" title="Filter ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+}
+// Same green triangle for a search-only column - opens the search box.
+function saleReportColSearchHeaderHtml(field, label) {
+  const active = String((saleReportState.colSearch || {})[field] || '').trim() !== '';
+  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); saleReportColSearchModal('${field}')" title="Search ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+}
+function saleReportColSearchModal(field) {
+  const def = SALE_COL_SEARCH_FIELDS[field];
+  if (!def) return;
+  const cur = String((saleReportState.colSearch || {})[field] || '');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+    <h2 style="margin:0 0 10px;font-size:16px;">Search: ${esc(def.label)}</h2>
+    <input type="text" id="srcs-input" value="${esc(cur)}" placeholder="Type part of the ${esc(def.label)}..." onkeydown="if (event.key === 'Enter') srColSearchApply('${field}')" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
+    <div class="modal-actions">
+      <button class="btn" onclick="srColSearchApply('${field}', '')">Clear</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="srColSearchApply('${field}')">Apply</button>
+    </div>
+  </div>`);
+  const el = document.getElementById('srcs-input');
+  if (el) { el.focus(); el.select(); }
+}
+function srColSearchApply(field, forced) {
+  const el = document.getElementById('srcs-input');
+  const v = forced !== undefined ? forced : (el ? el.value : '');
+  if (!saleReportState.colSearch) saleReportState.colSearch = {};
+  saleReportState.colSearch[field] = String(v || '').trim();
+  closeModal();
+  renderSaleReport();
 }
 // Excel-style checkbox row — green background while checked, same "this
 // one's selected" signal as a spreadsheet's own filter picker.
@@ -14609,18 +14794,18 @@ function saleReportCols(tabOverride) {
   const tab = tabOverride || saleReportState.tab || 'all';
   if (tab === SALE_REPORT_WASTE_TAB) return saleReportWasteCols();
   return [
-    { key: 'delivered', label: 'Delivery Date', cell: r => esc(r.deliveredAt), xl: r => r.deliveredAt, pr: r => esc(r.deliveredAt) },
-    { key: 'invoice', label: 'Invoice No.', cell: (r, c) => c.editCell(r, 'notes', r.challan, 90), xl: r => r.challan || '', pr: r => esc(r.challan || '') },
-    { key: 'msi', label: 'MSI No.', cell: (r, c) => c.editCell(r, 'msi_no', r.msiNo, 90), xl: r => r.msiNo || '', pr: r => esc(r.msiNo || '') },
-    { key: 'job', label: 'Job Card No.',
+    { key: 'delivered', label: 'Delivery Date', search: 'delivered', cell: r => esc(r.deliveredAt), xl: r => r.deliveredAt, pr: r => esc(r.deliveredAt) },
+    { key: 'invoice', label: 'Invoice No.', search: 'invoice', cell: (r, c) => c.editCell(r, 'notes', r.challan, 90), xl: r => r.challan || '', pr: r => esc(r.challan || '') },
+    { key: 'msi', label: 'MSI No.', search: 'msi', cell: (r, c) => c.editCell(r, 'msi_no', r.msiNo, 90), xl: r => r.msiNo || '', pr: r => esc(r.msiNo || '') },
+    { key: 'job', label: 'Job Card No.', search: 'job',
       cell: r => (r._merged && r._merged.length > 1)
         ? r._merged.map(mid => `<span onclick="event.stopPropagation(); openEdit(${mid})" title="Open Job E-${mid}" style="cursor:pointer;color:#1d4ed8;font-weight:600;text-decoration:underline;text-underline-offset:2px;">E-${mid}</span>`).join(' ')
         : esc(r.idDisplay),
       xl: r => r.idDisplay, pr: r => esc(r.idDisplay) },
-    { key: 'po', label: 'PO No.', cell: (r, c) => c.editCell(r, 'po_no', r.poNo, 90), xl: r => r.poNo, pr: r => esc(r.poNo) },
-    { key: 'fbr', label: 'E-FBR Invoice No.', cell: (r, c) => c.editCell(r, 'fbr_no', r.fbrNo, 100), xl: r => r.fbrNo || '', pr: r => esc(r.fbrNo || '') },
+    { key: 'po', label: 'PO No.', search: 'po', cell: (r, c) => c.editCell(r, 'po_no', r.poNo, 90), xl: r => r.poNo, pr: r => esc(r.poNo) },
+    { key: 'fbr', label: 'E-FBR Invoice No.', search: 'fbr', cell: (r, c) => c.editCell(r, 'fbr_no', r.fbrNo, 100), xl: r => r.fbrNo || '', pr: r => esc(r.fbrNo || '') },
     // Batch No. has no column of its own — it reads as part of the job name.
-    { key: 'name', label: 'Job Name',
+    { key: 'name', label: 'Job Name', search: 'name',
       cell: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;">Shade Card</span>' : ''),
       xl: r => r.isShadeCard ? nameWithBatch(r) + ' (Shade Card)' : nameWithBatch(r),
       pr: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <b>(Shade Card)</b>' : '') },
@@ -14629,10 +14814,10 @@ function saleReportCols(tabOverride) {
       xl: r => { let v = r.isShadeCard && r.cartons ? r.cartons + ' copies' : r.cartons; return r.isPartial ? v + ' (PARTIAL)' : v; },
       pr: r => '<span style="' + (r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '') + '">' + r.cartons.toLocaleString() + ((r.isShadeCard && r.cartons) ? ' copies' : '') + '</span>' },
     { key: 'sheetSize', label: 'Sheet Size', filter: 'sheetSize', cell: r => esc(r.sheetSize), xl: r => r.sheetSize, pr: r => esc(r.sheetSize) },
-    { key: 'sheetL', label: 'Length', right: true, cell: r => esc(String(r.sheetL)), xl: r => r.sheetL === '' ? '' : r.sheetL, pr: r => esc(String(r.sheetL)) },
-    { key: 'sheetW', label: 'Width', right: true, cell: r => esc(String(r.sheetW)), xl: r => r.sheetW === '' ? '' : r.sheetW, pr: r => esc(String(r.sheetW)) },
-    { key: 'sheetGsm', label: 'GSM', right: true, cell: r => esc(r.sheetGsm), xl: r => r.sheetGsm === '' ? '' : (Number.isFinite(+r.sheetGsm) ? +r.sheetGsm : r.sheetGsm), pr: r => esc(r.sheetGsm) },
-    { key: 'packets', label: 'Packets', right: true, total: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
+    { key: 'sheetL', label: 'Length', right: true, filter: 'sheetL', cell: r => esc(String(r.sheetL)), xl: r => r.sheetL === '' ? '' : r.sheetL, pr: r => esc(String(r.sheetL)) },
+    { key: 'sheetW', label: 'Width', right: true, filter: 'sheetW', cell: r => esc(String(r.sheetW)), xl: r => r.sheetW === '' ? '' : r.sheetW, pr: r => esc(String(r.sheetW)) },
+    { key: 'sheetGsm', label: 'GSM', right: true, filter: 'sheetGsm', cell: r => esc(r.sheetGsm), xl: r => r.sheetGsm === '' ? '' : (Number.isFinite(+r.sheetGsm) ? +r.sheetGsm : r.sheetGsm), pr: r => esc(r.sheetGsm) },
+    { key: 'packets', label: 'Packets', right: true, total: 'packets', filter: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty', cell: r => partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || esc(r.cartonQty), xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
     { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => partsOf(r, 'poQty', v => (+v).toLocaleString()) || esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
@@ -14674,9 +14859,9 @@ function saleReportCols(tabOverride) {
       pr: r => r.taxAmt === null || r.taxAmt === undefined ? dash : fmtRate(r.taxAmt) },
     { key: 'incTax', label: 'Rate Incl. Tax', right: true, total: 'amountIncTax', totalPrint: true,
       cell: r => partsOf(r, 'amountIncTax', v => fmtRate(v)) || (r.amountIncTax !== null ? fmtRate(r.amountIncTax) : '&mdash;'), xl: r => r.amountIncTax === null ? '' : +r.amountIncTax.toFixed(2), pr: r => r.amountIncTax !== null ? fmtRate(r.amountIncTax) : dash },
-    { key: 'client', label: 'Company', cell: r => esc(r.client), xl: r => r.client, pr: r => esc(r.client) },
-    { key: 'ntn', label: 'NTN', cell: r => esc(r.ntn), xl: r => r.ntn, pr: r => esc(r.ntn) },
-    { key: 'destination', label: 'Destination', cell: r => esc(r.destination), xl: r => r.destination, pr: r => esc(r.destination) },
+    { key: 'client', label: 'Company', filter: 'client', cell: r => esc(r.client), xl: r => r.client, pr: r => esc(r.client) },
+    { key: 'ntn', label: 'NTN', filter: 'ntn', cell: r => esc(r.ntn), xl: r => r.ntn, pr: r => esc(r.ntn) },
+    { key: 'destination', label: 'Destination', filter: 'destination', cell: r => esc(r.destination), xl: r => r.destination, pr: r => esc(r.destination) },
   ];
 }
 function renderSaleReport() {
@@ -14758,7 +14943,7 @@ function renderSaleReport() {
     </tr>`).join('');
   const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
-  const thead = cols.map(c => `<th ${c.right ? thR : th}>${c.filter ? saleReportColHeaderHtml(c.filter, c.label) : esc(c.label)}</th>`).join('');
+  const thead = cols.map(c => `<th ${c.right ? thR : th}>${c.filter ? saleReportColHeaderHtml(c.filter, c.label) : c.search ? saleReportColSearchHeaderHtml(c.search, c.label) : esc(c.label)}</th>`).join('');
   const tfoot = hasPerm('rpt_sale_report_totals', 'view')
     ? `<tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">${cols.map((c, i) => {
         if (c.totalCell) return `<td style="padding:8px 10px;text-align:right;">${c.totalCell(totals)}</td>`;
