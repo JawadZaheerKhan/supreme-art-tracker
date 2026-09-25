@@ -13347,6 +13347,7 @@ function buildJobsReportRows() {
   const jrLo = dfrom ? new Date(dfrom + 'T00:00:00').getTime() : -Infinity;
   const jrHi = dto   ? new Date(dto   + 'T23:59:59').getTime() :  Infinity;
   const jrInRange = (ms) => isFinite(ms) && ms >= jrLo && ms <= jrHi;
+  const linkSetOf = jobLinkSetResolver(jobs);
   const out = [];
   for (const j of jobs) {
     // Delivered mode now surfaces every job that has any shipment on the
@@ -13538,7 +13539,7 @@ function buildJobsReportRows() {
     out.push({
       id: j.id,
       idDisplay: 'E-' + j.id,
-      linkGroup: j.link_group_id || null,
+      linkGroup: linkSetOf(j.id),
       name: j.name || '',
       createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
@@ -14294,6 +14295,7 @@ function buildSaleReportRows(tabOverride) {
   const poSearchNorm      = String(poSearch      || '').trim().toLowerCase();
   const challanSearchNorm = String(challanSearch || '').trim().toLowerCase();
   const bounds = resolveDateFilterBounds(dateRange, dfrom, dto);
+  const linkSetOf = jobLinkSetResolver(jobs);
   const out = [];
   for (const j of jobs) {
     if (j.is_shade_card) continue; // Shade cards don't get invoiced like Sale Report's other jobs — Hamza's call 2026-09-18.
@@ -14456,7 +14458,7 @@ function buildSaleReportRows(tabOverride) {
       const taxAmt       = amountExTax !== null ? amountExTax * (taxPct / 100) : null;
       out.push({
         id: j.id, idDisplay: 'E-' + j.id, deliveryIndex: idx, name: j.name || '',
-        linkGroup: j.link_group_id || null,
+        linkGroup: linkSetOf(j.id),
         deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: companyName,
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         // A MIL delivery IS its own PO: the row's PO Qty is what that
@@ -14530,12 +14532,57 @@ const SALE_MERGE_ADDITIVE = [
   'packets', 'wastagePackets',
 ];
 const SALE_REPORT_MERGE = { additive: SALE_MERGE_ADDITIVE, perUnit: true };
+// Linked jobs, as sets. A job can say it is linked three ways: the link set
+// number (link_group_id), the partner field the "Linked with E-x" chip reads
+// (linked_job_id), and each delivery recorded through Deliver Linked Jobs
+// (deliveries[].linked_job_id). The reports used to read only the first, so
+// jobs whose chip said "linked" could still sit on two rows. All three join
+// jobs into one set here; returns jobId -> set key (null when on its own).
+function jobLinkSetResolver(list) {
+  const parent = new Map();
+  const find = (x) => {
+    if (!parent.has(x)) parent.set(x, x);
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r);
+    parent.set(x, r);
+    return r;
+  };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) { if (ra < rb) parent.set(rb, ra); else parent.set(ra, rb); }
+  };
+  for (const j of (list || [])) {
+    if (!j || !j.id) continue;
+    const me = 'j' + j.id;
+    find(me);
+    if (j.link_group_id) union(me, 'g' + j.link_group_id);
+    if (j.linked_job_id) union(me, 'j' + j.linked_job_id);
+    for (const d of (Array.isArray(j.deliveries) ? j.deliveries : [])) {
+      if (d && d.linked_job_id) union(me, 'j' + d.linked_job_id);
+    }
+  }
+  // A set is only a set with two or more jobs in it.
+  const size = new Map();
+  for (const k of parent.keys()) if (k[0] === 'j') { const r = find(k); size.set(r, (size.get(r) || 0) + 1); }
+  return (id) => {
+    const k = 'j' + id;
+    if (!parent.has(k)) return null;
+    const r = find(k);
+    return (size.get(r) || 0) >= 2 ? r : null;
+  };
+}
+// Invoice numbers compared by their letters and digits only, so "INV-1131",
+// "inv 1131" and "Inv.1131" are one invoice - same "names, not the spaces"
+// rule as Company Settings.
+function invoiceMatchKey(v) {
+  return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 function mergeLinkedShipmentRows(rows, cfg) {
   const conf = cfg || SALE_REPORT_MERGE;
   const groups = new Map();
   const order = [];
   for (const r of rows) {
-    const inv = String(r.challan || '').trim().toLowerCase();
+    const inv = invoiceMatchKey(r.challan);
     // No link set, or no invoice number yet: nothing to merge against.
     const key = (r.linkGroup && inv) ? 'g' + r.linkGroup + '|' + inv : null;
     if (!key) { order.push({ single: r }); continue; }
