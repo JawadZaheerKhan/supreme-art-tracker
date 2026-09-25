@@ -8172,6 +8172,30 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       });
       return res.json(upd[0]);
     }
+    // Sale Report hand-set figures for THIS shipment: Unit Carton Qty and
+    // Wastage. Stored on the delivery entry as overrides of the report's own
+    // calculation; blank clears the override (back to calculated). They
+    // change the report only - the job card's Unit Carton Qty is untouched.
+    if (req.body?.field === 'uc_qty' || req.body?.field === 'wastage_qty') {
+      const which = req.body.field;
+      const t = String(req.body.value ?? '').replace(/,/g, '').trim();
+      const num = t === '' ? null : Number(t);
+      if (num !== null && (!Number.isFinite(num) || num < 0)) {
+        return res.status(400).json({ error: (which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage') + ' must be a non-negative number (or blank for the calculated figure).' });
+      }
+      const prev = list[ix] || {};
+      const entry = { ...prev };
+      if (num === null) delete entry[which]; else entry[which] = num;
+      list[ix] = entry;
+      const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(list)} WHERE id = ${id} RETURNING *`;
+      const label = which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage';
+      await logAudit(sql, req, {
+        action: 'job.delivery.edit', entityType: 'job', entityId: id,
+        summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"`,
+        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num },
+      });
+      return res.json(upd[0]);
+    }
     const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons', date: 'date' };
     const field = FIELDS[req.body?.field];
     if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons, date' });
@@ -8181,7 +8205,7 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
     // Delivered column parse it.
     if (field === 'date') {
       const v = String(req.body?.value ?? '').trim();
-      if (!/^d{4}-d{2}-d{2}$/.test(v) || isNaN(new Date(v + 'T00:00:00'))) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || isNaN(new Date(v + 'T00:00:00'))) {
         return res.status(400).json({ error: 'Date must be a valid date (YYYY-MM-DD).' });
       }
     }

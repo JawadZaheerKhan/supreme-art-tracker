@@ -14543,6 +14543,12 @@ function buildSaleReportRows(tabOverride) {
     const cs = resolveCompanySettings(j.client);
     const companyName = (cs && cs.company) || j.client || '';
     const cartonsPackets = cartonsPacketsFor(j);
+    // Hand-set Sale Report figures (per delivery; blank = calculated).
+    const ovNum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
+    const ucBase = deliveriesList.map(d => { const o = ovNum(d && d.uc_qty); return o !== null ? o : (parseFloat(d && d.cartons) || 0); });
+    // Once ANY delivery of the job has a typed wastage, the typed figures
+    // replace the calculation for the whole job (no double counting).
+    const wastageTyped = deliveriesList.some(d => ovNum(d && d.wastage_qty) !== null);
     deliveriesList.forEach((d, idx) => {
       const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
       const batchNo = (d && d.batch_no ? String(d.batch_no).trim() : '') || (j.bno || '');
@@ -14571,10 +14577,17 @@ function buildSaleReportRows(tabOverride) {
       // ÷ (100 × 2 for a 1/2 cut) = 19.5 pkts - so the rows total exactly
       // the job's own packet count.
       const isLastDelivery = idx === deliveriesList.length - 1;
-      const rowCartonQty = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum))
-        ? cartonQtyNum - (deliveredTotal - cartons)
+      // Calculated figures first (what the report works out)...
+      const othersUc = ucBase.reduce((a, v, k) => a + (k === idx ? 0 : v), 0);
+      const ucCalc = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum))
+        ? cartonQtyNum - othersUc
         : cartons;
-      const rowWastage = isLastDelivery ? jobWastageAll : null;
+      const wastageCalc = isLastDelivery ? jobWastageAll : null;
+      // ...then anything typed into the report wins.
+      const ucTyped = ovNum(d && d.uc_qty);
+      const wTyped  = ovNum(d && d.wastage_qty);
+      const rowCartonQty = ucTyped !== null ? ucTyped : ucCalc;
+      const rowWastage = wTyped !== null ? wTyped : (wastageTyped ? null : wastageCalc);
       // No ups / packet size on file: share the job's own packet count out
       // by the row's UC instead of showing 0.
       const rowPackets = pkPerUnit > 0
@@ -14602,6 +14615,7 @@ function buildSaleReportRows(tabOverride) {
         // delivery shipped (owner spec) - normal jobs keep the job's PO Qty.
         poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets,
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
+        ucTyped: ucTyped !== null, ucCalc, wastageTyped: wTyped !== null, wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         ups: upsVal, plates: platesVal,
         wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
@@ -15162,7 +15176,10 @@ function saleReportCols(tabOverride) {
     { key: 'sheetGsm', label: 'GSM', right: true, filter: 'sheetGsm', cell: r => esc(r.sheetGsm), xl: r => r.sheetGsm === '' ? '' : (Number.isFinite(+r.sheetGsm) ? +r.sheetGsm : r.sheetGsm), pr: r => esc(r.sheetGsm) },
     { key: 'packets', label: 'Packets', right: true, total: 'packets', filter: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
-    { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty', cell: r => partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || esc(r.cartonQty), xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
+    { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty',
+      cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'uc_qty', r.cartonQty, r.ucTyped, r.ucCalc)
+        : (partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || esc(r.cartonQty)),
+      xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
     { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => partsOf(r, 'poQty', v => (+v).toLocaleString()) || esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
     { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => r.plates, pr: r => esc(r.plates) },
     { key: 'paperType', label: 'Paper Type', filter: 'paperType', cell: r => esc(r.paperType), xl: r => r.paperType, pr: r => esc(r.paperType) },
@@ -15175,7 +15192,8 @@ function saleReportCols(tabOverride) {
       cell: r => partsOf(r, 'packKg', v => d2(v)) || (r.packKg === null || r.packKg === undefined ? '&mdash;' : d2(r.packKg)), xl: r => r.packKg === null || r.packKg === undefined ? '' : +r.packKg.toFixed(2), pr: r => r.packKg === null || r.packKg === undefined ? dash : d2(r.packKg) },
     // Wastage and Ready share one cell, kept as two numbers: "20 + 430" - the green one is the Ready Qty (produced, not yet shipped).
     { key: 'wastage', label: 'Wastage', right: true, total: 'wastage',
-      cell: r => (partsOf(r, 'wastage', v => fmt(v)) || (r.wastage === null ? '&mdash;' : fmt(r.wastage))) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
+      cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'wastage_qty', r.wastage, r.wastageTyped, r.wastageCalc)
+        : (partsOf(r, 'wastage', v => fmt(v)) || (r.wastage === null ? '&mdash;' : fmt(r.wastage))) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
       totalCell: t => fmt(t.wastage) + (t.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(t.readyQty) + '</span>' : ''),
       xl: r => (r.wastage === null ? '' : r.wastage) + (r.readyQty > 0 ? ' + ' + r.readyQty : ''),
       pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:bold;">' + fmt(r.readyQty) + '</span>' : '') },
@@ -15279,7 +15297,15 @@ function renderSaleReport() {
       ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;"><span style="font-weight:600;">${amt}</span><input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'tax_pct', this.value)" style="width:46px;padding:3px 4px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:11px;" title="Sale Tax %"><span style="font-size:11px;color:var(--text2);">%</span></div>`
       : `${amt} <span style="font-size:11px;color:var(--text2);">(${fmt(r.taxPct)}%)</span>`;
   };
-  const ctx = { editCell, rateCell, taxCell };
+  // Unit Carton Qty / Wastage: a number box for the invoicing team. A
+  // typed figure reads amber (like an overridden rate); clearing the box
+  // goes back to the report's own calculation.
+  const qtyCell = canEditFields ? (r, field, value, typed, calc) => {
+    const calcTxt = (calc === null || calc === undefined) ? 'blank' : (+calc).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const tip = typed ? `Typed by hand — clear the box to go back to the calculated ${calcTxt}` : `Calculated (${calcTxt}) — type a figure to set it by hand`;
+    return `<input type="number" min="0" step="any" value="${value === null || value === undefined ? '' : esc(String(+(+value).toFixed(2)))}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, '${field}', this.value)" title="${esc(tip)}" style="width:88px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${typed ? RATE_OVERRIDE_STYLE : ''}">`;
+  } : null;
+  const ctx = { editCell, rateCell, taxCell, qtyCell };
   const cols = saleReportCols();
   const tbody = rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${(r._merged && r._merged.length > 1) ? `Open the newest job (E-${r.id}) — or click a job number to open that one` : `Open this job's card`}">
       ${cols.map(c => `<td ${c.right ? tdR : td}>${c.cell(r, ctx)}</td>`).join('')}
@@ -24346,6 +24372,11 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
   if (field === 'cartons') {
     const n = parseFloat(String(valueStr).replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(n) || n <= 0) { notify('Cartons must be a positive number'); render(); return; }
+  }
+  if (field === 'uc_qty' || field === 'wastage_qty') {
+    const t = String(valueStr).replace(/,/g, '').trim();
+    const n = t === '' ? null : Number(t);
+    if (n !== null && (!Number.isFinite(n) || n < 0)) { await alertDialog({ title: 'Enter a valid number', message: 'Or leave it blank for the calculated figure.', kind: 'warn' }); renderSaleReport(); return; }
   }
   if (field === 'rate' || field === 'tax_pct') {
     const t = String(valueStr).trim();
