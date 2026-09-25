@@ -13340,7 +13340,9 @@ function buildJobsReportRows() {
     if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
     if (client && j.client !== client) continue;
     if (milOnly && !j.stock_group_name) continue;
-    if (shadeOnly && !j.is_shade_card) continue;
+    // Shade cards live behind their own toggle: OFF = real jobs only,
+    // ON = shade cards only. The two never mix in one list.
+    if (shadeOnly ? !j.is_shade_card : j.is_shade_card) continue;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
@@ -13493,6 +13495,11 @@ function buildJobsReportRows() {
     // falls back to delqty so legacy jobs (typed straight on the card)
     // still register correctly.
     const isPartial = isPartialDelivery(j);
+    // Yellow shade only while deliveries are OPEN: gone once everything
+    // produced has shipped (MIL or a job at Ready+) or it was finalized.
+    const allDeliveredJR = readyTotalJR > 0 && deliveredJR >= readyTotalJR
+      && (j.stock_group_name ? true : productionDone);
+    const shadeOpen = isPartial && !allDeliveredJR;
     // Linked-delivery partner — set on any delivery entry recorded via
     // "Deliver Linked Jobs". Used below to merge this job's row with its
     // partner's row into one combined line (only when BOTH rows survive
@@ -13523,6 +13530,7 @@ function buildJobsReportRows() {
       // flagged permanently once shipped late); for a still-in-progress
       // partial delivery, falls back to "has today reached the deadline".
       isLate: isDeadlinePassed(j),
+      shadeOpen,
       wastage,
       readyQty,
       readyNow: readyQty,          // current remainder - the footer's figure
@@ -13819,7 +13827,7 @@ function renderJobsReport() {
     const rowTitle = (r._merged && r._merged.length > 1)
       ? `Open the newest job (E-${r.id}) — or click a job number to open that one`
       : `Open this job's card`;
-    return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.isPartial ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
+    return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
       <td class="bulk-td">${r.shipmentIndex ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
       <td ${td}>${idCell}</td>
       <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
@@ -14392,6 +14400,10 @@ function buildSaleReportRows(tabOverride) {
         wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
         coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
+        // The yellow row shade is for deliveries still OPEN - it clears by
+        // itself once everything produced has shipped or the job was
+        // finalized as delivered (finalize already unsets isPartial).
+        shadeOpen: isPartialDelivery(j) && !allDelivered,
         rate, taxPct, taxAmt, rateOverride, amountExTax, amountIncTax,
         destination: (cs && cs.destination) || '', ntn: (cs && cs.ntn) || '',
       });
@@ -14938,7 +14950,7 @@ function renderSaleReport() {
   };
   const ctx = { editCell, rateCell, taxCell };
   const cols = saleReportCols();
-  const tbody = rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.isPartial ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${(r._merged && r._merged.length > 1) ? `Open the newest job (E-${r.id}) — or click a job number to open that one` : `Open this job's card`}">
+  const tbody = rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${(r._merged && r._merged.length > 1) ? `Open the newest job (E-${r.id}) — or click a job number to open that one` : `Open this job's card`}">
       ${cols.map(c => `<td ${c.right ? tdR : td}>${c.cell(r, ctx)}</td>`).join('')}
     </tr>`).join('');
   const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
