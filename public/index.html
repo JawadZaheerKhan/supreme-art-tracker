@@ -13066,6 +13066,10 @@ function openJobsReport() {
           <span class="whole-toggle-text">Shade Cards only</span>
         </label>
       </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <button class="btn btn-sm" onclick="resetReportFilters('jobs')" title="Clear every filter and search, including the column filters">&#8634; Reset filters</button>
+      </div>
     </div>
     <div id="jr-content" style="font-size:12px;"></div>
   `;
@@ -13793,7 +13797,7 @@ function renderJobsReport() {
   }
   if (!rows.length) {
     el.innerHTML = `<div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
-      <div class="empty">No ${jobsReportState.mode === 'created' ? 'created' : 'delivered'} jobs match these filters.</div>`;
+      ${reportEmptyHtml('jobs', `No ${jobsReportState.mode === 'created' ? 'created' : 'delivered'} jobs match these filters.`)}`;
     return;
   }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
@@ -13913,6 +13917,7 @@ function renderJobsReport() {
   const someVisSel = !allVisSel && rows.some(r => jobsReportSel.has(r.id));
   el.innerHTML = `
     <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
+    ${reportFilterChipsHtml('jobs')}
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${jobCount} delivered job${jobCount===1?'':'s'}${rows.length !== jobCount ? ` &middot; ${rows.length} shipment${rows.length===1?'':'s'}` : ''} in window</div>
     <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
@@ -14137,6 +14142,79 @@ function srResetColFilters() {
   // Column filters now stay until the page is refreshed (see loadPersistedFilters).
 }
 
+// ── Active filters, visible and clearable (Sale + Jobs Report) ──
+// The column-header filters live in the table's header row - so when they
+// match nothing the table (and its header) disappears and there was no way
+// back. Every active filter is listed as a chip with its own ×, above the
+// table and in the empty state, plus a Reset that clears them all.
+function reportActiveFilters(kind) {
+  const isSale = kind === 'sale';
+  const st = isSale ? saleReportState : jobsReportState;
+  const out = [];
+  const short = (vals) => vals.length > 3 ? vals.slice(0, 3).join(', ') + ' +' + (vals.length - 3) + ' more' : vals.join(', ');
+  if (String(st.q || '').trim())             out.push({ key: 'q', label: 'Search: ' + st.q });
+  if (String(st.poSearch || '').trim())      out.push({ key: 'poSearch', label: 'PO No.: ' + st.poSearch });
+  if (String(st.challanSearch || '').trim()) out.push({ key: 'challanSearch', label: 'Invoice No.: ' + st.challanSearch });
+  if (isSale ? !!st.dateRange : (st.period && st.period !== 'all')) {
+    out.push({ key: 'date', label: 'Period: ' + (isSale
+      ? dateRangeLabel(st.dateRange, st.dfrom, st.dto)
+      : (fmtDMY(st.dfrom) || '(any)') + ' to ' + (fmtDMY(st.dto) || '(any)')) });
+  }
+  if (st.client)    out.push({ key: 'client', label: 'Company: ' + st.client });
+  if (st.milOnly)   out.push({ key: 'milOnly', label: 'MIL Products only' });
+  if (st.shadeOnly) out.push({ key: 'shadeOnly', label: 'Shade Cards only' });
+  const dropLabels   = isSale ? SALE_REPORT_COL_LABELS : Object.fromEntries(Object.entries(JR_COL_DROPDOWN_FIELDS).map(([k, d]) => [k, d.label]));
+  const searchLabels = isSale ? SALE_COL_SEARCH_FIELDS : JR_COL_SEARCH_FIELDS;
+  for (const [f, vals] of Object.entries(st.colFilters || {})) {
+    if (Array.isArray(vals) && vals.length) out.push({ key: 'cf:' + f, label: (dropLabels[f] || f) + ': ' + short(vals) });
+  }
+  for (const [f, v] of Object.entries(st.colSearch || {})) {
+    if (String(v || '').trim()) out.push({ key: 'cs:' + f, label: ((searchLabels[f] || {}).label || f) + ' contains "' + v + '"' });
+  }
+  return out;
+}
+function reportFilterChipsHtml(kind) {
+  const list = reportActiveFilters(kind);
+  if (!list.length) return '';
+  const chips = list.map(f => `<span style="display:inline-flex;align-items:center;gap:4px;background:#dcfce7;color:#166534;border:1px solid #86efac;border-radius:999px;padding:2px 4px 2px 10px;font-size:12px;font-weight:600;">${esc(f.label)}<button type="button" onclick="clearReportFilter('${kind}', '${f.key}')" title="Remove this filter" style="background:none;border:none;cursor:pointer;color:#166534;font-size:15px;line-height:1;padding:0 4px;font-weight:800;">&times;</button></span>`).join('');
+  return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:8px;">
+    <span style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;font-weight:700;">Filters on:</span>
+    ${chips}
+    <button type="button" class="btn btn-sm" onclick="resetReportFilters('${kind}')" title="Clear every filter and search">&#8634; Reset all</button>
+  </div>`;
+}
+// The empty result: say so, show what is filtering, offer the way back.
+function reportEmptyHtml(kind, msg) {
+  const any = reportActiveFilters(kind).length > 0;
+  return `<div class="empty">${esc(msg)}
+    ${any ? `<div style="margin-top:14px;display:flex;justify-content:center;">${reportFilterChipsHtml(kind)}</div>
+    <div style="margin-top:4px;"><button type="button" class="btn btn-primary btn-sm" onclick="resetReportFilters('${kind}')">&#8634; Reset all filters</button></div>` : ''}
+  </div>`;
+}
+// Clearing re-opens the report so the toolbar's boxes and dropdowns show
+// the new state too.
+function clearReportFilter(kind, key) {
+  const isSale = kind === 'sale';
+  const st = isSale ? saleReportState : jobsReportState;
+  if (key.startsWith('cf:'))      { if (st.colFilters) st.colFilters[key.slice(3)] = []; }
+  else if (key.startsWith('cs:')) { if (st.colSearch) delete st.colSearch[key.slice(3)]; }
+  else if (key === 'date') {
+    if (isSale) { st.dateRange = ''; st.dfrom = ''; st.dto = ''; }
+    else        { st.period = 'all'; st.dfrom = ''; st.dto = ''; }
+  }
+  else if (key === 'milOnly' || key === 'shadeOnly') st[key] = false;
+  else st[key] = '';
+  if (isSale) openSaleReport(); else openJobsReport();
+}
+function resetReportFilters(kind) {
+  const isSale = kind === 'sale';
+  const st = isSale ? saleReportState : jobsReportState;
+  Object.assign(st, { q: '', poSearch: '', challanSearch: '', client: '', milOnly: false, dfrom: '', dto: '', colSearch: {} });
+  if (isSale) st.dateRange = ''; else { st.period = 'all'; st.shadeOnly = false; }
+  for (const k of Object.keys(st.colFilters || {})) st.colFilters[k] = [];
+  if (isSale) openSaleReport(); else openJobsReport();
+}
+
 function openSaleReportPage() {
   if (!hasPerm('rpt_sale_report', 'view')) { notify('Sale Report is not available for your role.'); return; }
   openReportsGroup('sale-report-group');
@@ -14206,6 +14284,10 @@ function openSaleReport() {
           <input class="jr-mil-toggle-input" type="checkbox" id="sr-mil-only" ${saleReportState.milOnly ? 'checked' : ''} onchange="setSrMilOnly(this.checked)">
           <span class="whole-toggle-text">MIL Products only</span>
         </label>
+      </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <button class="btn btn-sm" onclick="resetReportFilters('sale')" title="Clear every filter and search, including the column filters">&#8634; Reset filters</button>
       </div>
     </div>
     <div id="sr-tabs" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
@@ -15019,7 +15101,7 @@ function renderSaleReport() {
   const el = document.getElementById('sr-content');
   if (!el) return;
   if (saleReportState.tab === SALE_REPORT_WASTE_TAB) { renderSaleReportWasteTab(el); return; }
-  if (!rows.length) { el.innerHTML = '<div class="empty">No delivered jobs match these filters.</div>'; return; }
+  if (!rows.length) { el.innerHTML = reportEmptyHtml('sale', 'No delivered jobs match these filters.'); return; }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
   const td  = 'style="padding:8px 10px;"';
   const tdR = 'style="padding:8px 10px;text-align:right;"';
@@ -15104,6 +15186,7 @@ function renderSaleReport() {
   const _wrapPrev = el.querySelector('.report-scroll-wrap');
   const _keepL = _wrapPrev ? _wrapPrev.scrollLeft : 0, _keepT = _wrapPrev ? _wrapPrev.scrollTop : 0;
   el.innerHTML = `
+    ${reportFilterChipsHtml('sale')}
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} shipment${rows.length===1?'':'s'} in window</div>
     <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
