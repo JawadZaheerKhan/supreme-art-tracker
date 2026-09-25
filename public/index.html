@@ -13702,7 +13702,7 @@ function renderJobsReport() {
     const rowTitle = (r._merged && r._merged.length > 1)
       ? `Open the newest job (E-${r.id}) — or click a job number to open that one`
       : `Open this job's card`;
-    return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);" onclick="openEdit(${r.id})" title="${rowTitle}">
+    return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.isPartial ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
       <td class="bulk-td">${r.shipmentIndex ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
       <td ${td}>${idCell}</td>
       <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
@@ -14257,6 +14257,9 @@ function buildSaleReportRows(tabOverride) {
       const rowWastageKgPct   = (rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null;
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
+      // The tax VALUE itself - 18% of a 2,000 base is Rs 360. The report
+      // shows this figure; the % is just how it was computed.
+      const taxAmt       = amountExTax !== null ? amountExTax * (taxPct / 100) : null;
       out.push({
         id: j.id, idDisplay: 'E-' + j.id, deliveryIndex: idx, name: j.name || '',
         linkGroup: j.link_group_id || null,
@@ -14271,7 +14274,7 @@ function buildSaleReportRows(tabOverride) {
         wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
         coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
-        rate, taxPct, rateOverride, amountExTax, amountIncTax,
+        rate, taxPct, taxAmt, rateOverride, amountExTax, amountIncTax,
         destination: (cs && cs.destination) || '', ntn: (cs && cs.ntn) || '',
       });
     });
@@ -14323,7 +14326,7 @@ function buildSaleReportRows(tabOverride) {
 // slight wording changes between reprints are not worth printing twice.
 const SALE_MERGE_ADDITIVE = [
   'cartons', 'cartonQty', 'poQty', 'cartonsPackets', 'wastage', 'readyQty',
-  'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'amountIncTax',
+  'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'taxAmt', 'amountIncTax',
 ];
 const SALE_REPORT_MERGE = { additive: SALE_MERGE_ADDITIVE, perUnit: true };
 function mergeLinkedShipmentRows(rows, cfg) {
@@ -14665,7 +14668,10 @@ function saleReportCols(tabOverride) {
     { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => r.rate === null ? '' : r.rate, pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
     { key: 'exTax', label: 'Rate Excl. Tax', right: true, total: 'amountExTax', totalPrint: true,
       cell: r => partsOf(r, 'amountExTax', v => fmtRate(v)) || (r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;'), xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
-    { key: 'taxPct', label: 'Sale Tax %', right: true, cell: (r, c) => c.taxCell(r), xl: r => r.taxPct, pr: r => fmt(r.taxPct) + '%' },
+    { key: 'taxPct', label: 'Sale Tax', right: true, total: 'taxAmt', totalPrint: true,
+      cell: (r, c) => c.taxCell(r),
+      xl: r => r.taxAmt === null || r.taxAmt === undefined ? '' : +r.taxAmt.toFixed(2),
+      pr: r => r.taxAmt === null || r.taxAmt === undefined ? dash : fmtRate(r.taxAmt) },
     { key: 'incTax', label: 'Rate Incl. Tax', right: true, total: 'amountIncTax', totalPrint: true,
       cell: r => partsOf(r, 'amountIncTax', v => fmtRate(v)) || (r.amountIncTax !== null ? fmtRate(r.amountIncTax) : '&mdash;'), xl: r => r.amountIncTax === null ? '' : +r.amountIncTax.toFixed(2), pr: r => r.amountIncTax !== null ? fmtRate(r.amountIncTax) : dash },
     { key: 'client', label: 'Company', cell: r => esc(r.client), xl: r => r.client, pr: r => esc(r.client) },
@@ -14720,9 +14726,10 @@ function renderSaleReport() {
       wastageKg:      a.wastageKg      + once('wastageKg', r.wastageKg),
       issuedKg:       a.issuedKg       + once('issuedKg', r.issuedKg),
       amountExTax:    a.amountExTax    + (r.amountExTax  || 0),
+      taxAmt:         a.taxAmt         + (r.taxAmt       || 0),
       amountIncTax:   a.amountIncTax   + (r.amountIncTax || 0),
     };
-  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, wastageSheets: 0, wastagePackets: 0, wastageKg: 0, issuedKg: 0, amountExTax: 0, amountIncTax: 0 });
+  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, wastageSheets: 0, wastagePackets: 0, wastageKg: 0, issuedKg: 0, taxAmt: 0, amountExTax: 0, amountIncTax: 0 });
   const canEditRate   = hasPerm('job_btn_pricing', 'yes');   // per-job Rate / Sale Tax cells, saved via /pricing
   const canEditFields = hasPerm('job_btn_pricing', 'yes');
   // Inline-editable reference-field cell — same PATCH route the job
@@ -14735,12 +14742,18 @@ function renderSaleReport() {
   const rateCell = r => (canEditRate && !r._merged)
     ? `<input type="number" min="0" step="any" value="${r.rate !== null ? esc(String(r.rate)) : ''}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'rate', this.value)" title="${r.rateOverride ? 'Differs from the product\'s standard rate' : ''}" style="width:75px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${r.rateOverride ? RATE_OVERRIDE_STYLE : ''}">`
     : (r.rate !== null ? fmtRate(r.rate) : '&mdash;');
-  const taxCell = r => (canEditRate && !r._merged)
-    ? `<input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'tax_pct', this.value)" style="width:55px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;">`
-    : `${fmt(r.taxPct)}%`;
+  // The Sale Tax cell leads with the VALUE the percentage comes to
+  // (Rs 360 on a 2,000 base at 18%); the % itself stays as the small
+  // editable box beside it (or in brackets when read-only).
+  const taxCell = r => {
+    const amt = (r.taxAmt === null || r.taxAmt === undefined) ? '&mdash;' : fmtRate(r.taxAmt);
+    return (canEditRate && !r._merged)
+      ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;"><span style="font-weight:600;">${amt}</span><input type="number" min="0" step="any" value="${esc(String(r.taxPct))}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, 'tax_pct', this.value)" style="width:46px;padding:3px 4px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:11px;" title="Sale Tax %"><span style="font-size:11px;color:var(--text2);">%</span></div>`
+      : `${amt} <span style="font-size:11px;color:var(--text2);">(${fmt(r.taxPct)}%)</span>`;
+  };
   const ctx = { editCell, rateCell, taxCell };
   const cols = saleReportCols();
-  const tbody = rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="openEdit(${r.id})" title="${(r._merged && r._merged.length > 1) ? `Open the newest job (E-${r.id}) — or click a job number to open that one` : `Open this job's card`}">
+  const tbody = rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.isPartial ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${(r._merged && r._merged.length > 1) ? `Open the newest job (E-${r.id}) — or click a job number to open that one` : `Open this job's card`}">
       ${cols.map(c => `<td ${c.right ? tdR : td}>${c.cell(r, ctx)}</td>`).join('')}
     </tr>`).join('');
   const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -14749,7 +14762,7 @@ function renderSaleReport() {
   const tfoot = hasPerm('rpt_sale_report_totals', 'view')
     ? `<tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">${cols.map((c, i) => {
         if (c.totalCell) return `<td style="padding:8px 10px;text-align:right;">${c.totalCell(totals)}</td>`;
-        if (c.total) return `<td style="padding:8px 10px;text-align:right;">${c.total === 'amountExTax' || c.total === 'amountIncTax' ? fmtRate(totals[c.total]) : fmt(totals[c.total])}</td>`;
+        if (c.total) return `<td style="padding:8px 10px;text-align:right;">${c.total === 'amountExTax' || c.total === 'amountIncTax' || c.total === 'taxAmt' ? fmtRate(totals[c.total]) : fmt(totals[c.total])}</td>`;
         return i === 0 ? `<td style="padding:8px 10px;white-space:nowrap;">Total &middot; ${rows.length} shipment${rows.length===1?'':'s'}</td>` : '<td></td>';
       }).join('')}</tr></tfoot>`
     : '';
@@ -14884,7 +14897,10 @@ async function runSaleReportExport() {
     const tab  = SALE_REPORT_TABS.find(t => t.key === key);
     const cols = saleReportCols(key);
     const rows = buildSaleReportRows(key);
-    const header = cols.map(c => c.label);
+    // When every visible row shares one Sale Tax % (the normal case), the
+    // % belongs in the column HEADLINE - the cells carry the amounts.
+    const uniformPct = rows.length && rows.every(r => r.taxPct === rows[0].taxPct) ? rows[0].taxPct : null;
+    const header = cols.map(c => (c.key === 'taxPct' && uniformPct !== null) ? `Sale Tax (${uniformPct}%)` : c.label);
     const aoa = reportExcelAoa(header).concat(rows.map(r => cols.map(c => c.xl(r))));
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     // Each sheet names its own tab, since one workbook can hold several.
@@ -14932,8 +14948,9 @@ function printSaleReport() {
   const tableRows = rows.map(r => `<tr>${cols.map(c => `<td ${c.right ? tdR : tdL}>${c.pr(r)}</td>`).join('')}</tr>`).join('');
   const totals = rows.reduce((a, r) => ({
     amountExTax:  a.amountExTax  + (r.amountExTax  || 0),
+    taxAmt:       a.taxAmt       + (r.taxAmt       || 0),
     amountIncTax: a.amountIncTax + (r.amountIncTax || 0),
-  }), { amountExTax: 0, amountIncTax: 0 });
+  }), { amountExTax: 0, taxAmt: 0, amountIncTax: 0 });
   const totalsRow = hasPerm('rpt_sale_report_totals', 'view')
     ? `<tr style="background:#eee;font-weight:bold;">${cols.map((c, i) => c.totalPrint ? `<td ${tdR}>${fmtRate(totals[c.total])}</td>` : (i === 0 ? `<td ${tdL}>Total</td>` : `<td ${tdL}></td>`)).join('')}</tr>`
     : '';
@@ -14947,7 +14964,7 @@ function printSaleReport() {
         note: `Generated: ${fmtDMYT(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:7pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#f7f1ea;">${cols.map(c => `<th ${c.right ? tdR : tdL}>${esc(c.label)}</th>`).join('')}</tr>
+        <tr style="background:#f7f1ea;">${cols.map(c => `<th ${c.right ? tdR : tdL}>${esc((c.key === 'taxPct' && rows.length && rows.every(r => r.taxPct === rows[0].taxPct)) ? `Sale Tax (${rows[0].taxPct}%)` : c.label)}</th>`).join('')}</tr>
         ${tableRows}
         ${totalsRow}
       </table>
