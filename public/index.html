@@ -14096,20 +14096,25 @@ function buildSaleReportRows(tabOverride) {
       if (sheets && ps) packets = sheets / ps;
     }
     const cartonQtyNum = parseFloat(j.cartonqty);
-    // Wastage is ONE number now - the old "wastage + green ready" split is
-    // gone from this report by owner instruction (2026-09-25).
-    //   Normal job: Unit Carton Qty − delivered so far. It shrinks with
-    //   every delivery and settles on the true wastage once all shipped.
-    //   MIL job:    Unit Carton Qty − Ready Qty (E-146: 25,200 − 24,200 =
-    //   1,000) - written as ONE figure on the LAST delivery row, and only
-    //   once EVERY delivery is done. Until then all rows stay blank: the
-    //   adjustment belongs to a final delivery that has not happened yet.
+    // EVERY job's shipment rows follow the per-delivery criteria now
+    // (owner spec, E-146 for MIL and E-489 for normal jobs): the Unit
+    // Carton Qty column carries what each delivery shipped, the LAST
+    // delivery of a finished job absorbs the remainder, and packets +
+    // issued weight derive from the row's UC figure. Wastage is ONE
+    // figure, on the last delivery row, and appears when it is KNOWN:
+    //   MIL:    UC − Ready (25,200 − 24,200 = 1,000), only once EVERY
+    //           delivery is done.
+    //   Normal: UC − Ready-to-Delivery total, as soon as production is
+    //           FINISHED (job at Ready or beyond) - while qty is still in
+    //           process the field stays empty. PO Qty stays the job's own
+    //           on normal rows; MIL rows write their delivery there.
     const isMilJob       = !!j.stock_group_name;
     const deliveredTotal = totalDeliveredCartons(j) || 0;
     const readyTotalAll  = readyCartonsTotal(j) || 0;
-    const milComplete    = isMilJob && readyTotalAll > 0 && deliveredTotal >= readyTotalAll;
-    const milWastageAll  = (milComplete && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
-    const wastage = isMilJob ? null : (Number.isFinite(cartonQtyNum) ? (cartonQtyNum - deliveredTotal) : null);
+    const productionDone = (j.stage_index || 0) >= 6;
+    const allDelivered   = readyTotalAll > 0 && deliveredTotal >= readyTotalAll && (isMilJob || productionDone);
+    const wastageKnown   = isMilJob ? allDelivered : (productionDone && readyTotalAll > 0);
+    const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
     const readyQty = 0;   // never rides in the Wastage column any more
     const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
     const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
@@ -14142,13 +14147,7 @@ function buildSaleReportRows(tabOverride) {
     const ptype        = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
     const upsNum       = parseFloat(j.ups);
     const packKg       = packWeightKg(ptype, invItem ? invItem.size : j.size, invItem ? invItem.gsm : j.gsm);
-    const wastageUps     = wastage;
-    const wastageSheets  = (wastageUps !== null && upsNum > 0) ? wastageUps / upsNum : null;
-    const wastagePackets = wastageSheets !== null ? wastageSheets / packetSize(ptype) : null;
-    const wastageKg      = (wastagePackets !== null && packKg !== null) ? wastagePackets * packKg : null;
-    const issuedKg       = (packets > 0 && packKg !== null) ? packets * packKg : null;
-    // Wastage as a share of the paper actually issued for the job.
-    const wastageKgPct   = (wastageKg !== null && issuedKg !== null && issuedKg > 0) ? (wastageKg * 100 / issuedKg) : null;
+    // (The whole kg chain is computed per shipment row below.)
     const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
     // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
@@ -14189,32 +14188,26 @@ function buildSaleReportRows(tabOverride) {
       const { rate, tax: taxPct, override: rateOverride } = shipmentPricing(j, d);
       if (cf.rate.length && !cf.rate.includes(rate !== null ? fmtRate(rate) : '')) return;
       const cartons = parseFloat(d && d.cartons) || 0;
-      // MIL: the row's Unit Carton Qty is what it shipped - except the LAST
-      // delivery of a finished job, which absorbs the remainder so the
-      // column sums to the job's real Unit Carton Qty. E-146: 6,000 and
-      // 7,500 plain, last row 25,200 − 13,500 = 11,700 (10,700 shipped +
-      // 1,000 wastage). The whole wastage figure sits on that same last
-      // row, and packets + issued weight derive from the UC figure - so
-      // the last row's packets read 11,700 ÷ 3 ÷ (100 × 2) = 19.5, and the
-      // rows total exactly the job's own packet count.
+      // The row's Unit Carton Qty is what it shipped - except the LAST
+      // delivery of a fully-delivered job, which absorbs the remainder so
+      // the column sums to the job's real Unit Carton Qty (E-146: 6,000
+      // and 7,500 plain, last row 25,200 − 13,500 = 11,700 = 10,700
+      // shipped + 1,000 wastage). Wastage sits on the last row once it is
+      // known; packets + issued weight derive from the row UC - 11,700 ÷ 3
+      // ÷ (100 × 2 for a 1/2 cut) = 19.5 pkts - so the rows total exactly
+      // the job's own packet count.
       const isLastDelivery = idx === deliveriesList.length - 1;
-      const rowCartonQty = isMilJob
-        ? ((isLastDelivery && milComplete) ? cartonQtyNum - (deliveredTotal - cartons) : cartons)
-        : (j.cartonqty || '');
-      const rowWastage = isMilJob ? ((isLastDelivery && milComplete) ? milWastageAll : null) : wastage;
-      const rowPackets = isMilJob
-        ? ((upsNum > 0 && packetSize(ptype) > 0) ? rowCartonQty / upsNum / (packetSize(ptype) * jobCutPieces(j)) : 0)
-        : packets;
-      const rowIssuedKg = isMilJob
-        ? ((rowPackets > 0 && packKg !== null) ? rowPackets * packKg : null)
-        : issuedKg;
-      // The kg/sheet wastage chain follows the row's own wastage for MIL.
-      const rowWastageSheets  = isMilJob ? ((rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null) : wastageSheets;
-      const rowWastagePackets = isMilJob ? (rowWastageSheets !== null ? rowWastageSheets / packetSize(ptype) : null) : wastagePackets;
-      const rowWastageKg      = isMilJob ? ((rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null) : wastageKg;
-      const rowWastageKgPct   = isMilJob
-        ? ((rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null)
-        : wastageKgPct;
+      const rowCartonQty = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum))
+        ? cartonQtyNum - (deliveredTotal - cartons)
+        : cartons;
+      const rowWastage = isLastDelivery ? jobWastageAll : null;
+      const rowPackets = (upsNum > 0 && packetSize(ptype) > 0)
+        ? rowCartonQty / upsNum / (packetSize(ptype) * jobCutPieces(j)) : 0;
+      const rowIssuedKg = (rowPackets > 0 && packKg !== null) ? rowPackets * packKg : null;
+      const rowWastageSheets  = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
+      const rowWastagePackets = rowWastageSheets !== null ? rowWastageSheets / packetSize(ptype) : null;
+      const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
+      const rowWastageKgPct   = (rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null;
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       out.push({
@@ -14648,9 +14641,10 @@ function renderSaleReport() {
   // per-shipment. Count every job-level figure ONCE per job (its first
   // row here), or a job split across N shipments would inflate them Nx.
   const seenJobsForTotals = new Set();
-  // MIL rows carry per-DELIVERY values in these keys (each row its own PO
-  // qty / packets / weight, wastage as an even share), so the total adds
-  // every row. Normal rows keep the once-per-job rule below.
+  // Every row carries per-DELIVERY values in these keys now (UC, packets,
+  // weight; wastage on the last row), so the total adds every row. PO Qty
+  // is per-row only on MIL rows - normal jobs keep their job-level PO Qty
+  // counted once.
   const MIL_PER_ROW_TOTALS = new Set(['poQty', 'cartonQty', 'wastage', 'readyQty', 'packets', 'wastageSheets', 'wastagePackets', 'wastageKg', 'issuedKg']);
   const totals = rows.reduce((a, r) => {
     const ids = r._merged || [r.id];
@@ -14660,7 +14654,7 @@ function renderSaleReport() {
     // have not been counted yet. On a plain row that is the old behaviour -
     // the whole value the first time the job appears, nothing after.
     const once = (key, v) => {
-      if (r.milPerRow && MIL_PER_ROW_TOTALS.has(key)) return v || 0;
+      if (MIL_PER_ROW_TOTALS.has(key) && (r.milPerRow || key !== 'poQty')) return v || 0;
       if (!fresh.length) return 0;
       const p = r._parts && r._parts[key];
       if (!p || !r._merged) return fresh.length ? (v || 0) : 0;
