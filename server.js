@@ -280,7 +280,9 @@ function getDb() {
 // keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
 // Bumped again to seed the Forms tab rows (forms_tab_access / forms_btn_transfer_note) from the old forms_print defaults.
 // Bumped again to create finance.waste_board_sales, behind the Sale Report's Waste of Board tab.
-const SCHEMA_VERSION = 'v2026-09-23-link-sets';
+// Bumped again to add inventory_transactions.recorded_at (stock Entry Date) - without it the
+// fast-path skipped the ALTER and every stock-ledger INSERT failed on the missing column.
+const SCHEMA_VERSION = 'v2026-09-25-stock-entry-date';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
