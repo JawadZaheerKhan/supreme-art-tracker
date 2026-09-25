@@ -13308,20 +13308,7 @@ function jrColFilterApply(field) {
   renderJobsReport();
 }
 function jrColSearchModal(field) {
-  const def = JR_COL_SEARCH_FIELDS[field];
-  if (!def) return;
-  const cur = String((jobsReportState.colSearch || {})[field] || '');
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
-    <h2 style="margin:0 0 10px;font-size:16px;">Search: ${esc(def.label)}</h2>
-    <input type="text" id="srcs-input" value="${esc(cur)}" placeholder="Type part of the ${esc(def.label)}..." onkeydown="if (event.key === 'Enter') jrColSearchApply('${field}')" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
-    <div class="modal-actions">
-      <button class="btn" onclick="jrColSearchApply('${field}', '')">Clear</button>
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="jrColSearchApply('${field}')">Apply</button>
-    </div>
-  </div>`);
-  const el = document.getElementById('srcs-input');
-  if (el) { el.focus(); el.select(); }
+  colSearchPickerModal('jobs', field);
 }
 function jrColSearchApply(field, forced) {
   const el = document.getElementById('srcs-input');
@@ -14884,20 +14871,91 @@ function saleReportColSearchHeaderHtml(field, label) {
   return `${esc(label)} <button type="button" onclick="event.stopPropagation(); saleReportColSearchModal('${field}')" title="Search ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
 }
 function saleReportColSearchModal(field) {
-  const def = SALE_COL_SEARCH_FIELDS[field];
+  colSearchPickerModal('sale', field);
+}
+// Excel-style search for the near-unique columns (Invoice, PO, dates, job
+// no., name...): as you type, the values that REALLY exist in that column
+// drop down, and clicking one filters to it. Type something that is not
+// there ("900") and nothing drops down - it cannot be applied, so the
+// report can never be filtered into an empty table by a typo.
+// Values come from the rows with this column's own search lifted (the same
+// Excel rule the dropdown columns follow).
+let _colSearchCtx = null;
+function colSearchPickerModal(kind, field) {
+  const isSale = kind === 'sale';
+  const st   = isSale ? saleReportState : jobsReportState;
+  const def  = (isSale ? SALE_COL_SEARCH_FIELDS : JR_COL_SEARCH_FIELDS)[field];
   if (!def) return;
-  const cur = String((saleReportState.colSearch || {})[field] || '');
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+  if (!st.colSearch) st.colSearch = {};
+  const saved = st.colSearch[field];
+  delete st.colSearch[field];
+  let rows = [];
+  try { rows = isSale ? buildSaleReportRows() : buildJobsReportRows(); }
+  finally { if (saved !== undefined) st.colSearch[field] = saved; }
+  const values = [...new Set(rows.map(r => String(def.get(r) ?? '').trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  _colSearchCtx = { kind, field, values, shown: [] };
+  const cur = String(saved || '');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
     <h2 style="margin:0 0 10px;font-size:16px;">Search: ${esc(def.label)}</h2>
-    <input type="text" id="srcs-input" value="${esc(cur)}" placeholder="Type part of the ${esc(def.label)}..." onkeydown="if (event.key === 'Enter') srColSearchApply('${field}')" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
+    <input type="text" id="srcs-input" value="${esc(cur)}" autocomplete="off" placeholder="Type part of the ${esc(def.label)}..." oninput="colSearchSuggest()" onkeydown="if (event.key === 'Enter') colSearchPickerApply()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
+    <div id="srcs-list" style="max-height:45vh;overflow-y:auto;margin-top:6px;"></div>
+    <div id="srcs-none" style="display:none;color:#991b1b;font-size:12.5px;padding:8px 2px;"></div>
     <div class="modal-actions">
-      <button class="btn" onclick="srColSearchApply('${field}', '')">Clear</button>
+      <button class="btn" onclick="colSearchPickerSet('')">Clear</button>
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="srColSearchApply('${field}')">Apply</button>
+      <button class="btn btn-primary" id="srcs-apply" onclick="colSearchPickerApply()" title="Filter to every value containing what you typed">Apply</button>
     </div>
   </div>`);
+  colSearchSuggest();
   const el = document.getElementById('srcs-input');
   if (el) { el.focus(); el.select(); }
+}
+function colSearchSuggest() {
+  const ctx = _colSearchCtx;
+  const el = document.getElementById('srcs-input');
+  const list = document.getElementById('srcs-list');
+  const none = document.getElementById('srcs-none');
+  const apply = document.getElementById('srcs-apply');
+  if (!ctx || !el || !list) return;
+  const q = el.value.trim().toLowerCase();
+  // Nothing typed: no list (the column can hold hundreds of values).
+  const hits = q ? ctx.values.filter(v => v.toLowerCase().includes(q)) : [];
+  ctx.shown = hits.slice(0, 60);
+  const mark = (v) => {
+    const i = v.toLowerCase().indexOf(q);
+    return i < 0 ? esc(v) : esc(v.slice(0, i)) + '<b style="color:#166534;">' + esc(v.slice(i, i + q.length)) + '</b>' + esc(v.slice(i + q.length));
+  };
+  list.innerHTML = ctx.shown.length
+    ? `<div style="border:1px solid var(--border);border-radius:8px;padding:4px;">${ctx.shown.map((v, i) =>
+        `<div onclick="colSearchPickerPick(${i})" style="padding:6px 8px;border-radius:5px;cursor:pointer;font-size:13px;" onmouseover="this.style.background='#dcfce7'" onmouseout="this.style.background=''">${mark(v)}</div>`).join('')}
+        ${hits.length > ctx.shown.length ? `<div style="padding:6px 8px;font-size:11.5px;color:var(--text2);">+ ${hits.length - ctx.shown.length} more — keep typing to narrow</div>` : ''}</div>`
+    : '';
+  if (none) {
+    none.style.display = (q && !hits.length) ? '' : 'none';
+    none.textContent = (q && !hits.length) ? 'Nothing in this column matches "' + el.value.trim() + '".' : '';
+  }
+  // A search that matches nothing cannot be applied.
+  if (apply) apply.disabled = !!(q && !hits.length);
+}
+function colSearchPickerPick(i) {
+  const ctx = _colSearchCtx;
+  if (!ctx || ctx.shown[i] === undefined) return;
+  colSearchPickerSet(ctx.shown[i]);
+}
+function colSearchPickerApply() {
+  const ctx = _colSearchCtx;
+  const el = document.getElementById('srcs-input');
+  if (!ctx || !el) return;
+  const q = el.value.trim();
+  if (q && !ctx.values.some(v => v.toLowerCase().includes(q.toLowerCase()))) return;   // nothing there - stay put
+  colSearchPickerSet(q);
+}
+function colSearchPickerSet(v) {
+  const ctx = _colSearchCtx;
+  if (!ctx) return;
+  if (ctx.kind === 'sale') srColSearchApply(ctx.field, v);
+  else jrColSearchApply(ctx.field, v);
 }
 function srColSearchApply(field, forced) {
   const el = document.getElementById('srcs-input');
