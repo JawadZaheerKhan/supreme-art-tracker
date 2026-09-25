@@ -13362,10 +13362,13 @@ function buildJobsReportRows() {
     // Shade cards live behind their own toggle: OFF = real jobs only,
     // ON = shade cards only. The two never mix in one list.
     if (shadeOnly ? !j.is_shade_card : j.is_shade_card) continue;
+    // Searches flag rather than drop, same as the Sale Report, so a linked
+    // partner survives long enough to merge into the shared-invoice row.
+    let searchHit = true;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
-      if (!idHit && !nameHit) continue;
+      if (!idHit && !nameHit) searchHit = false;
     }
     // Delivery date(s) — for jobs shipped via the deliveries ledger, join
     // every shipment's date (dd/mm/yyyy) so a job split across days shows
@@ -13517,8 +13520,8 @@ function buildJobsReportRows() {
     // filtering Created mode too, since the state isn't cleared on toggle
     // (same as every other Jobs Report filter).
     if (!isCreatedMode) {
-      if (poSearchNorm      && !poNoJoined.toLowerCase().includes(poSearchNorm))    continue;
-      if (challanSearchNorm && !challans.toLowerCase().includes(challanSearchNorm)) continue;
+      if (poSearchNorm      && !poNoJoined.toLowerCase().includes(poSearchNorm))    searchHit = false;
+      if (challanSearchNorm && !challans.toLowerCase().includes(challanSearchNorm)) searchHit = false;
     }
     // Partial when there's at least one shipment but the running total
     // is still short of the booked qty. Uses the deliveries ledger, but
@@ -13540,6 +13543,7 @@ function buildJobsReportRows() {
       id: j.id,
       idDisplay: 'E-' + j.id,
       linkGroup: linkSetOf(j.id),
+      searchHit,
       name: j.name || '',
       createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
@@ -13606,7 +13610,11 @@ function buildJobsReportRows() {
   // shipments and belong on two rows. The merge happens further down instead,
   // once the rows are one-per-shipment, where the invoice is known - see
   // mergeLinkedShipmentRows, the same rule the Sale Report uses.
-  const merged = out;
+  // Search pass (first half): matching jobs plus their linked partners go
+  // on; the partners drop again after the shipment merge below unless they
+  // ended up inside a matching row.
+  const hitSets = new Set(out.filter(r => r.searchHit && r.linkGroup).map(r => r.linkGroup));
+  const merged = out.filter(r => r.searchHit || (r.linkGroup && hitSets.has(r.linkGroup)));
   // Merge Mill (stock group) rows that share the same delivery — same
   // group, same PO No., same Challan No. means they were all paid out by
   // one "Record Delivery" FIFO click on the group, so they're really one
@@ -13672,6 +13680,7 @@ function buildJobsReportRows() {
         shipments: combineShipments(sorted.map(b => b.shipments)),
         stockGroupName: sorted[0].stockGroupName,
         isShadeCard: sorted.some(b => b.isShadeCard),
+        searchHit: sorted.some(b => b.searchHit),
       });
     } else {
       withMilMerge.push(r);
@@ -13708,7 +13717,7 @@ function buildJobsReportRows() {
   // repeat on each of a job's rows exactly as they do there — the footer
   // counts them once per job, see renderJobsReport. Created mode has no
   // shipments to speak of, and a job with none keeps its single row.
-  if (isCreatedMode) return withMilMerge.filter(jrRowPassesColFilters);
+  if (isCreatedMode) return withMilMerge.filter(r => r.searchHit).filter(jrRowPassesColFilters);
   const numQty = (v) => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
   const perShipment = [];
   for (const r of withMilMerge) {
@@ -13764,7 +13773,7 @@ function buildJobsReportRows() {
   // the same rule, and the same code, as the Sale Report. Worked out here
   // rather than when the delivery was recorded, so a delivery entered first
   // and invoiced afterwards joins up the moment the numbers match.
-  return mergeLinkedShipmentRows(perShipment, JOBS_REPORT_MERGE).filter(jrRowPassesColFilters);
+  return mergeLinkedShipmentRows(perShipment, JOBS_REPORT_MERGE).filter(r => r.searchHit).filter(jrRowPassesColFilters);
 }
 // The Jobs Report's own quantity columns. Everything not named here follows
 // the general rule: shown once when the members agree, space-separated when
@@ -14304,10 +14313,15 @@ function buildSaleReportRows(tabOverride) {
     if (client && j.client !== client) continue;
     if (milOnly && !j.stock_group_name) continue;
     if (tab !== 'all' && saleReportTabFor(j) !== tab) continue;
+    // The searches (job no./name, PO, invoice) no longer DROP a job here -
+    // they flag its rows. Dropping it first meant searching E-374 threw
+    // away its linked partner E-455 before the two could merge into their
+    // shared-invoice row. See the search pass after the loop.
+    let searchHit = true;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
-      if (!idHit && !nameHit) continue;
+      if (!idHit && !nameHit) searchHit = false;
     }
     let packets = 0;
     const pktFromForm = parseFloat(j.particulars && j.particulars.quantity_of_packets);
@@ -14413,8 +14427,9 @@ function buildSaleReportRows(tabOverride) {
       const fbrNo   = (d && d.fbr_no ? String(d.fbr_no).trim() : '');
       const msiNo   = (d && d.msi_no ? String(d.msi_no).trim() : '');
       const invoice = deliveryChallanText(d);
-      if (poSearchNorm      && !poNo.toLowerCase().includes(poSearchNorm))      return;
-      if (challanSearchNorm && !invoice.toLowerCase().includes(challanSearchNorm)) return;
+      const rowHit = searchHit
+        && (!poSearchNorm      || poNo.toLowerCase().includes(poSearchNorm))
+        && (!challanSearchNorm || invoice.toLowerCase().includes(challanSearchNorm));
       const refMs = deliveryEntryMs(d);
       const refMsOk = isFinite(refMs) ? refMs : null;
       if (bounds) {
@@ -14458,7 +14473,7 @@ function buildSaleReportRows(tabOverride) {
       const taxAmt       = amountExTax !== null ? amountExTax * (taxPct / 100) : null;
       out.push({
         id: j.id, idDisplay: 'E-' + j.id, deliveryIndex: idx, name: j.name || '',
-        linkGroup: linkSetOf(j.id),
+        linkGroup: linkSetOf(j.id), searchHit: rowHit,
         deliveredAt: (d && d.date) ? fmtDMY(d.date) : '', deliveredAtRaw: refMsOk, client: companyName,
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         // A MIL delivery IS its own PO: the row's PO Qty is what that
@@ -14479,7 +14494,12 @@ function buildSaleReportRows(tabOverride) {
       });
     });
   }
-  const merged = mergeLinkedShipmentRows(out);
+  // Search pass: rows that matched, plus their linked partners' rows so a
+  // shared-invoice pair can still merge; after the merge only rows holding
+  // at least one matching job stay (a merged row ORs the flag).
+  const hitSets = new Set(out.filter(r => r.searchHit && r.linkGroup).map(r => r.linkGroup));
+  const merged = mergeLinkedShipmentRows(out.filter(r => r.searchHit || (r.linkGroup && hitSets.has(r.linkGroup))))
+    .filter(r => r.searchHit);
   out.length = 0;
   out.push(...merged.filter(saleReportRowPassesNewFilters));
   // Sort by whichever field the "Sort by" dropdown picked, ascending or
