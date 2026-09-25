@@ -356,7 +356,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // What is typed saves itself into the job's delivery_draft; only the button
   // turns it into an actual delivery. Defaults match the button's own roles,
   // so nothing changes until someone takes the button away from a role.
-  job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Cartons/Packets, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Carton Shipper, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // The green/yellow dot beside a Job Card particulars row. Opens that
   // stage's Station entry with no station PIN asked, so the holder can fix
   // an operator's quantity from the job card. The entry can only edit the
@@ -7186,7 +7186,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     let cpTotal = null;
     if (req.body.cartons_packets !== undefined && String(req.body.cartons_packets).trim() !== '') {
       cpTotal = Number(req.body.cartons_packets);
-      if (!Number.isFinite(cpTotal) || cpTotal < 0) return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
+      if (!Number.isFinite(cpTotal) || cpTotal < 0) return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
     }
     const byEmail  = req.user?.email || 'unknown';
     const groupJobs = await sql`
@@ -7304,7 +7304,7 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
     const raw = req.body?.cartons_packets;
     const value = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
     if (value !== null && (!Number.isFinite(value) || value < 0)) {
-      return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
+      return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
     }
     const rows = await sql`SELECT id, cartons_packets FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -7317,7 +7317,7 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
       action: 'job.cartons_packets.update',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} Cartons/Packets set to ${value === null ? '— (station figure)' : value}`,
+      summary: `Job E-${id} Carton Shipper set to ${value === null ? '— (station figure)' : value}`,
       metadata: { cartons_packets: value, prior: rows[0].cartons_packets },
     });
     res.json(updated[0]);

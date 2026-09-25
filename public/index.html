@@ -4056,7 +4056,8 @@ function readyCartonsTotal(j) {
   }
   return 0;
 }
-// "Cartons/Packets" as this app shows it: the finance-side override
+// "Carton Shipper" (formerly "Cartons/Packets" - the stored keys keep the
+// old names) as this app shows it: the finance-side override
 // (jobs.cartons_packets, set on the Record Delivery form) when one exists,
 // otherwise whatever the tracker's Pasting station recorded. The station's
 // own JSONB row is never overwritten — see the column's comment in
@@ -14549,7 +14550,7 @@ function saleReportCols(tabOverride) {
     { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => r.plates, pr: r => esc(r.plates) },
     { key: 'paperType', label: 'Paper Type', filter: 'paperType', cell: r => esc(r.paperType), xl: r => r.paperType, pr: r => esc(r.paperType) },
     { key: 'coatings', label: 'Coatings', filter: 'coatings', cell: r => esc(r.coatings), xl: r => r.coatings, pr: r => esc(r.coatings) },
-    { key: 'cartonsPackets', label: 'Cartons/Packets', right: true, total: 'cartonsPackets',
+    { key: 'cartonsPackets', label: 'Carton Shipper', right: true, total: 'cartonsPackets',
       cell: r => partsOf(r, 'cartonsPackets', v => (+v).toLocaleString()) || (r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : '&mdash;'), xl: r => r.cartonsPackets > 0 ? r.cartonsPackets : '', pr: r => r.cartonsPackets > 0 ? r.cartonsPackets.toLocaleString() : dash },
     // Weight of ONE packet: sheet length x width x gsm / 15500 (packWeightKg),
     // the same figure Wastage Weight and Packets Issued Weight are built from.
@@ -22684,7 +22685,7 @@ function deliveriesSection(j, opts) {
           <input type="number" id="deliv-cartons" min="1" step="any" value="${esc(String(draftVal('cartons', cartonsPrefill)))}"${draftSave('cartons')} placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         ${isShadeCard ? '' : `<div style="min-width:0;">
-          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
+          <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Carton Shipper</label>
           <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', cartonsPackets > 0 ? cartonsPackets : '')))}"${draftSave('cartons_packets')} data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it. Clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
         </div>`}
         <div style="min-width:0;">
@@ -22885,7 +22886,7 @@ function deliveriesSectionFinance(j, opts) {
           </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(95px,1fr));gap:10px;">
             ${fieldBox(countLabel, editCell(i, 'cartons', ctns, { title: 'Editing this changes Delivered Qty / stage — recompute is automatic.' }))}
-            ${isShadeCard ? '' : fieldBox('Cartons/Packets', canEditEntries
+            ${isShadeCard ? '' : fieldBox('Carton Shipper', canEditEntries
               ? `<input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="&mdash;" title="Job-level figure — editing it here changes it for every shipment on this job. Clear the box to fall back to the Pasting station's own number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
               : (cartonsPackets > 0 ? `<b>${cartonsPackets.toLocaleString()}</b>` : '&mdash;'))}
             ${isShadeCard ? '' : fieldBox('PO No.', editCell(i, 'po_no', po))}
@@ -22937,7 +22938,7 @@ function deliveriesSectionFinance(j, opts) {
           </div>
           ${isShadeCard ? '' : `
           <div style="min-width:0;">
-            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Cartons/Packets</label>
+            <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Carton Shipper</label>
             <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', cartonsPackets > 0 ? cartonsPackets : '')))}"${draftSave('cartons_packets')} data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saved when you press Record Delivery; clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
           </div>
           `}
@@ -23578,7 +23579,7 @@ async function recordDelivery(jobId) {
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
   if (cpStr !== '') {
     const cpN = parseFloat(cpStr);
-    if (!Number.isFinite(cpN) || cpN < 0) { await alertDialog({ title: 'Cartons/Packets must be a positive number', kind: 'warn' }); return; }
+    if (!Number.isFinite(cpN) || cpN < 0) { await alertDialog({ title: 'Carton Shipper must be a positive number', kind: 'warn' }); return; }
   }
   // Rate / Sale Tax inputs only exist for holders of job_btn_pricing (see
   // deliveriesSectionFinance); for everyone else these ride along undefined.
@@ -23631,7 +23632,7 @@ async function saveCartonsPackets(jobId, valueStr) {
   const raw = String(valueStr == null ? '' : valueStr).trim();
   if (raw !== '') {
     const n = parseFloat(raw.replace(/[^0-9.\-]/g, ''));
-    if (!Number.isFinite(n) || n < 0) { notify('Cartons/Packets must be a positive number'); render(); return; }
+    if (!Number.isFinite(n) || n < 0) { notify('Carton Shipper must be a positive number'); render(); return; }
   }
   showSaving(true);
   try {
@@ -24610,7 +24611,7 @@ function openDeliverGroupModal(groupName) {
     ${showPricing ? `
     <div class="form-row">
       <div class="form-group"><label class="form-label">Total Unit Cartons *</label><input type="number" id="dg-cartons" min="0" style="width:100%;"></div>
-      <div class="form-group"><label class="form-label">Cartons/Packets</label><input type="number" id="dg-cp" min="0" step="any" title="Total for this delivery — split across the jobs in proportion to the unit cartons each one ships." style="width:100%;"></div>
+      <div class="form-group"><label class="form-label">Carton Shipper</label><input type="number" id="dg-cp" min="0" step="any" title="Total for this delivery — split across the jobs in proportion to the unit cartons each one ships." style="width:100%;"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Date *</label><input type="date" id="dg-date" value="${new Date().toISOString().slice(0,10)}"></div>
@@ -28418,7 +28419,7 @@ const STATION_STAGE_FIELDS = {
   5: [
     { key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' },
     { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' },
-    { key: 'ready_packets_qty', label: 'Packets / Cartons' },
+    { key: 'ready_packets_qty', label: 'Carton Shipper' },
   ],
   // Ready to Deliver has TWO inputs — Ready Cartons Qty AND
   // Packets/Cartons. Both are saved to particulars separately; the
@@ -28426,7 +28427,7 @@ const STATION_STAGE_FIELDS = {
   // the "Ready to Delivery Qty" row.
   6: [
     { key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' },
-    { key: 'ready_packets_qty',     label: 'Packets / Cartons' },
+    { key: 'ready_packets_qty',     label: 'Carton Shipper' },
   ],
 };
 // Coatings (stage 2) fields depend on which section the operator belongs
