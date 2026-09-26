@@ -14524,9 +14524,12 @@ function partyLedgerSummaryHtml(invoices, from, to) {
 function plParticularsHtml(e) {
   if (e.type === 'rcpt') {
     const r = e.receipt;
+    // A receipt voucher's lines (bank and tax) carry only what was typed in
+    // the voucher's Particular box (owner, 2026-09-26).
+    if (plIsVoucher(r)) return esc(r.reference || '');
     const inv = r.invoice_nos ? ` &middot; against invoice no = ${esc(r.invoice_nos)}` : '';
     if (e.taxPart) return `Tax deducted at source${inv}`;
-    const head = plIsVoucher(r) ? esc(plAccountLabel(r.bank_code) || PARTY_KIND_LABELS[r.kind] || r.kind) : esc(PARTY_KIND_LABELS[r.kind] || r.kind);
+    const head = esc(PARTY_KIND_LABELS[r.kind] || r.kind);
     return `${head}${r.reference ? ' &middot; ' + esc(r.reference) : ''}${inv}${r.notes ? `<div style="font-size:11px;color:var(--text2);">${esc(r.notes)}</div>` : ''}`;
   }
   const l = e.line;
@@ -14859,9 +14862,25 @@ function plVoucherNoPreview() {
     el.innerHTML = esc(r.voucher_no);
     return;
   }
-  const prefix = acct ? `${acct.cash ? 'CRV' : 'BRV'}-${plVoucherFy(date)}` : 'CRV / BRV';
-  el.innerHTML = `${esc(prefix)}-&hellip; <span style="font-family:inherit;font-weight:500;font-size:11px;color:var(--text2);">${acct ? 'next number, given when saved' : '(CRV for Cash in Hand, BRV for a bank)'}</span>`;
+  if (!acct) {
+    el.innerHTML = `CRV / BRV-&hellip; <span style="font-family:inherit;font-weight:500;font-size:11px;color:var(--text2);">(CRV for Cash in Hand, BRV for a bank)</span>`;
+    return;
+  }
+  // Show the number this voucher is about to get. The server hands the real
+  // one out at save time; if someone else saves first, the saved notice
+  // shows the number it actually got.
+  const kind = acct.cash ? 'cash' : 'bank';
+  const prefix = `${acct.cash ? 'CRV' : 'BRV'}-${plVoucherFy(date)}`;
+  el.innerHTML = `${esc(prefix)}-&hellip;`;
+  const ticket = ++plVoucherPeekTicket;
+  api('GET', `/api/party-receipts/next-voucher-no?kind=${kind}&date=${encodeURIComponent(date || localDateISO())}`)
+    .then(res => {
+      if (ticket !== plVoucherPeekTicket || !el.isConnected || !res || !res.voucher_no) return;
+      el.innerHTML = esc(res.voucher_no);
+    })
+    .catch(() => {});
 }
+let plVoucherPeekTicket = 0;
 function plReceiptNetSync() {
   const total = Number((document.getElementById('plr-total') || {}).value || 0);
   const tax = Number((document.getElementById('plr-tax') || {}).value || 0);
@@ -14874,7 +14893,7 @@ function plReceiptNetSync() {
   set('plv-dr-total', any ? money2(total) : '—');
   set('plv-cr-total', total > 0 ? money2(total) : '—');
   const w = document.getElementById('plv-words');
-  if (w) w.textContent = any ? plAmountWords(total - tax) : '';
+  if (w) w.textContent = total - tax > 0 ? plAmountWords(total - tax) : '';   // never "Zero Only"
 }
 async function savePartyReceipt(id, printAfter) {
   const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
@@ -14994,7 +15013,7 @@ function printPartyVoucher(id) {
           <td style="${b}padding:5px;text-align:right;font-weight:bold;">${money(total)}</td>
         </tr>
       </table>
-      <div style="margin-top:14px;font-size:11pt;"><b>Rupees:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${esc(plAmountWords(net))}</span></div>
+      <div style="margin-top:14px;font-size:11pt;"><b>Rupees:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${net > 0 ? esc(plAmountWords(net)) : ''}</span></div>
       <div style="margin-top:10px;font-size:11pt;"><b>Particular:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${esc(particular)}</span></div>
       <table style="width:100%;margin-top:60px;font-size:10.5pt;text-align:center;">
         <tr>
@@ -15074,9 +15093,10 @@ function partyLedgerPeriodText(from, to) {
 function plPlainParticulars(e) {
   if (e.type === 'rcpt') {
     const r = e.receipt;
+    if (plIsVoucher(r)) return r.reference || '';   // voucher lines: the Particular only
     const inv = r.invoice_nos ? `against invoice no = ${r.invoice_nos}` : '';
     if (e.taxPart) return ['Tax deducted at source', inv].filter(Boolean).join(' · ');
-    const head = plIsVoucher(r) ? (plAccountLabel(r.bank_code) || PARTY_KIND_LABELS[r.kind] || r.kind) : (PARTY_KIND_LABELS[r.kind] || r.kind);
+    const head = PARTY_KIND_LABELS[r.kind] || r.kind;
     return [head, r.reference, inv, r.notes].filter(Boolean).join(' · ');
   }
   const l = e.line;

@@ -7775,6 +7775,14 @@ async function nextVoucherNo(sql, kind, dateStr) {
     RETURNING last_number`;
   return prefix + '-' + String(r[0].last_number).padStart(4, '0');
 }
+// The number the NEXT voucher of this kind would get - a read, nothing is
+// used up. The voucher form shows it before saving; the real number is
+// still handed out by nextVoucherNo() at save time.
+async function peekVoucherNo(sql, kind, dateStr) {
+  const prefix = voucherPrefix(kind, dateStr);
+  const r = await sql`SELECT last_number FROM finance.voucher_counters WHERE prefix = ${prefix}`;
+  return prefix + '-' + String((r.length ? Number(r[0].last_number) : 0) + 1).padStart(4, '0');
+}
 function partyDateOk(v) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
   return !!m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
@@ -7823,6 +7831,14 @@ app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), asyn
     const chart = await chartAll(sql);
     res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS,
       accounts: chartReceivingAccounts(chart), partyCodes: chartPartyCodes(chart), taxAccount: chartTaxAccount(chart) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.get('/api/party-receipts/next-voucher-no', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const kind = req.query.kind === 'cash' ? 'cash' : 'bank';
+    const date = partyDateOk(req.query.date) ? String(req.query.date) : businessDateISO();
+    res.json({ voucher_no: await peekVoucherNo(getDb(), kind, date) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
