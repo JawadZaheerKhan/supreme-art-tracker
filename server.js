@@ -289,7 +289,9 @@ function getDb() {
 // Bumped again for the Chart of Accounts: finance.chart_accounts (seeded
 // with Cash / Bank / Party Ledger groups) and its Access Register rows.
 // Bumped again for automatic voucher numbers (finance.voucher_counters).
-const SCHEMA_VERSION = 'v2026-09-26-voucher-numbers';
+// Bumped again to trim the Chart of Accounts to Cash + Bank Account (owner:
+// "we only have cash and bank account") - see the one-time clean-up in initDb.
+const SCHEMA_VERSION = 'v2026-09-26-chart-cash-bank-only';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -581,12 +583,12 @@ function reverseTierFor(user) {
 
 // Starting set of the Chart of Accounts (seeded once; after that the
 // finance.chart_accounts table is the truth). [code, name, parent, group?, role]
+// Only Cash and Bank Account (owner's call) - no Assets / Current Assets /
+// Party Ledger groups above or beside them.
 const CHART_SEED = [
-  ['1',     'Assets',                 null,  true,  null],
-  ['12',    'Current Assets',         '1',   true,  null],
-  ['120',   'Cash',                   '12',  true,  'cash'],
+  ['120',   'Cash',                   null,  true,  'cash'],
   ['12001', 'Cash in Hand',           '120', false, null],
-  ['121',   'Bank Account',           '12',  true,  'bank'],
+  ['121',   'Bank Account',           null,  true,  'bank'],
   ['12101', 'BAHL (K) 4181',          '121', false, null],
   ['12102', 'BAHL (IBB) 8360',        '121', false, null],
   ['12103', 'BAHL (Bilal Mkt) 3801',  '121', false, null],
@@ -596,7 +598,6 @@ const CHART_SEED = [
   ['12107', 'Faysal Bank 2465',       '121', false, null],
   ['12108', 'Al-Barka Bank',          '121', false, null],
   ['12109', 'Bank Al-Falah',          '121', false, null],
-  ['122',   'Party Ledger',           '12',  true,  'party'],
 ];
 async function initDb() {
   try {
@@ -1631,6 +1632,19 @@ async function initDb() {
         VALUES (${code}, ${name}, ${parent}, ${isGroup}, ${role}, 'asset', 'seed')
         ON CONFLICT (code) DO NOTHING
       `;
+    }
+    // One-time clean-up (flagged in schema_meta so it never runs twice, and
+    // so a group someone deliberately adds back later is left alone): Cash
+    // and Bank Account move to the top, and the earlier 1 Assets / 12 Current
+    // Assets / 122 Party Ledger groups are removed - but only while empty.
+    const chartTrimmed = await sql`SELECT value FROM schema_meta WHERE key = 'chart_trim_cash_bank_2026_09_26'`;
+    if (!chartTrimmed.length) {
+      await sql`UPDATE finance.chart_accounts SET parent_code = NULL WHERE code IN ('120', '121') AND parent_code = '12'`;
+      await sql`DELETE FROM finance.chart_accounts a WHERE a.code IN ('12', '122')
+                  AND NOT EXISTS (SELECT 1 FROM finance.chart_accounts c WHERE c.parent_code = a.code)`;
+      await sql`DELETE FROM finance.chart_accounts a WHERE a.code = '1'
+                  AND NOT EXISTS (SELECT 1 FROM finance.chart_accounts c WHERE c.parent_code = a.code)`;
+      await sql`INSERT INTO schema_meta (key, value) VALUES ('chart_trim_cash_bank_2026_09_26', 'done') ON CONFLICT (key) DO NOTHING`;
     }
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_aliases (
