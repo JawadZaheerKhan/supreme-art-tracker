@@ -15664,7 +15664,7 @@ function buildSaleReportRows(tabOverride) {
     // on the job card, falling back to the paper's dimensions otherwise.
     // Weights are untouched: the Packets column counts RAW sheets, so
     // Packet/KG keeps the raw sheet's weight.
-    const cutDim    = parseSizeInches(String((j.particulars || {}).cutting_size_gsm || '').trim());
+    const cutDim    = parseSizeInches(normalizeCuttingSize((j.particulars || {}).cutting_size_gsm));
     const sheetDim  = cutDim || parseSizeInches(sizeStr);
     const sheetL    = sheetDim ? sheetDim.w : '';
     const sheetW    = sheetDim ? sheetDim.h : '';
@@ -23602,6 +23602,18 @@ function removeSpecialMix(idx, mIdx) {
 // Strip any "/ NNNgsm" suffix from a size string so the dimensions stand
 // alone (e.g. "20x15 / 200gsm" → "20x15"). Used to derive cut/offcut sizes
 // from the form's Cutting Size/GSM and Size/GSM fields.
+// "Cutting Size / GSM" uses "/" between the size and the GSM ("25x36 / 300").
+// A size typed with a slash instead of an x ("11.5/18") is caught here: when
+// the whole value is two inch-sized numbers joined by "/" with no x - both
+// 80 or under, which a GSM never is - it is a size and reads as "11.5x18".
+// Anything else ("25x36/300", "300") is returned as typed.
+function normalizeCuttingSize(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (/[xX×*]/.test(t)) return t;
+  const m = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(t);
+  if (m && +m[1] > 0 && +m[2] > 0 && +m[1] <= 80 && +m[2] <= 80) return `${m[1]}x${m[2]}`;
+  return t;
+}
 function dimsOnly(s) { return String(s || '').split('/')[0].trim(); }
 
 // Parse "25x30" / "25 x 30" / "25x30 / 300gsm" → {w:25, h:30}. Null if unparseable.
@@ -23641,7 +23653,7 @@ function renderCutPreview() {
   const hidden  = document.getElementById('f-inventory-item');
   const itemId  = hidden && parseInt(hidden.value, 10);
   const source  = itemId ? inventory.find(i => i.id === itemId) : null;
-  const cutSize = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  const cutSize = dimsOnly(normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value));
   if (!source || !source.size) {
     el.innerHTML = `<span style="color:#A32D2D;">Pick a paper item above to enable cut.</span>`;
     return;
@@ -26963,7 +26975,7 @@ function getFormData() {
   // resolve a valid offcut from the source — that way the server's "no cut"
   // path runs cleanly instead of recording half-set state.
   const cutToggle  = (document.getElementById('f-cut-toggle')||{}).checked;
-  const cutSizeRaw = dimsOnly((document.getElementById('f-cutting-size')||{}).value);
+  const cutSizeRaw = dimsOnly(normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value));
   const sourceItem = inventory_item_id ? inventory.find(i => i.id === inventory_item_id) : null;
   const computedOffcut = (cutToggle && sourceItem && cutSizeRaw)
     ? computeOffcutSize(sourceItem.size, cutSizeRaw)
@@ -27101,7 +27113,7 @@ function collectParticulars() {
   if (Object.values(shadeMerged ).some(v => v !== '' && v != null)) out.shade_card               = shadeMerged;
   if (Object.values(platesMerged).some(v => v !== '' && v != null)) out.plates                   = platesMerged;
   if (Object.values(colorsMerged).some(v => v !== '' && v != null)) out.no_of_colors             = colorsMerged;
-  out.cutting_size_gsm = (document.getElementById('f-cutting-size')||{}).value?.trim() || '';
+  out.cutting_size_gsm = normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value) || '';
   // quantity_of_packets is the TOTAL. When a 2nd paper split is active the
   // f-packets box holds only the PRIMARY, so recombine primary + secondary;
   // otherwise f-packets already holds the full total.
