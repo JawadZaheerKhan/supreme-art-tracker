@@ -13515,10 +13515,18 @@ function buildJobsReportRows() {
     const deliveredJR    = totalDeliveredCartons(j) || 0;
     const productionDone = (j.stage_index || 0) >= 6;
     const finalizedJR    = !!(j.stages && j.stages[7] && j.stages[7].finalized);
-    const wastageKnown   = j.stock_group_name
-      ? (readyTotalJR > 0 && (deliveredJR >= readyTotalJR || (finalizedJR && deliveredJR > 0)))
-      : (productionDone && readyTotalJR > 0);
-    const wastage = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalJR) : null;
+    // Good output for wastage: QC's Ready qty, else Pasting's, else the
+    // delivered qty (wastageGoodQty) - same fallback the report always had.
+    const recordedReadyJR = earlyReadyTotal(j) || 0;
+    const goodQtyJR       = recordedReadyJR || deliveredJR;
+    // All delivered: everything recorded as ready has shipped (MIL, or a job
+    // at Ready+), or finalized - or, with no ready figure at all, Delivered.
+    const allDeliveredJR = (finalizedJR && deliveredJR > 0)
+      || (recordedReadyJR > 0
+          ? (deliveredJR >= recordedReadyJR && (j.stock_group_name ? true : productionDone))
+          : ((j.stage_index || 0) >= 7 && deliveredJR > 0));
+    const wastageKnown   = goodQtyJR > 0 && (recordedReadyJR > 0 ? (j.stock_group_name ? allDeliveredJR : productionDone) : allDeliveredJR);
+    const wastage = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - goodQtyJR) : null;
     // Ready Qty — unshipped ready-to-deliver stock for this job, straight
     // from the production entries[] (same source groupStats()/tiles use),
     // not the legacy cartonqty field wastage relies on. Always shown as its
@@ -13604,8 +13612,6 @@ function buildJobsReportRows() {
     const isPartial = isPartialDelivery(j);
     // Yellow shade only while deliveries are OPEN: gone once everything
     // produced has shipped (MIL or a job at Ready+) or it was finalized.
-    const allDeliveredJR = (finalizedJR && deliveredJR > 0) || (readyTotalJR > 0 && deliveredJR >= readyTotalJR
-      && (j.stock_group_name ? true : productionDone));
     const shadeOpen = isPartial && !allDeliveredJR;
     // Linked-delivery partner — set on any delivery entry recorded via
     // "Deliver Linked Jobs". Used below to merge this job's row with its
@@ -15622,14 +15628,23 @@ function buildSaleReportRows(tabOverride) {
     //           on normal rows; MIL rows write their delivery there.
     const isMilJob       = !!j.stock_group_name;
     const deliveredTotal = totalDeliveredCartons(j) || 0;
-    const readyTotalAll  = readyCartonsTotal(j) || 0;
+    // The "good output" wastage is measured against, in the order it was
+    // always taken: QC's Ready qty, else Pasting's, else (neither ever
+    // entered) what was delivered - wastageGoodQty(). Reading QC's figure
+    // alone left wastage blank on every job QC never signed off.
+    const recordedReady  = earlyReadyTotal(j) || 0;
+    const readyTotalAll  = recordedReady || deliveredTotal;
     const productionDone = (j.stage_index || 0) >= 6;
     // A job the PM FINALIZED as delivered (remainder waived) is finished
     // too - its deliveries are over even though they fall short of Ready.
     const finalized      = !!(j.stages && j.stages[7] && j.stages[7].finalized);
+    // All delivered: everything recorded as ready has shipped - or, with no
+    // ready figure on file at all, the job has reached Delivered.
     const allDelivered   = (finalized && deliveredTotal > 0)
-      || (readyTotalAll > 0 && deliveredTotal >= readyTotalAll && (isMilJob || productionDone));
-    const wastageKnown   = readyTotalAll > 0 && (isMilJob ? allDelivered : productionDone);
+      || (recordedReady > 0
+          ? (deliveredTotal >= recordedReady && (isMilJob || productionDone))
+          : ((j.stage_index || 0) >= 7 && deliveredTotal > 0));
+    const wastageKnown   = readyTotalAll > 0 && (recordedReady > 0 ? (isMilJob ? allDelivered : productionDone) : allDelivered);
     const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
     const readyQty = 0;   // never rides in the Wastage column any more
     const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
