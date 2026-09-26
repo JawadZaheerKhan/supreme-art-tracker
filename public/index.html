@@ -3175,10 +3175,14 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rpt="rpt_party_ledger" data-rt="party-ledger" onclick="setReportsTab('party-ledger')">
           <span class="rsb-icon">&#128210;</span> Party Ledger
         </button>
+        <button class="rsb-item" data-rpt="rpt_chart_accounts" data-rt="chart-accounts" onclick="setReportsTab('chart-accounts')">
+          <span class="rsb-icon">&#128209;</span> Chart of Accounts
+        </button>
       </aside>
       <main class="reports-content">
         <div id="rt-sale-report" class="rt-pane"></div>
         <div id="rt-party-ledger" class="rt-pane" style="display:none;"></div>
+        <div id="rt-chart-accounts" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -14519,7 +14523,7 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
     </tr>`;
   }).join('');
   return `<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
-      <div style="font-size:17px;font-weight:700;">${esc(company)}</div>
+      <div style="font-size:17px;font-weight:700;">${plPartyCode(company) ? `<span style="font-family:monospace;color:var(--text2);font-weight:600;margin-right:6px;">${esc(plPartyCode(company))}</span>` : ''}${esc(company)}</div>
       <div style="font-size:12px;color:var(--text2);">${from || to ? `${esc(fmtDMY(from) || '(start)')} to ${esc(fmtDMY(to) || '(today)')}` : 'All time'} &middot; ${L.lines.length} entr${L.lines.length === 1 ? 'y' : 'ies'}</div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="setPlCompanyIdx(-1)">&larr; All companies</button>
     </div>
@@ -14545,6 +14549,8 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
 // deducted at source, and the Net Receipt that actually landed.
 function plIsVoucher(r) { return !!r && ['bank', 'cheque', 'cash'].includes(r.kind); }
 function plAccounts() { return ((partyLedgerState.data || {}).accounts) || []; }
+// A company's party account code from the Chart of Accounts ('' if not linked).
+function plPartyCode(company) { return (((partyLedgerState.data || {}).partyCodes) || {})[partyKey(company)] || ''; }
 function plAccountLabel(code) {
   const a = plAccounts().find(x => x.code === String(code || ''));
   return a ? `${a.code} ${a.name}` : '';
@@ -14580,7 +14586,7 @@ function openPartyReceiptModal(id) {
       <div class="form-row">
         <div class="form-group"><label class="form-label">Received into (account) *</label>
           <select id="plr-bank"><option value="">Pick the bank / cash account…</option>
-            ${plAccounts().map(a => `<option value="${esc(a.code)}"${r && r.bank_code === a.code ? ' selected' : ''}>${esc(a.code)} &nbsp; ${esc(a.name)}</option>`).join('')}
+            ${plAccounts().filter(a => a.active !== false || (r && r.bank_code === a.code)).map(a => `<option value="${esc(a.code)}"${r && r.bank_code === a.code ? ' selected' : ''}>${esc(a.code)} &nbsp; ${esc(a.name)}</option>`).join('')}
           </select></div>
         <div class="form-group"><label class="form-label">Against invoice no(s) <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="plr-inv" value="${esc(r ? (r.invoice_nos || '') : '')}" placeholder="e.g. 822, 823"></div>
       </div>
@@ -14633,7 +14639,7 @@ async function savePartyReceipt(id) {
     if (!bank) { await alertDialog({ title: 'Pick the account it was received into', message: 'Cash in Hand or one of the banks.', kind: 'warn' }); return; }
     if (!Number.isFinite(total) || total <= 0) { await alertDialog({ title: 'Enter the Total', kind: 'warn' }); return; }
     if (!Number.isFinite(tax) || tax < 0 || tax > total) { await alertDialog({ title: 'Tax Deducted must be between 0 and the Total', kind: 'warn' }); return; }
-    Object.assign(body, { kind: bank === '12001' ? 'cash' : 'bank', bank_code: bank, amount: total - tax, tax_deducted: tax, invoice_nos: val('plr-inv') });
+    Object.assign(body, { kind: (plAccounts().find(a => a.code === bank) || {}).cash ? 'cash' : 'bank', bank_code: bank, amount: total - tax, tax_deducted: tax, invoice_nos: val('plr-inv') });
   } else {
     const amt = Number(val('plr-amount').replace(/,/g, ''));
     if (!Number.isFinite(amt) || amt <= 0) { await alertDialog({ title: 'Enter the amount', message: 'A number above 0.', kind: 'warn' }); return; }
@@ -14677,8 +14683,10 @@ function plAmountWords(n) {
 function printPartyVoucher(id) {
   const r = (((partyLedgerState.data || {}).receipts) || []).find(x => x.id === id);
   if (!r) { notify('Voucher not found.'); return; }
-  const isCash = r.kind === 'cash' || String(r.bank_code) === '12001';
   const acct = plAccounts().find(a => a.code === String(r.bank_code || '')) || { code: r.bank_code || '', name: '' };
+  const isCash = r.kind === 'cash' || !!acct.cash;
+  // The party's own code from the Chart of Accounts (blank until linked).
+  const partyCode = plPartyCode(r.company);
   const net = +r.amount || 0, tax = +r.tax_deducted || 0, total = net + tax;
   const money = (n) => (+n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const b = 'border:1px solid #000;';
@@ -14707,7 +14715,7 @@ function printPartyVoucher(id) {
           <th style="${b}padding:5px;width:22%;">Amount (Cr)<br>Rs.</th>
         </tr>
         <tr style="height:360px;vertical-align:top;">
-          <td style="${b}padding:6px;"></td>
+          <td style="${b}padding:6px;text-align:center;">${esc(partyCode)}</td>
           <td style="${b}padding:6px;">${esc(r.company)}</td>
           <td style="${b}padding:6px;text-align:right;">${money(total)}</td>
         </tr>
@@ -14869,6 +14877,299 @@ async function exportPartyLedger() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, String(sheet).replace(/[:\\\/?*\[\]]/g, '-').slice(0, 31));
   XLSX.writeFile(wb, `supreme-art-ledger-${String(sheet).replace(/\s+/g, '-').toLowerCase()}-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+
+// ── Chart of Accounts ────────────────────────────────────────────
+// The accounts system's coded account tree (1 Assets > 12 Current Assets >
+// 121 Bank Account > 12104 MBL (K) 8188 ...). Groups marked Cash / Bank feed
+// the Receipt Voucher's "Received into" list; the Party Ledger group holds
+// one account per customer, linked to its Company Settings company so the
+// voucher prints the party's code.
+const chartState = { rows: [], usage: {}, q: '', showInactive: false, error: '' };
+const CHART_KIND_LABELS = { asset: 'Asset', liability: 'Liability', equity: 'Equity', income: 'Income', expense: 'Expense' };
+const CHART_ROLE_LABELS = { cash: 'Cash — receipts go in', bank: 'Bank — receipts go in', party: 'Party Ledger — customers' };
+function chartCanEdit() { return hasPerm('rpt_chart_accounts_edit', 'yes'); }
+function chartCodeCmp(a, b) { return String(a).localeCompare(String(b), undefined, { numeric: true }); }
+async function loadChartAccounts() {
+  try {
+    const d = await api('GET', '/api/chart-accounts');
+    chartState.rows = d.accounts || [];
+    chartState.usage = d.usage || {};
+    chartState.error = '';
+  } catch (e) { chartState.error = e.message; }
+}
+function openChartAccounts() {
+  const pane = document.getElementById('rt-chart-accounts');
+  if (!pane) return;
+  pane.innerHTML = `<div style="font-size:13px;color:var(--text2);padding:18px 0;">Loading the chart of accounts…</div>`;
+  loadChartAccounts().then(renderChartAccounts);
+}
+// Depth-first, code order, with each account's depth.
+function chartTree(rows) {
+  const byCode = new Map(rows.map(r => [r.code, r]));
+  const kids = new Map();
+  const roots = [];
+  for (const r of rows) {
+    if (r.parent_code && byCode.has(r.parent_code)) {
+      if (!kids.has(r.parent_code)) kids.set(r.parent_code, []);
+      kids.get(r.parent_code).push(r);
+    } else roots.push(r);
+  }
+  const out = [];
+  const walk = (r, depth) => {
+    out.push({ ...r, depth });
+    (kids.get(r.code) || []).sort((a, b) => chartCodeCmp(a.code, b.code)).forEach(c => walk(c, depth + 1));
+  };
+  roots.sort((a, b) => chartCodeCmp(a.code, b.code)).forEach(r => walk(r, 0));
+  return out;
+}
+// Nearest group role at or above a code.
+function chartRoleOf(code) {
+  const byCode = new Map(chartState.rows.map(r => [r.code, r]));
+  let cur = code ? byCode.get(code) : null;
+  for (let g = 0; cur && g < 30; g++) {
+    if (cur.is_group && cur.role) return cur.role;
+    cur = cur.parent_code ? byCode.get(cur.parent_code) : null;
+  }
+  return '';
+}
+// The next free code under a group: last child + 1, or the group's code
+// plus "1" (short codes) / "01" (3+ digits) for its first child - the
+// pattern the chart already follows (12 > 121, 121 > 12101).
+function chartNextCode(parentCode, extraTaken) {
+  const taken = new Set(chartState.rows.map(r => r.code).concat(extraTaken || []));
+  const kids = chartState.rows.filter(r => r.parent_code === parentCode).map(r => r.code)
+    .concat((extraTaken || []).filter(c => c.startsWith(parentCode || '')));
+  let next;
+  if (kids.length) {
+    const last = kids.sort(chartCodeCmp).pop();
+    next = String(BigInt(last) + 1n);
+  } else {
+    next = parentCode ? parentCode + (parentCode.length >= 3 ? '01' : '1') : '1';
+  }
+  while (taken.has(next)) next = String(BigInt(next) + 1n);
+  return next;
+}
+function chartCompaniesUnlinked() {
+  const linked = new Set(chartState.rows.filter(r => r.company).map(r => String(r.company).trim().toLowerCase()));
+  return (typeof companySettings !== 'undefined' ? companySettings : [])
+    .map(c => String(c.company || '').trim()).filter(Boolean)
+    .filter(c => !linked.has(c.toLowerCase()))
+    .sort((a, b) => a.localeCompare(b));
+}
+function setChartQ(v) { chartState.q = String(v || ''); renderChartAccountsTable(); }
+function setChartInactive(v) { chartState.showInactive = !!v; renderChartAccountsTable(); }
+function renderChartAccounts() {
+  const pane = document.getElementById('rt-chart-accounts');
+  if (!pane) return;
+  const canEdit = chartCanEdit();
+  if (chartState.error) { pane.innerHTML = `<div class="empty">Could not load the chart of accounts: ${esc(chartState.error)}</div>`; return; }
+  const unlinked = chartCompaniesUnlinked();
+  const partyGroups = chartState.rows.filter(r => r.is_group && r.role === 'party');
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Chart of Accounts</h2>
+      <span style="color:var(--text2);font-size:12px;">Account codes as in the accounts system. Cash / Bank groups feed the Receipt Voucher; each customer gets a Party Ledger code.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+        ${canEdit ? `<button class="btn btn-sm btn-primary" onclick="openChartAccountModal(0)">+ Account</button>` : ''}
+        <button class="btn btn-sm" onclick="exportChartAccounts()">&#128202; Export to Excel</button>
+      </div>
+    </div>
+    ${canEdit && unlinked.length && partyGroups.length ? `<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span style="font-size:13px;"><b>${unlinked.length}</b> compan${unlinked.length === 1 ? 'y in Company Settings has' : 'ies in Company Settings have'} no party account code yet.</span>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="openChartLinkCompaniesModal()">Give them codes…</button>
+    </div>` : ''}
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div><div class="dash-flbl">Search</div><input class="filter" type="text" value="${esc(chartState.q)}" placeholder="Code, name or company" oninput="setChartQ(this.value)" style="min-width:240px;"></div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" ${chartState.showInactive ? 'checked' : ''} onchange="setChartInactive(this.checked)" style="width:auto;"> Show inactive</label>
+    </div>
+    <div id="chart-table"></div>`;
+  renderChartAccountsTable();
+}
+function renderChartAccountsTable() {
+  const el = document.getElementById('chart-table');
+  if (!el) return;
+  const canEdit = chartCanEdit();
+  const q = chartState.q.trim().toLowerCase();
+  let tree = chartTree(chartState.rows);
+  if (!chartState.showInactive) tree = tree.filter(r => r.active !== false);
+  if (q) tree = tree.filter(r => [r.code, r.name, r.company].filter(Boolean).join(' ').toLowerCase().includes(q));
+  if (!tree.length) { el.innerHTML = `<div class="empty">${q ? 'No account matches that search.' : 'No accounts yet.'}</div>`; return; }
+  const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  el.innerHTML = `<div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead><tr style="background:var(--bg2);"><th ${th}>Code</th><th ${th}>Account</th><th ${th}>Type</th><th ${th}>Used for</th><th ${th}>Status</th></tr></thead>
+    <tbody>${tree.map(r => {
+      const used = chartState.usage[r.code] || 0;
+      const roleTxt = r.is_group
+        ? (r.role ? `<span style="background:#dbeafe;color:#1e40af;font-size:11px;font-weight:700;padding:1px 8px;border-radius:999px;">${esc(CHART_ROLE_LABELS[r.role] || r.role)}</span>` : '')
+        : (r.company ? `Customer: <b>${esc(r.company)}</b>` : (['cash', 'bank'].includes(chartRoleOf(r.parent_code)) ? `Receipts${used ? ` &middot; ${used} voucher${used === 1 ? '' : 's'}` : ''}` : ''));
+      const click = canEdit ? ` onclick="openChartAccountModal(${r.id})" title="Edit this account" style="cursor:pointer;border-bottom:1px solid var(--border);${r.active === false ? 'opacity:0.55;' : ''}"` : ` style="border-bottom:1px solid var(--border);${r.active === false ? 'opacity:0.55;' : ''}"`;
+      return `<tr class="${canEdit ? 'row-hover-red cv-summary-row' : ''}"${click}>
+        <td style="padding:7px 10px;font-family:monospace;font-weight:${r.is_group ? 800 : 600};white-space:nowrap;padding-left:${10 + r.depth * 18}px;">${esc(r.code)}</td>
+        <td style="padding:7px 10px;${r.is_group ? 'font-weight:800;' : ''}padding-left:${10 + r.depth * 18}px;">${r.is_group ? '&#9662; ' : ''}${esc(r.name)}</td>
+        <td style="padding:7px 10px;color:var(--text2);">${esc(CHART_KIND_LABELS[r.kind] || r.kind || '')}</td>
+        <td style="padding:7px 10px;">${roleTxt}</td>
+        <td style="padding:7px 10px;">${r.active === false ? '<span style="color:#991b1b;font-weight:700;">Inactive</span>' : 'Active'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+function openChartAccountModal(id, presetParent) {
+  if (!chartCanEdit()) return;
+  const r = id ? chartState.rows.find(x => x.id === id) : null;
+  const groups = chartState.rows.filter(x => x.is_group && (!r || x.id !== r.id)).sort((a, b) => chartCodeCmp(a.code, b.code));
+  const parent = r ? (r.parent_code || '') : (presetParent || '');
+  const used = r ? (chartState.usage[r.code] || 0) : 0;
+  const kids = r ? chartState.rows.filter(x => x.parent_code === r.code).length : 0;
+  const isGroup = r ? !!r.is_group : false;
+  const companies = (typeof companySettings !== 'undefined' ? companySettings : []).map(c => String(c.company || '').trim()).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:540px;">
+    <h2>${r ? 'Edit Account' : 'New Account'}</h2>
+    ${r && (used || kids) ? `<div style="font-size:12px;color:var(--text2);margin:-4px 0 10px;">${used ? `Used by ${used} receipt voucher${used === 1 ? '' : 's'}. ` : ''}${kids ? `Has ${kids} sub-account${kids === 1 ? '' : 's'}. ` : ''}Its code is locked.</div>` : ''}
+    <div class="form-group"><label class="form-label">Under (group)</label>
+      <select id="coa-parent" onchange="chartParentChanged()">
+        <option value="">— top level —</option>
+        ${groups.map(g => `<option value="${esc(g.code)}"${g.code === parent ? ' selected' : ''}>${esc(g.code)} &nbsp; ${esc(g.name)}</option>`).join('')}
+      </select></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Code *</label>
+        <div style="display:flex;gap:6px;"><input type="text" id="coa-code" value="${esc(r ? r.code : '')}" placeholder="e.g. 12201" inputmode="numeric" ${r && (used || kids) ? 'disabled' : ''} style="flex:1;">
+        ${r && (used || kids) ? '' : `<button type="button" class="btn btn-sm" onclick="chartFillNextCode()" title="Next free code under the chosen group">Next free</button>`}</div></div>
+      <div class="form-group"><label class="form-label">Account name *</label><input type="text" id="coa-name" value="${esc(r ? r.name : '')}" placeholder="e.g. Stanley Pharmaceuticals (Pvt) Ltd"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Kind</label>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer;margin-top:6px;"><input type="checkbox" id="coa-group" ${isGroup ? 'checked' : ''} onchange="chartGroupToggled()" style="width:auto;"> A group (holds other accounts)</label></div>
+      <div class="form-group"><label class="form-label">Type</label>
+        <select id="coa-kind">${Object.entries(CHART_KIND_LABELS).map(([k, l]) => `<option value="${k}"${(r ? r.kind : 'asset') === k ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+    </div>
+    <div id="coa-role-wrap" class="form-group" style="display:${isGroup ? '' : 'none'};"><label class="form-label">This group is used for</label>
+      <select id="coa-role"><option value="">Nothing special</option>
+        ${Object.entries(CHART_ROLE_LABELS).map(([k, l]) => `<option value="${k}"${r && r.role === k ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+    <div id="coa-company-wrap" class="form-group" style="display:${isGroup ? 'none' : ''};"><label class="form-label">Linked customer <span style="font-weight:400;color:var(--text2);">(for a party account)</span></label>
+      <select id="coa-company"><option value="">— none —</option>
+        ${companies.map(c => `<option value="${esc(c)}"${r && r.company && r.company.toLowerCase() === c.toLowerCase() ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+    ${r ? `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px;"><input type="checkbox" id="coa-active" ${r.active !== false ? 'checked' : ''} style="width:auto;"> Active (inactive accounts leave the pick lists but keep their history)</label>` : ''}
+    <div class="modal-actions">
+      ${r && !used && !kids ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deleteChartAccount(${r.id})">Delete</button>` : ''}
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveChartAccount(${r ? r.id : 0})">Save</button>
+    </div>
+  </div>`);
+  if (!r && parent) chartFillNextCode();
+}
+function chartGroupToggled() {
+  const g = (document.getElementById('coa-group') || {}).checked;
+  const rw = document.getElementById('coa-role-wrap');
+  const cw = document.getElementById('coa-company-wrap');
+  if (rw) rw.style.display = g ? '' : 'none';
+  if (cw) cw.style.display = g ? 'none' : '';
+}
+function chartParentChanged() {
+  const p = (document.getElementById('coa-parent') || {}).value || '';
+  const parent = chartState.rows.find(x => x.code === p);
+  const kind = document.getElementById('coa-kind');
+  if (parent && kind) kind.value = parent.kind || 'asset';
+  const code = document.getElementById('coa-code');
+  if (code && !code.disabled && (!code.value || !code.value.startsWith(p))) chartFillNextCode();
+}
+function chartFillNextCode() {
+  const p = (document.getElementById('coa-parent') || {}).value || '';
+  const code = document.getElementById('coa-code');
+  if (code && !code.disabled) code.value = chartNextCode(p);
+}
+async function saveChartAccount(id) {
+  const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
+  const isGroup = !!(document.getElementById('coa-group') || {}).checked;
+  const activeEl = document.getElementById('coa-active');
+  const body = { parent_code: val('coa-parent'), code: val('coa-code'), name: val('coa-name'), is_group: isGroup,
+    kind: val('coa-kind'), role: isGroup ? val('coa-role') : '', company: isGroup ? '' : val('coa-company'),
+    active: activeEl ? activeEl.checked : true };
+  if (!/^\d{1,12}$/.test(body.code)) { await alertDialog({ title: 'Code must be digits only', message: 'e.g. 12104', kind: 'warn' }); return; }
+  if (!body.name) { await alertDialog({ title: 'Enter the account name', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    if (id) await api('PUT', `/api/chart-accounts/${id}`, body);
+    else    await api('POST', '/api/chart-accounts', body);
+    await loadChartAccounts();
+    closeModal();
+    renderChartAccounts();
+    notify('Saved');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function deleteChartAccount(id) {
+  const r = chartState.rows.find(x => x.id === id);
+  const ok = await confirmDialog({ title: `Delete ${r ? r.code + ' ' + r.name : 'this account'}?`, message: 'It is removed from the chart. (Accounts that vouchers use can only be made inactive.)', danger: true, confirmText: 'Delete' });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/chart-accounts/${id}`);
+    await loadChartAccounts();
+    closeModal();
+    renderChartAccounts();
+    notify('Account deleted');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// One click: every Company Settings company without a code gets the next
+// free code under the chosen Party Ledger group, named as the company.
+function openChartLinkCompaniesModal() {
+  const unlinked = chartCompaniesUnlinked();
+  const groups = chartState.rows.filter(r => r.is_group && r.role === 'party').sort((a, b) => chartCodeCmp(a.code, b.code));
+  if (!groups.length) { notify('Mark a group as "Party Ledger — customers" first.'); return; }
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
+    <h2>Give customers their codes</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:10px;">Each ticked company gets the next free code under the group, named as in Company Settings. You can change any code afterwards (until a voucher uses it).</div>
+    <div class="form-group"><label class="form-label">Under</label>
+      <select id="coa-link-group">${groups.map(g => `<option value="${esc(g.code)}">${esc(g.code)} &nbsp; ${esc(g.name)}</option>`).join('')}</select></div>
+    <div style="max-height:45vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px 8px;">
+      ${unlinked.map((c, i) => `<label style="display:flex;align-items:center;gap:8px;padding:5px 2px;font-size:13px;cursor:pointer;"><input type="checkbox" class="coa-link-co" data-i="${i}" checked style="width:auto;"> ${esc(c)}</label>`).join('')}
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveChartLinkCompanies()">Create codes</button>
+    </div>
+  </div>`);
+}
+async function saveChartLinkCompanies() {
+  const unlinked = chartCompaniesUnlinked();
+  const group = ((document.getElementById('coa-link-group') || {}).value || '').trim();
+  const picked = [...document.querySelectorAll('.coa-link-co')].filter(x => x.checked).map(x => unlinked[+x.dataset.i]).filter(Boolean);
+  if (!group || !picked.length) { closeModal(); return; }
+  const parent = chartState.rows.find(r => r.code === group);
+  showSaving(true);
+  let made = 0, failed = 0;
+  const takenNow = [];
+  for (const company of picked) {
+    const code = chartNextCode(group, takenNow);
+    try {
+      await api('POST', '/api/chart-accounts', { parent_code: group, code, name: company, is_group: false, kind: (parent && parent.kind) || 'asset', company });
+      takenNow.push(code);
+      made++;
+    } catch (e) { console.error('Could not create', company, e); failed++; }
+  }
+  await loadChartAccounts();
+  closeModal();
+  renderChartAccounts();
+  showSaving(false);
+  notify(`${made} customer code${made === 1 ? '' : 's'} created${failed ? ` · ${failed} failed` : ''}`);
+}
+async function exportChartAccounts() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const tree = chartTree(chartState.rows);
+  if (!tree.length) { notify('Nothing to export.'); return; }
+  const header = ['Code', 'Account', 'Group?', 'Type', 'Used for', 'Linked customer', 'Status'];
+  const aoa = reportExcelAoa(header);
+  tree.forEach(r => aoa.push([/^[1-9]\d{0,14}$/.test(r.code) ? Number(r.code) : r.code, '  '.repeat(r.depth) + r.name, r.is_group ? 'Group' : '',
+    CHART_KIND_LABELS[r.kind] || r.kind || '', r.role ? (CHART_ROLE_LABELS[r.role] || r.role) : '', r.company || '', r.active === false ? 'Inactive' : 'Active']));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, header, { title: 'CHART OF ACCOUNTS', scope: `${tree.length} accounts`, dateText: `Date: ${fmtDMY(localDateISO())}` });
+  applyReportExcelCols(ws, header, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Chart of Accounts');
+  XLSX.writeFile(wb, `supreme-art-chart-of-accounts-${localDateISO()}.xlsx`);
   notify('Exported!');
 }
 
@@ -18327,13 +18628,14 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['sale-report', 'party-ledger', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['sale-report', 'party-ledger', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
   if (name === 'sale-report')     openSaleReport();
   if (name === 'party-ledger')    openPartyLedger();
+  if (name === 'chart-accounts')  openChartAccounts();
   if (name === 'stock-in')        openStockMovementPane('in');
   if (name === 'stock-out')       openStockMovementPane('out');
   if (name === 'manual-consumption') openManualConsumptionPane();
@@ -32220,6 +32522,8 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_sale_report_company',         type: 'button' },
   { key: 'rpt_party_ledger',                type: 'tab' },
   { key: 'rpt_party_ledger_entry',          type: 'button' },
+  { key: 'rpt_chart_accounts',              type: 'tab' },
+  { key: 'rpt_chart_accounts_edit',         type: 'button' },
 ];
 // Products tab (Product Rate), merged in from the Finance app.
 const ACC_PRODUCTS_TAB_ROWS = [

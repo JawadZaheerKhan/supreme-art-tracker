@@ -286,7 +286,9 @@ function getDb() {
 // and the rpt_party_ledger* Access Register rows.
 // Bumped again for the Receipt Voucher: bank_code / tax_deducted /
 // invoice_nos on finance.party_receipts.
-const SCHEMA_VERSION = 'v2026-09-26-receipt-voucher';
+// Bumped again for the Chart of Accounts: finance.chart_accounts (seeded
+// with Cash / Bank / Party Ledger groups) and its Access Register rows.
+const SCHEMA_VERSION = 'v2026-09-26-chart-of-accounts';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -449,6 +451,10 @@ const ROLE_PERMISSION_DEFAULTS = {
   // and running balance. Viewing and entering are separate rows.
   rpt_party_ledger:                { label: 'Party Ledger — view each company\'s invoices, receipts and running balance', levels: { ceo: 'view', finance: 'view' } },
   rpt_party_ledger_entry:          { label: 'Party Ledger — enter / edit / delete receipts and opening balances', levels: { finance: 'yes' } },
+  // Chart of Accounts — the coded account tree (cash, banks, one party
+  // account per customer) that vouchers and the Party Ledger read.
+  rpt_chart_accounts:              { label: 'Chart of Accounts — view the coded account list', levels: { ceo: 'view', finance: 'view' } },
+  rpt_chart_accounts_edit:         { label: 'Chart of Accounts — add / edit / remove accounts and link customers', levels: { finance: 'yes' } },
 
   // Access Register — Users tab. Same "not wired into any gate yet" note
   // applies — user_view/user_admin/operator_admin keep enforcing exactly
@@ -572,6 +578,25 @@ function reverseTierFor(user) {
   return best;
 }
 
+// Starting set of the Chart of Accounts (seeded once; after that the
+// finance.chart_accounts table is the truth). [code, name, parent, group?, role]
+const CHART_SEED = [
+  ['1',     'Assets',                 null,  true,  null],
+  ['12',    'Current Assets',         '1',   true,  null],
+  ['120',   'Cash',                   '12',  true,  'cash'],
+  ['12001', 'Cash in Hand',           '120', false, null],
+  ['121',   'Bank Account',           '12',  true,  'bank'],
+  ['12101', 'BAHL (K) 4181',          '121', false, null],
+  ['12102', 'BAHL (IBB) 8360',        '121', false, null],
+  ['12103', 'BAHL (Bilal Mkt) 3801',  '121', false, null],
+  ['12104', 'MBL (K) 8188',           '121', false, null],
+  ['12105', 'MBL (Bilal Mkt) 9585',   '121', false, null],
+  ['12106', 'BOK 7487',               '121', false, null],
+  ['12107', 'Faysal Bank 2465',       '121', false, null],
+  ['12108', 'Al-Barka Bank',          '121', false, null],
+  ['12109', 'Bank Al-Falah',          '121', false, null],
+  ['122',   'Party Ledger',           '12',  true,  'party'],
+];
 async function initDb() {
   try {
     const sql = getDb();
@@ -1571,6 +1596,35 @@ async function initDb() {
     await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS bank_code TEXT`;
     await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS tax_deducted NUMERIC NOT NULL DEFAULT 0`;
     await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS invoice_nos TEXT`;
+    // Chart of Accounts. code is the accounts system's own number (1 > 12 >
+    // 121 > 12104); a child's code starts with its parent's. role marks the
+    // groups the app reads: 'cash' / 'bank' (where receipts go in) and
+    // 'party' (customers). A party account links to one Company Settings
+    // company, so vouchers print its code.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.chart_accounts (
+        id          SERIAL PRIMARY KEY,
+        code        TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL,
+        parent_code TEXT,
+        is_group    BOOLEAN NOT NULL DEFAULT false,
+        role        TEXT,
+        kind        TEXT NOT NULL DEFAULT 'asset',
+        company     TEXT,
+        active      BOOLEAN NOT NULL DEFAULT true,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // Seed what is known (ON CONFLICT: never touches an account once it exists,
+    // so edits made in the app survive every later schema bump).
+    for (const [code, name, parent, isGroup, role] of CHART_SEED) {
+      await sql`
+        INSERT INTO finance.chart_accounts (code, name, parent_code, is_group, role, kind, updated_by)
+        VALUES (${code}, ${name}, ${parent}, ${isGroup}, ${role}, 'asset', 'seed')
+        ON CONFLICT (code) DO NOTHING
+      `;
+    }
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_aliases (
         alias       TEXT PRIMARY KEY,
@@ -7662,7 +7716,7 @@ const PARTY_RECEIPT_KINDS = {
 // Receipt vouchers (money in, into one of our accounts). Old rows may still
 // carry 'cheque' - treated the same.
 const PARTY_VOUCHER_KINDS = new Set(['bank', 'cheque', 'cash']);
-// Our receiving accounts, as the chart of accounts numbers them.
+// Fallback receiving accounts (used only if no chart map is passed in).
 const PARTY_ACCOUNTS = {
   '12001': 'Cash in Hand',
   '12101': 'BAHL (K) 4181',
@@ -7680,7 +7734,9 @@ function partyDateOk(v) {
   return !!m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
 }
 // Validates + normalises a receipt body. Returns { row } or { error }.
-function partyReceiptFromBody(b) {
+// allowed: Map code -> { cash } of the receiving accounts in the chart.
+function partyReceiptFromBody(b, allowed) {
+  const acctMap = allowed || new Map(Object.keys(PARTY_ACCOUNTS).map(c => [c, { cash: c === '12001' }]));
   const company = String((b && b.company) || '').trim();
   if (!company) return { error: 'Pick the company.' };
   const entry_date = String((b && b.entry_date) || '').trim();
@@ -7699,9 +7755,11 @@ function partyReceiptFromBody(b) {
   }
   const clean = (v, max) => { const t = String(v == null ? '' : v).trim(); return t ? t.slice(0, max) : null; };
   const bank_code = clean(b && b.bank_code, 20);
-  if (bank_code && !PARTY_ACCOUNTS[bank_code]) return { error: 'Pick the bank / cash account from the list.' };
+  if (bank_code && !acctMap.has(bank_code)) return { error: 'Pick the bank / cash account from the list (Chart of Accounts).' };
   if (bank_code && !isVoucher) return { error: 'A bank account goes on a receipt voucher only.' };
-  return { row: { company, entry_date, kind, amount, tax_deducted, bank_code: isVoucher ? bank_code : null,
+  // The account decides cash vs bank, not the form.
+  const finalKind = (isVoucher && bank_code) ? (acctMap.get(bank_code).cash ? 'cash' : 'bank') : kind;
+  return { row: { company, entry_date, kind: finalKind, amount, tax_deducted, bank_code: isVoucher ? bank_code : null,
     invoice_nos: clean(b && b.invoice_nos, 200),
     voucher_no: clean(b.voucher_no, 60), reference: clean(b.reference, 200), notes: clean(b.notes, 500) } };
 }
@@ -7711,15 +7769,16 @@ app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), asyn
     const sql = getDb();
     const receipts = await sql`SELECT * FROM finance.party_receipts WHERE deleted_at IS NULL ORDER BY entry_date ASC, id ASC`;
     const openings = await sql`SELECT * FROM finance.party_openings ORDER BY company ASC`;
+    const chart = await chartAll(sql);
     res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS,
-      accounts: Object.entries(PARTY_ACCOUNTS).map(([code, name]) => ({ code, name })) });
+      accounts: chartReceivingAccounts(chart), partyCodes: chartPartyCodes(chart) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const { row, error } = partyReceiptFromBody(req.body || {});
+    const { row, error } = partyReceiptFromBody(req.body || {}, chartReceivingMap(await chartAll(sql)));
     if (error) return res.status(400).json({ error });
     const ins = await sql`
       INSERT INTO finance.party_receipts (company, entry_date, kind, voucher_no, reference, amount, notes, bank_code, tax_deducted, invoice_nos, created_by, updated_by)
@@ -7740,7 +7799,7 @@ app.put('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), 
     const id = parseInt(req.params.id, 10);
     const prev = (await sql`SELECT * FROM finance.party_receipts WHERE id = ${id} AND deleted_at IS NULL`)[0];
     if (!prev) return res.status(404).json({ error: 'Receipt not found' });
-    const { row, error } = partyReceiptFromBody(req.body || {});
+    const { row, error } = partyReceiptFromBody(req.body || {}, chartReceivingMap(await chartAll(sql)));
     if (error) return res.status(400).json({ error });
     const upd = await sql`
       UPDATE finance.party_receipts SET company = ${row.company}, entry_date = ${row.entry_date}, kind = ${row.kind},
@@ -7805,6 +7864,137 @@ app.put('/api/party-openings', requirePermission('rpt_party_ledger_entry'), asyn
       metadata: { before: prev, after: row },
     });
     res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Chart of Accounts ─────────────────────────────────────────────
+const CHART_KINDS = new Set(['asset', 'liability', 'equity', 'income', 'expense']);
+const CHART_ROLES = new Set(['cash', 'bank', 'party']);
+async function chartAll(sql) {
+  return sql`SELECT * FROM finance.chart_accounts ORDER BY code ASC`;
+}
+// Nearest group role at or above a code ('' when none).
+function chartRoleResolver(rows) {
+  const byCode = new Map(rows.map(r => [r.code, r]));
+  return (code) => {
+    let cur = code ? byCode.get(code) : null;
+    for (let guard = 0; cur && guard < 30; guard++) {
+      if (cur.is_group && cur.role) return cur.role;
+      cur = cur.parent_code ? byCode.get(cur.parent_code) : null;
+    }
+    return '';
+  };
+}
+// Plain accounts under a Cash or Bank group - where receipts can go in.
+function chartReceivingAccounts(rows) {
+  const roleOf = chartRoleResolver(rows);
+  return rows.filter(r => !r.is_group && ['cash', 'bank'].includes(roleOf(r.parent_code)))
+    .map(r => ({ code: r.code, name: r.name, cash: roleOf(r.parent_code) === 'cash', active: r.active !== false }));
+}
+function chartReceivingMap(rows) {
+  return new Map(chartReceivingAccounts(rows).map(a => [a.code, { cash: a.cash }]));
+}
+// Company (lower-case) -> its party account code.
+function chartPartyCodes(rows) {
+  const out = {};
+  for (const r of rows) if (!r.is_group && r.company && r.active !== false) out[String(r.company).trim().toLowerCase()] = r.code;
+  return out;
+}
+async function chartUsage(sql) {
+  const rows = await sql`SELECT bank_code, COUNT(*)::int AS n FROM finance.party_receipts
+                          WHERE deleted_at IS NULL AND bank_code IS NOT NULL GROUP BY bank_code`;
+  return Object.fromEntries(rows.map(r => [r.bank_code, r.n]));
+}
+// Validates an account body against the whole chart. Returns { row } or { error }.
+function chartAccountFromBody(b, all, usage, existing) {
+  const code = String((b && b.code) || '').trim();
+  if (!/^\d{1,12}$/.test(code)) return { error: 'Code must be digits only (up to 12), e.g. 12104.' };
+  const name = String((b && b.name) || '').trim().slice(0, 120);
+  if (!name) return { error: 'Enter the account name.' };
+  const dup = all.find(x => x.code === code && (!existing || x.id !== existing.id));
+  if (dup) return { error: `Code ${code} is already "${dup.name}".` };
+  const parent_code = String((b && b.parent_code) || '').trim() || null;
+  const parent = parent_code ? all.find(x => x.code === parent_code) : null;
+  if (parent_code && (!parent || !parent.is_group)) return { error: 'The parent must be a group account.' };
+  if (parent && (!code.startsWith(parent.code) || code.length <= parent.code.length)) {
+    return { error: `A code under ${parent.code} (${parent.name}) must start with ${parent.code} and be longer, e.g. ${parent.code}01.` };
+  }
+  const is_group = !!(b && b.is_group);
+  const role = is_group && CHART_ROLES.has(String((b && b.role) || '')) ? String(b.role) : null;
+  const kind = CHART_KINDS.has(String((b && b.kind) || '')) ? String(b.kind) : (parent ? parent.kind : 'asset');
+  const company = !is_group ? (String((b && b.company) || '').trim().slice(0, 200) || null) : null;
+  if (company) {
+    const taken = all.find(x => x.company && x.company.trim().toLowerCase() === company.toLowerCase() && (!existing || x.id !== existing.id));
+    if (taken) return { error: `${company} is already linked to ${taken.code} ${taken.name}.` };
+  }
+  const active = (b && b.active === false) ? false : true;
+  if (existing) {
+    const kids = all.filter(x => x.parent_code === existing.code);
+    const used = usage[existing.code] || 0;
+    if (code !== existing.code && kids.length) return { error: 'This group has sub-accounts, so its code cannot change.' };
+    if (code !== existing.code && used) return { error: `Used by ${used} receipt${used === 1 ? '' : 's'}, so its code cannot change.` };
+    if (!is_group && existing.is_group && kids.length) return { error: 'This group has sub-accounts, so it cannot become a plain account.' };
+    if (is_group && !existing.is_group && used) return { error: 'Receipts use this account, so it cannot become a group.' };
+  }
+  return { row: { code, name, parent_code, is_group, role, kind, company, active } };
+}
+app.get('/api/chart-accounts', requirePermission('rpt_chart_accounts', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json({ accounts: await chartAll(sql), usage: await chartUsage(sql) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/chart-accounts', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { row, error } = chartAccountFromBody(req.body || {}, await chartAll(sql), await chartUsage(sql), null);
+    if (error) return res.status(400).json({ error });
+    const ins = await sql`
+      INSERT INTO finance.chart_accounts (code, name, parent_code, is_group, role, kind, company, active, updated_by)
+      VALUES (${row.code}, ${row.name}, ${row.parent_code}, ${row.is_group}, ${row.role}, ${row.kind}, ${row.company}, ${row.active}, ${req.user.email})
+      RETURNING *`;
+    await logAudit(sql, req, { action: 'chart_account.create', entityType: 'chart_account', entityId: ins[0].id,
+      summary: `Chart of Accounts: added ${row.code} ${row.name}${row.company ? ' (' + row.company + ')' : ''}`, metadata: row });
+    res.json(ins[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/chart-accounts/:id', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const all = await chartAll(sql);
+    const prev = all.find(x => x.id === id);
+    if (!prev) return res.status(404).json({ error: 'Account not found' });
+    const { row, error } = chartAccountFromBody(req.body || {}, all, await chartUsage(sql), prev);
+    if (error) return res.status(400).json({ error });
+    const upd = await sql`
+      UPDATE finance.chart_accounts SET code = ${row.code}, name = ${row.name}, parent_code = ${row.parent_code},
+             is_group = ${row.is_group}, role = ${row.role}, kind = ${row.kind}, company = ${row.company}, active = ${row.active},
+             updated_by = ${req.user.email}, updated_at = NOW()
+       WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, { action: 'chart_account.edit', entityType: 'chart_account', entityId: id,
+      summary: `Chart of Accounts: ${prev.code} ${prev.name} -> ${row.code} ${row.name}${row.active ? '' : ' (inactive)'}`, metadata: { before: prev, after: row } });
+    res.json(upd[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/chart-accounts/:id', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const all = await chartAll(sql);
+    const prev = all.find(x => x.id === id);
+    if (!prev) return res.status(404).json({ error: 'Account not found' });
+    if (all.some(x => x.parent_code === prev.code)) return res.status(400).json({ error: 'It has sub-accounts — remove or move those first.' });
+    const used = (await chartUsage(sql))[prev.code] || 0;
+    if (used) return res.status(400).json({ error: `Used by ${used} receipt${used === 1 ? '' : 's'} — make it inactive instead.` });
+    await sql`DELETE FROM finance.chart_accounts WHERE id = ${id}`;
+    await logAudit(sql, req, { action: 'chart_account.delete', entityType: 'chart_account', entityId: id,
+      summary: `Chart of Accounts: removed ${prev.code} ${prev.name}`, metadata: prev });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
