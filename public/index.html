@@ -14533,7 +14533,7 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
   if (L.undated.length) notes.push(`<span style="color:#991b1b;">${L.undated.length} Waste of Board sale${L.undated.length === 1 ? '' : 's'} with no readable date left out.</span>`);
   const body = L.lines.map(e => {
     const click = e.type === 'rcpt'
-      ? (canEnter ? ` onclick="openPartyReceiptModal(${e.receipt.id})" title="Edit this receipt" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`)
+      ? ((canEnter || plIsVoucher(e.receipt)) ? ` onclick="openPartyReceiptModal(${e.receipt.id})" title="${plIsVoucher(e.receipt) ? 'Open this voucher' : 'Edit this entry'}" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`)
       : (e.line.jobIds.length ? ` onclick="openEdit(${e.line.jobIds[e.line.jobIds.length - 1]})" title="Open the job" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`);
     return `<tr class="row-hover-red${click.includes('onclick') ? ' cv-summary-row' : ''}"${click}>
       <td style="padding:7px 10px;white-space:nowrap;font-weight:600;">${esc(e.vno)}${e.type === 'rcpt' && !e.taxPart && plIsVoucher(e.receipt) ? ` <button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:11px;" onclick="event.stopPropagation(); printPartyVoucher(${e.receipt.id})" title="Print the receipt voucher">&#128424;</button>` : ''}</td>
@@ -14577,14 +14577,18 @@ function plAccountLabel(code) {
   const a = plAccounts().find(x => x.code === String(code || ''));
   return a ? `${a.code} ${a.name}` : '';
 }
-function openPartyReceiptModal(id) {
+function openPartyReceiptModal(id, presetMode) {
+  // A receipt voucher (new, or a saved one) opens as the paper voucher.
+  const d0 = partyLedgerState.data || {};
+  const r0 = id ? (d0.receipts || []).find(x => x.id === id) : null;
+  if (!presetMode && (!r0 || plIsVoucher(r0))) return openReceiptVoucherPaper(id);
   if (!plCanEnter()) return;
   const d = partyLedgerState.data || {};
   const r = id ? (d.receipts || []).find(x => x.id === id) : null;
   const companies = partyLedgerState.companies.length ? partyLedgerState.companies : partyLedgerCompanyList(partyLedgerInvoices());
   const cur = r ? r.company : partyLedgerState.company;
   const today = localDateISO();
-  const mode = !r || plIsVoucher(r) ? 'voucher' : r.kind;
+  const mode = presetMode || (!r || plIsVoucher(r) ? 'voucher' : r.kind);
   plEditingReceipt = r || null;
   const tax = r ? (+r.tax_deducted || 0) : 0;
   const total = r ? (+r.amount || 0) + tax : '';
@@ -14636,8 +14640,93 @@ function openPartyReceiptModal(id) {
   plReceiptNetSync();
   plVoucherNoPreview();
 }
+// The receipt voucher as the office's paper Cash / Bank Receipts Voucher:
+// the same form is filled in, saved, reopened and printed. Anyone who can
+// see the ledger can open a saved one; without edit rights it is read-only.
+function openReceiptVoucherPaper(id) {
+  const d = partyLedgerState.data || {};
+  const r = id ? (d.receipts || []).find(x => x.id === id) : null;
+  if (id && !r) { notify('Voucher not found.'); return; }
+  const canEdit = plCanEnter();
+  if (!r && !canEdit) return;
+  const dis = canEdit ? '' : 'disabled';
+  const companies = partyLedgerState.companies.length ? partyLedgerState.companies : partyLedgerCompanyList(partyLedgerInvoices());
+  const cur = r ? r.company : partyLedgerState.company;
+  const today = localDateISO();
+  plEditingReceipt = r || null;
+  const tax = r ? (+r.tax_deducted || 0) : 0;
+  const total = r ? (+r.amount || 0) + tax : '';
+  const fld = 'border:none;border-bottom:1px dotted #444;border-radius:0;background:transparent;padding:3px 4px;font:inherit;color:#000;box-shadow:none;outline:none;';
+  const cell = 'border:1px solid #000;padding:6px 8px;';
+  const accounts = plAccounts().filter(a => a.active !== false || (r && r.bank_code === a.code));
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:800px;">
+    <input type="hidden" id="plr-kind" value="voucher">
+    ${canEdit && !r ? `<div style="text-align:right;font-size:12px;margin:-6px 0 8px;"><a href="#" onclick="event.preventDefault(); closeModal(); openPartyReceiptModal(0, 'jv');" style="color:var(--text2);">Other entry: Tax deducted / Credit Note / Debit Note &rarr;</a></div>` : ''}
+    <div style="background:#fff;color:#000;border:1px solid #d6d3d1;border-radius:6px;padding:22px 26px;font-family:'Times New Roman',Times,serif;">
+      <div style="text-align:center;font-size:25px;font-weight:bold;letter-spacing:0.5px;">SUPREME ART (PVT) LTD.</div>
+      <div style="text-align:center;font-size:12px;margin-top:2px;">Plot # 148-B, Industrial Estate, Jamrud Road, Hayatabad, Peshawar &nbsp; NTN # 7226736-6</div>
+      <div id="plv-title" style="text-align:center;font-size:19px;font-style:italic;text-decoration:underline;margin:10px 0 16px;">Receipts Voucher</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;font-size:14.5px;margin-bottom:10px;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span id="plv-code-label" style="font-weight:bold;">Bank / Cash Code:</span>
+          <select id="plr-bank" onchange="plVoucherNoPreview()" ${dis} style="${fld}min-width:240px;">
+            <option value="">Pick the account it went into…</option>
+            ${accounts.map(a => `<option value="${esc(a.code)}"${r && r.bank_code === a.code ? ' selected' : ''}>${esc(a.code)} &nbsp; ${esc(a.name)}</option>`).join('')}
+          </select>
+        </div>
+        <table style="font-size:14.5px;border-collapse:collapse;">
+          <tr><td style="padding:3px 12px 3px 0;">Voucher #</td><td><span id="plr-vno-auto" style="font-weight:bold;"></span></td></tr>
+          <tr><td style="padding:3px 12px 3px 0;">Date</td><td><input type="date" id="plr-date" value="${esc(r ? r.entry_date : today)}" max="${today}" onchange="plVoucherNoPreview()" ${dis} style="${fld}font-weight:bold;"></td></tr>
+        </table>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:14.5px;">
+        <tr>
+          <th style="${cell}width:16%;font-weight:bold;">Account<br>Code</th>
+          <th style="${cell}font-weight:bold;">Head of Account</th>
+          <th style="${cell}width:25%;font-weight:bold;">Amount (Cr)<br>Rs.</th>
+        </tr>
+        <tr style="vertical-align:top;height:180px;">
+          <td style="${cell}text-align:center;"><span id="plv-party-code"></span></td>
+          <td style="${cell}">
+            <select id="plr-company" onchange="plVoucherPartySync()" ${dis} style="${fld}width:100%;font-weight:bold;">
+              <option value="">Pick the party (received from)…</option>
+              ${companies.map(c => `<option value="${esc(c)}"${partyKey(c) === partyKey(cur) ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+            </select>
+            <div style="margin-top:12px;font-size:13.5px;display:flex;align-items:center;gap:6px;">Against invoice no(s): <input type="text" id="plr-inv" value="${esc(r ? (r.invoice_nos || '') : '')}" placeholder="e.g. 822, 823 (optional)" ${dis} style="${fld}flex:1;"></div>
+          </td>
+          <td style="${cell}text-align:right;"><input type="number" id="plr-total" min="0" step="any" value="${total === '' ? '' : esc(String(total))}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" style="${fld}width:100%;text-align:right;font-weight:bold;"></td>
+        </tr>
+        <tr><td style="border-left:1px solid #000;"></td><td style="${cell}text-align:right;font-weight:bold;">Total</td><td style="${cell}text-align:right;" id="plv-total-show">&mdash;</td></tr>
+        <tr><td style="border-left:1px solid #000;"></td><td style="${cell}text-align:right;font-weight:bold;">Tax Deducted</td><td style="${cell}text-align:right;"><input type="number" id="plr-tax" min="0" step="any" value="${tax ? esc(String(tax)) : ''}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" style="${fld}width:100%;text-align:right;"></td></tr>
+        <tr><td style="border-left:1px solid #000;border-bottom:1px solid #000;"></td><td style="${cell}text-align:right;font-weight:bold;">Net Receipt</td><td style="${cell}text-align:right;font-weight:bold;" id="plr-net">&mdash;</td></tr>
+      </table>
+      <div style="margin-top:14px;font-size:14.5px;"><b>Rupees:</b> <span id="plv-words" style="border-bottom:1px solid #000;padding:0 6px;"></span></div>
+      <div style="margin-top:10px;font-size:14.5px;display:flex;align-items:center;gap:6px;"><b>Particular:</b> <input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="cheque no., bank slip…" ${dis} style="${fld}flex:1;"></div>
+      <div style="margin-top:8px;font-size:13px;display:flex;align-items:center;gap:6px;color:#444;">Notes: <input type="text" id="plr-notes" value="${esc(r ? (r.notes || '') : '')}" ${dis} style="${fld}flex:1;"></div>
+      <table style="width:100%;margin-top:44px;font-size:13px;text-align:center;">
+        <tr>${['Prepared By', 'Checked By', 'Approved By', 'Received By'].map(t => `<td style="width:25%;"><div style="border-top:1px solid #000;margin:0 10px;padding-top:3px;">${t}</div></td>`).join('')}</tr>
+      </table>
+    </div>
+    <div class="modal-actions">
+      ${r && canEdit ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deletePartyReceipt(${r.id})">Delete</button>` : ''}
+      ${r ? `<button class="btn" onclick="printPartyVoucher(${r.id})" title="Print the saved voucher">&#128424; Print</button>` : ''}
+      <button class="btn" onclick="closeModal()">${canEdit ? 'Cancel' : 'Close'}</button>
+      ${canEdit ? `<button class="btn" onclick="savePartyReceipt(${r ? r.id : 0}, true)">Save &amp; Print</button>
+      <button class="btn btn-primary" onclick="savePartyReceipt(${r ? r.id : 0})">Save</button>` : ''}
+    </div>
+  </div>`);
+  plReceiptNetSync();
+  plVoucherNoPreview();
+  plVoucherPartySync();
+}
+function plVoucherPartySync() {
+  const el = document.getElementById('plv-party-code');
+  if (el) el.textContent = plPartyCode((document.getElementById('plr-company') || {}).value || '');
+}
 function plReceiptModeChanged() {
   const v = (document.getElementById('plr-kind') || {}).value;
+  // Picking "Receipt Voucher" in the plain form switches to the paper voucher.
+  if (v === 'voucher' && !document.getElementById('plv-title')) { closeModal(); openReceiptVoucherPaper(0); return; }
   const vb = document.getElementById('plr-voucher-block');
   const ob = document.getElementById('plr-other-block');
   if (vb) vb.style.display = v === 'voucher' ? '' : 'none';
@@ -14667,6 +14756,11 @@ function plVoucherNoPreview() {
   const code = (document.getElementById('plr-bank') || {}).value || '';
   const date = (document.getElementById('plr-date') || {}).value || '';
   const acct = plAccounts().find(a => a.code === code);
+  // The paper voucher's title and code label follow the account picked.
+  const title = document.getElementById('plv-title');
+  if (title) title.textContent = acct ? (acct.cash ? 'Cash Receipts Voucher' : 'Bank Receipts Voucher') : 'Receipts Voucher';
+  const codeLabel = document.getElementById('plv-code-label');
+  if (codeLabel) codeLabel.textContent = acct ? (acct.cash ? 'Cash Code:' : 'Bank Code:') : 'Bank / Cash Code:';
   const r = plEditingReceipt;
   if (r && plIsVoucher(r) && r.voucher_no && (!acct || !!acct.cash === (r.kind === 'cash'))) {
     el.innerHTML = esc(r.voucher_no);
@@ -14678,10 +14772,16 @@ function plVoucherNoPreview() {
 function plReceiptNetSync() {
   const total = Number((document.getElementById('plr-total') || {}).value || 0);
   const tax = Number((document.getElementById('plr-tax') || {}).value || 0);
+  const any = total > 0 || tax > 0;
+  const money2 = (n) => (+n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const el = document.getElementById('plr-net');
-  if (el) el.textContent = (total > 0 || tax > 0) ? plMoney(total - tax) : '—';
+  if (el) el.textContent = any ? money2(total - tax) : '—';
+  const ts = document.getElementById('plv-total-show');
+  if (ts) ts.textContent = total > 0 ? money2(total) : '—';
+  const w = document.getElementById('plv-words');
+  if (w) w.textContent = any ? plAmountWords(total - tax) : '';
 }
-async function savePartyReceipt(id) {
+async function savePartyReceipt(id, printAfter) {
   const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
   const mode = val('plr-kind');
   const isVoucher = mode === 'voucher';
@@ -14706,12 +14806,14 @@ async function savePartyReceipt(id) {
   }
   showSaving(true);
   try {
-    if (id) await api('PUT', `/api/party-receipts/${id}`, body);
-    else    await api('POST', '/api/party-receipts', body);
+    const saved = id ? await api('PUT', `/api/party-receipts/${id}`, body)
+                     : await api('POST', '/api/party-receipts', body);
     await loadPartyLedgerData();
     closeModal();
     renderPartyLedger();
-    notify(id ? 'Saved' : (isVoucher ? 'Receipt voucher posted to the ledger' : 'Entry added'));
+    notify(id ? 'Saved' : (isVoucher ? `Receipt voucher ${saved && saved.voucher_no ? saved.voucher_no + ' ' : ''}posted to the ledger` : 'Entry added'));
+    // Save & Print: print the voucher as saved (with its number).
+    if (printAfter && saved && saved.id) printPartyVoucher(saved.id);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
