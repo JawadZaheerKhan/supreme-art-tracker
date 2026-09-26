@@ -821,6 +821,10 @@
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%2316a34a' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat; background-position: right 8px center; background-size: 12px 8px; }
   .plv-paper select.plv-fld:disabled { background-image: none; cursor: default; padding-right: 6px; }
+  .plv-paper .plv-pick { width: 100%; min-height: 30px; text-align: left; cursor: pointer; line-height: 1.5; padding-right: 26px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%2316a34a' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 8px center; background-size: 12px 8px; }
+  .plv-paper .plv-pick:disabled { cursor: default; padding-right: 6px; }
   .plv-link { cursor: pointer; color: #1d4ed8; text-decoration: underline; text-underline-offset: 2px; }
   .cv-summary-row { position: relative; cursor: pointer; transition: background 0.15s, transform 0.15s, box-shadow 0.15s; will-change: transform; }
   .cv-summary-row:hover { background: rgba(163, 45, 45, 0.10); transform: scale(1.005); transform-origin: center; box-shadow: 0 3px 12px rgba(163, 45, 45, 0.18); z-index: 2; }
@@ -3184,6 +3188,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rpt="rpt_party_ledger" data-rt="party-ledger" onclick="setReportsTab('party-ledger')">
           <span class="rsb-icon">&#128210;</span> Party Ledger
         </button>
+        <button class="rsb-item" data-rpt="rpt_party_ledger" data-rt="aging-report" onclick="setReportsTab('aging-report')">
+          <span class="rsb-icon">&#9203;</span> Aging Report
+        </button>
         <button class="rsb-item" data-rpt="rpt_chart_accounts" data-rt="chart-accounts" onclick="setReportsTab('chart-accounts')">
           <span class="rsb-icon">&#128209;</span> Chart of Accounts
         </button>
@@ -3191,6 +3198,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <main class="reports-content">
         <div id="rt-sale-report" class="rt-pane"></div>
         <div id="rt-party-ledger" class="rt-pane" style="display:none;"></div>
+        <div id="rt-aging-report" class="rt-pane" style="display:none;"></div>
         <div id="rt-chart-accounts" class="rt-pane" style="display:none;"></div>
       </main>
     </div>
@@ -14605,26 +14613,32 @@ function plClearReturn() {
 function plReturnBarHtml() {
   if (!plReturn) return '';
   return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
-      <button class="btn btn-sm" onclick="plReturnToLedger()">&#8592; Back to Party Ledger</button>
-      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(plReturn.label)}</b>, opened from ${esc(plReturn.company)}'s ledger. Your own Sale Report filters come back when you leave.</span>
+      <button class="btn btn-sm" onclick="plReturnToLedger()">&#8592; Back to ${esc(plReturn.backLabel || 'Party Ledger')}</button>
+      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(plReturn.label)}</b>, opened from ${esc(plReturn.fromText || plReturn.company + "'s ledger")}. Your own Sale Report filters come back when you leave.</span>
     </div>`;
 }
 function plReturnToLedger() {
   const back = plReturn;
   plClearReturn();                        // Sale Report filters restored before we leave
   if (!back) return;
-  setReportsTab('party-ledger');
+  setReportsTab(back.pane || 'party-ledger');
   Promise.resolve(partyLedgerState._loadP).then(() => requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0)));
 }
-function plOpenInvoiceInSaleReport(i) {
-  const l = (partyLedgerState.lineRefs || [])[i];
+// from: '' = the Party Ledger's invoice lines, 'aging' = the Aging Report's.
+function plOpenInvoiceInSaleReport(i, from) {
+  const fromAging = from === 'aging';
+  const l = ((fromAging ? agingState.lineRefs : partyLedgerState.lineRefs) || [])[i];
   if (!l) return;
   if (!hasPerm('rpt_sale_report', 'view')) { notify('Sale Report is not available for your role.'); return; }
   plClearReturn();                        // a second jump replaces the first cleanly
+  const company = (fromAging ? agingState.company : partyLedgerState.company) || l.company;
   plReturn = {
     restore: JSON.parse(JSON.stringify(saleReportState)),
     label: l.noInvoice ? `E-${l.jobIds[0] || ''} (no invoice no. yet)` : `invoice ${l.invoice}`,
-    company: partyLedgerState.company || l.company,
+    company,
+    pane: fromAging ? 'aging-report' : 'party-ledger',
+    backLabel: fromAging ? 'Aging Report' : 'Party Ledger',
+    fromText: fromAging ? `${company}'s aging` : `${company}'s ledger`,
     scrollY: window.scrollY || 0,
   };
   const st = saleReportState;
@@ -14751,7 +14765,7 @@ function openReceiptVoucherPaper(id) {
       <div style="display:grid;grid-template-columns:minmax(0,1fr) 240px;align-items:end;gap:20px;font-size:14.5px;margin-bottom:10px;">
         <div style="display:flex;align-items:center;gap:8px;min-width:0;">
           <span style="font-weight:bold;white-space:nowrap;">Received from:</span>
-          <select id="plr-company" class="plv-fld" ${dis} style="flex:1;min-width:0;max-width:400px;font-weight:bold;">
+          <select id="plr-company" class="plv-fld" onchange="plInvPickCompanyChanged()" ${dis} style="flex:1;min-width:0;max-width:400px;font-weight:bold;">
             <option value="">Pick the company…</option>
             ${companies.map(c => `<option value="${esc(c)}"${partyKey(c) === partyKey(cur) ? ' selected' : ''}>${esc(c)}</option>`).join('')}
           </select>
@@ -14788,7 +14802,14 @@ function openReceiptVoucherPaper(id) {
         <tr style="vertical-align:top;height:140px;">
           <td style="${cell}"></td>
           <td style="${cell}">
-            <div style="font-size:13.5px;display:flex;align-items:center;gap:6px;">Against invoice no(s): <input type="text" id="plr-inv" class="plv-fld" value="${esc(r ? (r.invoice_nos || '') : '')}" placeholder="e.g. 822, 823 (optional)" ${dis} style="flex:1;"></div>
+            <div style="font-size:13.5px;display:flex;align-items:flex-start;gap:6px;">
+              <span style="padding-top:5px;white-space:nowrap;">Against invoice no(s):</span>
+              <div style="flex:1;min-width:0;position:relative;">
+                <input type="hidden" id="plr-inv" value="${esc(r ? (r.invoice_nos || '') : '')}">
+                <button type="button" id="plv-inv-box" class="plv-fld plv-pick" onclick="plInvPickToggle()" ${dis} title="Tick the unpaid invoices this payment is for"></button>
+                <div id="plv-inv-panel" style="display:none;"></div>
+              </div>
+            </div>
           </td>
           <td style="${cell}"></td>
           <td style="${cell}text-align:right;"><input type="number" id="plr-total" class="plv-fld" min="0" step="any" value="${total === '' ? '' : esc(String(total))}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" title="The full amount the party is paid off by" style="width:100%;text-align:right;font-weight:bold;"></td>
@@ -14818,6 +14839,102 @@ function openReceiptVoucherPaper(id) {
   </div>`);
   plReceiptNetSync();
   plVoucherNoPreview();
+  plInvPick.invoices = null;              // worked out fresh when the list is first opened
+  plInvPickBox();
+}
+// ── Against invoice no(s): pick list ──
+// The company's UNPAID invoices, each with what is still owed on it (as of
+// today, leaving this voucher itself out), to tick. Saved as the same
+// "822, 823" text as before, so printing and older vouchers are unchanged.
+// A saved number that is not one of this company's invoices (e.g. a typo)
+// stays listed, ticked, so it can be seen and unticked.
+const plInvPick = { invoices: null };
+function plInvPickSelected() { return agingInvoiceTokens((document.getElementById('plr-inv') || {}).value || ''); }
+function plInvPickBox() {
+  const box = document.getElementById('plv-inv-box');
+  if (!box) return;
+  const sel = plInvPickSelected();
+  box.innerHTML = sel.length
+    ? sel.map(t => `<span style="display:inline-block;background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:0 6px;margin:1px 4px 1px 0;font-size:13px;">${esc(t)}</span>`).join('')
+    : `<span style="color:#888;">${box.disabled ? '' : 'Pick the invoices (optional)…'}</span>`;
+}
+function plInvPickCompanyChanged() {
+  // Another company's invoices don't carry over.
+  const inv = document.getElementById('plr-inv');
+  if (inv) inv.value = '';
+  plInvPickBox();
+  const panel = document.getElementById('plv-inv-panel');
+  if (panel && panel.style.display !== 'none') plInvPickRender();
+}
+function plInvPickToggle() {
+  const panel = document.getElementById('plv-inv-panel');
+  if (!panel) return;
+  const open = panel.style.display === 'none';
+  panel.style.display = open ? '' : 'none';
+  if (open) plInvPickRender();
+}
+function plInvPickRender() {
+  const panel = document.getElementById('plv-inv-panel');
+  if (!panel) return;
+  panel.style.cssText = 'position:absolute;left:0;width:100%;min-width:420px;top:100%;margin-top:4px;z-index:30;background:#fff;border:1px solid #94a3b8;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,0.18);font-family:system-ui,sans-serif;font-size:12.5px;color:#000;';
+  const company = (document.getElementById('plr-company') || {}).value || '';
+  if (!company) { panel.innerHTML = `<div style="padding:10px 12px;color:#666;">Pick the company at the top first.</div>`; return; }
+  if (!plInvPick.invoices) plInvPick.invoices = partyLedgerInvoices();
+  const A = partyAgingFor(company, plInvPick.invoices, localDateISO(), { excludeReceiptId: plEditingReceipt ? plEditingReceipt.id : 0 });
+  const invItems = A.items.filter(it => it.type === 'inv' && it.key);
+  const resolve = (t) => agingResolveKey(t, invItems);
+  const selKeys = new Set(plInvPickSelected().map(resolve).filter(Boolean));
+  const openInv = A.open.filter(it => it.type === 'inv' && it.key);
+  const openKeys = new Set(openInv.map(it => it.key));
+  const known = new Map(invItems.map(it => [it.key, it]));
+  // Ticked on this voucher but not in the unpaid list: already paid, or not an invoice of this company.
+  const extra = plInvPickSelected().filter(t => !openKeys.has(resolve(t)));
+  const row = (value, main, sub, checked, warn) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #f1f5f9;cursor:pointer;${warn ? 'background:#fff7ed;' : ''}">
+      <input type="checkbox" class="plv-inv-cb" value="${esc(value)}"${checked ? ' checked' : ''} onchange="plInvPickChanged()" style="width:16px;height:16px;margin:0;accent-color:#16a34a;flex-shrink:0;">
+      <span style="flex:1;min-width:0;">${main}</span><span style="white-space:nowrap;color:${warn ? '#9a3412' : '#334155'};">${sub}</span></label>`;
+  const rows = [
+    ...extra.map(t => { const it = known.get(resolve(t)); return row(t, `<b>${esc(t)}</b>`, it ? 'already paid' : 'not an invoice of this company', true, true); }),
+    ...openInv.map(it => row(it.label, `<b>${esc(it.label)}</b> <span style="color:#64748b;">&middot; ${esc(fmtDMY(it.date))}${it.overdue > 0 ? ` &middot; <span style="color:${it.bucket.key === 'd30' ? '#854d0e' : '#991b1b'};">${it.overdue} days overdue</span>` : ''}</span>`,
+      `${it.missingRate ? '<span style="color:#991b1b;">no rate &middot; </span>' : ''}Rs ${plMoney(it.balance)}${it.received > 0 ? ` <span style="color:#64748b;">of ${plMoney(it.amount)}</span>` : ''}`, selKeys.has(it.key), false)),
+  ];
+  panel.innerHTML = `
+    <div style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#475569;">Unpaid invoices of <b style="color:#000;">${esc(company)}</b> &middot; still owed today</div>
+    <div style="max-height:240px;overflow:auto;">${rows.join('') || `<div style="padding:10px 12px;color:#666;">No unpaid invoices for this company.</div>`}</div>
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #e2e8f0;flex-wrap:wrap;">
+      <span id="plv-inv-sum" style="color:#334155;"></span>
+      <button type="button" id="plv-inv-fill" class="btn btn-sm" style="margin-left:auto;display:none;" onclick="plInvPickFillCredit()">Put this in Credit</button>
+      <button type="button" class="btn btn-sm btn-primary" onclick="plInvPickToggle()">Done</button>
+    </div>`;
+  plInvPick.balances = new Map(openInv.map(it => [it.key, it.balance]));
+  plInvPick.items = invItems;
+  plInvPickSum();
+}
+function plInvPickChanged() {
+  const vals = [...document.querySelectorAll('#plv-inv-panel .plv-inv-cb')].filter(cb => cb.checked).map(cb => cb.value);
+  const inv = document.getElementById('plr-inv');
+  if (inv) inv.value = vals.join(', ');
+  plInvPickBox();
+  plInvPickSum();
+}
+function plInvPickSelectedBalance() {
+  const bal = plInvPick.balances || new Map();
+  const items = plInvPick.items || [];
+  return plInvPickSelected().reduce((a, t) => a + (bal.get(agingResolveKey(t, items)) || 0), 0);
+}
+function plInvPickSum() {
+  const el = document.getElementById('plv-inv-sum');
+  const fill = document.getElementById('plv-inv-fill');
+  const n = plInvPickSelected().length;
+  const total = Math.round(plInvPickSelectedBalance() * 100) / 100;
+  if (el) el.innerHTML = n ? `${n} ticked &middot; still owed <b>Rs ${plMoney(total)}</b>` : 'Tick the invoices this payment is for.';
+  if (fill) fill.style.display = total > 0 ? '' : 'none';
+}
+// Ticked invoices' balance -> the party's Credit (the full amount paid off).
+function plInvPickFillCredit() {
+  const t = document.getElementById('plr-total');
+  if (!t || t.disabled) return;
+  t.value = String(Math.round(plInvPickSelectedBalance() * 100) / 100);
+  plReceiptNetSync();
 }
 function plReceiptModeChanged() {
   const v = (document.getElementById('plr-kind') || {}).value;
@@ -15170,6 +15287,360 @@ async function exportPartyLedger() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, String(sheet).replace(/[:\\\/?*\[\]]/g, '-').slice(0, 31));
   XLSX.writeFile(wb, `supreme-art-ledger-${String(sheet).replace(/\s+/g, '-').toLowerCase()}-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+
+// ── Aging Report ─────────────────────────────────────────────────
+// Every company's unpaid invoices, by age. An invoice is due 30 days after
+// its invoice date (owner, 2026-09-27). Payments are matched to invoices
+// the standard way ("cash application", as SAP / Dynamics do it):
+//   1. first to the invoices the voucher names (Against invoice no(s)),
+//   2. whatever is left pays the OLDEST unpaid invoices first (FIFO).
+// Tax deducted and Credit Notes / JVs pay invoices off the same way; a
+// Debit Note is a new amount owed; the opening balance is the oldest item.
+// The unpaid balances minus any unapplied (advance) money always equal the
+// Party Ledger's closing balance for the same date.
+const AGING_DUE_DAYS = 30;
+const AGING_BUCKETS = [
+  { key: 'current', label: 'Not yet due',          short: 'Not yet due', min: -Infinity, max: 0,  color: '#166534', bg: '#dcfce7' },
+  { key: 'd30',     label: '1–30 days overdue',    short: '1–30',        min: 1,         max: 30, color: '#854d0e', bg: '#fef9c3' },
+  { key: 'd60',     label: '31–60 days overdue',   short: '31–60',       min: 31,        max: 60, color: '#9a3412', bg: '#ffedd5' },
+  { key: 'd90',     label: '61–90 days overdue',   short: '61–90',       min: 61,        max: 90, color: '#991b1b', bg: '#fee2e2' },
+  { key: 'd90p',    label: 'Over 90 days overdue', short: '90+',         min: 91,        max: Infinity, color: '#ffffff', bg: '#991b1b' },
+];
+const agingState = { company: '', asOf: '', bucket: '', lineRefs: [], companies: [] };
+function agingUtc(iso) { return Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)); }
+function agingDays(fromIso, toIso) { return Math.round((agingUtc(toIso) - agingUtc(fromIso)) / 86400000); }
+function agingAddDays(iso, n) { return new Date(agingUtc(iso) + n * 86400000).toISOString().slice(0, 10); }
+function agingBucketOf(overdue) { return AGING_BUCKETS.find(b => overdue >= b.min && overdue <= b.max) || AGING_BUCKETS[0]; }
+// "822, 823" / "822 & 823" / "822 and 823" -> ['822', '823']. A space alone
+// does not split: "INV 822" is one number.
+function agingInvoiceTokens(text) {
+  return String(text || '').split(/[,;&\n]|\band\b/i).map(t => t.trim()).filter(Boolean);
+}
+// A typed invoice number -> the key of one of these invoice items ('' if
+// none). Hand-typed "INV-823" against invoice "823" matches on the digits,
+// but only when exactly one invoice has them.
+function agingResolveKey(text, items) {
+  const key = invoiceMatchKey(text);
+  if (!key) return '';
+  if (items.some(it => it.key === key)) return key;
+  if (!/\d/.test(key)) return '';
+  const digits = key.replace(/\D/g, '');
+  const keys = new Set(items.filter(it => it.key && it.key.replace(/\D/g, '') === digits).map(it => it.key));
+  return keys.size === 1 ? [...keys][0] : '';
+}
+// One company's aging as of a date. opts.excludeReceiptId leaves one
+// receipt out (the voucher being edited, so its own invoices show unpaid).
+function partyAgingFor(company, invoices, asOf, opts) {
+  const o = opts || {};
+  const d = partyLedgerState.data || {};
+  const k = partyKey(company);
+  const opening = (d.openings || []).find(x => partyKey(x.company) === k) || null;
+  const since = opening ? String(opening.as_of || '') : '';
+  // Same window as the ledger: entries before the opening's date are inside it.
+  const inRange = (dt) => !!dt && dt <= asOf && (!since || dt >= since);
+  const items = [];
+  const credits = [];
+  let undated = 0;
+  for (const l of invoices) {
+    if (partyKey(l.company) !== k) continue;
+    if (!l.date) { undated++; continue; }
+    if (!inRange(l.date)) continue;
+    items.push({ type: 'inv', date: l.date, key: l.noInvoice ? '' : invoiceMatchKey(l.invoice), label: l.noInvoice ? '' : l.invoice,
+      amount: +l.debit || 0, line: l, missingRate: !!l.missingRate, allocs: [] });
+  }
+  for (const r of (d.receipts || [])) {
+    if (partyKey(r.company) !== k || (o.excludeReceiptId && r.id === o.excludeReceiptId)) continue;
+    const dt = String(r.entry_date || '');
+    if (!inRange(dt)) continue;
+    const amt = (+r.amount || 0) + (+r.tax_deducted || 0);
+    if (!(amt > 0)) continue;
+    if (PARTY_DEBIT_KINDS.has(r.kind)) {
+      items.push({ type: 'dn', date: dt, key: '', label: 'Debit Note ' + (r.voucher_no || r.reference || ''), amount: amt, receipt: r, allocs: [] });
+    } else {
+      credits.push({ date: dt, id: r.id, left: amt, receipt: r, named: agingInvoiceTokens(r.invoice_nos) });
+    }
+  }
+  if (opening && since && since <= asOf) {
+    const oa = +opening.amount || 0;
+    if (oa > 0) items.push({ type: 'opening', date: since, key: '', label: 'Opening balance', amount: oa, allocs: [] });
+    else if (oa < 0) credits.push({ date: since, id: 0, left: -oa, receipt: null, named: [] });
+  }
+  const rank = { opening: 0, inv: 1, dn: 2 };
+  items.sort((a, b) => a.date.localeCompare(b.date) || rank[a.type] - rank[b.type]
+    || String(a.label).localeCompare(String(b.label), undefined, { numeric: true }));
+  credits.sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
+  items.forEach(it => { it.balance = it.amount; });
+  const apply = (c, it, how) => {
+    const x = Math.min(c.left, it.balance);
+    if (!(x > 0.004)) return;
+    c.left -= x; it.balance -= x;
+    it.allocs.push({ amount: x, how, date: c.date, vno: c.receipt ? (c.receipt.voucher_no || PARTY_KIND_LABELS[c.receipt.kind] || c.receipt.kind) : 'Opening balance (Cr)' });
+  };
+  // 1. The invoices each voucher names.
+  const unmatched = [];
+  for (const c of credits) {
+    for (const t of c.named) {
+      const key = agingResolveKey(t, items);
+      const hits = key ? items.filter(it => it.key === key) : [];
+      if (!hits.length) { unmatched.push({ text: t, vno: c.receipt ? (c.receipt.voucher_no || '') : '' }); continue; }
+      hits.forEach(it => { if (c.left > 0.004) apply(c, it, 'named'); });
+    }
+  }
+  // 2. The rest pays the oldest unpaid first.
+  for (const c of credits) for (const it of items) { if (!(c.left > 0.004)) break; apply(c, it, 'oldest'); }
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const open = items.filter(it => r2(it.balance) > 0).map(it => {
+    const age = agingDays(it.date, asOf);
+    const overdue = age - AGING_DUE_DAYS;
+    return { ...it, balance: r2(it.balance), received: r2(it.amount - it.balance), due: agingAddDays(it.date, AGING_DUE_DAYS), age, overdue, bucket: agingBucketOf(overdue) };
+  });
+  const totals = Object.fromEntries(AGING_BUCKETS.map(b => [b.key, 0]));
+  open.forEach(it => { totals[it.bucket.key] = r2(totals[it.bucket.key] + it.balance); });
+  const due = r2(open.reduce((a, it) => a + it.balance, 0));
+  const unapplied = r2(credits.reduce((a, c) => a + Math.max(0, c.left), 0));
+  return { company, asOf, items, open, totals, due, unapplied, net: r2(due - unapplied), undated, unmatched,
+    missingRate: open.filter(it => it.missingRate).length };
+}
+function agingSummaryRows(invoices, asOf) {
+  return agingState.companies.map((c, i) => ({ idx: i, ...partyAgingFor(c, invoices, asOf) }))
+    .filter(r => r.due > 0 || r.unapplied > 0);
+}
+function openAgingReport() {
+  const pane = document.getElementById('rt-aging-report');
+  if (!pane) return;
+  pane.innerHTML = `<div style="font-size:13px;color:var(--text2);padding:18px 0;">Loading the aging report…</div>`;
+  partyLedgerState._loadP = loadPartyLedgerData().then(renderAgingReport);
+}
+function setAgingCompanyIdx(i, bucket) {
+  agingState.company = i < 0 ? '' : (agingState.companies[i] || '');
+  agingState.bucket = bucket || '';
+  renderAgingReport();
+  if (i >= 0) window.scrollTo(0, 0);
+}
+function setAgingAsOf(v) { agingState.asOf = v || localDateISO(); renderAgingReport(); }
+function setAgingBucket(v) { agingState.bucket = v || ''; renderAgingReport(); }
+function agingBucketPill(b) {
+  return `<span style="display:inline-block;background:${b.bg};color:${b.color};font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap;">${esc(b.label)}</span>`;
+}
+function renderAgingReport() {
+  const pane = document.getElementById('rt-aging-report');
+  if (!pane) return;
+  const s = agingState;
+  if (!s.asOf) s.asOf = localDateISO();
+  const d = partyLedgerState.data || {};
+  const invoices = partyLedgerInvoices();
+  s.companies = partyLedgerCompanyList(invoices);
+  if (s.company && !s.companies.some(c => partyKey(c) === partyKey(s.company))) s.companies.push(s.company);
+  const selIdx = s.companies.findIndex(c => partyKey(c) === partyKey(s.company));
+  const toolbar = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Aging Report</h2>
+      <span style="color:var(--text2);font-size:12px;">Unpaid invoices by age &middot; due ${AGING_DUE_DAYS} days after the invoice date &middot; payments go to the invoices named on the voucher first, then to the oldest.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-sm" onclick="exportAgingReport()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printAgingReport()">&#128424; Print</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Company</div>
+        <select class="filter" onchange="setAgingCompanyIdx(parseInt(this.value, 10))" style="min-width:240px;">
+          <option value="-1"${selIdx < 0 ? ' selected' : ''}>All companies (summary)</option>
+          ${s.companies.map((c, i) => `<option value="${i}"${i === selIdx ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">As of</div>
+        <input class="filter" type="date" value="${esc(s.asOf)}" max="${esc(localDateISO())}" onchange="setAgingAsOf(this.value)">
+      </div>
+      ${s.company ? `<div>
+        <div class="dash-flbl">Bucket</div>
+        <select class="filter" onchange="setAgingBucket(this.value)">
+          <option value="">All unpaid</option>
+          ${AGING_BUCKETS.map(b => `<option value="${b.key}"${s.bucket === b.key ? ' selected' : ''}>${esc(b.label)}</option>`).join('')}
+        </select>
+      </div>` : ''}
+    </div>`;
+  if (d.error) { pane.innerHTML = toolbar + `<div class="empty">Could not load: ${esc(d.error)}</div>`; return; }
+  pane.innerHTML = toolbar + (s.company ? agingCompanyHtml(s.company, invoices) : agingSummaryHtml(invoices));
+}
+function agingSummaryHtml(invoices) {
+  const s = agingState;
+  const rows = agingSummaryRows(invoices, s.asOf);
+  if (!rows.length) return `<div class="empty">Nothing unpaid as of ${esc(fmtDMY(s.asOf))}.</div>`;
+  const anyAdv = rows.some(r => r.unapplied > 0);
+  const tot = { due: 0, adv: 0, ...Object.fromEntries(AGING_BUCKETS.map(b => [b.key, 0])) };
+  rows.forEach(r => { tot.due += r.due; tot.adv += r.unapplied; AGING_BUCKETS.forEach(b => { tot[b.key] += r.totals[b.key]; }); });
+  const th = 'text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;white-space:nowrap;';
+  const td = 'padding:8px 10px;text-align:right;white-space:nowrap;';
+  const cellFor = (r, b) => r.totals[b.key] > 0
+    ? `<td style="${td}cursor:pointer;" title="Show ${esc(r.company)}'s invoices ${esc(b.label.toLowerCase())}" onclick="event.stopPropagation(); setAgingCompanyIdx(${r.idx}, '${b.key}')">${plMoney(r.totals[b.key])}</td>`
+    : `<td style="${td}color:var(--text3);">&mdash;</td>`;
+  return `<div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${rows.length} compan${rows.length === 1 ? 'y' : 'ies'} with money owed as of ${esc(fmtDMY(s.asOf))} &middot; click a company for its invoices, or a figure for just that bucket</div>
+    <div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);">
+        <th style="${th}text-align:left;">Company</th>
+        <th style="${th}">Total Due</th>
+        ${AGING_BUCKETS.map(b => `<th style="${th}background:${b.bg};color:${b.color};">${esc(b.short)}</th>`).join('')}
+        ${anyAdv ? `<th style="${th}" title="Money received that is not matched to any invoice yet (paid in advance / more than invoiced)">Advance</th>` : ''}
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="setAgingCompanyIdx(${r.idx})">
+        <td style="padding:8px 10px;font-weight:600;">${esc(r.company)}${r.missingRate ? ` <span title="Invoices without a rate - their amounts are missing" style="background:#fee2e2;color:#991b1b;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;">${r.missingRate} no rate</span>` : ''}</td>
+        <td style="${td}font-weight:700;">${plMoney(r.due)}</td>
+        ${AGING_BUCKETS.map(b => cellFor(r, b)).join('')}
+        ${anyAdv ? `<td style="${td}">${r.unapplied > 0 ? plMoney(r.unapplied) : '&mdash;'}</td>` : ''}
+      </tr>`).join('')}</tbody>
+      <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+        <td style="padding:8px 10px;">Total</td>
+        <td style="${td}">${plMoney(tot.due)}</td>
+        ${AGING_BUCKETS.map(b => `<td style="${td}">${tot[b.key] > 0 ? plMoney(tot[b.key]) : '&mdash;'}</td>`).join('')}
+        ${anyAdv ? `<td style="${td}">${plMoney(tot.adv)}</td>` : ''}
+      </tr></tfoot>
+    </table></div>`;
+}
+function agingItemTitle(it) {
+  if (it.type === 'opening') return 'Opening balance';
+  if (it.type === 'dn') return it.label;
+  return it.line.noInvoice ? 'delivery (no invoice no. yet)' : it.label;
+}
+// "CRV-27-0002 on 26/09/2026: 100,000 (named on the voucher)" - how an invoice got paid.
+function agingAllocText(it) {
+  return it.allocs.map(a => `${a.vno} on ${fmtDMY(a.date)}: ${plMoney(a.amount)} (${a.how === 'named' ? 'named on the voucher' : 'oldest first'})`).join('\n');
+}
+function agingCompanyHtml(company, invoices) {
+  const s = agingState;
+  const A = partyAgingFor(company, invoices, s.asOf);
+  const shown = A.open.filter(it => !s.bucket || it.bucket.key === s.bucket);
+  s.lineRefs = [];
+  const tdR = 'padding:7px 10px;text-align:right;white-space:nowrap;';
+  const th = 'text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;white-space:nowrap;';
+  const notes = [];
+  if (A.unapplied > 0) notes.push(`<b>${plMoney(A.unapplied)}</b> received is not matched to any invoice (paid in advance, or more than invoiced) &mdash; net owed <b>${plBalance(A.net)}</b>.`);
+  if (A.unmatched.length) notes.push(`<span style="color:#991b1b;">Voucher${A.unmatched.length === 1 ? '' : 's'} naming an invoice this company doesn't have: ${A.unmatched.map(u => `${esc(u.vno || 'entry')} &rarr; &ldquo;${esc(u.text)}&rdquo;`).join(', ')} &mdash; that money went to the oldest invoices instead.</span>`);
+  if (A.missingRate) notes.push(`<span style="color:#991b1b;">${A.missingRate} invoice${A.missingRate === 1 ? ' has' : 's have'} a delivery with no rate &mdash; set it in the Sale Report or the amount due is short.</span>`);
+  if (A.undated) notes.push(`<span style="color:#991b1b;">${A.undated} Waste of Board sale${A.undated === 1 ? '' : 's'} with no readable date left out.</span>`);
+  const chips = AGING_BUCKETS.map(b => `<button type="button" onclick="setAgingBucket('${s.bucket === b.key ? '' : b.key}')" title="${s.bucket === b.key ? 'Show all unpaid' : 'Show only ' + esc(b.label.toLowerCase())}"
+      style="border:2px solid ${s.bucket === b.key ? b.color : 'transparent'};background:${b.bg};color:${b.color};border-radius:10px;padding:6px 12px;cursor:pointer;text-align:left;font:inherit;">
+      <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">${esc(b.label)}</div>
+      <div style="font-size:15px;font-weight:700;">${A.totals[b.key] > 0 ? plMoney(A.totals[b.key]) : '&mdash;'}</div>
+    </button>`).join('');
+  const body = shown.map(it => {
+    const idx = it.type === 'inv' ? s.lineRefs.push(it.line) - 1 : -1;
+    const click = idx >= 0 ? ` onclick="plOpenInvoiceInSaleReport(${idx}, 'aging')" title="Show ${it.line.noInvoice ? 'this delivery' : 'invoice ' + esc(it.label)} in the Sale Report" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`;
+    const jobsHtml = it.type === 'inv' ? it.line.jobIds.map(id => `<span class="plv-link" onclick="event.stopPropagation(); openEdit(${id})" title="Open the job card E-${id}">E-${id}</span>`).join(' ') : '';
+    const head = it.type === 'inv' && !it.line.noInvoice
+      ? `<span style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;font-weight:600;">${esc(it.label)}</span>`
+      : `<span style="font-weight:600;">${esc(agingItemTitle(it))}</span>`;
+    return `<tr class="row-hover-red${idx >= 0 ? ' cv-summary-row' : ''}"${click}>
+      <td style="padding:7px 10px;white-space:nowrap;">${head}${it.missingRate ? ' <span title="A delivery on this invoice has no rate, so its amount is missing" style="background:#fee2e2;color:#991b1b;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;">no rate</span>' : ''}${it.type === 'inv' && it.line.source === 'waste' ? ' <span style="font-size:10px;color:var(--text2);">(Waste of Board)</span>' : ''}</td>
+      <td style="padding:7px 10px;white-space:nowrap;">${esc(fmtDMY(it.date))}</td>
+      <td style="padding:7px 10px;white-space:nowrap;">${esc(fmtDMY(it.due))}</td>
+      <td style="padding:7px 10px;font-size:12px;">${jobsHtml}${it.type === 'inv' && it.line.names.length ? `<div style="font-size:11px;color:var(--text2);">${esc(it.line.names.join(' / '))}</div>` : ''}</td>
+      <td style="${tdR}">${plMoney(it.amount)}</td>
+      <td style="${tdR}"${it.allocs.length ? ` title="${esc(agingAllocText(it))}"` : ''}>${it.received > 0 ? `<span style="border-bottom:1px dotted var(--text2);">${plMoney(it.received)}</span>` : '&mdash;'}</td>
+      <td style="${tdR}font-weight:700;">${plMoney(it.balance)}</td>
+      <td style="${tdR}">${it.age}</td>
+      <td style="${tdR}">${it.overdue > 0 ? it.overdue : '&mdash;'}</td>
+      <td style="padding:7px 10px;">${agingBucketPill(it.bucket)}</td>
+    </tr>`;
+  }).join('');
+  const shownTotal = shown.reduce((a, it) => a + it.balance, 0);
+  return `<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+      <div style="font-size:17px;font-weight:700;">${esc(company)}</div>
+      <div style="font-size:12px;color:var(--text2);">as of ${esc(fmtDMY(s.asOf))} &middot; ${A.open.length} unpaid &middot; total due <b style="color:var(--text);">${plMoney(A.due)}</b></div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="setAgingCompanyIdx(-1)">&larr; All companies</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">${chips}</div>
+    ${notes.length ? `<div style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.6;">${notes.join('<br>')}</div>` : ''}
+    <div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);">
+        <th style="${th}">Invoice No</th><th style="${th}">Invoice Date</th><th style="${th}">Due Date</th><th style="${th}">Jobs</th>
+        <th style="${th}text-align:right;">Invoice Amount</th><th style="${th}text-align:right;" title="Hover a figure to see which vouchers paid it">Received</th>
+        <th style="${th}text-align:right;">Balance</th><th style="${th}text-align:right;">Days Old</th><th style="${th}text-align:right;">Days Overdue</th><th style="${th}">Bucket</th>
+      </tr></thead>
+      <tbody>${body || `<tr><td colspan="10" style="padding:16px;text-align:center;color:var(--text3);font-style:italic;">${A.open.length ? 'No invoices in this bucket.' : 'Nothing unpaid as of this date.'}</td></tr>`}</tbody>
+      ${shown.length ? `<tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+        <td colspan="6" style="padding:8px 10px;text-align:right;">${s.bucket ? esc((AGING_BUCKETS.find(b => b.key === s.bucket) || {}).label || '') + ' &middot; ' : ''}Total balance</td>
+        <td style="${tdR}">${plMoney(shownTotal)}</td><td colspan="3"></td>
+      </tr></tfoot>` : ''}
+    </table></div>`;
+}
+function agingRowsForExport() {
+  const s = agingState;
+  const invoices = partyLedgerInvoices();
+  if (s.company) {
+    const A = partyAgingFor(s.company, invoices, s.asOf);
+    return { company: A, rows: A.open.filter(it => !s.bucket || it.bucket.key === s.bucket) };
+  }
+  return { summary: agingSummaryRows(invoices, s.asOf) };
+}
+function agingScopeText() {
+  const s = agingState;
+  const b = s.bucket ? AGING_BUCKETS.find(x => x.key === s.bucket) : null;
+  return s.company ? `Aging · ${s.company}${b ? ' · ' + b.label : ''}` : 'Aging · all companies';
+}
+function printAgingReport() {
+  const s = agingState;
+  const X = agingRowsForExport();
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;white-space:nowrap;"';
+  let table;
+  if (X.company) {
+    if (!X.rows.length) { notify('Nothing to print.'); return; }
+    table = `<table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
+      <tr style="background:#f7f1ea;"><th ${tdL}>Invoice No</th><th ${tdL}>Invoice Date</th><th ${tdL}>Due Date</th><th ${tdL}>Jobs</th><th ${tdR}>Invoice Amount</th><th ${tdR}>Received</th><th ${tdR}>Balance</th><th ${tdR}>Days Old</th><th ${tdR}>Overdue</th><th ${tdL}>Bucket</th></tr>
+      ${X.rows.map(it => `<tr><td ${tdL}>${esc(agingItemTitle(it))}</td><td ${tdL}>${esc(fmtDMY(it.date))}</td><td ${tdL}>${esc(fmtDMY(it.due))}</td><td ${tdL}>${it.type === 'inv' ? esc(it.line.jobIds.map(id => 'E-' + id).join(' ')) : ''}</td><td ${tdR}>${plMoney(it.amount)}</td><td ${tdR}>${it.received > 0 ? plMoney(it.received) : '-'}</td><td ${tdR}><b>${plMoney(it.balance)}</b></td><td ${tdR}>${it.age}</td><td ${tdR}>${it.overdue > 0 ? it.overdue : '-'}</td><td ${tdL}>${esc(it.bucket.label)}</td></tr>`).join('')}
+      <tr style="background:#eee;font-weight:bold;"><td ${tdL} colspan="6">Total balance</td><td ${tdR}>${plMoney(X.rows.reduce((a, it) => a + it.balance, 0))}</td><td ${tdL} colspan="3"></td></tr>
+    </table>
+    <table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;margin-top:8px;"><tr>${AGING_BUCKETS.map(b => `<td ${tdL}><b>${esc(b.label)}</b><br>${plMoney(X.company.totals[b.key])}</td>`).join('')}<td ${tdL}><b>Total due</b><br>${plMoney(X.company.due)}</td></tr></table>`;
+  } else {
+    if (!X.summary.length) { notify('Nothing to print.'); return; }
+    const t = (k) => X.summary.reduce((a, r) => a + (k === 'due' ? r.due : r.totals[k]), 0);
+    table = `<table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
+      <tr style="background:#f7f1ea;"><th ${tdL}>Company</th><th ${tdR}>Total Due</th>${AGING_BUCKETS.map(b => `<th ${tdR}>${esc(b.short)}</th>`).join('')}</tr>
+      ${X.summary.map(r => `<tr><td ${tdL}>${esc(r.company)}</td><td ${tdR}><b>${plMoney(r.due)}</b></td>${AGING_BUCKETS.map(b => `<td ${tdR}>${r.totals[b.key] > 0 ? plMoney(r.totals[b.key]) : '-'}</td>`).join('')}</tr>`).join('')}
+      <tr style="background:#eee;font-weight:bold;"><td ${tdL}>Total</td><td ${tdR}>${plMoney(t('due'))}</td>${AGING_BUCKETS.map(b => `<td ${tdR}>${plMoney(t(b.key))}</td>`).join('')}</tr>
+    </table>`;
+  }
+  const area = document.getElementById('print-area');
+  area.innerHTML = `
+    <style>@media print { @page { size: A4 ${X.company ? 'landscape' : 'portrait'}; margin: 0.35in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'AGING REPORT', scope: agingScopeText(), dateText: `As of ${fmtDMY(s.asOf)} · due ${AGING_DUE_DAYS} days after invoice date`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      ${table}
+    </div>`;
+  setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 300);
+}
+async function exportAgingReport() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const s = agingState;
+  const X = agingRowsForExport();
+  const r2 = (n) => Math.round((+n || 0) * 100) / 100;
+  let header, aoa, sheet;
+  if (X.company) {
+    if (!X.rows.length) { notify('Nothing to export.'); return; }
+    header = ['Invoice No', 'Invoice Date', 'Due Date', 'Jobs', 'Job Name', 'Invoice Amount', 'Received', 'Balance', 'Days Old', 'Days Overdue', 'Bucket'];
+    aoa = reportExcelAoa(header);
+    X.rows.forEach(it => aoa.push([agingItemTitle(it), fmtDMY(it.date), fmtDMY(it.due), it.type === 'inv' ? it.line.jobIds.map(id => 'E-' + id).join(' ') : '',
+      it.type === 'inv' ? it.line.names.join(' / ') : '', r2(it.amount), r2(it.received), r2(it.balance), it.age, it.overdue > 0 ? it.overdue : 0, it.bucket.label]));
+    aoa.push(['Total balance', '', '', '', '', '', '', r2(X.rows.reduce((a, it) => a + it.balance, 0)), '', '', '']);
+    sheet = s.company;
+  } else {
+    if (!X.summary.length) { notify('Nothing to export.'); return; }
+    header = ['Company', 'Total Due', ...AGING_BUCKETS.map(b => b.label), 'Advance (unmatched)'];
+    aoa = reportExcelAoa(header);
+    X.summary.forEach(r => aoa.push([r.company, r2(r.due), ...AGING_BUCKETS.map(b => r2(r.totals[b.key])), r2(r.unapplied)]));
+    aoa.push(['Total', r2(X.summary.reduce((a, r) => a + r.due, 0)), ...AGING_BUCKETS.map(b => r2(X.summary.reduce((a, r) => a + r.totals[b.key], 0))), r2(X.summary.reduce((a, r) => a + r.unapplied, 0))]);
+    sheet = 'All companies';
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, header, { title: 'AGING REPORT', scope: agingScopeText(), dateText: `As of ${fmtDMY(s.asOf)}` });
+  applyReportExcelCols(ws, header, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, String(sheet).replace(/[:\\\/?*\[\]]/g, '-').slice(0, 31));
+  XLSX.writeFile(wb, `supreme-art-aging-${String(sheet).replace(/\s+/g, '-').toLowerCase()}-${s.asOf}.xlsx`);
   notify('Exported!');
 }
 
@@ -18980,13 +19451,14 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['sale-report', 'party-ledger', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
   if (name === 'sale-report')     openSaleReport();
   if (name === 'party-ledger')    openPartyLedger();
+  if (name === 'aging-report')    openAgingReport();
   if (name === 'chart-accounts')  openChartAccounts();
   if (name === 'stock-in')        openStockMovementPane('in');
   if (name === 'stock-out')       openStockMovementPane('out');
