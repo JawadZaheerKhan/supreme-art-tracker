@@ -4489,10 +4489,32 @@ async function api(method, path, body) {
   }
   if (!res.ok) {
     let msg = 'Request failed';
-    try { const e = await res.json(); msg = e.error || msg; } catch {}
-    throw new Error(msg);
+    let data = null;
+    try { data = await res.json(); msg = (data && data.error) || msg; } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;      // e.g. { needs_reason: true } from the paid-invoice guard
+    throw err;
   }
   return res.json();
+}
+// Like api(), but when the server says a reason is needed (an invoice that
+// already has money received against it), asks for one and retries.
+// A cancelled prompt throws an Error with .cancelled = true.
+async function apiWithReason(method, path, body) {
+  try { return await api(method, path, body); }
+  catch (e) {
+    if (!(e && e.data && e.data.needs_reason)) throw e;
+    const reason = await promptDialog({ title: 'Reason for this change', message: e.message, placeholder: 'e.g. rate was entered wrong', confirmText: 'Save with reason' });
+    if (reason === null || String(reason).trim().length < 3) {
+      const c = new Error('Not changed — a reason is needed for a paid invoice');
+      c.cancelled = true;
+      throw c;
+    }
+    const why = String(reason).trim();
+    if (method === 'DELETE') return api(method, path + (path.includes('?') ? '&' : '?') + 'reason=' + encodeURIComponent(why));
+    return api(method, path, { ...(body || {}), reason: why });
+  }
 }
 
 // ── Auth state ────────────────────────────────────────────────
@@ -14602,7 +14624,7 @@ function openPartyReceiptModal(id) {
     <div id="plr-other-block" style="display:${mode === 'voucher' ? 'none' : ''};">
       <div class="form-group"><label class="form-label">Amount (Rs) *</label><input type="number" id="plr-amount" min="0" step="any" value="${r && mode !== 'voucher' ? esc(String(+r.amount)) : ''}"></div>
     </div>
-    <div class="form-group"><label class="form-label">Particular <span style="font-weight:400;color:var(--text2);">(cheque no., bank slip, CPR no.)</span></label><input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="e.g. 2 CHQS Faysal Bank"></div>
+    <div class="form-group"><label class="form-label" id="plr-ref-label">${mode === 'voucher' ? 'Particular <span style="font-weight:400;color:var(--text2);">(cheque no., bank slip)</span>' : 'Reason / reference * <span style="font-weight:400;color:var(--text2);">(CPR no., or why)</span>'}</label><input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="e.g. 2 CHQS Faysal Bank"></div>
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="plr-notes" value="${esc(r ? (r.notes || '') : '')}"></div>
     <div class="modal-actions">
       ${r ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deletePartyReceipt(${r.id})">Delete</button>` : ''}
@@ -14624,6 +14646,10 @@ function plReceiptModeChanged() {
   const typed = document.getElementById('plr-vno');
   if (auto) auto.style.display = v === 'voucher' ? '' : 'none';
   if (typed) typed.style.display = v === 'voucher' ? 'none' : '';
+  const refLabel = document.getElementById('plr-ref-label');
+  if (refLabel) refLabel.innerHTML = v === 'voucher'
+    ? 'Particular <span style="font-weight:400;color:var(--text2);">(cheque no., bank slip)</span>'
+    : 'Reason / reference * <span style="font-weight:400;color:var(--text2);">(CPR no., or why)</span>';
   plVoucherNoPreview();
 }
 // Receipt vouchers are numbered by the app: CRV-27-0001 (cash) / BRV-27-0001
@@ -14675,6 +14701,7 @@ async function savePartyReceipt(id) {
   } else {
     const amt = Number(val('plr-amount').replace(/,/g, ''));
     if (!Number.isFinite(amt) || amt <= 0) { await alertDialog({ title: 'Enter the amount', message: 'A number above 0.', kind: 'warn' }); return; }
+    if (!body.reference) { await alertDialog({ title: 'Give the reason / reference', message: 'A Credit Note, Debit Note or Tax deducted entry must say why (e.g. the CPR no.).', kind: 'warn' }); return; }
     Object.assign(body, { kind: mode, amount: amt, tax_deducted: 0, bank_code: '', invoice_nos: '' });
   }
   showSaving(true);
@@ -14918,18 +14945,41 @@ async function exportPartyLedger() {
 // the Receipt Voucher's "Received into" list; the Party Ledger group holds
 // one account per customer, linked to its Company Settings company so the
 // voucher prints the party's code.
-const chartState = { rows: [], usage: {}, q: '', showInactive: false, error: '' };
+const chartState = { rows: [], usage: {}, q: '', showInactive: false, error: '', period: 'month', from: '', to: '', received: {} };
 const CHART_KIND_LABELS = { asset: 'Asset', liability: 'Liability', equity: 'Equity', income: 'Income', expense: 'Expense' };
 const CHART_ROLE_LABELS = { cash: 'Cash — receipts go in', bank: 'Bank — receipts go in', party: 'Party Ledger — customers' };
 function chartCanEdit() { return hasPerm('rpt_chart_accounts_edit', 'yes'); }
 function chartCodeCmp(a, b) { return String(a).localeCompare(String(b), undefined, { numeric: true }); }
 async function loadChartAccounts() {
   try {
-    const d = await api('GET', '/api/chart-accounts');
+    const { from, to } = periodToDateRange(chartState.period, chartState.from, chartState.to);
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to) qs.set('to', to);
+    const d = await api('GET', '/api/chart-accounts' + (qs.toString() ? '?' + qs.toString() : ''));
     chartState.rows = d.accounts || [];
     chartState.usage = d.usage || {};
+    chartState.received = d.received || {};
     chartState.error = '';
   } catch (e) { chartState.error = e.message; }
+}
+function setChartPeriod(v) { chartState.period = v; loadChartAccounts().then(renderChartAccounts); }
+function setChartCustom() {
+  chartState.from = (document.getElementById('coa-from') || {}).value || '';
+  chartState.to   = (document.getElementById('coa-to')   || {}).value || '';
+  loadChartAccounts().then(renderChartAccounts);
+}
+// Received total for an account: its own figure, or for a group the sum of
+// every receiving account under it (codes under a group start with its code).
+function chartReceivedFor(r) {
+  const rec = chartState.received || {};
+  if (!r.is_group) return rec[r.code] ? rec[r.code].total : 0;
+  return chartState.rows.filter(x => !x.is_group && x.code.startsWith(r.code) && x.code !== r.code)
+    .reduce((a, x) => a + (rec[x.code] ? rec[x.code].total : 0), 0);
+}
+function chartIsReceiving(r) {
+  if (!r.is_group) return ['cash', 'bank'].includes(chartRoleOf(r.parent_code));
+  return chartState.rows.some(x => !x.is_group && x.code.startsWith(r.code) && x.code !== r.code && ['cash', 'bank'].includes(chartRoleOf(x.parent_code)));
 }
 function openChartAccounts() {
   const pane = document.getElementById('rt-chart-accounts');
@@ -15014,8 +15064,14 @@ function renderChartAccounts() {
     </div>` : ''}
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div><div class="dash-flbl">Search</div><input class="filter" type="text" value="${esc(chartState.q)}" placeholder="Code, name or company" oninput="setChartQ(this.value)" style="min-width:240px;"></div>
+      <div><div class="dash-flbl">Received — period</div><select class="filter" onchange="setChartPeriod(this.value)">${reportPeriodOptions(chartState.period)}</select></div>
+      <div style="display:${chartState.period === 'custom' ? 'flex' : 'none'};gap:10px;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" id="coa-from" value="${esc(chartState.from)}" onchange="setChartCustom()"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" id="coa-to" value="${esc(chartState.to)}" onchange="setChartCustom()"></div>
+      </div>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" ${chartState.showInactive ? 'checked' : ''} onchange="setChartInactive(this.checked)" style="width:auto;"> Show inactive</label>
     </div>
+    <div style="font-size:11.5px;color:var(--text2);margin:-6px 0 10px;">Received = net money in through receipt vouchers in the period (tax deducted never reaches the bank). Payments and transfers are not in the app, so this is not the bank balance.</div>
     <div id="chart-table"></div>`;
   renderChartAccountsTable();
 }
@@ -15030,7 +15086,7 @@ function renderChartAccountsTable() {
   if (!tree.length) { el.innerHTML = `<div class="empty">${q ? 'No account matches that search.' : 'No accounts yet.'}</div>`; return; }
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   el.innerHTML = `<div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
-    <thead><tr style="background:var(--bg2);"><th ${th}>Code</th><th ${th}>Account</th><th ${th}>Type</th><th ${th}>Used for</th><th ${th}>Status</th></tr></thead>
+    <thead><tr style="background:var(--bg2);"><th ${th}>Code</th><th ${th}>Account</th><th ${th}>Type</th><th ${th}>Used for</th><th ${th.replace('text-align:left', 'text-align:right')} title="Net receipts in the chosen period">Received</th><th ${th}>Status</th></tr></thead>
     <tbody>${tree.map(r => {
       const used = chartState.usage[r.code] || 0;
       const roleTxt = r.is_group
@@ -15042,6 +15098,7 @@ function renderChartAccountsTable() {
         <td style="padding:7px 10px;${r.is_group ? 'font-weight:800;' : ''}padding-left:${10 + r.depth * 18}px;">${r.is_group ? '&#9662; ' : ''}${esc(r.name)}</td>
         <td style="padding:7px 10px;color:var(--text2);">${esc(CHART_KIND_LABELS[r.kind] || r.kind || '')}</td>
         <td style="padding:7px 10px;">${roleTxt}</td>
+        <td style="padding:7px 10px;text-align:right;white-space:nowrap;${r.is_group ? 'font-weight:800;' : 'font-weight:600;'}">${chartIsReceiving(r) ? (chartReceivedFor(r) ? (+chartReceivedFor(r)).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '&mdash;') : ''}</td>
         <td style="padding:7px 10px;">${r.active === false ? '<span style="color:#991b1b;font-weight:700;">Inactive</span>' : 'Active'}</td>
       </tr>`;
     }).join('')}</tbody>
@@ -25386,7 +25443,7 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
     : null;
   showSaving(true);
   try {
-    const updated = await api('PATCH', `/api/jobs/${jobId}/deliveries/${index}`, { field, value: valueStr });
+    const updated = await apiWithReason('PATCH', `/api/jobs/${jobId}/deliveries/${index}`, { field, value: valueStr });
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     notify('Saved');
@@ -25401,7 +25458,11 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
       if (idx >= 0) openProductHistoryModal(idx); else closeModal();
     }
     if (document.getElementById('sr-content')) renderSaleReport();
-  } catch (e) { notify('Error: ' + e.message); }
+  } catch (e) {
+    notify(e.cancelled ? e.message : 'Error: ' + e.message);
+    // put the typed value back to what is saved
+    if (e.cancelled && document.getElementById('sr-content')) renderSaleReport();
+  }
   showSaving(false);
 }
 
@@ -25488,13 +25549,13 @@ async function removeDelivery(jobId, index) {
   if (!ok) return;
   showSaving(true);
   try {
-    const updated = await api('DELETE', `/api/jobs/${jobId}/deliveries/${index}`);
+    const updated = await apiWithReason('DELETE', `/api/jobs/${jobId}/deliveries/${index}`);
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     const place = captureJobEditPlace();
     closeModal(); render(); notify('Delivery entry removed');
     setTimeout(() => { openEdit(jobId); restoreJobEditPlace(place); }, 50);
-  } catch (e) { notify('Error: ' + e.message); }
+  } catch (e) { notify(e.cancelled ? e.message : 'Error: ' + e.message); }
   showSaving(false);
 }
 

@@ -7786,6 +7786,11 @@ function partyReceiptFromBody(b, allowed) {
     return { error: 'Amount must be a number above 0.' };
   }
   const clean = (v, max) => { const t = String(v == null ? '' : v).trim(); return t ? t.slice(0, max) : null; };
+  // Credit / Debit Notes and Tax deducted (JV) change what a client owes
+  // with no bank money behind them - each must say why.
+  if (['credit_note', 'debit_note', 'jv'].includes(kind) && !clean(b && b.reference, 200)) {
+    return { error: 'Give the reason / reference for this entry (e.g. the CPR no., or why the credit was given).' };
+  }
   const bank_code = clean(b && b.bank_code, 20);
   if (bank_code && !acctMap.has(bank_code)) return { error: 'Pick the bank / cash account from the list (Chart of Accounts).' };
   if (bank_code && !isVoucher) return { error: 'A bank account goes on a receipt voucher only.' };
@@ -7907,6 +7912,42 @@ app.put('/api/party-openings', requirePermission('rpt_party_ledger_entry'), asyn
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// ── Paid-invoice guard ────────────────────────────────────────────
+// A delivery whose invoice no. is named on a receipt ("against invoice no")
+// has had money received against it. Changing its amount (Rate, Sale Tax %,
+// delivered qty) or removing it changes what the client owed - allowed, but
+// only with a stated reason, which goes to the audit log.
+function invoiceKeyParts(s) {
+  const t = String(s || '').toLowerCase();
+  return { norm: t.replace(/[^a-z0-9]/g, ''), digits: t.replace(/\D/g, '') };
+}
+// "822" matches a receipt's "822, 823", "INV-822" or "inv 822".
+function invoiceRefMatches(invText, invoiceNos) {
+  const a = invoiceKeyParts(invText);
+  if (!a.norm) return false;
+  return String(invoiceNos || '').split(/[,;\/&\s]+/).some(tok => {
+    const b = invoiceKeyParts(tok);
+    if (!b.norm) return false;
+    if (b.norm === a.norm) return true;
+    return !!b.digits && b.digits === a.digits && (b.norm === b.digits || a.norm === a.digits);
+  });
+}
+async function paidInvoiceGuard(sql, invText, reasonRaw) {
+  const inv = String(invText || '').trim();
+  if (!inv || inv === 'Backfilled from legacy delqty on schema upgrade') return { reason: null, receipts: [] };
+  const rows = await sql`SELECT id, voucher_no, invoice_nos FROM finance.party_receipts
+                          WHERE deleted_at IS NULL AND invoice_nos IS NOT NULL AND invoice_nos <> ''`;
+  const hits = rows.filter(r => invoiceRefMatches(inv, r.invoice_nos)).map(r => r.voucher_no || ('receipt #' + r.id));
+  if (!hits.length) return { reason: null, receipts: [] };
+  const reason = String(reasonRaw || '').trim().slice(0, 300);
+  if (reason.length < 3) {
+    return { error: { needs_reason: true, receipts: hits,
+      error: `Invoice ${inv} already has money received against it (${hits.join(', ')}). Give a reason for this change.` } };
+  }
+  return { reason, receipts: hits };
+}
+const guardNote = (g) => (g && g.reason) ? ` · reason: ${g.reason} (paid via ${g.receipts.join(', ')})` : '';
+
 // ── Chart of Accounts ─────────────────────────────────────────────
 const CHART_KINDS = new Set(['asset', 'liability', 'equity', 'income', 'expense']);
 const CHART_ROLES = new Set(['cash', 'bank', 'party']);
@@ -7939,6 +7980,21 @@ function chartPartyCodes(rows) {
   const out = {};
   for (const r of rows) if (!r.is_group && r.company && r.active !== false) out[String(r.company).trim().toLowerCase()] = r.code;
   return out;
+}
+// Money RECEIVED into each cash / bank account through receipt vouchers
+// (net receipt - tax deducted never reaches the bank), optionally for a
+// date range. Not a bank balance: payments and transfers are not in the app.
+async function chartReceived(sql, from, to) {
+  const f = partyDateOk(from) ? String(from) : null;
+  const t = partyDateOk(to) ? String(to) : null;
+  const rows = await sql`
+    SELECT bank_code, COALESCE(SUM(amount), 0)::float AS total, COUNT(*)::int AS n
+      FROM finance.party_receipts
+     WHERE deleted_at IS NULL AND bank_code IS NOT NULL AND kind IN ('cash', 'bank', 'cheque')
+       AND (${f}::text IS NULL OR entry_date >= ${f})
+       AND (${t}::text IS NULL OR entry_date <= ${t})
+     GROUP BY bank_code`;
+  return Object.fromEntries(rows.map(r => [r.bank_code, { total: Number(r.total) || 0, n: r.n }]));
 }
 async function chartUsage(sql) {
   const rows = await sql`SELECT bank_code, COUNT(*)::int AS n FROM finance.party_receipts
@@ -7982,7 +8038,8 @@ app.get('/api/chart-accounts', requirePermission('rpt_chart_accounts', 'view'), 
   try {
     await dbReady;
     const sql = getDb();
-    res.json({ accounts: await chartAll(sql), usage: await chartUsage(sql) });
+    res.json({ accounts: await chartAll(sql), usage: await chartUsage(sql),
+      received: await chartReceived(sql, req.query.from, req.query.to) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/chart-accounts', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
@@ -8518,6 +8575,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
     const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
     if (ix < 0 || ix >= list.length) return res.status(400).json({ error: 'Delivery index out of range' });
     const removed = list.splice(ix, 1)[0] || null;
+    const delGuard = await paidInvoiceGuard(sql, removed && removed.notes, req.query.reason);
+    if (delGuard.error) return res.status(409).json(delGuard.error);
     const totalCartons = sumDeliveryCartons(list);
     const bookedQty    = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
     const nowIso = new Date().toISOString();
@@ -8557,8 +8616,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       action: 'job.delivery.remove',
       entityType: 'job',
       entityId: id,
-      summary: `Removed delivery entry #${ix + 1} from Job E-${id}`,
-      metadata: { removed, remaining_total: totalCartons },
+      summary: `Removed delivery entry #${ix + 1} from Job E-${id}${guardNote(delGuard)}`,
+      metadata: { removed, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -8592,6 +8651,9 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       if (which === 'tax_pct' && num === null) return res.status(400).json({ error: 'Sale Tax % is required.' });
       const frozen = freezeLegacyDeliveryRates(list, job);
       const prev = frozen[ix];
+      const prevNum = (prev[which] === null || prev[which] === undefined || prev[which] === '') ? null : Number(prev[which]);
+      const guard = prevNum !== num ? await paidInvoiceGuard(sql, prev.notes, req.body?.reason) : { reason: null, receipts: [] };
+      if (guard.error) return res.status(409).json(guard.error);
       const entry = { ...prev };
       if (which === 'rate') {
         entry.rate = num;
@@ -8610,8 +8672,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       `;
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override },
+        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}${guardNote(guard)}`,
+        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override, reason: guard.reason, paid_via: guard.receipts },
       });
       return res.json(upd[0]);
     }
@@ -8658,6 +8720,9 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
         return res.status(400).json({ error: 'Cartons must be a positive number.' });
       }
+      const cartonsGuard = cartonsN !== (parseFloat(String(before.cartons || '').replace(/[^0-9.\-]/g, '')) || 0)
+        ? await paidInvoiceGuard(sql, before.notes, req.body?.reason) : { reason: null, receipts: [] };
+      if (cartonsGuard.error) return res.status(409).json(cartonsGuard.error);
       list[ix] = { ...before, cartons: String(cartonsN) };
       const totalCartons = sumDeliveryCartons(list);
       const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
@@ -8698,8 +8763,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
         action: 'job.delivery.edit',
         entityType: 'job',
         entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"`,
-        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN) },
+        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"${guardNote(cartonsGuard)}`,
+        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN), reason: cartonsGuard.reason, paid_via: cartonsGuard.receipts },
       });
       return res.json(updated[0]);
     }
