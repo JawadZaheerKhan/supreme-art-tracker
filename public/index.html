@@ -14571,6 +14571,10 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
 // deducted at source, and the Net Receipt that actually landed.
 function plIsVoucher(r) { return !!r && ['bank', 'cheque', 'cash'].includes(r.kind); }
 function plAccounts() { return ((partyLedgerState.data || {}).accounts) || []; }
+// The account tax deducted is debited to (Chart of Accounts group marked
+// "Tax deducted"), or null until one is set up.
+function plTaxAccount() { return ((partyLedgerState.data || {}).taxAccount) || null; }
+const PL_TAX_DEFAULT_NAME = 'Advance Income Tax (tax deducted)';
 // A company's party account code from the Chart of Accounts ('' if not linked).
 function plPartyCode(company) { return (((partyLedgerState.data || {}).partyCodes) || {})[partyKey(company)] || ''; }
 function plAccountLabel(code) {
@@ -14656,10 +14660,11 @@ function openReceiptVoucherPaper(id) {
   plEditingReceipt = r || null;
   const tax = r ? (+r.tax_deducted || 0) : 0;
   const total = r ? (+r.amount || 0) + tax : '';
+  const taxAcct = plTaxAccount();
   const fld = 'border:none;border-bottom:1px dotted #444;border-radius:0;background:transparent;padding:3px 4px;font:inherit;color:#000;box-shadow:none;outline:none;';
   const cell = 'border:1px solid #000;padding:6px 8px;';
   const accounts = plAccounts().filter(a => a.active !== false || (r && r.bank_code === a.code));
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:800px;">
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:820px;">
     <input type="hidden" id="plr-kind" value="voucher">
     ${canEdit && !r ? `<div style="text-align:right;font-size:12px;margin:-6px 0 8px;"><a href="#" onclick="event.preventDefault(); closeModal(); openPartyReceiptModal(0, 'jv');" style="color:var(--text2);">Other entry: Tax deducted / Credit Note / Debit Note &rarr;</a></div>` : ''}
     <div style="background:#fff;color:#000;border:1px solid #d6d3d1;border-radius:6px;padding:22px 26px;font-family:'Times New Roman',Times,serif;">
@@ -14681,12 +14686,25 @@ function openReceiptVoucherPaper(id) {
       </div>
       <table style="width:100%;border-collapse:collapse;font-size:14.5px;">
         <tr>
-          <th style="${cell}width:16%;font-weight:bold;">Account<br>Code</th>
+          <th style="${cell}width:14%;font-weight:bold;">Account<br>Code</th>
           <th style="${cell}font-weight:bold;">Head of Account</th>
-          <th style="${cell}width:25%;font-weight:bold;">Amount (Cr)<br>Rs.</th>
+          <th style="${cell}width:19%;font-weight:bold;">Debit<br>Rs.</th>
+          <th style="${cell}width:19%;font-weight:bold;">Credit<br>Rs.</th>
         </tr>
-        <tr style="vertical-align:top;height:180px;">
-          <td style="${cell}text-align:center;"><span id="plv-party-code"></span></td>
+        <tr>
+          <td style="${cell}text-align:center;" id="plv-bank-code"></td>
+          <td style="${cell}" id="plv-bank-name"></td>
+          <td style="${cell}text-align:right;font-weight:bold;" id="plr-net" title="What actually came in: Total − Tax Deducted">&mdash;</td>
+          <td style="${cell}"></td>
+        </tr>
+        <tr>
+          <td style="${cell}text-align:center;">${esc(taxAcct ? taxAcct.code : '')}</td>
+          <td style="${cell}">${esc(taxAcct ? taxAcct.name : PL_TAX_DEFAULT_NAME)}${!taxAcct && canEdit ? ` <span style="font-family:system-ui,sans-serif;font-size:10.5px;color:#b45309;" title="Chart of Accounts: add a group used for 'Tax deducted' and the account under it - its code and name then show here">no account set</span>` : ''}</td>
+          <td style="${cell}text-align:right;"><input type="number" id="plr-tax" min="0" step="any" value="${tax ? esc(String(tax)) : ''}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" title="Tax the party deducted at source" style="${fld}width:100%;text-align:right;"></td>
+          <td style="${cell}"></td>
+        </tr>
+        <tr style="vertical-align:top;height:140px;">
+          <td style="${cell}"></td>
           <td style="${cell}">
             <select id="plr-company" onchange="plVoucherPartySync()" ${dis} style="${fld}width:100%;font-weight:bold;">
               <option value="">Pick the party (received from)…</option>
@@ -14694,12 +14712,17 @@ function openReceiptVoucherPaper(id) {
             </select>
             <div style="margin-top:12px;font-size:13.5px;display:flex;align-items:center;gap:6px;">Against invoice no(s): <input type="text" id="plr-inv" value="${esc(r ? (r.invoice_nos || '') : '')}" placeholder="e.g. 822, 823 (optional)" ${dis} style="${fld}flex:1;"></div>
           </td>
-          <td style="${cell}text-align:right;"><input type="number" id="plr-total" min="0" step="any" value="${total === '' ? '' : esc(String(total))}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" style="${fld}width:100%;text-align:right;font-weight:bold;"></td>
+          <td style="${cell}"></td>
+          <td style="${cell}text-align:right;"><input type="number" id="plr-total" min="0" step="any" value="${total === '' ? '' : esc(String(total))}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" title="The full amount the party is paid off by" style="${fld}width:100%;text-align:right;font-weight:bold;"></td>
         </tr>
-        <tr><td style="border-left:1px solid #000;"></td><td style="${cell}text-align:right;font-weight:bold;">Total</td><td style="${cell}text-align:right;" id="plv-total-show">&mdash;</td></tr>
-        <tr><td style="border-left:1px solid #000;"></td><td style="${cell}text-align:right;font-weight:bold;">Tax Deducted</td><td style="${cell}text-align:right;"><input type="number" id="plr-tax" min="0" step="any" value="${tax ? esc(String(tax)) : ''}" oninput="plReceiptNetSync()" ${dis} placeholder="0.00" style="${fld}width:100%;text-align:right;"></td></tr>
-        <tr><td style="border-left:1px solid #000;border-bottom:1px solid #000;"></td><td style="${cell}text-align:right;font-weight:bold;">Net Receipt</td><td style="${cell}text-align:right;font-weight:bold;" id="plr-net">&mdash;</td></tr>
+        <tr>
+          <td style="border-left:1px solid #000;border-bottom:1px solid #000;"></td>
+          <td style="${cell}text-align:right;font-weight:bold;">Total</td>
+          <td style="${cell}text-align:right;font-weight:bold;" id="plv-dr-total">&mdash;</td>
+          <td style="${cell}text-align:right;font-weight:bold;" id="plv-cr-total">&mdash;</td>
+        </tr>
       </table>
+      ${canEdit ? `<div style="font-family:system-ui,sans-serif;font-size:11.5px;color:#666;margin-top:6px;">Type the full amount in the party's <b>Credit</b> and the tax the party kept in the tax line's <b>Debit</b> — the bank's Debit (what actually came in) works itself out.</div>` : ''}
       <div style="margin-top:14px;font-size:14.5px;"><b>Rupees:</b> <span id="plv-words" style="border-bottom:1px solid #000;padding:0 6px;"></span></div>
       <div style="margin-top:10px;font-size:14.5px;display:flex;align-items:center;gap:6px;"><b>Particular:</b> <input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="cheque no., bank slip…" ${dis} style="${fld}flex:1;"></div>
       <div style="margin-top:8px;font-size:13px;display:flex;align-items:center;gap:6px;color:#444;">Notes: <input type="text" id="plr-notes" value="${esc(r ? (r.notes || '') : '')}" ${dis} style="${fld}flex:1;"></div>
@@ -14717,7 +14740,6 @@ function openReceiptVoucherPaper(id) {
   </div>`);
   plReceiptNetSync();
   plVoucherNoPreview();
-  plVoucherPartySync();
 }
 function plVoucherPartySync() {
   const el = document.getElementById('plv-party-code');
@@ -14756,11 +14778,15 @@ function plVoucherNoPreview() {
   const code = (document.getElementById('plr-bank') || {}).value || '';
   const date = (document.getElementById('plr-date') || {}).value || '';
   const acct = plAccounts().find(a => a.code === code);
-  // The paper voucher's title and code label follow the account picked.
+  // The paper voucher's title, code label and bank (Debit) line follow the account picked.
   const title = document.getElementById('plv-title');
   if (title) title.textContent = acct ? (acct.cash ? 'Cash Receipts Voucher' : 'Bank Receipts Voucher') : 'Receipts Voucher';
   const codeLabel = document.getElementById('plv-code-label');
   if (codeLabel) codeLabel.textContent = acct ? (acct.cash ? 'Cash Code:' : 'Bank Code:') : 'Bank / Cash Code:';
+  const bc = document.getElementById('plv-bank-code');
+  if (bc) bc.textContent = acct ? acct.code : '';
+  const bn = document.getElementById('plv-bank-name');
+  if (bn) bn.innerHTML = acct ? esc(acct.name) : '<span style="color:#999;">(pick the account above)</span>';
   const r = plEditingReceipt;
   if (r && plIsVoucher(r) && r.voucher_no && (!acct || !!acct.cash === (r.kind === 'cash'))) {
     el.innerHTML = esc(r.voucher_no);
@@ -14774,10 +14800,12 @@ function plReceiptNetSync() {
   const tax = Number((document.getElementById('plr-tax') || {}).value || 0);
   const any = total > 0 || tax > 0;
   const money2 = (n) => (+n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const el = document.getElementById('plr-net');
-  if (el) el.textContent = any ? money2(total - tax) : '—';
-  const ts = document.getElementById('plv-total-show');
-  if (ts) ts.textContent = total > 0 ? money2(total) : '—';
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  // Bank Debit = what actually came in; Debit total (bank + tax) = Credit (party) = Total.
+  set('plr-net', any ? money2(total - tax) : '—');
+  set('plv-total-show', total > 0 ? money2(total) : '—');
+  set('plv-dr-total', any ? money2(total) : '—');
+  set('plv-cr-total', total > 0 ? money2(total) : '—');
   const w = document.getElementById('plv-words');
   if (w) w.textContent = any ? plAmountWords(total - tax) : '';
 }
@@ -14846,12 +14874,16 @@ function printPartyVoucher(id) {
   if (!r) { notify('Voucher not found.'); return; }
   const acct = plAccounts().find(a => a.code === String(r.bank_code || '')) || { code: r.bank_code || '', name: '' };
   const isCash = r.kind === 'cash' || !!acct.cash;
-  // The party's own code from the Chart of Accounts (blank until linked).
-  const partyCode = plPartyCode(r.company);
+  const taxAcct = plTaxAccount();
   const net = +r.amount || 0, tax = +r.tax_deducted || 0, total = net + tax;
   const money = (n) => (+n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const b = 'border:1px solid #000;';
-  const particular = [r.reference, r.invoice_nos ? `against invoice no = ${r.invoice_nos}` : '', r.notes].filter(Boolean).join(' · ');
+  const particular = [r.reference, r.notes].filter(Boolean).join(' · ');
+  // Double entry: bank / cash Debit (what came in) + tax Debit = party Credit.
+  const lines = [
+    { code: acct.code, head: acct.name, dr: net, cr: 0 },
+    ...(tax > 0 ? [{ code: taxAcct ? taxAcct.code : '', head: taxAcct ? taxAcct.name : PL_TAX_DEFAULT_NAME, dr: tax, cr: 0 }] : []),
+  ];
   const area = document.getElementById('print-area');
   area.innerHTML = `
     <style>@media print { @page { size: A4 portrait; margin: 0.5in; } }</style>
@@ -14871,18 +14903,29 @@ function printPartyVoucher(id) {
       </table>
       <table style="width:100%;border-collapse:collapse;font-size:11pt;">
         <tr>
-          <th style="${b}padding:5px;width:16%;">Account<br>Code</th>
+          <th style="${b}padding:5px;width:14%;">Account<br>Code</th>
           <th style="${b}padding:5px;">Head of Account</th>
-          <th style="${b}padding:5px;width:22%;">Amount (Cr)<br>Rs.</th>
+          <th style="${b}padding:5px;width:19%;">Debit<br>Rs.</th>
+          <th style="${b}padding:5px;width:19%;">Credit<br>Rs.</th>
         </tr>
-        <tr style="height:360px;vertical-align:top;">
-          <td style="${b}padding:6px;text-align:center;">${esc(partyCode)}</td>
-          <td style="${b}padding:6px;">${esc(r.company)}</td>
+        ${lines.map(l => `<tr>
+          <td style="${b}padding:6px;text-align:center;">${esc(l.code)}</td>
+          <td style="${b}padding:6px;">${esc(l.head)}</td>
+          <td style="${b}padding:6px;text-align:right;">${money(l.dr)}</td>
+          <td style="${b}padding:6px;"></td>
+        </tr>`).join('')}
+        <tr style="height:260px;vertical-align:top;">
+          <td style="${b}padding:6px;"></td>
+          <td style="${b}padding:6px;">${esc(r.company)}${r.invoice_nos ? `<div style="font-size:10pt;margin-top:4px;">against invoice no = ${esc(r.invoice_nos)}</div>` : ''}</td>
+          <td style="${b}padding:6px;"></td>
           <td style="${b}padding:6px;text-align:right;">${money(total)}</td>
         </tr>
-        <tr><td style="border-left:1px solid #000;"></td><td style="${b}padding:5px;text-align:right;font-weight:bold;">Total</td><td style="${b}padding:5px;text-align:right;">${money(total)}</td></tr>
-        <tr><td style="border-left:1px solid #000;"></td><td style="${b}padding:5px;text-align:right;font-weight:bold;">Tax Deducted</td><td style="${b}padding:5px;text-align:right;">${tax ? money(tax) : '-'}</td></tr>
-        <tr><td style="border-left:1px solid #000;border-bottom:1px solid #000;"></td><td style="${b}padding:5px;text-align:right;font-weight:bold;">Net Receipt</td><td style="${b}padding:5px;text-align:right;font-weight:bold;">${money(net)}</td></tr>
+        <tr>
+          <td style="border-left:1px solid #000;border-bottom:1px solid #000;"></td>
+          <td style="${b}padding:5px;text-align:right;font-weight:bold;">Total</td>
+          <td style="${b}padding:5px;text-align:right;font-weight:bold;">${money(total)}</td>
+          <td style="${b}padding:5px;text-align:right;font-weight:bold;">${money(total)}</td>
+        </tr>
       </table>
       <div style="margin-top:14px;font-size:11pt;"><b>Rupees:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${esc(plAmountWords(net))}</span></div>
       <div style="margin-top:10px;font-size:11pt;"><b>Particular:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${esc(particular)}</span></div>
@@ -15049,7 +15092,7 @@ async function exportPartyLedger() {
 // voucher prints the party's code.
 const chartState = { rows: [], usage: {}, q: '', showInactive: false, error: '', period: 'month', from: '', to: '', received: {} };
 const CHART_KIND_LABELS = { asset: 'Asset', liability: 'Liability', equity: 'Equity', income: 'Income', expense: 'Expense' };
-const CHART_ROLE_LABELS = { cash: 'Cash — receipts go in', bank: 'Bank — receipts go in', party: 'Party Ledger — customers' };
+const CHART_ROLE_LABELS = { cash: 'Cash — receipts go in', bank: 'Bank — receipts go in', party: 'Party Ledger — customers', tax: 'Tax deducted — receipt vouchers' };
 function chartCanEdit() { return hasPerm('rpt_chart_accounts_edit', 'yes'); }
 function chartCodeCmp(a, b) { return String(a).localeCompare(String(b), undefined, { numeric: true }); }
 async function loadChartAccounts() {
@@ -15193,7 +15236,7 @@ function renderChartAccountsTable() {
       const used = chartState.usage[r.code] || 0;
       const roleTxt = r.is_group
         ? (r.role ? `<span style="background:#dbeafe;color:#1e40af;font-size:11px;font-weight:700;padding:1px 8px;border-radius:999px;">${esc(CHART_ROLE_LABELS[r.role] || r.role)}</span>` : '')
-        : (r.company ? `Customer: <b>${esc(r.company)}</b>` : (['cash', 'bank'].includes(chartRoleOf(r.parent_code)) ? `Receipts${used ? ` &middot; ${used} voucher${used === 1 ? '' : 's'}` : ''}` : ''));
+        : (r.company ? `Customer: <b>${esc(r.company)}</b>` : (['cash', 'bank'].includes(chartRoleOf(r.parent_code)) ? `Receipts${used ? ` &middot; ${used} voucher${used === 1 ? '' : 's'}` : ''}` : (chartRoleOf(r.parent_code) === 'tax' ? 'Tax deducted on receipt vouchers (Debit)' : '')));
       const click = canEdit ? ` onclick="openChartAccountModal(${r.id})" title="Edit this account" style="cursor:pointer;border-bottom:1px solid var(--border);${r.active === false ? 'opacity:0.55;' : ''}"` : ` style="border-bottom:1px solid var(--border);${r.active === false ? 'opacity:0.55;' : ''}"`;
       return `<tr class="${canEdit ? 'row-hover-red cv-summary-row' : ''}"${click}>
         <td style="padding:7px 10px;font-family:monospace;font-weight:${r.is_group ? 800 : 600};white-space:nowrap;padding-left:${10 + r.depth * 18}px;">${esc(r.code)}</td>

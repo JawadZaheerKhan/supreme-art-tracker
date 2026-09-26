@@ -7822,7 +7822,7 @@ app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), asyn
     const openings = await sql`SELECT * FROM finance.party_openings ORDER BY company ASC`;
     const chart = await chartAll(sql);
     res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS,
-      accounts: chartReceivingAccounts(chart), partyCodes: chartPartyCodes(chart) });
+      accounts: chartReceivingAccounts(chart), partyCodes: chartPartyCodes(chart), taxAccount: chartTaxAccount(chart) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
@@ -7964,7 +7964,7 @@ const guardNote = (g) => (g && g.reason) ? ` · reason: ${g.reason} (paid via ${
 
 // ── Chart of Accounts ─────────────────────────────────────────────
 const CHART_KINDS = new Set(['asset', 'liability', 'equity', 'income', 'expense']);
-const CHART_ROLES = new Set(['cash', 'bank', 'party']);
+const CHART_ROLES = new Set(['cash', 'bank', 'party', 'tax']);
 async function chartAll(sql) {
   return sql`SELECT * FROM finance.chart_accounts ORDER BY code ASC`;
 }
@@ -7988,6 +7988,14 @@ function chartReceivingAccounts(rows) {
 }
 function chartReceivingMap(rows) {
   return new Map(chartReceivingAccounts(rows).map(a => [a.code, { cash: a.cash }]));
+}
+// The account a receipt's tax deducted at source is debited to: the first
+// active plain account under a group marked "Tax deducted" (null if none).
+function chartTaxAccount(rows) {
+  const roleOf = chartRoleResolver(rows);
+  const a = rows.filter(r => !r.is_group && r.active !== false && roleOf(r.parent_code) === 'tax')
+    .sort((x, y) => String(x.code).localeCompare(String(y.code), undefined, { numeric: true }))[0];
+  return a ? { code: a.code, name: a.name } : null;
 }
 // Company (lower-case) -> its party account code.
 function chartPartyCodes(rows) {
