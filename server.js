@@ -7749,15 +7749,14 @@ function voucherPrefix(kind, dateStr) {
   return (kind === 'cash' ? 'CRV' : 'BRV') + '-' + voucherFy(dateStr);
 }
 // Next number for a prefix, handed out atomically (one statement), so two
-// people saving at once never get the same number. The first use of a
-// prefix starts after the highest number already on file for it.
+// people saving at once never get the same number. Every series starts
+// fresh at 0001 (owner's call) - numbers typed into older entries are
+// not continued from.
 async function nextVoucherNo(sql, kind, dateStr) {
   const prefix = voucherPrefix(kind, dateStr);
-  const like = prefix + '-%';
   const r = await sql`
     INSERT INTO finance.voucher_counters (prefix, last_number)
-    VALUES (${prefix}, (SELECT COALESCE(MAX(substring(voucher_no from '(\\d+)$')::int), 0) + 1
-                          FROM finance.party_receipts WHERE voucher_no LIKE ${like}))
+    VALUES (${prefix}, 1)
     ON CONFLICT (prefix) DO UPDATE SET last_number = finance.voucher_counters.last_number + 1
     RETURNING last_number`;
   return prefix + '-' + String(r[0].last_number).padStart(4, '0');
