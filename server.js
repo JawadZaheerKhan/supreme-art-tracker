@@ -288,7 +288,8 @@ function getDb() {
 // invoice_nos on finance.party_receipts.
 // Bumped again for the Chart of Accounts: finance.chart_accounts (seeded
 // with Cash / Bank / Party Ledger groups) and its Access Register rows.
-const SCHEMA_VERSION = 'v2026-09-26-chart-of-accounts';
+// Bumped again for automatic voucher numbers (finance.voucher_counters).
+const SCHEMA_VERSION = 'v2026-09-26-voucher-numbers';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1601,6 +1602,12 @@ async function initDb() {
     // groups the app reads: 'cash' / 'bank' (where receipts go in) and
     // 'party' (customers). A party account links to one Company Settings
     // company, so vouchers print its code.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.voucher_counters (
+        prefix      TEXT PRIMARY KEY,
+        last_number INTEGER NOT NULL
+      )
+    `;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.chart_accounts (
         id          SERIAL PRIMARY KEY,
@@ -7729,6 +7736,32 @@ const PARTY_ACCOUNTS = {
   '12108': 'Al-Barka Bank',
   '12109': 'Bank Al-Falah',
 };
+// Financial year label (July-June), as the accounts system writes it:
+// any date from 1 Jul 2026 to 30 Jun 2027 is "27".
+function voucherFy(dateStr) {
+  const m = /^(\d{4})-(\d{2})/.exec(String(dateStr || ''));
+  const now = new Date();
+  const y = m ? +m[1] : now.getFullYear();
+  const mo = m ? +m[2] : now.getMonth() + 1;
+  return String((mo >= 7 ? y + 1 : y) % 100).padStart(2, '0');
+}
+function voucherPrefix(kind, dateStr) {
+  return (kind === 'cash' ? 'CRV' : 'BRV') + '-' + voucherFy(dateStr);
+}
+// Next number for a prefix, handed out atomically (one statement), so two
+// people saving at once never get the same number. The first use of a
+// prefix starts after the highest number already on file for it.
+async function nextVoucherNo(sql, kind, dateStr) {
+  const prefix = voucherPrefix(kind, dateStr);
+  const like = prefix + '-%';
+  const r = await sql`
+    INSERT INTO finance.voucher_counters (prefix, last_number)
+    VALUES (${prefix}, (SELECT COALESCE(MAX(substring(voucher_no from '(\\d+)$')::int), 0) + 1
+                          FROM finance.party_receipts WHERE voucher_no LIKE ${like}))
+    ON CONFLICT (prefix) DO UPDATE SET last_number = finance.voucher_counters.last_number + 1
+    RETURNING last_number`;
+  return prefix + '-' + String(r[0].last_number).padStart(4, '0');
+}
 function partyDateOk(v) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
   return !!m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
@@ -7780,6 +7813,8 @@ app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), asy
     const sql = getDb();
     const { row, error } = partyReceiptFromBody(req.body || {}, chartReceivingMap(await chartAll(sql)));
     if (error) return res.status(400).json({ error });
+    // Receipt vouchers are numbered by the app: CRV (cash) / BRV (bank).
+    if (PARTY_VOUCHER_KINDS.has(row.kind)) row.voucher_no = await nextVoucherNo(sql, row.kind, row.entry_date);
     const ins = await sql`
       INSERT INTO finance.party_receipts (company, entry_date, kind, voucher_no, reference, amount, notes, bank_code, tax_deducted, invoice_nos, created_by, updated_by)
       VALUES (${row.company}, ${row.entry_date}, ${row.kind}, ${row.voucher_no}, ${row.reference}, ${row.amount}, ${row.notes}, ${row.bank_code}, ${row.tax_deducted}, ${row.invoice_nos}, ${req.user.email}, ${req.user.email})
@@ -7801,6 +7836,12 @@ app.put('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), 
     if (!prev) return res.status(404).json({ error: 'Receipt not found' });
     const { row, error } = partyReceiptFromBody(req.body || {}, chartReceivingMap(await chartAll(sql)));
     if (error) return res.status(400).json({ error });
+    // A voucher keeps its number - unless it moved between cash and bank
+    // (CRV <-> BRV) or never had one, then it gets the next of its kind.
+    if (PARTY_VOUCHER_KINDS.has(row.kind)) {
+      const sameSide = PARTY_VOUCHER_KINDS.has(prev.kind) && ((prev.kind === 'cash') === (row.kind === 'cash'));
+      row.voucher_no = (sameSide && prev.voucher_no) ? prev.voucher_no : await nextVoucherNo(sql, row.kind, row.entry_date);
+    }
     const upd = await sql`
       UPDATE finance.party_receipts SET company = ${row.company}, entry_date = ${row.entry_date}, kind = ${row.kind},
              voucher_no = ${row.voucher_no}, reference = ${row.reference}, amount = ${row.amount}, notes = ${row.notes},

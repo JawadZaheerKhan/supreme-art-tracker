@@ -14563,6 +14563,7 @@ function openPartyReceiptModal(id) {
   const cur = r ? r.company : partyLedgerState.company;
   const today = localDateISO();
   const mode = !r || plIsVoucher(r) ? 'voucher' : r.kind;
+  plEditingReceipt = r || null;
   const tax = r ? (+r.tax_deducted || 0) : 0;
   const total = r ? (+r.amount || 0) + tax : '';
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
@@ -14573,19 +14574,21 @@ function openPartyReceiptModal(id) {
           <option value="voucher"${mode === 'voucher' ? ' selected' : ''}>Receipt Voucher (bank / cash)</option>
           ${['jv', 'credit_note', 'debit_note'].map(k => `<option value="${k}"${mode === k ? ' selected' : ''}>${esc(PARTY_KIND_LABELS[k])}${PARTY_DEBIT_KINDS.has(k) ? ' (adds to balance)' : ''}</option>`).join('')}
         </select></div>
-      <div class="form-group"><label class="form-label">Voucher # <span style="font-weight:400;color:var(--text2);">(as in the accounts system)</span></label><input type="text" id="plr-vno" value="${esc(r ? (r.voucher_no || '') : '')}" placeholder="e.g. BRV-27-0046"></div>
+      <div class="form-group"><label class="form-label">Voucher #</label>
+        <div id="plr-vno-auto" style="display:${mode === 'voucher' ? '' : 'none'};padding:8px 2px;font-weight:700;font-family:monospace;"></div>
+        <input type="text" id="plr-vno" value="${esc(r && !plIsVoucher(r) ? (r.voucher_no || '') : '')}" placeholder="e.g. JVO-27-0020" style="display:${mode === 'voucher' ? 'none' : ''};"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Received from (party) *</label>
         <select id="plr-company"><option value="">Pick the company…</option>
           ${companies.map(c => `<option value="${esc(c)}"${partyKey(c) === partyKey(cur) ? ' selected' : ''}>${esc(c)}</option>`).join('')}
         </select></div>
-      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="plr-date" value="${esc(r ? r.entry_date : today)}" max="${today}"></div>
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="plr-date" value="${esc(r ? r.entry_date : today)}" max="${today}" onchange="plVoucherNoPreview()"></div>
     </div>
     <div id="plr-voucher-block" style="display:${mode === 'voucher' ? '' : 'none'};">
       <div class="form-row">
         <div class="form-group"><label class="form-label">Received into (account) *</label>
-          <select id="plr-bank"><option value="">Pick the bank / cash account…</option>
+          <select id="plr-bank" onchange="plVoucherNoPreview()"><option value="">Pick the bank / cash account…</option>
             ${plAccounts().filter(a => a.active !== false || (r && r.bank_code === a.code)).map(a => `<option value="${esc(a.code)}"${r && r.bank_code === a.code ? ' selected' : ''}>${esc(a.code)} &nbsp; ${esc(a.name)}</option>`).join('')}
           </select></div>
         <div class="form-group"><label class="form-label">Against invoice no(s) <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="plr-inv" value="${esc(r ? (r.invoice_nos || '') : '')}" placeholder="e.g. 822, 823"></div>
@@ -14609,6 +14612,7 @@ function openPartyReceiptModal(id) {
     </div>
   </div>`);
   plReceiptNetSync();
+  plVoucherNoPreview();
 }
 function plReceiptModeChanged() {
   const v = (document.getElementById('plr-kind') || {}).value;
@@ -14616,6 +14620,34 @@ function plReceiptModeChanged() {
   const ob = document.getElementById('plr-other-block');
   if (vb) vb.style.display = v === 'voucher' ? '' : 'none';
   if (ob) ob.style.display = v === 'voucher' ? 'none' : '';
+  const auto = document.getElementById('plr-vno-auto');
+  const typed = document.getElementById('plr-vno');
+  if (auto) auto.style.display = v === 'voucher' ? '' : 'none';
+  if (typed) typed.style.display = v === 'voucher' ? 'none' : '';
+  plVoucherNoPreview();
+}
+// Receipt vouchers are numbered by the app: CRV-27-0001 (cash) / BRV-27-0001
+// (bank) - prefix, financial year (July-June), running number.
+let plEditingReceipt = null;
+function plVoucherFy(dateStr) {
+  const m = /^(\d{4})-(\d{2})/.exec(String(dateStr || ''));
+  const y = m ? +m[1] : new Date().getFullYear();
+  const mo = m ? +m[2] : new Date().getMonth() + 1;
+  return String((mo >= 7 ? y + 1 : y) % 100).padStart(2, '0');
+}
+function plVoucherNoPreview() {
+  const el = document.getElementById('plr-vno-auto');
+  if (!el) return;
+  const code = (document.getElementById('plr-bank') || {}).value || '';
+  const date = (document.getElementById('plr-date') || {}).value || '';
+  const acct = plAccounts().find(a => a.code === code);
+  const r = plEditingReceipt;
+  if (r && plIsVoucher(r) && r.voucher_no && (!acct || !!acct.cash === (r.kind === 'cash'))) {
+    el.innerHTML = esc(r.voucher_no);
+    return;
+  }
+  const prefix = acct ? `${acct.cash ? 'CRV' : 'BRV'}-${plVoucherFy(date)}` : 'CRV / BRV';
+  el.innerHTML = `${esc(prefix)}-&hellip; <span style="font-family:inherit;font-weight:500;font-size:11px;color:var(--text2);">${acct ? 'next number, given when saved' : '(CRV for Cash in Hand, BRV for a bank)'}</span>`;
 }
 function plReceiptNetSync() {
   const total = Number((document.getElementById('plr-total') || {}).value || 0);
@@ -14627,7 +14659,7 @@ async function savePartyReceipt(id) {
   const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
   const mode = val('plr-kind');
   const isVoucher = mode === 'voucher';
-  const body = { company: val('plr-company'), entry_date: val('plr-date'), voucher_no: val('plr-vno'),
+  const body = { company: val('plr-company'), entry_date: val('plr-date'), voucher_no: mode === 'voucher' ? '' : val('plr-vno'),
     reference: val('plr-ref'), notes: val('plr-notes') };
   if (!body.company) { await alertDialog({ title: 'Pick the party (company)', kind: 'warn' }); return; }
   if (!body.entry_date) { await alertDialog({ title: 'Pick the date', kind: 'warn' }); return; }
