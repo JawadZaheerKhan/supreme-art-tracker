@@ -284,7 +284,9 @@ function getDb() {
 // fast-path skipped the ALTER and every stock-ledger INSERT failed on the missing column.
 // Bumped again for the Party Ledger: finance.party_receipts / party_openings
 // and the rpt_party_ledger* Access Register rows.
-const SCHEMA_VERSION = 'v2026-09-25-party-ledger';
+// Bumped again for the Receipt Voucher: bank_code / tax_deducted /
+// invoice_nos on finance.party_receipts.
+const SCHEMA_VERSION = 'v2026-09-26-receipt-voucher';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1562,6 +1564,13 @@ async function initDb() {
       )
     `;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS party_openings_company_uq ON finance.party_openings (lower(company))`;
+    // Receipt Voucher: which of our accounts the money went into (12001 Cash
+    // in Hand / 121xx banks), tax the party deducted at source (posted as its
+    // own ledger line), and the invoice no(s) it is against (a tag only).
+    // amount stays the NET receipt; Total = amount + tax_deducted.
+    await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS bank_code TEXT`;
+    await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS tax_deducted NUMERIC NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS invoice_nos TEXT`;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_aliases (
         alias       TEXT PRIMARY KEY,
@@ -7650,6 +7659,22 @@ const PARTY_RECEIPT_KINDS = {
   credit_note: { label: 'Credit Note',       side: 'cr' },
   debit_note:  { label: 'Debit Note',        side: 'dr' },
 };
+// Receipt vouchers (money in, into one of our accounts). Old rows may still
+// carry 'cheque' - treated the same.
+const PARTY_VOUCHER_KINDS = new Set(['bank', 'cheque', 'cash']);
+// Our receiving accounts, as the chart of accounts numbers them.
+const PARTY_ACCOUNTS = {
+  '12001': 'Cash in Hand',
+  '12101': 'BAHL (K) 4181',
+  '12102': 'BAHL (IBB) 8360',
+  '12103': 'BAHL (Bilal Mkt) 3801',
+  '12104': 'MBL (K) 8188',
+  '12105': 'MBL (Bilal Mkt) 9585',
+  '12106': 'BOK 7487',
+  '12107': 'Faysal Bank 2465',
+  '12108': 'Al-Barka Bank',
+  '12109': 'Bank Al-Falah',
+};
 function partyDateOk(v) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
   return !!m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
@@ -7663,10 +7688,21 @@ function partyReceiptFromBody(b) {
   if (entry_date > businessDateISO()) return { error: 'Date cannot be in the future.' };
   const kind = String((b && b.kind) || '').trim();
   if (!PARTY_RECEIPT_KINDS[kind]) return { error: 'Pick a type (Bank Receipt, Cheque, Cash, Tax deducted, Credit Note or Debit Note).' };
-  const amount = Number(String((b && b.amount) ?? '').replace(/,/g, '').trim());
-  if (!Number.isFinite(amount) || amount <= 0) return { error: 'Amount must be a number above 0.' };
+  const num = (v) => { const t = String(v ?? '').replace(/,/g, '').trim(); return t === '' ? 0 : Number(t); };
+  const amount = num(b && b.amount);
+  const tax_deducted = num(b && b.tax_deducted);
+  const isVoucher = PARTY_VOUCHER_KINDS.has(kind);
+  if (!Number.isFinite(tax_deducted) || tax_deducted < 0) return { error: 'Tax deducted must be 0 or more.' };
+  if (tax_deducted > 0 && !isVoucher) return { error: 'Tax deducted goes on a receipt voucher only.' };
+  if (!Number.isFinite(amount) || amount < 0 || amount + tax_deducted <= 0 || (!isVoucher && amount <= 0)) {
+    return { error: 'Amount must be a number above 0.' };
+  }
   const clean = (v, max) => { const t = String(v == null ? '' : v).trim(); return t ? t.slice(0, max) : null; };
-  return { row: { company, entry_date, kind, amount,
+  const bank_code = clean(b && b.bank_code, 20);
+  if (bank_code && !PARTY_ACCOUNTS[bank_code]) return { error: 'Pick the bank / cash account from the list.' };
+  if (bank_code && !isVoucher) return { error: 'A bank account goes on a receipt voucher only.' };
+  return { row: { company, entry_date, kind, amount, tax_deducted, bank_code: isVoucher ? bank_code : null,
+    invoice_nos: clean(b && b.invoice_nos, 200),
     voucher_no: clean(b.voucher_no, 60), reference: clean(b.reference, 200), notes: clean(b.notes, 500) } };
 }
 app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), async (req, res) => {
@@ -7675,7 +7711,8 @@ app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), asyn
     const sql = getDb();
     const receipts = await sql`SELECT * FROM finance.party_receipts WHERE deleted_at IS NULL ORDER BY entry_date ASC, id ASC`;
     const openings = await sql`SELECT * FROM finance.party_openings ORDER BY company ASC`;
-    res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS });
+    res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS,
+      accounts: Object.entries(PARTY_ACCOUNTS).map(([code, name]) => ({ code, name })) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
@@ -7685,8 +7722,8 @@ app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), asy
     const { row, error } = partyReceiptFromBody(req.body || {});
     if (error) return res.status(400).json({ error });
     const ins = await sql`
-      INSERT INTO finance.party_receipts (company, entry_date, kind, voucher_no, reference, amount, notes, created_by, updated_by)
-      VALUES (${row.company}, ${row.entry_date}, ${row.kind}, ${row.voucher_no}, ${row.reference}, ${row.amount}, ${row.notes}, ${req.user.email}, ${req.user.email})
+      INSERT INTO finance.party_receipts (company, entry_date, kind, voucher_no, reference, amount, notes, bank_code, tax_deducted, invoice_nos, created_by, updated_by)
+      VALUES (${row.company}, ${row.entry_date}, ${row.kind}, ${row.voucher_no}, ${row.reference}, ${row.amount}, ${row.notes}, ${row.bank_code}, ${row.tax_deducted}, ${row.invoice_nos}, ${req.user.email}, ${req.user.email})
       RETURNING *`;
     await logAudit(sql, req, {
       action: 'party_receipt.create', entityType: 'party_receipt', entityId: ins[0].id,
@@ -7708,6 +7745,7 @@ app.put('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), 
     const upd = await sql`
       UPDATE finance.party_receipts SET company = ${row.company}, entry_date = ${row.entry_date}, kind = ${row.kind},
              voucher_no = ${row.voucher_no}, reference = ${row.reference}, amount = ${row.amount}, notes = ${row.notes},
+             bank_code = ${row.bank_code}, tax_deducted = ${row.tax_deducted}, invoice_nos = ${row.invoice_nos},
              updated_by = ${req.user.email}, updated_at = NOW()
        WHERE id = ${id} RETURNING *`;
     await logAudit(sql, req, {

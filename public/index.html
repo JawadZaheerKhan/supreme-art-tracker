@@ -14372,14 +14372,20 @@ function partyLedgerFor(company, invoices, from, to) {
   for (const r of (d.receipts || [])) {
     if (partyKey(r.company) !== k) continue;
     const amt = +r.amount || 0;
+    const tax = +r.tax_deducted || 0;
     const isDr = PARTY_DEBIT_KINDS.has(r.kind);
-    entries.push({ type: 'rcpt', date: String(r.entry_date || ''), vno: r.voucher_no || '—', debit: isDr ? amt : 0, credit: isDr ? 0 : amt, receipt: r });
+    const base = { type: 'rcpt', date: String(r.entry_date || ''), vno: r.voucher_no || '—', receipt: r };
+    // A receipt voucher posts TWO lines, like the accounts system: the net
+    // receipt into the bank, and the tax the party deducted at source.
+    if (amt > 0 || !tax) entries.push({ ...base, debit: isDr ? amt : 0, credit: isDr ? 0 : amt });
+    if (tax > 0) entries.push({ ...base, taxPart: true, debit: 0, credit: tax });
   }
   const inOpening = asOf ? entries.filter(e => e.date < asOf).length : 0;
   const counted = entries.filter(e => !asOf || e.date >= asOf);
   counted.sort((a, b) => a.date.localeCompare(b.date)
     || (a.type !== b.type ? (a.type === 'inv' ? -1 : 1)
-        : a.type === 'inv' ? String(a.vno).localeCompare(String(b.vno), undefined, { numeric: true }) : a.receipt.id - b.receipt.id));
+        : a.type === 'inv' ? String(a.vno).localeCompare(String(b.vno), undefined, { numeric: true })
+        : (a.receipt.id - b.receipt.id) || ((a.taxPart ? 1 : 0) - (b.taxPart ? 1 : 0))));
   const net = (e) => (e.debit || 0) - (e.credit || 0);
   let bal = (opening ? (+opening.amount || 0) : 0) + counted.filter(e => from && e.date < from).reduce((a, e) => a + net(e), 0);
   const openingBal = bal;
@@ -14422,7 +14428,7 @@ function renderPartyLedger() {
       <h2 style="margin:0;font-size:20px;">Party Ledger</h2>
       <span style="color:var(--text2);font-size:12px;">Invoices from the Sale Report, receipts entered by finance, running balance per company.</span>
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
-        ${canEnter ? `<button class="btn btn-sm btn-primary" onclick="openPartyReceiptModal(0)">+ Receipt</button>` : ''}
+        ${canEnter ? `<button class="btn btn-sm btn-primary" onclick="openPartyReceiptModal(0)">+ Receipt Voucher</button>` : ''}
         ${canEnter && s.company ? `<button class="btn btn-sm" onclick="openPartyOpeningModal()">Opening Balance</button>` : ''}
         <button class="btn btn-sm" onclick="exportPartyLedger()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printPartyLedger()">&#128424; Print</button>
@@ -14477,7 +14483,10 @@ function partyLedgerSummaryHtml(invoices, from, to) {
 function plParticularsHtml(e) {
   if (e.type === 'rcpt') {
     const r = e.receipt;
-    return `${esc(PARTY_KIND_LABELS[r.kind] || r.kind)}${r.reference ? ' &middot; ' + esc(r.reference) : ''}${r.notes ? `<div style="font-size:11px;color:var(--text2);">${esc(r.notes)}</div>` : ''}`;
+    const inv = r.invoice_nos ? ` &middot; against invoice no = ${esc(r.invoice_nos)}` : '';
+    if (e.taxPart) return `Tax deducted at source${inv}`;
+    const head = plIsVoucher(r) ? esc(plAccountLabel(r.bank_code) || PARTY_KIND_LABELS[r.kind] || r.kind) : esc(PARTY_KIND_LABELS[r.kind] || r.kind);
+    return `${head}${r.reference ? ' &middot; ' + esc(r.reference) : ''}${inv}${r.notes ? `<div style="font-size:11px;color:var(--text2);">${esc(r.notes)}</div>` : ''}`;
   }
   const l = e.line;
   const jobs = l.jobIds.map(id => `<span onclick="event.stopPropagation(); openEdit(${id})" title="Open Job E-${id}" style="cursor:pointer;color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">E-${id}</span>`).join(' ');
@@ -14501,7 +14510,7 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
       ? (canEnter ? ` onclick="openPartyReceiptModal(${e.receipt.id})" title="Edit this receipt" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`)
       : (e.line.jobIds.length ? ` onclick="openEdit(${e.line.jobIds[e.line.jobIds.length - 1]})" title="Open the job" style="cursor:pointer;border-bottom:1px solid var(--border);"` : ` style="border-bottom:1px solid var(--border);"`);
     return `<tr class="row-hover-red${click.includes('onclick') ? ' cv-summary-row' : ''}"${click}>
-      <td style="padding:7px 10px;white-space:nowrap;font-weight:600;">${esc(e.vno)}</td>
+      <td style="padding:7px 10px;white-space:nowrap;font-weight:600;">${esc(e.vno)}${e.type === 'rcpt' && !e.taxPart && plIsVoucher(e.receipt) ? ` <button type="button" class="btn btn-sm" style="padding:1px 6px;font-size:11px;" onclick="event.stopPropagation(); printPartyVoucher(${e.receipt.id})" title="Print the receipt voucher">&#128424;</button>` : ''}</td>
       <td style="padding:7px 10px;white-space:nowrap;">${esc(fmtDMY(e.date))}</td>
       <td style="padding:7px 10px;">${plParticularsHtml(e)}</td>
       <td ${tdR}>${e.debit ? plMoney(e.debit) : (e.type === 'inv' && e.line.missingRate ? '<span style="color:#991b1b;">?</span>' : '&mdash;')}</td>
@@ -14531,6 +14540,15 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
     </table></div>`;
 }
 // ── Receipt entry ──
+// Receipt Voucher (and the other entry types) - one form. A voucher records
+// money received into one of our accounts: the Total, the tax the party
+// deducted at source, and the Net Receipt that actually landed.
+function plIsVoucher(r) { return !!r && ['bank', 'cheque', 'cash'].includes(r.kind); }
+function plAccounts() { return ((partyLedgerState.data || {}).accounts) || []; }
+function plAccountLabel(code) {
+  const a = plAccounts().find(x => x.code === String(code || ''));
+  return a ? `${a.code} ${a.name}` : '';
+}
 function openPartyReceiptModal(id) {
   if (!plCanEnter()) return;
   const d = partyLedgerState.data || {};
@@ -14538,39 +14556,89 @@ function openPartyReceiptModal(id) {
   const companies = partyLedgerState.companies.length ? partyLedgerState.companies : partyLedgerCompanyList(partyLedgerInvoices());
   const cur = r ? r.company : partyLedgerState.company;
   const today = localDateISO();
-  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
-    <h2>${r ? 'Edit Receipt' : 'Add Receipt'}</h2>
-    <div class="form-group"><label class="form-label">Company *</label>
-      <select id="plr-company"><option value="">Pick the company…</option>
-        ${companies.map(c => `<option value="${esc(c)}"${partyKey(c) === partyKey(cur) ? ' selected' : ''}>${esc(c)}</option>`).join('')}
-      </select></div>
+  const mode = !r || plIsVoucher(r) ? 'voucher' : r.kind;
+  const tax = r ? (+r.tax_deducted || 0) : 0;
+  const total = r ? (+r.amount || 0) + tax : '';
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
+    <h2>${r ? 'Edit' : 'New'} ${mode === 'voucher' ? 'Receipt Voucher' : 'Entry'}</h2>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="plr-date" value="${esc(r ? r.entry_date : today)}" max="${today}"></div>
       <div class="form-group"><label class="form-label">Type *</label>
-        <select id="plr-kind">${Object.entries(PARTY_KIND_LABELS).map(([k, l]) => `<option value="${k}"${(r ? r.kind : 'bank') === k ? ' selected' : ''}>${esc(l)}${PARTY_DEBIT_KINDS.has(k) ? ' (adds to balance)' : ''}</option>`).join('')}</select></div>
+        <select id="plr-kind" onchange="plReceiptModeChanged()">
+          <option value="voucher"${mode === 'voucher' ? ' selected' : ''}>Receipt Voucher (bank / cash)</option>
+          ${['jv', 'credit_note', 'debit_note'].map(k => `<option value="${k}"${mode === k ? ' selected' : ''}>${esc(PARTY_KIND_LABELS[k])}${PARTY_DEBIT_KINDS.has(k) ? ' (adds to balance)' : ''}</option>`).join('')}
+        </select></div>
+      <div class="form-group"><label class="form-label">Voucher # <span style="font-weight:400;color:var(--text2);">(as in the accounts system)</span></label><input type="text" id="plr-vno" value="${esc(r ? (r.voucher_no || '') : '')}" placeholder="e.g. BRV-27-0046"></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">V-No <span style="font-weight:400;color:var(--text2);">(as in the accounts system)</span></label><input type="text" id="plr-vno" value="${esc(r ? (r.voucher_no || '') : '')}" placeholder="e.g. BRV-27-0046"></div>
-      <div class="form-group"><label class="form-label">Amount (Rs) *</label><input type="number" id="plr-amount" min="0" step="any" value="${r ? esc(String(+r.amount)) : ''}" placeholder="0"></div>
+      <div class="form-group"><label class="form-label">Received from (party) *</label>
+        <select id="plr-company"><option value="">Pick the company…</option>
+          ${companies.map(c => `<option value="${esc(c)}"${partyKey(c) === partyKey(cur) ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        </select></div>
+      <div class="form-group"><label class="form-label">Date *</label><input type="date" id="plr-date" value="${esc(r ? r.entry_date : today)}" max="${today}"></div>
     </div>
-    <div class="form-group"><label class="form-label">Reference <span style="font-weight:400;color:var(--text2);">(cheque no., bank, CPR no.)</span></label><input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="e.g. 2 CHQS Faysal Bank"></div>
+    <div id="plr-voucher-block" style="display:${mode === 'voucher' ? '' : 'none'};">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Received into (account) *</label>
+          <select id="plr-bank"><option value="">Pick the bank / cash account…</option>
+            ${plAccounts().map(a => `<option value="${esc(a.code)}"${r && r.bank_code === a.code ? ' selected' : ''}>${esc(a.code)} &nbsp; ${esc(a.name)}</option>`).join('')}
+          </select></div>
+        <div class="form-group"><label class="form-label">Against invoice no(s) <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="plr-inv" value="${esc(r ? (r.invoice_nos || '') : '')}" placeholder="e.g. 822, 823"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Total (Rs) *</label><input type="number" id="plr-total" min="0" step="any" value="${total === '' ? '' : esc(String(total))}" oninput="plReceiptNetSync()"></div>
+        <div class="form-group"><label class="form-label">Tax Deducted (Rs)</label><input type="number" id="plr-tax" min="0" step="any" value="${tax ? esc(String(tax)) : ''}" placeholder="0" oninput="plReceiptNetSync()"></div>
+        <div class="form-group"><label class="form-label">Net Receipt</label><div id="plr-net" style="padding:8px 2px;font-weight:700;">&mdash;</div></div>
+      </div>
+    </div>
+    <div id="plr-other-block" style="display:${mode === 'voucher' ? 'none' : ''};">
+      <div class="form-group"><label class="form-label">Amount (Rs) *</label><input type="number" id="plr-amount" min="0" step="any" value="${r && mode !== 'voucher' ? esc(String(+r.amount)) : ''}"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Particular <span style="font-weight:400;color:var(--text2);">(cheque no., bank slip, CPR no.)</span></label><input type="text" id="plr-ref" value="${esc(r ? (r.reference || '') : '')}" placeholder="e.g. 2 CHQS Faysal Bank"></div>
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="plr-notes" value="${esc(r ? (r.notes || '') : '')}"></div>
     <div class="modal-actions">
       ${r ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deletePartyReceipt(${r.id})">Delete</button>` : ''}
+      ${r && plIsVoucher(r) ? `<button class="btn" onclick="printPartyVoucher(${r.id})">&#128424; Print Voucher</button>` : ''}
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="savePartyReceipt(${r ? r.id : 0})">Save</button>
     </div>
   </div>`);
+  plReceiptNetSync();
+}
+function plReceiptModeChanged() {
+  const v = (document.getElementById('plr-kind') || {}).value;
+  const vb = document.getElementById('plr-voucher-block');
+  const ob = document.getElementById('plr-other-block');
+  if (vb) vb.style.display = v === 'voucher' ? '' : 'none';
+  if (ob) ob.style.display = v === 'voucher' ? 'none' : '';
+}
+function plReceiptNetSync() {
+  const total = Number((document.getElementById('plr-total') || {}).value || 0);
+  const tax = Number((document.getElementById('plr-tax') || {}).value || 0);
+  const el = document.getElementById('plr-net');
+  if (el) el.textContent = (total > 0 || tax > 0) ? plMoney(total - tax) : '—';
 }
 async function savePartyReceipt(id) {
   const val = (x) => ((document.getElementById(x) || {}).value || '').trim();
-  const body = { company: val('plr-company'), entry_date: val('plr-date'), kind: val('plr-kind'),
-    voucher_no: val('plr-vno'), amount: val('plr-amount'), reference: val('plr-ref'), notes: val('plr-notes') };
-  if (!body.company) { await alertDialog({ title: 'Pick the company', kind: 'warn' }); return; }
+  const mode = val('plr-kind');
+  const isVoucher = mode === 'voucher';
+  const body = { company: val('plr-company'), entry_date: val('plr-date'), voucher_no: val('plr-vno'),
+    reference: val('plr-ref'), notes: val('plr-notes') };
+  if (!body.company) { await alertDialog({ title: 'Pick the party (company)', kind: 'warn' }); return; }
   if (!body.entry_date) { await alertDialog({ title: 'Pick the date', kind: 'warn' }); return; }
   if (body.entry_date > localDateISO()) { await alertDialog({ title: 'The date is in the future', kind: 'warn' }); return; }
-  const amt = Number(String(body.amount).replace(/,/g, ''));
-  if (!Number.isFinite(amt) || amt <= 0) { await alertDialog({ title: 'Enter the amount', message: 'A number above 0.', kind: 'warn' }); return; }
+  if (isVoucher) {
+    const bank = val('plr-bank');
+    const total = Number(val('plr-total').replace(/,/g, ''));
+    const tax = Number(val('plr-tax').replace(/,/g, '') || 0);
+    if (!bank) { await alertDialog({ title: 'Pick the account it was received into', message: 'Cash in Hand or one of the banks.', kind: 'warn' }); return; }
+    if (!Number.isFinite(total) || total <= 0) { await alertDialog({ title: 'Enter the Total', kind: 'warn' }); return; }
+    if (!Number.isFinite(tax) || tax < 0 || tax > total) { await alertDialog({ title: 'Tax Deducted must be between 0 and the Total', kind: 'warn' }); return; }
+    Object.assign(body, { kind: bank === '12001' ? 'cash' : 'bank', bank_code: bank, amount: total - tax, tax_deducted: tax, invoice_nos: val('plr-inv') });
+  } else {
+    const amt = Number(val('plr-amount').replace(/,/g, ''));
+    if (!Number.isFinite(amt) || amt <= 0) { await alertDialog({ title: 'Enter the amount', message: 'A number above 0.', kind: 'warn' }); return; }
+    Object.assign(body, { kind: mode, amount: amt, tax_deducted: 0, bank_code: '', invoice_nos: '' });
+  }
   showSaving(true);
   try {
     if (id) await api('PUT', `/api/party-receipts/${id}`, body);
@@ -14578,9 +14646,87 @@ async function savePartyReceipt(id) {
     await loadPartyLedgerData();
     closeModal();
     renderPartyLedger();
-    notify(id ? 'Receipt updated' : 'Receipt added');
+    notify(id ? 'Saved' : (isVoucher ? 'Receipt voucher posted to the ledger' : 'Entry added'));
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+// Rupees in words, the way vouchers here write them (crore / lakh).
+function plAmountWords(n) {
+  n = Math.round((+n || 0) * 100) / 100;
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve',
+    'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  const two = (x) => x < 20 ? ones[x] : tens[Math.floor(x / 10)] + (x % 10 ? ' ' + ones[x % 10] : '');
+  const three = (x) => (x >= 100 ? ones[Math.floor(x / 100)] + ' Hundred' + (x % 100 ? ' ' : '') : '') + (x % 100 ? two(x % 100) : '');
+  let rupees = Math.floor(n);
+  const paisa = Math.round((n - rupees) * 100);
+  if (!rupees && !paisa) return 'Zero Only';
+  const parts = [];
+  const crore = Math.floor(rupees / 10000000); rupees %= 10000000;
+  const lakh = Math.floor(rupees / 100000); rupees %= 100000;
+  const thousand = Math.floor(rupees / 1000); rupees %= 1000;
+  if (crore) parts.push((crore >= 1000 ? plAmountWords(crore).replace(/ Only$/, '') : three(crore)) + ' Crore');
+  if (lakh) parts.push(two(lakh) + ' Lakh');
+  if (thousand) parts.push(two(thousand) + ' Thousand');
+  if (rupees) parts.push(three(rupees));
+  return (parts.join(' ') || 'Zero') + (paisa ? ' and ' + two(paisa) + ' Paisa' : '') + ' Only';
+}
+// The printed voucher, laid out like the office's paper Cash / Bank
+// Receipts Voucher: our receiving account at the top (debited), the party
+// in the body (credited) with the Total, then Tax Deducted and Net Receipt.
+function printPartyVoucher(id) {
+  const r = (((partyLedgerState.data || {}).receipts) || []).find(x => x.id === id);
+  if (!r) { notify('Voucher not found.'); return; }
+  const isCash = r.kind === 'cash' || String(r.bank_code) === '12001';
+  const acct = plAccounts().find(a => a.code === String(r.bank_code || '')) || { code: r.bank_code || '', name: '' };
+  const net = +r.amount || 0, tax = +r.tax_deducted || 0, total = net + tax;
+  const money = (n) => (+n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const b = 'border:1px solid #000;';
+  const particular = [r.reference, r.invoice_nos ? `against invoice no = ${r.invoice_nos}` : '', r.notes].filter(Boolean).join(' · ');
+  const area = document.getElementById('print-area');
+  area.innerHTML = `
+    <style>@media print { @page { size: A4 portrait; margin: 0.5in; } }</style>
+    <div style="font-family:'Times New Roman',Times,serif;color:#000;width:100%;">
+      <div style="text-align:center;font-size:24pt;font-weight:bold;letter-spacing:0.5px;">SUPREME ART (PVT) LTD.</div>
+      <div style="text-align:center;font-size:9.5pt;margin-top:2px;">Plot # 148-B, Industrial Estate, Jamrud Road, Hayatabad, Peshawar &nbsp; NTN # 7226736-6</div>
+      <div style="text-align:center;font-size:16pt;font-style:italic;text-decoration:underline;margin:10px 0 14px;">${isCash ? 'Cash' : 'Bank'} Receipts Voucher</div>
+      <table style="width:100%;font-size:11pt;margin-bottom:8px;border-collapse:collapse;">
+        <tr>
+          <td style="width:60%;"></td>
+          <td style="padding:2px 0;">Voucher #</td><td style="padding:2px 0 2px 10px;font-weight:bold;">${esc(r.voucher_no || '')}</td>
+        </tr>
+        <tr>
+          <td style="padding:2px 0;">${isCash ? 'Cash' : 'Bank'} Code: &nbsp;<b>${esc(acct.code)}</b> &nbsp;&nbsp; ${esc(acct.name)}</td>
+          <td style="padding:2px 0;">Date</td><td style="padding:2px 0 2px 10px;font-weight:bold;">${esc(fmtDMY(r.entry_date))}</td>
+        </tr>
+      </table>
+      <table style="width:100%;border-collapse:collapse;font-size:11pt;">
+        <tr>
+          <th style="${b}padding:5px;width:16%;">Account<br>Code</th>
+          <th style="${b}padding:5px;">Head of Account</th>
+          <th style="${b}padding:5px;width:22%;">Amount (Cr)<br>Rs.</th>
+        </tr>
+        <tr style="height:360px;vertical-align:top;">
+          <td style="${b}padding:6px;"></td>
+          <td style="${b}padding:6px;">${esc(r.company)}</td>
+          <td style="${b}padding:6px;text-align:right;">${money(total)}</td>
+        </tr>
+        <tr><td style="border-left:1px solid #000;"></td><td style="${b}padding:5px;text-align:right;font-weight:bold;">Total</td><td style="${b}padding:5px;text-align:right;">${money(total)}</td></tr>
+        <tr><td style="border-left:1px solid #000;"></td><td style="${b}padding:5px;text-align:right;font-weight:bold;">Tax Deducted</td><td style="${b}padding:5px;text-align:right;">${tax ? money(tax) : '-'}</td></tr>
+        <tr><td style="border-left:1px solid #000;border-bottom:1px solid #000;"></td><td style="${b}padding:5px;text-align:right;font-weight:bold;">Net Receipt</td><td style="${b}padding:5px;text-align:right;font-weight:bold;">${money(net)}</td></tr>
+      </table>
+      <div style="margin-top:14px;font-size:11pt;"><b>Rupees:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${esc(plAmountWords(net))}</span></div>
+      <div style="margin-top:10px;font-size:11pt;"><b>Particular:</b> <span style="border-bottom:1px solid #000;padding:0 6px;">${esc(particular)}</span></div>
+      <table style="width:100%;margin-top:60px;font-size:10.5pt;text-align:center;">
+        <tr>
+          <td style="width:25%;"><div style="border-top:1px solid #000;margin:0 12px;padding-top:3px;">Prepared By</div></td>
+          <td style="width:25%;"><div style="border-top:1px solid #000;margin:0 12px;padding-top:3px;">Checked By</div></td>
+          <td style="width:25%;"><div style="border-top:1px solid #000;margin:0 12px;padding-top:3px;">Approved By</div></td>
+          <td style="width:25%;"><div style="border-top:1px solid #000;margin:0 12px;padding-top:3px;">Received By</div></td>
+        </tr>
+      </table>
+    </div>`;
+  setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 250);
 }
 async function deletePartyReceipt(id) {
   const ok = await confirmDialog({ title: 'Delete this receipt?', message: 'It comes off the company\'s ledger. The deletion is kept in the audit log.', danger: true, confirmText: 'Delete' });
@@ -14649,7 +14795,10 @@ function partyLedgerPeriodText(from, to) {
 function plPlainParticulars(e) {
   if (e.type === 'rcpt') {
     const r = e.receipt;
-    return [PARTY_KIND_LABELS[r.kind] || r.kind, r.reference, r.notes].filter(Boolean).join(' · ');
+    const inv = r.invoice_nos ? `against invoice no = ${r.invoice_nos}` : '';
+    if (e.taxPart) return ['Tax deducted at source', inv].filter(Boolean).join(' · ');
+    const head = plIsVoucher(r) ? (plAccountLabel(r.bank_code) || PARTY_KIND_LABELS[r.kind] || r.kind) : (PARTY_KIND_LABELS[r.kind] || r.kind);
+    return [head, r.reference, inv, r.notes].filter(Boolean).join(' · ');
   }
   const l = e.line;
   return [l.noInvoice ? 'delivery (no invoice no. yet)' : `invoice no = ${l.invoice}`,
