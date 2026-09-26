@@ -14444,7 +14444,7 @@ function openPartyLedger() {
   const pane = document.getElementById('rt-party-ledger');
   if (!pane) return;
   pane.innerHTML = `<div style="font-size:13px;color:var(--text2);padding:18px 0;">Loading the ledger…</div>`;
-  loadPartyLedgerData().then(renderPartyLedger);
+  partyLedgerState._loadP = loadPartyLedgerData().then(renderPartyLedger);
 }
 function setPlCompanyIdx(i) { partyLedgerState.company = i < 0 ? '' : (partyLedgerState.companies[i] || ''); renderPartyLedger(); }
 function setPlPeriod(v) { partyLedgerState.period = v; renderPartyLedger(); }
@@ -14588,10 +14588,42 @@ function partyLedgerCompanyHtml(company, invoices, from, to) {
 // A ledger invoice line -> the Sale Report showing just that invoice (or, for
 // a delivery with no invoice no. yet, that job). The Sale Report's other
 // filters are cleared so nothing hides the row.
+// The Sale Report's own filters are snapshotted and put back on the way out
+// (Back to Party Ledger, or any other report), like the Stock Summary jumps.
+let plReturn = null;
+function plClearReturn() {
+  if (!plReturn) return;
+  const r = plReturn;
+  plReturn = null;
+  for (const k of Object.keys(saleReportState)) if (!(k in r.restore)) delete saleReportState[k];
+  Object.assign(saleReportState, r.restore);
+  _persistSr();
+}
+function plReturnBarHtml() {
+  if (!plReturn) return '';
+  return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
+      <button class="btn btn-sm" onclick="plReturnToLedger()">&#8592; Back to Party Ledger</button>
+      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(plReturn.label)}</b>, opened from ${esc(plReturn.company)}'s ledger. Your own Sale Report filters come back when you leave.</span>
+    </div>`;
+}
+function plReturnToLedger() {
+  const back = plReturn;
+  plClearReturn();                        // Sale Report filters restored before we leave
+  if (!back) return;
+  setReportsTab('party-ledger');
+  Promise.resolve(partyLedgerState._loadP).then(() => requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0)));
+}
 function plOpenInvoiceInSaleReport(i) {
   const l = (partyLedgerState.lineRefs || [])[i];
   if (!l) return;
   if (!hasPerm('rpt_sale_report', 'view')) { notify('Sale Report is not available for your role.'); return; }
+  plClearReturn();                        // a second jump replaces the first cleanly
+  plReturn = {
+    restore: JSON.parse(JSON.stringify(saleReportState)),
+    label: l.noInvoice ? `E-${l.jobIds[0] || ''} (no invoice no. yet)` : `invoice ${l.invoice}`,
+    company: partyLedgerState.company || l.company,
+    scrollY: window.scrollY || 0,
+  };
   const st = saleReportState;
   Object.assign(st, { q: '', poSearch: '', challanSearch: '', client: '', milOnly: false, dateRange: '', dfrom: '', dto: '', colSearch: {} });
   for (const k of Object.keys(st.colFilters || {})) st.colFilters[k] = [];
@@ -14603,6 +14635,7 @@ function plOpenInvoiceInSaleReport(i) {
   if (l.source !== 'waste' && jobs.some(j => j.client === l.company)) st.client = l.company;
   _persistSr();
   setReportsTab('sale-report');
+  window.scrollTo(0, 0);
 }
 // ── Receipt entry ──
 // Receipt Voucher (and the other entry types) - one form. A voucher records
@@ -15462,6 +15495,7 @@ function openSaleReport() {
   const scopeJobs = jobs.filter(j => (j.stage_index || 0) === lastStageIdx || (Array.isArray(j.deliveries) && j.deliveries.length));
   const clients = [...new Set(scopeJobs.map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
   pane.innerHTML = `
+    ${plReturnBarHtml()}
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Sale Report</h2>
       <span style="color:var(--text2);font-size:12px;">One row per shipment — every job with a delivery recorded, with Rate, Sale Tax %, and Company/Destination/NTN.</span>
@@ -18927,6 +18961,7 @@ function exitReportsGroup() {
 function setReportsTab(name) {
   // A Stock Summary jump's filters must not outlive the visit to its target pane.
   if (ssReturn && name !== ssReturn.pane) ssClearReturn();
+  if (plReturn && name !== 'sale-report') plClearReturn();
   // A pane whose sidebar entry is hidden (Access Register) can't be opened by name either.
   const _item = document.querySelector('.rsb-item[data-rt="' + name + '"]');
   if (_item && getComputedStyle(_item).display === 'none') return;
