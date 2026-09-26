@@ -14777,6 +14777,7 @@ function openSaleReport() {
           <option value="id"${saleReportState.sortBy==='id'?' selected':''}>Job ID</option>
           <option value="name"${saleReportState.sortBy==='name'?' selected':''}>Job Name</option>
           <option value="delivered"${saleReportState.sortBy==='delivered'?' selected':''}>Delivered Date</option>
+          <option value="invoice"${saleReportState.sortBy==='invoice'?' selected':''}>Invoice No.</option>
           <option value="client"${saleReportState.sortBy==='client'?' selected':''}>Company</option>
           <option value="deliveredQty"${saleReportState.sortBy==='deliveredQty'?' selected':''}>Delivered UC Qty</option>
           <option value="amount"${saleReportState.sortBy==='amount'?' selected':''}>Rate w/ Sale Tax</option>
@@ -15119,6 +15120,7 @@ function buildSaleReportRows(tabOverride) {
       case 'name':         return String(r.name || '').toLowerCase();
       case 'client':       return String(r.client || '').toLowerCase();
       case 'delivered':    return r.deliveredAtRaw;
+      case 'invoice':      return String(r.challan || '').trim();
       case 'deliveredQty': return +r.cartons || 0;
       case 'amount':       return r.amountIncTax;
       case 'id': default:  return r.id;
@@ -15131,7 +15133,8 @@ function buildSaleReportRows(tabOverride) {
     if (aNil && bNil) return 0;
     if (aNil) return 1;
     if (bNil) return -1;
-    if (typeof ka === 'string') return dir * ka.localeCompare(kb);
+    // numeric: "822" sorts before "1131", as numbers should.
+    if (typeof ka === 'string') return dir * ka.localeCompare(kb, undefined, { numeric: true });
     return dir * (ka - kb);
   });
   return out;
@@ -15407,7 +15410,9 @@ function saleReportColHeaderHtml(field, label) {
 // Same green triangle for a search-only column - opens the search box.
 function saleReportColSearchHeaderHtml(field, label) {
   const active = String((saleReportState.colSearch || {})[field] || '').trim() !== '';
-  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); saleReportColSearchModal('${field}')" title="Search ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
+  const sorted = saleReportState.sortBy === field
+    ? ` <span title="Sorted ${saleReportState.sortDir === 'desc' ? 'largest to smallest' : 'smallest to largest'}" style="color:#166534;font-weight:900;">${saleReportState.sortDir === 'desc' ? '&#8595;' : '&#8593;'}</span>` : '';
+  return `${esc(label)}${sorted} <button type="button" onclick="event.stopPropagation(); saleReportColSearchModal('${field}')" title="Search ${esc(label)}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${active ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${active ? '#166534' : '#22c55e'};font-weight:${active ? '900' : '700'};">&#9660;</button>`;
 }
 function saleReportColSearchModal(field) {
   colSearchPickerModal('sale', field);
@@ -15435,8 +15440,16 @@ function colSearchPickerModal(kind, field) {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   _colSearchCtx = { kind, field, values, shown: [] };
   const cur = String(saved || '');
+  // Invoice No. (Sale Report) also sorts, so an export comes out in invoice order.
+  const canSort = isSale && field === 'invoice';
+  const sortOn = canSort && saleReportState.sortBy === 'invoice' ? saleReportState.sortDir : '';
+  const sortRow = canSort ? `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
+      <button type="button" class="btn btn-sm${sortOn === 'asc' ? ' btn-primary' : ''}" onclick="srSortByColumn('invoice', 'asc')">&#8593; Smallest to largest</button>
+      <button type="button" class="btn btn-sm${sortOn === 'desc' ? ' btn-primary' : ''}" onclick="srSortByColumn('invoice', 'desc')">&#8595; Largest to smallest</button>
+    </div>` : '';
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
     <h2 style="margin:0 0 10px;font-size:16px;">Search: ${esc(def.label)}</h2>
+    ${sortRow}
     <input type="text" id="srcs-input" value="${esc(cur)}" autocomplete="off" placeholder="Type part of the ${esc(def.label)}..." oninput="colSearchSuggest()" onkeydown="if (event.key === 'Enter') colSearchPickerApply()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
     <div id="srcs-list" style="max-height:45vh;overflow-y:auto;margin-top:6px;"></div>
     <div id="srcs-none" style="display:none;color:#991b1b;font-size:12.5px;padding:8px 2px;"></div>
@@ -15449,6 +15462,14 @@ function colSearchPickerModal(kind, field) {
   colSearchSuggest();
   const el = document.getElementById('srcs-input');
   if (el) { el.focus(); el.select(); }
+}
+// Sort the Sale Report by a column from its header filter; re-opens the
+// report so the toolbar's Sort by / Asc-Desc show the same choice.
+function srSortByColumn(field, dir) {
+  saleReportState.sortBy = field;
+  saleReportState.sortDir = dir === 'desc' ? 'desc' : 'asc';
+  closeModal();
+  openSaleReport();
 }
 function colSearchSuggest() {
   const ctx = _colSearchCtx;
@@ -15594,10 +15615,29 @@ const SALE_REPORT_WASTE_FIELDS = [
   ['ntn',            'NTN',                   false, 100],
   ['destination',    'Destination',           false, 110],
 ];
+// Excel wants REAL numbers in number columns: thousands commas stripped,
+// no words tacked on ("(PARTIAL)", "copies", "+ ready"). A value that is not
+// a clean number (e.g. a merged row's "25 20") stays as it reads.
+function xlNum(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number') return Number.isFinite(v) ? v : '';
+  const t = String(v).replace(/,/g, '').trim();
+  if (t === '') return '';
+  return /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : String(v).trim();
+}
+// Reference numbers (Invoice / PO / MSI / E-FBR): a number when it IS a
+// plain number Excel can hold exactly (up to 15 digits, no leading zero,
+// which a number would drop); anything else stays text.
+function xlRef(v) {
+  const t = String(v == null ? '' : v).trim();
+  return /^[1-9]\d{0,14}$/.test(t) ? Number(t) : t;
+}
 function saleReportWasteCols() {
   return SALE_REPORT_WASTE_FIELDS.map(([key, label, right, width]) => ({
     key, label, right: !!right, width,
-    cell: r => esc(r[key] || ''), xl: r => r[key] || '', pr: r => esc(r[key] || ''),
+    cell: r => esc(r[key] || ''),
+    xl: r => right ? xlNum(r[key]) : (['invoice_no', 'msi_no', 'fbr_no'].includes(key) ? xlRef(r[key]) : (r[key] || '')),
+    pr: r => esc(r[key] || ''),
   }));
 }
 // The Sale Report's columns, in display order. Screen, Excel and print all read this one
@@ -15624,15 +15664,15 @@ function saleReportCols(tabOverride) {
   if (tab === SALE_REPORT_WASTE_TAB) return saleReportWasteCols();
   return [
     { key: 'delivered', label: 'Delivery Date', search: 'delivered', cell: r => esc(r.deliveredAt), xl: r => r.deliveredAt, pr: r => esc(r.deliveredAt) },
-    { key: 'invoice', label: 'Invoice No.', search: 'invoice', cell: (r, c) => c.editCell(r, 'notes', r.challan, 90), xl: r => r.challan || '', pr: r => esc(r.challan || '') },
-    { key: 'msi', label: 'MSI No.', search: 'msi', cell: (r, c) => c.editCell(r, 'msi_no', r.msiNo, 90), xl: r => r.msiNo || '', pr: r => esc(r.msiNo || '') },
+    { key: 'invoice', label: 'Invoice No.', search: 'invoice', cell: (r, c) => c.editCell(r, 'notes', r.challan, 90), xl: r => xlRef(r.challan), pr: r => esc(r.challan || '') },
+    { key: 'msi', label: 'MSI No.', search: 'msi', cell: (r, c) => c.editCell(r, 'msi_no', r.msiNo, 90), xl: r => xlRef(r.msiNo), pr: r => esc(r.msiNo || '') },
     { key: 'job', label: 'Job Card No.', search: 'job',
       cell: r => (r._merged && r._merged.length > 1)
         ? r._merged.map(mid => `<span onclick="event.stopPropagation(); openEdit(${mid})" title="Open Job E-${mid}" style="cursor:pointer;color:#1d4ed8;font-weight:600;text-decoration:underline;text-underline-offset:2px;">E-${mid}</span>`).join(' ')
         : esc(r.idDisplay),
       xl: r => r.idDisplay, pr: r => esc(r.idDisplay) },
-    { key: 'po', label: 'PO No.', search: 'po', cell: (r, c) => c.editCell(r, 'po_no', r.poNo, 90), xl: r => r.poNo, pr: r => esc(r.poNo) },
-    { key: 'fbr', label: 'E-FBR Invoice No.', search: 'fbr', cell: (r, c) => c.editCell(r, 'fbr_no', r.fbrNo, 100), xl: r => r.fbrNo || '', pr: r => esc(r.fbrNo || '') },
+    { key: 'po', label: 'PO No.', search: 'po', cell: (r, c) => c.editCell(r, 'po_no', r.poNo, 90), xl: r => xlRef(r.poNo), pr: r => esc(r.poNo) },
+    { key: 'fbr', label: 'E-FBR Invoice No.', search: 'fbr', cell: (r, c) => c.editCell(r, 'fbr_no', r.fbrNo, 100), xl: r => xlRef(r.fbrNo), pr: r => esc(r.fbrNo || '') },
     // Batch No. has no column of its own — it reads as part of the job name.
     { key: 'name', label: 'Job Name', search: 'name',
       cell: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;">Shade Card</span>' : ''),
@@ -15640,20 +15680,21 @@ function saleReportCols(tabOverride) {
       pr: r => esc(nameWithBatch(r)) + (r.isShadeCard ? ' <b>(Shade Card)</b>' : '') },
     { key: 'cartons', label: 'Delivered UC Qty', right: true, total: 'cartons',
       cell: r => partsOf(r, 'cartons', v => (+v).toLocaleString()) || r.cartons.toLocaleString(),
-      xl: r => { let v = r.isShadeCard && r.cartons ? r.cartons + ' copies' : r.cartons; return r.isPartial ? v + ' (PARTIAL)' : v; },
+      // A plain number - no "(PARTIAL)" / "copies" words, so Excel can add it up.
+      xl: r => xlNum(r.cartons),
       pr: r => '<span style="' + (r.isPartial ? 'color:#ca8a04;font-weight:bold;' : '') + '">' + r.cartons.toLocaleString() + ((r.isShadeCard && r.cartons) ? ' copies' : '') + '</span>' },
     { key: 'sheetSize', label: 'Sheet Size', filter: 'sheetSize', cell: r => esc(r.sheetSize), xl: r => r.sheetSize, pr: r => esc(r.sheetSize) },
-    { key: 'sheetL', label: 'Length', right: true, filter: 'sheetL', cell: r => esc(String(r.sheetL)), xl: r => r.sheetL === '' ? '' : r.sheetL, pr: r => esc(String(r.sheetL)) },
-    { key: 'sheetW', label: 'Width', right: true, filter: 'sheetW', cell: r => esc(String(r.sheetW)), xl: r => r.sheetW === '' ? '' : r.sheetW, pr: r => esc(String(r.sheetW)) },
-    { key: 'sheetGsm', label: 'GSM', right: true, filter: 'sheetGsm', cell: r => esc(r.sheetGsm), xl: r => r.sheetGsm === '' ? '' : (Number.isFinite(+r.sheetGsm) ? +r.sheetGsm : r.sheetGsm), pr: r => esc(r.sheetGsm) },
+    { key: 'sheetL', label: 'Length', right: true, filter: 'sheetL', cell: r => esc(String(r.sheetL)), xl: r => xlNum(r.sheetL), pr: r => esc(String(r.sheetL)) },
+    { key: 'sheetW', label: 'Width', right: true, filter: 'sheetW', cell: r => esc(String(r.sheetW)), xl: r => xlNum(r.sheetW), pr: r => esc(String(r.sheetW)) },
+    { key: 'sheetGsm', label: 'GSM', right: true, filter: 'sheetGsm', cell: r => esc(r.sheetGsm), xl: r => xlNum(r.sheetGsm), pr: r => esc(r.sheetGsm) },
     { key: 'packets', label: 'Packets', right: true, total: 'packets', filter: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
-    { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => r.ups, pr: r => esc(r.ups) },
+    { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty',
       cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'uc_qty', r.cartonQty, r.ucTyped, r.ucCalc)
         : (partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || esc(r.cartonQty)),
-      xl: r => r.cartonQty, pr: r => esc(r.cartonQty) },
-    { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => partsOf(r, 'poQty', v => (+v).toLocaleString()) || esc(r.poQty), xl: r => r.poQty, pr: r => esc(r.poQty) },
-    { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => r.plates, pr: r => esc(r.plates) },
+      xl: r => xlNum(r.cartonQty), pr: r => esc(r.cartonQty) },
+    { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => partsOf(r, 'poQty', v => (+v).toLocaleString()) || esc(r.poQty), xl: r => xlNum(r.poQty), pr: r => esc(r.poQty) },
+    { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => xlNum(r.plates), pr: r => esc(r.plates) },
     { key: 'paperType', label: 'Paper Type', filter: 'paperType', cell: r => esc(r.paperType), xl: r => r.paperType, pr: r => esc(r.paperType) },
     { key: 'coatings', label: 'Coatings', filter: 'coatings', cell: r => esc(r.coatings), xl: r => r.coatings, pr: r => esc(r.coatings) },
     { key: 'cartonsPackets', label: 'Carton Shipper', right: true, total: 'cartonsPackets',
@@ -15667,7 +15708,7 @@ function saleReportCols(tabOverride) {
       cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'wastage_qty', r.wastage, r.wastageTyped, r.wastageCalc)
         : (partsOf(r, 'wastage', v => fmt(v)) || (r.wastage === null ? '&mdash;' : fmt(r.wastage))) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(r.readyQty) + '</span>' : ''),
       totalCell: t => fmt(t.wastage) + (t.readyQty > 0 ? ' + <span style="color:#166534;font-weight:700;">' + fmt(t.readyQty) + '</span>' : ''),
-      xl: r => (r.wastage === null ? '' : r.wastage) + (r.readyQty > 0 ? ' + ' + r.readyQty : ''),
+      xl: r => xlNum(r.wastage),
       pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:bold;">' + fmt(r.readyQty) + '</span>' : '') },
     { key: 'wastageSheets', label: 'Wastage Sheets', right: true,
       cell: r => partsOf(r, 'wastageSheets', v => d1(v)) || sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) : '',
@@ -15683,7 +15724,7 @@ function saleReportCols(tabOverride) {
       pr: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? dash : d2(r.wastageKgPct) + '%' },
     { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
       cell: r => partsOf(r, 'issuedKg', v => d2(v)) || (r.issuedKg === null ? '&mdash;' : d2(r.issuedKg)), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : +r.issuedKg.toFixed(2), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
-    { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => r.rate === null ? '' : r.rate, pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
+    { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => xlNum(r.rate), pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
     { key: 'exTax', label: 'Rate Excl. Tax', right: true, total: 'amountExTax', totalPrint: true,
       cell: r => partsOf(r, 'amountExTax', v => fmtRate(v)) || (r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;'), xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
     { key: 'taxPct', label: 'Sale Tax', right: true, total: 'taxAmt', totalPrint: true,
