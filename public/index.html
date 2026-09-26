@@ -15690,6 +15690,10 @@ function buildSaleReportRows(tabOverride) {
     const jobIssuedKg = (pkPerUnit > 0 && packKg !== null && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0)
       ? cartonQtyNum * pkPerUnit * packKg : null;
     const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
+    // Labels and Leaflets are counted in SHEETS, not packets (owner): the
+    // Packets column shows sheets of the Sheet Size for them (packets x
+    // sheets per packet). The weight columns are unaffected.
+    const sheetUnit      = ['labels', 'leaflets'].includes(saleReportTabFor(j)) && psJob > 0;
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
     // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
     // array for a column means "no filter, show everything". Coatings is
@@ -15766,8 +15770,11 @@ function buildSaleReportRows(tabOverride) {
         ? rowCartonQty * pkPerUnit
         : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * rowCartonQty / cartonQtyNum : 0);
       const rowIssuedKg = (rowPackets > 0 && packKg !== null) ? rowPackets * packKg : null;
-      const rowWastageSheets  = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
-      const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? rowWastageSheets / (psJob * cutPieces) : null;
+      // Wastage Sheets are FULL sheets of the Sheet Size column (owner): UC ÷
+      // ups = printed pieces, ÷ cut pieces = full sheets - so Wastage Sheets
+      // ÷ sheets-per-packet × Packet/KG gives exactly the Wastage Weight.
+      const rowWastageSheets  = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum / cutPieces : null;
+      const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? rowWastageSheets / psJob : null;
       const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
       // The wastage is the whole JOB's, so its % is of the whole job's
       // paper - not of the last delivery's slice (that overstated it 3-4x).
@@ -15787,6 +15794,7 @@ function buildSaleReportRows(tabOverride) {
         // delivery shipped (owner spec) - normal jobs keep the job's PO Qty.
         poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets,
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
+        packetsShown: sheetUnit ? rowPackets * psJob : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
         ucTyped: ucTyped !== null, ucCalc, wastageTyped: wTyped !== null, wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         ups: upsVal, plates: platesVal,
@@ -15859,7 +15867,7 @@ const SALE_MERGE_ADDITIVE = [
   'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'taxAmt', 'amountIncTax',
   // Per-delivery now, so they add like the rest - left out, two jobs'
   // packets were joined as text ("10 12.5") and the cell read NaN.
-  'packets', 'wastagePackets',
+  'packets', 'wastagePackets', 'packetsShown',
 ];
 const SALE_REPORT_MERGE = { additive: SALE_MERGE_ADDITIVE, perUnit: true };
 // Linked jobs, as sets. A job can say it is linked three ways: the link set
@@ -16045,7 +16053,7 @@ function saleReportColValue(field, r) {
     case 'sheetL':      return String(r.sheetL ?? '').trim();
     case 'sheetW':      return String(r.sheetW ?? '').trim();
     case 'sheetGsm':    return String(r.sheetGsm ?? '').trim();
-    case 'packets':     return num(r.packets);
+    case 'packets':     return num(r.packetsShown !== undefined ? r.packetsShown : r.packets);
     case 'client':      return String(r.client || '').trim();
     case 'ntn':         return String(r.ntn || '').trim();
     case 'destination': return String(r.destination || '').trim();
@@ -16386,7 +16394,14 @@ function saleReportCols(tabOverride) {
     { key: 'sheetL', label: 'Length', right: true, filter: 'sheetL', cell: r => esc(String(r.sheetL)), xl: r => xlNum(r.sheetL), pr: r => esc(String(r.sheetL)) },
     { key: 'sheetW', label: 'Width', right: true, filter: 'sheetW', cell: r => esc(String(r.sheetW)), xl: r => xlNum(r.sheetW), pr: r => esc(String(r.sheetW)) },
     { key: 'sheetGsm', label: 'GSM', right: true, filter: 'sheetGsm', cell: r => esc(r.sheetGsm), xl: r => xlNum(r.sheetGsm), pr: r => esc(r.sheetGsm) },
-    { key: 'packets', label: 'Packets', right: true, total: 'packets', filter: 'packets', cell: r => fmt(r.packets), xl: r => r.packets ? +r.packets.toFixed(2) : '', pr: r => fmt(r.packets) },
+    // Labels / Leaflets show SHEETS here, everything else packets. The header
+    // follows the tab; on All, sheet rows carry a small "sheets" tag.
+    { key: 'packets', label: (tab === 'labels' || tab === 'leaflets') ? 'Sheets' : (tab === 'all' ? 'Packets / Sheets' : 'Packets'),
+      right: true, total: 'packets', filter: 'packets',
+      cell: r => fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) + (tab === 'all' && r.packetsUnit === 'sheets' ? ' <span style="font-size:10px;color:var(--text2);">sheets</span>' : ''),
+      totalCell: t => [t.packets ? fmt(t.packets) + (t.sheetsCount ? ' pkts' : '') : '', t.sheetsCount ? fmt(t.sheetsCount) + ' sheets' : ''].filter(Boolean).join(' + '),
+      xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; },
+      pr: r => fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) + (tab === 'all' && r.packetsUnit === 'sheets' ? ' sheets' : '') },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty',
       cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'uc_qty', r.cartonQty, r.ucTyped, r.ucCalc)
@@ -16478,7 +16493,9 @@ function renderSaleReport() {
       cartonsPackets: a.cartonsPackets + once('cartonsPackets', +r.cartonsPackets),
       wastage:        a.wastage        + once('wastage', r.wastage),
       readyQty:       a.readyQty       + once('readyQty', +r.readyQty),
-      packets:        a.packets        + once('packets', +r.packets),
+      // Packets and sheets are different units - never added together.
+      packets:        a.packets        + (r.packetsUnit === 'sheets' ? 0 : once('packets', +r.packets)),
+      sheetsCount:    (a.sheetsCount || 0) + (r.packetsUnit === 'sheets' ? (+r.packetsShown || 0) : 0),
       wastageSheets:  a.wastageSheets  + once('wastageSheets', r.wastageSheets),
       wastagePackets: a.wastagePackets + once('wastagePackets', r.wastagePackets),
       wastageKg:      a.wastageKg      + once('wastageKg', r.wastageKg),
