@@ -195,7 +195,6 @@
      write buttons of both areas. role-lock-jobs = can see Jobs but can't
      write them; role-lock-inventory = can see Inventory but can't write it. */
   body.role-lock-jobs #jobs-mode .ceo-hide,
-  body.role-lock-jobs #forms-mode .ceo-hide,
   body.role-lock-jobs #stickers-mode .ceo-hide { display: none !important; }
   /* Finance also gets role-lock-jobs (can't write jobs generally), which
      was silently defeating .finance-allow's escape hatch above (line 110)
@@ -2903,7 +2902,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="setMode('reports')">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
-    <button class="mode-btn" data-mode="forms" id="mode-forms-btn" onclick="setMode('forms')">Forms</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
     <button class="mode-btn" data-mode="client-view" onclick="setMode('client-view')" id="mode-client-view-btn">&#128100; Client View</button>
   </div>
@@ -3424,7 +3422,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 
       <div class="stk-actions">
         <button class="btn btn-primary" onclick="printStickers()">&#128424; Print Stickers</button>
-        <button class="btn" onclick="stickerToTransferNote()" style="margin-left:8px;">&#128230; Transfer Note</button>
         <span id="stk-count-hint" style="margin-left:12px;color:var(--text2);font-size:13px;"></span>
       </div>
     </div>
@@ -3435,25 +3432,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <div id="stk-preview" class="stk-preview"></div>
     </div>
   </div>
-</div>
-
-<!-- Forms tab — collection of printable form templates.
-     Each form is print-focused: type to fill, then print. -->
-<div class="main" id="forms-mode" style="display:none;">
-  <div id="forms-landing">
-    <div style="margin-bottom:18px;">
-      <h2 style="margin:0 0 4px;font-size:20px;">Forms</h2>
-      <div style="color:var(--text2);font-size:13px;">Printable form templates. Type to fill in, or print blank to handwrite.</div>
-    </div>
-    <div class="reports-cards">
-      <button class="report-card" onclick="openFormTransferNote()">
-        <div class="report-card-icon">&#128230;</div>
-        <div class="report-card-title">Transfer Note</div>
-        <div class="report-card-desc">Finished Goods Transfer Note (PRD/QR/008). Select jobs by PO to auto-fill, then print.</div>
-      </button>
-    </div>
-  </div>
-  <div id="forms-tn-pane" style="display:none;"></div>
 </div>
 
 <div class="main" id="users-mode" style="display:none;">
@@ -4903,7 +4881,7 @@ function hideLogin() {
 function showClientPortal() {
   document.getElementById('login-screen').style.display = 'none';
   document.querySelector('.topbar').style.display = 'flex';
-  const modes = ['jobs-mode','inventory-mode','stickers-mode','forms-mode','users-mode','station-mode'];
+  const modes = ['jobs-mode','inventory-mode','stickers-mode','users-mode','station-mode'];
   modes.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
   const cm = document.getElementById('client-mode');
   if (cm) cm.style.display = 'block';
@@ -4992,8 +4970,6 @@ const BTN_FN_ROWS = {
   openInvAddOffcut: ['inv_btn_add_offcut', 'yes'], openInvAdd: ['inv_btn_add_paper', 'yes'],
   openImportAdd: ['inv_btn_add_import', 'yes'], editImport: ['inv_btn_add_import', 'yes'], cancelImport: ['inv_btn_add_import', 'yes'], bulkCancelImports: ['inv_btn_add_import', 'yes'],
   // Forms
-  openFormTransferNote: ['forms_btn_transfer_note', 'view'], stickerToTransferNote: ['forms_btn_transfer_note', 'view'], reprintTn: ['forms_btn_transfer_note', 'view'],
-  saveAndPrintTn: ['forms_btn_transfer_note', 'yes'], printTnOnly: ['forms_btn_transfer_note', 'yes'], deleteTn: ['forms_btn_transfer_note', 'yes'],
   // Users
   openInviteUser: ['user_btn_invite', 'yes'], toggleUserBlock: ['user_btn_block', 'yes'], removeUser: ['user_btn_remove', 'yes'],
   openUserActivity: ['user_btn_activity', 'view'], openUserSessions: ['user_btn_sessions', 'view'], revokeUserSession: ['user_btn_sessions', 'yes'],
@@ -5038,13 +5014,12 @@ function tabAllowed(m) {
     case 'reports':     return hasPerm('reports_tab_access', 'view');
     case 'stickers':    return hasPerm('job_btn_stickers', 'view');
     case 'station':     return hasPerm('station_access', 'view');
-    case 'forms':       return hasPerm('forms_tab_access', 'view');
     case 'users':       return hasPerm('user_tab_access', 'view');
     case 'client-view': return hasPerm('client_view_preview', 'view');
     default:            return true;
   }
 }
-const TAB_ORDER = ['jobs', 'products', 'inventory', 'reports', 'stickers', 'station', 'forms', 'users', 'client-view'];
+const TAB_ORDER = ['jobs', 'products', 'inventory', 'reports', 'stickers', 'station', 'users', 'client-view'];
 function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
@@ -5071,7 +5046,6 @@ function renderUserChip() {
   showTab('mode-reports-btn', 'reports');
   showTab('mode-stickers-btn', 'stickers');
   showTab('mode-station-btn', 'station');
-  showTab('mode-forms-btn', 'forms');
   showTab('mode-users-btn', 'users');
   showTab('mode-client-view-btn', 'client-view');
   if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
@@ -5507,9 +5481,11 @@ function setMode(m) {
   // the button and then bounced them straight back to Station. By default
   // they still hold only job_tab_access and station_access, so the tabs they
   // land on are unchanged until someone grants them more.
+  // The Forms tab was removed (2026-09-29) - a stale call lands on the home tab.
+  if (m === 'forms') m = firstAllowedTab();
   if (isOperator() && !tabAllowed(m)) m = 'station';
-  // Store Manager has no business on Forms/Stickers/Station.
-  if (isStoreManager() && (m === 'forms' || m === 'stickers' || m === 'station')) m = 'inventory';
+  // Store Manager has no business on Stickers/Station.
+  if (isStoreManager() && (m === 'stickers' || m === 'station')) m = 'inventory';
   // Users tab: admin (full), ceo (read-only — every write button is
   // tagged .ceo-hide), and production_manager (operators-only — the
   // Authorized Users + Recent Activity sections are tagged .pm-hide
@@ -5540,7 +5516,6 @@ function setMode(m) {
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
   document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
-  document.getElementById('forms-mode').style.display     = m === 'forms' ? 'block' : 'none';
   document.getElementById('users-mode').style.display     = m === 'users' ? 'block' : 'none';
   document.getElementById('station-mode').style.display   = m === 'station' ? 'block' : 'none';
   const clientViewEl = document.getElementById('client-view-mode');
@@ -5588,13 +5563,6 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     if (refreshBtn) refreshBtn.style.display = 'none';
     initStickersTab();
-  } else if (m === 'forms') {
-    addBtn.style.display = 'none';
-    exportBtn.style.display = 'none';
-    if (refreshBtn) refreshBtn.style.display = 'none';
-    // Always show landing on (re-)entry — leaves any open form pane intact
-    // in case the user backs out without losing what they typed.
-    document.getElementById('forms-landing').style.display = 'block';
   } else if (m === 'users') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -21800,582 +21768,6 @@ let stickerActiveIdx = -1;        // keyboard-highlighted item in the dropdown
 // single-batch UI until the user clicks "+ Add another quantity".
 let stickerVariants = [{ qty: '', total: '' }];
 
-// ── Forms tab ────────────────────────────────────────────────
-// Printable form templates. Like stickers — type to fill or print blank
-// then write by hand. Nothing persists; the page values live in memory
-// only and a refresh clears them. To add a new form in the future:
-//   1) Add another <button class="report-card"> in #forms-landing.
-//   2) Write its openForm…() and printForm…() pair below.
-
-function backToForms() {
-  document.getElementById('forms-landing').style.display = 'block';
-  document.getElementById('forms-tn-pane').style.display = 'none';
-}
-
-// ── Transfer Note form (PRD/QR/008) ─────────────────────────
-let tnJobs = [];        // jobs selected for this transfer note
-let tnSavedNotes = [];  // cached from server
-
-function openFormTransferNote(preselectedJobId) {
-  if (!isSuperAdmin() && !hasPerm('forms_btn_transfer_note', 'view')) { notify('Not allowed'); return; }
-  const pane = document.getElementById('forms-tn-pane');
-  document.getElementById('forms-landing').style.display = 'none';
-  pane.style.display = 'block';
-  if (!pane.dataset.built) {
-    pane.innerHTML = buildFormTnHtml();
-    pane.dataset.built = '1';
-    loadTransferNotes();
-  }
-  if (preselectedJobId) {
-    const j = jobs.find(x => x.id === preselectedJobId);
-    if (j) addTnJob(j);
-  }
-}
-
-function resetFormTn() {
-  tnJobs = [];
-  const pane = document.getElementById('forms-tn-pane');
-  pane.dataset.built = '';
-  pane.innerHTML = buildFormTnHtml();
-  loadTransferNotes();
-}
-
-async function loadTransferNotes() {
-  try {
-    const r = await fetch('/api/transfer-notes');
-    if (r.ok) { tnSavedNotes = await r.json(); renderTnHistory(); }
-  } catch (e) { console.error(e); }
-}
-
-function buildFormTnHtml() {
-  const today = new Date().toISOString().slice(0, 10);
-  const readyJobs = jobs.filter(j => {
-    const si = j.stage_index || 0;
-    return si >= STAGES.indexOf('Ready to Deliver') && !isDone(j);
-  });
-  const poGroups = {};
-  readyJobs.forEach(j => {
-    const po = j.ref || '(no PO)';
-    if (!poGroups[po]) poGroups[po] = [];
-    poGroups[po].push(j);
-  });
-
-  return `
-    <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px;">
-      <button class="btn btn-sm" onclick="backToForms()">&larr; Back to Forms</button>
-      <h2 style="margin:0;font-size:18px;">Finished Goods Transfer Note</h2>
-      <span style="color:var(--text2);font-size:12px;">PRD/QR/008</span>
-      <button class="btn btn-sm" onclick="resetFormTn()" style="margin-left:auto;">Reset</button>
-    </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px;">
-      <!-- Left: Job selection -->
-      <div class="modal-card" style="padding:16px;">
-        <div style="font-weight:600;margin-bottom:10px;">Select Jobs to Transfer</div>
-        <div style="margin-bottom:8px;">
-          <label style="font-size:12px;color:var(--text2);">Filter by PO</label>
-          <select class="filter" id="tn-po-filter" onchange="filterTnJobs()" style="width:100%;">
-            <option value="">All POs (Ready to Deliver)</option>
-            ${Object.keys(poGroups).sort().map(po => `<option value="${esc(po)}">${esc(po)} (${poGroups[po].length} job${poGroups[po].length>1?'s':''})</option>`).join('')}
-          </select>
-        </div>
-        <div id="tn-job-list" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">
-          ${renderTnJobList(readyJobs)}
-        </div>
-      </div>
-
-      <!-- Right: Form fields -->
-      <div class="modal-card" style="padding:16px;">
-        <div style="font-weight:600;margin-bottom:10px;">Transfer Details</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-          <div>
-            <label style="font-size:12px;color:var(--text2);">Transfer Note No.</label>
-            <input class="ss-input" id="tn-number" value="(auto)" disabled style="width:100%;background:var(--bg2);">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--text2);">Date</label>
-            <input type="date" class="ss-input" id="tn-date" value="${today}" style="width:100%;">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--text2);">PO No.</label>
-            <input class="ss-input" id="tn-po" placeholder="Auto-filled from jobs" style="width:100%;">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--text2);">Client Name</label>
-            <input class="ss-input" id="tn-client" placeholder="Auto-filled from jobs" style="width:100%;">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--text2);">Transferred From</label>
-            <input class="ss-input" id="tn-from" value="Production" style="width:100%;">
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--text2);">Transferred To</label>
-            <input class="ss-input" id="tn-to" value="Store / Warehouse" style="width:100%;">
-          </div>
-          <div style="grid-column:1/-1;">
-            <label style="font-size:12px;color:var(--text2);">Product Name</label>
-            <input class="ss-input" id="tn-product" placeholder="Auto-filled from jobs" style="width:100%;">
-          </div>
-        </div>
-        <div style="margin-top:12px;">
-          <label style="font-size:12px;color:var(--text2);">QC Clearance Status</label>
-          <div style="display:flex;gap:12px;margin-top:4px;">
-            <label style="font-size:13px;cursor:pointer;"><input type="radio" name="tn-qc" value="passed" checked> Passed</label>
-            <label style="font-size:13px;cursor:pointer;"><input type="radio" name="tn-qc" value="on_hold"> On Hold</label>
-            <label style="font-size:13px;cursor:pointer;"><input type="radio" name="tn-qc" value="rejected"> Rejected</label>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Items table -->
-    <div class="modal-card" style="padding:16px;margin-bottom:18px;">
-      <div style="font-weight:600;margin-bottom:10px;">Details of Finished Goods Transferred</div>
-      <div style="overflow-x:auto;">
-        <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;" id="tn-items-table">
-          <thead>
-            <tr style="background:var(--bg2);">
-              <th style="padding:6px 8px;text-align:center;width:40px;">Sr.</th>
-              <th style="padding:6px 8px;text-align:left;">Job Card No.</th>
-              <th style="padding:6px 8px;text-align:left;">Description / Product Name</th>
-              <th style="padding:6px 8px;text-align:right;">Carton</th>
-              <th style="padding:6px 8px;text-align:center;">Mfg. Date</th>
-              <th style="padding:6px 8px;text-align:right;">Qty</th>
-              <th style="padding:6px 8px;text-align:center;">UOM</th>
-              <th style="padding:6px 8px;text-align:left;">Remarks</th>
-              <th style="padding:6px 8px;width:40px;"></th>
-            </tr>
-          </thead>
-          <tbody id="tn-items-body">
-            <tr><td colspan="9" style="padding:16px;text-align:center;color:var(--text2);">Select jobs from the left panel to add items</td></tr>
-          </tbody>
-          <tfoot id="tn-items-foot" style="display:none;">
-            <tr style="border-top:2px solid var(--border);font-weight:600;">
-              <td colspan="3" style="padding:6px 8px;">Total</td>
-              <td style="padding:6px 8px;text-align:right;" id="tn-total-cartons">0</td>
-              <td></td>
-              <td style="padding:6px 8px;text-align:right;" id="tn-total-qty">0</td>
-              <td colspan="3"></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-    </div>
-
-    <!-- Authorization -->
-    <div class="modal-card" style="padding:16px;margin-bottom:18px;">
-      <div style="font-weight:600;margin-bottom:10px;">Authorization</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
-        <div>
-          <label style="font-size:11px;color:var(--text2);">Prepared / Handed Over By (Production)</label>
-          <input class="ss-input" id="tn-auth-prepared" placeholder="Name" style="width:100%;">
-        </div>
-        <div>
-          <label style="font-size:11px;color:var(--text2);">Checked By (QC / Supervisor)</label>
-          <input class="ss-input" id="tn-auth-checked" placeholder="Name" style="width:100%;">
-        </div>
-        <div>
-          <label style="font-size:11px;color:var(--text2);">Received By (Store / Warehouse)</label>
-          <input class="ss-input" id="tn-auth-received" placeholder="Name" style="width:100%;">
-        </div>
-        <div>
-          <label style="font-size:11px;color:var(--text2);">Approved By (Production Manager)</label>
-          <input class="ss-input" id="tn-auth-approved" placeholder="Name" style="width:100%;">
-        </div>
-      </div>
-    </div>
-
-    <!-- Actions -->
-    <div style="display:flex;gap:10px;margin-bottom:24px;">
-      <button class="btn btn-primary" onclick="saveAndPrintTn()">Save &amp; Print</button>
-      <button class="btn" onclick="printTnOnly()">Print Without Saving</button>
-    </div>
-
-    <!-- History -->
-    <div class="modal-card" style="padding:16px;">
-      <div style="font-weight:600;margin-bottom:10px;">Recent Transfer Notes</div>
-      <div id="tn-history" style="color:var(--text2);font-size:13px;">Loading...</div>
-    </div>
-  `;
-}
-
-function renderTnJobList(jobList) {
-  if (!jobList.length) return '<div style="padding:12px;text-align:center;color:var(--text2);font-size:13px;">No jobs ready to deliver</div>';
-  return jobList.map(j => {
-    const selected = tnJobs.some(x => x.id === j.id);
-    return `<div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;cursor:pointer;${selected?'background:rgba(37,99,235,0.08);':''}"
-      onclick="${selected ? `removeTnJob(${j.id})` : `addTnJobById(${j.id})`}">
-      <input type="checkbox" ${selected?'checked':''} style="pointer-events:none;">
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:13px;font-weight:500;">E-${j.id} ${esc(j.jobcode||'')} — ${esc(j.name||'')}</div>
-        <div style="font-size:11px;color:var(--text2);">${esc(j.client||'')} ${j.ref?'· PO: '+esc(j.ref):''} ${j.cartonqty?'· '+esc(j.cartonqty)+' cartons':''}</div>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-function filterTnJobs() {
-  const po = document.getElementById('tn-po-filter')?.value || '';
-  let list = jobs.filter(j => {
-    const si = j.stage_index || 0;
-    return si >= STAGES.indexOf('Ready to Deliver') && !isDone(j);
-  });
-  if (po) list = list.filter(j => (j.ref || '') === po);
-  const el = document.getElementById('tn-job-list');
-  if (el) el.innerHTML = renderTnJobList(list);
-}
-
-function addTnJobById(id) {
-  const j = jobs.find(x => x.id === id);
-  if (j) addTnJob(j);
-}
-
-function addTnJob(j) {
-  if (tnJobs.some(x => x.id === j.id)) return;
-  tnJobs.push(j);
-  syncTnForm();
-}
-
-function removeTnJob(id) {
-  tnJobs = tnJobs.filter(j => j.id !== id);
-  syncTnForm();
-}
-
-function syncTnForm() {
-  filterTnJobs();
-  const clients = [...new Set(tnJobs.map(j => j.client).filter(Boolean))];
-  const pos = [...new Set(tnJobs.map(j => j.ref).filter(Boolean))];
-  const products = [...new Set(tnJobs.map(j => j.name).filter(Boolean))];
-  const ci = document.getElementById('tn-client');
-  const pi = document.getElementById('tn-po');
-  const pr = document.getElementById('tn-product');
-  if (ci) ci.value = clients.join(', ');
-  if (pi) pi.value = pos.join(', ');
-  if (pr) pr.value = products.join(', ');
-  renderTnItems();
-}
-
-function tnMfgDate(j) {
-  if (!j.log || !j.log.length) return '';
-  for (let i = j.log.length - 1; i >= 0; i--) {
-    const e = j.log[i];
-    if (e && e.time) return e.time.split(' ')[0] || '';
-  }
-  return '';
-}
-
-function tnJobQty(j) {
-  const p = j.particulars || {};
-  if (p.delivered_cartons_qty?.quantity) return p.delivered_cartons_qty.quantity;
-  if (p.sorted_cartons_qty?.quantity) return p.sorted_cartons_qty.quantity;
-  if (p.pasted_cartons_qty?.quantity) return p.pasted_cartons_qty.quantity;
-  return j.cartonqty || j.qty || '';
-}
-
-function renderTnItems() {
-  const body = document.getElementById('tn-items-body');
-  const foot = document.getElementById('tn-items-foot');
-  if (!body) return;
-  if (!tnJobs.length) {
-    body.innerHTML = '<tr><td colspan="9" style="padding:16px;text-align:center;color:var(--text2);">Select jobs from the left panel to add items</td></tr>';
-    if (foot) foot.style.display = 'none';
-    return;
-  }
-  let totalQty = 0, totalCartons = 0;
-  body.innerHTML = tnJobs.map((j, i) => {
-    const qty = tnJobQty(j);
-    const cartons = j.cartonqty || '';
-    const qtyNum = parseInt(qty) || 0;
-    const cartNum = parseInt(cartons) || 0;
-    totalQty += qtyNum;
-    totalCartons += cartNum;
-    return `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:6px 8px;text-align:center;">${i+1}</td>
-      <td style="padding:6px 8px;">E-${j.id} ${esc(j.jobcode||'')}</td>
-      <td style="padding:6px 8px;">${esc(j.name||'')}</td>
-      <td style="padding:6px 8px;text-align:right;"><input class="ss-input tn-item-carton" data-idx="${i}" value="${esc(cartons)}" style="width:60px;text-align:right;" onchange="updateTnTotals()"></td>
-      <td style="padding:6px 8px;text-align:center;">${esc(tnMfgDate(j))}</td>
-      <td style="padding:6px 8px;text-align:right;"><input class="ss-input tn-item-qty" data-idx="${i}" value="${esc(String(qty))}" style="width:70px;text-align:right;" onchange="updateTnTotals()"></td>
-      <td style="padding:6px 8px;text-align:center;">Pcs</td>
-      <td style="padding:6px 8px;"><input class="ss-input tn-item-remarks" data-idx="${i}" value="" style="width:100%;"></td>
-      <td style="padding:6px 8px;text-align:center;"><button class="btn btn-sm" onclick="removeTnJob(${j.id})" title="Remove">&times;</button></td>
-    </tr>`;
-  }).join('');
-  if (foot) {
-    foot.style.display = '';
-    document.getElementById('tn-total-cartons').textContent = totalCartons || '';
-    document.getElementById('tn-total-qty').textContent = totalQty || '';
-  }
-}
-
-function updateTnTotals() {
-  let totalQty = 0, totalCartons = 0;
-  document.querySelectorAll('.tn-item-qty').forEach(el => { totalQty += parseInt(el.value) || 0; });
-  document.querySelectorAll('.tn-item-carton').forEach(el => { totalCartons += parseInt(el.value) || 0; });
-  const eq = document.getElementById('tn-total-qty');
-  const ec = document.getElementById('tn-total-cartons');
-  if (eq) eq.textContent = totalQty || '';
-  if (ec) ec.textContent = totalCartons || '';
-}
-
-function collectTnData() {
-  const qcEl = document.querySelector('input[name="tn-qc"]:checked');
-  const items = tnJobs.map((j, i) => {
-    const cartonEl = document.querySelector(`.tn-item-carton[data-idx="${i}"]`);
-    const qtyEl = document.querySelector(`.tn-item-qty[data-idx="${i}"]`);
-    const remEl = document.querySelector(`.tn-item-remarks[data-idx="${i}"]`);
-    return {
-      job_id: j.id, jobcode: j.jobcode || '', product: j.name || '',
-      carton: cartonEl?.value || '', mfg_date: tnMfgDate(j),
-      qty: qtyEl?.value || '', uom: 'Pcs', remarks: remEl?.value || ''
-    };
-  });
-  let totalQty = 0, totalPkg = 0;
-  items.forEach(it => { totalQty += parseInt(it.qty) || 0; totalPkg += parseInt(it.carton) || 0; });
-  return {
-    date: document.getElementById('tn-date')?.value || '',
-    po_no: document.getElementById('tn-po')?.value || '',
-    client: document.getElementById('tn-client')?.value || '',
-    transferred_from: document.getElementById('tn-from')?.value || 'Production',
-    transferred_to: document.getElementById('tn-to')?.value || 'Store / Warehouse',
-    product_name: document.getElementById('tn-product')?.value || '',
-    job_ids: tnJobs.map(j => j.id),
-    items, total_qty: totalQty, total_packages: totalPkg,
-    qc_status: qcEl?.value || 'passed',
-    authorization: {
-      prepared: document.getElementById('tn-auth-prepared')?.value || '',
-      checked: document.getElementById('tn-auth-checked')?.value || '',
-      received: document.getElementById('tn-auth-received')?.value || '',
-      approved: document.getElementById('tn-auth-approved')?.value || '',
-    },
-  };
-}
-
-async function saveAndPrintTn() {
-  if (!tnJobs.length) return showToast('Add at least one job', 'error');
-  const data = collectTnData();
-  try {
-    const r = await fetch('/api/transfer-notes', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
-    if (!r.ok) { const e = await r.json(); throw new Error(e.error || 'Save failed'); }
-    const saved = await r.json();
-    showToast('Transfer Note ' + saved.transfer_note_no + ' saved');
-    printTnDocument(saved.transfer_note_no, data);
-    loadTransferNotes();
-  } catch (e) { showToast(e.message, 'error'); }
-}
-
-function printTnOnly() {
-  if (!tnJobs.length) return showToast('Add at least one job', 'error');
-  printTnDocument('DRAFT', collectTnData());
-}
-
-function printTnDocument(tnNo, d) {
-  const area = document.getElementById('print-area');
-  const old = document.getElementById('__tn-print-page');
-  if (old) old.remove();
-  const oldJc = document.getElementById('__jc-print-page');
-  if (oldJc) oldJc.remove();
-  const oldStk = document.getElementById('__stk-print-page');
-  if (oldStk) oldStk.remove();
-
-  const qcChecked = (v) => d.qc_status === v ? '&#9745;' : '&#9744;';
-  const fmtDate = (iso) => { if (!iso) return ''; const p = iso.split('-'); return p.length===3 ? p[2]+'-'+p[1]+'-'+p[0] : iso; };
-
-  const style = document.createElement('style');
-  style.id = '__tn-print-page';
-  style.textContent = '@page { size: A4 portrait; margin: 10mm; }';
-  document.head.appendChild(style);
-
-  area.innerHTML = `
-    <div style="font-family:Arial,sans-serif;color:#000;font-size:12px;max-width:190mm;">
-      <!-- Header -->
-      <table style="width:100%;border-collapse:collapse;border:2px solid #000;margin-bottom:0;">
-        <tr>
-          <td style="border:1px solid #000;padding:4px 8px;width:20%;font-size:11px;font-weight:700;">PRD/QR/008</td>
-          <td style="border:1px solid #000;padding:4px 8px;width:15%;font-size:11px;"><b>Issue Status:</b> 01</td>
-          <td style="border:1px solid #000;padding:4px 8px;width:30%;font-size:11px;">Issue date 09-07-2026</td>
-          <td style="border:1px solid #000;padding:4px 8px;width:15%;font-size:11px;">Page 1 of 1</td>
-        </tr>
-      </table>
-      <table style="width:100%;border-collapse:collapse;border:2px solid #000;border-top:none;">
-        <tr>
-          <td style="border:1px solid #000;padding:6px;width:25%;text-align:center;">
-            <div style="font-size:14px;font-weight:700;">SUPREME ART</div>
-            <div style="font-size:9px;">(PRIVATE) LIMITED</div>
-          </td>
-          <td style="border:1px solid #000;padding:8px;text-align:center;">
-            <div style="font-size:13px;font-weight:700;letter-spacing:1px;">QUALITY & ENVIRONMENTAL SYSTEM</div>
-            <div style="font-size:16px;font-weight:700;margin-top:6px;letter-spacing:1px;">FINISHED GOODS TRANSFER NOTE</div>
-          </td>
-        </tr>
-      </table>
-
-      <!-- Form fields -->
-      <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:12px;">
-        <tr>
-          <td style="padding:5px 0;width:50%;"><b>Transfer Note No.:</b> ${esc(tnNo)}</td>
-          <td style="padding:5px 0;"><b>Date:</b> ${esc(fmtDate(d.date))}</td>
-        </tr>
-        <tr>
-          <td style="padding:5px 0;"><b>Job Card No.:</b> ${d.job_ids.map(id => 'E-'+id).join(', ')}</td>
-          <td style="padding:5px 0;"><b>PO No.:</b> ${esc(d.po_no)}</td>
-        </tr>
-        <tr>
-          <td style="padding:5px 0;"><b>Transferred From (Dept.):</b> ${esc(d.transferred_from)}</td>
-          <td style="padding:5px 0;"><b>Transferred To (Store/Warehouse):</b> ${esc(d.transferred_to)}</td>
-        </tr>
-        <tr>
-          <td style="padding:5px 0;"><b>Product Name:</b> ${esc(d.product_name)}</td>
-          <td style="padding:5px 0;"><b>Client Name:</b> ${esc(d.client)}</td>
-        </tr>
-      </table>
-
-      <!-- Details table -->
-      <div style="margin-top:14px;font-size:12px;font-weight:600;">Details of Finished Goods Transferred</div>
-      <table style="width:100%;border-collapse:collapse;border:2px solid #000;margin-top:4px;font-size:11px;">
-        <thead>
-          <tr style="background:#333;color:#fff;">
-            <th style="border:1px solid #000;padding:5px;width:35px;">Sr. No.</th>
-            <th style="border:1px solid #000;padding:5px;">Item Code</th>
-            <th style="border:1px solid #000;padding:5px;">Description / Product Name</th>
-            <th style="border:1px solid #000;padding:5px;">Carton</th>
-            <th style="border:1px solid #000;padding:5px;">Mfg. Date</th>
-            <th style="border:1px solid #000;padding:5px;">Qty.</th>
-            <th style="border:1px solid #000;padding:5px;">UOM</th>
-            <th style="border:1px solid #000;padding:5px;">Remarks</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${d.items.map((it, i) => `
-            <tr>
-              <td style="border:1px solid #000;padding:5px;text-align:center;">${i+1}</td>
-              <td style="border:1px solid #000;padding:5px;">${esc(it.jobcode)}</td>
-              <td style="border:1px solid #000;padding:5px;">${esc(it.product)}</td>
-              <td style="border:1px solid #000;padding:5px;text-align:right;">${esc(it.carton)}</td>
-              <td style="border:1px solid #000;padding:5px;text-align:center;">${esc(it.mfg_date)}</td>
-              <td style="border:1px solid #000;padding:5px;text-align:right;">${esc(String(it.qty))}</td>
-              <td style="border:1px solid #000;padding:5px;text-align:center;">${esc(it.uom)}</td>
-              <td style="border:1px solid #000;padding:5px;">${esc(it.remarks)}</td>
-            </tr>
-          `).join('')}
-          ${Array(Math.max(0, 4 - d.items.length)).fill(0).map((_, i) => `
-            <tr><td style="border:1px solid #000;padding:5px;text-align:center;">${d.items.length+i+1}</td>${'<td style="border:1px solid #000;padding:5px;">&nbsp;</td>'.repeat(7)}</tr>
-          `).join('')}
-        </tbody>
-      </table>
-
-      <!-- Totals -->
-      <table style="width:60%;border-collapse:collapse;margin-top:12px;font-size:12px;">
-        <tr>
-          <td style="border:1px solid #000;padding:5px;width:50%;font-weight:600;">Total Quantity Transferred:</td>
-          <td style="border:1px solid #000;padding:5px;">${d.total_qty || ''}</td>
-        </tr>
-        <tr>
-          <td style="border:1px solid #000;padding:5px;font-weight:600;">Total No. of Packages / Cartons:</td>
-          <td style="border:1px solid #000;padding:5px;">${d.total_packages || ''}</td>
-        </tr>
-      </table>
-
-      <!-- QC Status -->
-      <table style="width:60%;border-collapse:collapse;margin-top:14px;font-size:12px;">
-        <tr>
-          <td style="border:1px solid #000;padding:6px;font-weight:600;">QC Clearance Status:</td>
-          <td style="border:1px solid #000;padding:6px;">${qcChecked('passed')} Passed &nbsp; ${qcChecked('on_hold')} On Hold &nbsp; ${qcChecked('rejected')} Rejected</td>
-        </tr>
-      </table>
-
-      <!-- Declaration -->
-      <div style="margin-top:14px;font-size:11px;">
-        <div style="font-weight:700;margin-bottom:2px;">Declaration</div>
-        <div>This is to certify that the above finished goods have been manufactured, inspected, and are being transferred from Production to Store/Warehouse in good condition and correct quantity as per the production order and quality control clearance.</div>
-      </div>
-
-      <!-- Authorization -->
-      <div style="margin-top:14px;font-size:11px;">
-        <div style="font-weight:700;margin-bottom:4px;">Authorization</div>
-        <table style="width:100%;border-collapse:collapse;border:2px solid #000;">
-          <tr style="background:#333;color:#fff;">
-            <th style="border:1px solid #000;padding:5px;width:25%;">Prepared / Handed Over By (Production)</th>
-            <th style="border:1px solid #000;padding:5px;width:25%;">Checked By (QC / Supervisor)</th>
-            <th style="border:1px solid #000;padding:5px;width:25%;">Received By (Store / Warehouse)</th>
-            <th style="border:1px solid #000;padding:5px;width:25%;">Approved By (Production Manager)</th>
-          </tr>
-          <tr>
-            <td style="border:1px solid #000;padding:5px;">Name: ${esc(d.authorization?.prepared || '')}</td>
-            <td style="border:1px solid #000;padding:5px;">Name: ${esc(d.authorization?.checked || '')}</td>
-            <td style="border:1px solid #000;padding:5px;">Name: ${esc(d.authorization?.received || '')}</td>
-            <td style="border:1px solid #000;padding:5px;">Name: ${esc(d.authorization?.approved || '')}</td>
-          </tr>
-          <tr>
-            <td style="border:1px solid #000;padding:5px;height:40px;">Signature:</td>
-            <td style="border:1px solid #000;padding:5px;height:40px;">Signature:</td>
-            <td style="border:1px solid #000;padding:5px;height:40px;">Signature:</td>
-            <td style="border:1px solid #000;padding:5px;height:40px;">Signature:</td>
-          </tr>
-        </table>
-      </div>
-    </div>
-  `;
-
-  document.title = '';
-  window.print();
-  const cleanup = () => { area.innerHTML = ''; document.title = 'Job Tracker Supreme Art'; style.remove(); };
-  window.addEventListener('afterprint', cleanup, { once: true });
-  setTimeout(cleanup, 30000);
-}
-
-function renderTnHistory() {
-  const el = document.getElementById('tn-history');
-  if (!el) return;
-  if (!tnSavedNotes.length) { el.innerHTML = '<div style="color:var(--text2);">No transfer notes yet.</div>'; return; }
-  el.innerHTML = `
-    <table class="ss-table" style="width:100%;font-size:13px;border-collapse:collapse;">
-      <thead><tr style="background:var(--bg2);">
-        <th style="padding:6px 8px;text-align:left;">TN No.</th>
-        <th style="padding:6px 8px;text-align:left;">Date</th>
-        <th style="padding:6px 8px;text-align:left;">Client</th>
-        <th style="padding:6px 8px;text-align:left;">PO</th>
-        <th style="padding:6px 8px;text-align:right;">Qty</th>
-        <th style="padding:6px 8px;text-align:left;">QC</th>
-        <th style="padding:6px 8px;text-align:center;">Actions</th>
-      </tr></thead>
-      <tbody>
-        ${tnSavedNotes.map(n => `<tr style="border-bottom:1px solid var(--border);">
-          <td style="padding:6px 8px;font-weight:600;">${esc(n.transfer_note_no)}</td>
-          <td style="padding:6px 8px;">${esc(n.date)}</td>
-          <td style="padding:6px 8px;">${esc(n.client)}</td>
-          <td style="padding:6px 8px;">${esc(n.po_no)}</td>
-          <td style="padding:6px 8px;text-align:right;">${n.total_qty||''}</td>
-          <td style="padding:6px 8px;"><span style="padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;${n.qc_status==='passed'?'background:#dcfce7;color:#166534;':n.qc_status==='rejected'?'background:#fef2f2;color:#991b1b;':'background:#fef9c3;color:#854d0e;'}">${esc((n.qc_status||'').replace('_',' '))}</span></td>
-          <td style="padding:6px 8px;text-align:center;">
-            <button class="btn btn-sm" onclick="reprintTn(${n.id})" title="Print">Print</button>
-            ${isAdmin()?`<button class="btn btn-sm btn-danger" onclick="deleteTn(${n.id})" title="Delete" style="margin-left:4px;">Del</button>`:''}
-          </td>
-        </tr>`).join('')}
-      </tbody>
-    </table>
-  `;
-}
-
-async function reprintTn(id) {
-  try {
-    const r = await fetch('/api/transfer-notes/' + id);
-    if (!r.ok) throw new Error('Not found');
-    const n = await r.json();
-    printTnDocument(n.transfer_note_no, n);
-  } catch (e) { showToast(e.message, 'error'); }
-}
-
-async function deleteTn(id) {
-  if (!confirm('Delete this transfer note?')) return;
-  try {
-    const r = await fetch('/api/transfer-notes/' + id, { method: 'DELETE' });
-    if (!r.ok) { const e = await r.json(); throw new Error(e.error); }
-    showToast('Deleted');
-    loadTransferNotes();
-  } catch (e) { showToast(e.message, 'error'); }
-}
-
 // Sticker form source: 'job' (default — pick a job, fields autofill +
 // lock) or 'manual' (job picker hidden, all fields freely editable so
 // the user can print a one-off sticker without a job tied to it).
@@ -22551,12 +21943,6 @@ function applyStickerJob(j) {
   document.getElementById('stk-po').value       = j ? (j.ref || '')    : '';
   document.getElementById('stk-desc').value     = j ? (j.name || '')   : '';
   renderStickerPreview();
-}
-
-function stickerToTransferNote() {
-  const jobId = parseInt(document.getElementById('stk-job')?.value);
-  setMode('forms');
-  openFormTransferNote(jobId || null);
 }
 
 // ── Sticker variants ─────────────────────────────────────────
@@ -33291,7 +32677,6 @@ const ACC_REG_TABS = [
   ['inventory', 'Inventory'],
   ['reports', 'Reports'],
   ['station', 'Station'],
-  ['forms', 'Forms'],
   ['users', 'Users'],
   ['client-view', 'Client View'],
 ];
@@ -33375,11 +32760,6 @@ const ACC_PRODUCTS_TAB_ROWS = [
 const ACC_STATION_TAB_ROWS = [
   { key: 'station_access', type: 'tab' },
 ];
-// Forms tab: the tab itself (View / Hidden) and the Transfer Note (Edit / View / Hidden).
-const ACC_FORMS_TAB_ROWS = [
-  { key: 'forms_tab_access',        type: 'tab' },
-  { key: 'forms_btn_transfer_note', type: 'button' },
-];
 // Users tab. user_accessregister_tab_access is special-cased in
 // accGroupRow: every role except super_admin renders as a locked HIDDEN
 // cell for that one row, no matter what's saved — the Access Register
@@ -33407,7 +32787,7 @@ const ACC_CLIENT_VIEW_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, forms: ACC_FORMS_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
+const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));

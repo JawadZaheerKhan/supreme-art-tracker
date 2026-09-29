@@ -476,9 +476,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_btn_invite:                 { label: 'Invite User button', levels: { admin: 'yes' } },
   user_btn_operators:              { label: 'Operators — also covers every button in Floor Operators (add, edit, remove)', levels: { admin: 'yes', production_manager: 'yes' } },
   user_activitylog_tab_access:     { label: 'Activity Log — view the site-wide activity feed', levels: { admin: 'view', ceo: 'view' } },
-  // Access Register - Forms tab. Both are live gates: the tab follows forms_tab_access (tabAllowed in the client), the
-  // Transfer Note card and its Save / Print buttons follow forms_btn_transfer_note, and POST /api/transfer-notes checks it
-  // (Edit needed). Defaults match the old forms_print group, which nothing reads any more.
+  // Forms tab + Transfer Note: RETIRED 2026-09-29 (the tab, the form and its routes were removed). The two keys stay
+  // only so saved role_permissions rows and the old one-time seed still line up; nothing checks them any more.
   forms_tab_access:                { label: 'Forms tab — view the Forms page', levels: { admin: 'view', production_manager: 'view', ceo: 'view', finance: 'view' } },
   forms_btn_transfer_note:         { label: 'Transfer Note — open the form; Edit also lets them save and print a transfer note', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes', finance: 'yes' } },
   user_accessregister_tab_access:  { label: 'Access Register — Super Admin only; always locked hidden for every other role', levels: {} },
@@ -11220,76 +11219,8 @@ app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) =>
 });
 
 
-// ── Transfer Notes (Finished Goods Transfer) ────────────────
-app.get('/api/transfer-notes', requireAuth, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM transfer_notes ORDER BY id DESC`;
-    res.json(rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/transfer-notes/:id', requireAuth, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json(rows[0]);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/transfer-notes', requirePermission('forms_btn_transfer_note'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const last = await sql`SELECT transfer_note_no FROM transfer_notes ORDER BY id DESC LIMIT 1`;
-    let nextNum = 1;
-    if (last.length) {
-      const m = /(\d+)$/.exec(last[0].transfer_note_no);
-      if (m) nextNum = parseInt(m[1], 10) + 1;
-    }
-    const tnNo = 'TN-' + String(nextNum).padStart(4, '0');
-    const b = req.body;
-    const [row] = await sql`
-      INSERT INTO transfer_notes (transfer_note_no, date, po_no, client, transferred_from, transferred_to,
-        product_name, job_ids, items, total_qty, total_packages, qc_status, auth_signatures, remarks, created_by)
-      VALUES (${tnNo}, ${b.date || businessStamp()}, ${b.po_no || ''}, ${b.client || ''},
-        ${b.transferred_from || 'Production'}, ${b.transferred_to || 'Store / Warehouse'},
-        ${b.product_name || ''}, ${JSON.stringify(b.job_ids || [])}, ${JSON.stringify(b.items || [])},
-        ${b.total_qty || 0}, ${b.total_packages || 0}, ${b.qc_status || 'passed'},
-        ${JSON.stringify(b.authorization || {})}, ${b.remarks || ''}, ${req.user?.email || ''})
-      RETURNING *
-    `;
-    await logAudit(sql, req, {
-      action: 'transfer_note.create',
-      entityType: 'transfer_note',
-      entityId: row.id,
-      summary: `Transfer Note ${tnNo} created`,
-      metadata: { transfer_note_no: tnNo, job_ids: b.job_ids, client: b.client },
-    });
-    res.json(row);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    await sql`DELETE FROM transfer_notes WHERE id=${req.params.id}`;
-    await logAudit(sql, req, {
-      action: 'transfer_note.delete',
-      entityType: 'transfer_note',
-      entityId: rows[0].id,
-      summary: `Transfer Note ${rows[0].transfer_note_no} deleted`,
-      metadata: { transfer_note_no: rows[0].transfer_note_no },
-    });
-    res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
+// (The Transfer Note routes were removed 2026-09-29 with the Forms tab. The
+// transfer_notes table is kept, so the saved notes are still in the database.)
 
 // ── Wastage Adjustment: adjustment + finalized-jobs endpoints ────
 // Settings — read/write the global wastage defaults.
