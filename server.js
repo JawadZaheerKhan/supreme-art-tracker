@@ -10265,13 +10265,14 @@ app.post('/api/imports/:id/cancel', requirePermission('inv_btn_add_import'), asy
 });
 
 // ── Trash (soft-deleted jobs + imports) ─────────────────────
-// Items soft-deleted by the bulk "Delete from History" actions live here for
-// 30 days, then auto-purge. Lazy purge model: every GET /api/trash runs a
-// cleanup first so we don't need cron on Vercel.
-const TRASH_RETENTION_DAYS = 30;
+// Items soft-deleted by the bulk "Delete from History" actions live here
+// until an admin deliberately deletes them. Nothing ages out any more.
+const TRASH_RETENTION_DAYS = 30;   // kept only for old audit wording; nothing purges on it
 
-// Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
-// idempotent — safe to call on every list request.
+// NOT CALLED ANY MORE (owner, 2026-10-01). It used to run on every Archive
+// open and erase imports and stock entries archived over 30 days ago - and
+// an archived Manual Consumption entry still counts in Stock In/Out, so a
+// report could change by itself a month later. Kept for reference only.
 async function purgeExpiredTrash(sql) {
   // JOBS ARE NEVER AUTO-PURGED. They used to be, after 30 days, and silently:
   // the row was hard-deleted and nothing was written down, so a job card
@@ -10313,7 +10314,6 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
   try {
     await dbReady;
     const sql = getDb();
-    await purgeExpiredTrash(sql);
     const jobsRows = await sql`
       SELECT id, name, jobcode, client, stage_index, deleted_at, deleted_by, created_at
       FROM jobs WHERE deleted_at IS NOT NULL
@@ -10334,7 +10334,7 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
     `;
     // jobs_retained: archived jobs are kept indefinitely, so the Archive can
     // say so instead of counting down days that no longer run out.
-    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true });
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true, all_retained: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

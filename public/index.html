@@ -3093,7 +3093,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <button class="report-card" id="trash-card-btn" onclick="openTrashPage()" style="display:none;">
         <div class="report-card-icon">&#128465;</div>
         <div class="report-card-title">Archive</div>
-        <div class="report-card-desc">Deleted jobs and imports are archived here for 30 days before being permanently removed. Anyone can view; only admin can restore or empty the archive.</div>
+        <div class="report-card-desc">Deleted jobs, imports and stock entries are kept here until an admin deletes them permanently. Anyone can view; only admin can restore or empty the archive.</div>
       </button>
     </div>
   </div>
@@ -13493,7 +13493,7 @@ async function bulkDeleteJobsReport() {
   const count = allIds.size;
   const ok = await confirmDialog({
     title: `Move ${count} delivered job${count===1?'':'s'} to Archive?`,
-    message: 'They\'ll stay in the Archive for 30 days where an admin can restore them, then auto-purge. Their issued stock is NOT returned. After 30 days they\'re gone for good.',
+    message: 'They\'ll stay in the Archive, where an admin can restore them. Their issued stock is NOT returned.',
     danger: true,
     confirmText: 'Move to Archive',
   });
@@ -18389,8 +18389,8 @@ function openDashboard() {
 }
 
 // ── Trash (soft-deleted jobs + imports) ──────────────────────
-// Admin-only view of the bin. Items live here for 30 days (retention is
-// reported by the server so the frontend just shows it). Restore puts them
+// Admin-only view of the bin. Items stay until an admin deletes them
+// (nothing auto-purges since 2026-10-01). Restore puts them
 // back; Delete Permanently hard-deletes; Empty Trash wipes everything.
 let trashCache = { jobs: [], imports: [], transactions: [], retention_days: 30 };
 
@@ -19455,11 +19455,11 @@ function trashDaysLeft(deletedAt) {
 // Shared header chrome (title, count, Empty Trash button). Stays at the top
 // of both panes.
 function trashPaneHeader(label, count) {
-  // Jobs are kept indefinitely (see purgeExpiredTrash); everything else still
-  // ages out. The header must not promise a countdown that no longer runs.
+  // Nothing in the Archive ages out any more (owner, 2026-10-01) - it stays
+  // until an admin deliberately deletes it.
   const retention = label === 'Jobs'
     ? 'kept permanently · a job number must always be accounted for'
-    : `auto-purges after ${trashCache.retention_days} days`;
+    : 'kept until an admin deletes it permanently';
   return `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Archive · ${label}</h2>
@@ -19539,8 +19539,6 @@ function renderTrashImports() {
   const tdR = 'style="padding:8px 10px;text-align:right;"';
   const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
   const body = rows.map(r => {
-    const left = trashDaysLeft(r.deleted_at);
-    const expiringSoon = left <= 3;
     const unit = packetUnitLabel(r.paper_type).toLowerCase();
     const statusBadge = r.status === 'pending'
       ? '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;">Pending</span>'
@@ -19559,7 +19557,7 @@ function renderTrashImports() {
       <td ${tdL}>${esc(r.supplier || '—')}</td>
       <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
-      <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
+      <td ${tdN} style="color:var(--text2);">until deleted</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('import', ${r.id})">&#8635; Restore</button>
         <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('import', ${r.id})">&#128465; Delete Permanently</button>
@@ -19580,7 +19578,7 @@ function renderTrashImports() {
         <th ${thL}>Supplier</th>
         <th ${thL}>Deleted</th>
         <th ${thL}>By</th>
-        <th ${thL}>Auto-purge</th>
+        <th ${thL}>Kept</th>
         <th ${thL}></th>
       </tr></thead>
       <tbody>${body}</tbody>
@@ -19603,8 +19601,6 @@ function renderTrashTransactions() {
   const tdR = 'style="padding:8px 10px;text-align:right;"';
   const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
   const body = rows.map(r => {
-    const left = trashDaysLeft(r.deleted_at);
-    const expiringSoon = left <= 3;
     const unit = packetUnitLabel(r.paper_type).toLowerCase();
     const ps = packetSize(r.paper_type || '');
     const sheets = Math.abs(r.change);
@@ -19617,7 +19613,7 @@ function renderTrashTransactions() {
       <td ${tdR} style="font-weight:600;">${fmtPkts(sheets / ps, {keepZero:true})} ${unit}</td>
       <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
-      <td ${tdN} style="font-weight:600;color:${expiringSoon?'#A32D2D':'var(--text)'};">${left} day${left===1?'':'s'} left</td>
+      <td ${tdN} style="color:var(--text2);">until deleted</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('transaction', ${r.id})">&#8635; Restore</button>
         <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('transaction', ${r.id})">&#128465; Delete Permanently</button>
@@ -19637,7 +19633,7 @@ function renderTrashTransactions() {
         <th ${thR}>Consumed</th>
         <th ${thL}>Deleted</th>
         <th ${thL}>By</th>
-        <th ${thL}>Auto-purge</th>
+        <th ${thL}>Kept</th>
         <th ${thL}></th>
       </tr></thead>
       <tbody>${body}</tbody>
@@ -20785,7 +20781,7 @@ async function bulkDeleteSelectedFinalizedJobs() {
   const names = ids.map(id => { const j = jobs.find(x => x.id === id); return j ? `E-${id} (${j.name})` : `E-${id}`; });
   const ok = await confirmDialog({
     title: `Move ${ids.length} finalized job${ids.length === 1 ? '' : 's'} to Archive?`,
-    message: `${names.join('\n')}\n\nEach stays in the Archive for 30 days where it can be restored, then auto-purges. Inventory ledger entries are preserved.`,
+    message: `${names.join('\n')}\n\nEach stays in the Archive, where it can be restored. Inventory ledger entries are preserved.`,
     danger: true,
     confirmText: 'Move to Archive',
   });
@@ -21587,7 +21583,7 @@ async function deleteManualConsumptionRows(ids, skipConfirm = false) {
   if (!skipConfirm) {
     const ok = await confirmDialog({
       title: `Move this Manual Job Card Consumption row to Archive?`,
-      message: `${cleanIds.length} transaction record${cleanIds.length===1?'':'s'} will be removed from Manual Job Card Consumption and kept in Archive for 30 days (restorable), then auto-purged. It'll keep showing in Stock In/Out and Total Stock In/Out — this only affects the Manual Job Card Consumption report. The current physical stock balance will not change.`,
+      message: `${cleanIds.length} transaction record${cleanIds.length===1?'':'s'} will be removed from Manual Job Card Consumption and kept in the Archive (restorable). It'll keep showing in Stock In/Out and Total Stock In/Out — this only affects the Manual Job Card Consumption report. The current physical stock balance will not change.`,
       confirmText: 'Move to Archive', danger: true,
     });
     if (!ok) return;
@@ -21607,7 +21603,7 @@ async function deleteSelectedManualConsumption() {
   if (!ids.length) return;
   const ok = await confirmDialog({
     title: `Move ${ids.length} selected transaction${ids.length===1?'':'s'} to Archive?`,
-    message: "They will be removed from Manual Job Card Consumption and kept in Archive for 30 days (restorable). They'll keep showing in Stock In/Out and Total Stock In/Out — this only affects the Manual Job Card Consumption report. Current physical stock balances will not change.",
+    message: "They will be removed from Manual Job Card Consumption and kept in the Archive (restorable). They'll keep showing in Stock In/Out and Total Stock In/Out — this only affects the Manual Job Card Consumption report. Current physical stock balances will not change.",
     confirmText: 'Move to Archive', danger: true,
   });
   if (!ok) return;
@@ -23034,7 +23030,7 @@ async function bulkDeleteImports() {
   if (!rows.length) { notify('Nothing deletable selected (received rows must be reversed first).'); return; }
   const ok = await confirmDialog({
     title: `Move ${rows.length} import row${rows.length===1?'':'s'} to Archive?`,
-    message: 'They\'ll stay in the Archive for 30 days where an admin can restore them, then auto-purge. (Received rows are skipped — reverse them from the inventory ledger instead.)',
+    message: 'They\'ll stay in the Archive, where an admin can restore them. (Received rows are skipped — reverse them from the inventory ledger instead.)',
     danger: true,
     confirmText: 'Move to Archive',
   });
@@ -28863,7 +28859,7 @@ async function deleteJob(id) {
   if (!j) return;
   const ok = await confirmDialog({
     title: `Move Job E-${id} to Archive?`,
-    message: `"${j.name}"\n\nIt'll stay in the Archive for 30 days where you can restore it, then auto-purge. Inventory ledger entries are preserved.`,
+    message: `"${j.name}"\n\nIt'll stay in the Archive, where you can restore it. Inventory ledger entries are preserved.`,
     danger: true,
     confirmText: 'Move to Archive',
   });
