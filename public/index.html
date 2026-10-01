@@ -11488,6 +11488,55 @@ function reportPrintHeading({ title, formCode, scope, dateText, note }) {
         ${note ? `<div style="font-size:8pt;text-align:center;">${esc(note)}</div>` : ''}
       </div>`;
 }
+// Page setup for every report print. The app's base print rule is the job
+// card's (A4 portrait, 0 mm page margin, a 210 mm print area): reports that
+// relied on it put the first / last rows of every page after the first, and
+// the outer columns, in the printer's unprintable edge, and a wide table ran
+// off the right of the paper. This applies A4 in the report's orientation
+// with real margins, frees the print area, and shrinks a report wider than
+// the page to fit. The page rule goes in <head> (Chrome can ignore one
+// inside #print-area) and is removed after printing.
+const REPORT_PRINT_MARGIN_MM = 6;
+function reportPrintPrepare(area, orientation) {
+  const landscape = orientation === 'landscape';
+  document.querySelectorAll('style[data-report-print]').forEach(s => s.remove());
+  const style = document.createElement('style');
+  style.setAttribute('data-report-print', '');
+  style.textContent = '@media print { @page { size: A4 ' + (landscape ? 'landscape' : 'portrait') + '; margin: ' + REPORT_PRINT_MARGIN_MM + 'mm; } '
+    + '#print-area { width: auto !important; max-width: none !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important; } }';
+  document.head.appendChild(style);
+  reportPrintFit(area, (landscape ? 297 : 210) - 2 * REPORT_PRINT_MARGIN_MM);
+  const done = () => { window.removeEventListener('afterprint', done); style.remove(); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => { if (style.isConnected) done(); }, 60000);   // browsers that skip afterprint
+}
+// Measures the report (the print area's first <div>) laid out at the page's
+// usable width, off-screen; if it is wider, zooms it down to fit.
+function reportPrintFit(area, usableMm) {
+  const wrap = area && area.querySelector(':scope > div');
+  if (!wrap) return;
+  wrap.style.zoom = '';
+  const usablePx = Math.floor(usableMm / 25.4 * 96);
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;left:-30000px;top:0;visibility:hidden;width:' + usablePx + 'px;font-family:Arial,sans-serif;';
+  probe.innerHTML = wrap.outerHTML;
+  document.body.appendChild(probe);
+  const w = probe.firstElementChild;
+  const widthOf = () => Math.max(Math.ceil(w.getBoundingClientRect().width), ...[...w.querySelectorAll('table')].map(t => Math.ceil(t.getBoundingClientRect().width)));
+  let zoom = 1;
+  if (w && widthOf() > usablePx) {
+    // Borders don't shrink below 1px, so the zoomed report is a little wider
+    // than the plain ratio says - re-measure the zoomed copy and correct.
+    for (let i = 0; i < 4; i++) {
+      const visual = widthOf();
+      if (visual <= usablePx) break;
+      zoom = Math.floor(zoom * usablePx / visual * 0.995 * 1000) / 1000;
+      w.style.zoom = String(zoom);
+    }
+  }
+  probe.remove();
+  if (zoom < 1) wrap.style.zoom = String(zoom);
+}
 // The same block as the first two rows of a worksheet, with the column header
 // on row 3. Call it with the sheet and the header array after aoa_to_sheet;
 // data must start at REPORT_XL_HEADER_ROWS.
@@ -11583,7 +11632,7 @@ function printInventoryReport() {
     </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'CURRENT BALANCE SUMMARY',
@@ -11610,6 +11659,7 @@ function printInventoryReport() {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -12208,25 +12258,6 @@ function renderStockSummary() {
 }
 
 // Print version — landscape A4, same numbers but with company header.
-// Stock Summary print: 6 mm page margins keep every column inside what the
-// printer can actually print (0 mm clipped both sides), and a table wider
-// than the page is shrunk to fit instead of being cut off.
-const SS_PRINT_MARGIN_MM = 6;
-function ssPrintFitToPage(area) {
-  const wrap = area.querySelector(':scope > div');
-  const table = wrap && wrap.querySelector('table');
-  if (!table) return;
-  const usablePx = Math.floor((297 - 2 * SS_PRINT_MARGIN_MM) / 25.4 * 96);   // A4 landscape width at 96 px/in
-  const probe = document.createElement('div');
-  probe.style.cssText = 'position:absolute;left:-20000px;top:0;visibility:hidden;width:' + usablePx + 'px;font-family:Arial,sans-serif;';
-  probe.innerHTML = wrap.outerHTML;
-  probe.querySelectorAll('tbody td').forEach(td => { td.style.whiteSpace = 'nowrap'; });
-  document.body.appendChild(probe);
-  const t = probe.querySelector('table');
-  const needed = t ? Math.max(t.scrollWidth, t.offsetWidth) : 0;
-  probe.remove();
-  wrap.style.zoom = needed > usablePx ? String(Math.floor(usablePx / needed * 1000) / 1000) : '';
-}
 function printStockSummary() {
   const { paperType, from, to, granularity } = stockSummaryState;
   const isAll = !paperType;
@@ -12311,13 +12342,13 @@ function printStockSummary() {
     while (td.firstChild) number.appendChild(td.firstChild);
     td.appendChild(number);
   });
-  ssPrintFitToPage(area);
+  reportPrintFit(area, 297 - 2 * REPORT_PRINT_MARGIN_MM);
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   // A page rule inside #print-area can be ignored by Chrome. Add it to
   // <head> for this print only, after the app's global portrait rule.
   const pageStyle = document.createElement('style');
-  pageStyle.textContent = `@media print { @page { size: A4 landscape; margin: ${SS_PRINT_MARGIN_MM}mm; } }`;
+  pageStyle.textContent = `@media print { @page { size: A4 landscape; margin: ${REPORT_PRINT_MARGIN_MM}mm; } }`;
   document.head.appendChild(pageStyle);
   const cleanup = () => {
     window.removeEventListener('afterprint', cleanup);
@@ -12796,7 +12827,7 @@ function printImports() {
   </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'IMPORTS REPORT',
@@ -12823,6 +12854,7 @@ function printImports() {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -13013,7 +13045,7 @@ function printJobNumbers() {
     return `<tr>${cells}</tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.4in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'JOB NUMBER REGISTER',
@@ -13030,6 +13062,7 @@ function printJobNumbers() {
   // logo load, then print.
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -14154,7 +14187,7 @@ function printJobsReport() {
   </tr>`;
   }).join('');
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'JOBS REPORT',
@@ -14188,6 +14221,7 @@ function printJobsReport() {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -15237,11 +15271,12 @@ function printPartyLedger() {
   }
   const area = document.getElementById('print-area');
   area.innerHTML = `
-    <style>@media print { @page { size: A4 portrait; margin: 0.35in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'LEDGER REPORT', scope, dateText: partyLedgerPeriodText(from, to), note: `Generated: ${fmtDMYT(new Date())}` })}</div>
       ${table}
     </div>`;
+  reportPrintPrepare(area, 'portrait');
   setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 300);
 }
 async function exportPartyLedger() {
@@ -15594,11 +15629,12 @@ function printAgingReport() {
   }
   const area = document.getElementById('print-area');
   area.innerHTML = `
-    <style>@media print { @page { size: A4 ${X.company ? 'landscape' : 'portrait'}; margin: 0.35in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'AGING REPORT', scope: agingScopeText(), dateText: `As of ${fmtDMY(s.asOf)} · due ${AGING_DUE_DAYS} days after invoice date`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
       ${table}
     </div>`;
+  reportPrintPrepare(area, X.company ? 'landscape' : 'portrait');
   setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 300);
 }
 async function exportAgingReport() {
@@ -17283,7 +17319,7 @@ function printSaleReport() {
     ? `<tr style="background:#eee;font-weight:bold;">${cols.map((c, i) => c.totalPrint ? `<td ${tdR}>${fmtRate(totals[c.total])}</td>` : (i === 0 ? `<td ${tdL}>Total</td>` : `<td ${tdL}></td>`)).join('')}</tr>`
     : '';
   const html = `
-    <style>@media print { @page { size: A4 landscape; margin: 0.3in; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'SALE REPORT',
@@ -17299,6 +17335,7 @@ function printSaleReport() {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -17736,6 +17773,7 @@ function printProductionReport() {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'portrait');
   setTimeout(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); }, 50);
 }
 
@@ -20291,6 +20329,7 @@ function printStockTotal(direction) {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'portrait');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -21351,6 +21390,7 @@ function printManualConsumption() {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'portrait');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
@@ -21622,7 +21662,7 @@ function printOffcutConsumption() {
       dateText: offcutConsumptionDateText(),
       note: `Generated: ${fmtDMYT(new Date())}`,
     })}</div>
-    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#f7f1ea;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Reason</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No offcut issuance in this period.</div>'}</div>`;window.print();setTimeout(()=>area.innerHTML='',500);
+    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#f7f1ea;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Reason</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No offcut issuance in this period.</div>'}</div>`;reportPrintPrepare(area, 'portrait');window.print();setTimeout(()=>area.innerHTML='',500);
 }
 
 // Rows for Print/Export: if the user has checked specific rows via the bulk
@@ -21711,6 +21751,7 @@ function printStockMovement(direction) {
     </div>`;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
+  reportPrintPrepare(area, 'portrait');
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
