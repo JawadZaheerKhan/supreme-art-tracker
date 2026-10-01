@@ -13626,13 +13626,22 @@ function buildJobsReportRows() {
     // Per-shipment detail, so the report can show one row per delivery the
     // way the Sale Report does. The pipe-joined strings above are still what
     // the searches and the two merges below work on.
-    const shipments = deliveriesList.map(d => ({
+    // Each shipment's Unit Carton Qty, Wastage and Packets come from
+    // jobShipmentFigures() - the SAME calculation as the Sale Report, so the
+    // two reports' columns and totals agree (owner, 2026-10-01).
+    const SF = jobShipmentFigures(j);
+    const shipments = deliveriesList.map((d, idx) => ({
       date:    (d && d.date) ? fmtDMY(d.date) : stampFromStage,
       poNo:    (d && d.po_no    ? String(d.po_no).trim()    : '') || String(j.ref || '').trim(),
       batchNo: (d && d.batch_no ? String(d.batch_no).trim() : '') || String(j.bno || '').trim(),
       challan: deliveryChallanText(d).trim(),
       cartons: parseFloat(d && d.cartons) || 0,
       ms:      deliveryEntryMs(d),
+      uc:      SF.rows[idx].cartonQty,
+      wastage: SF.rows[idx].wastage,
+      pk:      SF.rows[idx].packets,
+      pkShown: SF.rows[idx].packetsShown,
+      pkUnit:  SF.rows[idx].packetsUnit,
     }));
     // Only enforced in Delivered mode — matches the toolbar, which hides
     // these two fields in Created mode. Without this guard, a leftover
@@ -13691,6 +13700,8 @@ function buildJobsReportRows() {
       packets,
       packetsTotal: packets,
       perUnitPk,
+      sheetUnit: SF.sheetUnit,   // Labels / Leaflets: packets shown as sheets
+      psJob: SF.psJob,
       paper,
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
@@ -13711,6 +13722,10 @@ function buildJobsReportRows() {
       if (key && byKey.has(key)) {
         const prev = byKey.get(key);
         prev.cartons += s.cartons || 0;
+        prev.uc      = (prev.uc || 0) + (s.uc || 0);
+        prev.pk      = (prev.pk || 0) + (s.pk || 0);
+        prev.pkShown = (prev.pkShown || 0) + (s.pkShown || 0);
+        if (s.wastage != null) prev.wastage = (prev.wastage || 0) + s.wastage;
         if (s.batchNo && prev.batchNo !== s.batchNo) prev.batchNo = [prev.batchNo, s.batchNo].filter(Boolean).join(' | ');
         if (s.poNo    && prev.poNo    !== s.poNo)    prev.poNo    = [prev.poNo, s.poNo].filter(Boolean).join(' | ');
         continue;
@@ -13841,15 +13856,20 @@ function buildJobsReportRows() {
   for (const r of withMilMerge) {
     const list = Array.isArray(r.shipments) ? r.shipments : [];
     if (list.length < 2) {
-      // One shipment: this row IS the job's last delivery. Its packets
-      // read per-delivery too ("10/42") when the factor is known.
-      // Its packets come from the ledger's own figure when there is one
-      // (delqty is the legacy typed field and can disagree).
-      const oneQty = list.length === 1 ? numQty(list[0].cartons) : numQty(r.deliveredQty);
-      perShipment.push({
+      // One shipment: this row IS the job's last delivery, and carries that
+      // delivery's UC / Wastage / Packets - the same figures as the Sale
+      // Report. No shipment recorded at all (moved to Delivered by hand):
+      // the job's own UC and issued packets stand.
+      const s = list[0];
+      const sheets = !!r.sheetUnit;
+      perShipment.push(s ? {
         ...r,
-        packets: r.perUnitPk > 0 ? oneQty * r.perUnitPk : r.packets,
-        packetsSlash: r.perUnitPk > 0,
+        cartonQty: s.uc, wastage: s.wastage,
+        packets: s.pk, packetsShown: s.pkShown, packetsUnit: s.pkUnit,
+      } : {
+        ...r,
+        packetsShown: sheets ? (+r.packets || 0) * (r.psJob || 0) : r.packets,
+        packetsUnit: sheets ? 'sheets' : 'packets',
       });
       continue;
     }
@@ -13873,15 +13893,18 @@ function buildJobsReportRows() {
         challan:      s.challan,
         deliveredQty: s.cartons,
         poQty:        r.stockGroupName ? s.cartons : r.poQty,
-        // Wastage belongs to the job ONCE, on its last delivery row.
-        wastage:      i === list.length - 1 ? r.wastage : null,
+        // UC, Wastage (once, on the last delivery) and Packets: this
+        // delivery's own figures - the same as the Sale Report's row.
+        cartonQty:    s.uc,
+        wastage:      s.wastage,
         // Ready Qty AS OF that delivery: produced total minus everything
         // delivered up to and including this row (E-146: 24,400 − 6,000 =
         // 18,400 on the first row, then 10,900) - not today's remainder
         // repeated on every row.
         readyQty:     Math.max(0, (+r.readyTotalAll || 0) - cumDelivered),
-        packets:      r.perUnitPk > 0 ? numQty(s.cartons) * r.perUnitPk : r.packets,
-        packetsSlash: r.perUnitPk > 0,
+        packets:      s.pk,
+        packetsShown: s.pkShown,
+        packetsUnit:  s.pkUnit,
         shipmentIndex: i,
         shipmentOfJob: list.length,
       });
@@ -13897,7 +13920,7 @@ function buildJobsReportRows() {
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
 const JOBS_REPORT_MERGE = {
-  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'readyNow', 'packets', 'packetsTotal', 'milQty'],
+  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty'],
   amount: [],
 };
 
@@ -13943,6 +13966,7 @@ function renderJobsReport() {
   // that job's rows, so they're counted on its first row only — otherwise a
   // job delivered eight times would multiply them eightfold.
   const seenJobsForTotals = new Set();
+  const numCell = (v) => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
   const totals = rows.reduce((a, r) => {
     const memberIds = r._merged || [r.id];
     const fresh = memberIds.map((id, i) => i).filter(i => !seenJobsForTotals.has(memberIds[i]));
@@ -13966,7 +13990,9 @@ function renderJobsReport() {
     return {
       poQty:        a.poQty        + poQtyAdd,
       milQty:       a.milQty       + milQtyAdd,
-      cartonQty:    a.cartonQty    + once(r.cartonQty, 'cartonQty'),
+      // Unit Carton Qty and Packets are PER SHIPMENT now (the Sale Report's
+      // figures), so every row adds - the same totals as the Sale Report.
+      cartonQty:    a.cartonQty    + numCell(r.cartonQty),
       deliveredQty: a.deliveredQty + (+r.deliveredQty || 0),
       // Wastage sits on exactly one row per job now (its last delivery),
       // MIL included - a plain per-row sum is the honest total.
@@ -13974,9 +14000,13 @@ function renderJobsReport() {
       // Per-shipment rows carry the HISTORIC remainder; the footer wants
       // what is on the shelf now, counted once per job.
       readyQty:     a.readyQty     + once(r.readyNow != null ? r.readyNow : r.readyQty, 'readyNow'),
-      packets:      a.packets      + (r.packetsSlash ? (+r.packets || 0) : once(r.packets, 'packets')),
+      // Packets and sheets are different units - never added together; a
+      // sheet row's packets are kept apart, for reference.
+      packets:       a.packets       + (r.packetsUnit === 'sheets' ? 0 : numCell(r.packets)),
+      sheetsCount:   a.sheetsCount   + (r.packetsUnit === 'sheets' ? numCell(r.packetsShown) : 0),
+      sheetsPackets: a.sheetsPackets + (r.packetsUnit === 'sheets' ? numCell(r.packets) : 0),
     };
-  }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0 });
+  }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, packets: 0, sheetsCount: 0, sheetsPackets: 0 });
   const tbody = rows.map(r => {
     // Wastage (carton qty − ready qty) is just a tracking number, not a
     // good/bad indicator — the gap between PO / produced / ready can
@@ -14019,7 +14049,7 @@ function renderJobsReport() {
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
       ${readyCell}
-      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.packets)}${r.packetsSlash ? '<span style="font-weight:500;color:var(--text2);">/' + fmt(r.packetsTotal) + '</span>' : ''}</td>
+      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${r.packetsUnit === 'sheets' ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets)}</td>
       <td ${td}>${esc(r.paper)}</td>
       <td ${td}>${esc(r.machine)}</td>
       <td ${td}>${esc(r.coatings)}</td>
@@ -14070,7 +14100,7 @@ function renderJobsReport() {
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.readyQty)}</td>
-          <td style="padding:8px 10px;text-align:right;">${fmt(totals.packets)}</td>
+          <td style="padding:8px 10px;text-align:right;">${[totals.packets ? fmt(totals.packets) + (totals.sheetsCount ? ' pkts' : '') : '', totals.sheetsCount ? `${fmt(totals.sheetsCount)} sheets (${fmt(totals.sheetsPackets)} pkts)` : ''].filter(Boolean).join(' + ')}</td>
           <td colspan="3"></td>
         </tr>
       </tfoot>
@@ -14089,7 +14119,7 @@ async function exportJobsReport() {
   const milMode = !!jobsReportState.milOnly;
   const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets Consumed', 'Paper', 'Machine', 'Coatings'];
+    'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -14114,7 +14144,8 @@ async function exportJobsReport() {
       deliveredCell,
       r.wastage === null ? (r.stockGroupName ? 'MIL' : '') : r.wastage,
       r.readyQty,
-      r.packetsSlash ? `${+(+r.packets).toFixed(2)}/${+(+r.packetsTotal).toFixed(2)}` : (r.packets ? +r.packets.toFixed(2) : ''),
+      // Same as the Sale Report's Excel: packets, or sheets for Labels / Leaflets.
+      (() => { const v = r.packetsUnit === 'sheets' ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; })(),
       r.paper,
       r.machine,
       r.coatings,
@@ -14180,7 +14211,7 @@ function printJobsReport() {
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.readyQty)}</td>
-    <td ${tdR}>${fmt(r.packets)}${r.packetsSlash ? '/' + fmt(r.packetsTotal) : ''}</td>
+    <td ${tdR}>${r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
@@ -16152,6 +16183,88 @@ function setSrMilOnly(v) {
 // rows; only Cartons/Rate w/o & w/ Sale Tax are per-shipment amounts.
 // tabOverride lets the Excel export build each tab's rows without disturbing
 // the tab the user is looking at.
+// Per-delivery Unit Carton Qty, Wastage and Packets for one job: the ONE
+// calculation the Sale Report AND the Jobs Report use, so their columns and
+// totals agree (owner, 2026-10-01 - they used to count UC and packets
+// differently). Per delivery, like the Sale Report always did:
+//   Unit Carton Qty - what the delivery shipped; the LAST delivery of a fully
+//     delivered job absorbs the remainder, so the rows add up to the job's
+//     real UC (E-146: 6,000 and 7,500 plain, last row 25,200 - 13,500 =
+//     11,700). A UC typed into the Sale Report wins.
+//   Wastage - one figure, on the last delivery, once it is KNOWN: MIL when
+//     every delivery is done, a normal job when production is finished. A
+//     typed wastage wins, and the last row carries what is left of the real
+//     figure after the typed ones.
+//   Packets - packets ISSUED for the row's UC (UC / ups / cut pieces /
+//     packet size); Labels and Leaflets are shown in SHEETS of the sheet size.
+function jobShipmentFigures(j) {
+  const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
+  let packets = 0;
+  const pktFromForm = parseFloat(j.particulars && j.particulars.quantity_of_packets);
+  if (Number.isFinite(pktFromForm) && pktFromForm > 0) {
+    packets = pktFromForm;
+  } else {
+    const sheets = parseFloat(j.sheets) || 0;
+    const ps     = packetSize(j.paper || '');
+    if (sheets && ps) packets = sheets / ps;
+  }
+  const cartonQtyNum   = parseFloat(j.cartonqty);
+  const isMilJob       = !!j.stock_group_name;
+  const deliveredTotal = totalDeliveredCartons(j) || 0;
+  // The "good output" wastage is measured against: QC's Ready qty, else
+  // Pasting's, else (neither ever entered) what was delivered.
+  const recordedReady  = earlyReadyTotal(j) || 0;
+  const readyTotalAll  = recordedReady || deliveredTotal;
+  const productionDone = (j.stage_index || 0) >= 6;
+  // A job the PM FINALIZED as delivered (remainder waived) is finished too.
+  const finalized      = !!(j.stages && j.stages[7] && j.stages[7].finalized);
+  const allDelivered   = (finalized && deliveredTotal > 0)
+    || (recordedReady > 0
+        ? (deliveredTotal >= recordedReady && (isMilJob || productionDone))
+        : ((j.stage_index || 0) >= 7 && deliveredTotal > 0));
+  const wastageKnown   = readyTotalAll > 0 && (recordedReady > 0 ? (isMilJob ? allDelivered : productionDone) : allDelivered);
+  const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
+  const invItem   = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const ptype     = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
+  const upsNum    = parseFloat(j.ups);
+  const psJob     = packetSize(ptype);
+  const cutPieces = jobCutPieces(j);
+  const pkPerUnit = (upsNum > 0 && psJob > 0) ? 1 / (upsNum * psJob * cutPieces) : 0;
+  const sheetUnit = ['labels', 'leaflets'].includes(saleReportTabFor(j)) && psJob > 0;
+  const ovNum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
+  const ucBase = deliveriesList.map(d => { const o = ovNum(d && d.uc_qty); return o !== null ? o : (parseFloat(d && d.cartons) || 0); });
+  const wastageTypedArr = deliveriesList.map(d => ovNum(d && d.wastage_qty));
+  const rows = deliveriesList.map((d, idx) => {
+    const cartons = parseFloat(d && d.cartons) || 0;
+    const isLastDelivery = idx === deliveriesList.length - 1;
+    const othersUc = ucBase.reduce((a, v, k) => a + (k === idx ? 0 : v), 0);
+    const ucCalc = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum)) ? cartonQtyNum - othersUc : cartons;
+    const typedWastageOthers = wastageTypedArr.reduce((a, v, k) => a + (k === idx || v === null ? 0 : v), 0);
+    const wastageCalc = (isLastDelivery && jobWastageAll !== null) ? jobWastageAll - typedWastageOthers : null;
+    const ucTyped = ovNum(d && d.uc_qty);
+    const wTyped  = ovNum(d && d.wastage_qty);
+    const cartonQty = ucTyped !== null ? ucTyped : ucCalc;
+    // No ups / packet size on file: share the job's own packet count out by
+    // the row's UC instead of showing 0.
+    const rowPackets = pkPerUnit > 0
+      ? cartonQty * pkPerUnit
+      : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * cartonQty / cartonQtyNum : 0);
+    return {
+      cartons, cartonQty, ucTyped: ucTyped !== null, ucCalc,
+      wastage: wTyped !== null ? wTyped : wastageCalc, wastageTyped: wTyped !== null, wastageCalc,
+      packets: rowPackets,
+      packetsShown: sheetUnit ? rowPackets * psJob : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
+    };
+  });
+  return { isMilJob, cartonQtyNum, allDelivered, jobWastageAll, packets, pkPerUnit, psJob, upsNum, sheetUnit, rows };
+}
+// Packets cell text shared by both reports: plain packets, or for Labels /
+// Leaflets the sheets with their packets alongside for reference
+// ("4,200 sheets (42 pkts)").
+function shipmentPacketsText(packets, unit, sheets, fmt) {
+  if (unit === 'sheets') return `${fmt(sheets)} sheets (${fmt(packets)} pkts)`;
+  return fmt(packets);
+}
 function buildSaleReportRows(tabOverride) {
   const { client, dateRange, dfrom, dto, q, sortBy, sortDir, poSearch, challanSearch, milOnly } = saleReportState;
   const tab = tabOverride || saleReportState.tab || 'all';
@@ -16183,48 +16296,12 @@ function buildSaleReportRows(tabOverride) {
       const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
       if (!idHit && !nameHit) searchHit = false;
     }
-    let packets = 0;
-    const pktFromForm = parseFloat(j.particulars && j.particulars.quantity_of_packets);
-    if (Number.isFinite(pktFromForm) && pktFromForm > 0) {
-      packets = pktFromForm;
-    } else {
-      const sheets = parseFloat(j.sheets) || 0;
-      const ps     = packetSize(j.paper || '');
-      if (sheets && ps) packets = sheets / ps;
-    }
-    const cartonQtyNum = parseFloat(j.cartonqty);
-    // EVERY job's shipment rows follow the per-delivery criteria now
-    // (owner spec, E-146 for MIL and E-489 for normal jobs): the Unit
-    // Carton Qty column carries what each delivery shipped, the LAST
-    // delivery of a finished job absorbs the remainder, and packets +
-    // issued weight derive from the row's UC figure. Wastage is ONE
-    // figure, on the last delivery row, and appears when it is KNOWN:
-    //   MIL:    UC − Ready (25,200 − 24,200 = 1,000), only once EVERY
-    //           delivery is done.
-    //   Normal: UC − Ready-to-Delivery total, as soon as production is
-    //           FINISHED (job at Ready or beyond) - while qty is still in
-    //           process the field stays empty. PO Qty stays the job's own
-    //           on normal rows; MIL rows write their delivery there.
-    const isMilJob       = !!j.stock_group_name;
-    const deliveredTotal = totalDeliveredCartons(j) || 0;
-    // The "good output" wastage is measured against, in the order it was
-    // always taken: QC's Ready qty, else Pasting's, else (neither ever
-    // entered) what was delivered - wastageGoodQty(). Reading QC's figure
-    // alone left wastage blank on every job QC never signed off.
-    const recordedReady  = earlyReadyTotal(j) || 0;
-    const readyTotalAll  = recordedReady || deliveredTotal;
-    const productionDone = (j.stage_index || 0) >= 6;
-    // A job the PM FINALIZED as delivered (remainder waived) is finished
-    // too - its deliveries are over even though they fall short of Ready.
-    const finalized      = !!(j.stages && j.stages[7] && j.stages[7].finalized);
-    // All delivered: everything recorded as ready has shipped - or, with no
-    // ready figure on file at all, the job has reached Delivered.
-    const allDelivered   = (finalized && deliveredTotal > 0)
-      || (recordedReady > 0
-          ? (deliveredTotal >= recordedReady && (isMilJob || productionDone))
-          : ((j.stage_index || 0) >= 7 && deliveredTotal > 0));
-    const wastageKnown   = readyTotalAll > 0 && (recordedReady > 0 ? (isMilJob ? allDelivered : productionDone) : allDelivered);
-    const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
+    // Unit Carton Qty, Wastage and Packets per delivery come from
+    // jobShipmentFigures() - the same calculation the Jobs Report uses, so
+    // the two reports agree. PO Qty stays the job's own on normal rows; MIL
+    // rows write their delivery there.
+    const F = jobShipmentFigures(j);
+    const { isMilJob, cartonQtyNum, allDelivered } = F;
     const readyQty = 0;   // never rides in the Wastage column any more
     const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
     const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
@@ -16262,9 +16339,8 @@ function buildSaleReportRows(tabOverride) {
     // pieces = raw sheets, ÷ packet size = packets. The SAME factor turns
     // wastage into packets/kg - it used to skip the cut, doubling the
     // wastage weight of every 1/2-cut job.
-    const psJob       = packetSize(ptype);
-    const cutPieces   = jobCutPieces(j);
-    const pkPerUnit   = (upsNum > 0 && psJob > 0) ? 1 / (upsNum * psJob * cutPieces) : 0;
+    const psJob       = F.psJob;
+    const pkPerUnit   = F.pkPerUnit;
     // Paper issued for the WHOLE job - what its wastage is a share of.
     const jobIssuedKg = (pkPerUnit > 0 && packKg !== null && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0)
       ? cartonQtyNum * pkPerUnit * packKg : null;
@@ -16272,7 +16348,7 @@ function buildSaleReportRows(tabOverride) {
     // Labels and Leaflets are counted in SHEETS, not packets (owner): the
     // Packets column shows sheets of the Sheet Size for them (packets x
     // sheets per packet). The weight columns are unaffected.
-    const sheetUnit      = ['labels', 'leaflets'].includes(saleReportTabFor(j)) && psJob > 0;
+    const sheetUnit      = F.sheetUnit;
     const coatingsVal  = Array.isArray(j.coatings) ? j.coatings.join(', ') : '';
     // Excel-style column filters (Paper/Machine/Coatings/Rate) — an empty
     // array for a column means "no filter, show everything". Coatings is
@@ -16294,15 +16370,6 @@ function buildSaleReportRows(tabOverride) {
     const cs = resolveCompanySettings(j.client);
     const companyName = (cs && cs.company) || j.client || '';
     const cartonsPackets = cartonsPacketsFor(j);
-    // Hand-set Sale Report figures (per delivery; blank = calculated).
-    const ovNum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
-    const ucBase = deliveriesList.map(d => { const o = ovNum(d && d.uc_qty); return o !== null ? o : (parseFloat(d && d.cartons) || 0); });
-    // Wastage typed on deliveries (estimates for a partial / MIL job, say).
-    // Same rule as the Unit Carton Qty column: once the job's real wastage
-    // is known, the LAST delivery carries what is left of it after the
-    // typed rows - so the column always totals the real wastage, and the
-    // estimates already exported stay as they were.
-    const wastageTypedArr = deliveriesList.map(d => ovNum(d && d.wastage_qty));
     deliveriesList.forEach((d, idx) => {
       const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
       const batchNo = (d && d.batch_no ? String(d.batch_no).trim() : '') || (j.bno || '');
@@ -16322,32 +16389,12 @@ function buildSaleReportRows(tabOverride) {
       const { rate, tax: taxPct, override: rateOverride } = shipmentPricing(j, d);
       if (cf.rate.length && !cf.rate.includes(rate !== null ? fmtRate(rate) : '')) return;
       const cartons = parseFloat(d && d.cartons) || 0;
-      // The row's Unit Carton Qty is what it shipped - except the LAST
-      // delivery of a fully-delivered job, which absorbs the remainder so
-      // the column sums to the job's real Unit Carton Qty (E-146: 6,000
-      // and 7,500 plain, last row 25,200 − 13,500 = 11,700 = 10,700
-      // shipped + 1,000 wastage). Wastage sits on the last row once it is
-      // known; packets + issued weight derive from the row UC - 11,700 ÷ 3
-      // ÷ (100 × 2 for a 1/2 cut) = 19.5 pkts - so the rows total exactly
-      // the job's own packet count.
-      const isLastDelivery = idx === deliveriesList.length - 1;
-      // Calculated figures first (what the report works out)...
-      const othersUc = ucBase.reduce((a, v, k) => a + (k === idx ? 0 : v), 0);
-      const ucCalc = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum))
-        ? cartonQtyNum - othersUc
-        : cartons;
-      const typedWastageOthers = wastageTypedArr.reduce((a, v, k) => a + (k === idx || v === null ? 0 : v), 0);
-      const wastageCalc = (isLastDelivery && jobWastageAll !== null) ? jobWastageAll - typedWastageOthers : null;
-      // ...then anything typed into the report wins.
-      const ucTyped = ovNum(d && d.uc_qty);
-      const wTyped  = ovNum(d && d.wastage_qty);
-      const rowCartonQty = ucTyped !== null ? ucTyped : ucCalc;
-      const rowWastage = wTyped !== null ? wTyped : wastageCalc;
-      // No ups / packet size on file: share the job's own packet count out
-      // by the row's UC instead of showing 0.
-      const rowPackets = pkPerUnit > 0
-        ? rowCartonQty * pkPerUnit
-        : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * rowCartonQty / cartonQtyNum : 0);
+      // This delivery's UC / Wastage / Packets (jobShipmentFigures): the
+      // issued weight and wastage kg below derive from them.
+      const fig = F.rows[idx];
+      const rowCartonQty = fig.cartonQty;
+      const rowWastage   = fig.wastage;
+      const rowPackets   = fig.packets;
       const rowIssuedKg = (rowPackets > 0 && packKg !== null) ? rowPackets * packKg : null;
       // Wastage Sheets = printed sheets (wastage ÷ ups). Wastage Weight is
       // those sheets weighed at the SHEET SIZE's Packet/KG, no cut division
@@ -16374,8 +16421,8 @@ function buildSaleReportRows(tabOverride) {
         // delivery shipped (owner spec) - normal jobs keep the job's PO Qty.
         poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets,
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
-        packetsShown: sheetUnit ? rowPackets * psJob : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
-        ucTyped: ucTyped !== null, ucCalc, wastageTyped: wTyped !== null, wastageCalc,
+        packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
+        ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         ups: upsVal, plates: platesVal,
         wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
@@ -16978,10 +17025,15 @@ function saleReportCols(tabOverride) {
     // follows the tab; on All, sheet rows carry a small "sheets" tag.
     { key: 'packets', label: (tab === 'labels' || tab === 'leaflets') ? 'Sheets' : (tab === 'all' ? 'Packets / Sheets' : 'Packets'),
       right: true, total: 'packets', filter: 'packets',
-      cell: r => fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) + (tab === 'all' && r.packetsUnit === 'sheets' ? ' <span style="font-size:10px;color:var(--text2);">sheets</span>' : ''),
-      totalCell: t => [t.packets ? fmt(t.packets) + (t.sheetsCount ? ' pkts' : '') : '', t.sheetsCount ? fmt(t.sheetsCount) + ' sheets' : ''].filter(Boolean).join(' + '),
+      // Sheet rows (Labels / Leaflets) carry their packets alongside, for
+      // reference only - the total keeps them out of the packets figure.
+      cell: r => r.packetsUnit === 'sheets'
+        ? `${fmt(r.packetsShown)} sheets <span style="font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>`
+        : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets),
+      totalCell: t => [t.packets ? fmt(t.packets) + (t.sheetsCount ? ' pkts' : '') : '',
+        t.sheetsCount ? `${fmt(t.sheetsCount)} sheets (${fmt(t.sheetsPackets || 0)} pkts)` : ''].filter(Boolean).join(' + '),
       xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; },
-      pr: r => fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) + (tab === 'all' && r.packetsUnit === 'sheets' ? ' sheets' : '') },
+      pr: r => r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty',
       cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'uc_qty', r.cartonQty, r.ucTyped, r.ucCalc)
@@ -17076,6 +17128,7 @@ function renderSaleReport() {
       // Packets and sheets are different units - never added together.
       packets:        a.packets        + (r.packetsUnit === 'sheets' ? 0 : once('packets', +r.packets)),
       sheetsCount:    (a.sheetsCount || 0) + (r.packetsUnit === 'sheets' ? (+r.packetsShown || 0) : 0),
+      sheetsPackets:  (a.sheetsPackets || 0) + (r.packetsUnit === 'sheets' ? (+r.packets || 0) : 0),   // reference only
       wastageSheets:  a.wastageSheets  + once('wastageSheets', r.wastageSheets),
       wastagePackets: a.wastagePackets + once('wastagePackets', r.wastagePackets),
       wastageKg:      a.wastageKg      + once('wastageKg', r.wastageKg),
