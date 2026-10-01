@@ -5676,62 +5676,104 @@ async function explainMissingJob() {
 }
 
 // True when either search box has something in it. A search is a request for
-// specific jobs, so both the stage tabs and the MIL group collapsing step
-// aside for it - see renderJobsCompact / renderJobsCards.
+// specific jobs, so the MIL group collapsing steps aside for it (see
+// renderJobsCompact / renderJobsCards); the tabs don't - matches in other
+// tabs are offered by searchElsewhereHtml().
 function jobsSearchActive() {
   return !!String(filterText || '').trim() || !!String(filterPO || '').trim();
 }
-function getFiltered() {
+// Search / PO / company / stage / machine / group / date filters - everything
+// except which tab the job sits in.
+function jobPassesFilters(j) {
   const t = String(filterText || '').trim().toLowerCase();
   // "E-350", "e350" and "350" all mean job 350 - that's how the id is shown
   // everywhere in the app, so the search box has to accept it written that way.
   const idNeedle = t.replace(/^e[-\s]?/, '');
-  const searching = jobsSearchActive();
-  return jobs.filter(j => {
-    if (t) {
-      const name   = String(j.name   || '').toLowerCase();
-      const client = String(j.client || '').toLowerCase();
-      const id     = String(j.id);
-      if (!name.includes(t) && !client.includes(t) && id !== idNeedle && !id.includes(idNeedle)) return false;
-    }
-    if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
-    if (filterClient && j.client !== filterClient) return false;
-    if (filterPO) {
-      const po = String(j.ref || '').toLowerCase();
-      if (!po.includes(String(filterPO).toLowerCase())) return false;
-    }
-    if (filterShadeCard === 'only' && !j.is_shade_card) return false;
-    if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
-    if (filterMachine && j.machine !== filterMachine) return false;
-    if (filterGroup && j.stock_group_name !== filterGroup) return false;
-    if (!inDateRange(j)) return false;
-    // A search looks across every stage. Otherwise the job had to already be
-    // in whichever tab you happened to be on, so searching a job number from
-    // In Progress found nothing when the job had moved to Ready to Deliver —
-    // the box looked broken even though the job was right there.
-    if (searching && view !== 'finalized') return true;
-    if (view === 'new')     return isNewJob(j);
-    if (view === 'ctp')     return isCtpQueue(j);
-    // Only TRUE-pending (never issued) lives in the Pending Stock tab.
-    // Partial-issued jobs are already in production with real sheets in
-    // hand, so they belong in Active with a "Requires More Stock" badge.
-    if (view === 'pending') return j.issuance_status === 'pending';
-    // Partial-delivery jobs at Ready to Deliver (6) or later move to
-    // their own tab; a partial-delivered job still at Pasting (5) or
-    // earlier stays in Active alongside the rest of its stage so the
-    // floor sees it in the queue it's actually working from.
-    const isPartialDelvPostReady = isPartialDelivery(j) && (j.stage_index || 0) >= 6;
-    if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelvPostReady;
-    if (view === 'storage') return isStorage(j);
-    if (view === 'partial') return isPartialDelvPostReady;
-    if (view === 'done')    return isDone(j);
-    if (view === 'blocked') return isBlocked(j);
-    if (view === 'finalized') return _finalizedJobIds.has(j.id);
-    // 'All' means all — New Jobs and the CTP queue used to be hidden here
-    // because they have their own tabs, which made a freshly created job
-    // look missing until you found the right tab.
-    return true;
-  });
+  if (t) {
+    const name   = String(j.name   || '').toLowerCase();
+    const client = String(j.client || '').toLowerCase();
+    const id     = String(j.id);
+    if (!name.includes(t) && !client.includes(t) && id !== idNeedle && !id.includes(idNeedle)) return false;
+  }
+  if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
+  if (filterClient && j.client !== filterClient) return false;
+  if (filterPO) {
+    const po = String(j.ref || '').toLowerCase();
+    if (!po.includes(String(filterPO).toLowerCase())) return false;
+  }
+  if (filterShadeCard === 'only' && !j.is_shade_card) return false;
+  if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
+  if (filterMachine && j.machine !== filterMachine) return false;
+  if (filterGroup && j.stock_group_name !== filterGroup) return false;
+  if (!inDateRange(j)) return false;
+  return true;
+}
+// Which jobs a tab holds. A search no longer reaches across tabs (owner,
+// 2026-10-01): the open tab shows only its own matches, and matches in
+// other tabs are offered as "go to" buttons above the list instead - see
+// searchElsewhereHtml().
+function jobInView(j, view) {
+  if (view === 'new')     return isNewJob(j);
+  if (view === 'ctp')     return isCtpQueue(j);
+  // Only TRUE-pending (never issued) lives in the Pending Stock tab.
+  // Partial-issued jobs are already in production with real sheets in
+  // hand, so they belong in Active with a "Requires More Stock" badge.
+  if (view === 'pending') return j.issuance_status === 'pending';
+  // Partial-delivery jobs at Ready to Deliver (6) or later move to
+  // their own tab; a partial-delivered job still at Pasting (5) or
+  // earlier stays in Active alongside the rest of its stage so the
+  // floor sees it in the queue it's actually working from.
+  const isPartialDelvPostReady = isPartialDelivery(j) && (j.stage_index || 0) >= 6;
+  if (view === 'active')  return !isNewJob(j) && !isCtpQueue(j) && j.issuance_status !== 'pending' && !isDone(j) && !isStorage(j) && !isBlocked(j) && !isPartialDelvPostReady;
+  if (view === 'storage') return isStorage(j);
+  if (view === 'partial') return isPartialDelvPostReady;
+  if (view === 'done')    return isDone(j);
+  if (view === 'blocked') return isBlocked(j);
+  if (view === 'finalized') return _finalizedJobIds.has(j.id);
+  // 'All' means all — New Jobs and the CTP queue used to be hidden here
+  // because they have their own tabs, which made a freshly created job
+  // look missing until you found the right tab.
+  return true;
+}
+function getFiltered() {
+  return jobs.filter(j => jobPassesFilters(j) && jobInView(j, view));
+}
+
+// The Jobs tabs, in screen order. Finalized is Super Admin only.
+function jobsTabsList() {
+  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
+  if (canWastageAdjust()) views.push(['finalized','Finalized']);
+  return views;
+}
+// While searching (job / name / company box, or PO box): the matching jobs
+// that are NOT in the open tab, grouped by the tab they are in - one button
+// per tab. A job number found in one other tab reads "E-350 is in New Jobs".
+function searchElsewhereHtml() {
+  if (!jobsSearchActive() || view === 'all') return '';
+  const here = new Set(getFiltered().map(j => j.id));
+  const matches = jobs.filter(j => j && !here.has(j.id) && jobPassesFilters(j));
+  if (!matches.length) return '';
+  const claimed = new Set();
+  const btns = [];
+  for (const [v, label] of jobsTabsList()) {
+    if (v === 'all' || v === view) continue;
+    const inTab = matches.filter(j => !claimed.has(j.id) && jobInView(j, v));
+    if (!inTab.length) continue;
+    inTab.forEach(j => claimed.add(j.id));
+    const what = inTab.length === 1 ? `E-${inTab[0].id} is in <b>${label}</b>` : `${inTab.length} in <b>${label}</b>`;
+    btns.push(`<button type="button" class="btn btn-sm" onclick="goToJobsTab('${v}')" style="background:#eff6ff;border-color:#93c5fd;color:#1e3a8a;font-weight:600;">${what} &rarr; Go</button>`);
+  }
+  if (!btns.length) return '';
+  const tabLabel = (jobsTabsList().find(([v]) => v === view) || [, 'this tab'])[1];
+  return `<div class="search-elsewhere" style="grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 10px;margin-bottom:8px;background:#f8fafc;border:1px dashed #93c5fd;border-radius:8px;font-size:12px;color:var(--text2);">
+    <span>${here.size ? 'Also found outside <b>' + esc(tabLabel) + '</b>:' : 'Not in <b>' + esc(tabLabel) + '</b> — found in:'}</span>${btns.join('')}
+  </div>`;
+}
+// Jump to the tab a searched job is in, keeping the search.
+function goToJobsTab(v) {
+  setView(v);
+  const list = document.getElementById('jobs-list');
+  if (list && list.scrollIntoView) list.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
 // Parses a stage timestamp written by fmtDMYT ("dd/mm/yyyy HH:MM") into
@@ -5879,11 +5921,10 @@ function renderStats() {
 }
 
 function renderTabs() {
-  const views = [['all','All'],['new','New Jobs'],['ctp','CTP'],['pending','Pending Stock'],['active','In Progress'],['storage','Ready to Deliver'],['partial','Partially Delivered'],['blocked','Blocked'],['done','Delivered']];
   // Finalized (wastage adjustment) is a Super Admin-only feature end to
   // end — the tab itself stays hidden from every other role, not just the
   // data, and regular Admins are deliberately excluded too.
-  if (canWastageAdjust()) views.push(['finalized','Finalized']);
+  const views = jobsTabsList();
   const tabsWrap = document.getElementById('tabs-wrap');
   const viewsKey = views.map(([v]) => v).join('|');
   // Preserve the existing buttons between renders so the shared selector can
@@ -6018,9 +6059,10 @@ function clearNewJobSelection() {
 function renderJobsCompact() {
   const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
+  const elsewhere = searchElsewhereHtml();
   if (!filtered.length) {
-    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}<div id="job-missing-trace"></div></div>`;
-    explainMissingJob();   // a searched-for job number gets an explanation, not a shrug
+    el.innerHTML = elsewhere || `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}<div id="job-missing-trace"></div></div>`;
+    if (!elsewhere) explainMissingJob();   // a searched-for job number gets an explanation, not a shrug
     return;
   }
   const seenGroupsC = new Set();
@@ -6031,7 +6073,7 @@ function renderJobsCompact() {
   // job asked for never appeared and read as missing. A search overrides
   // the collapsing and shows the matched jobs as themselves.
   const searching = jobsSearchActive();
-  el.innerHTML = filtered.map(j => {
+  el.innerHTML = elsewhere + filtered.map(j => {
     if (j.stock_group_name && !searching) {
       if (seenGroupsC.has(j.stock_group_name)) return '';
       seenGroupsC.add(j.stock_group_name);
@@ -6270,14 +6312,15 @@ function renderJobRowCompact(j, opts) {
 function renderJobsCards() {
   const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
+  const elsewhere = searchElsewhereHtml();
   if (!filtered.length) {
-    el.innerHTML = `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}<div id="job-missing-trace"></div></div>`;
-    explainMissingJob();   // a searched-for job number gets an explanation, not a shrug
+    el.innerHTML = elsewhere || `<div class="empty">${jobs.length===0?'No jobs yet. Click <b>+ New Job</b> to create the first job card.':'No jobs match this filter.'}<div id="job-missing-trace"></div></div>`;
+    if (!elsewhere) explainMissingJob();   // a searched-for job number gets an explanation, not a shrug
     return;
   }
   const seenGroups = new Set();
   const searching = jobsSearchActive();   // see renderJobsCompact
-  el.innerHTML = filtered.map(j => {
+  el.innerHTML = elsewhere + filtered.map(j => {
     if (j.stock_group_name && !searching) {
       if (seenGroups.has(j.stock_group_name)) return '';
       seenGroups.add(j.stock_group_name);
@@ -6748,7 +6791,7 @@ function renderJobCard(j, opts) {
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
     ${clientPreview ? '' : overIssueBannerHtml(j)}
     ${clientPreview ? '' : partialIssueBannerHtml(j)}
-    ${clientDeliveriesBreakdown(j, clientPreview)}
+    ${clientPreview ? clientDeliveriesBreakdown(j, true) : ((done || isPartialDelivery(j)) ? clientDeliveriesBreakdown(j, false, { small: true }) : '')}
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
@@ -25771,8 +25814,11 @@ async function deleteCompanySetting(id) {
   showSaving(false);
 }
 
-function clientDeliveriesBreakdown(j, clientPreview) {
-  if (!clientPreview) return '';
+// Internal tiles get the same box, smaller (owner, 2026-10-01): pass
+// { small: true } with clientPreview false.
+function clientDeliveriesBreakdown(j, clientPreview, opts) {
+  const small = !!(opts && opts.small);
+  if (!clientPreview && !small) return '';
   const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
   if (!list.length) return '';
   const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
@@ -25822,12 +25868,12 @@ function clientDeliveriesBreakdown(j, clientPreview) {
   };
   const visibleRows = sorted.slice(0, VISIBLE).map(renderRow).join('');
   const hiddenRows = sorted.slice(VISIBLE).map(renderRow).join('');
-  const moreId = `client-ship-more-${j.id}`;
+  const moreId = `${small ? 'tile' : 'client'}-ship-more-${j.id}`;
   const rows = hiddenRows
     ? `${visibleRows}
        <div id="${moreId}" style="display:none;">${hiddenRows}</div>
        <div style="text-align:center;margin-top:4px;">
-         <button type="button" onclick="const m=document.getElementById('${moreId}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sorted.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sorted.length})</button>
+         <button type="button" onclick="event.stopPropagation();const m=document.getElementById('${moreId}');const b=this;const open=m.style.display!=='none';m.style.display=open?'none':'block';b.textContent=open?'Show all shipments (${sorted.length})':'Show fewer';" style="background:none;border:none;color:#9a3412;font-size:11px;font-weight:700;text-decoration:underline;cursor:pointer;padding:2px;">Show all shipments (${sorted.length})</button>
        </div>`
     : visibleRows;
   const footer = booked
@@ -25838,8 +25884,8 @@ function clientDeliveriesBreakdown(j, clientPreview) {
     : `<div style="display:flex;justify-content:space-between;gap:8px;padding-top:4px;margin-top:4px;border-top:1px solid #e5e7eb;font-weight:700;">
         <span>Total shipped</span><span>${shipped.toLocaleString()} cartons</span>
       </div>`;
-  return `<div style="margin-top:6px;padding:8px 10px;background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;">
-    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:4px;">Shipments</div>
+  return `<div class="tile-shipments" style="margin-top:6px;padding:${small ? '5px 8px' : '8px 10px'};background:#fff8ed;border:1px solid #fed7aa;border-radius:8px;font-size:${small ? '11px' : '12px'};line-height:1.3;">
+    <div style="font-size:${small ? '9px' : '10px'};text-transform:uppercase;letter-spacing:0.4px;color:#9a3412;font-weight:700;margin-bottom:${small ? '2px' : '4px'};">Shipments</div>
     ${rows}
     ${footer}
   </div>`;
