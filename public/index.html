@@ -1196,6 +1196,14 @@
   .job-card.is-pending    { border-left-color: #166534; }
   .job-card.is-done { background: #f0fdf4; border-left-color: #16a34a; opacity: 0.85; }
   .job-top { display: flex; align-items: flex-start; gap: 16px; }
+  /* Recorded deliveries strip at the top of a job tile - same yellow as the
+     job card's delivery ledger, small. See tileDeliveryRecordsHtml(). */
+  .tdr { background:#fefce8; border:1px solid #fde68a; border-radius:8px; padding:5px 9px; margin-bottom:8px; font-size:11px; line-height:1.35; color:var(--text); }
+  .tdr-head { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; font-size:10px; text-transform:uppercase; letter-spacing:0.04em; color:#854d0e; font-weight:700; margin-bottom:2px; }
+  .tdr-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 10px; padding:2px 0; border-top:1px dashed #fde68a; }
+  .tdr-head + .tdr-row { border-top:none; }
+  .tdr-l { color:var(--text2); font-size:10px; }
+  .tdr-more { background:none; border:none; color:#854d0e; font-size:10.5px; font-weight:700; text-decoration:underline; cursor:pointer; padding:1px 0; }
   .job-meta { flex: 1; min-width: 0; }
   .job-id-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
   .job-id-row > .badge, .job-id-row > .job-id { flex-shrink: 0; }
@@ -6084,6 +6092,59 @@ function renderJobsCompact() {
   }).join('');
 }
 
+// Every recorded delivery of a job, read-only, with the same fields as the
+// job card's Record Delivery ledger: date, cartons, PO, Batch, E-FBR, MSI,
+// Invoice No. (Delivery Challan on shade cards), rate and sale tax (only for
+// roles that see pricing), who recorded it and any linked job. Newest first;
+// the latest 3 show, the rest behind "Show all". '' when nothing is shipped.
+function tileDeliveryRecordsHtml(j) {
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  if (!list.length) return '';
+  const shade = !!j.is_shade_card;
+  const unit = shade ? 'copies' : 'unit cartons';
+  const seePricing = hasPerm('job_btn_pricing', 'view');
+  const num = (v) => parseFloat(String(v || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const booked = num(j.qty);
+  const shipped = totalDeliveredCartons(j);
+  const left = booked ? Math.max(0, booked - shipped) : 0;
+  const shipper = shade ? 0 : cartonsPacketsFor(j);
+  const f = (label, val) => (val === '' || val === null || val === undefined) ? '' : `<span><span class="tdr-l">${label}</span> ${val}</span>`;
+  const sorted = list.map((d, i) => ({ d, i })).sort((a, b) => {
+    const ta = a.d && a.d.date ? new Date(a.d.date).getTime() : 0;
+    const tb = b.d && b.d.date ? new Date(b.d.date).getTime() : 0;
+    return (tb - ta) || (b.i - a.i);
+  });
+  const row = ({ d }) => {
+    const sp = seePricing && !shade ? shipmentPricing(j, d) : null;
+    const inv = deliveryChallanText(d);
+    return `<div class="tdr-row">
+      <b>${esc(d.date ? (fmtDMY(d.date) || d.date) : '—')}</b>
+      <span style="font-weight:700;">${num(d.cartons).toLocaleString()} ${unit}</span>
+      ${shade ? '' : f('PO', esc(d.po_no || ''))}
+      ${shade ? '' : f('Batch', esc(d.batch_no || ''))}
+      ${shade ? '' : f('E-FBR', esc(d.fbr_no || ''))}
+      ${shade ? '' : f('MSI', esc(d.msi_no || ''))}
+      ${f(shade ? 'Challan' : 'Invoice', esc(inv))}
+      ${sp && sp.rate !== null ? f('Rate', `<span style="${sp.override ? RATE_OVERRIDE_STYLE : ''}">${fmtRate(sp.rate)}</span>`) : ''}
+      ${sp ? f('Tax', esc(String(sp.tax)) + '%') : ''}
+      ${d.linked_job_id ? `<span style="background:#ede9fe;color:#5b21b6;font-size:9.5px;font-weight:700;padding:0 5px;border-radius:999px;">&#128279; with E-${esc(d.linked_job_id)}</span>` : ''}
+      ${d.by ? `<span class="tdr-l" title="${esc(d.by)}">by ${esc(String(d.by).split('@')[0])}</span>` : ''}
+    </div>`;
+  };
+  const VISIBLE = 3;
+  const moreId = `tdr-more-${j.id}`;
+  const hidden = sorted.slice(VISIBLE);
+  return `<div class="tdr">
+    <div class="tdr-head">
+      <span>&#128666; Recorded deliveries (${list.length})</span>
+      <span>${shipped.toLocaleString()}${booked ? ' / ' + booked.toLocaleString() : ''} ${unit} shipped${left ? ' · ' + left.toLocaleString() + ' left' : ''}${shipper > 0 ? ' · Carton Shipper ' + shipper.toLocaleString() : ''}</span>
+    </div>
+    ${sorted.slice(0, VISIBLE).map(row).join('')}
+    ${hidden.length ? `<div id="${moreId}" style="display:none;">${hidden.map(row).join('')}</div>
+      <button type="button" class="tdr-more" onclick="event.stopPropagation();const m=document.getElementById('${moreId}');const open=m.style.display!=='none';m.style.display=open?'none':'block';this.textContent=open?'Show all ${list.length} deliveries':'Show fewer';">Show all ${list.length} deliveries</button>` : ''}
+  </div>`;
+}
+
 // Per-row template for the Jobs (compact) list — extracted so the
 // Stock Group "View Jobs" modal can render each member with the exact
 // same tile shape and no Track-view clock animation.
@@ -6238,6 +6299,7 @@ function renderJobRowCompact(j, opts) {
         : '';
     return `
     <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
+      ${tileDeliveryRecordsHtml(j)}
       <div class="job-top">
         <div class="job-meta">
           <div class="job-id-row">
@@ -6768,6 +6830,7 @@ function renderJobCard(j, opts) {
   <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${tileAttr}>
     ${sideStats}
     ${clientTopRow}
+    ${clientPreview ? '' : tileDeliveryRecordsHtml(j)}
     <div class="tile-head">
       ${selBox}
       ${clientPreview
@@ -6791,7 +6854,7 @@ function renderJobCard(j, opts) {
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
     ${clientPreview ? '' : overIssueBannerHtml(j)}
     ${clientPreview ? '' : partialIssueBannerHtml(j)}
-    ${clientPreview ? clientDeliveriesBreakdown(j, true) : ((done || isPartialDelivery(j)) ? clientDeliveriesBreakdown(j, false, { small: true }) : '')}
+    ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${primary}
