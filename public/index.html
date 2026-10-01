@@ -7582,11 +7582,12 @@ function ssClearReturn() {
   const r = ssReturn;
   ssReturn = null;
   if (r.direction) Object.assign(stockMovementStates[r.direction], r.restore);
+  else if (r.target === 'offcut') Object.assign(offcutConsumptionState, r.restore);
   else Object.assign(invReportState, r.restore);
   renderSsReturnBars();
 }
 function renderSsReturnBars() {
-  for (const id of ['sm-in-return', 'sm-out-return', 'ir-return-bar']) {
+  for (const id of ['sm-in-return', 'sm-out-return', 'ir-return-bar', 'oc-return-bar']) {
     const el = document.getElementById(id);
     if (!el) continue;
     const mine = !!ssReturn && ssReturn.barId === id;
@@ -7616,18 +7617,45 @@ function jhPaperLabel(it) {
   if (!it) return '';
   return [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (it.brand ? ' · ' + it.brand : '');
 }
-// Newer entries carry their papers; older ones fall back to what the job
-// was issued (its issued_items, looked up in Inventory).
-function jhIssuePapers(a, job) {
+// Which History lines open an issuance: stock issues, and the old automatic
+// "auto-consumed from offcut" at CTP (before 16 Sep 2026).
+function jhIsIssueEntry(a) {
+  return !!a && (a.action === 'job.issue_stock' || (a.action === 'job.process_from_ctp' && /offcut/i.test(a.summary || '')));
+}
+// The paper items an entry is about: its own (newer entries), else what the
+// job was issued (issued_items).
+function jhEntryItems(a, job) {
   const items = a && a.metadata && Array.isArray(a.metadata.items) ? a.metadata.items : null;
-  if (items && items.length) return items.map(x => `${x.paper || ''}${x.brand ? ' · ' + x.brand : ''}`.trim()).filter(Boolean);
+  if (items && items.length) return items;
   const own = job && Array.isArray(job.issued_items) ? job.issued_items : [];
+  // The old automatic offcut step tagged its rows source: 'offcut'.
+  if (a && a.action === 'job.process_from_ctp') { const off = own.filter(x => x && x.source === 'offcut'); if (off.length) return off; }
+  return own;
+}
+// Offcut paper lives in its own report (Stock Out leaves offcut out).
+function jhIsOffcutEntry(a, job) {
+  if (a && a.action === 'job.process_from_ctp') return true;
   const inv = typeof inventory !== 'undefined' ? inventory : [];
-  return [...new Set(own.map(x => jhPaperLabel(inv.find(i => i.id === x.item_id))).filter(Boolean))];
+  const found = jhEntryItems(a, job).map(x => inv.find(i => i.id === x.item_id)).filter(Boolean);
+  return found.length > 0 && found.every(i => i.is_offcut);
+}
+// Paper names; an item no longer in Inventory is said so (deleting an item
+// also erases its stock movements - E-344's offcut, for one).
+function jhIssuePapers(a, job) {
+  const items = jhEntryItems(a, job);
+  const inv = typeof inventory !== 'undefined' ? inventory : [];
+  const out = items.map(x => {
+    if (x && x.paper) return `${x.paper}${x.brand ? ' · ' + x.brand : ''}`;
+    const it = inv.find(i => i.id === (x && x.item_id));
+    return it ? jhPaperLabel(it) : 'paper item deleted from Inventory';
+  }).filter(Boolean);
+  return [...new Set(out)];
 }
 function jhOpenIssuance(jobId, auditId) {
   const a = jhAuditRows[auditId];
   if (!a) return;
+  const job = (typeof jobs !== 'undefined' ? jobs : []).find(j => j.id === jobId);
+  if (jhIsOffcutEntry(a, job)) return jhOpenOffcutIssuance(jobId, a);
   if (!hasPerm('rpt_stock_out', 'view')) { notify('The Stock Out report is not available for your role.'); return; }
   const txIds = (a.metadata && Array.isArray(a.metadata.tx_ids)) ? a.metadata.tx_ids : [];
   const auditDay = localDateISO(new Date(a.created_at));
@@ -7660,6 +7688,43 @@ function jhOpenIssuance(jobId, auditId) {
       clearInterval(timer);
       els.forEach(el => { const prev = el.style.background; el.style.transition = 'background 0.3s'; el.style.background = '#fde68a'; setTimeout(() => { el.style.background = prev; }, 2200); });
       if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 150);
+}
+// The same jump into the Offcut Consumption report, for offcut paper.
+function jhOpenOffcutIssuance(jobId, a) {
+  if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut Consumption report is not available for your role.'); return; }
+  const txIds = (a.metadata && Array.isArray(a.metadata.tx_ids)) ? a.metadata.tx_ids : [];
+  const auditDay = localDateISO(new Date(a.created_at));
+  const prevMode = mode;
+  closeModal();
+  setMode('reports');
+  ssClearReturn();
+  const st = offcutConsumptionState;
+  ssReturn = {
+    target: 'offcut', barId: 'oc-return-bar', pane: 'offcut-consumption',
+    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType, jobCard: st.jobCard },
+    label: `Job E-${jobId} · offcut issued ${fmtDMY(auditDay)}`,
+    rangeText: 'all of this job\'s offcut issuance',
+    scrollY: 0, backLabel: `Job E-${jobId} History`, historyJobId: jobId, prevMode,
+  };
+  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', jobCard: 'e-' + jobId });
+  openReportsGroup('stocks-group', 'offcut-consumption');
+  renderSsReturnBars();
+  window.scrollTo(0, 0);
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    const ids = txIds.length ? txIds
+      : (st.rows || []).filter(t => t.job_id === jobId && localDateISO(new Date(t.recorded_at || t.created_at)) === auditDay).map(t => t.id);
+    const els = ids.map(id => document.querySelector(`tr[data-oc-row="${id}"]`)).filter(Boolean);
+    if (els.length || tries > 40) {
+      clearInterval(timer);
+      els.forEach(el => { const prev = el.style.background; el.style.transition = 'background 0.3s'; el.style.background = '#fde68a'; setTimeout(() => { el.style.background = prev; }, 2200); });
+      if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      else if (tries > 40 && !(st.rows || []).some(t => t.job_id === jobId)) {
+        notify(`E-${jobId}: no offcut issuance on record - if its offcut paper item was deleted from Inventory, its stock movements went with it.`);
+      }
     }
   }, 150);
 }
@@ -10571,14 +10636,16 @@ async function renderInvHistory(id) {
 function renderAuditFeed(rows, opts) {
   if (!rows || !rows.length) return '<div class="empty">No activity yet.</div>';
   const jobId = opts && opts.jobId;
-  if (jobId) { jhAuditRows = {}; rows.forEach(a => { if (a && a.action === 'job.issue_stock') jhAuditRows[a.id] = a; }); }
+  if (jobId) { jhAuditRows = {}; rows.forEach(a => { if (jhIsIssueEntry(a)) jhAuditRows[a.id] = a; }); }
   const issueExtra = (a) => {
-    if (!jobId || a.action !== 'job.issue_stock') return '';
-    const papers = jhIssuePapers(a, (typeof jobs !== 'undefined' ? jobs : []).find(j => j.id === jobId));
+    if (!jobId || !jhIsIssueEntry(a)) return '';
+    const job = (typeof jobs !== 'undefined' ? jobs : []).find(j => j.id === jobId);
+    const papers = jhIssuePapers(a, job);
+    const offcut = jhIsOffcutEntry(a, job);
     // New entries already name the paper in their text; older ones get it here.
     const showPaper = papers.length && !(a.metadata && Array.isArray(a.metadata.items) && a.metadata.items.length);
     return `${showPaper ? `<div style="font-size:12px;color:var(--text);margin-top:2px;">Paper: <b>${esc(papers.join(' + '))}</b></div>` : ''}
-      <div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open in the Stock Out report &rarr;</div>`;
+      <div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open in the ${offcut ? 'Offcut Consumption' : 'Stock Out'} report &rarr;</div>`;
   };
   const groups = [];
   let curKey = null, curArr = null;
@@ -10594,9 +10661,9 @@ function renderAuditFeed(rows, opts) {
     <div class="audit-day">
       <div class="audit-day-header">${esc(dayHeader(g.date))}</div>
       ${g.rows.map(a => {
-        const link = jobId && a.action === 'job.issue_stock';
+        const link = jobId && jhIsIssueEntry(a);
         return `
-      <div class="audit-row${link ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in the Stock Out report" style="cursor:pointer;"` : ''}>
+      <div class="audit-row${link ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
         <div><span class="audit-tag-badge">${esc(String(a.action || '').toUpperCase())}</span></div>
         <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span>${issueExtra(a)}</div>
@@ -21637,6 +21704,7 @@ function openOffcutConsumptionPane() {
         <input class="filter" type="text" id="oc-jobcard" value="${esc(state.jobCard || '')}" placeholder="E-254 or manual no." title="Matches an E-job (e.g. E-254 or 254) or a Manual Job Card reference" oninput="setOffcutConsumptionJobCard(this.value)" style="min-width:150px;">
       </div>
     </div>
+    <div id="oc-return-bar" style="display:none;"></div>
     <div id="oc-summary" style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;"></div>
     <div id="oc-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div id="oc-content">Loading…</div>`;
@@ -21734,7 +21802,7 @@ function renderOffcutConsumption() {
         const ps = packetSize(t.paper_type || '');
         const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
         const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this issuance in the item's History"` : '';
-        return `<tr class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);"${rowClick}>
+        return `<tr data-oc-row="${t.id}" class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);"${rowClick}>
           ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
           <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT(t.created_at))}</td>
           <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">${esc(offcutRowJobText(t))}</td>
