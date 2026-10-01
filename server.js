@@ -9732,6 +9732,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     // re-issue. Stage stays where it is; the operator will see the
     // "Pending Stock" badge on the job until the store keeper acts.
     let jobReverted = false;
+    let jobPartial = null;        // set when only ONE of the job's issues was undone
     let offcutRefundedSheets = 0;
     if (tx.reason === 'offcut') {
       for (const paired of pairedOffcutRows) {
@@ -9750,7 +9751,53 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
-      if (job && job.issuance_status === 'issued') {
+      // Is anything else still issued to this job? (The row just reversed is
+      // already netted out by its reversal.) Then this undid ONE issue - a
+      // top-up, one of several, one brand of a split, the 2nd paper - not the
+      // job's whole issuance: the job stays issued and only these sheets are
+      // owed again (owner, E-489, 2026-10-01: reversing a 41.5-packet top-up
+      // sent the job back to "505 needed"). Same for every way an issue is
+      // reversed - one row, a bulk reversal, a split - all come through here.
+      const standingRows = await sql`
+        SELECT COALESCE(SUM(-t.change), 0) AS sheets FROM inventory_transactions t
+        WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-consumed'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)`;
+      const standingSheets = parseFloat(standingRows[0] && standingRows[0].sheets) || 0;
+      if (job && (job.issuance_status === 'issued' || (job.issuance_status === 'ctp' && job.issued_at)) && standingSheets > 0) {
+        const sheetsBack = Math.round(Math.abs(parseFloat(tx.change) || 0));
+        const p = { ...(job.particulars || {}) };
+        // Main paper or 2nd paper? By the issued list's own tag when it has
+        // this row, else by which of the two paper groups the item is in.
+        const items = Array.isArray(job.issued_items) ? [...job.issued_items] : [];
+        let k = items.findIndex(x => x && x.tx_id === tx.id);
+        if (k < 0) k = items.findIndex(x => x && x.item_id === tx.item_id && Math.round(+x.sheets || 0) === sheetsBack);
+        let isSecondary = k >= 0 && items[k].source === 'secondary';
+        const sec = p.secondary_paper && typeof p.secondary_paper === 'object' ? p.secondary_paper : null;
+        if (k < 0 && sec && sec.inventory_item_id) {
+          const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id IN (${tx.item_id}, ${job.inventory_item_id || 0}, ${sec.inventory_item_id})`;
+          const byId = new Map(grp.map(x => [x.id, x]));
+          const key = (it) => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
+          const mine = key(byId.get(tx.item_id));
+          isSecondary = mine !== null && mine === key(byId.get(sec.inventory_item_id)) && mine !== key(byId.get(job.inventory_item_id));
+        }
+        if (k >= 0) items.splice(k, 1);
+        if (isSecondary) {
+          // The 2nd paper owes these sheets again; the main paper is untouched.
+          p.secondary_paper = { ...sec, issued_sheets: Math.max(0, (parseInt(sec.issued_sheets, 10) || 0) - sheetsBack) };
+        } else {
+          // The main paper owes these sheets again ("Requires More Stock").
+          const prev = parseInt(p.partial_pending_sheets, 10);
+          p.partial_pending_sheets = (Number.isFinite(prev) && prev > 0 ? prev : 0) + sheetsBack;
+        }
+        await sql`
+          UPDATE jobs
+             SET issued_items = ${JSON.stringify(items)}::jsonb,
+                 particulars  = ${JSON.stringify(p)}
+           WHERE id = ${tx.job_id}
+        `;
+        jobPartial = { sheets: sheetsBack, secondary: isSecondary };
+      } else if (job && job.issuance_status === 'issued') {
         // Same cleanup as /reverse-issuance: drop anything created by
         // the specific issuance we're undoing so the job doesn't keep
         // ghost effects (owner report: reversal left a "+2 top-up" chip
@@ -9809,6 +9856,8 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
         WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-offcut'
           AND t.reverses_tx_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+          -- One issue undone: only the offcut written with it (same moment).
+          AND (${!jobPartial} OR ABS(EXTRACT(EPOCH FROM (t.created_at - ${tx.created_at}::timestamptz))) <= 10)
         ORDER BY t.id ASC
       `;
       for (const orow of pairedOffcuts) {
@@ -9829,10 +9878,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
       action: 'inventory.reverse',
       entityType: 'inventory',
       entityId: tx.item_id,
-      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${jobPartial ? ` · Job E-${tx.job_id} stays issued - ${jobPartial.sheets.toLocaleString()} sheets of its ${jobPartial.secondary ? '2nd' : 'main'} paper owed again` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
     });
 
-    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, offcut_refunded_sheets: offcutRefundedSheets });
+    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, job_partial: jobPartial, offcut_refunded_sheets: offcutRefundedSheets });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

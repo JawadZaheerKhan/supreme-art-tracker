@@ -10722,14 +10722,18 @@ async function reverseStockTx(txId, itemId) {
       await loadInventory();           // current_balance changed
       // Job state might have flipped — refresh jobs so the Pending Stock
       // queue picks it up and the badge updates.
-      if (result && result.job_reverted) await loadJobs();
+      if (result && (result.job_reverted || result.job_partial)) await loadJobs();
       // Re-render the History modal only if it survived the re-render.
       if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
       refreshVisibleStockMovement();
     } catch (uiErr) {
       console.error('Post-reverse UI refresh failed (reversal itself succeeded):', uiErr);
     }
-    notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock' : 'Entry reversed');
+    // One of several issues undone: the job stays issued, only these sheets are owed again.
+    const part = result && result.job_partial;
+    notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock'
+      : part ? `Entry reversed · the job stays issued - ${(+part.sheets || 0).toLocaleString()} sheets of its ${part.secondary ? '2nd' : 'main'} paper are owed again`
+      : 'Entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
   }
@@ -10747,16 +10751,21 @@ async function reverseStockTxGroup(txIds, itemId) {
   if (!ok) return;
   showSaving(true);
   try {
-    let jobReverted = false;
+    let jobReverted = false, owedAgain = 0;
     for (const txId of txIds) {
       const result = await api('POST', `/api/inventory/transactions/${txId}/reverse`);
       if (result && result.job_reverted) jobReverted = true;
+      if (result && result.job_partial) owedAgain += +result.job_partial.sheets || 0;
     }
     await loadInventory();
-    if (jobReverted) await loadJobs();
+    if (jobReverted || owedAgain) await loadJobs();
     if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
     refreshVisibleStockMovement();
-    notify(jobReverted ? 'Combined entry reversed · job moved to Pending Stock' : 'Combined entry reversed');
+    // The last part of a split that was the job's ONLY issue sends it to
+    // Pending Stock; parts of one issue among others leave the job issued.
+    notify(jobReverted ? 'Combined entry reversed · job moved to Pending Stock'
+      : owedAgain ? `Combined entry reversed · the job stays issued - ${owedAgain.toLocaleString()} sheets are owed again`
+      : 'Combined entry reversed');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
   }
