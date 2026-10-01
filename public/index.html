@@ -13541,30 +13541,9 @@ function buildJobsReportRows() {
       const ps     = packetSize(j.paper || '');
       if (sheets && ps) packets = sheets / ps;
     }
-    // Wastage = Unit Carton Qty − Ready Qty, shown only once it is KNOWN
-    // (owner spec, E-489): while some qty is still in process the field
-    // stays empty - each new delivery would otherwise keep rewriting a
-    // wrong number. A normal job knows its wastage when production is
-    // finished (job at Ready or beyond); a MIL job only when it is FULLY
-    // delivered. The figure then sits on the job's LAST delivery row
-    // (see the per-shipment split below).
-    const cartonQtyNum   = parseFloat(j.cartonqty);
+    // Wastage, Unit Carton Qty and "all delivered" come from
+    // jobShipmentFigures() below - the same rules as the Sale Report.
     const readyTotalJR   = readyCartonsTotal(j) || 0;
-    const deliveredJR    = totalDeliveredCartons(j) || 0;
-    const productionDone = (j.stage_index || 0) >= 6;
-    const finalizedJR    = !!(j.stages && j.stages[7] && j.stages[7].finalized);
-    // Good output for wastage: QC's Ready qty, else Pasting's, else the
-    // delivered qty (wastageGoodQty) - same fallback the report always had.
-    const recordedReadyJR = earlyReadyTotal(j) || 0;
-    const goodQtyJR       = recordedReadyJR || deliveredJR;
-    // All delivered: everything recorded as ready has shipped (MIL, or a job
-    // at Ready+), or finalized - or, with no ready figure at all, Delivered.
-    const allDeliveredJR = (finalizedJR && deliveredJR > 0)
-      || (recordedReadyJR > 0
-          ? (deliveredJR >= recordedReadyJR && (j.stock_group_name ? true : productionDone))
-          : ((j.stage_index || 0) >= 7 && deliveredJR > 0));
-    const wastageKnown   = goodQtyJR > 0 && (recordedReadyJR > 0 ? (j.stock_group_name ? allDeliveredJR : productionDone) : allDeliveredJR);
-    const wastage = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - goodQtyJR) : null;
     // Ready Qty — unshipped ready-to-deliver stock for this job, straight
     // from the production entries[] (same source groupStats()/tiles use),
     // not the legacy cartonqty field wastage relies on. Always shown as its
@@ -13659,7 +13638,7 @@ function buildJobsReportRows() {
     const isPartial = isPartialDelivery(j);
     // Yellow shade only while deliveries are OPEN: gone once everything
     // produced has shipped (MIL or a job at Ready+) or it was finalized.
-    const shadeOpen = isPartial && !allDeliveredJR;
+    const shadeOpen = isPartial && !SF.allDelivered;
     // Linked-delivery partner — set on any delivery entry recorded via
     // "Deliver Linked Jobs". Used below to merge this job's row with its
     // partner's row into one combined line (only when BOTH rows survive
@@ -13692,10 +13671,13 @@ function buildJobsReportRows() {
       // partial delivery, falls back to "has today reached the deadline".
       isLate: isDeadlinePassed(j),
       shadeOpen,
-      wastage,
-      readyQty,
-      readyNow: readyQty,          // current remainder - the footer's figure
-      readyTotalAll: readyTotalJR, // produced total - per-shipment math below
+      // Same rule as the Sale Report (jobShipmentFigures): a closed normal
+      // job - PO fully delivered or Finalized - has its leftover counted as
+      // wastage, so nothing of it stays Ready.
+      wastage: SF.jobWastageAll,
+      readyQty: SF.closed ? 0 : readyQty,
+      readyNow: SF.closed ? 0 : readyQty,                       // current remainder - the footer's figure
+      readyTotalAll: SF.closed ? SF.deliveredTotal : readyTotalJR, // per-shipment "ready as of" math below
       milQty,
       packets,
       packetsTotal: packets,
@@ -16194,10 +16176,14 @@ function setSrMilOnly(v) {
 //     delivered job absorbs the remainder, so the rows add up to the job's
 //     real UC (E-146: 6,000 and 7,500 plain, last row 25,200 - 13,500 =
 //     11,700). A UC typed into the Sale Report wins.
-//   Wastage - one figure, on the last delivery, once it is KNOWN: MIL when
-//     every delivery is done, a normal job when production is finished. A
-//     typed wastage wins, and the last row carries what is left of the real
-//     figure after the typed ones.
+//   Wastage - one figure, on the last delivery, once it is KNOWN:
+//     closed normal job (PO fully delivered, or Finalized): printed -
+//       delivered - its leftover good cartons are wastage, not Ready;
+//     partly-delivered job still open: printed - QC Ready, once production
+//       is finished (the leftover can still ship);
+//     MIL: printed - Ready, once every delivery is done.
+//     A typed wastage wins, and the last row carries what is left of the
+//     real figure after the typed ones.
 //   Packets - packets ISSUED for the row's UC (UC / ups / cut pieces /
 //     packet size); Labels and Leaflets are shown in SHEETS of the sheet size.
 function jobShipmentFigures(j) {
@@ -16221,12 +16207,20 @@ function jobShipmentFigures(j) {
   const productionDone = (j.stage_index || 0) >= 6;
   // A job the PM FINALIZED as delivered (remainder waived) is finished too.
   const finalized      = !!(j.stages && j.stages[7] && j.stages[7].finalized);
-  const allDelivered   = (finalized && deliveredTotal > 0)
+  // A CLOSED normal job (owner, 2026-10-01): its PO is fully delivered, or
+  // it was Finalized. Its leftover good cartons will never ship, so they
+  // are wastage, not Ready: wastage = printed (UC) - delivered, and its
+  // Ready is 0. A partly-delivered job still open keeps printed - QC Ready
+  // (the leftover can still ship). MIL jobs keep their own rule.
+  const booked         = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const closedNormal   = !isMilJob && deliveredTotal > 0 && (finalized || (booked > 0 && deliveredTotal >= booked));
+  const allDelivered   = closedNormal || (finalized && deliveredTotal > 0)
     || (recordedReady > 0
         ? (deliveredTotal >= recordedReady && (isMilJob || productionDone))
         : ((j.stage_index || 0) >= 7 && deliveredTotal > 0));
-  const wastageKnown   = readyTotalAll > 0 && (recordedReady > 0 ? (isMilJob ? allDelivered : productionDone) : allDelivered);
-  const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum)) ? (cartonQtyNum - readyTotalAll) : null;
+  const wastageKnown   = closedNormal || (readyTotalAll > 0 && (recordedReady > 0 ? (isMilJob ? allDelivered : productionDone) : allDelivered));
+  const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum))
+    ? (cartonQtyNum - (closedNormal ? deliveredTotal : readyTotalAll)) : null;
   const invItem   = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
   const ptype     = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
   const upsNum    = parseFloat(j.ups);
@@ -16259,7 +16253,7 @@ function jobShipmentFigures(j) {
       packetsShown: sheetUnit ? rowPackets * psJob : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
     };
   });
-  return { isMilJob, cartonQtyNum, allDelivered, jobWastageAll, packets, pkPerUnit, psJob, upsNum, sheetUnit, rows };
+  return { isMilJob, cartonQtyNum, allDelivered, closed: closedNormal, deliveredTotal, jobWastageAll, packets, pkPerUnit, psJob, upsNum, sheetUnit, rows };
 }
 // Packets cell text shared by both reports: plain packets, or for Labels /
 // Leaflets the sheets with their packets alongside for reference
