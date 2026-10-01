@@ -2518,6 +2518,10 @@
 .jc-part .jc-row-label { font-weight: 600; min-width: 170px; }
 .jc-part input[type="text"], .jc-part textarea { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 12px; padding: 1px 0; color: var(--text); resize: vertical; }
 .jc-part input[type="text"]:focus, .jc-part textarea:focus { background: #fff7d6; }
+/* Production rows recorded at the Station: read-only on the job card except
+   for a Super Admin - edited through the green ▶ in Quantity instead. */
+.jc-part tr.jc-row-locked input[readonly] { cursor: not-allowed; }
+.jc-part tr.jc-row-locked input[readonly]:focus { background: transparent; }
 .jc-part textarea { min-height: 38px; }
 /* Details column: the plain text input stays exactly as it was so the
    date VALUE is fully visible; a small calendar-icon button sits
@@ -24407,6 +24411,8 @@ function particularsTable(p, job, opts) {
   // stage's Station entry (no PIN) for holders of the job_btn_operator_entry
   // Access Register row. Not in preview mode (finalized view is read-only).
   const canEntryDot = !opts.preview && job.id && hasPerm('job_btn_operator_entry');
+  // Locked for all but Super Admin (owner, 2026-10-01) - see the row below.
+  const jcStageRowsLocked = !isSuperAdmin();
   const rows = jobParticularsRows
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
     .map(r => {
@@ -24474,16 +24480,21 @@ function particularsTable(p, job, opts) {
         : (wasteNewValue !== undefined && wasteNewValue > 0)
           ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="New ${WASTAGE_ADJ_ROW_UNIT[r.key]} total from the wastage formula — (Unit Carton Qty − Delivered) ÷ Ups + manual adjustment, split by percentage. Ignores the operator's own entry above.">${wasteNewValue.toLocaleString()}</div>`
           : '';
+      // Production rows are the Station's to record: read-only on the job
+      // card for everyone but a Super Admin (the server enforces it too) -
+      // the green ▶ in Quantity opens that stage's operator entry instead.
+      const locked = jcStageRowsLocked && !!stage;
+      const lockAttr = locked ? ` readonly title="Recorded at the Station - use the green ▶ to change it there"` : '';
       return `
-    <tr>
-      <td class="jc-row-label">${r.label}${entryDot}</td>
+    <tr${locked ? ' class="jc-row-locked"' : ''}>
+      <td class="jc-row-label">${r.label}</td>
       <td class="jc-details-cell">
-        <input type="text" id="p-${r.key}-details" value="${detailsVal}">
-        <button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>
+        <input type="text" id="p-${r.key}-details" value="${detailsVal}"${lockAttr}>
+        ${locked ? '' : `<button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>`}
       </td>
-      <td><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"${qtyPlaceholder ? ` placeholder="${qtyPlaceholder}"` : ''}>${wasteExtraHtml}</td>
-      <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
-      <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator" list="${personsListId}"></td>
+      <td><div style="display:flex;align-items:center;"><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"${qtyPlaceholder ? ` placeholder="${qtyPlaceholder}"` : ''}${lockAttr} style="flex:1;min-width:0;">${entryDot}</div>${wasteExtraHtml}</td>
+      <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId && !locked ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"${lockAttr}><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
+      <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"${locked ? '' : ` list="${personsListId}"`}${lockAttr}></td>
     </tr>`;
     }).join('');
   return `

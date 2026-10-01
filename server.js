@@ -1793,6 +1793,17 @@ function normalizeUserRoles(src) {
   }
   return out;
 }
+// Job-card particulars rows recorded at the Station - locked to Super Admin
+// on the job card (see PUT /api/jobs/:id).
+const STATION_LOCKED_PARTICULARS = [
+  'printed_sheets_qty', 'printed_waste_sheets',
+  'coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets',
+  'embellish_sheets_qty', 'embellish_waste_sheets',
+  'die_cutting_sheets', 'die_cutting_waste',
+  'sorted_cartons_qty', 'sorted_cartons_waste',
+  'pasted_cartons_qty', 'pasting_waste_qty',
+  'delivered_cartons_qty', 'ready_packets_qty',
+];
 function userHasRole(user, ...want) {
   if (!user) return false;
   const rs = normalizeUserRoles(Array.isArray(user.roles) && user.roles.length ? user.roles : user.role);
@@ -5177,7 +5188,22 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     // ghost waste count in the daily-production coatings report.
     const priorParticulars = (prior[0]?.particulars && typeof prior[0].particulars === 'object')
       ? prior[0].particulars : {};
-    const newParticularsRaw = (particulars && typeof particulars === 'object') ? particulars : {};
+    // Production numbers (Printed Sheets … Ready to Delivery) belong to the
+    // Station: only a Super Admin may change them on the job card. For anyone
+    // else the stored rows stand whatever the form sent - a PM corrects them
+    // at the operator station, so no entry goes missing (owner, 2026-10-01).
+    // This also stops a job card left open from writing old numbers back over
+    // what an operator has since recorded.
+    const newParticularsRaw = (() => {
+      const incoming = (particulars && typeof particulars === 'object') ? particulars : {};
+      if (userHasRole(req.user, 'super_admin')) return incoming;
+      const out = { ...incoming };
+      for (const k of STATION_LOCKED_PARTICULARS) {
+        if (priorParticulars[k] !== undefined) out[k] = priorParticulars[k];
+        else delete out[k];
+      }
+      return out;
+    })();
     // Admin job-card edits to Quantity/Name/Signature only ever patch the
     // flat display strings (see collectParticulars() on the client) — the
     // underlying entries[] that every report/tile actually reads from was
