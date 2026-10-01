@@ -12208,41 +12208,60 @@ function renderStockSummary() {
 }
 
 // Print version — landscape A4, same numbers but with company header.
+// Stock Summary print: 6 mm page margins keep every column inside what the
+// printer can actually print (0 mm clipped both sides), and a table wider
+// than the page is shrunk to fit instead of being cut off.
+const SS_PRINT_MARGIN_MM = 6;
+function ssPrintFitToPage(area) {
+  const wrap = area.querySelector(':scope > div');
+  const table = wrap && wrap.querySelector('table');
+  if (!table) return;
+  const usablePx = Math.floor((297 - 2 * SS_PRINT_MARGIN_MM) / 25.4 * 96);   // A4 landscape width at 96 px/in
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;left:-20000px;top:0;visibility:hidden;width:' + usablePx + 'px;font-family:Arial,sans-serif;';
+  probe.innerHTML = wrap.outerHTML;
+  probe.querySelectorAll('tbody td').forEach(td => { td.style.whiteSpace = 'nowrap'; });
+  document.body.appendChild(probe);
+  const t = probe.querySelector('table');
+  const needed = t ? Math.max(t.scrollWidth, t.offsetWidth) : 0;
+  probe.remove();
+  wrap.style.zoom = needed > usablePx ? String(Math.floor(usablePx / needed * 1000) / 1000) : '';
+}
 function printStockSummary() {
   const { paperType, from, to, granularity } = stockSummaryState;
   const isAll = !paperType;
   const { rows, buckets, asOfPast } = computeSummaryRows();
   const periodHeaders = buckets.map(b =>
-    `<th colspan="3" style="border:1px solid #000;padding:3px;text-align:center;background:#f7f1ea;">${esc(b.label)}</th>`).join('');
+    `<th colspan="3" style="border:1px solid #000;padding:1px 3px;text-align:center;background:#f7f1ea;">${esc(b.label)}</th>`).join('');
   const periodSubHeaders = buckets.map(() =>
-    `<th style="border:1px solid #000;padding:3px;background:#f7f1ea;">IN</th>
-     <th style="border:1px solid #000;padding:3px;background:#f7f1ea;">OUT</th>
-     <th style="border:1px solid #000;padding:3px;background:#f7f1ea;">Bal</th>`).join('');
-  const tdL = 'style="border:1px solid #000;padding:3px;"';
-  const tdR = 'style="border:1px solid #000;padding:3px;text-align:right;"';
+    `<th style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">IN</th>
+     <th style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">OUT</th>
+     <th style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Bal</th>`).join('');
+  const tdL = 'style="border:1px solid #000;padding:1px 3px;"';
+  const tdR = 'style="border:1px solid #000;padding:1px 3px;text-align:right;"';
   const typeTd = (r) => isAll ? `<td ${tdL}>${esc(r.item.paper_type || '—')}</td>` : '';
   const unitTd = (r) => isAll ? `<td ${tdL}>${esc(r.unit)}</td>` : '';
-  const typeTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Paper Type</th>' : '';
-  const unitTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Unit</th>' : '';
+  const typeTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Paper Type</th>' : '';
+  const unitTh = isAll ? '<th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Unit</th>' : '';
   const body = rows.map(r => {
     const periodCells = r.periods.map(p =>
-      `<td style="border:1px solid #000;padding:3px;text-align:right;color:#166534;"><b>${fmtPkts(p.in)}</b></td><td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(p.out)}</b></td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
+      `<td style="border:1px solid #000;padding:1px 3px;text-align:right;color:#166534;"><b>${fmtPkts(p.in)}</b></td><td style="border:1px solid #000;padding:1px 3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(p.out)}</b></td><td ${tdR}>${fmtPkts(p.balance, {keepZero:true})}</td>`).join('');
     return `<tr>
       ${typeTd(r)}
       <td ${tdL}>${esc(r.item.gsm || '—')}</td>
       <td ${tdL}>${esc(r.item.size || '—')}</td>
-      <td style="border:1px solid #000;padding:3px;text-transform:uppercase;letter-spacing:0.03em;">${esc(r.item.brand || '—')}</td>
+      <td style="border:1px solid #000;padding:1px 3px;text-transform:uppercase;letter-spacing:0.03em;">${esc(r.item.brand || '—')}</td>
       ${unitTd(r)}
       <td ${tdR}>${fmtPkts(r.openingPkts, {keepZero:true})}</td>
       ${periodCells}
-      <td style="border:1px solid #000;padding:3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(r.totalOutPkts)}</b></td>
+      <td style="border:1px solid #000;padding:1px 3px;text-align:right;color:#A32D2D;"><b>${fmtPkts(r.totalOutPkts)}</b></td>
       <td ${tdR}><b>${fmtPkts(r.stockNowPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.weightKg)}</td>
-      <td style="border:1px solid #000;padding:3px;text-align:right;">${r.pendingImportPkts ? `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:bold;padding:1px 7px;border-radius:8px;">${fmtPkts(r.pendingImportPkts)}</span>` : ''}</td>
+      <td style="border:1px solid #000;padding:1px 3px;text-align:right;">${r.pendingImportPkts ? `<span style="display:inline-block;background:#facc15;border:1px solid #eab308;color:#422006;font-weight:bold;padding:1px 7px;border-radius:8px;">${fmtPkts(r.pendingImportPkts)}</span>` : ''}</td>
       <td ${tdR}><b>${fmtPkts(r.afterImportPkts, {keepZero:true})}</b></td>
       <td ${tdR}>${fmtKg(r.importKg)}</td>
-      <td style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};"><b>${fmtSignedPkts(r.requiredNextPkts)}</b></td>
-      <td style="border:1px solid #000;padding:3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
+      <td style="border:1px solid #000;padding:1px 3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};"><b>${fmtSignedPkts(r.requiredNextPkts)}</b></td>
+      <td style="border:1px solid #000;padding:1px 3px;text-align:right;color:${r.requiredNextPkts>0?'#A32D2D':r.requiredNextPkts<0?'#166534':'inherit'};">${fmtSignedKg(r.requiredKg)}</td>
     </tr>`;
   }).join('');
   const heading = reportPrintHeading({
@@ -12253,27 +12272,27 @@ function printStockSummary() {
     note: asOfPast ? summaryAsOfNote(asOfPast) : '',
   });
   const html = `
-    <style>@media print { .ss-print-num { display:inline-block; transform:scaleY(1.45); transform-origin:center center; white-space:nowrap; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:auto !important; max-width:none !important; padding:0 !important; margin:0 !important; box-sizing:border-box; } #print-area > div { width:100%; } }</style>
+    <style>@media print { .ss-print-num { display:inline-block; transform:scaleY(1.45); transform-origin:center center; white-space:nowrap; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area { width:auto !important; max-width:none !important; padding:0 !important; margin:0 !important; box-sizing:border-box; } #print-area > div { width:100%; } #print-area tbody td { white-space:nowrap; } }</style>
     <div style="font-family:Arial,sans-serif;color:#000;">
       ${rows.length ? `
-      <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
+      <table style="width:100%;font-size:8pt;line-height:1.15;border:1px solid #000;border-collapse:collapse;">
         <caption style="caption-side:top;text-align:left;padding:0;">${heading}</caption>
         <thead style="display:table-header-group;"><tr>
           ${typeTh}
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">GSM</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Size (in)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Brand(s)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">GSM</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Size<br>(in)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Brand(s)</th>
           ${unitTh}
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Opening</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Opening</th>
           ${periodHeaders}
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Total Out</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">${esc(summaryStockLabel(asOfPast))}</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Weight (kg)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Pending Import</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">After Import</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Import (kg)</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Status</th>
-          <th rowspan="2" style="border:1px solid #000;padding:3px;background:#f7f1ea;">Status (kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Total<br>Out</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">${asOfPast ? `Stock on<br>${esc(fmtDMY(stockSummaryState.to))}` : 'Stock<br>Now'}</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Weight<br>(kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Pending<br>Import</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">After<br>Import</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Import<br>(kg)</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Status</th>
+          <th rowspan="2" style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;">Status<br>(kg)</th>
         </tr>
         <tr>${periodSubHeaders}</tr></thead>
         <tbody>${body}</tbody>
@@ -12292,12 +12311,13 @@ function printStockSummary() {
     while (td.firstChild) number.appendChild(td.firstChild);
     td.appendChild(number);
   });
+  ssPrintFitToPage(area);
   const imgs = Array.from(area.querySelectorAll('img'));
   const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
   // A page rule inside #print-area can be ignored by Chrome. Add it to
   // <head> for this print only, after the app's global portrait rule.
   const pageStyle = document.createElement('style');
-  pageStyle.textContent = '@media print { @page { size: A4 landscape; margin: 0; } }';
+  pageStyle.textContent = `@media print { @page { size: A4 landscape; margin: ${SS_PRINT_MARGIN_MM}mm; } }`;
   document.head.appendChild(pageStyle);
   const cleanup = () => {
     window.removeEventListener('afterprint', cleanup);
@@ -21716,20 +21736,34 @@ async function exportStockMovement(direction) {
   const state = stockMovementStates[direction];
   const txs = stockMovementPrintRows(direction);
   if (!txs.length) { notify('Nothing to export — empty filter result.'); return; }
-  const header = ['When', 'Item', 'Change (Sheets)', 'Change (Packets/Reams)', 'Reason', 'Job', 'Entered by', 'Notes'];
+  // Every column the report shows on screen (Current Balance, Weight and
+  // Challan No. were missing), worked out the same way as the screen rows.
+  const header = ['When', 'Item', 'Change (Packets/Reams)', 'Change (Sheets)', 'Current Balance (Packets/Reams)', 'Current Balance (Sheets)',
+    'Weight (kg)', 'Weight on Hand (kg)', 'Reason', 'Job', 'Challan No.', 'Entered by', 'Notes'];
   const aoa = reportExcelAoa(header);
+  const r2 = (n) => Math.round(n * 100) / 100;
   for (const t of txs) {
+    const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code ? ' · ' + t.job_code : ''}` : '';
     const ps   = packetSize(t.paper_type || '');
-    const pkts = +(t.change / ps).toFixed(2);
+    const pkts = t.change / ps;
+    // A split issuance pulled from 2+ brands - no single balance (screen shows "split").
+    const inv  = isGroup ? null : inventory.find(i => i.id === t.item_id);
+    const bal  = inv ? (inv.current_balance || 0) : null;
+    const wPer = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     aoa.push([
       fmtDMYT(t.created_at),
       item,
-      t.change,
-      pkts,
+      r2(Math.abs(pkts)),
+      Math.abs(t.change),
+      isGroup ? 'split' : bal === null ? '' : r2(bal / ps),
+      isGroup ? 'split' : bal === null ? '' : bal,
+      wPer !== null ? r2(wPer * Math.abs(pkts)) : '',
+      (!isGroup && wPer !== null && bal !== null) ? r2(wPer * (bal / ps)) : '',
       t.reason || '',
       job,
+      t.challan_no || '',
       t.user_email || '',
       t.split_note || txDisplayNotes(t),
     ]);
