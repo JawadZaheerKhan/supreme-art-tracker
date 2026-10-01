@@ -6,6 +6,12 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 
 const app = express();
+// Do NOT add the `compression` middleware. It was tried (Sep 2026) to cut
+// Vercel's Fast Origin Transfer and worked perfectly locally, but on Vercel
+// full-size responses stalled mid-stream and were cut off at the 60s function
+// limit (e.g. 437 KB of the 483 KB shell, then nothing). Its streaming relies
+// on the response emitting 'drain', which Vercel's wrapped response does not
+// reliably do. Vercel's CDN already compresses on the way to the browser.
 // 6mb limit: station voice notes arrive as base64 audio (~1MB for 60s of
 // opus). Default 100kb would 413 them. Vercel itself caps bodies at 4.5MB.
 app.use(express.json({ limit: '6mb' }));
@@ -223,12 +229,16 @@ app.get('/config.js', (req, res) => {
 // The logo effectively never changes, so the CDN caches it for a year; a
 // deploy purges Vercel's cache anyway, so a replaced asset still ships
 // immediately. Browsers re-check daily as a safety valve.
-// index.html is the exception: it must NEVER be cached, because that's what
-// guarantees everyone picks up the newest deploy right away.
+// index.html is the exception: the browser must check with us on EVERY load,
+// because that's what guarantees everyone picks up the newest deploy right
+// away. That is exactly what `no-cache` means ("store it, but revalidate
+// before each use"). Do NOT add `no-store`: it forbids keeping a copy, so the
+// browser can never send If-None-Match and every load re-downloads the whole
+// ~1.7 MB shell instead of getting a zero-byte 304 when nothing changed.
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.html')) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Cache-Control', 'no-cache');
     } else {
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
     }
@@ -256,7 +266,7 @@ function getDb() {
 // 'wastage_adjustment.*' — the "Artline" internal name is retired.
 // Bumped again to add role_permissions (the Access Register's editable
 // backing store). Bumped once more when that same table's default set
-// grew from 7 to 24 groups — a DB already stamped with the first,
+// grew from 7 to 24 groups — a DB already stamped with an earlier,
 // smaller version would otherwise hit the fast-path and never seed the
 // new groups' rows at all.
 // Bumped again to bring in Supreme Art Finance's features (Rate / Sale Tax /
@@ -269,7 +279,19 @@ function getDb() {
 // job card (job_btn_edit / job_btn_history) for CEO, Finance, Store Manager and Operator so they
 // keep the read-only access they always had. DO NOTHING keeps any row already set by hand.
 // Bumped again to seed the Forms tab rows (forms_tab_access / forms_btn_transfer_note) from the old forms_print defaults.
-const SCHEMA_VERSION = 'v2026-09-19-forms-rows';
+// Bumped again to create finance.waste_board_sales, behind the Sale Report's Waste of Board tab.
+// Bumped again to add inventory_transactions.recorded_at (stock Entry Date) - without it the
+// fast-path skipped the ALTER and every stock-ledger INSERT failed on the missing column.
+// Bumped again for the Party Ledger: finance.party_receipts / party_openings
+// and the rpt_party_ledger* Access Register rows.
+// Bumped again for the Receipt Voucher: bank_code / tax_deducted /
+// invoice_nos on finance.party_receipts.
+// Bumped again for the Chart of Accounts: finance.chart_accounts (seeded
+// with Cash / Bank / Party Ledger groups) and its Access Register rows.
+// Bumped again for automatic voucher numbers (finance.voucher_counters).
+// Bumped again to trim the Chart of Accounts to Cash + Bank Account (owner:
+// "we only have cash and bank account") - see the one-time clean-up in initDb.
+const SCHEMA_VERSION = 'v2026-09-26-chart-cash-bank-only';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -302,7 +324,6 @@ const ROLE_PERMISSION_DEFAULTS = {
   // silently hand Store Manager admin's unconditional bypass.
   inventory_reverse:    { label: 'Reverse a stock transaction', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
   inventory_reports:    { label: 'Stock/Total In & Out, Offcut Consumption, and Stock Summary & Inventory reports', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'yes', finance: 'yes' } },
-  production_reports:   { label: 'Jobs Report, Production Report, and Daily Production registers — view', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'hidden', finance: 'yes' } },
   production_edit:      { label: 'Daily Production registers — edit', levels: { admin: 'yes', production_manager: 'yes', store_manager: 'yes' } },
   trash_view:           { label: 'Trash / Archive — view', levels: { admin: 'yes', ceo: 'yes' } },
   trash_admin:          { label: 'Trash / Archive — restore, purge, empty; delete/archive a transaction or import row', levels: { admin: 'yes' } },
@@ -314,7 +335,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   forms_print:          { label: 'Forms — open & print Transfer Note', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes', finance: 'yes' } },
   user_view:            { label: 'View the Authorized Users list', levels: { admin: 'yes', ceo: 'view' } },
   user_admin:           { label: "Invite/create a user, edit a user's roles, or block/unblock/delete a user", levels: { admin: 'yes' } },
-  client_view_preview:  { label: 'Open the internal "Client View" preview', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
+  client_view_preview:  { label: 'Client View tab — open the internal preview of what a client sees', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
   // NOTE (2026-09-19): every job_btn_* / inv_btn_* / user_btn_* / *_tab_access / rpt_* row below is now a LIVE gate:
   // the routes use requirePermission / requireAnyBtn / userHasBtn and the client hides or disables the button. The
@@ -341,6 +362,17 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing and Finalize as Delivered', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  // Filling the Record Delivery form is separated from pressing the button, so
+  // finance can enter the invoicing detail on a shipment the PM then records.
+  // What is typed saves itself into the job's delivery_draft; only the button
+  // turns it into an actual delivery. Defaults match the button's own roles,
+  // so nothing changes until someone takes the button away from a role.
+  job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Carton Shipper, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  // The green/yellow dot beside a Job Card particulars row. Opens that
+  // stage's Station entry with no station PIN asked, so the holder can fix
+  // an operator's quantity from the job card. The entry can only edit the
+  // numbers — advancing/skipping the stage stays PIN-only.
+  job_btn_operator_entry:  { label: 'Operator Entry dot — open a particulars row\'s Station entry from the Job Card (no station PIN) to edit its quantities', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
   // Distinct from the existing wastage_adjustment group above (which also
@@ -358,7 +390,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // MSI No., Cartons/Packets, and editing an already-recorded delivery entry.
   // Server-enforced (canSetPricing / requirePermission). Finance + CEO (view)
   // by default; Super Admin always.
-  job_btn_pricing:         { label: 'Invoicing fields — Rate, Sale Tax, E-FBR No., MSI No., Cartons/Packets, and editing recorded delivery entries', levels: { finance: 'yes', ceo: 'view' } },
+  job_btn_pricing:         { label: 'Invoicing fields — every delivery field plus E-FBR No., MSI No., Rate and Sale Tax, and editing recorded delivery entries', levels: { finance: 'yes', ceo: 'view' } },
   job_btn_stickers:        { label: 'Stickers tab — open & print', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
 
   // Access Register — Inventory tab (Imports lives inside this same tab,
@@ -381,11 +413,15 @@ const ROLE_PERMISSION_DEFAULTS = {
   // within the last 30 days — same tier the existing inventory_reverse
   // group already uses, kept as this row's own extra level too.
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
+  inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
   // read-only, there's no "edit" concept for any of them. Same "not wired
-  // into any gate yet" note applies — inventory_reports/production_reports/
-  // wastage_adjustment/trash_view keep enforcing exactly as before.
+  // into any gate yet" note applies — inventory_reports/wastage_adjustment/
+  // trash_view keep enforcing exactly as before. rpt_production_report and
+  // rpt_daily_production_report ARE live gates: they replaced the bundled
+  // production_reports key, which lumped the two together with the Jobs
+  // Report so neither could be granted on its own.
   reports_tab_access:              { label: 'Reports tab — view the Reports landing page', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   rpt_stock_in:                    { label: 'Stock In report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   rpt_stock_out:                   { label: 'Stock Out report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
@@ -397,6 +433,14 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
   rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_production_report:           { label: 'Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  // Its own row rather than riding on the Jobs Report: this one accounts for
+  // deleted and never-used job numbers, which is an audit question, not a
+  // production one. Starts matching the Jobs Report so nobody loses access on
+  // upgrade; tighten it from the Access Register if it should be narrower.
+  rpt_job_number_register:         { label: 'Job Number Register — every job card number and what became of it', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  // Reuse is a job-CREATION power (the next card takes the spent number),
+  // so it needs this row AND the New Job row — either alone is not enough.
+  rpt_job_number_reuse:            { label: 'Job Number Register — Reuse button (create the next job card on a spent, never-used number; also needs New Job)', levels: { admin: 'yes', production_manager: 'yes' } },
   rpt_daily_production_report:     { label: 'Daily Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_jobs_archive:                { label: 'Jobs Archive', levels: { admin: 'view', ceo: 'view' } },
   rpt_imports_archive:             { label: 'Imports Archive', levels: { admin: 'view', ceo: 'view' } },
@@ -406,6 +450,14 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_sale_report:                 { label: 'Sale Report — full invoicing detail (Rate, Sale Tax, Company / Destination / NTN)', levels: { ceo: 'view', finance: 'view' } },
   rpt_sale_report_totals:          { label: 'Sale Report — totals row at the bottom (summed Rate w/o & w/ Sale Tax)', levels: { ceo: 'view' } },
   rpt_sale_report_company:         { label: 'Sale Report — Company Settings button (NTN / Destination per company)', levels: { finance: 'yes', ceo: 'view' } },
+  // Party Ledger — each company's invoices (from the Sale Report), receipts
+  // and running balance. Viewing and entering are separate rows.
+  rpt_party_ledger:                { label: 'Party Ledger — view each company\'s invoices, receipts and running balance', levels: { ceo: 'view', finance: 'view' } },
+  rpt_party_ledger_entry:          { label: 'Party Ledger — enter / edit / delete receipts and opening balances', levels: { finance: 'yes' } },
+  // Chart of Accounts — the coded account tree (cash, banks, one party
+  // account per customer) that vouchers and the Party Ledger read.
+  rpt_chart_accounts:              { label: 'Chart of Accounts — view the coded account list', levels: { ceo: 'view', finance: 'view' } },
+  rpt_chart_accounts_edit:         { label: 'Chart of Accounts — add / edit / remove accounts and link customers', levels: { finance: 'yes' } },
 
   // Access Register — Users tab. Same "not wired into any gate yet" note
   // applies — user_view/user_admin/operator_admin keep enforcing exactly
@@ -424,9 +476,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   user_btn_invite:                 { label: 'Invite User button', levels: { admin: 'yes' } },
   user_btn_operators:              { label: 'Operators — also covers every button in Floor Operators (add, edit, remove)', levels: { admin: 'yes', production_manager: 'yes' } },
   user_activitylog_tab_access:     { label: 'Activity Log — view the site-wide activity feed', levels: { admin: 'view', ceo: 'view' } },
-  // Access Register - Forms tab. Both are live gates: the tab follows forms_tab_access (tabAllowed in the client), the
-  // Transfer Note card and its Save / Print buttons follow forms_btn_transfer_note, and POST /api/transfer-notes checks it
-  // (Edit needed). Defaults match the old forms_print group, which nothing reads any more.
+  // Forms tab + Transfer Note: RETIRED 2026-09-29 (the tab, the form and its routes were removed). The two keys stay
+  // only so saved role_permissions rows and the old one-time seed still line up; nothing checks them any more.
   forms_tab_access:                { label: 'Forms tab — view the Forms page', levels: { admin: 'view', production_manager: 'view', ceo: 'view', finance: 'view' } },
   forms_btn_transfer_note:         { label: 'Transfer Note — open the form; Edit also lets them save and print a transfer note', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes', finance: 'yes' } },
   user_accessregister_tab_access:  { label: 'Access Register — Super Admin only; always locked hidden for every other role', levels: {} },
@@ -529,6 +580,24 @@ function reverseTierFor(user) {
   return best;
 }
 
+// Starting set of the Chart of Accounts (seeded once; after that the
+// finance.chart_accounts table is the truth). [code, name, parent, group?, role]
+// Only Cash and Bank Account (owner's call) - no Assets / Current Assets /
+// Party Ledger groups above or beside them.
+const CHART_SEED = [
+  ['120',   'Cash',                   null,  true,  'cash'],
+  ['12001', 'Cash in Hand',           '120', false, null],
+  ['121',   'Bank Account',           null,  true,  'bank'],
+  ['12101', 'BAHL (K) 4181',          '121', false, null],
+  ['12102', 'BAHL (IBB) 8360',        '121', false, null],
+  ['12103', 'BAHL (Bilal Mkt) 3801',  '121', false, null],
+  ['12104', 'MBL (K) 8188',           '121', false, null],
+  ['12105', 'MBL (Bilal Mkt) 9585',   '121', false, null],
+  ['12106', 'BOK 7487',               '121', false, null],
+  ['12107', 'Faysal Bank 2465',       '121', false, null],
+  ['12108', 'Al-Barka Bank',          '121', false, null],
+  ['12109', 'Bank Al-Falah',          '121', false, null],
+];
 async function initDb() {
   try {
     const sql = getDb();
@@ -649,6 +718,17 @@ async function initDb() {
     // joint delivery (1 challan, both jobs' own qty) and to merge their
     // rows in the Jobs Report.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS linked_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL`;
+    // link_group_id: jobs that ship together share one number, so a set can
+    // hold three or four jobs instead of the two a single partner field
+    // allowed. linked_job_id stays alongside it, pointing at one other
+    // member, so everything that already reads it keeps working.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS link_group_id INTEGER`;
+    await sql`CREATE INDEX IF NOT EXISTS jobs_link_group_idx ON jobs(link_group_id)`;
+    // Every existing pair becomes a set of two, named after the lower of the
+    // two ids. Deterministic, so re-running it changes nothing.
+    await sql`
+      UPDATE jobs SET link_group_id = LEAST(id, linked_job_id)
+       WHERE linked_job_id IS NOT NULL AND link_group_id IS NULL`;
     // Stock Groups — named tag shared by multiple job cards for the same
     // product (ongoing reprints). FIFO delivery deducts from oldest first.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stock_group_name TEXT`;
@@ -912,6 +992,11 @@ async function initDb() {
     // the Stock In / Stock Out reports. Nullable — single-item entries
     // and pre-existing rows leave it blank.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS challan_no TEXT`;
+    // Entry Date: a missed stock entry can be recorded on the day it really
+    // happened. created_at then carries THAT day (so every report, balance
+    // and summary files it correctly) and recorded_at keeps the real moment
+    // it was typed in - the audit trail. NULL = entered on the day itself.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_challan_idx ON inventory_transactions(challan_no) WHERE challan_no IS NOT NULL`;
     // Soft delete: "Delete from history" (Manual Consumption, Stock In/Out
     // bulk delete) moves a row to the Archive instead of wiping it outright,
@@ -1420,6 +1505,11 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rate    NUMERIC`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tax_pct NUMERIC NOT NULL DEFAULT 18`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cartons_packets NUMERIC`;
+    // delivery_draft: what has been typed into the Record Delivery form but
+    // not yet recorded. Finance fills the invoicing detail, the PM presses the
+    // button later - possibly on another machine - so the half-filled form has
+    // to outlive the browser tab. Cleared the moment the delivery is recorded.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS delivery_draft JSONB NOT NULL DEFAULT '{}'::jsonb`;
     await sql`CREATE SCHEMA IF NOT EXISTS finance`;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_rates (
@@ -1440,6 +1530,121 @@ async function initDb() {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Board sold as waste never goes through a job card, so the Sale Report's
+    // "Waste of Board" tab keeps its own hand-entered rows here. Every value
+    // is typed by the user — nothing is derived from jobs.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.waste_board_sales (
+        id             SERIAL PRIMARY KEY,
+        entry_date     TEXT,
+        invoice_no     TEXT,
+        msi_no         TEXT,
+        fbr_no         TEXT,
+        job_name       TEXT,
+        qty            TEXT,
+        rate           TEXT,
+        amount_ex_tax  TEXT,
+        tax18          TEXT,
+        tax4           TEXT,
+        amount_inc_tax TEXT,
+        company        TEXT,
+        ntn            TEXT,
+        destination    TEXT,
+        updated_by     TEXT,
+        updated_at     TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // Party Ledger. Invoices are NOT stored - they come live from the Sale
+    // Report (every delivery's invoice no. and amount incl. tax). What IS
+    // stored is what finance types: money received (and the odd debit
+    // note) per company, and one opening balance per company so the ledger
+    // starts where the accounts system is, without re-typing history.
+    // Dates are TEXT 'YYYY-MM-DD' (validated) - business dates, no timezone.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.party_receipts (
+        id          SERIAL PRIMARY KEY,
+        company     TEXT NOT NULL,
+        entry_date  TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        voucher_no  TEXT,
+        reference   TEXT,
+        amount      NUMERIC NOT NULL,
+        notes       TEXT,
+        created_by  TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at  TIMESTAMPTZ,
+        deleted_by  TEXT
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.party_openings (
+        id          SERIAL PRIMARY KEY,
+        company     TEXT NOT NULL,
+        as_of       TEXT NOT NULL,
+        amount      NUMERIC NOT NULL,
+        notes       TEXT,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS party_openings_company_uq ON finance.party_openings (lower(company))`;
+    // Receipt Voucher: which of our accounts the money went into (12001 Cash
+    // in Hand / 121xx banks), tax the party deducted at source (posted as its
+    // own ledger line), and the invoice no(s) it is against (a tag only).
+    // amount stays the NET receipt; Total = amount + tax_deducted.
+    await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS bank_code TEXT`;
+    await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS tax_deducted NUMERIC NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE finance.party_receipts ADD COLUMN IF NOT EXISTS invoice_nos TEXT`;
+    // Chart of Accounts. code is the accounts system's own number (1 > 12 >
+    // 121 > 12104); a child's code starts with its parent's. role marks the
+    // groups the app reads: 'cash' / 'bank' (where receipts go in) and
+    // 'party' (customers). A party account links to one Company Settings
+    // company, so vouchers print its code.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.voucher_counters (
+        prefix      TEXT PRIMARY KEY,
+        last_number INTEGER NOT NULL
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.chart_accounts (
+        id          SERIAL PRIMARY KEY,
+        code        TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL,
+        parent_code TEXT,
+        is_group    BOOLEAN NOT NULL DEFAULT false,
+        role        TEXT,
+        kind        TEXT NOT NULL DEFAULT 'asset',
+        company     TEXT,
+        active      BOOLEAN NOT NULL DEFAULT true,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // Seed what is known (ON CONFLICT: never touches an account once it exists,
+    // so edits made in the app survive every later schema bump).
+    for (const [code, name, parent, isGroup, role] of CHART_SEED) {
+      await sql`
+        INSERT INTO finance.chart_accounts (code, name, parent_code, is_group, role, kind, updated_by)
+        VALUES (${code}, ${name}, ${parent}, ${isGroup}, ${role}, 'asset', 'seed')
+        ON CONFLICT (code) DO NOTHING
+      `;
+    }
+    // One-time clean-up (flagged in schema_meta so it never runs twice, and
+    // so a group someone deliberately adds back later is left alone): Cash
+    // and Bank Account move to the top, and the earlier 1 Assets / 12 Current
+    // Assets / 122 Party Ledger groups are removed - but only while empty.
+    const chartTrimmed = await sql`SELECT value FROM schema_meta WHERE key = 'chart_trim_cash_bank_2026_09_26'`;
+    if (!chartTrimmed.length) {
+      await sql`UPDATE finance.chart_accounts SET parent_code = NULL WHERE code IN ('120', '121') AND parent_code = '12'`;
+      await sql`DELETE FROM finance.chart_accounts a WHERE a.code IN ('12', '122')
+                  AND NOT EXISTS (SELECT 1 FROM finance.chart_accounts c WHERE c.parent_code = a.code)`;
+      await sql`DELETE FROM finance.chart_accounts a WHERE a.code = '1'
+                  AND NOT EXISTS (SELECT 1 FROM finance.chart_accounts c WHERE c.parent_code = a.code)`;
+      await sql`INSERT INTO schema_meta (key, value) VALUES ('chart_trim_cash_bank_2026_09_26', 'done') ON CONFLICT (key) DO NOTHING`;
+    }
     await sql`
       CREATE TABLE IF NOT EXISTS finance.product_aliases (
         alias       TEXT PRIMARY KEY,
@@ -1632,6 +1837,31 @@ function canRecordDelivery(user) { return userHasBtn(user, 'job_btn_record_deliv
 // the terminal (view-only) via canRunStation, but must never process a
 // job by default. Admin / PM / operator still write freely.
 function canProcessStation(user) { return userHasRole(user, 'super_admin') || roleHasPermission(user, 'station_write'); }
+// The green/yellow dot on a Job Card particulars row: holders may open a
+// stage's Station entry from the job card without the station PIN. The
+// entry can never advance the job — it only edits that stage's numbers.
+function canOperatorEntryFromJobCard(user) {
+  return userHasRole(user, 'super_admin') || roleHasPermission(user, 'job_btn_operator_entry');
+}
+// Which machine a job-card entry acts as: by name when the particulars row
+// names one, else by preferred role (coatings vs embellish share stage 2),
+// else the first active machine covering the stage.
+async function resolveJobCardMachine(sql, body) {
+  const stageIdx = parseInt(body.stage_index, 10);
+  if (!Number.isFinite(stageIdx)) return null;
+  const wantName = String(body.machine_name || '').trim().toLowerCase();
+  const preferRole = String(body.prefer_role || '').trim();
+  const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE active`;
+  const covers = rows.filter(o => {
+    const idxs = (o.stage_indices && o.stage_indices.length) ? o.stage_indices : [o.stage_index];
+    return idxs.includes(stageIdx);
+  });
+  if (!covers.length) return null;
+  const effRoles = o => (Array.isArray(o.roles) && o.roles.length) ? o.roles : rolesOf(o);
+  let hit = wantName ? covers.find(o => String(o.name || '').trim().toLowerCase() === wantName) : null;
+  if (!hit && preferRole) hit = covers.find(o => effRoles(o).includes(preferRole));
+  return hit || covers[0];
+}
 // Operator roster CRUD — admin or production manager by default. The PM
 // owns the floor and needs to add / edit / retire operators without an
 // admin having to be involved every time.
@@ -1668,6 +1898,20 @@ function requireDeliveryWriter(req, res, next) {
   }
   next();
 }
+// Filling in the delivery form is a lesser right than recording the delivery:
+// anyone who can record can obviously also type into the form.
+function canFillDeliveryDetails(user) {
+  return userHasRole(user, 'super_admin')
+      || roleHasPermission(user, 'job_btn_delivery_details')
+      || canRecordDelivery(user);
+}
+function requireDeliveryDetailsWriter(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!canFillDeliveryDetails(req.user)) {
+    return res.status(403).json({ error: 'Not allowed — delivery details access required' });
+  }
+  next();
+}
 // Finance's invoicing fields (Rate, Sale Tax, E-FBR/MSI No., Cartons/Packets,
 // editing recorded delivery entries) sit behind their own Access Register row
 // (job_btn_pricing) rather than delivery_write, so Admin/PM can keep recording
@@ -1678,7 +1922,7 @@ function canSetPricing(user) { return userHasRole(user, 'super_admin') || roleHa
 // Report or the job-card pricing fields.
 function canSeeFinanceData(user) {
   return userHasRole(user, 'super_admin')
-    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing'].some(k => roleHasPermission(user, k, 'view'));
+    || ['products_tab_access', 'rpt_sale_report', 'job_btn_pricing', 'rpt_party_ledger'].some(k => roleHasPermission(user, k, 'view'));
 }
 function requireFinanceView(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
@@ -1776,6 +2020,20 @@ app.use(authMiddleware);
 
 // Write an action-level audit row. Called from every mutating handler after
 // the primary write succeeds, so the log only ever shows real changes.
+// Audit entry for something the app did on its own - no user, no request.
+// Kept separate from logAudit so that one can keep its "no user, no entry"
+// guard, which is what stops unauthenticated noise getting in.
+async function logSystemAudit(sql, { action, entityType, entityId, summary, metadata }) {
+  try {
+    await sql`
+      INSERT INTO audit_log (user_id, user_email, action, entity_type, entity_id, summary, metadata)
+      VALUES (NULL, 'system', ${action}, ${entityType || null}, ${entityId || null}, ${summary}, ${JSON.stringify(metadata || {})})
+    `;
+  } catch (e) {
+    console.error('System audit log write failed:', e.message);
+  }
+}
+
 async function logAudit(sql, req, { action, entityType, entityId, summary, metadata }) {
   if (!req.user) return;
   try {
@@ -2518,6 +2776,27 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
   }
 });
 
+// Job-card Operator Entry: hand the client the machine it will act as,
+// WITHOUT any PIN — gated by the job_btn_operator_entry Access Register
+// row. Same shape /api/operators/verify returns (PINs never selected).
+app.post('/api/station/job-card-context', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    if (!canOperatorEntryFromJobCard(req.user)) {
+      return res.status(403).json({ error: 'Not allowed — Operator Entry access required' });
+    }
+    const op = await resolveJobCardMachine(sql, req.body);
+    if (!op) return res.status(404).json({ error: 'No active station machine covers this stage yet — add one under Users → Operators.' });
+    if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
+    if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
+    if (!Array.isArray(op.persons)) op.persons = [];
+    res.json(op);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // All active persons across every machine — backs the "Custom" picker on
 // the station, used when an operator works on a machine that's not their
 // usual one. Returns a flat list of { name, name_ur, machine } so the UI
@@ -2600,9 +2879,12 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
   // machine tagged 'embellish' but not 'diecut' (e.g. one used only for
   // embossing/foiling) still needs to show up here, since that's where
   // its embellish_sheets_qty/embellish_waste_sheets entries are credited.
+  // Managers hold a PIN against a section but are not machines — without
+  // excluding them, a "line manager" account appears as its own row in the
+  // register with nothing to report against it.
   const machineRows = stageLabel === 'Die Cutting'
-    ? await sql`SELECT name, persons FROM operators WHERE active AND (roles @> ARRAY['diecut']::text[] OR roles @> ARRAY['embellish']::text[]) ORDER BY name`
-    : await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
+    ? await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND (roles @> ARRAY['diecut']::text[] OR roles @> ARRAY['embellish']::text[]) ORDER BY name`
+    : await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND roles @> ARRAY[${sectionRole}]::text[] ORDER BY name`;
   const machines = machineRows.map(r => r.name).filter(Boolean);
   // Person-name → machine-name map for THIS section's operators only. Used
   // by the LEGACY (no-entries[]) fallback to credit "obaid" (typed on the
@@ -2898,7 +3180,7 @@ function jobsDisplayPair(jobsMap) {
 // machine with sheets, jobs count, colors breakdown, plates and the
 // operator list. Hours + Remarks come from daily_production_notes so
 // admin can scribble what the auto-totals can't capture.
-app.get('/api/reports/daily-production/printing/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/printing/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2987,7 +3269,7 @@ function isoTsToDate(ts) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
   return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
 }
-app.get('/api/reports/daily-production/coatings/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/coatings/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -2997,9 +3279,11 @@ app.get('/api/reports/daily-production/coatings/:date', requirePermission('produ
     // Coating machines = operators with the 'coatings' (wet) role.
     // Embellishment (Emboss/Hot Foiling/etc.) is reported under Die
     // Cutting instead — those are the machines that actually do it.
+    // Managers excluded for the same reason as every other section: they
+    // hold a PIN against the stage but are not machines.
     const machineRows = await sql`
       SELECT name FROM operators
-      WHERE active AND roles @> ARRAY['coatings']::text[]
+      WHERE active AND NOT is_manager AND roles @> ARRAY['coatings']::text[]
       ORDER BY name
     `;
     const machines = machineRows.map(r => r.name).filter(Boolean);
@@ -3193,14 +3477,15 @@ app.get('/api/reports/daily-production/coatings/:date', requirePermission('produ
 // there's no workflow stage to aggregate from, so all numeric cells
 // are admin-entered. We pull the operator roster from anyone whose
 // machine has the 'break' role and serve their saved cells.
-app.get('/api/reports/daily-production/breaking/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/breaking/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
 
-    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND roles @> ARRAY['break']::text[]`;
+    // Managers excluded: only the breaking crew belongs in this list.
+    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND roles @> ARRAY['break']::text[]`;
     // De-dupe by lowercase name so the same person appearing on two
     // machines only shows up once in the register.
     const seen = new Map();
@@ -3246,10 +3531,41 @@ app.get('/api/reports/daily-production/breaking/:date', requirePermission('produ
   }
 });
 
+// Daily Production register — Sorting section. Same shape as Breaking, but
+// entirely hand-entered: nothing on the Job Card feeds it, so there is no
+// roster to derive and every row is one somebody added with the + button.
+// Rows live in daily_production_notes under section 'sorting', keyed by the
+// person's name in the `machine` column exactly as Breaking does.
+app.get('/api/reports/daily-production/sorting/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'sorting'`;
+    const out = notesRows
+      .filter(r => r.machine)
+      .sort((a, b) => String(a.machine).toLowerCase().localeCompare(String(b.machine).toLowerCase()))
+      .map(r => ({
+        operator: r.machine,
+        operator_ur: '',
+        sheets:  r.sheets  || '',
+        hours:   r.hours   || '',
+        jobs:    r.jobs    || '',
+        helper:  r.helper  || '',
+        remarks: r.remarks || '',
+        is_custom: true,
+      }));
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Daily Production register — Pasting section. Same byline-parsing
 // pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
 // per job per machine on the chosen date.
-app.get('/api/reports/daily-production/pasting/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/pasting/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3292,7 +3608,7 @@ app.get('/api/reports/daily-production/pasting/:date', requirePermission('produc
 // Printing endpoint but sheets come from die_cutting_sheets, the stage
 // label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
 // as admin-editable cells.
-app.get('/api/reports/daily-production/die/:date', requirePermission('production_reports', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/die/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3658,7 +3974,146 @@ async function aggregateProductionRange(sql, { from, to }) {
   return { byMachineDaily: byMachineDailyArr, byOperatorDaily: byOperatorDailyArr };
 }
 
-app.get('/api/reports/production', requirePermission('production_reports', 'view'), async (req, res) => {
+// May job card number `id` be issued to a new job?
+//
+// A number that NEVER reached a job card can be reused safely: nothing was
+// ever printed, delivered, invoiced or reported under it, so handing it to a
+// new job creates no ambiguity. A number that DID belong to a job cannot,
+// even if that job was deleted - a printed job card may be on the floor, and
+// old deliveries and reports still refer to it. Two different jobs sharing
+// one number is a worse audit problem than a gap, which is the whole reason
+// gaps were being chased in the first place.
+//
+// So the test is "was this number ever a job", and it is answered from the
+// audit log, which outlives the job row:
+//   - any audit entry other than job.create_failed => it was a job. Never.
+//   - a job.create_failed entry                    => provably burned. Reusable.
+//   - no entries at all                            => only trustworthy ABOVE the
+//     watermark, the lowest number the audit log has ever recorded a creation
+//     for. Below that, silence proves nothing: the log did not exist yet, so a
+//     real job may have lived there and been purged without a trace.
+// The number must also already have been issued (at or below the sequence
+// top); handing out a higher one would skip the numbers in between and open
+// a fresh gap.
+function jobNumberReusable(id, { hasRow, actions, watermark, seqTop }) {
+  if (hasRow) return false;
+  if (!Number.isFinite(watermark)) return false;          // no audit history: trust nothing
+  if (!(id > 0) || id > seqTop) return false;
+  const real = (actions || []).filter(a => a !== 'job.create_failed');
+  if (real.length) return false;                          // it was a job once
+  if ((actions || []).includes('job.create_failed')) return true;
+  return id > watermark;
+}
+
+// JOB NUMBER REGISTER - one row per job card number ever issued, from E-1 to
+// the highest the sequence has handed out, each one accounted for. Job numbers
+// come from a Postgres sequence: it never reuses a value and never gives one
+// back, so the only way to prove nothing has gone astray is to be able to say
+// what became of every number. Four outcomes:
+//   live     - the job exists
+//   archived - the job exists, in the Archive, restorable
+//   gone     - the job existed and was destroyed (who and when, from the audit log)
+//   unused   - no job ever held this number (a creation that failed, or one
+//              from before the audit log; the failure reason when we have it)
+app.get('/api/reports/job-numbers', requirePermission('rpt_job_number_register', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT id, name, client, jobcode, created_at, deleted_at, deleted_by FROM jobs ORDER BY id ASC`;
+    // The sequence knows about numbers that no longer have a row - that is
+    // the whole point. Without it the register would stop at the highest
+    // SURVIVING job and quietly hide a gap at the very top.
+    const seq = await sql`SELECT last_value FROM jobs_id_seq`;
+    const audit = await sql`
+      SELECT entity_id, action, user_email, created_at, summary
+      FROM audit_log
+      WHERE entity_type = 'job'
+        AND action IN ('job.create', 'job.delete', 'job.restore', 'job.purge', 'job.auto_purge', 'job.create_failed')
+      ORDER BY id ASC`;
+    const byId = new Map();
+    for (const j of rows) byId.set(j.id, j);
+    const trail = new Map();
+    for (const a of audit) {
+      if (!trail.has(a.entity_id)) trail.set(a.entity_id, {});
+      trail.get(a.entity_id)[a.action] = a;     // last one of each kind wins
+    }
+    const seqTop = seq && seq[0] ? parseInt(seq[0].last_value, 10) : 0;
+    // Watermark: the lowest number the audit log has a creation for. Silence
+    // below it is meaningless - see jobNumberReusable.
+    let watermark = Infinity;
+    for (const a of audit) if (a.action === 'job.create' && a.entity_id < watermark) watermark = a.entity_id;
+    if (!Number.isFinite(watermark)) watermark = null;
+    const maxRow = rows.length ? rows[rows.length - 1].id : 0;
+    const highest = Math.max(seqTop || 0, maxRow);
+    const out = [];
+    for (let id = 1; id <= highest; id++) {
+      const job = byId.get(id);
+      const t = trail.get(id) || {};
+      const created = t['job.create'];
+      if (job) {
+        out.push({
+          id, status: job.deleted_at ? 'archived' : 'live',
+          name: job.name || '', client: job.client || '', jobcode: job.jobcode || '',
+          created_at: job.created_at || (created ? created.created_at : null),
+          created_by: created ? created.user_email : null,
+          ended_at: job.deleted_at || null, ended_by: job.deleted_by || null,
+          note: job.deleted_at ? 'In the Archive - can be restored' : '',
+        });
+        continue;
+      }
+      const purged = t['job.purge'], auto = t['job.auto_purge'], failed = t['job.create_failed'];
+      const archived = t['job.delete'];
+      if (created || purged || auto) {
+        const end = purged || auto || null;
+        // No purge recorded is the normal shape for anything destroyed before
+        // 23/09/2026, when the auto-purge started writing entries. If it was
+        // archived more than the retention window ago, that purge is what
+        // happened to it and the register should say so rather than imply the
+        // app lost the row. Inside the window, it really is unexplained.
+        const archivedDaysAgo = archived
+          ? Math.floor((Date.now() - new Date(archived.created_at).getTime()) / 86400000)
+          : null;
+        const inferredAutoPurge = !end && archivedDaysAgo !== null && archivedDaysAgo >= TRASH_RETENTION_DAYS;
+        out.push({
+          id, status: 'gone',
+          name: '', client: '', jobcode: '',
+          created_at: created ? created.created_at : null,
+          created_by: created ? created.user_email : null,
+          ended_at: end ? end.created_at : (archived ? archived.created_at : null),
+          ended_by: end
+            ? (auto && !purged ? 'system (30-day purge)' : end.user_email)
+            : (archived ? archived.user_email : null),
+          note: end
+            ? (purged ? 'Permanently deleted' : `Auto-purged after ${TRASH_RETENTION_DAYS} days`)
+            : inferredAutoPurge
+              ? `Archived ${archivedDaysAgo} days ago, then auto-purged - purges were not recorded before 23/09/2026`
+              : archived
+                ? 'Archived, and the row is gone although the retention window has not passed - worth investigating'
+                : 'The job row is gone but no deletion was recorded - worth investigating',
+        });
+        continue;
+      }
+      const reusable = jobNumberReusable(id, {
+        hasRow: false, actions: Object.keys(t), watermark, seqTop,
+      });
+      out.push({
+        id, status: 'unused', reusable,
+        name: '', client: '', jobcode: '',
+        created_at: null, created_by: null, ended_at: failed ? failed.created_at : null, ended_by: null,
+        note: (failed
+          ? `Job card failed to save - ${failed.summary || 'no reason recorded'}`
+          : 'No job card ever held this number')
+          + (reusable ? ' - can be issued to a new job' : ''),
+      });
+    }
+    res.json({ highest, rows: out });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/reports/production', requirePermission('rpt_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3774,7 +4229,7 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
     // can't see the Product Rate tab / Sale Report / invoicing fields, so they
     // never reach an Admin, PM or Operator browser even via the network tab.
     if (!canSeeFinanceData(req.user)) {
-      for (const j of jobs) { delete j.rate; delete j.tax_pct; delete j.cartons_packets; }
+      for (const j of jobs) { delete j.rate; delete j.tax_pct; }
     }
     res.json(jobs);
   } catch (err) {
@@ -4052,7 +4507,10 @@ app.get('/api/client/jobs', requireClient, async (req, res) => {
 // default so the admin can't accidentally reveal the wrong client's
 // jobs from a saved link.
 app.get('/api/admin/client-view', requireAuth, async (req, res) => {
-  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'client_view_preview')) {
+  // 'view' is the minimum, matching canRunStation: this is a tab-visibility
+  // row in the Access Register, so setting it to VIEW there has to be enough
+  // server-side too, or the tab would show and then 403 on open.
+  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'client_view_preview', 'view')) {
     return res.status(403).json({ error: 'Not allowed' });
   }
   try {
@@ -4152,6 +4610,21 @@ function parseSheets(v) {
 // Returns 0 if packets is missing/zero; caller must surface a clear error.
 const REAM_PAPERS = new Set(['art paper', 'off-white', 'offset paper']);
 function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
+// Reams for art/offset paper, packets for board - the words the shop uses.
+function packetUnitLabelSrv(paperType) { return REAM_PAPERS.has(paperType) ? 'reams' : 'packets'; }
+// Packets, exactly as they are - trailing zeros trimmed, nothing rounded.
+// 46,350 sheets of a 100-sheet board is 463.5 packets, and it must say so.
+function fmtPackets(sheets, ps) {
+  const p = (Number(ps) > 0) ? (Number(sheets) / Number(ps)) : 0;
+  if (!Number.isFinite(p)) return '0';
+  return Number.isInteger(p) ? String(p) : String(parseFloat(p.toFixed(6)));
+}
+// "463.5 packets (46,350 sheets)" - the unit people work in first, the raw
+// count second. unitLabel comes from the paper type: reams for art/offset.
+function packetsWithSheets(sheets, ps, unitLabel) {
+  const unit = unitLabel || (Number(ps) === 500 ? 'reams' : 'packets');
+  return `${fmtPackets(sheets, ps)} ${unit} (${Number(sheets).toLocaleString()} sheets)`;
+}
 function jobDeductionSheets({ paperType, particulars }) {
   const ps      = packetSize(paperType || '');
   const packets = parseFloat((particulars || {}).quantity_of_packets);
@@ -4164,7 +4637,22 @@ function jobDeductionSheets({ paperType, particulars }) {
 // in the same UPDATE so balance always matches the sum of ledger changes.
 // user / reversesTxId are optional metadata used by the History UI to show
 // who entered the row and to link reversals to their originals.
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo }) {
+// Optional Entry Date (YYYY-MM-DD, business-local) sent by the stock forms.
+// Blank or today = an ordinary entry. An earlier day = a missed entry filed
+// on that day, at the current clock time. Future dates are refused.
+function stockEntryInstant(rawDate) {
+  const v = String(rawDate == null ? '' : rawDate).trim();
+  if (!v) return { at: null };
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m || isNaN(Date.UTC(+m[1], +m[2] - 1, +m[3])) || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > 31) {
+    return { error: 'Entry date must be a valid date (YYYY-MM-DD).' };
+  }
+  const today = businessDateISO();
+  if (v > today) return { error: 'Entry date cannot be in the future.' };
+  if (v === today) return { at: null };
+  return { at: businessInstantForDate(v), date: v };
+}
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt }) {
   if (!itemId || !change) return null;
   if (change < 0) {
     const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
@@ -4174,9 +4662,13 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   const userId    = user && user.id    ? user.id    : null;
   const userEmail = user && user.email ? user.email : null;
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
+  // Backdated (occurredAt): created_at = that day, recorded_at = now.
+  const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan})
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan},
+            COALESCE(${occurredIso}::timestamptz, NOW()),
+            CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
     RETURNING id
   `;
   await sql`
@@ -4235,6 +4727,7 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
 
 // CREATE a job
 app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), async (req, res) => {
+  let reuseId = null;            // visible to the catch below
   try {
     await dbReady;
     const sql = getDb();
@@ -4262,6 +4755,39 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
         }
       }
     }
+    // Validate BEFORE the INSERT. name and client are NOT NULL, so a blank
+    // one used to reach Postgres and fail there - and by then the job number
+    // had already been handed out by the sequence and could never be given
+    // back. Rejecting here costs the caller a 400 and costs the numbering
+    // nothing. (See the catch below for the case an INSERT still fails.)
+    if (!name)   return res.status(400).json({ error: 'Job name is required.' });
+    if (!client) return res.status(400).json({ error: 'Company is required.' });
+    // Optional: issue this job a number that was spent but never used (from
+    // the Job Number Register's Reuse button). Re-checked here rather than
+    // trusted from the client - this is the one place a number can be given
+    // to a second job, so the rule is enforced at the point of writing.
+    if (req.body.reuse_number !== undefined && req.body.reuse_number !== null && req.body.reuse_number !== '') {
+      reuseId = parseInt(req.body.reuse_number, 10);
+      if (!Number.isFinite(reuseId) || reuseId <= 0) return res.status(400).json({ error: 'Invalid job number.' });
+      if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'rpt_job_number_reuse')) {
+        return res.status(403).json({ error: 'Not allowed — Job Number Reuse access required' });
+      }
+      const [held, trail, seq, firstCreate] = await Promise.all([
+        sql`SELECT 1 FROM jobs WHERE id = ${reuseId}`,
+        sql`SELECT DISTINCT action FROM audit_log WHERE entity_type = 'job' AND entity_id = ${reuseId}`,
+        sql`SELECT last_value FROM jobs_id_seq`,
+        sql`SELECT MIN(entity_id) AS lowest FROM audit_log WHERE entity_type = 'job' AND action = 'job.create'`,
+      ]);
+      const okToReuse = jobNumberReusable(reuseId, {
+        hasRow: held.length > 0,
+        actions: trail.map(r => r.action),
+        watermark: firstCreate.length && firstCreate[0].lowest !== null ? parseInt(firstCreate[0].lowest, 10) : NaN,
+        seqTop: seq && seq[0] ? parseInt(seq[0].last_value, 10) : 0,
+      });
+      if (!okToReuse) {
+        return res.status(409).json({ error: `E-${reuseId} cannot be reused - it already belonged to a job, or there is no record proving it never did.` });
+      }
+    }
     // Newly-created jobs land in issuance_status='new' — they show up
     // in the "New Jobs" tab for the Production Manager (or Admin) to
     // review, and are NOT visible to the store keeper yet. Clicking
@@ -4269,18 +4795,56 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     // store keeper's Pending Stock queue picks them up. Stock is only
     // deducted after that, via POST /api/jobs/:id/issue-stock.
     const result = await sql`
-      INSERT INTO jobs (name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id, stock_group_name, stock_group_visible, issuance_status)
-      VALUES (${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible || stockGroupVisibleFromGroup}, ${groupIdInt}, ${stockGroupName}, ${stockGroupVisibleFromGroup}, 'new')
+      INSERT INTO jobs (id, name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id, stock_group_name, stock_group_visible, issuance_status)
+      -- COALESCE short-circuits in Postgres, so nextval() is NOT called when a
+      -- number is being reclaimed: reusing E-5 must not also spend E-702.
+      -- With no reuseId this is exactly what the column default would have done.
+      VALUES (COALESCE(${reuseId}::int, nextval('jobs_id_seq')), ${name}, ${client}, ${jobcode||null}, ${ref||null}, ${dateissued||null}, ${deadline||null}, ${size||null}, ${ups||null}, ${sheets||null}, ${qty||null}, ${paper||null}, ${machine||null}, ${coatings||[]}, ${priority||'Normal'}, ${delqty||null}, ${cartonqty||null}, ${notes||null}, ${bno||null}, ${mfgdate||null}, ${expdate||null}, ${mrp||null}, ${JSON.stringify(particulars||{})}, ${inventory_item_id||null}, ${cut_size||null}, ${offcut_size||null}, ${!!is_shade_card}, ${!!client_visible || stockGroupVisibleFromGroup}, ${groupIdInt}, ${stockGroupName}, ${stockGroupVisibleFromGroup}, 'new')
       RETURNING *
     `;
     const job = result[0];
-    await logAudit(sql, req, { action: 'job.create', entityType: 'job', entityId: job.id, summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — new job (awaiting Process to CTP)` });
+    await logAudit(sql, req, {
+      action: 'job.create', entityType: 'job', entityId: job.id,
+      summary: `Created Job E-${job.id}: ${job.name} (${job.client}) — new job (awaiting Process to CTP)`
+        + (reuseId ? ` — issued on reclaimed number E-${reuseId}, which had never been used` : ''),
+      metadata: reuseId ? { reused_number: reuseId } : {},
+    });
     res.json(job);
   } catch (err) {
     console.error(err);
+    // A failed INSERT still consumes its sequence value - Postgres sequences
+    // are not transactional, so the number is spent and can never be issued
+    // again. Nothing can give it back, but it must not vanish unexplained:
+    // read which number was taken and, if no job holds it, write that down.
+    // Guarded so a failure in here can never mask the original error.
+    // Only when the sequence was actually used. A reclaimed number goes in as
+    // a literal, so nothing was drawn from the sequence and nothing is burned -
+    // reading last_value here would blame an unrelated number.
+    if (!reuseId) {
+      try { await recordBurnedJobNumber(getDb(), req, err); } catch (e2) { console.error('Burned-number log failed:', e2.message); }
+    }
     res.status(500).json({ error: err.message });
   }
 });
+
+// Which job number did a failed creation consume, and did it really consume
+// one? last_value is the most recent value the sequence handed out; if a job
+// already holds it then the failure happened BEFORE nextval (a validation
+// error, say) and no number was burned, so nothing is written.
+async function recordBurnedJobNumber(sql, req, err) {
+  const seq = await sql`SELECT last_value FROM jobs_id_seq`;
+  const burned = seq && seq[0] ? parseInt(seq[0].last_value, 10) : null;
+  if (!Number.isFinite(burned)) return;
+  const held = await sql`SELECT 1 FROM jobs WHERE id = ${burned}`;
+  if (held.length) return;                    // the sequence never advanced
+  const already = await sql`SELECT 1 FROM audit_log WHERE entity_type = 'job' AND entity_id = ${burned} AND action = 'job.create_failed'`;
+  if (already.length) return;                 // one entry per number is enough
+  await logAudit(sql, req, {
+    action: 'job.create_failed', entityType: 'job', entityId: burned,
+    summary: `Job creation failed - number E-${burned} was consumed and can never be used. Reason: ${err && err.message ? err.message : 'unknown'}`,
+    metadata: { error: err && err.message ? err.message : null },
+  });
+}
 
 // Flip a job from New Jobs into the production queue. Only meaningful
 // for status='new'; anything else is idempotent-refused. After this
@@ -4497,15 +5061,20 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
     const time = businessStamp();
     const nowIso = new Date().toISOString();
     const by = `${(req.user && req.user.name) || 'Manager'} (CTP)`;
+    // Stock may have been issued EARLY, while the job still sat at CTP
+    // (issued_items carries primary rows). Then Pending Stock is already
+    // behind us — go straight to Printing as an issued job.
+    const stockDone = Array.isArray(job.issued_items)
+      && job.issued_items.some(x => x && x.source !== 'secondary');
     stages[0] = { ...(stages[0] || {}), status: 'done', by, time, at: nowIso, notes: 'CTP plates finished (marked by manager)' };
     stages[1] = { ...(stages[1] || {}), status: 'active', by, time, at: nowIso };
-    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to Pending Stock / Printing`, by, time });
+    log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to ${stockDone ? 'Printing (stock already issued)' : 'Pending Stock'}`, by, time });
     // Offcut paper is no longer auto-consumed here — offcut jobs go to
     // Pending Stock like fresh paper and are issued there, or by a Paper
     // Cutting PIN at the Station (see /api/jobs/:id/papercut-issue-stock).
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status = 'pending',
+         SET issuance_status = ${stockDone ? 'issued' : 'pending'},
              stage_index     = 1,
              stages          = ${JSON.stringify(stages)},
              log             = ${JSON.stringify(log)}
@@ -4516,7 +5085,7 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
       action: 'job.process_from_ctp',
       entityType: 'job',
       entityId: id,
-      summary: `CTP done for Job E-${id}: ${job.name} — moved to Pending Stock / Printing`,
+      summary: `CTP done for Job E-${id}: ${job.name} — moved to ${stockDone ? 'Printing (stock already issued)' : 'Pending Stock'}`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -5073,7 +5642,7 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 // Dismiss pending stock for a delivered job. Admin-only. Clears the
 // issuance_status to 'issued' and removes any partial_pending_sheets
 // so the job drops out of the pending queue.
-app.post('/api/jobs/:id/dismiss-pending', requireAdmin, async (req, res) => {
+app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pending'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5149,6 +5718,11 @@ async function performIssueStock(sql, req, id, body) {
   const challanNo = (body && typeof body.challan_no === 'string')
     ? (body.challan_no.trim() || null)
     : null;
+  const entry = stockEntryInstant(body && body.entry_date);
+  if (entry.error) return { status: 400, error: entry.error };
+  const occurredAt = entry.at;
+  // The job's own issued_at follows the entry date too.
+  const issuedAtIso = occurredAt ? occurredAt.toISOString() : null;
   // Resolve the paper GROUP from either the primary or secondary
   // inventory item, depending on source. Every accepted split must
   // live in the resolved anchor's paper group.
@@ -5206,11 +5780,17 @@ async function performIssueStock(sql, req, id, body) {
     // initialization" (temporal dead zone). Both equal packetSize(paperType).
     return Math.round(packets * psForNeed);
   })();
+  const freshNeed = Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary);
+  // Same ceiling rule as primaryOwedSheets: the marker caps it, but what is
+  // really owed is the current requirement less what has already been issued.
+  const issuedPrimary = (Array.isArray(job.issued_items) ? job.issued_items : [])
+    .reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+  const issuedRows = Array.isArray(job.issued_items) ? job.issued_items : [];
   const needSheets = isSecondary
     ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
     : (partialPending > 0
-        ? partialPending
-        : Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary));
+        ? (issuedRows.length ? Math.max(0, freshNeed - issuedPrimary) : partialPending)
+        : freshNeed);
   if (needSheets <= 0) {
     // Full coverage but the job somehow stayed in Pending Stock (edge
     // case where the CTP-forward path didn't flip status — e.g. a job
@@ -5224,7 +5804,7 @@ async function performIssueStock(sql, req, id, body) {
       UPDATE jobs
          SET issuance_status = 'issued',
              stage_index     = ${bumpedStage},
-             issued_at       = COALESCE(issued_at, NOW()),
+             issued_at       = COALESCE(issued_at, ${issuedAtIso}::timestamptz, NOW()),
              issued_by_id    = COALESCE(issued_by_id, ${req.user.id || null}),
              particulars     = ${JSON.stringify(cleanP)}
        WHERE id = ${id}
@@ -5233,7 +5813,7 @@ async function performIssueStock(sql, req, id, body) {
     await logAudit(sql, req, {
       action: 'job.issue_stock_auto',
       entityType: 'job', entityId: id,
-      summary: `Job E-${id}: auto-issued — fully covered by ${preConsumedSheets} sheets of offcut pre-consumed on CTP forward.`,
+      summary: `Job E-${id}: auto-issued — fully covered by ${packetsWithSheets(preConsumedSheets, psForNeed, packetUnitLabelSrv(paperType))} of offcut pre-consumed on CTP forward.`,
     });
     return { job: flipped[0] };
   }
@@ -5326,6 +5906,7 @@ async function performIssueStock(sql, req, id, body) {
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${fmtPack(packs)} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}${overNote}`,
       user: req.user,
       challanNo,
+      occurredAt,
     });
     if (job.cut_size && job.offcut_size) {
       const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
@@ -5337,6 +5918,7 @@ async function performIssueStock(sql, req, id, body) {
         notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
         user: req.user,
         challanNo,
+        occurredAt,
       });
     }
     // Over-issuance handling — the auto-offcut credit that used to run
@@ -5427,6 +6009,13 @@ async function performIssueStock(sql, req, id, body) {
     job.issuance_status === 'new' || job.issuance_status === 'ctp' ||
     (job.issuance_status === 'pending' && (await primaryOwedSheets(sql, job)) > 0)
   );
+  // Early issuance: the store keeper may issue while the job is still in
+  // the CTP queue (it shows there AND in Pending Stock in parallel). The
+  // stock moves now, but the job STAYS with CTP — status and stage are
+  // untouched, so plate-making carries on undisturbed. issued_at +
+  // issued_items record that stock is done; the CTP-done transition reads
+  // them and routes the job straight to Printing instead of Pending Stock.
+  const stayAtCtp = !isSecondary && job.issuance_status === 'ctp';
   const updated = primaryStillOwed
     ? await sql`
         UPDATE jobs
@@ -5435,10 +6024,21 @@ async function performIssueStock(sql, req, id, body) {
          WHERE id = ${id}
          RETURNING *
       `
+    : stayAtCtp
+    ? await sql`
+        UPDATE jobs
+           SET issued_at = COALESCE(issued_at, ${issuedAtIso}::timestamptz, NOW()),
+               issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
+               inventory_item_id = ${nextInvItemId},
+               particulars = ${JSON.stringify(nextParticulars)},
+               issued_items = (COALESCE(issued_items, '[]'::jsonb) || ${JSON.stringify(issuedItemsTagged)}::jsonb)
+         WHERE id = ${id}
+         RETURNING *
+      `
     : await sql`
         UPDATE jobs
            SET issuance_status = 'issued',
-               issued_at = COALESCE(issued_at, NOW()),
+               issued_at = COALESCE(issued_at, ${issuedAtIso}::timestamptz, NOW()),
                issued_by_id = COALESCE(issued_by_id, ${req.user.id || null}),
                inventory_item_id = ${nextInvItemId},
                stage_index = ${bumpedStage},
@@ -5452,7 +6052,9 @@ async function performIssueStock(sql, req, id, body) {
     action: 'job.issue_stock',
     entityType: 'job',
     entityId: id,
-    summary: `Issued ${totalIssued} sheets for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${remaining} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${totalIssued} sheets of ${job.offcut_size} offcut returned` : ''}`,
+    // Issued amount in packets first; what is still NEEDED stays in sheets as
+    // well, since that is the figure the rest of the app quotes back.
+    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
   });
   return { job: updated[0] };
 }
@@ -5516,13 +6118,20 @@ async function primaryOwedSheets(sql, job, itemsById) {
   const p = job.particulars || {};
   const partialRaw = parseInt(p.partial_pending_sheets, 10);
   const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
-  if (job.issuance_status === 'issued') return partial;
-  if (job.issuance_status !== 'pending') return 0;
-  if (partial > 0) return partial;
+  if (job.issuance_status !== 'issued' && job.issuance_status !== 'pending' && job.issuance_status !== 'ctp') return 0;
+  if (job.issuance_status === 'issued' && !partial) return 0;
+  // At CTP the main paper may already have been issued early (status stays
+  // 'ctp' by design) — then nothing more is owed unless a partial marker
+  // says otherwise. A fresh CTP job owes its full need, like 'pending'.
+  if (job.issuance_status === 'ctp' && !partial) {
+    const rowsCtp = Array.isArray(job.issued_items) ? job.issued_items : [];
+    const issuedCtp = rowsCtp.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    if (issuedCtp > 0) return 0;
+  }
   const item = itemsById
     ? itemsById.get(job.inventory_item_id)
     : (await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`)[0];
-  if (!item) return 0;
+  if (!item) return partial;            // cannot recompute - trust the marker
   const paperType = item.paper_type || '';
   const ps = packetSize(paperType);
   const total = jobDeductionSheets({ paperType, particulars: p });
@@ -5535,7 +6144,20 @@ async function primaryOwedSheets(sql, job, itemsById) {
     const inPre = pre && Array.isArray(pre.items) && pre.items.some(it => it && it.item_id === sec.inventory_item_id);
     if (Number.isFinite(packets) && packets > 0 && !inPre) secSheets = Math.round(packets * ps);
   }
-  return Math.max(0, total - preSheets - secSheets);
+  const need = Math.max(0, total - preSheets - secSheets);
+  // The partial marker is a snapshot from the last issuance and goes stale as
+  // soon as the requirement changes (a 2nd paper added afterwards, packets
+  // edited up or down). What is owed is the requirement as it stands now less
+  // what has already gone out; the marker is only the fallback for a job with
+  // no issuance recorded to reckon from - see partialPendingSheets on the
+  // client for the same rule and the case that forced it.
+  if (partial > 0) {
+    const rows = Array.isArray(job.issued_items) ? job.issued_items : [];
+    if (!rows.length) return partial;
+    const issued = rows.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    return Math.max(0, need - issued);
+  }
+  return need;
 }
 
 // Sheets still owed on a job's 2nd paper. Legacy jobs whose 2nd paper was
@@ -5568,7 +6190,7 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
     const jobs = await sql`
       SELECT * FROM jobs
       WHERE deleted_at IS NULL
-        AND issuance_status IN ('pending', 'issued')
+        AND issuance_status IN ('pending', 'issued', 'ctp')
       ORDER BY id ASC`;
     const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true`;
     const itemsById = new Map(offcuts.map(it => [it.id, it]));
@@ -5672,7 +6294,7 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
       action: 'job.papercut_issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id}: ${owed} sheets of offcut${source === 'secondary' ? ' (2nd paper)' : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
+      summary: `Job E-${id}: ${packetsWithSheets(owed, packetSize(anchor.paper_type || ''), packetUnitLabelSrv(anchor.paper_type || ''))} of offcut${source === 'secondary' ? ' (2nd paper)' : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
     });
     res.json(result.job);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -5799,7 +6421,10 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    if (job.issuance_status !== 'issued') {
+    // An early issue made while the job still sits at CTP (status stays
+    // 'ctp', issued_at set) is just as reversible as a normal one.
+    const earlyAtCtp = job.issuance_status === 'ctp' && job.issued_at;
+    if (job.issuance_status !== 'issued' && !earlyAtCtp) {
       return res.status(400).json({ error: 'Stock was not issued for this job' });
     }
     if ((job.stage_index || 0) > 0) {
@@ -5874,7 +6499,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     }
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status = 'pending',
+         SET issuance_status = ${earlyAtCtp ? 'ctp' : 'pending'},
              issued_at = NULL,
              issued_by_id = NULL,
              particulars = ${JSON.stringify(cleanParticulars)},
@@ -5974,6 +6599,9 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     const splitItems = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
     const byId = new Map(splitItems.map(x => [x.id, x]));
     const challanNo = req.body && req.body.challan_no ? String(req.body.challan_no).trim() || null : null;
+    const entry = stockEntryInstant(req.body && req.body.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const occurredAt = entry.at;
     for (const s of splits) {
       const splitItem = byId.get(s.item_id);
       if (!splitItem) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
@@ -5991,6 +6619,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
         notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${s.sheets / ps} ${unit} (${s.sheets} sheets) top-up from ${splitItem.brand || 'no brand'} issued by ${req.user.email}`,
         user: req.user,
         challanNo,
+        occurredAt,
       });
     }
     if (job.cut_size && job.offcut_size && sourceItem) {
@@ -6005,6 +6634,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
           notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${splitItem.brand || 'no brand'}) returned to stock (top-up)`,
         user: req.user,
           challanNo,
+          occurredAt,
       });
       }
     }
@@ -6291,12 +6921,18 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
   log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
     notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
     by: `${by} (${STAGES[stage_index] || '?'})`, time });
-  if (bookedQty && nextTotal >= bookedQty && stage_index < 7) {
+  // With no booked P.O. Qty (bookedQty falsy — routine for shade cards,
+  // which never carry one) there's no target to compare against, so any
+  // recorded shipment counts as the whole delivery rather than leaving
+  // the job stuck at "Ready to Deliver" forever waiting to clear a
+  // booked qty of 0.
+  const deliveryComplete = bookedQty ? nextTotal >= bookedQty : nextTotal > 0;
+  if (deliveryComplete && stage_index < 7) {
     // Mark 6 done, move to 7.
     stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
     stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
     stage_index = 7;
-    log.push({ stage: STAGES[7], status: 'done', notes: `All ${bookedQty.toLocaleString()} pcs delivered`, by: `${by} (${STAGES[7]})`, time });
+    log.push({ stage: STAGES[7], status: 'done', notes: bookedQty ? `All ${bookedQty.toLocaleString()} pcs delivered` : `${nextTotal.toLocaleString()} delivered (no booked qty set)`, by: `${by} (${STAGES[7]})`, time });
   }
   return { deliveries, delqty: String(nextTotal), stage_index, stages, log, entry, nextTotal, bookedQty };
 }
@@ -6321,6 +6957,47 @@ app.get('/api/shade-card-dc/peek', requireAuth, async (req, res) => {
 // used for deliveries in this shop (1 carton == 1 piece per the owner).
 // delqty stays in sync as the running sum of cartons so the tile's
 // "Delivered Qty" and the client view keep working with no pieces math.
+// One field of the not-yet-recorded delivery form. Saved on every change so
+// whoever fills the form never has to press anything, and whoever records the
+// shipment later opens the card to find it already filled in.
+//
+// A draft is NOT a delivery: it moves no stock, changes no stage and appears
+// in no report. It is only what is sitting in the form.
+const DELIVERY_DRAFT_FIELDS = new Set([
+  'cartons', 'cartons_packets', 'date', 'po_no', 'batch_no',
+  'efbr_no', 'msi_no', 'invoice_no', 'rate', 'tax_pct',
+]);
+app.patch('/api/jobs/:id/delivery-draft', requireDeliveryDetailsWriter, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid job id' });
+    const { field, value } = req.body || {};
+    if (!DELIVERY_DRAFT_FIELDS.has(field)) return res.status(400).json({ error: 'Unknown field: ' + field });
+    // The pricing fields in the draft are consumed by Record now (see
+    // /deliveries), so they must be gated exactly like typing them on the
+    // record form itself: invoicing access only. The other draft fields
+    // stay open to every delivery-details holder.
+    if (['efbr_no', 'msi_no', 'rate', 'tax_pct'].includes(field) && !canSetPricing(req.user)) {
+      return res.status(403).json({ error: 'Not allowed — invoicing access required for this field' });
+    }
+    const text = value === null || value === undefined ? '' : String(value);
+    // An emptied box drops out of the draft rather than storing "", so the
+    // form falls back to its normal prefill instead of showing a blank.
+    const rows = text === ''
+      ? await sql`UPDATE jobs SET delivery_draft = COALESCE(delivery_draft, '{}'::jsonb) - ${field}::text WHERE id = ${id} AND deleted_at IS NULL RETURNING *`
+      : await sql`UPDATE jobs SET delivery_draft = COALESCE(delivery_draft, '{}'::jsonb) || jsonb_build_object(${field}::text, ${text}::text) WHERE id = ${id} AND deleted_at IS NULL RETURNING *`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    if (!canSeeFinanceData(req.user)) { delete job.rate; delete job.tax_pct; }
+    res.json(job);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => {
   try {
     await dbReady;
@@ -6335,8 +7012,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // job_btn_pricing may set them, anyone else's values are ignored (not
     // rejected — the delivery itself still records).
     const canPrice = canSetPricing(req.user);
-    const fbrNo   = canPrice ? (String(req.body.fbr_no   ?? '').trim() || null) : null;
-    const msiNo   = canPrice ? (String(req.body.msi_no   ?? '').trim() || null) : null;
+    let fbrNo   = canPrice ? (String(req.body.fbr_no   ?? '').trim() || null) : null;
+    let msiNo   = canPrice ? (String(req.body.msi_no   ?? '').trim() || null) : null;
     const cartonsN = parseFloat(cartons.replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
       return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
@@ -6346,8 +7023,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // showPricingFields in deliveriesSection). Both keys must be present
     // together for pricing to be touched at all, so a manager-deliver-
     // style caller that never sends them leaves rate/tax_pct untouched.
-    const hasPricing = canPrice && (Object.prototype.hasOwnProperty.call(req.body, 'rate') || Object.prototype.hasOwnProperty.call(req.body, 'tax_pct'));
-    let rate = null, taxPct = null;
+    let hasPricing = canPrice && (Object.prototype.hasOwnProperty.call(req.body, 'rate') || Object.prototype.hasOwnProperty.call(req.body, 'tax_pct'));
+    let rate = null, taxPct = null, pricingFromDraft = false;
     if (hasPricing) {
       const rateRaw = req.body.rate;
       rate = (rateRaw === null || rateRaw === undefined || rateRaw === '') ? null : Number(rateRaw);
@@ -6364,6 +7041,32 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     const job = rows[0];
     const eligErr = deliveryEligibilityError(job);
     if (eligErr) return res.status(400).json({ error: eligErr });
+    // The whole point of the delivery draft is that FINANCE types the
+    // invoicing fields and someone WITHOUT the pricing row presses Record.
+    // The old code only ever CLEARED the draft - the finance Rate / Sale
+    // Tax / E-FBR / MSI evaporated whenever the presser was not a pricing
+    // holder, and every such shipment then read the default 18% in the
+    // Sale Report. Any finance field the request itself did not carry now
+    // falls back to what is sitting in the job's draft; each value was
+    // permission-checked when it was typed there (see /delivery-draft).
+    const draft = (job.delivery_draft && typeof job.delivery_draft === 'object') ? job.delivery_draft : {};
+    if (fbrNo === null && String(draft.efbr_no ?? '').trim()) fbrNo = String(draft.efbr_no).trim();
+    if (msiNo === null && String(draft.msi_no ?? '').trim()) msiNo = String(draft.msi_no).trim();
+    if (!hasPricing) {
+      const dRate = String(draft.rate ?? '').trim();
+      const dTax  = String(draft.tax_pct ?? '').trim();
+      const dRateN = (dRate !== '' && Number.isFinite(Number(dRate)) && Number(dRate) >= 0) ? Number(dRate) : null;
+      const dTaxN  = (dTax  !== '' && Number.isFinite(Number(dTax))  && Number(dTax)  >= 0) ? Number(dTax)  : null;
+      if (dRateN !== null || dTaxN !== null) {
+        rate   = dRateN;
+        // A draft that set only the rate must not blank the tax: keep the
+        // job's own tax in that case.
+        taxPct = dTaxN !== null ? dTaxN
+          : ((job.tax_pct === null || job.tax_pct === undefined) ? null : Number(job.tax_pct));
+        hasPricing = true;
+        pricingFromDraft = true;
+      }
+    }
     // Shade cards don't get a challan from a customer PO — they ship
     // against an internally-numbered Delivery Challan (DC-01, DC-02, …)
     // that the store also writes into the physical DC register by hand.
@@ -6383,8 +7086,9 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // the running total against the booked qty for context.
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
       computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }) });
-    const nextRate   = hasPricing ? rate   : job.rate;
-    const nextTaxPct = hasPricing ? taxPct : job.tax_pct;
+    // Draft-sourced pricing never CLEARS a job-level value it did not set.
+    const nextRate   = hasPricing ? ((pricingFromDraft && rate   === null) ? job.rate    : rate)   : job.rate;
+    const nextTaxPct = hasPricing ? ((pricingFromDraft && taxPct === null) ? job.tax_pct : taxPct) : job.tax_pct;
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
@@ -6393,7 +7097,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
              stages      = ${JSON.stringify(stages)},
              log         = ${JSON.stringify(log)},
              rate        = ${nextRate},
-             tax_pct     = ${nextTaxPct}
+             tax_pct     = ${nextTaxPct},
+             delivery_draft = '{}'::jsonb
        WHERE id = ${id}
        RETURNING *
     `;
@@ -6487,20 +7192,55 @@ app.post('/api/jobs/:id/link', requirePermission('job_btn_link'), async (req, re
     const target = rows.find(r => r.id === targetId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (!target) return res.status(404).json({ error: 'Target job not found' });
-    if (job.linked_job_id) return res.status(400).json({ error: `Job E-${id} is already linked to E-${job.linked_job_id}. Unlink it first.` });
-    if (target.linked_job_id) return res.status(400).json({ error: `Job E-${targetId} is already linked to E-${target.linked_job_id}. Unlink it first.` });
-    await sql`UPDATE jobs SET linked_job_id = ${targetId} WHERE id = ${id}`;
-    await sql`UPDATE jobs SET linked_job_id = ${id} WHERE id = ${targetId}`;
+    // Linking joins the two jobs' sets together rather than refusing when
+    // either is already linked - that refusal was what capped a set at two.
+    // Whichever set number is lower wins, so linking A to B and B to A land
+    // in the same place and re-linking is harmless.
+    const groupA = job.link_group_id || (job.linked_job_id ? Math.min(job.id, job.linked_job_id) : null);
+    const groupB = target.link_group_id || (target.linked_job_id ? Math.min(target.id, target.linked_job_id) : null);
+    const group = Math.min(...[groupA, groupB, id, targetId].filter(x => Number.isFinite(x) && x > 0));
+    if (groupA && groupB && groupA === groupB) {
+      return res.status(400).json({ error: `Job E-${id} and Job E-${targetId} are already in the same link set.` });
+    }
+    // Pull in every member of both sets, not just the two jobs clicked.
+    await sql`
+      UPDATE jobs SET link_group_id = ${group}
+       WHERE deleted_at IS NULL
+         AND (id = ${id} OR id = ${targetId}
+              OR (${groupA}::int IS NOT NULL AND link_group_id = ${groupA})
+              OR (${groupB}::int IS NOT NULL AND link_group_id = ${groupB}))`;
+    // linked_job_id is kept pointing at one other member so the existing
+    // "linked to E-x" chip and Deliver Linked keep working on a set of two.
+    await syncLinkedJobIds(sql, group);
+    const members = await sql`SELECT id FROM jobs WHERE link_group_id = ${group} AND deleted_at IS NULL ORDER BY id`;
     await logAudit(sql, req, {
       action: 'job.link',
       entityType: 'job',
       entityId: id,
-      summary: `Linked Job E-${id} with Job E-${targetId}`,
+      summary: `Linked Job E-${id} with Job E-${targetId}${members.length > 2 ? ` — link set is now ${members.map(m => 'E-' + m.id).join(', ')}` : ''}`,
+      metadata: { link_group_id: group, members: members.map(m => m.id) },
     });
     const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+
+// Point every member of a set at one other member, so the parts of the app
+// that still read linked_job_id (the "linked to E-x" chip, Deliver Linked)
+// keep working. In a set of two they point at each other, as they always did;
+// in a bigger set each points at the next one round, which is enough for a
+// chip and never claims a set is only two jobs.
+async function syncLinkedJobIds(sql, group) {
+  const members = await sql`SELECT id FROM jobs WHERE link_group_id = ${group} AND deleted_at IS NULL ORDER BY id`;
+  if (members.length < 2) {
+    if (members.length === 1) await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${members[0].id}`;
+    return;
+  }
+  for (let i = 0; i < members.length; i++) {
+    const partner = members[(i + 1) % members.length].id;
+    await sql`UPDATE jobs SET linked_job_id = ${partner} WHERE id = ${members[i].id}`;
+  }
+}
 
 app.post('/api/jobs/:id/unlink', requirePermission('job_btn_link'), async (req, res) => {
   try {
@@ -6510,14 +7250,27 @@ app.post('/api/jobs/:id/unlink', requirePermission('job_btn_link'), async (req, 
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    const partnerId = job.linked_job_id;
-    await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${id}`;
-    if (partnerId) await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${partnerId}`;
+    // Leaving a set takes this job out and leaves the others linked to each
+    // other. A set of two collapses on its own: one member left is not a set.
+    const group = job.link_group_id || null;
+    await sql`UPDATE jobs SET linked_job_id = NULL, link_group_id = NULL WHERE id = ${id}`;
+    let remaining = [];
+    if (group) {
+      remaining = await sql`SELECT id FROM jobs WHERE link_group_id = ${group} AND deleted_at IS NULL ORDER BY id`;
+      if (remaining.length < 2) {
+        await sql`UPDATE jobs SET linked_job_id = NULL, link_group_id = NULL WHERE link_group_id = ${group}`;
+        remaining = [];
+      } else {
+        await syncLinkedJobIds(sql, group);
+      }
+    } else if (job.linked_job_id) {
+      await sql`UPDATE jobs SET linked_job_id = NULL WHERE id = ${job.linked_job_id}`;
+    }
     await logAudit(sql, req, {
       action: 'job.unlink',
       entityType: 'job',
       entityId: id,
-      summary: `Unlinked Job E-${id}${partnerId ? ' from Job E-' + partnerId : ''}`,
+      summary: `Unlinked Job E-${id}${remaining.length ? ` — link set is now ${remaining.map(m => 'E-' + m.id).join(', ')}` : (job.linked_job_id ? ' from Job E-' + job.linked_job_id : '')}`,
     });
     const updated = await sql`SELECT * FROM jobs WHERE id = ${id}`;
     res.json(updated[0]);
@@ -6628,9 +7381,9 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     // Cartons/Packets is a per-job figure; for a group delivery the total typed in is split across
     // the jobs in proportion to the unit cartons each one ships.
     let cpTotal = null;
-    if (canPrice && req.body.cartons_packets !== undefined && String(req.body.cartons_packets).trim() !== '') {
+    if (req.body.cartons_packets !== undefined && String(req.body.cartons_packets).trim() !== '') {
       cpTotal = Number(req.body.cartons_packets);
-      if (!Number.isFinite(cpTotal) || cpTotal < 0) return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
+      if (!Number.isFinite(cpTotal) || cpTotal < 0) return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
     }
     const byEmail  = req.user?.email || 'unknown';
     const groupJobs = await sql`
@@ -6748,7 +7501,7 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
     const raw = req.body?.cartons_packets;
     const value = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
     if (value !== null && (!Number.isFinite(value) || value < 0)) {
-      return res.status(400).json({ error: 'Cartons/Packets must be a non-negative number.' });
+      return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
     }
     const rows = await sql`SELECT id, cartons_packets FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -6761,7 +7514,7 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
       action: 'job.cartons_packets.update',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} Cartons/Packets set to ${value === null ? '— (station figure)' : value}`,
+      summary: `Job E-${id} Carton Shipper set to ${value === null ? '— (station figure)' : value}`,
       metadata: { cartons_packets: value, prior: rows[0].cartons_packets },
     });
     res.json(updated[0]);
@@ -6964,6 +7717,486 @@ app.delete('/api/company-settings/:id', requirePermission('rpt_sale_report_compa
     await logAudit(sql, req, {
       action: 'company_settings.delete', entityType: 'company_settings', entityId: id,
       summary: `Company Settings removed: "${deleted[0].company}"`,
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Party Ledger ──────────────────────────────────────────────────
+// kind decides the side: everything reduces what the company owes (Credit)
+// except a debit note, which adds to it.
+const PARTY_RECEIPT_KINDS = {
+  bank:        { label: 'Bank Receipt',      side: 'cr' },
+  cheque:      { label: 'Cheque',            side: 'cr' },
+  cash:        { label: 'Cash',              side: 'cr' },
+  jv:          { label: 'Tax deducted (JV)', side: 'cr' },
+  credit_note: { label: 'Credit Note',       side: 'cr' },
+  debit_note:  { label: 'Debit Note',        side: 'dr' },
+};
+// Receipt vouchers (money in, into one of our accounts). Old rows may still
+// carry 'cheque' - treated the same.
+const PARTY_VOUCHER_KINDS = new Set(['bank', 'cheque', 'cash']);
+// Fallback receiving accounts (used only if no chart map is passed in).
+const PARTY_ACCOUNTS = {
+  '12001': 'Cash in Hand',
+  '12101': 'BAHL (K) 4181',
+  '12102': 'BAHL (IBB) 8360',
+  '12103': 'BAHL (Bilal Mkt) 3801',
+  '12104': 'MBL (K) 8188',
+  '12105': 'MBL (Bilal Mkt) 9585',
+  '12106': 'BOK 7487',
+  '12107': 'Faysal Bank 2465',
+  '12108': 'Al-Barka Bank',
+  '12109': 'Bank Al-Falah',
+};
+// Financial year label (July-June), as the accounts system writes it:
+// any date from 1 Jul 2026 to 30 Jun 2027 is "27".
+function voucherFy(dateStr) {
+  const m = /^(\d{4})-(\d{2})/.exec(String(dateStr || ''));
+  const now = new Date();
+  const y = m ? +m[1] : now.getFullYear();
+  const mo = m ? +m[2] : now.getMonth() + 1;
+  return String((mo >= 7 ? y + 1 : y) % 100).padStart(2, '0');
+}
+function voucherPrefix(kind, dateStr) {
+  return (kind === 'cash' ? 'CRV' : 'BRV') + '-' + voucherFy(dateStr);
+}
+// Next number for a prefix, handed out atomically (one statement), so two
+// people saving at once never get the same number. Every series starts
+// fresh at 0001 (owner's call) - numbers typed into older entries are
+// not continued from.
+async function nextVoucherNo(sql, kind, dateStr) {
+  const prefix = voucherPrefix(kind, dateStr);
+  const r = await sql`
+    INSERT INTO finance.voucher_counters (prefix, last_number)
+    VALUES (${prefix}, 1)
+    ON CONFLICT (prefix) DO UPDATE SET last_number = finance.voucher_counters.last_number + 1
+    RETURNING last_number`;
+  return prefix + '-' + String(r[0].last_number).padStart(4, '0');
+}
+// The number the NEXT voucher of this kind would get - a read, nothing is
+// used up. The voucher form shows it before saving; the real number is
+// still handed out by nextVoucherNo() at save time.
+async function peekVoucherNo(sql, kind, dateStr) {
+  const prefix = voucherPrefix(kind, dateStr);
+  const r = await sql`SELECT last_number FROM finance.voucher_counters WHERE prefix = ${prefix}`;
+  return prefix + '-' + String((r.length ? Number(r[0].last_number) : 0) + 1).padStart(4, '0');
+}
+function partyDateOk(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+  return !!m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
+}
+// Validates + normalises a receipt body. Returns { row } or { error }.
+// allowed: Map code -> { cash } of the receiving accounts in the chart.
+function partyReceiptFromBody(b, allowed) {
+  const acctMap = allowed || new Map(Object.keys(PARTY_ACCOUNTS).map(c => [c, { cash: c === '12001' }]));
+  const company = String((b && b.company) || '').trim();
+  if (!company) return { error: 'Pick the company.' };
+  const entry_date = String((b && b.entry_date) || '').trim();
+  if (!partyDateOk(entry_date)) return { error: 'Date must be a valid date (YYYY-MM-DD).' };
+  if (entry_date > businessDateISO()) return { error: 'Date cannot be in the future.' };
+  const kind = String((b && b.kind) || '').trim();
+  if (!PARTY_RECEIPT_KINDS[kind]) return { error: 'Pick a type (Bank Receipt, Cheque, Cash, Tax deducted, Credit Note or Debit Note).' };
+  const num = (v) => { const t = String(v ?? '').replace(/,/g, '').trim(); return t === '' ? 0 : Number(t); };
+  const amount = num(b && b.amount);
+  const tax_deducted = num(b && b.tax_deducted);
+  const isVoucher = PARTY_VOUCHER_KINDS.has(kind);
+  if (!Number.isFinite(tax_deducted) || tax_deducted < 0) return { error: 'Tax deducted must be 0 or more.' };
+  if (tax_deducted > 0 && !isVoucher) return { error: 'Tax deducted goes on a receipt voucher only.' };
+  if (!Number.isFinite(amount) || amount < 0 || amount + tax_deducted <= 0 || (!isVoucher && amount <= 0)) {
+    return { error: 'Amount must be a number above 0.' };
+  }
+  const clean = (v, max) => { const t = String(v == null ? '' : v).trim(); return t ? t.slice(0, max) : null; };
+  // Credit / Debit Notes and Tax deducted (JV) change what a client owes
+  // with no bank money behind them - each must say why.
+  if (['credit_note', 'debit_note', 'jv'].includes(kind) && !clean(b && b.reference, 200)) {
+    return { error: 'Give the reason / reference for this entry (e.g. the CPR no., or why the credit was given).' };
+  }
+  const bank_code = clean(b && b.bank_code, 20);
+  if (bank_code && !acctMap.has(bank_code)) return { error: 'Pick the bank / cash account from the list (Chart of Accounts).' };
+  if (bank_code && !isVoucher) return { error: 'A bank account goes on a receipt voucher only.' };
+  // The account decides cash vs bank, not the form.
+  const finalKind = (isVoucher && bank_code) ? (acctMap.get(bank_code).cash ? 'cash' : 'bank') : kind;
+  return { row: { company, entry_date, kind: finalKind, amount, tax_deducted, bank_code: isVoucher ? bank_code : null,
+    invoice_nos: clean(b && b.invoice_nos, 200),
+    voucher_no: clean(b.voucher_no, 60), reference: clean(b.reference, 200), notes: clean(b.notes, 500) } };
+}
+app.get('/api/party-ledger', requirePermission('rpt_party_ledger', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const receipts = await sql`SELECT * FROM finance.party_receipts WHERE deleted_at IS NULL ORDER BY entry_date ASC, id ASC`;
+    const openings = await sql`SELECT * FROM finance.party_openings ORDER BY company ASC`;
+    const chart = await chartAll(sql);
+    res.json({ receipts, openings, kinds: PARTY_RECEIPT_KINDS,
+      accounts: chartReceivingAccounts(chart), partyCodes: chartPartyCodes(chart), taxAccount: chartTaxAccount(chart) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.get('/api/party-receipts/next-voucher-no', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const kind = req.query.kind === 'cash' ? 'cash' : 'bank';
+    const date = partyDateOk(req.query.date) ? String(req.query.date) : businessDateISO();
+    res.json({ voucher_no: await peekVoucherNo(getDb(), kind, date) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/party-receipts', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { row, error } = partyReceiptFromBody(req.body || {}, chartReceivingMap(await chartAll(sql)));
+    if (error) return res.status(400).json({ error });
+    // Receipt vouchers are numbered by the app: CRV (cash) / BRV (bank).
+    if (PARTY_VOUCHER_KINDS.has(row.kind)) row.voucher_no = await nextVoucherNo(sql, row.kind, row.entry_date);
+    const ins = await sql`
+      INSERT INTO finance.party_receipts (company, entry_date, kind, voucher_no, reference, amount, notes, bank_code, tax_deducted, invoice_nos, created_by, updated_by)
+      VALUES (${row.company}, ${row.entry_date}, ${row.kind}, ${row.voucher_no}, ${row.reference}, ${row.amount}, ${row.notes}, ${row.bank_code}, ${row.tax_deducted}, ${row.invoice_nos}, ${req.user.email}, ${req.user.email})
+      RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'party_receipt.create', entityType: 'party_receipt', entityId: ins[0].id,
+      summary: `${PARTY_RECEIPT_KINDS[row.kind].label} ${row.voucher_no ? row.voucher_no + ' ' : ''}· ${row.company} · ${row.amount.toLocaleString()} on ${row.entry_date}`,
+      metadata: row,
+    });
+    res.json(ins[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const prev = (await sql`SELECT * FROM finance.party_receipts WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    if (!prev) return res.status(404).json({ error: 'Receipt not found' });
+    const { row, error } = partyReceiptFromBody(req.body || {}, chartReceivingMap(await chartAll(sql)));
+    if (error) return res.status(400).json({ error });
+    // A voucher keeps its number - unless it moved between cash and bank
+    // (CRV <-> BRV) or never had one, then it gets the next of its kind.
+    if (PARTY_VOUCHER_KINDS.has(row.kind)) {
+      const sameSide = PARTY_VOUCHER_KINDS.has(prev.kind) && ((prev.kind === 'cash') === (row.kind === 'cash'));
+      row.voucher_no = (sameSide && prev.voucher_no) ? prev.voucher_no : await nextVoucherNo(sql, row.kind, row.entry_date);
+    }
+    const upd = await sql`
+      UPDATE finance.party_receipts SET company = ${row.company}, entry_date = ${row.entry_date}, kind = ${row.kind},
+             voucher_no = ${row.voucher_no}, reference = ${row.reference}, amount = ${row.amount}, notes = ${row.notes},
+             bank_code = ${row.bank_code}, tax_deducted = ${row.tax_deducted}, invoice_nos = ${row.invoice_nos},
+             updated_by = ${req.user.email}, updated_at = NOW()
+       WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, {
+      action: 'party_receipt.edit', entityType: 'party_receipt', entityId: id,
+      summary: `Edited receipt ${prev.voucher_no || '#' + id} · ${row.company}: ${Number(prev.amount).toLocaleString()} on ${prev.entry_date} -> ${row.amount.toLocaleString()} on ${row.entry_date}`,
+      metadata: { before: prev, after: row },
+    });
+    res.json(upd[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/party-receipts/:id', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const del = await sql`
+      UPDATE finance.party_receipts SET deleted_at = NOW(), deleted_by = ${req.user.email}
+       WHERE id = ${id} AND deleted_at IS NULL RETURNING *`;
+    if (!del.length) return res.status(404).json({ error: 'Receipt not found' });
+    await logAudit(sql, req, {
+      action: 'party_receipt.delete', entityType: 'party_receipt', entityId: id,
+      summary: `Deleted receipt ${del[0].voucher_no || '#' + id} · ${del[0].company} · ${Number(del[0].amount).toLocaleString()} on ${del[0].entry_date}`,
+      metadata: del[0],
+    });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// One opening balance per company: the balance at the START of as_of.
+// amount > 0 = Dr (they owe us), < 0 = Cr. Blank amount removes it.
+app.put('/api/party-openings', requirePermission('rpt_party_ledger_entry'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const company = String((req.body && req.body.company) || '').trim();
+    if (!company) return res.status(400).json({ error: 'Pick the company.' });
+    const prev = (await sql`SELECT * FROM finance.party_openings WHERE lower(company) = lower(${company})`)[0] || null;
+    const rawAmt = String((req.body && req.body.amount) ?? '').replace(/,/g, '').trim();
+    if (rawAmt === '') {
+      await sql`DELETE FROM finance.party_openings WHERE lower(company) = lower(${company})`;
+      await logAudit(sql, req, { action: 'party_opening.delete', entityType: 'party_opening', entityId: prev ? prev.id : null,
+        summary: `Removed opening balance for ${company}`, metadata: { before: prev } });
+      return res.json({ ok: true, removed: true });
+    }
+    const amount = Number(rawAmt);
+    if (!Number.isFinite(amount)) return res.status(400).json({ error: 'Opening balance must be a number (negative for a Cr balance).' });
+    const as_of = String((req.body && req.body.as_of) || '').trim();
+    if (!partyDateOk(as_of)) return res.status(400).json({ error: 'As-of date must be a valid date (YYYY-MM-DD).' });
+    const notes = String((req.body && req.body.notes) || '').trim().slice(0, 500) || null;
+    const row = prev
+      ? (await sql`UPDATE finance.party_openings SET company = ${company}, as_of = ${as_of}, amount = ${amount}, notes = ${notes},
+                     updated_by = ${req.user.email}, updated_at = NOW() WHERE id = ${prev.id} RETURNING *`)[0]
+      : (await sql`INSERT INTO finance.party_openings (company, as_of, amount, notes, updated_by)
+                   VALUES (${company}, ${as_of}, ${amount}, ${notes}, ${req.user.email}) RETURNING *`)[0];
+    await logAudit(sql, req, {
+      action: 'party_opening.set', entityType: 'party_opening', entityId: row.id,
+      summary: `Opening balance ${company}: ${prev ? Number(prev.amount).toLocaleString() + ' (' + prev.as_of + ')' : 'none'} -> ${amount.toLocaleString()} (${as_of})`,
+      metadata: { before: prev, after: row },
+    });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Paid-invoice guard ────────────────────────────────────────────
+// A delivery whose invoice no. is named on a receipt ("against invoice no")
+// has had money received against it. Changing its amount (Rate, Sale Tax %,
+// delivered qty) or removing it changes what the client owed - allowed, but
+// only with a stated reason, which goes to the audit log.
+function invoiceKeyParts(s) {
+  const t = String(s || '').toLowerCase();
+  return { norm: t.replace(/[^a-z0-9]/g, ''), digits: t.replace(/\D/g, '') };
+}
+// "822" matches a receipt's "822, 823", "INV-822" or "inv 822".
+function invoiceRefMatches(invText, invoiceNos) {
+  const a = invoiceKeyParts(invText);
+  if (!a.norm) return false;
+  return String(invoiceNos || '').split(/[,;\/&\s]+/).some(tok => {
+    const b = invoiceKeyParts(tok);
+    if (!b.norm) return false;
+    if (b.norm === a.norm) return true;
+    return !!b.digits && b.digits === a.digits && (b.norm === b.digits || a.norm === a.digits);
+  });
+}
+async function paidInvoiceGuard(sql, invText, reasonRaw) {
+  const inv = String(invText || '').trim();
+  if (!inv || inv === 'Backfilled from legacy delqty on schema upgrade') return { reason: null, receipts: [] };
+  const rows = await sql`SELECT id, voucher_no, invoice_nos FROM finance.party_receipts
+                          WHERE deleted_at IS NULL AND invoice_nos IS NOT NULL AND invoice_nos <> ''`;
+  const hits = rows.filter(r => invoiceRefMatches(inv, r.invoice_nos)).map(r => r.voucher_no || ('receipt #' + r.id));
+  if (!hits.length) return { reason: null, receipts: [] };
+  const reason = String(reasonRaw || '').trim().slice(0, 300);
+  if (reason.length < 3) {
+    return { error: { needs_reason: true, receipts: hits,
+      error: `Invoice ${inv} already has money received against it (${hits.join(', ')}). Give a reason for this change.` } };
+  }
+  return { reason, receipts: hits };
+}
+const guardNote = (g) => (g && g.reason) ? ` · reason: ${g.reason} (paid via ${g.receipts.join(', ')})` : '';
+
+// ── Chart of Accounts ─────────────────────────────────────────────
+const CHART_KINDS = new Set(['asset', 'liability', 'equity', 'income', 'expense']);
+const CHART_ROLES = new Set(['cash', 'bank', 'party', 'tax']);
+async function chartAll(sql) {
+  return sql`SELECT * FROM finance.chart_accounts ORDER BY code ASC`;
+}
+// Nearest group role at or above a code ('' when none).
+function chartRoleResolver(rows) {
+  const byCode = new Map(rows.map(r => [r.code, r]));
+  return (code) => {
+    let cur = code ? byCode.get(code) : null;
+    for (let guard = 0; cur && guard < 30; guard++) {
+      if (cur.is_group && cur.role) return cur.role;
+      cur = cur.parent_code ? byCode.get(cur.parent_code) : null;
+    }
+    return '';
+  };
+}
+// Plain accounts under a Cash or Bank group - where receipts can go in.
+function chartReceivingAccounts(rows) {
+  const roleOf = chartRoleResolver(rows);
+  return rows.filter(r => !r.is_group && ['cash', 'bank'].includes(roleOf(r.parent_code)))
+    .map(r => ({ code: r.code, name: r.name, cash: roleOf(r.parent_code) === 'cash', active: r.active !== false }));
+}
+function chartReceivingMap(rows) {
+  return new Map(chartReceivingAccounts(rows).map(a => [a.code, { cash: a.cash }]));
+}
+// The account a receipt's tax deducted at source is debited to: the first
+// active plain account under a group marked "Tax deducted" (null if none).
+function chartTaxAccount(rows) {
+  const roleOf = chartRoleResolver(rows);
+  const a = rows.filter(r => !r.is_group && r.active !== false && roleOf(r.parent_code) === 'tax')
+    .sort((x, y) => String(x.code).localeCompare(String(y.code), undefined, { numeric: true }))[0];
+  return a ? { code: a.code, name: a.name } : null;
+}
+// Company (lower-case) -> its party account code.
+function chartPartyCodes(rows) {
+  const out = {};
+  for (const r of rows) if (!r.is_group && r.company && r.active !== false) out[String(r.company).trim().toLowerCase()] = r.code;
+  return out;
+}
+// Money RECEIVED into each cash / bank account through receipt vouchers
+// (net receipt - tax deducted never reaches the bank), optionally for a
+// date range. Not a bank balance: payments and transfers are not in the app.
+async function chartReceived(sql, from, to) {
+  const f = partyDateOk(from) ? String(from) : null;
+  const t = partyDateOk(to) ? String(to) : null;
+  const rows = await sql`
+    SELECT bank_code, COALESCE(SUM(amount), 0)::float AS total, COUNT(*)::int AS n
+      FROM finance.party_receipts
+     WHERE deleted_at IS NULL AND bank_code IS NOT NULL AND kind IN ('cash', 'bank', 'cheque')
+       AND (${f}::text IS NULL OR entry_date >= ${f})
+       AND (${t}::text IS NULL OR entry_date <= ${t})
+     GROUP BY bank_code`;
+  return Object.fromEntries(rows.map(r => [r.bank_code, { total: Number(r.total) || 0, n: r.n }]));
+}
+async function chartUsage(sql) {
+  const rows = await sql`SELECT bank_code, COUNT(*)::int AS n FROM finance.party_receipts
+                          WHERE deleted_at IS NULL AND bank_code IS NOT NULL GROUP BY bank_code`;
+  return Object.fromEntries(rows.map(r => [r.bank_code, r.n]));
+}
+// Validates an account body against the whole chart. Returns { row } or { error }.
+function chartAccountFromBody(b, all, usage, existing) {
+  const code = String((b && b.code) || '').trim();
+  if (!/^\d{1,12}$/.test(code)) return { error: 'Code must be digits only (up to 12), e.g. 12104.' };
+  const name = String((b && b.name) || '').trim().slice(0, 120);
+  if (!name) return { error: 'Enter the account name.' };
+  const dup = all.find(x => x.code === code && (!existing || x.id !== existing.id));
+  if (dup) return { error: `Code ${code} is already "${dup.name}".` };
+  const parent_code = String((b && b.parent_code) || '').trim() || null;
+  const parent = parent_code ? all.find(x => x.code === parent_code) : null;
+  if (parent_code && (!parent || !parent.is_group)) return { error: 'The parent must be a group account.' };
+  if (parent && (!code.startsWith(parent.code) || code.length <= parent.code.length)) {
+    return { error: `A code under ${parent.code} (${parent.name}) must start with ${parent.code} and be longer, e.g. ${parent.code}01.` };
+  }
+  const is_group = !!(b && b.is_group);
+  const role = is_group && CHART_ROLES.has(String((b && b.role) || '')) ? String(b.role) : null;
+  const kind = CHART_KINDS.has(String((b && b.kind) || '')) ? String(b.kind) : (parent ? parent.kind : 'asset');
+  const company = !is_group ? (String((b && b.company) || '').trim().slice(0, 200) || null) : null;
+  if (company) {
+    const taken = all.find(x => x.company && x.company.trim().toLowerCase() === company.toLowerCase() && (!existing || x.id !== existing.id));
+    if (taken) return { error: `${company} is already linked to ${taken.code} ${taken.name}.` };
+  }
+  const active = (b && b.active === false) ? false : true;
+  if (existing) {
+    const kids = all.filter(x => x.parent_code === existing.code);
+    const used = usage[existing.code] || 0;
+    if (code !== existing.code && kids.length) return { error: 'This group has sub-accounts, so its code cannot change.' };
+    if (code !== existing.code && used) return { error: `Used by ${used} receipt${used === 1 ? '' : 's'}, so its code cannot change.` };
+    if (!is_group && existing.is_group && kids.length) return { error: 'This group has sub-accounts, so it cannot become a plain account.' };
+    if (is_group && !existing.is_group && used) return { error: 'Receipts use this account, so it cannot become a group.' };
+  }
+  return { row: { code, name, parent_code, is_group, role, kind, company, active } };
+}
+app.get('/api/chart-accounts', requirePermission('rpt_chart_accounts', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json({ accounts: await chartAll(sql), usage: await chartUsage(sql),
+      received: await chartReceived(sql, req.query.from, req.query.to) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/chart-accounts', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const { row, error } = chartAccountFromBody(req.body || {}, await chartAll(sql), await chartUsage(sql), null);
+    if (error) return res.status(400).json({ error });
+    const ins = await sql`
+      INSERT INTO finance.chart_accounts (code, name, parent_code, is_group, role, kind, company, active, updated_by)
+      VALUES (${row.code}, ${row.name}, ${row.parent_code}, ${row.is_group}, ${row.role}, ${row.kind}, ${row.company}, ${row.active}, ${req.user.email})
+      RETURNING *`;
+    await logAudit(sql, req, { action: 'chart_account.create', entityType: 'chart_account', entityId: ins[0].id,
+      summary: `Chart of Accounts: added ${row.code} ${row.name}${row.company ? ' (' + row.company + ')' : ''}`, metadata: row });
+    res.json(ins[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/chart-accounts/:id', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const all = await chartAll(sql);
+    const prev = all.find(x => x.id === id);
+    if (!prev) return res.status(404).json({ error: 'Account not found' });
+    const { row, error } = chartAccountFromBody(req.body || {}, all, await chartUsage(sql), prev);
+    if (error) return res.status(400).json({ error });
+    const upd = await sql`
+      UPDATE finance.chart_accounts SET code = ${row.code}, name = ${row.name}, parent_code = ${row.parent_code},
+             is_group = ${row.is_group}, role = ${row.role}, kind = ${row.kind}, company = ${row.company}, active = ${row.active},
+             updated_by = ${req.user.email}, updated_at = NOW()
+       WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, { action: 'chart_account.edit', entityType: 'chart_account', entityId: id,
+      summary: `Chart of Accounts: ${prev.code} ${prev.name} -> ${row.code} ${row.name}${row.active ? '' : ' (inactive)'}`, metadata: { before: prev, after: row } });
+    res.json(upd[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/chart-accounts/:id', requirePermission('rpt_chart_accounts_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const all = await chartAll(sql);
+    const prev = all.find(x => x.id === id);
+    if (!prev) return res.status(404).json({ error: 'Account not found' });
+    if (all.some(x => x.parent_code === prev.code)) return res.status(400).json({ error: 'It has sub-accounts — remove or move those first.' });
+    const used = (await chartUsage(sql))[prev.code] || 0;
+    if (used) return res.status(400).json({ error: `Used by ${used} receipt${used === 1 ? '' : 's'} — make it inactive instead.` });
+    await sql`DELETE FROM finance.chart_accounts WHERE id = ${id}`;
+    await logAudit(sql, req, { action: 'chart_account.delete', entityType: 'chart_account', entityId: id,
+      summary: `Chart of Accounts: removed ${prev.code} ${prev.name}`, metadata: prev });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Waste of Board sales (Sale Report tab) ────────────────────────
+// Board sold as waste isn't a job, so these rows are typed by hand. Every
+// column is free text: the tab is a ledger the finance team fills in, and
+// forcing numeric types here would only reject part-filled rows mid-entry.
+const WASTE_BOARD_FIELDS = ['entry_date', 'invoice_no', 'msi_no', 'fbr_no', 'job_name', 'qty', 'rate',
+  'amount_ex_tax', 'tax18', 'tax4', 'amount_inc_tax', 'company', 'ntn', 'destination'];
+app.get('/api/waste-board-sales', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT * FROM finance.waste_board_sales ORDER BY id ASC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// The + button adds an empty row, which is then filled in cell by cell.
+app.post('/api/waste-board-sales', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const inserted = await sql`
+      INSERT INTO finance.waste_board_sales (updated_by, updated_at) VALUES (${req.user.email}, NOW()) RETURNING *
+    `;
+    await logAudit(sql, req, {
+      action: 'waste_board_sales.create', entityType: 'waste_board_sales', entityId: inserted[0].id,
+      summary: 'Waste of Board row added',
+    });
+    res.json(inserted[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// One field at a time from the table's inline inputs. The whole row is
+// rewritten from the body rather than patching a dynamically-named column,
+// so no column name ever reaches the query as interpolated text.
+app.patch('/api/waste-board-sales/:id', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const existing = await sql`SELECT * FROM finance.waste_board_sales WHERE id = ${id}`;
+    if (!existing.length) return res.status(404).json({ error: 'Waste of Board row not found' });
+    const field = String(req.body?.field ?? '');
+    if (!WASTE_BOARD_FIELDS.includes(field)) return res.status(400).json({ error: 'Unknown field' });
+    const v = { ...existing[0], [field]: String(req.body?.value ?? '').trim() || null };
+    const updated = await sql`
+      UPDATE finance.waste_board_sales SET
+        entry_date = ${v.entry_date}, invoice_no = ${v.invoice_no}, msi_no = ${v.msi_no},
+        fbr_no = ${v.fbr_no}, job_name = ${v.job_name}, qty = ${v.qty}, rate = ${v.rate},
+        amount_ex_tax = ${v.amount_ex_tax}, tax18 = ${v.tax18}, tax4 = ${v.tax4},
+        amount_inc_tax = ${v.amount_inc_tax}, company = ${v.company}, ntn = ${v.ntn},
+        destination = ${v.destination}, updated_by = ${req.user.email}, updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/waste-board-sales/:id', requirePermission('rpt_sale_report_company'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const deleted = await sql`DELETE FROM finance.waste_board_sales WHERE id = ${id} RETURNING *`;
+    if (!deleted.length) return res.status(404).json({ error: 'Waste of Board row not found' });
+    await logAudit(sql, req, {
+      action: 'waste_board_sales.delete', entityType: 'waste_board_sales', entityId: id,
+      summary: 'Waste of Board row removed',
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7379,6 +8612,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
     const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
     if (ix < 0 || ix >= list.length) return res.status(400).json({ error: 'Delivery index out of range' });
     const removed = list.splice(ix, 1)[0] || null;
+    const delGuard = await paidInvoiceGuard(sql, removed && removed.notes, req.query.reason);
+    if (delGuard.error) return res.status(409).json(delGuard.error);
     const totalCartons = sumDeliveryCartons(list);
     const bookedQty    = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
     const nowIso = new Date().toISOString();
@@ -7418,8 +8653,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       action: 'job.delivery.remove',
       entityType: 'job',
       entityId: id,
-      summary: `Removed delivery entry #${ix + 1} from Job E-${id}`,
-      metadata: { removed, remaining_total: totalCartons },
+      summary: `Removed delivery entry #${ix + 1} from Job E-${id}${guardNote(delGuard)}`,
+      metadata: { removed, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7453,6 +8688,9 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       if (which === 'tax_pct' && num === null) return res.status(400).json({ error: 'Sale Tax % is required.' });
       const frozen = freezeLegacyDeliveryRates(list, job);
       const prev = frozen[ix];
+      const prevNum = (prev[which] === null || prev[which] === undefined || prev[which] === '') ? null : Number(prev[which]);
+      const guard = prevNum !== num ? await paidInvoiceGuard(sql, prev.notes, req.body?.reason) : { reason: null, receipts: [] };
+      if (guard.error) return res.status(409).json(guard.error);
       const entry = { ...prev };
       if (which === 'rate') {
         entry.rate = num;
@@ -7471,21 +8709,57 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       `;
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override },
+        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}${guardNote(guard)}`,
+        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override, reason: guard.reason, paid_via: guard.receipts },
       });
       return res.json(upd[0]);
     }
-    const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons' };
+    // Sale Report hand-set figures for THIS shipment: Unit Carton Qty and
+    // Wastage. Stored on the delivery entry as overrides of the report's own
+    // calculation; blank clears the override (back to calculated). They
+    // change the report only - the job card's Unit Carton Qty is untouched.
+    if (req.body?.field === 'uc_qty' || req.body?.field === 'wastage_qty') {
+      const which = req.body.field;
+      const t = String(req.body.value ?? '').replace(/,/g, '').trim();
+      const num = t === '' ? null : Number(t);
+      if (num !== null && (!Number.isFinite(num) || num < 0)) {
+        return res.status(400).json({ error: (which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage') + ' must be a non-negative number (or blank for the calculated figure).' });
+      }
+      const prev = list[ix] || {};
+      const entry = { ...prev };
+      if (num === null) delete entry[which]; else entry[which] = num;
+      list[ix] = entry;
+      const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(list)} WHERE id = ${id} RETURNING *`;
+      const label = which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage';
+      await logAudit(sql, req, {
+        action: 'job.delivery.edit', entityType: 'job', entityId: id,
+        summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"`,
+        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num },
+      });
+      return res.json(upd[0]);
+    }
+    const FIELDS = { po_no: 'po_no', batch_no: 'batch_no', fbr_no: 'fbr_no', notes: 'notes', msi_no: 'msi_no', cartons: 'cartons', date: 'date' };
     const field = FIELDS[req.body?.field];
-    if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons' });
+    if (!field) return res.status(400).json({ error: 'field must be one of: po_no, batch_no, fbr_no, notes, msi_no, cartons, date' });
     const before = list[ix];
+    // The delivery date is editable after the fact (owner ask) - but it
+    // must stay a real date: the Sale Report's date filters and the
+    // Delivered column parse it.
+    if (field === 'date') {
+      const v = String(req.body?.value ?? '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || isNaN(new Date(v + 'T00:00:00'))) {
+        return res.status(400).json({ error: 'Date must be a valid date (YYYY-MM-DD).' });
+      }
+    }
 
     if (field === 'cartons') {
       const cartonsN = parseFloat(String(req.body?.value ?? '').replace(/[^0-9.\-]/g, ''));
       if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
         return res.status(400).json({ error: 'Cartons must be a positive number.' });
       }
+      const cartonsGuard = cartonsN !== (parseFloat(String(before.cartons || '').replace(/[^0-9.\-]/g, '')) || 0)
+        ? await paidInvoiceGuard(sql, before.notes, req.body?.reason) : { reason: null, receipts: [] };
+      if (cartonsGuard.error) return res.status(409).json(cartonsGuard.error);
       list[ix] = { ...before, cartons: String(cartonsN) };
       const totalCartons = sumDeliveryCartons(list);
       const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
@@ -7526,8 +8800,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
         action: 'job.delivery.edit',
         entityType: 'job',
         entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"`,
-        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN) },
+        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"${guardNote(cartonsGuard)}`,
+        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN), reason: cartonsGuard.reason, paid_via: cartonsGuard.receipts },
       });
       return res.json(updated[0]);
     }
@@ -8141,9 +9415,12 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { change, reason, notes, job_card, challan_no } = req.body;
+    const { change, reason, notes, job_card, challan_no, entry_date } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
+    const entry = stockEntryInstant(entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const occurredAt = entry.at;
     if (!userHasBtn(req.user, delta > 0 ? 'inv_btn_stock_in' : 'inv_btn_stock_out')) return res.status(403).json({ error: 'Not allowed' });
     const itemId = parseInt(id, 10);
     const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
@@ -8255,6 +9532,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       notes: finalNotes,
       user: req.user,
       challanNo: challan_no,
+      occurredAt,
     });
 
     let offcutItem = null;
@@ -8272,6 +9550,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         user: req.user,
         pairedTxId: sourceTxId,
         challanNo: challan_no,
+        occurredAt,
       });
     }
 
@@ -8289,7 +9568,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       await sql`
         UPDATE jobs
            SET issuance_status='issued',
-               issued_at = COALESCE(issued_at, NOW()),
+               issued_at = COALESCE(issued_at, ${occurredAt ? occurredAt.toISOString() : null}::timestamptz, NOW()),
                issued_by_id = COALESCE(issued_by_id, ${req.user?.id || null}),
                particulars = ${JSON.stringify(nextParticulars)}
          WHERE id=${jobRow.id}
@@ -8306,7 +9585,9 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         action: 'inventory.stock',
         entityType: 'inventory',
         entityId: it.id,
-        summary: `${sign}${delta.toLocaleString()} sheets · ${label} (${finalReason})${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${partialRemaining} sheets still needed)`) : ''}`,
+        // Same rule on the inventory side: packets lead, sheets follow.
+        summary: `${sign}${fmtPackets(Math.abs(delta), packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} (${sign}${delta.toLocaleString()} sheets) · ${label} (${finalReason})${entry.date ? ` · dated ${entry.date} (late entry)` : ''}${jobId ? ` · Job E-${jobId}` : ''}${isJobIssuance ? (jobFullyIssued ? ' · full issuance' : ` · partial (${fmtPackets(partialRemaining, packetSize(it.paper_type))} ${packetUnitLabelSrv(it.paper_type)} / ${partialRemaining.toLocaleString()} sheets still needed)`) : ''}`,
+
       });
     }
     res.json({
@@ -8389,7 +9670,9 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     // keep the audit trail intact.
     if (reverseTier === '30-day') {
       const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-      const withinWindow = (Date.now() - new Date(tx.created_at).getTime()) <= THIRTY_DAYS_MS;
+      // Counted from when the row was ENTERED - a missed entry filed today
+      // for last month is still reversible for the usual 30 days.
+      const withinWindow = (Date.now() - new Date(tx.recorded_at || tx.created_at).getTime()) <= THIRTY_DAYS_MS;
       if (!withinWindow) {
         return res.status(403).json({ error: 'You can only reverse entries created in the last 30 days. Ask an admin to reverse older entries.' });
       }
@@ -8484,6 +9767,29 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
            WHERE id = ${tx.job_id}
         `;
         jobReverted = true;
+      } else if (job && job.issuance_status === 'ctp' && job.issued_at) {
+        // Early issuance (made while the job still sat at CTP) reversed:
+        // the job STAYS in the CTP queue, but returns to the not-yet-
+        // issued state — its Pending Stock tile re-appears and CTP-done
+        // routes to Pending Stock again instead of Printing.
+        const cleanParticulars = { ...(job.particulars || {}) };
+        delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.over_issue_pending;
+        delete cleanParticulars.over_issue_decisions;
+        if (Array.isArray(cleanParticulars.packets_topups)) {
+          cleanParticulars.packets_topups = cleanParticulars.packets_topups
+            .filter(t => !t || t.source !== 'over-issue-reconcile');
+          if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
+        }
+        await sql`
+          UPDATE jobs
+             SET issued_at = NULL,
+                 issued_by_id = NULL,
+                 issued_items = '[]'::jsonb,
+                 particulars = ${JSON.stringify(cleanParticulars)}
+           WHERE id = ${tx.job_id}
+        `;
+        jobReverted = true;
       }
       // Cascade-reverse every unreversed job-offcut row for this same
       // job. Without this, the paired offcut credits (cut-size return
@@ -8551,6 +9857,11 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
     // Offcut Consumption report only: include automatic E-job deductions
     // from offcut inventory while all other movement reports stay unchanged.
     const includeOffcutAuto = req.query.include_offcut_auto === '1';
+    // Manual Consumption only: hide rows it has archived. This used to ride
+    // on include_offcut_manual, but Stock In/Out started sending that flag
+    // too (for the offcut carve-out below), so archiving a row there made it
+    // vanish from Stock Out as well — which is exactly what it must not do.
+    const excludeArchived = req.query.exclude_archived === '1';
     // raw=1: return the TRUE ledger with NO exclusions — corrections,
     // reversals, and offcut rows all included. The Stock Summary needs
     // this to compute an accurate balance: 'correction' rows are real
@@ -8591,14 +9902,14 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
       LEFT JOIN inventory_items i ON i.id = t.item_id
       WHERE (${fromTs}::timestamptz   IS NULL OR t.created_at >= ${fromTs}::timestamptz)
         AND (${toEndIso}::timestamptz IS NULL OR t.created_at <  ${toEndIso}::timestamptz)
-        -- Archived (soft-deleted) rows drop out ONLY of Manual Consumption
-        -- (the one caller that sends include_offcut_manual=1) — Stock
-        -- In/Out/Totals deliberately keep showing them. Deleting a row from
-        -- Manual Consumption must not make it vanish from Stock Out too;
+        -- Archived (soft-deleted) rows drop out ONLY for the caller that asks
+        -- via exclude_archived=1, which is Manual Consumption alone. Stock
+        -- In/Out and Totals deliberately keep showing them: archiving a row
+        -- from Manual Consumption is not a claim the stock movement never
+        -- happened, so it must not vanish from Stock Out too.
         -- deleted_at is only ever set by Manual Consumption's own delete
-        -- (see DELETE /api/inventory/transactions/:id?scope=manual below),
-        -- so every other caller (and raw=1) simply ignores it.
-        AND (${raw} OR NOT ${includeOffcutManual} OR t.deleted_at IS NULL)
+        -- (see DELETE /api/inventory/transactions/:id?scope=manual below).
+        AND (${raw} OR NOT ${excludeArchived} OR t.deleted_at IS NULL)
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.
@@ -8628,13 +9939,17 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
           -- this condition previously only let 'job-consumed' through,
           -- so every auto-consumed job (e.g. E-514, E-544) never reached
           -- the client at all, regardless of any client-side filtering.
-          OR (${includeOffcutAuto} AND t.reason IN ('job-consumed', 'job-auto-offcut') AND t.job_id IS NOT NULL)
+          -- ...and every OTHER stock-out from an offcut item too (Sold,
+          -- Damaged, Adjustment, Manual Job Card): taking offcut out of
+          -- stock for any reason is offcut issuance, and those rows used to
+          -- show in no movement report at all.
+          OR (${includeOffcutAuto} AND t.change < 0)
         )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
         AND (${challanQ} = '' OR t.challan_no ILIKE ${'%' + challanQ + '%'})
-      ORDER BY t.id DESC
+      ORDER BY t.created_at DESC, t.id DESC
     `;
     res.json(txs);
   } catch (err) {
@@ -8697,7 +10012,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN jobs j ON j.id = t.job_id
       WHERE t.item_id = ANY(${memberIds})
-      ORDER BY t.id DESC
+      ORDER BY t.created_at DESC, t.id DESC
     `;
     if (!grouped) return res.json(txs);
     const currentBalance = members.reduce((sum, x) => sum + (parseFloat(x.current_balance) || 0), 0);
@@ -8817,9 +10132,35 @@ const TRASH_RETENTION_DAYS = 30;
 // Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
 // idempotent — safe to call on every list request.
 async function purgeExpiredTrash(sql) {
-  await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
-  await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
-  await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval`;
+  // JOBS ARE NEVER AUTO-PURGED. They used to be, after 30 days, and silently:
+  // the row was hard-deleted and nothing was written down, so a job card
+  // number simply stopped existing with no way to say what had become of it.
+  // Job numbers come from a sequence that never reuses a value, so a destroyed
+  // job leaves a permanent hole in the numbering - which is an audit problem,
+  // not a housekeeping one. An archived job now stays in the Archive
+  // indefinitely; the only way one leaves is a deliberate, logged
+  // Delete Permanently by an admin. Jobs are small rows and there is no
+  // storage reason to destroy them.
+  //
+  // Imports and stock transactions keep the 30-day clock - neither carries a
+  // number anyone audits against - but each purge is written to the audit log
+  // below, since silent deletion was the actual defect here.
+  const imports = await sql`DELETE FROM inventory_imports WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, paper_type, deleted_at, deleted_by`;
+  for (const im of imports) {
+    await logSystemAudit(sql, {
+      action: 'import.auto_purge', entityType: 'import', entityId: im.id,
+      summary: `Auto-purged import #${im.id}: ${im.paper_type || ''} - archived by ${im.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
+      metadata: { deleted_at: im.deleted_at, deleted_by: im.deleted_by, retention_days: TRASH_RETENTION_DAYS },
+    });
+  }
+  const txs = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - (${TRASH_RETENTION_DAYS} || ' days')::interval RETURNING id, change, reason, deleted_at, deleted_by`;
+  for (const t of txs) {
+    await logSystemAudit(sql, {
+      action: 'transaction.auto_purge', entityType: 'transaction', entityId: t.id,
+      summary: `Auto-purged stock transaction #${t.id}: ${t.change} (${t.reason || 'no reason'}) - archived by ${t.deleted_by || 'unknown'}, past the ${TRASH_RETENTION_DAYS}-day retention`,
+      metadata: { deleted_at: t.deleted_at, deleted_by: t.deleted_by, retention_days: TRASH_RETENTION_DAYS },
+    });
+  }
 }
 
 // LIST everything in trash. Returns { jobs, imports, retention_days } so the
@@ -8850,7 +10191,9 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
        WHERE t.deleted_at IS NOT NULL
        ORDER BY t.deleted_at DESC
     `;
-    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS });
+    // jobs_retained: archived jobs are kept indefinitely, so the Archive can
+    // say so instead of counting down days that no longer run out.
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -8933,13 +10276,18 @@ app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req,
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes everything
-// currently in trash regardless of age.
+// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes the imports
+// and stock transactions currently in the Archive, regardless of age.
+// ARCHIVED JOBS ARE LEFT ALONE - see purgeExpiredTrash for why a job number
+// must not vanish. Destroying a job is still possible, but only one at a
+// time via Delete Permanently, which names the job in the audit log; a bulk
+// button that wipes a hundred job numbers in one click is not something an
+// audit can be reconstructed from.
 app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const jobsDel    = await sql`DELETE FROM jobs                  WHERE deleted_at IS NOT NULL RETURNING id`;
+    const jobsDel    = [];
     const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
     const txDel       = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL RETURNING id`;
     await logAudit(sql, req, {
@@ -9047,6 +10395,9 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
     const overridePackets = parseFloat(req.body?.packets);
     const challanNo = req.body?.challan_no;
     const receiveNotes = req.body?.notes;
+    const entry = stockEntryInstant(req.body?.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const occurredAt = entry.at;
     const imp = (await sql`SELECT * FROM inventory_imports WHERE id=${id} AND deleted_at IS NULL`)[0];
     if (!imp) return res.status(404).json({ error: 'Import not found' });
     if (imp.status !== 'pending' && imp.status !== 'partial') {
@@ -9100,6 +10451,7 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
       notes: notesParts.join(' · '),
       user: req.user,
       challanNo,
+      occurredAt,
     });
 
     const newReceivedTotal = (parseFloat(imp.received_packets) || 0) + receivedPackets;
@@ -9108,7 +10460,7 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
     const updated = await sql`
       UPDATE inventory_imports SET
         status=${newStatus},
-        received_at=NOW(),
+        received_at=COALESCE(${occurredAt ? occurredAt.toISOString() : null}::timestamptz, NOW()),
         inventory_item_id=${itemId},
         received_packets=${newReceivedTotal}
       WHERE id=${id} RETURNING *
@@ -9179,7 +10531,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
   try {
     // CEO can enter the terminal to observe, but every write action is
     // blocked here so a dev-tools POST can't sneak past the hidden UI.
-    if (!canProcessStation(req.user)) {
+    // Job-card entries (the green/yellow dot) pass on their own permission
+    // instead — a finance user may hold the dot without station_write.
+    const viaJobCard = req.body.via_job_card === true;
+    if (viaJobCard && !canOperatorEntryFromJobCard(req.user)) {
+      return res.status(403).json({ error: 'Not allowed — Operator Entry access required' });
+    }
+    if (!viaJobCard && !canProcessStation(req.user)) {
       return res.status(403).json({ error: 'View-only: your role cannot process jobs at the station.' });
     }
     await dbReady;
@@ -9188,20 +10546,29 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const pin = String(req.body.pin || '').trim();
     const particularsPatch = req.body.particulars_patch && typeof req.body.particulars_patch === 'object'
       ? req.body.particulars_patch : {};
-    const advance = req.body.advance === true;
+    const advance = req.body.advance === true && !viaJobCard;   // a job-card entry can never advance the stage
     // Optional skip target. When the operator uses 'Skip to stage', they
     // pick a downstream stage index; we mark every stage between current
     // and target as done and jump straight there. Must be > curStage and
     // within the STAGES array; anything else falls back to the regular
     // single-step advance below.
     const skipToRaw = req.body.skip_to;
-    const skipTo = Number.isFinite(parseInt(skipToRaw, 10)) ? parseInt(skipToRaw, 10) : null;
+    const skipTo = (!viaJobCard && Number.isFinite(parseInt(skipToRaw, 10))) ? parseInt(skipToRaw, 10) : null;
 
-    // 1) Identify the operator by PIN (server-side — never trust the client).
-    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
-    if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
-    const machine = ops[0];
+    // 1) Identify the machine. Normal path: the operator's PIN (server-side
+    // — never trust the client). Job-card path: no PIN — the machine is
+    // resolved by name/stage, gated above by job_btn_operator_entry, and
+    // the write is attributed to the signed-in app user below.
+    let machine;
+    if (viaJobCard) {
+      machine = await resolveJobCardMachine(sql, req.body);
+      if (!machine) return res.status(404).json({ error: 'No active station machine covers this stage.' });
+    } else {
+      if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
+      const ops = await sql`SELECT id, name, stage_index, stage_indices, roles, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+      if (!ops.length) return res.status(401).json({ error: 'PIN not recognized' });
+      machine = ops[0];
+    }
     const opStages = (machine.stage_indices && machine.stage_indices.length) ? machine.stage_indices : [machine.stage_index];
     const allowedFinishes = allowedFinishesForOperator(machine);
     // Pick the actual person doing this update from the machine's persons
@@ -9211,7 +10578,10 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     const reqPersonName = String(req.body.person_name || '').trim();
     let person = null;
     let personIsCustom = false;
-    if (personsList.length === 1 && !reqPersonName) person = personsList[0];
+    if (viaJobCard) {
+      // Attributed to the signed-in app user, not one of the machine's people.
+      person = { name: reqPersonName || req.user.name || req.user.email || 'App user' };
+    } else if (personsList.length === 1 && !reqPersonName) person = personsList[0];
     else if (reqPersonName) {
       person = personsList.find(p => p && p.name === reqPersonName) || null;
       // Custom fallback — operator working on a machine that isn't their
@@ -9231,7 +10601,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // keeps working without rewiring everything to a separate person object.
     const operator = {
       id: machine.id,
-      name: person.name + (personIsCustom ? ' (custom)' : ''),
+      name: person.name + (viaJobCard ? ' (job card)' : personIsCustom ? ' (custom)' : ''),
       name_ur: person.name_ur || '',
       stage_index: machine.stage_index,
       stage_indices: machine.stage_indices,
@@ -9267,7 +10637,12 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // un-advanced position; curStage is where THIS operator's work is
     // actually happening (identical to dbStage outside of a peek).
     let curStage = dbStage;
-    if (!opStages.includes(dbStage)) {
+    if (viaJobCard) {
+      // The dot edits ONE stage's numbers wherever the job now sits — a
+      // printed qty stays editable after the job moved on to Pasting.
+      const reqStage = parseInt(req.body.stage_index, 10);
+      if (Number.isFinite(reqStage)) curStage = reqStage;
+    } else if (!opStages.includes(dbStage)) {
       const peekCandidates = opStages
         .filter(s => s > dbStage && stageDoneQtyServer(job, s - 1) > 0)
         .sort((a, b) => a - b);
@@ -9571,8 +10946,12 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // pops into Pending Stock for the store keeper to issue paper. Every
     // other transition leaves issuance_status alone. Offcut paper takes the
     // same route — no auto-consumption here (must match process-from-ctp).
-    const nextStatus = (job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0)
-      ? 'pending' : job.issuance_status;
+    const ctpForward = job.issuance_status === 'ctp' && curStage === 0 && stage_index > 0;
+    // Early-issued jobs (stock issued while still at CTP) skip Pending
+    // Stock entirely — plates done + paper in hand = straight to Printing.
+    const ctpStockDone = ctpForward && Array.isArray(job.issued_items)
+      && job.issued_items.some(x => x && x.source !== 'secondary');
+    const nextStatus = ctpForward ? (ctpStockDone ? 'issued' : 'pending') : job.issuance_status;
     const updated = await sql`
       UPDATE jobs
          SET particulars     = ${JSON.stringify(particulars)},
@@ -9840,76 +11219,8 @@ app.post('/api/station-notes/:id/heard', requireStationUser, async (req, res) =>
 });
 
 
-// ── Transfer Notes (Finished Goods Transfer) ────────────────
-app.get('/api/transfer-notes', requireAuth, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM transfer_notes ORDER BY id DESC`;
-    res.json(rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/transfer-notes/:id', requireAuth, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json(rows[0]);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/transfer-notes', requirePermission('forms_btn_transfer_note'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const last = await sql`SELECT transfer_note_no FROM transfer_notes ORDER BY id DESC LIMIT 1`;
-    let nextNum = 1;
-    if (last.length) {
-      const m = /(\d+)$/.exec(last[0].transfer_note_no);
-      if (m) nextNum = parseInt(m[1], 10) + 1;
-    }
-    const tnNo = 'TN-' + String(nextNum).padStart(4, '0');
-    const b = req.body;
-    const [row] = await sql`
-      INSERT INTO transfer_notes (transfer_note_no, date, po_no, client, transferred_from, transferred_to,
-        product_name, job_ids, items, total_qty, total_packages, qc_status, auth_signatures, remarks, created_by)
-      VALUES (${tnNo}, ${b.date || businessStamp()}, ${b.po_no || ''}, ${b.client || ''},
-        ${b.transferred_from || 'Production'}, ${b.transferred_to || 'Store / Warehouse'},
-        ${b.product_name || ''}, ${JSON.stringify(b.job_ids || [])}, ${JSON.stringify(b.items || [])},
-        ${b.total_qty || 0}, ${b.total_packages || 0}, ${b.qc_status || 'passed'},
-        ${JSON.stringify(b.authorization || {})}, ${b.remarks || ''}, ${req.user?.email || ''})
-      RETURNING *
-    `;
-    await logAudit(sql, req, {
-      action: 'transfer_note.create',
-      entityType: 'transfer_note',
-      entityId: row.id,
-      summary: `Transfer Note ${tnNo} created`,
-      metadata: { transfer_note_no: tnNo, job_ids: b.job_ids, client: b.client },
-    });
-    res.json(row);
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/transfer-notes/:id', requireAdmin, async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const rows = await sql`SELECT * FROM transfer_notes WHERE id=${req.params.id}`;
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    await sql`DELETE FROM transfer_notes WHERE id=${req.params.id}`;
-    await logAudit(sql, req, {
-      action: 'transfer_note.delete',
-      entityType: 'transfer_note',
-      entityId: rows[0].id,
-      summary: `Transfer Note ${rows[0].transfer_note_no} deleted`,
-      metadata: { transfer_note_no: rows[0].transfer_note_no },
-    });
-    res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
+// (The Transfer Note routes were removed 2026-09-29 with the Forms tab. The
+// transfer_notes table is kept, so the saved notes are still in the database.)
 
 // ── Wastage Adjustment: adjustment + finalized-jobs endpoints ────
 // Settings — read/write the global wastage defaults.
@@ -10112,9 +11423,9 @@ app.get('/favicon.ico', (req, res) => {
 
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app
-  // shell. Same rule as above: never cache it, or users end up running an
-  // old build against the live API.
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  // shell. Same rule as above: always revalidate (never serve a stale copy),
+  // or users end up running an old build against the live API.
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
