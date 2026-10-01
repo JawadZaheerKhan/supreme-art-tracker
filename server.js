@@ -291,7 +291,9 @@ function getDb() {
 // Bumped again for automatic voucher numbers (finance.voucher_counters).
 // Bumped again to trim the Chart of Accounts to Cash + Bank Account (owner:
 // "we only have cash and bank account") - see the one-time clean-up in initDb.
-const SCHEMA_VERSION = 'v2026-09-26-chart-cash-bank-only';
+// Bumped again for inventory_items.deleted_at (deleting a paper item keeps
+// its stock history, reports and job links - owner, 2026-10-01).
+const SCHEMA_VERSION = 'v2026-10-01-inventory-soft-delete';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -964,6 +966,12 @@ async function initDb() {
     // cut from (e.g. "24x32"). Set on first create; not overwritten on
     // subsequent matches — the first source stays as the canonical origin.
     await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS cut_from_size TEXT`;
+    // Deleting a paper item only hides it (owner, 2026-10-01): it leaves the
+    // Inventory list and pickers, but its stock movements, the reports and
+    // the jobs that used it keep it. Adding the same paper again, or stock
+    // coming back into it, brings it back.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
 
     // (paper_type, size, gsm, brand, is_offcut) uniquely identifies an
     // inventory line. COALESCE keeps NULLs from defeating uniqueness —
@@ -4682,7 +4690,8 @@ function stockEntryInstant(rawDate) {
 async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt }) {
   if (!itemId || !change) return null;
   if (change < 0) {
-    const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
+    const [item] = await sql`SELECT current_balance, deleted_at FROM inventory_items WHERE id = ${itemId}`;
+    if (item && item.deleted_at) throw new Error('This paper item was deleted from Inventory - add the same paper again to bring it back, then retry.');
     const bal = item ? parseFloat(item.current_balance) || 0 : 0;
     if (bal + change < 0) throw new Error(`Insufficient stock: only ${bal} sheets available, cannot deduct ${Math.abs(change)}`);
   }
@@ -4698,8 +4707,12 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
             CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
     RETURNING id
   `;
+  // Stock coming back into a deleted item (a reversal, a receive) brings it back to Inventory.
   await sql`
-    UPDATE inventory_items SET current_balance = current_balance + ${change} WHERE id = ${itemId}
+    UPDATE inventory_items SET current_balance = current_balance + ${change},
+           deleted_at = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_at END,
+           deleted_by = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_by END
+     WHERE id = ${itemId}
   `;
   return inserted[0] ? inserted[0].id : null;
 }
@@ -4733,6 +4746,22 @@ async function reverseAutoConsumeOffcut(sql, job, user) {
   return particulars;
 }
 
+// A deleted item with exactly this paper (same match as the add-paper
+// duplicate check) comes back - with its history - instead of a new row.
+async function restoreDeletedItem(sql, { paper_type, size, gsm, brand, isOffcut }) {
+  const rows = await sql`
+    UPDATE inventory_items SET deleted_at = NULL, deleted_by = NULL
+     WHERE id = (SELECT id FROM inventory_items
+                  WHERE deleted_at IS NOT NULL AND is_offcut = ${!!isOffcut}
+                    AND lower(trim(paper_type))         = lower(trim(${paper_type}))
+                    AND lower(trim(COALESCE(size,'')))  = lower(trim(COALESCE(${size||null},  '')))
+                    AND lower(trim(COALESCE(gsm,'')))   = lower(trim(COALESCE(${gsm||null},   '')))
+                    AND lower(trim(COALESCE(brand,''))) = lower(trim(COALESCE(${brand||null}, '')))
+                  ORDER BY id LIMIT 1)
+    RETURNING *`;
+  return rows[0] || null;
+}
+
 async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   const existing = await sql`
     SELECT * FROM inventory_items
@@ -4743,7 +4772,12 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
       AND is_offcut = true
     LIMIT 1
   `;
-  if (existing[0]) return existing[0];
+  if (existing[0]) {
+    if (existing[0].deleted_at) {
+      return (await sql`UPDATE inventory_items SET deleted_at = NULL, deleted_by = NULL WHERE id = ${existing[0].id} RETURNING *`)[0];
+    }
+    return existing[0];
+  }
   const inserted = await sql`
     INSERT INTO inventory_items (paper_type, size, gsm, brand, unit, supplier, is_offcut, cut_from_size, reorder_threshold)
     VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, ${sourceItem.unit||'sheets'}, ${sourceItem.supplier||null}, true, ${sourceItem.size||null}, 0)
@@ -6241,7 +6275,7 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
       WHERE deleted_at IS NULL
         AND issuance_status IN ('pending', 'issued', 'ctp')
       ORDER BY id ASC`;
-    const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true`;
+    const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true AND deleted_at IS NULL`;
     const itemsById = new Map(offcuts.map(it => [it.id, it]));
     const onHandByGroup = new Map();
     for (const it of offcuts) {
@@ -6320,7 +6354,7 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
     if (owed <= 0) return res.status(400).json({ error: 'Nothing pending to issue for this job.' });
     const group = (await sql`
       SELECT * FROM inventory_items
-      WHERE is_offcut = true AND current_balance > 0
+      WHERE is_offcut = true AND current_balance > 0 AND deleted_at IS NULL
         AND COALESCE(paper_type,'') = ${anchor.paper_type || ''}
         AND COALESCE(size,'') = ${anchor.size || ''}
         AND COALESCE(gsm::text,'') = ${String(anchor.gsm || '')}
@@ -6371,7 +6405,7 @@ app.get('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const sql = getDb();
     const items = await sql`
       SELECT id, paper_type, size, gsm, brand, supplier, current_balance, cut_from_size
-      FROM inventory_items WHERE is_offcut = true
+      FROM inventory_items WHERE is_offcut = true AND deleted_at IS NULL
       ORDER BY lower(paper_type), lower(COALESCE(size,'')), COALESCE(gsm,''), lower(COALESCE(brand,''))`;
     const all = await sql`SELECT paper_type, size, gsm, brand, supplier FROM inventory_items`;
     const distinct = (k) => [...new Set(all.map(r => String(r[k] || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
@@ -6403,7 +6437,8 @@ app.post('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const opening = parseSheets(req.body.opening_sheets);
     if (opening < 0) return res.status(400).json({ error: 'Opening quantity cannot be negative' });
     const who = `Paper Cutting ${v.operator.name}${req.body.person_name ? ' · ' + String(req.body.person_name).trim() : ''}`;
-    const item = (await sql`
+    const restored = await restoreDeletedItem(sql, { paper_type: paperType, size, gsm, brand, isOffcut: true });
+    const item = restored || (await sql`
       INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier, is_offcut)
       VALUES (${paperType}, ${size}, ${gsm}, ${brand}, 0, ${supplier}, true)
       RETURNING *`)[0];
@@ -6418,7 +6453,7 @@ app.post('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const label = `${paperType} ${size}${gsm ? ' ' + gsm + 'gsm' : ''}${brand ? ' · ' + brand : ''}`;
     await logAudit(sql, req, {
       action: 'inventory.create', entityType: 'inventory', entityId: item.id,
-      summary: `Added offcut item from Station by ${who}: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}`,
+      summary: `${restored ? 'Restored deleted offcut item' : 'Added offcut item'} from Station by ${who}: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}`,
     });
     res.json((await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`)[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -9183,6 +9218,18 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
 
+    // Same paper as a deleted item: bring that one back (its history and
+    // job links included) instead of starting a second row.
+    const restored = await restoreDeletedItem(sql, { paper_type, size, gsm, brand, isOffcut });
+    if (restored) {
+      if (opening > 0) {
+        await applyInventoryChange(sql, { itemId: restored.id, change: +opening, reason: 'opening-balance', jobId: null, notes: opening_notes || 'Opening balance', user: req.user });
+      }
+      await logAudit(sql, req, { action: 'inventory.restore', entityType: 'inventory', entityId: restored.id,
+        summary: `Restored deleted paper item: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}` });
+      return res.json({ ...(await sql`SELECT * FROM inventory_items WHERE id = ${restored.id}`)[0], restored: true });
+    }
+
     // Hard duplicate check: same (paper_type, size, gsm, brand) — compared
     // case-insensitively and trimmed, so "ningbo" / "Ningbo" / "NINGBO" all
     // count as the same brand. Refuse the add with a 409 instead of merging.
@@ -9402,11 +9449,10 @@ app.post('/api/inventory/dropdown/:field/:value/unhide', requireAdmin, async (re
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE an inventory item. Admin only. Refused if any pending-issuance
-// jobs still reference this item (their stock hasn't been deducted yet, so
-// losing the link would orphan them). Issued/in-progress/delivered jobs are
-// fine to lose the live link — their deductions already happened. Cascades
-// the full transaction history (intentional — admin saw the warning).
+// DELETE an inventory item = hide it (owner, 2026-10-01). It leaves the
+// Inventory list and pickers; its stock movements, the reports and the jobs
+// that used it all keep it. Refused while a pending job (main or 2nd paper)
+// still waits for stock from it.
 app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req, res) => {
   try {
     await dbReady;
@@ -9419,7 +9465,8 @@ app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req
     // jobs don't block — they're conceptually gone.
     const blockers = await sql`
       SELECT id, jobcode, name FROM jobs
-      WHERE inventory_item_id = ${itemId} AND issuance_status = 'pending'
+      WHERE (inventory_item_id = ${itemId} OR particulars->'secondary_paper'->>'inventory_item_id' = ${String(itemId)})
+        AND issuance_status = 'pending'
         AND deleted_at IS NULL
       ORDER BY id
     `;
@@ -9433,22 +9480,18 @@ app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req
 
     // Snapshot for audit log before delete.
     const existing = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
-    if (!existing[0]) return res.status(404).json({ error: 'Item not found' });
+    if (!existing[0] || existing[0].deleted_at) return res.status(404).json({ error: 'Item not found' });
     const it = existing[0];
     const label = `${it.paper_type}${it.size?' '+it.size:''}${it.gsm?' '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
 
-    // Clear the link on any non-pending jobs that still pointed at this item
-    // (no FK on jobs.inventory_item_id, so we tidy up manually). Their
-    // historical paper data stays in the jobs row, just the live link is gone.
-    await sql`UPDATE jobs SET inventory_item_id = NULL WHERE inventory_item_id = ${itemId}`;
-    // Cascades inventory_transactions; sets inventory_imports.inventory_item_id NULL.
-    await sql`DELETE FROM inventory_items WHERE id = ${itemId}`;
+    // Hidden, not removed: stock movements and job links stay.
+    await sql`UPDATE inventory_items SET deleted_at = NOW(), deleted_by = ${(req.user && req.user.email) || null} WHERE id = ${itemId}`;
 
     await logAudit(sql, req, {
       action: 'inventory.delete',
       entityType: 'inventory',
       entityId: itemId,
-      summary: `Deleted paper item: ${label} (balance was ${it.current_balance||0} sheets)`,
+      summary: `Deleted paper item: ${label} (balance was ${it.current_balance||0} sheets; its stock history and job links are kept)`,
     });
 
     res.json({ ok: true, deleted_id: itemId });
@@ -10093,7 +10136,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
     if (!anchorRows.length) return res.status(404).json({ error: 'Inventory item not found' });
     const anchor = anchorRows[0];
     const members = grouped ? await sql`
-      SELECT id, brand, current_balance
+      SELECT id, brand, current_balance, deleted_at
         FROM inventory_items
        WHERE COALESCE(paper_type, '') = ${anchor.paper_type || ''}
          AND COALESCE(size, '') = ${anchor.size || ''}
@@ -10113,7 +10156,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       ORDER BY t.created_at DESC, t.id DESC
     `;
     if (!grouped) return res.json(txs);
-    const currentBalance = members.reduce((sum, x) => sum + (parseFloat(x.current_balance) || 0), 0);
+    const currentBalance = members.reduce((sum, x) => sum + (x.deleted_at ? 0 : (parseFloat(x.current_balance) || 0)), 0);
     res.json({
       transactions: txs,
       current_balance: currentBalance,

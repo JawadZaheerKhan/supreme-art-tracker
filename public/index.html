@@ -3743,6 +3743,9 @@ let productRates = [];       // cached Product Rate table (finance feature), see
 let productAliases = [];     // cached Product Aliases, see loadProductAliases()
 let companySettings = [];    // cached Company Settings (NTN, Destination), see loadCompanySettings()
 let inventory = [];          // cached inventory items (refreshed on load + after mutations)
+// Same list plus deleted paper items. A deleted item is only hidden: jobs,
+// reports and history still look it up by id to name the paper.
+let inventoryAll = [];
 let stockGroups = [];        // cached stock groups entity (client/product/po_qty template shared across sub jobs)
 // Helper: look up a group entity by id — returns undefined if not
 // loaded yet (safe to fall back to the sub job's own fields in that
@@ -4671,7 +4674,7 @@ const OFFCUT_TOPUP_BADGE = '<span class="badge" style="background:#dbeafe;color:
 // Pending Stock queue.
 function isOffcutJob(j) {
   if (!j || !j.inventory_item_id) return false;
-  const it = inventory.find(x => x.id === j.inventory_item_id);
+  const it = inventoryAll.find(x => x.id === j.inventory_item_id);
   return !!(it && it.is_offcut);
 }
 // Print job card — admin / production manager / CEO by default. Store
@@ -4773,7 +4776,7 @@ function secondaryPendingSheets(j) {
   if (secondaryInPreConsumed(j)) return 0;
   const packets = parseFloat(sec.packets);
   if (!Number.isFinite(packets) || packets <= 0) return 0;
-  const item = inventory.find(x => x.id === sec.inventory_item_id);
+  const item = inventoryAll.find(x => x.id === sec.inventory_item_id);
   if (!item) return 0;
   const ps = packetSize(item.paper_type);
   const needSheets = Math.round(packets * ps);
@@ -4833,7 +4836,7 @@ function overIssueBannerHtml(j) {
 function partialIssueBannerHtml(j) {
   const remaining = (typeof partialPendingSheets === 'function') ? partialPendingSheets(j) : 0;
   if (!remaining || remaining <= 0) return '';
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const ps    = invIt ? packetSize(invIt.paper_type) : 100;
   const unit  = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
   const pkts  = ps ? (remaining / ps) : 0;
@@ -5378,7 +5381,8 @@ async function loadInventory() {
     // Fetch dropdown-hidden list in parallel — cheap and needed for the brand/
     // supplier suggestion filtering in invDistinct(). Non-blocking failure.
     const hiddenP = loadDropdownHidden();
-    inventory = await api('GET', '/api/inventory');
+    inventoryAll = await api('GET', '/api/inventory');
+    inventory = inventoryAll.filter(i => !i.deleted_at);
     await hiddenP;
     if (mode === 'inventory') {
       renderInventory();
@@ -6295,7 +6299,7 @@ function jobStockBadge(j) {
   if (isPartialIssuance(j)) {
     return '<span class="badge badge-low-stock">&#9888; Requires More Stock</span>';
   }
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Store keeper can issue from ANY brand in the paper group (see
   // issueStock's split popup) — pool the whole group's balance, not just
   // the linked "representative" item, matching the Pending Stock tab's
@@ -6314,7 +6318,7 @@ function jobStockBadge(j) {
 }
 
 function cardIssueStockBtn(j) {
-  const invIt   = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt   = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Pooled across the paper group — see the matching comment in jobStockBadge.
   const have    = invIt ? paperGroupMembers(invIt).reduce((a, x) => a + (x.current_balance || 0), 0) : 0;
   const need    = parseFloat(j.sheets) || 0;
@@ -6533,13 +6537,13 @@ function renderJobCard(j, opts) {
   // Tracking-only view — machine and deadline are the only facts the floor
   // needs while a job is in flight. Everything else (PO, Size, Sheets,
   // Coatings, cut size) lives on the printed job card and the Edit form.
-  const invItemT = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invItemT = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const primaryLabel = j.paper || (invItemT ? invItemT.paper_type : '');
   // Secondary paper (if the PM ticked "Add 2nd paper" on the job form)
   // shows next to the primary as "primary | secondary". Offcut side is
   // underlined in offcut blue so it's obvious which side is offcut.
   const secRef = (j.particulars || {}).secondary_paper || null;
-  const secItemT = (secRef && secRef.inventory_item_id) ? inventory.find(i => i.id === secRef.inventory_item_id) : null;
+  const secItemT = (secRef && secRef.inventory_item_id) ? inventoryAll.find(i => i.id === secRef.inventory_item_id) : null;
   const primaryIsOffcut = !!(invItemT && invItemT.is_offcut);
   const secondaryIsOffcut = !!(secItemT && secItemT.is_offcut);
   const offcutUnderline = clientPreview
@@ -7499,7 +7503,7 @@ function importOpenItem(id) {
   const im = (importsCache || []).find(x => x.id === id);
   if (!im || !tabAllowed('inventory')) return;
   const norm = s => String(s || '').trim().toLowerCase();
-  const item = (im.inventory_item_id != null && inventory.find(it => it.id === im.inventory_item_id))
+  const item = (im.inventory_item_id != null && inventoryAll.find(it => it.id === im.inventory_item_id))
     || inventory.find(it =>
          norm(it.paper_type) === norm(im.paper_type)
       && norm(it.size)  === norm(im.size)
@@ -7639,19 +7643,20 @@ function jhEntryItems(a, job) {
 // Offcut paper lives in its own report (Stock Out leaves offcut out).
 function jhIsOffcutEntry(a, job) {
   if (a && a.action === 'job.process_from_ctp') return true;
-  const inv = typeof inventory !== 'undefined' ? inventory : [];
+  const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
   const found = jhEntryItems(a, job).map(x => inv.find(i => i.id === x.item_id)).filter(Boolean);
   return found.length > 0 && found.every(i => i.is_offcut);
 }
-// Paper names; an item no longer in Inventory is said so (deleting an item
-// also erases its stock movements - E-344's offcut, for one).
+// Paper names. Deleting an item now only hides it, so it's still named;
+// items erased before 1 Oct 2026 (with their stock movements - E-344's
+// offcut, for one) are gone and said so.
 function jhIssuePapers(a, job) {
   const items = jhEntryItems(a, job);
-  const inv = typeof inventory !== 'undefined' ? inventory : [];
+  const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
   const out = items.map(x => {
     if (x && x.paper) return `${x.paper}${x.brand ? ' · ' + x.brand : ''}`;
     const it = inv.find(i => i.id === (x && x.item_id));
-    return it ? jhPaperLabel(it) : 'paper item deleted from Inventory';
+    return it ? jhPaperLabel(it) + (it.deleted_at ? ' (deleted from Inventory)' : '') : 'paper item deleted from Inventory';
   }).filter(Boolean);
   return [...new Set(out)];
 }
@@ -8211,7 +8216,7 @@ function renderInvPendingList() {
     return;
   }
   const topupHtml = topupRows.map(({ job: j, topup: t }) => {
-    const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
     const groupMembers = invIt ? paperGroupMembers(invIt) : [];
     const have  = groupMembers.reduce((a, x) => a + (x.current_balance || 0), 0);
     const ps    = invIt ? packetSize(invIt.paper_type) : 100;
@@ -8258,7 +8263,7 @@ function renderInvPendingList() {
       </div>`;
   }).join('');
   el.innerHTML = pendingJobs.map(j => {
-    const invIt    = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const invIt    = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
     // Store keeper can issue from ANY brand in the paper group — so on-hand
     // and enough-checks pool the whole group, not just the linked item.
     // Brand names of every group member are shown together (century/ningbo)
@@ -8399,7 +8404,7 @@ function renderInvPendingList() {
       const remSecSheets = secondaryPendingSheets(j);
       if (remSecSheets <= 0) return '';
       const secRef = j.particulars && j.particulars.secondary_paper;
-      const secIt = secRef && inventory.find(x => x.id === secRef.inventory_item_id);
+      const secIt = secRef && inventoryAll.find(x => x.id === secRef.inventory_item_id);
       if (!secIt) return '';
       const secGroup = paperGroupMembers(secIt);
       const secHave = secGroup.reduce((a, x) => a + (x.current_balance || 0), 0);
@@ -8749,10 +8754,10 @@ async function saveInvAdd() {
     // Server returns 409 if the exact paper item already exists (case- and
     // whitespace-insensitive). The thrown error message includes which item
     // collided, so we can surface it directly.
-    await api('POST', '/api/inventory', data);
+    const saved = await api('POST', '/api/inventory', data);
     await loadInventory();
     closeModal();
-    notify('Paper item added');
+    notify(saved && saved.restored ? 'Deleted paper item brought back, with its history' : 'Paper item added');
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -8825,10 +8830,10 @@ async function saveInvAddOffcut() {
   if (!data.size)       { await alertDialog({ title: 'Offcut size is required', kind: 'warn' }); return; }
   showSaving(true);
   try {
-    await api('POST', '/api/inventory', data);
+    const saved = await api('POST', '/api/inventory', data);
     await loadInventory();
     closeModal();
-    notify('Offcut item added');
+    notify(saved && saved.restored ? 'Deleted offcut item brought back, with its history' : 'Offcut item added');
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -8840,7 +8845,7 @@ async function openInvEdit(id) {
   // display, leading to the wrong correction delta. The 409 guard on
   // save is the backstop; this is the cheap proactive layer.
   await loadInventory();
-  const it = inventory.find(x => x.id === id); if (!it) return;
+  const it = inventoryAll.find(x => x.id === id); if (!it) return;
   const curBalSheets = it.current_balance || 0;
   const sheetsUnit   = esc(it.unit || 'sheets');
   // The DB stores sheets, but admins think in packets / reams. Convert for
@@ -8974,7 +8979,7 @@ async function saveInvEdit(id) {
     // re-open and the displayed Was: will be the real one.
     if (/balance changed|409/i.test(e.message)) {
       await loadInventory();   // pull in the fresh number for next open
-      const fresh = inventory.find(x => x.id === id);
+      const fresh = inventoryAll.find(x => x.id === id);
       const freshPs   = fresh ? packetSize(fresh.paper_type) : 100;
       const freshPkts = fresh ? (fresh.current_balance || 0) / freshPs : 0;
       const unitFresh = freshPs === 500 ? 'reams' : 'packets';
@@ -8997,13 +9002,13 @@ async function saveInvEdit(id) {
 // undo button — the ledger goes with it.
 async function deleteInvItem(id) {
   if (!hasPerm('inv_btn_delete')) return;
-  const it = inventory.find(x => x.id === id);
+  const it = inventoryAll.find(x => x.id === id);
   if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
   const bal   = it.current_balance || 0;
   const ok = await confirmDialog({
-    title: 'Permanently delete this inventory item?',
-    message: `${label}\nCurrent balance: ${bal.toLocaleString()} sheets\n\nThis removes the item AND its full stock-in / stock-out / correction history. There is no undo. Pending jobs that reference this item will block the delete.`,
+    title: 'Delete this paper item?',
+    message: `${label}\nCurrent balance: ${bal.toLocaleString()} sheets\n\nIt leaves the Inventory list and pickers. Its stock-in / stock-out history, the reports and the jobs that used it keep it. Adding the same paper again brings it back. Pending jobs that use this paper block the delete.`,
     danger: true,
     confirmText: 'Delete',
   });
@@ -9020,7 +9025,7 @@ async function deleteInvItem(id) {
 }
 
 function openInvAddStock(id) {
-  const it = inventory.find(x => x.id === id); if (!it) return;
+  const it = inventoryAll.find(x => x.id === id); if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
   const ps = packetSize(it.paper_type);
   const unit = packetUnitLabel(it.paper_type);
@@ -9096,7 +9101,7 @@ async function saveInvAddStock(id) {
 // Pending Stock queue since the store keeper has manually issued the paper.
 function openInvRemoveStock(id, opts) {
   opts = opts || {};
-  const it = inventory.find(x => x.id === id); if (!it) return;
+  const it = inventoryAll.find(x => x.id === id); if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
   const ps    = packetSize(it.paper_type);
   const unit  = packetUnitLabel(it.paper_type);
@@ -9182,7 +9187,7 @@ function stockOutRecomputeWarning(itemId) {
     if (saveBtn) saveBtn.disabled = false;
     return;
   }
-  const it = inventory.find(x => x.id === itemId);
+  const it = inventoryAll.find(x => x.id === itemId);
   const ps = it ? packetSize(it.paper_type) : 100;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
   const fmt = n => { const v = n / ps; return Number.isInteger(v) ? v.toLocaleString() : (+v.toFixed(2)).toLocaleString(); };
@@ -9213,7 +9218,7 @@ function stockOutQtySync(source, ps) {
     const s = parseFloat(sheetsEl.value);
     packetsEl.value = isNaN(s) ? '' : +(s / ps).toFixed(2);
   }
-  const it = sheetsEl.dataset.itemId ? inventory.find(x => x.id === parseInt(sheetsEl.dataset.itemId, 10)) : null;
+  const it = sheetsEl.dataset.itemId ? inventoryAll.find(x => x.id === parseInt(sheetsEl.dataset.itemId, 10)) : null;
   stockOutRecomputeWarning(it ? it.id : (window._stockOutItemId || 0));
 }
 function stockOutReasonChanged(itemId) {
@@ -9242,7 +9247,7 @@ function stockOutReasonChanged(itemId) {
 function stockOutLoadPendingChips(itemId) {
   const wrap = document.getElementById('stockout-jobchips-wrap');
   if (!wrap) return;
-  const it = inventory.find(x => x.id === itemId);
+  const it = inventoryAll.find(x => x.id === itemId);
   if (!it) { wrap.innerHTML = ''; return; }
   const key = paperGroupKey(it);
   const ps = packetSize(it.paper_type);
@@ -9286,7 +9291,7 @@ function stockOutToggleChip(chip, ps) {
   stockOutRecomputeWarning(window._stockOutItemId || 0);
 }
 async function saveInvRemoveStock(id) {
-  const it = inventory.find(x => x.id === id);
+  const it = inventoryAll.find(x => x.id === id);
   const qty = parseInt(document.getElementById('stockout-qty').value, 10);
   if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
   const have = it ? (it.current_balance || 0) : 0;
@@ -9516,7 +9521,7 @@ function bulkComboFilter(prefix, idx, positiveOnly) {
   }).join('');
 }
 function bulkComboPick(prefix, idx, itemId, groupPick) {
-  const it = inventory.find(x => x.id === itemId);
+  const it = inventoryAll.find(x => x.id === itemId);
   if (!it) return;
   const search = document.getElementById(`${prefix}-search-${idx}`);
   const hidden = document.getElementById(`${prefix}-item-${idx}`);
@@ -9588,7 +9593,7 @@ function bulkRowSync(idx, source) {
   if (!tr) return;
   const sel = tr.querySelector('.bulk-item');
   const itemId = sel && parseInt(sel.value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   const packetsEl = tr.querySelector('.bulk-packets');
   const sheetsEl  = tr.querySelector('.bulk-qty');
@@ -9772,7 +9777,7 @@ function bulkOutRecomputeWarning(idx) {
     return;
   }
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
   const fmt = n => { const v = n / ps; return Number.isInteger(v) ? v.toLocaleString() : (+v.toFixed(2)).toLocaleString(); };
@@ -9800,7 +9805,7 @@ function bulkOutRefreshBrandSplits(idx) {
   const pktInput = tr.querySelector('.bulkout-packets');
   const shtInput = tr.querySelector('.bulkout-qty');
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   if (!it) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
   const members = paperGroupMembers(it);
   if (members.length <= 1) {
@@ -9840,7 +9845,7 @@ function bulkOutBrandSplitChanged(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
   if (!tr) return;
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   let totalPkts = 0;
   tr.querySelectorAll('.bulkout-brand-qty').forEach(el => {
@@ -9896,7 +9901,7 @@ function pendingJobChipsForGroup(key) {
     // true merely because a job's secondary is pending, which would
     // wrongly offer to re-issue an already-fully-issued primary.
     if (j.inventory_item_id) {
-      const pIt = inventory.find(x => x.id === j.inventory_item_id);
+      const pIt = inventoryAll.find(x => x.id === j.inventory_item_id);
       if (pIt && paperGroupKey(pIt) === key) {
         // CTP jobs awaiting stock are issuable here too — same rule as the
         // Pending Stock queue (issuing keeps them at CTP; see server).
@@ -9925,7 +9930,7 @@ function pendingJobChipsForGroup(key) {
     // Secondary (2nd) paper side — fresh 2nd paper still owed.
     const sec = j.particulars && j.particulars.secondary_paper;
     if (sec && sec.inventory_item_id) {
-      const sIt = inventory.find(x => x.id === sec.inventory_item_id);
+      const sIt = inventoryAll.find(x => x.id === sec.inventory_item_id);
       if (sIt && paperGroupKey(sIt) === key) {
         const rem = secondaryPendingSheets(j);
         if (rem > 0) {
@@ -9944,7 +9949,7 @@ function bulkOutRefreshJobsForRow(idx) {
   const reason = tr.querySelector('.bulkout-reason').value;
   if (reason !== 'job-card') return;
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   if (!it) {
     chips.innerHTML = `<span style="color:var(--text3);font-size:11px;">(pick a paper first)</span>`;
     return;
@@ -9994,7 +9999,7 @@ function jobDeductionSheetsClient(j) {
 // already issued: packets x packet size, less offcut pre-consumed on CTP
 // forward, less whatever the 2nd paper covers.
 function jobFreshNeedSheets(j) {
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   if (!invIt) return 0;
   const ps = packetSize(invIt.paper_type);
   const pkts = parseFloat((j.particulars || {}).quantity_of_packets);
@@ -10029,7 +10034,7 @@ function bulkOutJobsChanged(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
   if (!tr) return;
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   let totalSheets = 0;
   tr.querySelectorAll('.jobchip.is-sel').forEach(c => {
@@ -10060,7 +10065,7 @@ function bulkOutRowSync(idx, source) {
   if (!tr) return;
   const sel = tr.querySelector('.bulkout-item');
   const itemId = sel && parseInt(sel.value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   const packetsEl = tr.querySelector('.bulkout-packets');
   const sheetsEl  = tr.querySelector('.bulkout-qty');
@@ -10180,7 +10185,7 @@ async function saveBulkStockOut() {
     // input carries item_id + packets → sheets. When no brand inputs
     // are rendered (single-brand group), splits stays empty and the
     // row deducts from the picked item as before.
-    const itemForRow = inventory.find(it => it.id === itemId);
+    const itemForRow = inventoryAll.find(it => it.id === itemId);
     const psRow = itemForRow ? packetSize(itemForRow.paper_type) : 100;
     const brandSplits = [...tr.querySelectorAll('.bulkout-brand-qty')]
       .map(el => ({
@@ -10199,12 +10204,12 @@ async function saveBulkStockOut() {
     if (!qty || qty <= 0) {
       await alertDialog({ title: `${rowLabel}: quantity required`, message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
-    const match = inventory.find(it => it.id === itemId);
+    const match = inventoryAll.find(it => it.id === itemId);
     // Per-brand cap check when brandSplits is in use (multi-brand
     // group); otherwise fall back to the picked item's own balance.
     if (brandSplits.length) {
       for (const s of brandSplits) {
-        const item = inventory.find(it => it.id === s.item_id);
+        const item = inventoryAll.find(it => it.id === s.item_id);
         const have = item ? (item.current_balance || 0) : 0;
         if (s.sheets > have) {
           const label = item ? `${item.paper_type}${item.size?' · '+item.size:''}${item.gsm?' · '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}` : `item ${s.item_id}`;
@@ -10483,7 +10488,7 @@ async function openInvHistoryAt(itemId, txId) {
 }
 
 async function openInvHistory(id) {
-  const it = inventory.find(x => x.id === id); if (!it) return;
+  const it = inventoryAll.find(x => x.id === id); if (!it) return;
   const groupItems = paperGroupMembers(it);
   const brands = groupItems.map(x => x.brand).filter(Boolean);
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}`;
@@ -10513,7 +10518,7 @@ async function openInvHistory(id) {
 // Render (or re-render after a reversal) the history table for one item.
 // Split out so reverseStockTx() can refresh in place without reopening.
 async function renderInvHistory(id) {
-  const it = inventory.find(x => x.id === id);
+  const it = inventoryAll.find(x => x.id === id);
   const ps   = packetSize(it ? it.paper_type : '');
   const unit = packetUnitLabel(it ? it.paper_type : '').toLowerCase();
   const fmtPackets = (sheets) => {
@@ -10683,7 +10688,7 @@ async function loadInvAuditContent(id) {
   const el = document.getElementById('inv-audit-content');
   if (!el) return;
   try {
-    const anchor = inventory.find(x => x.id === id);
+    const anchor = inventoryAll.find(x => x.id === id);
     const ids = anchor ? paperGroupMembers(anchor).map(x => x.id) : [id];
     const batches = await Promise.all(ids.map(itemId =>
       api('GET', `/api/audit?entity_type=inventory&entity_id=${itemId}`)
@@ -10927,7 +10932,7 @@ function renderStockReport(from, to) {
     const pkts  = t.change / ps;
     // Look up the item's CURRENT balance from the cached inventory list. May
     // be null if the item was deleted after this transaction was recorded.
-    const inv   = inventory.find(i => i.id === t.item_id);
+    const inv   = inventoryAll.find(i => i.id === t.item_id);
     const bal   = inv ? (inv.current_balance || 0) : null;
     const balCell = bal === null
       ? '<span style="color:var(--text3)">—</span>'
@@ -10977,7 +10982,7 @@ function printStockReport() {
     const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
     const fmt  = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
     const pkts = t.change / ps;
-    const inv  = inventory.find(i => i.id === t.item_id);
+    const inv  = inventoryAll.find(i => i.id === t.item_id);
     const bal  = inv ? (inv.current_balance || 0) : null;
     const balCell = bal === null
       ? '—'
@@ -11950,7 +11955,8 @@ async function loadStockSummary() {
     const pt = stockSummaryState.paperType;
     const offcutOnly = stockSummaryState.offcutOnly;
     stockSummaryState.txs     = allTxs.filter(t => !pt || t.paper_type === pt);
-    stockSummaryState.items   = inventory.filter(i => (!pt || i.paper_type === pt) && !!i.is_offcut === offcutOnly);
+    const movedIds = new Set(stockSummaryState.txs.map(t => t.item_id));
+    stockSummaryState.items   = inventoryAll.filter(i => (!i.deleted_at || movedIds.has(i.id)) && (!pt || i.paper_type === pt) && !!i.is_offcut === offcutOnly);
     stockSummaryState.imports = offcutOnly ? [] : imports.filter(i => !pt || i.paper_type === pt);
     renderStockSummary();
   } catch (e) {
@@ -13731,7 +13737,7 @@ function buildJobsReportRows() {
     // Paper — modern jobs store the paper via the linked inventory item
     // (inventory_item_id), not the legacy free-text j.paper. Fall back to
     // the particulars paper_types checkboxes, then the legacy field.
-    const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const invItem = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
     const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
     const paper = invItem
       ? `${invItem.paper_type}${invItem.size ? ' ' + invItem.size : ''}${invItem.gsm ? ' ' + invItem.gsm + 'gsm' : ''}`
@@ -16437,7 +16443,7 @@ function jobShipmentFigures(j) {
   const wastageKnown   = closedNormal || (readyTotalAll > 0 && (recordedReady > 0 ? (isMilJob ? allDelivered : productionDone) : allDelivered));
   const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum))
     ? (cartonQtyNum - (closedNormal ? deliveredTotal : readyTotalAll)) : null;
-  const invItem   = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invItem   = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const ptype     = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
   const upsNum    = parseFloat(j.ups);
   const psJob     = packetSize(ptype);
@@ -16529,7 +16535,7 @@ function buildSaleReportRows(tabOverride) {
     const F = jobShipmentFigures(j);
     const { isMilJob, cartonQtyNum, allDelivered } = F;
     const readyQty = 0;   // never rides in the Wastage column any more
-    const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+    const invItem = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
     const paperTypesArr = j.particulars && Array.isArray(j.particulars.paper_types) ? j.particulars.paper_types : [];
     // Sheet size and gsm are four separate columns — the combined "20x30 230"
     // to read at a glance, then length, width and gsm on their own so they can
@@ -20329,7 +20335,7 @@ function renderStockMovement(direction, from, to) {
     // Balance / weight: a split-issuance group has no single item — it
     // pulled from 2+ brands, each with its own inventory row. Showing a
     // balance for a single brand would be misleading, so blank the cell.
-    const inv   = isGroup ? null : inventory.find(i => i.id === t.item_id);
+    const inv   = isGroup ? null : inventoryAll.find(i => i.id === t.item_id);
     const bal   = inv ? (inv.current_balance || 0) : null;
     const balCell = isGroup
       ? '<span style="color:var(--text3)" title="Split across brands — check individual brand balances in Inventory">split</span>'
@@ -20445,7 +20451,7 @@ function computeStockTotalRows(direction) {
     const w = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     if (w !== null) totalKg += w * units;
 
-    const invItem = t.item_id ? inventory.find(i => i.id === t.item_id) : null;
+    const invItem = t.item_id ? inventoryAll.find(i => i.id === t.item_id) : null;
     const isOffcut = !!(invItem && invItem.is_offcut);
     const key = [t.paper_type || '', t.item_size || '', String(t.item_gsm || ''), isOffcut ? '1' : '0'].join('||');
     if (!groups.has(key)) {
@@ -20464,7 +20470,7 @@ function computeStockTotalRows(direction) {
     const ps   = packetSize(g.paperType);
     const unit = packetUnitLabel(g.paperType).toLowerCase();
     const balSheets = [...g.itemIds].reduce((a, id) => {
-      const it = inventory.find(i => i.id === id);
+      const it = inventoryAll.find(i => i.id === id);
       return a + (it ? (it.current_balance || 0) : 0);
     }, 0);
     return {
@@ -20685,7 +20691,7 @@ function jobCutPieces(job) {
 }
 
 function jobHasManualMatch(j) {
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const paper = invIt ? invIt.paper_type : j.paper;
   const size  = invIt ? invIt.size : j.size;
   const gsm   = invIt ? invIt.gsm : j.gsm;
@@ -20698,7 +20704,7 @@ function jobHasManualMatch(j) {
 window.debugWastageAdjMatch = function(jobId) {
   const j = jobs.find(x => x.id === jobId);
   if (!j) { console.log('Job not found:', jobId); return; }
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const paper = invIt ? invIt.paper_type : j.paper;
   const size  = invIt ? invIt.size : j.size;
   const gsm   = invIt ? invIt.gsm : j.gsm;
@@ -20869,7 +20875,7 @@ async function openAdjustModal(jobId) {
     return;
   }
   const s = _wastageAdjSettings;
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Sheets-per-packet for THIS job — packet size × the job's own cut
   // factor (e.g. "1/2" = cut in half = twice the sheets for the same
   // packet count), matching jobPacketsSync()'s formula exactly.
@@ -21044,7 +21050,7 @@ function adjPacketsChanged(jobId) {
   const packetsEl = document.getElementById('adj-packets');
   const sheetsEl = document.getElementById('adj-sheets');
   if (!j || !packetsEl || !sheetsEl) return;
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Sheets-per-packet for THIS job — packet size × the job's own cut
   // factor (e.g. "1/2" = cut in half = twice the sheets for the same
   // packet count), matching jobPacketsSync()'s formula exactly.
@@ -21059,7 +21065,7 @@ function adjSheetsChanged(jobId) {
   const packetsEl = document.getElementById('adj-packets');
   const sheetsEl = document.getElementById('adj-sheets');
   if (!j || !packetsEl || !sheetsEl) return;
-  const invIt = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Sheets-per-packet for THIS job — packet size × the job's own cut
   // factor (e.g. "1/2" = cut in half = twice the sheets for the same
   // packet count), matching jobPacketsSync()'s formula exactly.
@@ -21990,7 +21996,7 @@ function printStockMovement(direction) {
     const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
     const fmt  = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
     const pkts = Math.abs(t.change / ps);
-    const inv  = inventory.find(i => i.id === t.item_id);
+    const inv  = inventoryAll.find(i => i.id === t.item_id);
     const bal  = inv ? (inv.current_balance || 0) : null;
     const balCell = bal === null ? '—' : `${fmt(bal/ps)} ${unit}<br><span style="font-size:8pt;">${bal.toLocaleString()} sheets</span>`;
     const tdL = 'style="border:1px solid #000;padding:4px;"';
@@ -22076,7 +22082,7 @@ async function exportStockMovement(direction) {
     const ps   = packetSize(t.paper_type || '');
     const pkts = t.change / ps;
     // A split issuance pulled from 2+ brands - no single balance (screen shows "split").
-    const inv  = isGroup ? null : inventory.find(i => i.id === t.item_id);
+    const inv  = isGroup ? null : inventoryAll.find(i => i.id === t.item_id);
     const bal  = inv ? (inv.current_balance || 0) : null;
     const wPer = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     aoa.push([
@@ -23974,7 +23980,7 @@ function renderCutPreview() {
   if (!on) { el.textContent = ''; return; }
   const hidden  = document.getElementById('f-inventory-item');
   const itemId  = hidden && parseInt(hidden.value, 10);
-  const source  = itemId ? inventory.find(i => i.id === itemId) : null;
+  const source  = itemId ? inventoryAll.find(i => i.id === itemId) : null;
   const cutSize = dimsOnly(normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value));
   if (!source || !source.size) {
     el.innerHTML = `<span style="color:#A32D2D;">Pick a paper item above to enable cut.</span>`;
@@ -24325,7 +24331,7 @@ function computeWastageAdjTopFieldOverlay(job, manualSheets, manualPackets, ups)
   let sheetsDisplay = newSheets.toLocaleString();
   let packetsDisplay = newPackets.toLocaleString();
   if (hasSecond) {
-    const primItem = job.inventory_item_id ? inventory.find(i => i.id === job.inventory_item_id) : null;
+    const primItem = job.inventory_item_id ? inventoryAll.find(i => i.id === job.inventory_item_id) : null;
     const psForm = primItem ? packetSize(primItem.paper_type) : 100;
     const secPackets = parseFloat(sec.packets) || 0;
     const secSheets  = Math.round(secPackets * psForm * jobCutPieces(job));
@@ -24552,7 +24558,7 @@ function jobForm(j={}, opts) {
   // paper-related control instead of the old two-spot split that
   // confused managers).
   const currentItemId = j && j.inventory_item_id;
-  const currentItem   = currentItemId ? inventory.find(i => i.id === currentItemId) : null;
+  const currentItem   = currentItemId ? inventoryAll.find(i => i.id === currentItemId) : null;
   const currentLabel  = currentItem ? paperGroupLabel(currentItem) : '';
   const currentBalance = currentItem
     ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
@@ -24663,7 +24669,7 @@ function jobForm(j={}, opts) {
           // already-issued → 2nd paper is extra on top (additive). Drives only
           // the live recompute when editing the secondary box.
           const packetsMode = (j.issuance_status === 'issued') ? 'issued' : 'pending';
-          const primItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+          const primItem = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
           const psForm   = primItem ? packetSize(primItem.paper_type) : 100;
           const secPkts  = sec ? (parseFloat(sec.packets) || 0) : 0;
           const totalPk  = parseFloat(partsP.quantity_of_packets) || 0;
@@ -24745,7 +24751,7 @@ function jobForm(j={}, opts) {
       ${(() => {
         const sec = (j.particulars||{}).secondary_paper || null;
         const secId = sec && sec.inventory_item_id;
-        const secItem = secId ? inventory.find(i => i.id === secId) : null;
+        const secItem = secId ? inventoryAll.find(i => i.id === secId) : null;
         const secLabel = secItem ? paperGroupLabel(secItem) : '';
         const secPackets = sec ? (sec.packets != null ? String(sec.packets) : '') : '';
         const showRow = !!secId;
@@ -27305,7 +27311,7 @@ function getFormData() {
   // path runs cleanly instead of recording half-set state.
   const cutToggle  = (document.getElementById('f-cut-toggle')||{}).checked;
   const cutSizeRaw = dimsOnly(normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value));
-  const sourceItem = inventory_item_id ? inventory.find(i => i.id === inventory_item_id) : null;
+  const sourceItem = inventory_item_id ? inventoryAll.find(i => i.id === inventory_item_id) : null;
   const computedOffcut = (cutToggle && sourceItem && cutSizeRaw)
     ? computeOffcutSize(sourceItem.size, cutSizeRaw)
     : null;
@@ -27534,7 +27540,7 @@ function updateStockHint() {
   if (!hidden || !hint) return;
   if (!hidden.value) { hint.textContent = ''; hint.className = 'stock-hint'; return; }
   const itemId = parseInt(hidden.value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   const balance = parseInt(hidden.dataset.balance, 10) || 0;
   const sheetsNeed = parseInt((document.getElementById('f-sheets')||{}).value, 10) || 0;
   const cutStr = (document.getElementById('f-sheet-cut')||{}).value || '1/1';
@@ -27565,7 +27571,7 @@ function updateStockHint() {
       if (j.id === editingId) return;
       if (!j.inventory_item_id) return;
       if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
-      const jIt = inventory.find(x => x.id === j.inventory_item_id);
+      const jIt = inventoryAll.find(x => x.id === j.inventory_item_id);
       if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
     });
   }
@@ -27704,8 +27710,8 @@ function refreshSecondPaperWarning() {
     warn.innerHTML = '&#9888; 2nd paper is the SAME item as the primary — pick a different one.';
     return;
   }
-  const p = inventory.find(x => x.id === primaryId);
-  const s = inventory.find(x => x.id === secondaryId);
+  const p = inventoryAll.find(x => x.id === primaryId);
+  const s = inventoryAll.find(x => x.id === secondaryId);
   if (!p || !s) return;
   // Cutting Size / GSM is the "working size" the primary paper is
   // cut down TO — an offcut leftover from that cut is a valid 2nd
@@ -27731,7 +27737,7 @@ function updateStockHint2() {
   if (!hint) return;
   const secondaryId = parseInt((document.getElementById('f-inventory-item-2')||{}).value, 10);
   if (!Number.isFinite(secondaryId)) { hint.textContent = ''; return; }
-  const it = inventory.find(x => x.id === secondaryId);
+  const it = inventoryAll.find(x => x.id === secondaryId);
   if (!it) { hint.textContent = ''; return; }
   const ps   = packetSize(it.paper_type);
   const unit = packetUnitLabel(it.paper_type);
@@ -27776,7 +27782,7 @@ function paperFilter2() {
   // size AND its paper_type + gsm match the primary. Same "reusable
   // leftover of THIS paper" signal as the primary picker.
   const primaryId2 = parseInt((document.getElementById('f-inventory-item')||{}).value, 10);
-  const primaryItem2 = Number.isFinite(primaryId2) ? inventory.find(x => x.id === primaryId2) : null;
+  const primaryItem2 = Number.isFinite(primaryId2) ? inventoryAll.find(x => x.id === primaryId2) : null;
   const wantedSizes2 = (() => {
     const s = new Set();
     // Case-insensitive — cutting size may be typed as "20X15" while
@@ -27805,7 +27811,7 @@ function paperFilter2() {
 }
 function paperKey2(ev) { if (ev.key === 'Escape') paperClose2(); }
 function paperSelect2(itemId) {
-  const it = inventory.find(x => x.id === itemId);
+  const it = inventoryAll.find(x => x.id === itemId);
   if (!it) return;
   const search = document.getElementById('paper-search-2');
   const hidden = document.getElementById('f-inventory-item-2');
@@ -27897,7 +27903,7 @@ function paperFilter() {
   }).join('');
 }
 function paperSelect(itemId) {
-  const it = inventory.find(x => x.id === itemId);
+  const it = inventoryAll.find(x => x.id === itemId);
   if (!it) return;
   const search = document.getElementById('paper-search');
   const hidden = document.getElementById('f-inventory-item');
@@ -27942,7 +27948,7 @@ function jobSecondPaperActive() {
 }
 function jobFormPs() {
   const itemEl = document.getElementById('f-inventory-item');
-  const it = itemEl ? inventory.find(x => x.id === parseInt(itemEl.value, 10)) : null;
+  const it = itemEl ? inventoryAll.find(x => x.id === parseInt(itemEl.value, 10)) : null;
   const ps = it ? packetSize(it.paper_type) : 100;
   const cutEl = document.getElementById('f-sheet-cut');
   const cutStr = (cutEl && cutEl.value) || '1/1';
@@ -28051,7 +28057,7 @@ function jobPacketsSync() {
   const cutEl     = document.getElementById('f-sheet-cut');
   if (!itemEl || !packetsEl || !sheetsEl) return;
   const itemId = parseInt(itemEl.value, 10);
-  const it = itemId ? inventory.find(x => x.id === itemId) : null;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
   if (!it) return; // No paper selected → can't determine packet size, skip.
   const sheets = parseFloat(sheetsEl.value);
   if (!Number.isFinite(sheets) || sheets <= 0) {
@@ -28114,7 +28120,7 @@ async function checkStockBeforeSave(data) {
   if (!data.inventory_item_id) return true;
   const sheets = parseInt(data.sheets, 10) || 0;
   if (sheets <= 0) return true;
-  const item = inventory.find(i => i.id === data.inventory_item_id);
+  const item = inventoryAll.find(i => i.id === data.inventory_item_id);
   if (!item) return true;
   const groupBalance = paperGroupMembers(item).reduce((a, x) => a + (x.current_balance || 0), 0);
   const ps = packetSize(item.paper_type);
@@ -28136,7 +28142,7 @@ async function checkStockBeforeSave(data) {
     if (j.id === editingId) return;
     if (!j.inventory_item_id) return;
     if (j.issuance_status === 'issued' && !isPartialIssuance(j)) return;
-    const jIt = inventory.find(x => x.id === j.inventory_item_id);
+    const jIt = inventoryAll.find(x => x.id === j.inventory_item_id);
     if (jIt && paperGroupKey(jIt) === key) otherPendingSheets += jobDeductionSheetsClient(j);
   });
   const afterPkts = fracPkts((groupBalance - rawNeed - otherPendingSheets) / ps);
@@ -28991,7 +28997,7 @@ async function issueStock(id, source) {
     ? (secondaryRef && secondaryRef.inventory_item_id)
     : j.inventory_item_id;
   if (!anchorId) { notify(src === 'secondary' ? 'This job has no 2nd paper set.' : 'This job has no paper picked — cannot issue stock.'); return; }
-  const anchor = inventory.find(i => i.id === anchorId);
+  const anchor = inventoryAll.find(i => i.id === anchorId);
   if (!anchor) { notify('Paper item missing from inventory.'); return; }
   const ps        = packetSize(anchor.paper_type);
   const unit      = packetUnitLabel(anchor.paper_type).toLowerCase();
@@ -29295,7 +29301,7 @@ async function openPacketsTopup(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (j.issuance_status !== 'issued') { notify('Top-ups are only for jobs whose stock is already issued.'); return; }
-  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
   const qtyStr = await promptDialog({
     title: `Request extra packets · Job E-${id}`,
@@ -29323,7 +29329,7 @@ async function approvePacketsTopup(jobId, topupId) {
   if (!j) return;
   const t = packetTopups(j).find(x => String(x.id) === String(topupId));
   if (!t) return;
-  const it = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
   const ps = it ? packetSize(it.paper_type) : 100;
   const sheets = Math.round(parseFloat(t.qty) * ps);
@@ -29469,7 +29475,7 @@ function buildPrintCard(j) {
     ? wastageAdjTopFieldOverlay(j) : null;
   // Paper source: prefer the live inventory item; fall back to the legacy
   // particulars fields for pre-inventory jobs.
-  const invItem = j.inventory_item_id ? inventory.find(i => i.id === j.inventory_item_id) : null;
+  const invItem = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   const paperType  = invItem ? (invItem.paper_type || '') : ((Array.isArray(p.paper_types) && p.paper_types[0]) || '');
   // Row 5's "Paper — Brand" cell prints paper type ONLY. Brand is left
   // blank by design so the cutting group can hand-write the actual
@@ -29482,7 +29488,7 @@ function buildPrintCard(j) {
   // was auto-consumed on CTP forward vs which came from the store.
   const secRefPrint = p.secondary_paper || null;
   const secItemPrint = (secRefPrint && secRefPrint.inventory_item_id)
-    ? inventory.find(i => i.id === secRefPrint.inventory_item_id) : null;
+    ? inventoryAll.find(i => i.id === secRefPrint.inventory_item_id) : null;
   const primaryIsOffcutP = !!(invItem && invItem.is_offcut);
   const secondaryIsOffcutP = !!(secItemPrint && secItemPrint.is_offcut);
   const secondaryPaperLabel = secItemPrint ? paperGroupLabel(secItemPrint) : '';
