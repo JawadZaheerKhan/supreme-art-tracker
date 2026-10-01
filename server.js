@@ -5898,7 +5898,9 @@ async function performIssueStock(sql, req, id, body) {
     const overNote = overThis > 0
       ? ` · ${fmtPack(overPacks)} ${unit} added to offcut (over-issued)`
       : '';
-    await applyInventoryChange(sql, {
+    // The stock-out row's id rides on the job's History entry, so a click
+    // there opens exactly this issuance in the Stock Out report.
+    const issueTxId = await applyInventoryChange(sql, {
       itemId: s.item_id,
       change: -s.sheets,
       reason: 'job-consumed',
@@ -5933,7 +5935,8 @@ async function performIssueStock(sql, req, id, body) {
     // Source deduction stays unchanged (still the -s.sheets applied
     // above), so the inventory report keeps recording the extra
     // issuance exactly as before.
-    issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
+    issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets, tx_id: issueTxId || null,
+      paper: [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' ') });
   }
   // Build the pending decision record from every split that got extras.
   const overIssueSplits = [];
@@ -6047,14 +6050,18 @@ async function performIssueStock(sql, req, id, body) {
          WHERE id = ${id}
          RETURNING *
       `;
-  const brandList = issuedItems.map(x => x.brand || 'no brand').join(', ');
+  // WHICH paper went out - type, size, gsm and brand - not just the qty
+  // (owner, 2026-10-01): "... of bleach board 25x36 270gsm · silverpack".
+  const paperList = issuedItems.map(x => `${x.paper || 'paper'}${x.brand ? ' · ' + x.brand : ''}`).join(' + ');
   await logAudit(sql, req, {
     action: 'job.issue_stock',
     entityType: 'job',
     entityId: id,
+    // tx_ids: the stock-out rows this issuance wrote, for the History click.
+    metadata: { tx_ids: issuedItems.map(x => x.tx_id).filter(Boolean), items: issuedItems, secondary: isSecondary },
     // Issued amount in packets first; what is still NEEDED stays in sheets as
     // well, since that is the figure the rest of the app quotes back.
-    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
+    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} of ${paperList} for Job E-${id}: ${job.name}${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
   });
   return { job: updated[0] };
 }
