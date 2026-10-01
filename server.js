@@ -10387,7 +10387,12 @@ app.post('/api/trash/restore', requirePermission('trash_admin'), async (req, res
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// PERMANENT delete from trash. Same shape as restore. Hard-deletes the row.
+// Stock entries can never be deleted permanently (owner, 2026-10-01): undo
+// one with Reverse, which keeps both rows so balance, History and reports agree.
+const TX_PERMANENT_DELETE_REFUSAL = "Stock entries can't be deleted permanently - use Reverse in the paper's History to undo one.";
+
+// PERMANENT delete from trash. Same shape as restore. Hard-deletes the row
+// (jobs and imports only).
 app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
@@ -10407,12 +10412,7 @@ app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req,
       await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
       return res.json({ ok: true });
     }
-    if (type === 'transaction') {
-      const deleted = await sql`DELETE FROM inventory_transactions WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
-      if (!deleted.length) return res.status(404).json({ error: 'Transaction not in archive' });
-      await logAudit(sql, req, { action: 'inventory.tx.purge', entityType: 'inventory_item', entityId: rowId, summary: `Permanently deleted tx #${rowId} (${deleted[0].change > 0 ? '+' : ''}${deleted[0].change} sheets · ${deleted[0].reason || 'no reason'})` });
-      return res.json({ ok: true });
-    }
+    if (type === 'transaction') return res.status(403).json({ error: TX_PERMANENT_DELETE_REFUSAL });
     res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -10430,7 +10430,7 @@ app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) 
     const sql = getDb();
     const jobsDel    = [];
     const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
-    const txDel       = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL RETURNING id`;
+    const txDel       = [];   // archived stock entries are kept - see TX_PERMANENT_DELETE_REFUSAL
     await logAudit(sql, req, {
       action: 'trash.empty',
       entityType: 'system',
@@ -10476,19 +10476,9 @@ app.delete('/api/inventory/transactions/:id', requirePermission('trash_admin'), 
       });
       return res.json({ ok: true });
     }
-    const tx = (await sql`SELECT id, item_id, change, reason FROM inventory_transactions WHERE id=${id}`)[0];
-    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-    // reverses_tx_id has ON DELETE SET NULL so reversal rows pointing at this
-    // one (if any) survive — they just lose their back-link. Acceptable for
-    // archival purposes.
-    await sql`DELETE FROM inventory_transactions WHERE id=${id}`;
-    await logAudit(sql, req, {
-      action: 'inventory.tx.delete',
-      entityType: 'inventory_item',
-      entityId: tx.item_id,
-      summary: `Deleted tx #${id} from history (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
-    });
-    res.json({ ok: true });
+    // Every other caller used to hard-delete the row (Stock In/Out "Delete
+    // from History", Offcut Consumption Delete). Not any more.
+    return res.status(403).json({ error: TX_PERMANENT_DELETE_REFUSAL });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

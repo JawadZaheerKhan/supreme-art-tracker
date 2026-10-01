@@ -19616,7 +19616,7 @@ function renderTrashTransactions() {
       <td ${tdN} style="color:var(--text2);">until deleted</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('transaction', ${r.id})">&#8635; Restore</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('transaction', ${r.id})">&#128465; Delete Permanently</button>
+        <span style="font-size:11px;color:var(--text2);" title="Stock entries can't be deleted permanently">kept</span>
         <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
       </td>
     </tr>`;
@@ -19682,19 +19682,20 @@ async function purgeTrash(type, id) {
 
 async function emptyTrash() {
   if (!hasPerm('trash_admin')) return;
-  // Jobs are deliberately excluded: Empty Archive clears imports and stock
-  // transactions only, so no job number can be wiped out in bulk.
+  // Jobs and stock entries are deliberately excluded: Empty Archive clears
+  // imports only, so no job number or stock movement can be wiped out in bulk.
   const jobCount = trashCache.jobs?.length || 0;
-  const total = (trashCache.imports?.length || 0) + (trashCache.transactions?.length || 0);
+  const txCount = trashCache.transactions?.length || 0;
+  const total = trashCache.imports?.length || 0;
   if (!total) {
-    notify(jobCount
-      ? `Nothing to empty \u2014 the ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept permanently.`
+    notify(jobCount || txCount
+      ? 'Nothing to empty \u2014 archived jobs and stock entries are kept permanently.'
       : 'Archive is already empty.');
     return;
   }
   const ok = await confirmDialog({
     title: `Empty Archive?`,
-    message: `Permanently delete ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'} + ${trashCache.transactions?.length || 0} manual consumption entr${(trashCache.transactions?.length||0)===1?'y':'ies'}. Cannot be undone.${jobCount ? ` The ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept \u2014 job numbers are never wiped in bulk. Use Delete Permanently on one job if you really mean it.` : ''}`,
+    message: `Permanently delete ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'}. Cannot be undone.${txCount ? ` The ${txCount} archived stock entr${txCount===1?'y is':'ies are'} kept.` : ''}${jobCount ? ` The ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept \u2014 job numbers are never wiped in bulk. Use Delete Permanently on one job if you really mean it.` : ''}`,
     danger: true,
     confirmText: 'Empty Archive',
   });
@@ -19702,7 +19703,7 @@ async function emptyTrash() {
   showSaving(true);
   try {
     const r = await api('POST', '/api/trash/empty');
-    notify(`Archive emptied · ${r.imports} import${r.imports===1?'':'s'} + ${r.transactions} transaction${r.transactions===1?'':'s'} deleted${jobCount ? ` · ${jobCount} job${jobCount===1?'':'s'} kept` : ''}`);
+    notify(`Archive emptied · ${r.imports} import${r.imports===1?'':'s'} deleted${jobCount ? ` · ${jobCount} job${jobCount===1?'':'s'} kept` : ''}`);
     refreshTrash();
   } catch (e) { notify('Empty failed: ' + e.message); }
   showSaving(false);
@@ -19891,9 +19892,7 @@ function renderStockMovementBulkBar(dir) {
     <span class="bulk-count">${sel.length} selected${qtyLabel}</span>
     <button class="btn btn-sm btn-clear" onclick="clearStockMovementSel('${dir}')">Clear</button>
     <span class="bulk-spacer"></span>
-    ${isAdmin()
-      ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteStockMovement('${dir}')">&#128465; Delete from History</button>`
-      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History wipes old rows from the audit log.</span>`}
+    <span style="font-size:11px;color:var(--text2);">Stock entries can't be deleted - use Reverse in the paper's History to undo one.</span>
   `;
 }
 
@@ -19901,7 +19900,7 @@ function renderStockMovementBulkBar(dir) {
 // explicit warning that balances stay untouched — the user has to remember
 // that this is archival cleanup, not a fix.
 async function bulkDeleteStockMovement(dir) {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  notify("Stock entries can't be deleted permanently - use Reverse in the paper's History to undo one."); return;   // locked (owner, 2026-10-01)
   const sel = [...stockMovementSel[dir]];
   const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
   if (!rows.length) { notify('Nothing selected.'); return; }
@@ -21789,7 +21788,7 @@ function offcutConsumptionRows() {
 }
 function renderOffcutConsumption() {
   const rows = offcutConsumptionRows();
-  const canDelete = isAdmin();
+  const canDelete = false;   // stock entries can't be deleted (owner, 2026-10-01) - Reverse instead
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
@@ -21880,7 +21879,7 @@ function toggleAllOffcutConsumption(checked) {
   renderOffcutConsumption();
 }
 async function deleteOffcutConsumptionRows(ids, skipConfirm = false) {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  notify("Stock entries can't be deleted permanently - use Reverse in the paper's History to undo one."); return;   // locked (owner, 2026-10-01)
   const cleanIds = [...new Set((ids || []).filter(Number.isFinite))];
   if (!cleanIds.length) return;
   if (!skipConfirm) {
