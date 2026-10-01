@@ -12873,6 +12873,7 @@ function printImports() {
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
 const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, period: 'all', sortBy: '', sortDir: 'desc',
+  tab: 'all',   // All / Box / Labels / Leaflets - the same split as the Sale Report's tabs
   // Excel-style column filters, same machinery as the Sale Report:
   // dropdown pickers for the low-cardinality columns, a search box for
   // the near-unique ones.
@@ -13192,6 +13193,9 @@ function openJobsReport() {
         <button class="btn btn-sm" onclick="resetReportFilters('jobs')" title="Clear every filter and search, including the column filters">&#8634; Reset filters</button>
       </div>
     </div>
+    <div id="jr-tabs" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+      ${JOBS_REPORT_TABS().map(t => `<button class="btn btn-sm sr-tab-btn${(jobsReportState.tab || 'all') === t.key ? ' is-on' : ''}" onclick="setJrTab('${t.key}')">${esc(t.label)}</button>`).join('')}
+    </div>
     <div id="jr-content" style="font-size:12px;"></div>
   `;
   renderJobsReport();
@@ -13231,6 +13235,15 @@ function setJrChallanSearch(v) {
   jobsReportSel.clear();
   clearTimeout(_jrChallanSearchTimer);
   _jrChallanSearchTimer = setTimeout(renderJobsReport, 200);
+}
+// The Sale Report's tabs minus Waste of Board (a hand-entered ledger, not jobs).
+function JOBS_REPORT_TABS() { return SALE_REPORT_TABS.filter(t => t.key !== SALE_REPORT_WASTE_TAB); }
+function setJrTab(v) {
+  jobsReportState.tab = v || 'all';
+  const keys = JOBS_REPORT_TABS().map(t => t.key);
+  document.querySelectorAll('#jr-tabs .sr-tab-btn').forEach((b, i) => b.classList.toggle('is-on', keys[i] === jobsReportState.tab));
+  jobsReportSel.clear();
+  renderJobsReport();
 }
 function setJrClient(v)  { jobsReportState.client = v;  jobsReportSel.clear(); renderJobsReport(); }
 function setJrMilOnly(v) {
@@ -13474,6 +13487,8 @@ function buildJobsReportRows() {
     // Shade cards live behind their own toggle: OFF = real jobs only,
     // ON = shade cards only. The two never mix in one list.
     if (shadeOnly ? !j.is_shade_card : j.is_shade_card) continue;
+    // Box / Labels / Leaflets: the Sale Report's own split (saleReportTabFor).
+    if ((jobsReportState.tab || 'all') !== 'all' && saleReportTabFor(j) !== jobsReportState.tab) continue;
     // Searches flag rather than drop, same as the Sale Report, so a linked
     // partner survives long enough to merge into the shared-invoice row.
     let searchHit = true;
@@ -14205,6 +14220,7 @@ function jobsReportScope(jobCount, rowCount) {
   return [
     s.mode === 'created' ? 'Created' : 'Delivered',
     s.client || 'All companies',
+    (s.tab && s.tab !== 'all') ? ((JOBS_REPORT_TABS().find(t => t.key === s.tab) || {}).label || s.tab) : '',
     s.milOnly ? 'MIL only' : '',
     s.shadeOnly ? 'Shade cards only' : '',
     // Delivered mode: one row per shipment - the same count as the Sale Report.
