@@ -13846,6 +13846,7 @@ function buildJobsReportRows() {
       const sheets = !!r.sheetUnit;
       perShipment.push(s ? {
         ...r,
+        jobUc: numQty(r.cartonQty),
         cartonQty: s.uc, wastage: s.wastage,
         packets: s.pk, packetsShown: s.pkShown, packetsUnit: s.pkUnit,
       } : {
@@ -13857,8 +13858,15 @@ function buildJobsReportRows() {
     }
     let cumDelivered = 0;
     let shownAny = false;
+    const jobUc = numQty(r.cartonQty);   // the job's own printed qty, shown beside each row's share
     list.forEach((s, i) => {
       cumDelivered += numQty(s.cartons);
+      // How much of this row's Ready balance went out in the job's LATER
+      // shipments - counted even when those fall outside the date filter
+      // (owner, 2026-10-01): "1,010,000 · shipped", clickable to that shipment.
+      const readyAsOf = Math.max(0, (+r.readyTotalAll || 0) - cumDelivered);
+      const shippedLater = list.slice(i + 1).reduce((a, x) => a + numQty(x.cartons), 0);
+      const nxt = list[i + 1];
       // Outside the date window: skipped, but still counted in the running
       // total so later rows' Ready-as-of stays right.
       if ((dfrom || dto) && isFinite(s.ms) && !jrInRange(s.ms)) return;
@@ -13883,7 +13891,10 @@ function buildJobsReportRows() {
         // delivered up to and including this row (E-146: 24,400 − 6,000 =
         // 18,400 on the first row, then 10,900) - not today's remainder
         // repeated on every row.
-        readyQty:     Math.max(0, (+r.readyTotalAll || 0) - cumDelivered),
+        readyQty:     readyAsOf,
+        readyShipped: Math.min(readyAsOf, shippedLater),
+        nextShip:     nxt ? { idx: i + 1, date: nxt.date, challan: nxt.challan } : null,
+        jobUc,
         packets:      s.pk,
         packetsShown: s.pkShown,
         packetsUnit:  s.pkUnit,
@@ -13902,10 +13913,29 @@ function buildJobsReportRows() {
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
 const JOBS_REPORT_MERGE = {
-  additive: ['deliveredQty', 'cartonQty', 'poQty', 'wastage', 'readyQty', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty'],
+  additive: ['deliveredQty', 'cartonQty', 'jobUc', 'poQty', 'wastage', 'readyQty', 'readyShipped', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty'],
   amount: [],
 };
 
+// Ready Qty "shipped" click: scroll to the job's next shipment row in this
+// report and flash it. If the date filter keeps that shipment out of the
+// list, say when and on which invoice it went.
+function jrGoToShipment(jobId, idx) {
+  const tr = document.querySelector(`#jr-content tr[data-jr-ship="${jobId}-${idx}"]`);
+  if (tr) {
+    tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const prev = tr.style.background;
+    tr.style.transition = 'background 0.3s';
+    tr.style.background = '#fde68a';
+    setTimeout(() => { tr.style.background = prev; }, 1600);
+    return;
+  }
+  const j = (typeof jobs !== 'undefined' ? jobs : []).find(x => x.id === jobId);
+  const d = j && Array.isArray(j.deliveries) ? j.deliveries[idx] : null;
+  if (!d) { notify('That shipment could not be found.'); return; }
+  const inv = deliveryChallanText(d);
+  notify(`E-${jobId}: ${(parseFloat(d.cartons) || 0).toLocaleString()} shipped on ${fmtDMY(d.date)}${inv ? ' · invoice ' + inv : ''} - outside the date filter, so not in this list.`);
+}
 function renderJobsReport() {
   const rows = buildJobsReportRows();
   const el = document.getElementById('jr-content');
@@ -14002,7 +14032,21 @@ function renderJobsReport() {
       : (r.wastage === null
           ? '<td ' + tdR + '>—</td>'
           : `<td style="padding:8px 10px;text-align:right;font-weight:600;">${fmt(r.wastage)}</td>`);
-    const readyCell = `<td style="padding:8px 10px;text-align:right;font-weight:600;color:${r.readyQty > 0 ? '#166534' : 'var(--text2)'};">${fmt(r.readyQty)}</td>`;
+    // A Ready balance that LATER shipments took out reads "shipped" (all of
+    // it) or "X shipped" (part) - also when those shipments fall outside the
+    // date filter - and a click jumps to the next shipment of the job.
+    const readyCell = (() => {
+      const v = +r.readyQty || 0, shipped = +r.readyShipped || 0;
+      if (v > 0 && shipped > 0 && r.nextShip && !r._merged) {
+        const all = shipped >= v - 0.5;
+        const nxt = r.nextShip;
+        return `<td style="padding:8px 10px;text-align:right;white-space:nowrap;">
+          <span onclick="event.stopPropagation(); jrGoToShipment(${r.id}, ${nxt.idx})" title="Shipped later - next shipment ${esc(nxt.date || '')}${nxt.challan ? ', invoice ' + esc(nxt.challan) : ''}. Click to go to it."
+            style="cursor:pointer;font-weight:600;color:${all ? 'var(--text2)' : '#166534'};text-decoration:underline;text-underline-offset:2px;">${fmt(v)}</span>
+          <span style="font-size:10px;font-weight:700;color:#166534;background:#dcfce7;padding:1px 6px;border-radius:999px;margin-left:4px;">${all ? 'shipped' : fmt(shipped) + ' shipped'}</span></td>`;
+      }
+      return `<td style="padding:8px 10px;text-align:right;font-weight:600;color:${v > 0 ? '#166534' : 'var(--text2)'};">${fmt(r.readyQty)}</td>`;
+    })();
     const milQtyCell = milMode ? `<td ${tdR}>${fmt(r.milQty)}</td>` : '';
     const isSel = jobsReportSel.has(r.id);
     // Partial shipment — Delivered Qty text itself reads amber instead of
@@ -14015,7 +14059,7 @@ function renderJobsReport() {
     const rowTitle = (r._merged && r._merged.length > 1)
       ? `Open the newest job (E-${r.id}) — or click a job number to open that one`
       : `Open this job's card`;
-    return `<tr data-jr-row="${r.id}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
+    return `<tr data-jr-row="${r.id}" data-jr-ship="${r.id}-${r.shipmentIndex || 0}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
       <td class="bulk-td">${(r.shipmentIndex && !r.firstOfJob) ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
       <td ${td}>${idCell}</td>
       <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
@@ -14027,7 +14071,7 @@ function renderJobsReport() {
       <td ${wrapTd(140)}>${esc(r.challan)}</td>
       ${milQtyCell}
       <td style="padding:8px 10px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}" title="${r.stockGroupName?'MIL job — PO Qty shown is what actually shipped':''}">${esc(r.poQty)}</td>
-      <td ${tdR}>${esc(r.cartonQty)}</td>
+      <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${ucWithJobTotal(r.cartonQty, r.jobUc, fmt, true)}</td>
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
       ${readyCell}
@@ -14192,10 +14236,10 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.challan || '')}</td>
     ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
     <td style="border:1px solid #000;padding:4px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}">${esc(r.poQty)}</td>
-    <td ${tdR}>${esc(r.cartonQty)}</td>
+    <td ${tdR}>${ucWithJobTotal(r.cartonQty, r.jobUc, fmt, false)}</td>
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
-    <td ${tdR}>${fmt(r.readyQty)}</td>
+    <td ${tdR}>${fmt(r.readyQty)}${(+r.readyQty > 0 && +r.readyShipped > 0 && !r._merged) ? (+r.readyShipped >= +r.readyQty - 0.5 ? ' (shipped)' : ` (${fmt(r.readyShipped)} shipped)`) : ''}</td>
     <td ${tdR}>${r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets)}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.machine)}</td>
@@ -16262,6 +16306,19 @@ function shipmentPacketsText(packets, unit, sheets, fmt) {
   if (unit === 'sheets') return `${fmt(sheets)} sheets (${fmt(packets)} pkts)`;
   return fmt(packets);
 }
+// A shipment's Unit Carton Qty with the job's own printed total beside it
+// ("300,000 / 1,350,000"), both reports (owner, 2026-10-01). The total is
+// left off when the row already IS the whole job. small = the screen's
+// muted second figure; otherwise plain text (print).
+function ucWithJobTotal(uc, jobTotal, fmt, small) {
+  const a = parseFloat(String(uc ?? '').replace(/[^0-9.\-]/g, ''));
+  const t = parseFloat(String(jobTotal ?? '').replace(/[^0-9.\-]/g, ''));
+  const shown = Number.isFinite(a) ? fmt(a) : (uc ?? '');
+  if (!Number.isFinite(a) || !(t > 0) || Math.abs(t - a) < 0.5) return shown;
+  return small
+    ? `${shown} <span style="font-size:10.5px;color:var(--text2);white-space:nowrap;">/ ${fmt(t)}</span>`
+    : `${shown} / ${fmt(t)}`;
+}
 function buildSaleReportRows(tabOverride) {
   const { client, dateRange, dfrom, dto, q, sortBy, sortDir, poSearch, challanSearch, milOnly } = saleReportState;
   const tab = tabOverride || saleReportState.tab || 'all';
@@ -16417,6 +16474,7 @@ function buildSaleReportRows(tabOverride) {
         // A MIL delivery IS its own PO: the row's PO Qty is what that
         // delivery shipped (owner spec) - normal jobs keep the job's PO Qty.
         poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets,
+        ucJob: Number.isFinite(cartonQtyNum) ? cartonQtyNum : null,   // the job's printed total, shown beside the row's share
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
         packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
@@ -16492,6 +16550,8 @@ const SALE_MERGE_ADDITIVE = [
   // Per-delivery now, so they add like the rest - left out, two jobs'
   // packets were joined as text ("10 12.5") and the cell read NaN.
   'packets', 'wastagePackets', 'packetsShown',
+  // Linked jobs on one invoice: their printed totals add up too.
+  'ucJob',
 ];
 const SALE_REPORT_MERGE = { additive: SALE_MERGE_ADDITIVE, perUnit: true };
 // Linked jobs, as sets. A job can say it is linked three ways: the link set
@@ -17033,9 +17093,12 @@ function saleReportCols(tabOverride) {
       pr: r => r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty',
-      cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'uc_qty', r.cartonQty, r.ucTyped, r.ucCalc)
-        : (partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || esc(r.cartonQty)),
-      xl: r => xlNum(r.cartonQty), pr: r => esc(r.cartonQty) },
+      // The row's share, with the job's printed total beside it when they
+      // differ ("300,000 / 1,350,000") - the typing box stays as it was.
+      cell: (r, c) => (c && c.qtyCell && !r._merged)
+        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.qtyCell(r, 'uc_qty', r.cartonQty, r.ucTyped, r.ucCalc)}${ucWithJobTotal(r.cartonQty, r.ucJob, fmt, true).replace(/^[^<]*/, '')}</div>`
+        : (partsOf(r, 'cartonQty', v => (+v).toLocaleString()) || ucWithJobTotal(r.cartonQty, r.ucJob, fmt, true)),
+      xl: r => xlNum(r.cartonQty), pr: r => ucWithJobTotal(r.cartonQty, r.ucJob, fmt, false) },
     { key: 'poQty', label: 'PO Qty', right: true, total: 'poQty', cell: r => partsOf(r, 'poQty', v => (+v).toLocaleString()) || esc(r.poQty), xl: r => xlNum(r.poQty), pr: r => esc(r.poQty) },
     { key: 'plates', label: 'Plates', filter: 'plates', cell: r => esc(r.plates), xl: r => xlNum(r.plates), pr: r => esc(r.plates) },
     { key: 'paperType', label: 'Paper Type', filter: 'paperType', cell: r => esc(r.paperType), xl: r => r.paperType, pr: r => esc(r.paperType) },
