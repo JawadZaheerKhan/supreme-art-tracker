@@ -3329,13 +3329,17 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
           <span class="rsb-icon">&#128666;</span> Imports
         </button>
         <button class="rsb-item" data-rpt="rpt_manual_job_card_consumption" data-rt="trash-transactions" onclick="setReportsTab('trash-transactions')">
-          <span class="rsb-icon">&#9997;</span> Manual Job Card Consumption
+          <span class="rsb-icon">&#9997;</span> Stock Entries
+        </button>
+        <button class="rsb-item" data-rpt="rpt_imports_archive" data-rt="trash-papers" onclick="setReportsTab('trash-papers')">
+          <span class="rsb-icon">&#128196;</span> Paper Items
         </button>
       </aside>
       <main class="reports-content">
         <div id="rt-trash-jobs"         class="rt-pane"></div>
         <div id="rt-trash-imports"      class="rt-pane" style="display:none;"></div>
         <div id="rt-trash-transactions" class="rt-pane" style="display:none;"></div>
+        <div id="rt-trash-papers"       class="rt-pane" style="display:none;"></div>
       </main>
     </div>
   </div>
@@ -9008,7 +9012,7 @@ async function deleteInvItem(id) {
   const bal   = it.current_balance || 0;
   const ok = await confirmDialog({
     title: 'Delete this paper item?',
-    message: `${label}\nCurrent balance: ${bal.toLocaleString()} sheets\n\nIt leaves the Inventory list and pickers. Its stock-in / stock-out history, the reports and the jobs that used it keep it. Adding the same paper again brings it back. Pending jobs that use this paper block the delete.`,
+    message: `${label}\nCurrent balance: ${bal.toLocaleString()} sheets\n\nIt moves to the Archive (Archive → Paper Items) and leaves the Inventory list and pickers. Its stock-in / stock-out history, the reports and the jobs that used it keep it. Restore it from the Archive, or add the same paper again. Pending jobs that use this paper block the delete.`,
     danger: true,
     confirmText: 'Delete',
   });
@@ -10581,6 +10585,9 @@ async function renderInvHistory(id) {
       const reasonHtml = isReversal
         ? `<span style="display:inline-block;background:#fed7aa;color:#9a3412;font-weight:700;font-size:10px;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;">&#8634; Reversal</span><div style="font-size:10px;color:var(--text2);margin-top:2px;">of TX #${t.reverses_tx_id}</div>`
         : esc(t.reason || '') + historySplitBadge;
+      const archivedTag = t.deleted_at && t.deleted_scope === 'history'
+        ? ` <span title="Deleted from Stock In/Out - in the Archive. Balance unchanged." style="display:inline-block;background:#e5e7eb;color:#374151;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;margin-left:4px;">ARCHIVED</span>`
+        : '';
 
       // Gating shared with the Stock In/Out report — see canReverseTx above.
       const canReverse = canReverseTx(t);
@@ -10610,7 +10617,7 @@ async function renderInvHistory(id) {
         <td style="white-space:nowrap;">${date}</td>
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
         <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
-        <td>${reasonHtml}</td>
+        <td>${reasonHtml}${archivedTag}</td>
         <td>${challan}</td>
         <td>${job}</td>
         <td>${by}</td>
@@ -18392,7 +18399,7 @@ function openDashboard() {
 // Admin-only view of the bin. Items stay until an admin deletes them
 // (nothing auto-purges since 2026-10-01). Restore puts them
 // back; Delete Permanently hard-deletes; Empty Trash wipes everything.
-let trashCache = { jobs: [], imports: [], transactions: [], retention_days: 30 };
+let trashCache = { jobs: [], imports: [], transactions: [], papers: [], retention_days: 30 };
 
 function openTrashPage() {
   // Admin can act, CEO can view (write buttons inside are .ceo-hide).
@@ -19432,11 +19439,12 @@ async function loadTrashAndRender(which) {
     trashCache = await api('GET', '/api/trash');
   } catch (e) {
     notify('Error loading archive: ' + e.message);
-    trashCache = { jobs: [], imports: [], transactions: [], retention_days: 30 };
+    trashCache = { jobs: [], imports: [], transactions: [], papers: [], retention_days: 30 };
   }
   if (which === 'jobs')         renderTrashJobs();
   if (which === 'imports')      renderTrashImports();
   if (which === 'transactions') renderTrashTransactions();
+  if (which === 'papers')       renderTrashPapers();
 }
 
 // Days remaining = retention_days - (now - deleted_at). Floor to whole days
@@ -19455,18 +19463,15 @@ function trashDaysLeft(deletedAt) {
 // Shared header chrome (title, count, Empty Trash button). Stays at the top
 // of both panes.
 function trashPaneHeader(label, count) {
-  // Nothing in the Archive ages out any more (owner, 2026-10-01) - it stays
-  // until an admin deliberately deletes it.
-  const retention = label === 'Jobs'
-    ? 'kept permanently · a job number must always be accounted for'
-    : 'kept until an admin deletes it permanently';
+  // Nothing in the Archive is ever erased (owner, 2026-10-01) - no ageing
+  // out, no Delete Permanently, no Empty. Restore is the only way out.
+  const retention = 'kept permanently · restore anything archived by mistake';
   return `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Archive · ${label}</h2>
       <span style="color:var(--text2);font-size:12px;">${count} item${count===1?'':'s'} · ${retention}</span>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="refreshTrash()">&#8635; Refresh</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="emptyTrash()">&#128465; Empty Archive</button>
       </div>
     </div>`;
 }
@@ -19474,7 +19479,7 @@ function trashPaneHeader(label, count) {
 function refreshTrash() {
   const activeBtn = document.querySelector('#trash-group .rsb-item.active');
   const rt = activeBtn?.dataset?.rt;
-  const which = rt === 'trash-imports' ? 'imports' : rt === 'trash-transactions' ? 'transactions' : 'jobs';
+  const which = rt === 'trash-imports' ? 'imports' : rt === 'trash-transactions' ? 'transactions' : rt === 'trash-papers' ? 'papers' : 'jobs';
   loadTrashAndRender(which);
 }
 
@@ -19501,7 +19506,6 @@ function renderTrashJobs() {
       <td ${tdN} style="font-weight:600;color:var(--text2);" title="Archived jobs are never deleted automatically - a job card number has to stay accounted for">Kept</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('job', ${r.id})">&#8635; Restore</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('job', ${r.id})">&#128465; Delete Permanently</button>
         <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
       </td>
     </tr>`;
@@ -19557,10 +19561,9 @@ function renderTrashImports() {
       <td ${tdL}>${esc(r.supplier || '—')}</td>
       <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
-      <td ${tdN} style="color:var(--text2);">until deleted</td>
+      <td ${tdN} style="color:var(--text2);">kept</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('import', ${r.id})">&#8635; Restore</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="purgeTrash('import', ${r.id})">&#128465; Delete Permanently</button>
         <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
       </td>
     </tr>`;
@@ -19591,8 +19594,8 @@ function renderTrashTransactions() {
   if (!el) return;
   const rows = trashCache.transactions || [];
   if (!rows.length) {
-    el.innerHTML = trashPaneHeader('Manual Job Card Consumption', 0)
-      + `<div class="empty">Archive is empty — no deleted manual consumption entries.</div>`;
+    el.innerHTML = trashPaneHeader('Stock Entries', 0)
+      + `<div class="empty">Archive is empty — no deleted stock entries.</div>`;
     return;
   }
   const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -19604,33 +19607,39 @@ function renderTrashTransactions() {
     const unit = packetUnitLabel(r.paper_type).toLowerCase();
     const ps = packetSize(r.paper_type || '');
     const sheets = Math.abs(r.change);
+    const fromHistory = r.deleted_scope === 'history';
+    const ref = fromHistory
+      ? (r.job_id ? `E-${r.job_id}` : (r.challan_no ? `Challan ${r.challan_no}` : (r.reason || '—')))
+      : extractManualJobCardNo(r.notes);
     return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
-      <td ${tdL} style="font-weight:700;">${esc(extractManualJobCardNo(r.notes))}</td>
+      <td ${tdL}>${fromHistory ? 'Stock In/Out' : 'Manual Consumption'}</td>
+      <td ${tdL} style="font-weight:700;">${esc(ref)}</td>
       <td ${tdL}>${esc(r.paper_type || '—')}</td>
       <td ${tdL}>${esc(r.item_size || '—')}</td>
       <td ${tdR}>${esc(r.item_gsm || '—')}</td>
       <td ${tdL}>${esc(r.item_brand || '—')}</td>
-      <td ${tdR} style="font-weight:600;">${fmtPkts(sheets / ps, {keepZero:true})} ${unit}</td>
+      <td ${tdR} style="font-weight:600;color:${r.change > 0 ? '#166534' : '#A32D2D'};">${r.change > 0 ? '+' : '−'}${fmtPkts(sheets / ps, {keepZero:true})} ${unit}</td>
       <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
-      <td ${tdN} style="color:var(--text2);">until deleted</td>
+      <td ${tdN} style="color:var(--text2);">kept</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('transaction', ${r.id})">&#8635; Restore</button>
-        <span style="font-size:11px;color:var(--text2);" title="Stock entries can't be deleted permanently">kept</span>
         <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
       </td>
     </tr>`;
   }).join('');
-  el.innerHTML = trashPaneHeader('Manual Job Card Consumption', rows.length) + `
+  el.innerHTML = trashPaneHeader('Stock Entries', rows.length) + `
+    <div style="font-size:12px;color:var(--text2);margin:-6px 0 10px;">Deleting an entry never changes a balance - it only leaves the report it was deleted from. The paper's History still lists it.</div>
     <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead><tr style="background:var(--bg2);">
-        <th ${thL}>Manual Job Card No.</th>
+        <th ${thL}>Deleted From</th>
+        <th ${thL}>Job / Manual Job Card</th>
         <th ${thL}>Paper Type</th>
         <th ${thL}>Size</th>
         <th ${thR}>GSM</th>
         <th ${thL}>Brand</th>
-        <th ${thR}>Consumed</th>
+        <th ${thR}>Quantity</th>
         <th ${thL}>Deleted</th>
         <th ${thL}>By</th>
         <th ${thL}>Kept</th>
@@ -19641,8 +19650,52 @@ function renderTrashTransactions() {
     </div>`;
 }
 
+// Deleted paper items (hidden from Inventory; history and job links kept).
+function renderTrashPapers() {
+  const el = document.getElementById('rt-trash-papers');
+  if (!el) return;
+  const rows = trashCache.papers || [];
+  if (!rows.length) {
+    el.innerHTML = trashPaneHeader('Paper Items', 0) + `<div class="empty">Archive is empty — no deleted paper items.</div>`;
+    return;
+  }
+  const thL = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
+  const tdL = 'style="padding:8px 10px;"';
+  const tdR = 'style="padding:8px 10px;text-align:right;"';
+  const tdN = 'style="padding:8px 10px;white-space:nowrap;"';
+  const body = rows.map(r => {
+    const unit = packetUnitLabel(r.paper_type).toLowerCase();
+    const bal = (parseFloat(r.current_balance) || 0) / packetSize(r.paper_type || '');
+    return `<tr class="row-hover-red" style="border-bottom:1px solid var(--border);">
+      <td ${tdL} style="font-weight:700;">${esc(r.paper_type || '—')}${r.is_offcut ? ' <span style="font-size:10px;color:#92400e;">OFFCUT</span>' : ''}</td>
+      <td ${tdL}>${esc(r.size || '—')}</td>
+      <td ${tdR}>${esc(r.gsm || '—')}</td>
+      <td ${tdL}>${esc(r.brand || '—')}</td>
+      <td ${tdR} style="font-weight:600;">${fmtPkts(bal, {keepZero:true})} ${unit}</td>
+      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdL}>${esc(r.deleted_by || '—')}</td>
+      <td ${tdN}>
+        <button class="btn btn-sm ceo-hide" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="restoreTrash('paper', ${r.id})">&#8635; Restore</button>
+        <span class="ceo-only" style="font-size:11px;color:var(--text2);">View only</span>
+      </td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = trashPaneHeader('Paper Items', rows.length) + `
+    <div style="font-size:12px;color:var(--text2);margin:-6px 0 10px;">A deleted paper is only hidden from Inventory and the pickers - its stock history, reports and job links are kept. Restore puts it back in Inventory.</div>
+    <div class="report-scroll-wrap">
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
+      <thead><tr style="background:var(--bg2);">
+        <th ${thL}>Paper Type</th><th ${thL}>Size</th><th ${thR}>GSM</th><th ${thL}>Brand</th>
+        <th ${thR}>Balance</th><th ${thL}>Deleted</th><th ${thL}>By</th><th ${thL}></th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    </div>`;
+}
+
 async function restoreTrash(type, id) {
-  const label = type === 'job' ? `Job E-${id}` : type === 'import' ? `Import #${id}` : `Transaction #${id}`;
+  const label = type === 'job' ? `Job E-${id}` : type === 'import' ? `Import #${id}` : type === 'paper' ? 'Paper item' : `Stock entry #${id}`;
   const ok = await confirmDialog({
     title: `Restore ${label}?`,
     message: 'It\'ll go back where it came from and show up in normal listings again.',
@@ -19655,12 +19708,16 @@ async function restoreTrash(type, id) {
     notify(`${label} restored`);
     if (type === 'job') await loadJobs();
     if (type === 'import') await loadImports();
+    if (type === 'paper') await loadInventory();
     refreshTrash();
   } catch (e) { notify('Restore failed: ' + e.message); }
   showSaving(false);
 }
 
+// Permanent delete and Empty Archive are gone (owner, 2026-10-01); the
+// server refuses both too. Kept as stubs in case an old link calls them.
 async function purgeTrash(type, id) {
+  notify("Nothing in the Archive can be deleted permanently - restore it if it was archived by mistake."); return;
   const label = type === 'job' ? `Job E-${id}` : type === 'import' ? `Import #${id}` : `Transaction #${id}`;
   const ok = await confirmDialog({
     title: `Permanently delete ${label}?`,
@@ -19681,21 +19738,21 @@ async function purgeTrash(type, id) {
 }
 
 async function emptyTrash() {
+  notify("Nothing in the Archive can be deleted permanently - restore it if it was archived by mistake."); return;
   if (!hasPerm('trash_admin')) return;
-  // Jobs and stock entries are deliberately excluded: Empty Archive clears
-  // imports only, so no job number or stock movement can be wiped out in bulk.
+  // Jobs are deliberately excluded: Empty Archive clears imports and stock
+  // transactions only, so no job number can be wiped out in bulk.
   const jobCount = trashCache.jobs?.length || 0;
-  const txCount = trashCache.transactions?.length || 0;
-  const total = trashCache.imports?.length || 0;
+  const total = (trashCache.imports?.length || 0) + (trashCache.transactions?.length || 0);
   if (!total) {
-    notify(jobCount || txCount
-      ? 'Nothing to empty \u2014 archived jobs and stock entries are kept permanently.'
+    notify(jobCount
+      ? `Nothing to empty \u2014 the ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept permanently.`
       : 'Archive is already empty.');
     return;
   }
   const ok = await confirmDialog({
     title: `Empty Archive?`,
-    message: `Permanently delete ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'}. Cannot be undone.${txCount ? ` The ${txCount} archived stock entr${txCount===1?'y is':'ies are'} kept.` : ''}${jobCount ? ` The ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept \u2014 job numbers are never wiped in bulk. Use Delete Permanently on one job if you really mean it.` : ''}`,
+    message: `Permanently delete ${trashCache.imports?.length || 0} import${(trashCache.imports?.length||0)===1?'':'s'} + ${trashCache.transactions?.length || 0} manual consumption entr${(trashCache.transactions?.length||0)===1?'y':'ies'}. Cannot be undone.${jobCount ? ` The ${jobCount} archived job${jobCount===1?'':'s'} ${jobCount===1?'is':'are'} kept \u2014 job numbers are never wiped in bulk. Use Delete Permanently on one job if you really mean it.` : ''}`,
     danger: true,
     confirmText: 'Empty Archive',
   });
@@ -19703,7 +19760,7 @@ async function emptyTrash() {
   showSaving(true);
   try {
     const r = await api('POST', '/api/trash/empty');
-    notify(`Archive emptied · ${r.imports} import${r.imports===1?'':'s'} deleted${jobCount ? ` · ${jobCount} job${jobCount===1?'':'s'} kept` : ''}`);
+    notify(`Archive emptied · ${r.imports} import${r.imports===1?'':'s'} + ${r.transactions} transaction${r.transactions===1?'':'s'} deleted${jobCount ? ` · ${jobCount} job${jobCount===1?'':'s'} kept` : ''}`);
     refreshTrash();
   } catch (e) { notify('Empty failed: ' + e.message); }
   showSaving(false);
@@ -19765,7 +19822,7 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'trash-papers', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -19786,6 +19843,7 @@ function setReportsTab(name) {
   if (name === 'trash-jobs')         loadTrashAndRender('jobs');
   if (name === 'trash-imports')      loadTrashAndRender('imports');
   if (name === 'trash-transactions') loadTrashAndRender('transactions');
+  if (name === 'trash-papers')       loadTrashAndRender('papers');
   if (name === 'dp-printing')     loadDailyProductionPrinting();
   if (name === 'dp-die')          loadDailyProductionDie();
   if (name === 'dp-coatings')     loadDailyProductionCoatings();
@@ -19892,7 +19950,9 @@ function renderStockMovementBulkBar(dir) {
     <span class="bulk-count">${sel.length} selected${qtyLabel}</span>
     <button class="btn btn-sm btn-clear" onclick="clearStockMovementSel('${dir}')">Clear</button>
     <span class="bulk-spacer"></span>
-    <span style="font-size:11px;color:var(--text2);">Stock entries can't be deleted - use Reverse in the paper's History to undo one.</span>
+    ${isAdmin()
+      ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteStockMovement('${dir}')">&#128465; Delete from History</button>`
+      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History moves rows to the Archive.</span>`}
   `;
 }
 
@@ -19900,15 +19960,15 @@ function renderStockMovementBulkBar(dir) {
 // explicit warning that balances stay untouched — the user has to remember
 // that this is archival cleanup, not a fix.
 async function bulkDeleteStockMovement(dir) {
-  notify("Stock entries can't be deleted permanently - use Reverse in the paper's History to undo one."); return;   // locked (owner, 2026-10-01)
+  if (!isAdmin()) { notify('Admin only.'); return; }
   const sel = [...stockMovementSel[dir]];
   const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
   if (!rows.length) { notify('Nothing selected.'); return; }
   const ok = await confirmDialog({
     title: `Delete ${rows.length} row${rows.length===1?'':'s'} from history?`,
-    message: 'These rows are wiped from the audit log. Current balances stay the same — to undo a row’s effect on stock, use Reverse on the inventory History modal instead. This cannot be undone.',
+    message: 'They move to the Archive (Archive → Stock Entries), where an admin can restore them, and leave Stock In/Out. Current balances stay the same and the paper’s History still lists them — to undo a row’s effect on stock, use Reverse in the History instead.',
     danger: true,
-    confirmText: 'Delete from history',
+    confirmText: 'Move to Archive',
   });
   if (!ok) return;
   let good = 0, failed = 0;
@@ -19920,7 +19980,7 @@ async function bulkDeleteStockMovement(dir) {
   showSaving(false);
   stockMovementSel[dir].clear();
   await loadStockMovement(dir);
-  notify(`Deleted ${good}${failed?` · ${failed} failed`:''}`);
+  notify(`Moved ${good} to Archive${failed?` · ${failed} failed`:''}`);
 }
 
 // Generic period-to-date-range helper, decoupled from any global state. Used
@@ -21788,7 +21848,7 @@ function offcutConsumptionRows() {
 }
 function renderOffcutConsumption() {
   const rows = offcutConsumptionRows();
-  const canDelete = false;   // stock entries can't be deleted (owner, 2026-10-01) - Reverse instead
+  const canDelete = isAdmin();
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
@@ -21879,13 +21939,13 @@ function toggleAllOffcutConsumption(checked) {
   renderOffcutConsumption();
 }
 async function deleteOffcutConsumptionRows(ids, skipConfirm = false) {
-  notify("Stock entries can't be deleted permanently - use Reverse in the paper's History to undo one."); return;   // locked (owner, 2026-10-01)
+  if (!isAdmin()) { notify('Admin only.'); return; }
   const cleanIds = [...new Set((ids || []).filter(Number.isFinite))];
   if (!cleanIds.length) return;
   if (!skipConfirm) {
     const ok = await confirmDialog({
       title: 'Delete this Offcut Consumption row?',
-      message: 'This removes the transaction from the report/history. The current physical stock balance will not change.',
+      message: 'It moves to the Archive (Archive → Stock Entries), where an admin can restore it, and leaves this report. The stock balance does not change.',
       confirmText: 'Delete', danger: true,
     });
     if (!ok) return;

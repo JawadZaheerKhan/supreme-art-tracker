@@ -293,7 +293,9 @@ function getDb() {
 // "we only have cash and bank account") - see the one-time clean-up in initDb.
 // Bumped again for inventory_items.deleted_at (deleting a paper item keeps
 // its stock history, reports and job links - owner, 2026-10-01).
-const SCHEMA_VERSION = 'v2026-10-01-inventory-soft-delete';
+// Bumped again for inventory_transactions.deleted_scope (deleting a stock
+// entry from Stock In/Out moves it to the Archive - owner, 2026-10-01).
+const SCHEMA_VERSION = 'v2026-10-01-archive-stock-entries';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1027,6 +1029,12 @@ async function initDb() {
     // hides the row from movement reports.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    // Where an archived stock entry was deleted from: 'manual' (Manual
+    // Consumption only - still counts in Stock In/Out) or 'history' (Stock
+    // In/Out or Offcut Consumption - leaves those reports). NULL on an
+    // archived row = 'manual' (the only kind before 2026-10-01). Either way
+    // the balance is unchanged and the paper's History keeps the row.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_scope TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_deleted_at_idx ON inventory_transactions(deleted_at) WHERE deleted_at IS NOT NULL`;
 
     // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
@@ -10051,6 +10059,10 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
         -- deleted_at is only ever set by Manual Consumption's own delete
         -- (see DELETE /api/inventory/transactions/:id?scope=manual below).
         AND (${raw} OR NOT ${excludeArchived} OR t.deleted_at IS NULL)
+        -- Deleted from Stock In/Out / Offcut Consumption (moved to Archive):
+        -- out of every movement report; the raw ledger keeps it so running
+        -- balances stay right.
+        AND (${raw} OR t.deleted_at IS NULL OR t.deleted_scope IS DISTINCT FROM 'history')
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.
@@ -10325,16 +10337,20 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
       ORDER BY deleted_at DESC
     `;
     const transactionsRows = await sql`
-      SELECT t.id, t.change, t.reason, t.notes, t.created_at, t.deleted_at, t.deleted_by,
+      SELECT t.id, t.change, t.reason, t.notes, t.created_at, t.deleted_at, t.deleted_by, t.deleted_scope, t.job_id, t.challan_no,
              i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
         FROM inventory_transactions t
         LEFT JOIN inventory_items i ON i.id = t.item_id
        WHERE t.deleted_at IS NOT NULL
        ORDER BY t.deleted_at DESC
     `;
-    // jobs_retained: archived jobs are kept indefinitely, so the Archive can
-    // say so instead of counting down days that no longer run out.
-    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true, all_retained: true });
+    const papersRows = await sql`
+      SELECT id, paper_type, size, gsm, brand, is_offcut, current_balance, deleted_at, deleted_by
+        FROM inventory_items WHERE deleted_at IS NOT NULL
+       ORDER BY deleted_at DESC
+    `;
+    // Everything in the Archive is kept until restored.
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, papers: papersRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true, all_retained: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -10378,107 +10394,75 @@ app.post('/api/trash/restore', requirePermission('trash_admin'), async (req, res
       return res.json({ ok: true });
     }
     if (type === 'transaction') {
-      const updated = await sql`UPDATE inventory_transactions SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
+      const updated = await sql`UPDATE inventory_transactions SET deleted_at=NULL, deleted_by=NULL, deleted_scope=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
       if (!updated.length) return res.status(404).json({ error: 'Transaction not in archive' });
       await logAudit(sql, req, { action: 'inventory.tx.restore', entityType: 'inventory_item', entityId: rowId, summary: `Restored tx #${rowId} from Archive (${updated[0].change > 0 ? '+' : ''}${updated[0].change} sheets · ${updated[0].reason || 'no reason'})` });
       return res.json({ ok: true });
     }
-    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
+    if (type === 'paper') {
+      const updated = await sql`UPDATE inventory_items SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING *`;
+      if (!updated.length) return res.status(404).json({ error: 'Paper item not in archive' });
+      const p = updated[0];
+      const label = `${p.paper_type}${p.size ? ' ' + p.size : ''}${p.gsm ? ' ' + p.gsm + 'gsm' : ''}${p.brand ? ' · ' + p.brand : ''}`;
+      await logAudit(sql, req, { action: 'inventory.restore', entityType: 'inventory', entityId: rowId, summary: `Restored paper item from Archive: ${label}` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job", "import", "transaction" or "paper"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// Stock entries can never be deleted permanently (owner, 2026-10-01): undo
-// one with Reverse, which keeps both rows so balance, History and reports agree.
-const TX_PERMANENT_DELETE_REFUSAL = "Stock entries can't be deleted permanently - use Reverse in the paper's History to undo one.";
+// Nothing in the Archive is ever deleted permanently (owner, 2026-10-01) -
+// both routes below refuse, so an old open page can't do it either.
+const ARCHIVE_NO_PURGE = "Nothing in the Archive can be deleted permanently - restore it if it was archived by mistake.";
 
-// PERMANENT delete from trash. Same shape as restore. Hard-deletes the row
-// (jobs and imports only).
+// PERMANENT delete from trash - refused.
 app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const type = req.params.type;
-    const rowId = parseInt(req.params.id, 10);
-    if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
-    if (type === 'job') {
-      const deleted = await sql`DELETE FROM jobs WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
-      if (!deleted.length) return res.status(404).json({ error: 'Job not in archive' });
-      await logAudit(sql, req, { action: 'job.purge', entityType: 'job', entityId: rowId, summary: `Permanently deleted Job E-${rowId}: ${deleted[0].name}` });
-      return res.json({ ok: true });
-    }
-    if (type === 'import') {
-      const deleted = await sql`DELETE FROM inventory_imports WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type`;
-      if (!deleted.length) return res.status(404).json({ error: 'Import not in archive' });
-      await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
-      return res.json({ ok: true });
-    }
-    if (type === 'transaction') return res.status(403).json({ error: TX_PERMANENT_DELETE_REFUSAL });
-    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+  res.status(403).json({ error: ARCHIVE_NO_PURGE });
 });
 
-// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes the imports
-// and stock transactions currently in the Archive, regardless of age.
-// ARCHIVED JOBS ARE LEFT ALONE - see purgeExpiredTrash for why a job number
-// must not vanish. Destroying a job is still possible, but only one at a
-// time via Delete Permanently, which names the job in the audit log; a bulk
-// button that wipes a hundred job numbers in one click is not something an
-// audit can be reconstructed from.
+// EMPTY Archive - refused (see ARCHIVE_NO_PURGE).
 app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const jobsDel    = [];
-    const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
-    const txDel       = [];   // archived stock entries are kept - see TX_PERMANENT_DELETE_REFUSAL
-    await logAudit(sql, req, {
-      action: 'trash.empty',
-      entityType: 'system',
-      entityId: 0,
-      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} + ${txDel.length} transaction${txDel.length===1?'':'s'} permanently deleted`,
-    });
-    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length, transactions: txDel.length });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+  res.status(403).json({ error: ARCHIVE_NO_PURGE });
 });
 
-// DELETE an inventory transaction row from history (admin only).
-// ?scope=manual (sent only by Manual Consumption's own Delete button) soft-
-// deletes — moves it to Archive (30-day retention, restorable), and is
-// scoped to Manual Consumption only: the row keeps showing in Stock In/Out
-// and Total In/Out exactly as before, since deleting a manual-consumption
-// entry is not the same thing as saying the stock movement never happened.
-// Every other caller (Stock In/Out's own bulk delete) hard-deletes, same as
-// always — no archive for those. Neither path touches current_balance; the
-// row already happened and its effect is baked into the running balance.
-// To actually undo a row's effect on stock, use the per-row Reverse on the
-// inventory History modal instead (which posts a proper correction entry).
+// DELETE a stock entry = move it to the Archive (admin only; restorable,
+// never erased - owner, 2026-10-01). Neither kind touches current_balance and
+// the paper's History keeps the row, so the ledger still adds up.
+//   ?scope=manual (Manual Consumption's own Delete): leaves Manual
+//     Consumption only - still counts in Stock In/Out.
+//   otherwise (Stock In/Out "Delete from History", Offcut Consumption
+//     Delete): leaves those movement reports too.
+// To undo an entry's effect on stock, use Reverse in the History instead.
 app.delete('/api/inventory/transactions/:id', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    if (req.query.scope === 'manual') {
-      const by = req.user?.email || 'unknown';
-      const updated = await sql`
-        UPDATE inventory_transactions
-           SET deleted_at = NOW(), deleted_by = ${by}
-         WHERE id = ${id} AND deleted_at IS NULL
-         RETURNING id, item_id, change, reason
-      `;
-      if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
-      const tx = updated[0];
-      await logAudit(sql, req, {
-        action: 'inventory.tx.delete',
-        entityType: 'inventory_item',
-        entityId: tx.item_id,
-        summary: `Moved tx #${id} to Archive from Manual Consumption (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — still shows in Stock In/Out, balance unchanged`,
-      });
-      return res.json({ ok: true });
-    }
-    // Every other caller used to hard-delete the row (Stock In/Out "Delete
-    // from History", Offcut Consumption Delete). Not any more.
-    return res.status(403).json({ error: TX_PERMANENT_DELETE_REFUSAL });
+    const scope = req.query.scope === 'manual' ? 'manual' : 'history';
+    const by = req.user?.email || 'unknown';
+    // A Manual-Consumption-archived row deleted again from Stock In/Out moves
+    // up to 'history'; nothing else re-archives an archived row.
+    const updated = scope === 'manual'
+      ? await sql`
+          UPDATE inventory_transactions SET deleted_at = NOW(), deleted_by = ${by}, deleted_scope = 'manual'
+           WHERE id = ${id} AND deleted_at IS NULL
+           RETURNING id, item_id, change, reason`
+      : await sql`
+          UPDATE inventory_transactions SET deleted_at = NOW(), deleted_by = ${by}, deleted_scope = 'history'
+           WHERE id = ${id} AND (deleted_at IS NULL OR deleted_scope IS DISTINCT FROM 'history')
+           RETURNING id, item_id, change, reason`;
+    if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
+    const tx = updated[0];
+    await logAudit(sql, req, {
+      action: 'inventory.tx.delete',
+      entityType: 'inventory_item',
+      entityId: tx.item_id,
+      summary: scope === 'manual'
+        ? `Moved tx #${id} to Archive from Manual Consumption (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — still shows in Stock In/Out, balance unchanged`
+        : `Moved tx #${id} to Archive from Stock In/Out (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged, restorable`,
+    });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
