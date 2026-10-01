@@ -494,6 +494,19 @@ const ROLE_PERMISSION_DEFAULTS = {
 // round trip — refreshRolePermissions() is awaited right after every
 // successful PUT.
 let ROLE_PERMS = {};
+// When this copy of the server last read the table. Vercel runs several
+// copies at once and a save only refreshes the copy that handled it, so
+// the others re-read it once it is older than ROLE_PERMS_MAX_AGE_MS -
+// otherwise two people with the same role could get different buttons
+// depending on which copy answered them (Store Managers #8 / #19, 2026-10-01).
+let ROLE_PERMS_LOADED_AT = 0;
+let ROLE_PERMS_INFLIGHT = null;
+const ROLE_PERMS_MAX_AGE_MS = 30 * 1000;
+function ensureRolePermsFresh() {
+  if (Date.now() - ROLE_PERMS_LOADED_AT < ROLE_PERMS_MAX_AGE_MS) return Promise.resolve();
+  if (!ROLE_PERMS_INFLIGHT) ROLE_PERMS_INFLIGHT = refreshRolePermissions().finally(() => { ROLE_PERMS_INFLIGHT = null; });
+  return ROLE_PERMS_INFLIGHT;
+}
 async function refreshRolePermissions() {
   try {
     await dbReady;
@@ -506,6 +519,7 @@ async function refreshRolePermissions() {
       next[r.permission_key][r.role] = r.level;
     }
     ROLE_PERMS = next;
+    ROLE_PERMS_LOADED_AT = Date.now();
   } catch (e) {
     console.error('refreshRolePermissions failed:', e.message);
   }
@@ -1739,6 +1753,8 @@ async function authMiddleware(req, res, next) {
       // Invalid/expired token — leave req.user undefined.
     }
   }
+  // Signed-in requests are the ones checked against the Permissions table.
+  if (req.user) await ensureRolePermsFresh();
   next();
 }
 // Best-effort User-Agent → short human label for the Users tab's session
