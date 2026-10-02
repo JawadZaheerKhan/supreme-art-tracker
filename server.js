@@ -8820,13 +8820,17 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       const prev = list[ix] || {};
       const entry = { ...prev };
       if (num === null) delete entry[which]; else entry[which] = num;
+      // A new UC makes a hand-typed wastage stale - drop it so the shipment's
+      // wastage is worked out again as UC - delivered (owner, 2026-10-02).
+      const droppedWastage = (which === 'uc_qty' && entry.wastage_qty !== undefined) ? entry.wastage_qty : undefined;
+      if (droppedWastage !== undefined) delete entry.wastage_qty;
       list[ix] = entry;
       const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(list)} WHERE id = ${id} RETURNING *`;
       const label = which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage';
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num },
+        summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"${droppedWastage !== undefined ? ` (typed Wastage ${droppedWastage} cleared - recalculated)` : ''}`,
+        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, wastage_cleared: droppedWastage ?? null },
       });
       return res.json(upd[0]);
     }
