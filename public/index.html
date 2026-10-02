@@ -3664,6 +3664,21 @@ const PAPER_TYPES_REAM = new Set(['art paper', 'off-white', 'offset paper']);
 function isReamPaper(paperType) { return PAPER_TYPES_REAM.has(String(paperType || '').toLowerCase()); }
 function packetSize(paperType)  { return isReamPaper(paperType) ? 500 : 100; }
 function packetUnitLabel(paperType) { return isReamPaper(paperType) ? 'Reams' : 'Packets'; }
+// A job's paper type for the reports: the linked item, else the job's own
+// paper fields, else a single ticked Paper Type on the job card. '' if none.
+function jobPaperTypeForReports(j, invItem) {
+  const ticked = (j && j.particulars && Array.isArray(j.particulars.paper_types)) ? j.particulars.paper_types.filter(Boolean) : [];
+  return (j && (j.paper_resolved || j.paper)) || (invItem && invItem.paper_type) || (ticked.length === 1 ? ticked[0] : '') || '';
+}
+// Sheets per packet for a job in the reports. With no paper type on file
+// (e.g. its paper item was erased by the old delete - E-344 & co.), Labels
+// and Leaflets are printed on ream paper (500), boxes on board (100) - the
+// old fallback put every unknown job at 100, so September's label sheets
+// read as 205 pkts instead of 116.6 (owner, 2026-10-02).
+function jobPacketSizeForReports(j, ptype) {
+  if (ptype) return packetSize(ptype);
+  return ['labels', 'leaflets'].includes(saleReportTabFor(j)) ? 500 : 100;
+}
 
 // Priority naming: form uses Normal / Urgent / Most Urgent. Old job rows
 // in the DB may still have Low / Medium / High — this maps them to the
@@ -13825,7 +13840,7 @@ function buildJobsReportRows() {
       packets = pktFromForm;
     } else {
       const sheets = parseFloat(j.sheets) || 0;
-      const ps     = packetSize(j.paper || '');
+      const ps     = jobPacketSizeForReports(j, jobPaperTypeForReports(j, j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null));
       if (sheets && ps) packets = sheets / ps;
     }
     // Wastage, Unit Carton Qty and "all delivered" come from
@@ -13860,7 +13875,7 @@ function buildJobsReportRows() {
     // = raw packets. 0 when ups or packet size are unknown - such rows
     // fall back to the whole-job packet count, displayed plain.
     const upsJR = parseFloat(j.ups);
-    const psJR  = packetSize((invItem && invItem.paper_type) || j.paper || '');
+    const psJR  = jobPacketSizeForReports(j, jobPaperTypeForReports(j, invItem));
     const perUnitPk = (upsJR > 0 && psJR > 0) ? 1 / (upsJR * psJR * jobCutPieces(j)) : 0;
     // Job creation timestamp — used for sorting and the Created At column.
     // Previously computed above the date-range filter; now inlined per-row
@@ -16529,7 +16544,7 @@ function jobShipmentFigures(j) {
     packets = pktFromForm;
   } else {
     const sheets = parseFloat(j.sheets) || 0;
-    const ps     = packetSize(j.paper || '');
+    const ps     = jobPacketSizeForReports(j, jobPaperTypeForReports(j, j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null));
     if (sheets && ps) packets = sheets / ps;
   }
   const cartonQtyNum   = parseFloat(j.cartonqty);
@@ -16557,9 +16572,9 @@ function jobShipmentFigures(j) {
   const jobWastageAll  = (wastageKnown && Number.isFinite(cartonQtyNum))
     ? (cartonQtyNum - (closedNormal ? deliveredTotal : readyTotalAll)) : null;
   const invItem   = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
-  const ptype     = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
+  const ptype     = jobPaperTypeForReports(j, invItem);
   const upsNum    = parseFloat(j.ups);
-  const psJob     = packetSize(ptype);
+  const psJob     = jobPacketSizeForReports(j, ptype);
   const cutPieces = jobCutPieces(j);
   const pkPerUnit = (upsNum > 0 && psJob > 0) ? 1 / (upsNum * psJob * cutPieces) : 0;
   const sheetUnit = ['labels', 'leaflets'].includes(saleReportTabFor(j)) && psJob > 0;
