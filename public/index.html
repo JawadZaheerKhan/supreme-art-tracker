@@ -16773,18 +16773,12 @@ function buildSaleReportRows(tabOverride) {
       const rowWastageSheets  = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
       const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? rowWastageSheets / psJob : null;
       const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
-      // Wastage KGs % is on the SAME basis as Wastage Weight (owner,
-      // 2026-10-02): printed sheets (UC / ups) weighed at the sheet's
-      // Packet/KG, no cut division - so it reads wastage / UC.
       // A shipment's OWN wastage (its UC or wastage typed) is a % of its own
-      // printed sheets; otherwise the wastage is the whole JOB's leftover,
-      // so it is a % of the whole job's printed sheets - not of the last
-      // delivery's slice (that overstated it 3-4x).
-      const printedKgOf       = (uc) => (uc > 0 && upsNum > 0 && psJob > 0 && packKg !== null) ? uc / upsNum / psJob * packKg : null;
-      const rowPrintedKg      = printedKgOf(rowCartonQty);
-      const jobPrintedKg      = printedKgOf(Number.isFinite(cartonQtyNum) ? cartonQtyNum : 0);
+      // paper. Otherwise the wastage is the whole JOB's leftover, so its % is
+      // of the whole job's paper - not of the last delivery's slice (that
+      // overstated it 3-4x).
       const ownWastage        = fig.ucTyped || fig.wastageTyped;
-      const pctBase           = (ownWastage && rowPrintedKg !== null) ? rowPrintedKg : (jobPrintedKg !== null ? jobPrintedKg : rowPrintedKg);
+      const pctBase           = (ownWastage && rowIssuedKg !== null) ? rowIssuedKg : (jobIssuedKg !== null ? jobIssuedKg : rowIssuedKg);
       const rowWastageKgPct   = (rowWastageKg !== null && pctBase !== null && pctBase > 0) ? rowWastageKg * 100 / pctBase : null;
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
@@ -16807,7 +16801,7 @@ function buildSaleReportRows(tabOverride) {
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         ups: upsVal, plates: platesVal,
-        wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, printedKg: rowPrintedKg, packKg, packUnit,
+        wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
         coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
         // The yellow row shade is for deliveries still OPEN - it clears by
@@ -16873,7 +16867,7 @@ function buildSaleReportRows(tabOverride) {
 // slight wording changes between reprints are not worth printing twice.
 const SALE_MERGE_ADDITIVE = [
   'cartons', 'cartonQty', 'poQty', 'cartonsPackets', 'wastage', 'readyQty',
-  'wastageSheets', 'wastageKg', 'issuedKg', 'printedKg', 'amountExTax', 'taxAmt', 'amountIncTax',
+  'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'taxAmt', 'amountIncTax',
   // Per-delivery now, so they add like the rest - left out, two jobs'
   // packets were joined as text ("10 12.5") and the cell read NaN.
   'packets', 'wastagePackets', 'packetsShown',
@@ -16966,8 +16960,8 @@ function mergeShipmentGroup(rows, conf) {
     const samePackKg = packKgs.length && packKgs.every(v => Math.abs(v - packKgs[0]) < 0.0001);
     out.packKg = packKgs.length ? packKgs[0] : null;
     if (packKgs.length && !samePackKg) parts.packKg = packKgs.slice();
-    out.wastageKgPct = (out.printedKg > 0 && out.wastageKg !== null && out.wastageKg !== undefined)
-      ? (out.wastageKg * 100 / out.printedKg)
+    out.wastageKgPct = (out.issuedKg > 0 && out.wastageKg !== null && out.wastageKg !== undefined)
+      ? (out.wastageKg * 100 / out.issuedKg)
       : null;
   }
   // Everything else: once when they agree, space-separated when they differ.
@@ -17456,7 +17450,7 @@ function saleReportCols(tabOverride) {
     // The total is the ratio of the two column totals, not a sum of percentages.
     { key: 'wastageKgPct', label: 'Wastage KGs %', right: true,
       cell: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '&mdash;' : d2(r.wastageKgPct) + '%',
-      totalCell: t => t.printedKg > 0 ? d2(t.wastageKg * 100 / t.printedKg) + '%' : '',
+      totalCell: t => t.issuedKg > 0 ? d2(t.wastageKg * 100 / t.issuedKg) + '%' : '',
       xl: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '' : +r.wastageKgPct.toFixed(2),
       pr: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? dash : d2(r.wastageKgPct) + '%' },
     { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
@@ -17494,7 +17488,7 @@ function renderSaleReport() {
   // weight; wastage on the last row), so the total adds every row. PO Qty
   // is per-row only on MIL rows - normal jobs keep their job-level PO Qty
   // counted once.
-  const MIL_PER_ROW_TOTALS = new Set(['poQty', 'cartonQty', 'wastage', 'readyQty', 'packets', 'wastageSheets', 'wastagePackets', 'wastageKg', 'issuedKg', 'printedKg']);
+  const MIL_PER_ROW_TOTALS = new Set(['poQty', 'cartonQty', 'wastage', 'readyQty', 'packets', 'wastageSheets', 'wastagePackets', 'wastageKg', 'issuedKg']);
   const totals = rows.reduce((a, r) => {
     const ids = r._merged || [r.id];
     const fresh = ids.map((id, i) => i).filter(i => !seenJobsForTotals.has(ids[i]));
@@ -17524,12 +17518,11 @@ function renderSaleReport() {
       wastagePackets: a.wastagePackets + once('wastagePackets', r.wastagePackets),
       wastageKg:      a.wastageKg      + once('wastageKg', r.wastageKg),
       issuedKg:       a.issuedKg       + once('issuedKg', r.issuedKg),
-      printedKg:      a.printedKg      + once('printedKg', r.printedKg),
       amountExTax:    a.amountExTax    + (r.amountExTax  || 0),
       taxAmt:         a.taxAmt         + (r.taxAmt       || 0),
       amountIncTax:   a.amountIncTax   + (r.amountIncTax || 0),
     };
-  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, wastageSheets: 0, wastagePackets: 0, wastageKg: 0, issuedKg: 0, printedKg: 0, taxAmt: 0, amountExTax: 0, amountIncTax: 0 });
+  }, { poQty: 0, cartonQty: 0, cartons: 0, cartonsPackets: 0, wastage: 0, readyQty: 0, packets: 0, wastageSheets: 0, wastagePackets: 0, wastageKg: 0, issuedKg: 0, taxAmt: 0, amountExTax: 0, amountIncTax: 0 });
   const canEditRate   = hasPerm('job_btn_pricing', 'yes');   // per-job Rate / Sale Tax cells, saved via /pricing
   const canEditFields = hasPerm('job_btn_pricing', 'yes');
   // Inline-editable reference-field cell — same PATCH route the job
