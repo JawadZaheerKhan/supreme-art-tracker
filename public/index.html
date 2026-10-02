@@ -14375,7 +14375,7 @@ function renderJobsReport() {
       <td ${wrapTd(140)}>${esc(r.batchNo)}</td>
       <td ${wrapTd(140)}>${esc(r.challan)}</td>
       ${milQtyCell}
-      <td style="padding:8px 10px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}" title="${r.stockGroupName?'MIL job — PO Qty shown is what actually shipped':''}">${esc(r.poQty)}</td>
+      <td style="padding:8px 10px;text-align:right;" title="${r.stockGroupName?'MIL job — PO Qty shown is what this shipment delivered':''}">${r.stockGroupName && Number.isFinite(+r.poQty) && r.poQty !== '' ? fmt(r.poQty) : esc(r.poQty)}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${ucWithJobTotal(r.cartonQty, r.jobUc, fmt, true)}</td>
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
@@ -14541,7 +14541,7 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.batchNo || '')}</td>
     <td ${tdL}>${esc(r.challan || '')}</td>
     ${milMode ? `<td ${tdR}>${esc(r.milQty ?? '')}</td>` : ''}
-    <td style="border:1px solid #000;padding:4px;text-align:right;${r.stockGroupName?'color:#7c3aed;font-weight:700;':''}">${esc(r.poQty)}</td>
+    <td style="border:1px solid #000;padding:4px;text-align:right;">${esc(r.poQty)}</td>
     <td ${tdR}>${ucWithJobTotal(r.cartonQty, r.jobUc, fmt, false)}</td>
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#dc2626;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
@@ -16580,16 +16580,26 @@ function jobShipmentFigures(j) {
   const sheetUnit = ['labels', 'leaflets'].includes(saleReportTabFor(j)) && psJob > 0;
   const ovNum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
   const ucBase = deliveriesList.map(d => { const o = ovNum(d && d.uc_qty); return o !== null ? o : (parseFloat(d && d.cartons) || 0); });
-  const wastageTypedArr = deliveriesList.map(d => ovNum(d && d.wastage_qty));
+  // A shipment's own wastage: typed, else - when its UC is typed (or set
+  // from Packets) - that UC minus what it delivered (owner, 2026-10-02).
+  // null = not known per shipment (the job's last shipment takes the rest).
+  const wastageTypedArr = deliveriesList.map(d => {
+    const w = ovNum(d && d.wastage_qty);
+    if (w !== null) return w;
+    const u = ovNum(d && d.uc_qty);
+    return u !== null ? u - (parseFloat(d && d.cartons) || 0) : null;
+  });
   const rows = deliveriesList.map((d, idx) => {
     const cartons = parseFloat(d && d.cartons) || 0;
     const isLastDelivery = idx === deliveriesList.length - 1;
     const othersUc = ucBase.reduce((a, v, k) => a + (k === idx ? 0 : v), 0);
     const ucCalc = (isLastDelivery && allDelivered && Number.isFinite(cartonQtyNum)) ? cartonQtyNum - othersUc : cartons;
     const typedWastageOthers = wastageTypedArr.reduce((a, v, k) => a + (k === idx || v === null ? 0 : v), 0);
-    const wastageCalc = (isLastDelivery && jobWastageAll !== null) ? jobWastageAll - typedWastageOthers : null;
     const ucTyped = ovNum(d && d.uc_qty);
     const wTyped  = ovNum(d && d.wastage_qty);
+    const wastageCalc = ucTyped !== null
+      ? ucTyped - cartons
+      : ((isLastDelivery && jobWastageAll !== null) ? jobWastageAll - typedWastageOthers : null);
     const cartonQty = ucTyped !== null ? ucTyped : ucCalc;
     // No ups / packet size on file: share the job's own packet count out by
     // the row's UC instead of showing 0.
@@ -16783,6 +16793,8 @@ function buildSaleReportRows(tabOverride) {
         ucJob: Number.isFinite(cartonQtyNum) ? cartonQtyNum : null,   // the job's printed total, shown beside the row's share
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
         packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
+        // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
+        pkPerUc: F.pkPerUnit > 0 ? (fig.packetsUnit === 'sheets' ? F.pkPerUnit * F.psJob : F.pkPerUnit) : 0,
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         ups: upsVal, plates: platesVal,
@@ -17390,9 +17402,13 @@ function saleReportCols(tabOverride) {
       right: true, total: 'packets', filter: 'packets',
       // Sheet rows (Labels / Leaflets) carry their packets alongside, for
       // reference only - the total keeps them out of the packets figure.
-      cell: r => r.packetsUnit === 'sheets'
-        ? `${fmt(r.packetsShown)} sheets <span style="font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>`
-        : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets),
+      // Editable (owner, 2026-10-02): type the packets - or sheets - and the
+      // shipment's Unit Carton Qty follows (UC = packets / packets-per-UC).
+      cell: (r, c) => (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
+        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}${r.packetsUnit === 'sheets' ? `<span style="font-size:10px;color:var(--text2);">sheets (${fmt(r.packets)} pkts)</span>` : ''}</div>`
+        : r.packetsUnit === 'sheets'
+          ? `${fmt(r.packetsShown)} sheets <span style="font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>`
+          : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets),
       totalCell: t => [t.packets ? fmt(t.packets) + (t.sheetsCount ? ' pkts' : '') : '',
         t.sheetsCount ? `${fmt(t.sheetsCount)} sheets (${fmt(t.sheetsPackets || 0)} pkts)` : ''].filter(Boolean).join(' + '),
       xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; },
@@ -17533,7 +17549,14 @@ function renderSaleReport() {
     const tip = typed ? `Typed by hand — clear the box to go back to the calculated ${calcTxt}` : `Calculated (${calcTxt}) — type a figure to set it by hand`;
     return `<input type="number" min="0" step="any" value="${value === null || value === undefined ? '' : esc(String(+(+value).toFixed(2)))}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveDeliveryEntryField(${r.id}, ${r.deliveryIndex}, '${field}', this.value)" title="${esc(tip)}" style="width:88px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${typed ? RATE_OVERRIDE_STYLE : ''}">`;
   } : null;
-  const ctx = { editCell, rateCell, taxCell, qtyCell };
+  // Packets box: same look as the UC box; amber while the UC is typed.
+  const packetsCell = canEditFields ? (r) => {
+    const shown = r.packetsShown !== undefined ? r.packetsShown : r.packets;
+    const unit = r.packetsUnit === 'sheets' ? 'sheets' : 'packets';
+    const tip = `Type the ${unit} for this shipment - its Unit Carton Qty is worked out from them (1 UC = ${+(r.pkPerUc).toPrecision(4)} ${unit}). Clear the box to go back to the calculated figure.`;
+    return `<input type="number" min="0" step="any" value="${shown === null || shown === undefined ? '' : esc(String(+(+shown).toFixed(2)))}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveShipmentPackets(${r.id}, ${r.deliveryIndex}, this.value, ${r.pkPerUc})" title="${esc(tip)}" style="width:80px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${r.ucTyped ? RATE_OVERRIDE_STYLE : ''}">`;
+  } : null;
+  const ctx = { editCell, rateCell, taxCell, qtyCell, packetsCell };
   const cols = saleReportCols();
   const tbody = rows.map(r => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.shadeOpen ? 'background:#fefce8;' : ''}" onclick="openEdit(${r.id})" title="${(r._merged && r._merged.length > 1) ? `Open the newest job (E-${r.id}) — or click a job number to open that one` : `Open this job's card`}">
       ${cols.map(c => `<td ${c.right ? tdR : td}>${c.cell(r, ctx)}</td>`).join('')}
@@ -26107,6 +26130,16 @@ function restoreJobEditPlace(p) {
   if (p.sel && typeof el.setSelectionRange === 'function') {
     try { el.setSelectionRange(p.sel[0], p.sel[1]); } catch (e) { /* number inputs refuse */ }
   }
+}
+
+// Sale Report Packets box -> the shipment's Unit Carton Qty (rounded to a
+// whole carton). Blank clears the typed UC, back to the calculation.
+async function saveShipmentPackets(jobId, index, valueStr, perUc) {
+  const t = String(valueStr).replace(/,/g, '').trim();
+  if (t === '') return saveDeliveryEntryField(jobId, index, 'uc_qty', '');
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0 || !(perUc > 0)) { await alertDialog({ title: 'Enter a valid number', message: 'Or leave it blank for the calculated figure.', kind: 'warn' }); renderSaleReport(); return; }
+  return saveDeliveryEntryField(jobId, index, 'uc_qty', String(Math.round(n / perUc)));
 }
 
 async function saveDeliveryEntryField(jobId, index, field, valueStr) {
