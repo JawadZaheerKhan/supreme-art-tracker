@@ -4682,6 +4682,97 @@ function jobDeductionSheets({ paperType, particulars }) {
   return Math.round(packets * ps);
 }
 
+// How many sheets of the job's MAIN paper went out beyond what the job now
+// needs and nobody has decided about yet - or null when none (owner,
+// 2026-10-05: E-588's cut went 1/2 -> 1/4 after 200 sheets were issued;
+// it needs 100). Read from the stock ledger itself:
+//   issued  = the job's stock-outs from its main paper GROUP (type / size /
+//             gsm / offcut - any brand), net of refunds; reversed entries
+//             and reversal rows are left out (they cancel).
+//   needed  = Quantity of Packets x sheets per packet, less a 2nd paper of
+//             another group (it is issued apart), plus approved top-ups
+//             (not the ones a "Use" decision created - see below).
+//   settled = every earlier over-issue decision + one still pending. A
+//             "Use" decision both adds a top-up and is settled, so its
+//             top-ups are not counted in needed. "Add to Offcut" credits
+//             (job-offcut) are not counted in issued for the same reason.
+// The extra is split over the brands it came from, like an over-issue at
+// issue time, so the existing decision route can handle it unchanged.
+const OVER_ISSUE_LEDGER_REASONS = ['job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund', 'job-issuance-reversed'];
+async function jobMainPaperOverIssue(sql, job) {
+  const p = job.particulars || {};
+  if (!job.inventory_item_id || p.paper_waived) return null;
+  const anchor = (await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`)[0];
+  if (!anchor) return null;
+  const paperType = anchor.paper_type || '';
+  const ps = packetSize(paperType);
+  const total = jobDeductionSheets({ paperType, particulars: p });
+  if (total <= 0) return null;
+  const sameGroup = (a, b) => (a.paper_type || '') === (b.paper_type || '') && (a.size || '') === (b.size || '')
+    && String(a.gsm || '') === String(b.gsm || '') && !!a.is_offcut === !!b.is_offcut;
+  let secSheets = 0;
+  const sec = p.secondary_paper;
+  if (sec && sec.inventory_item_id && parseFloat(sec.packets) > 0) {
+    const secItem = (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0];
+    if (secItem && !sameGroup(secItem, anchor)) secSheets = Math.round(parseFloat(sec.packets) * packetSize(secItem.paper_type || ''));
+  }
+  const topupSheets = (Array.isArray(p.packets_topups) ? p.packets_topups : [])
+    .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile')
+    .reduce((a, t) => a + Math.round((parseFloat(t.qty) || 0) * ps), 0);
+  const needed = Math.max(0, total - secSheets) + topupSheets;
+  const rows = await sql`
+    SELECT t.item_id, t.change, i.brand
+      FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
+     WHERE t.job_id = ${job.id}
+       AND t.reason = ANY(${OVER_ISSUE_LEDGER_REASONS})
+       AND t.reverses_tx_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+       AND COALESCE(i.paper_type, '') = ${anchor.paper_type || ''}
+       AND COALESCE(i.size, '') = ${anchor.size || ''}
+       AND COALESCE(i.gsm::text, '') = ${String(anchor.gsm || '')}
+       AND COALESCE(i.is_offcut, false) = ${!!anchor.is_offcut}`;
+  const byItem = new Map();
+  for (const r of rows) {
+    const e = byItem.get(r.item_id) || { item_id: r.item_id, brand: r.brand || null, sheets: 0 };
+    e.sheets += -(Number(r.change) || 0);
+    byItem.set(r.item_id, e);
+  }
+  const issued = [...byItem.values()].reduce((a, e) => a + e.sheets, 0);
+  const settled = (Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions : []).reduce((a, d) => a + (Number(d && d.total_sheets) || 0), 0)
+    + (p.over_issue_pending ? (Number(p.over_issue_pending.total_sheets) || 0) : 0);
+  const over = Math.round(issued - needed - settled);
+  if (over < 1) return null;
+  // Split the extra over the brands it came from (largest last takes the rounding).
+  const src = [...byItem.values()].filter(e => e.sheets > 0).sort((a, b) => a.sheets - b.sheets);
+  const srcTotal = src.reduce((a, e) => a + e.sheets, 0);
+  if (!srcTotal) return null;
+  let left = over;
+  const splits = src.map((e, i) => {
+    const sh = i === src.length - 1 ? left : Math.min(left, Math.round(over * e.sheets / srcTotal));
+    left -= sh;
+    return { source_item_id: e.item_id, brand: e.brand, sheets: sh, packets: sh / ps };
+  }).filter(x => x.sheets > 0);
+  return { overSheets: over, issued, needed, settled, ps, unit: packetUnitLabelSrv(paperType), splits };
+}
+// The over_issue_pending record for an extra found AFTER issue (the same
+// shape issue-stock writes, plus why it arose).
+function overIssuePendingFrom(oi, email, why) {
+  return {
+    id: 'oi' + Date.now() + Math.floor(Math.random() * 1000),
+    total_sheets: oi.overSheets,
+    total_packets: oi.overSheets / oi.ps,
+    unit: oi.unit,
+    ps: oi.ps,
+    splits: oi.splits,
+    challan_no: null,
+    issued_by_email: email || null,
+    issued_at: new Date().toISOString(),
+    reason: why,
+    issued_sheets: oi.issued,
+    needed_sheets: oi.needed,
+  };
+}
+
 // Helper: apply a stock change (+/-) and write a ledger row. Must be called
 // after dbReady. Assumes the item exists. Updates current_balance atomically
 // in the same UPDATE so balance always matches the sum of ledger changes.
@@ -5690,6 +5781,29 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       summary: `Edited Job E-${job.id}: ${job.name}${allChanges.length ? ' — ' + allChanges.join('; ') : ''}`,
       metadata: { changes: allChanges },
     });
+    // Quantity of Packets (or the 2nd paper's share) changed on a job whose
+    // paper already went out, same paper: if more went out than it now needs,
+    // raise the over-issue decision for the extra (see jobMainPaperOverIssue).
+    try {
+      const pq = (o) => String((o && o.quantity_of_packets) ?? '').trim();
+      const sp = (o) => String((o && o.secondary_paper && o.secondary_paper.packets) ?? '').trim();
+      const jp = job.particulars || {};
+      const needChanged = pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp);
+      if (needChanged && oldItemId === newItemId && !jp.over_issue_pending
+          && (job.issuance_status === 'issued' || job.issuance_status === 'ctp')) {
+        const oi = await jobMainPaperOverIssue(sql, job);
+        if (oi) {
+          const np = { ...jp, over_issue_pending: overIssuePendingFrom(oi, req.user && req.user.email, 'packets-lowered') };
+          const upd = await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)} WHERE id = ${job.id} RETURNING *`;
+          if (upd[0]) Object.assign(job, upd[0]);
+          await logAudit(sql, req, {
+            action: 'job.over_issue.raised', entityType: 'job', entityId: job.id,
+            summary: `Job E-${job.id}: Quantity of Packets lowered after its paper was issued - ${oi.issued.toLocaleString()} sheets went out, it now needs ${oi.needed.toLocaleString()}; ${oi.overSheets.toLocaleString()} sheets (${+(oi.overSheets / oi.ps).toFixed(2)} ${oi.unit}) extra waiting for a decision (Use in job / Add to Offcut / Send Back).`,
+            metadata: { issued_sheets: oi.issued, needed_sheets: oi.needed, over_sheets: oi.overSheets },
+          });
+        }
+      }
+    } catch (e) { console.error('over-issue check after save failed:', e.message); }   // never fails the save itself
     res.json(job);
   } catch (err) {
     console.error(err);
