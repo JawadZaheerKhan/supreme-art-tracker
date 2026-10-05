@@ -25960,19 +25960,47 @@ async function saveProductRateInline(i, valueStr) {
 // onclick) so a product name with an apostrophe can't break the markup.
 let __addToProductCandidates = [];
 let __addToProductTargetKey = '';
+// How alike two product names are, 0..1 (owner, 2026-10-05: "show me the
+// closest matching one"). Letter pairs (Dice) catch spelling / version
+// differences ("xavor 50mg tab gop" vs "... gop v2"); shared words and the
+// same first word (the brand) push the real variants to the top.
+function productNameSimilarity(a, b) {
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const A = norm(a), B = norm(b);
+  if (!A || !B) return 0;
+  const pairs = s => { const m = new Map(); const t = s.replace(/ /g, ''); for (let k = 0; k < t.length - 1; k++) { const p = t.slice(k, k + 2); m.set(p, (m.get(p) || 0) + 1); } return m; };
+  const pa = pairs(A), pb = pairs(B);
+  let common = 0, na = 0, nb = 0;
+  pa.forEach((n, p) => { na += n; common += Math.min(n, pb.get(p) || 0); });
+  pb.forEach(n => { nb += n; });
+  const dice = (na + nb) ? (2 * common) / (na + nb) : 0;
+  const wa = new Set(A.split(' ')), wb = new Set(B.split(' '));
+  let shared = 0; wa.forEach(w => { if (wb.has(w)) shared++; });
+  const words = shared / (new Set([...wa, ...wb]).size || 1);
+  const brand = A.split(' ')[0] === B.split(' ')[0] ? 1 : 0;
+  return 0.5 * dice + 0.3 * words + 0.2 * brand;
+}
 function openAddToProductModal(i) {
   const target = __productGroupsCache[i];
   if (!target) return;
   __addToProductTargetKey = target.key;
+  // Only products of the same company (owner, 2026-10-05) - a product with no
+  // company on its jobs shows everything, as before - closest names first.
+  const coKey = c => String(c || '').trim().toLowerCase();
+  const targetCos = new Set([...target.companies].map(coKey).filter(Boolean));
   __addToProductCandidates = __productGroupsAll
     .filter(g => g.key !== target.key)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .filter(g => !targetCos.size || [...g.companies].some(c => targetCos.has(coKey(c))))
+    .map(g => ({ g, score: productNameSimilarity(target.name, g.name) }))
+    .sort((x, y) => (y.score - x.score) || x.g.name.localeCompare(y.g.name))
+    .map(x => x.g);
+  const coNote = targetCos.size ? `Showing <b>${esc([...target.companies].sort().join(', '))}</b> products only, closest names first.` : 'Closest names first.';
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <h2 style="margin:0;font-size:17px;">&plus; Add product to ${esc(target.name)}</h2>
       <button class="btn btn-sm" onclick="closeModal()" style="padding:2px 8px;font-size:14px;line-height:1;">&times;</button>
     </div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick another product below to fold into <b>${esc(target.name)}</b> — every job with that name, past and future, will count as this product (and use its Rate) from now on.</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick another product below to fold into <b>${esc(target.name)}</b> — every job with that name, past and future, will count as this product (and use its Rate) from now on.<div style="margin-top:4px;color:var(--text3);">${coNote}</div></div>
     <input id="add-to-product-search" class="filter" placeholder="Search product name..." style="width:100%;box-sizing:border-box;margin-bottom:10px;" oninput="filterAddToProductList()">
     <div id="add-to-product-list" style="max-height:50vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
       ${__addToProductCandidates.length ? __addToProductCandidates.map((g, ci) => `
@@ -25982,7 +26010,7 @@ function openAddToProductModal(i) {
             <div style="font-size:11px;color:var(--text2);">${esc([...g.companies].sort().join(', ')) || '&mdash;'} &middot; ${g.jobs.length} job${g.jobs.length===1?'':'s'}</div>
           </div>
           <button class="btn btn-sm btn-primary" onclick="addProductAlias(${ci})">Add</button>
-        </div>`).join('') : `<div style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No other products to add.</div>`}
+        </div>`).join('') : `<div style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">${targetCos.size ? 'No other products of this company to add.' : 'No other products to add.'}</div>`}
     </div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button></div>
   </div>`);
