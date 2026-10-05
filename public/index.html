@@ -28211,6 +28211,27 @@ function updateStockHint2() {
   const pStr = Number.isInteger(balPackets) ? String(balPackets) : (+balPackets.toFixed(2)).toString();
   hint.innerHTML = `Available: <b>${pStr} ${unit}</b> <span style="color:#1e40af;">(${balSheets.toLocaleString()} sheets)</span>`;
 }
+// Paper box -> its hidden chosen-paper field. When the typed text is no
+// longer the chosen paper's label (cleared, or typing a new search) the
+// choice is dropped, so Save never sends a paper the box doesn't show.
+// Returns true when it dropped one.
+function paperDropStaleChoice(searchId, hiddenId) {
+  const input = document.getElementById(searchId);
+  const hidden = document.getElementById(hiddenId);
+  if (!input || !hidden || !hidden.value) return false;
+  const it = inventoryAll.find(x => x.id === parseInt(hidden.value, 10));
+  // Unchanged from what the box showed (a missing item shows an empty box) - keep it.
+  if (input.value.trim() === (it ? paperGroupLabel(it) : '')) return false;
+  hidden.value = '';
+  if (hidden.dataset) hidden.dataset.balance = '';
+  return true;
+}
+// Closing a list with nothing chosen leaves no half-typed search behind.
+function paperClearUnchosenText(searchId, hiddenId) {
+  const input = document.getElementById(searchId);
+  const hidden = document.getElementById(hiddenId);
+  if (input && hidden && !hidden.value && input.value.trim()) input.value = '';
+}
 function paperOpen2() {
   const list = document.getElementById('paper-list-2');
   if (!list) return;
@@ -28220,11 +28241,13 @@ function paperOpen2() {
 function paperClose2() {
   const list = document.getElementById('paper-list-2');
   if (list) list.style.display = 'none';
+  paperClearUnchosenText('paper-search-2', 'f-inventory-item-2');
 }
 function paperFilter2() {
   const input = document.getElementById('paper-search-2');
   const list  = document.getElementById('paper-list-2');
   if (!input || !list) return;
+  if (paperDropStaleChoice('paper-search-2', 'f-inventory-item-2') && typeof refreshSecondPaperWarning === 'function') refreshSecondPaperWarning();
   const q = (input.value || '').toLowerCase().trim();
   const filtered = inventory.filter(it => {
     if (!q) return true;
@@ -28294,11 +28317,13 @@ function paperOpen() {
 function paperClose() {
   const list = document.getElementById('paper-list');
   if (list) list.style.display = 'none';
+  paperClearUnchosenText('paper-search', 'f-inventory-item');
 }
 function paperFilter() {
   const input = document.getElementById('paper-search');
   const list  = document.getElementById('paper-list');
   if (!input || !list) return;
+  if (paperDropStaleChoice('paper-search', 'f-inventory-item')) updateStockHint();
   const q = (input.value || '').toLowerCase().trim();
   // Filter first — brand is intentionally searchable (some PMs still
   // hunt by brand when they know they've ordered from a specific one),
