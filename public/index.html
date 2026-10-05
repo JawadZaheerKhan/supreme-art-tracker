@@ -27442,24 +27442,51 @@ async function openCreateGroupPicker() {
     await alertDialog({ title: 'No ungrouped jobs available', message: 'All existing jobs are already in a Job Group.', kind: 'info' });
     return;
   }
-  const rowHtml = ungrouped.slice(0, 200).map(j =>
-    `<option value="${j.id}">E-${j.id} &middot; ${esc(j.name)}${j.client?' &middot; '+esc(j.client):''}</option>`
-  ).join('');
+  // Every ungrouped job is searchable - the list used to stop at the 200
+  // newest, so an older job (E-541) could not be picked at all.
+  _cgpJobs = ungrouped;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
     <h2 style="margin:0 0 4px;">&#128230; Create Mil Job</h2>
     <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Pick the seed job. The group is named after it and its tile shows the seed job's details. More jobs can be added later.</div>
     <div class="form-group">
       <label class="form-label">Seed Job *</label>
-      <select id="cgp-job" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
-        ${rowHtml}
-      </select>
+      <input type="text" id="cgp-search" placeholder="Search job no. (e.g. 541), name or company…" autocomplete="off" oninput="cgpFilter()" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmCreateGroupPicker();}"
+        style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);box-sizing:border-box;margin-bottom:6px;">
+      <select id="cgp-job" size="8" style="width:100%;padding:4px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);"></select>
+      <div id="cgp-count" style="font-size:11px;color:var(--text2);margin-top:4px;"></div>
     </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" style="background:#dc2626;border-color:#dc2626;" onclick="confirmCreateGroupPicker()">Create Mil Job</button>
     </div>
   </div>`);
-  setTimeout(() => { const el = document.getElementById('cgp-job'); if (el) el.focus(); }, 30);
+  cgpFilter();
+  setTimeout(() => { const el = document.getElementById('cgp-search'); if (el) el.focus(); }, 30);
+}
+// Create Mil Job picker list: every ungrouped job matching the search -
+// "541" / "E-541" finds the job number, any other text the name / company.
+// Newest first; the first match is selected so Enter / the button take it.
+let _cgpJobs = [];
+function cgpFilter() {
+  const sel = document.getElementById('cgp-job');
+  const input = document.getElementById('cgp-search');
+  const count = document.getElementById('cgp-count');
+  if (!sel) return;
+  const raw = String((input && input.value) || '').trim().toLowerCase();
+  const idNeedle = raw.replace(/^e[-\s]?/, '');
+  const hits = !raw ? _cgpJobs : _cgpJobs.filter(j =>
+    String(j.id) === idNeedle || String(j.id).includes(idNeedle)
+    || String(j.name || '').toLowerCase().includes(raw)
+    || String(j.client || '').toLowerCase().includes(raw));
+  // Exact job number first, then newest first.
+  const sorted = [...hits].sort((a, b) => (String(b.id) === idNeedle) - (String(a.id) === idNeedle) || b.id - a.id);
+  const SHOW = 300;
+  sel.innerHTML = sorted.slice(0, SHOW).map(j =>
+    `<option value="${j.id}">E-${j.id} &middot; ${esc(j.name)}${j.client ? ' &middot; ' + esc(j.client) : ''}</option>`).join('');
+  if (sorted.length) sel.selectedIndex = 0;
+  if (count) count.textContent = !sorted.length
+    ? (raw ? 'No job matches - it may already be in a MIL, or archived.' : '')
+    : (sorted.length > SHOW ? `Showing ${SHOW} of ${sorted.length} - type to narrow down.` : `${sorted.length} job${sorted.length === 1 ? '' : 's'}`);
 }
 async function confirmCreateGroupPicker() {
   const sel = document.getElementById('cgp-job');
