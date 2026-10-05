@@ -1198,6 +1198,8 @@
   .job-top { display: flex; align-items: flex-start; gap: 16px; }
   /* Recorded deliveries strip at the top of a job tile - same yellow as the
      job card's delivery ledger, small. See tileDeliveryRecordsHtml(). */
+  .sm-ref-input { padding:3px 6px; border:1px solid var(--border); border-radius:5px; font-size:12px; background:var(--bg); box-sizing:border-box; }
+  .sm-ref-input:focus { border-color:#A32D2D; outline:none; background:#fff; }
   .tdr { background:#fefce8; border:1px solid #fde68a; border-radius:8px; padding:5px 9px; margin-bottom:8px; font-size:11px; line-height:1.35; color:var(--text); }
   .tdr-head { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; font-size:10px; text-transform:uppercase; letter-spacing:0.04em; color:#854d0e; font-weight:700; margin-bottom:2px; }
   .tdr-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 10px; padding:2px 0; border-top:1px dashed #fde68a; }
@@ -7728,7 +7730,7 @@ function renderSsReturnBars() {
     el.innerHTML = mine ? `
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
         <button class="btn btn-sm" onclick="ssReturnToSummary()">&#8592; Back to ${esc(ssReturn.backLabel || 'Stock Summary')}</button>
-        <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(ssReturn.label)}</b> &middot; ${esc(ssReturn.rangeText)}, opened from ${ssReturn.historyJobId ? 'the job\'s History' : 'that report'}.</span>
+        <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(ssReturn.label)}</b> &middot; ${esc(ssReturn.rangeText)}, opened from ${ssReturn.historyJobId ? 'the job\'s History' : ssReturn.historyItemId ? 'the paper\'s History' : ssReturn.fromActivity ? 'the Activity Log' : 'that report'}.</span>
       </div>` : '';
   }
 }
@@ -7738,6 +7740,9 @@ function ssReturnToSummary() {
   if (!back) return;
   // Opened from a job's History: back to the tab it was on, History reopened.
   if (back.historyJobId) { setMode(back.prevMode || 'jobs'); openHistory(back.historyJobId); return; }
+  // Opened from a paper's History / the Activity Log (an edited entry).
+  if (back.historyItemId) { setMode(back.prevMode || 'inventory'); openInvHistory(back.historyItemId); return; }
+  if (back.fromActivity) { setMode(back.prevMode || 'users'); return; }
   setReportsTab('summary');
   requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
 }
@@ -10489,7 +10494,16 @@ async function saveBulkStockOut() {
 // ever shows genuine free text (manual-job-card references, sold/damaged/
 // sample remarks, etc). Every transaction ledger view uses this.
 function txDisplayNotes(t) {
+  // A note typed later on Stock In / Stock Out (user_notes, '' = cleared on
+  // purpose) wins over the system note.
+  if (t && t.user_notes !== null && t.user_notes !== undefined) return t.user_notes;
   return (t && t.reason === 'job-consumed') ? '' : ((t && t.notes) || '');
+}
+// Notes as the Stock In / Out reports show them: a typed note, else a split
+// issuance's brand breakdown, else the system note.
+function txNotesShown(t) {
+  if (t && t.user_notes !== null && t.user_notes !== undefined) return t.user_notes;
+  return (t && t.split_note) || txDisplayNotes(t);
 }
 
 // Job column for a ledger row. A real linked job shows "Job E-<id>" as
@@ -10733,7 +10747,7 @@ async function renderInvHistory(id) {
       const splitSources = t._parts.length > 1
         ? [...t._parts].sort((a, b) => a.id - b.id).map(p => `${p.item_brand || 'no brand'} ${fmtPackets(Math.abs(p.change))}`).join(' + ')
         : '';
-      const notes = splitSources || txDisplayNotes(t);
+      const notes = (t.user_notes !== null && t.user_notes !== undefined) ? t.user_notes : (splitSources || txDisplayNotes(t));
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" data-reason="${esc(t.reason || '')}" class="row-hover-red" style="${rowStyle}">
         <td style="white-space:nowrap;">${date}</td>
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
@@ -10773,6 +10787,10 @@ async function renderInvHistory(id) {
 function renderAuditFeed(rows, opts) {
   if (!rows || !rows.length) return '<div class="empty">No activity yet.</div>';
   const jobId = opts && opts.jobId;
+  // Stock In / Out Challan No. or Notes edits open the edited row.
+  const invItemId = (opts && opts.invItemId) || null;
+  const isTxEdit = a => a && a.action === 'inventory.tx.edit' && a.metadata && Array.isArray(a.metadata.tx_ids) && a.metadata.tx_ids.length;
+  rows.forEach(a => { if (isTxEdit(a)) txEditAuditRows[a.id] = a; });
   if (jobId) { jhAuditRows = {}; rows.forEach(a => { if (jhIsIssueEntry(a)) jhAuditRows[a.id] = a; }); }
   const issueExtra = (a) => {
     if (!jobId || !jhIsIssueEntry(a)) return '';
@@ -10799,11 +10817,12 @@ function renderAuditFeed(rows, opts) {
       <div class="audit-day-header">${esc(dayHeader(g.date))}</div>
       ${g.rows.map(a => {
         const link = jobId && jhIsIssueEntry(a);
+        const txLink = !link && isTxEdit(a);
         return `
-      <div class="audit-row${link ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : ''}>
+      <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
         <div><span class="audit-tag-badge">${esc(String(a.action || '').toUpperCase())}</span></div>
-        <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span>${issueExtra(a)}</div>
+        <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span>${issueExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
       </div>`;
       }).join('')}
     </div>`).join('')}</div>`;
@@ -10822,10 +10841,68 @@ async function loadInvAuditContent(id) {
       api('GET', `/api/audit?entity_type=inventory&entity_id=${itemId}`)
     ));
     const rows = batches.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    el.innerHTML = renderAuditFeed(rows);
+    el.innerHTML = renderAuditFeed(rows, { invItemId: id });
   } catch(e) {
     el.innerHTML = 'Error: ' + e.message;
   }
+}
+
+// Saves a Stock In / Out row's Challan No. or Notes (all ids of a split
+// issuance at once). The server logs it on the paper's History.
+async function saveTxRef(direction, ids, field, value) {
+  try {
+    const r = await api('POST', '/api/inventory/tx-ref', { ids, field, value });
+    if (r && r.unchanged) return;
+    const st = stockMovementStates[direction];
+    for (const row of (r && r.rows) || []) {
+      const t = (st.rows || []).find(x => x.id === row.id);
+      if (t) Object.assign(t, { challan_no: row.challan_no, notes: row.notes, user_notes: row.user_notes });
+    }
+    notify(field === 'challan_no' ? 'Challan No. saved' : 'Notes saved');
+  } catch (e) {
+    notify('Error: ' + e.message);
+    loadStockMovement(direction);   // put the saved value back
+  }
+}
+// An "edited Challan No. / Notes" line in a History or the Activity Log opens
+// that entry in Stock In / Stock Out (all dates), flashed, with a bar back.
+let txEditAuditRows = {};
+function openTxEditInReport(auditId, invItemId) {
+  const a = txEditAuditRows[auditId];
+  const m = a && a.metadata;
+  if (!m || !Array.isArray(m.tx_ids) || !m.tx_ids.length) return;
+  const dir = m.direction === 'in' ? 'in' : 'out';
+  if (!hasPerm(dir === 'in' ? 'rpt_stock_in' : 'rpt_stock_out', 'view')) { notify(`The Stock ${dir === 'in' ? 'In' : 'Out'} report is not available for your role.`); return; }
+  const prevMode = mode;
+  closeModal();
+  setMode('reports');
+  ssClearReturn();
+  const st = stockMovementStates[dir];
+  ssReturn = {
+    direction: dir, barId: `sm-${dir}-return`, pane: `stock-${dir}`,
+    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType,
+               size: st.size, gsm: st.gsm, challan: st.challan, jobCard: st.jobCard, viewMode: st.viewMode },
+    label: `the edited entry${m.tx_created_at ? ' of ' + fmtDMY(localDateISO(new Date(m.tx_created_at))) : ''}`,
+    rangeText: `all stock-${dir === 'in' ? 'ins' : 'outs'}`,
+    scrollY: 0, prevMode,
+    backLabel: invItemId ? 'Paper History' : 'Activity Log',
+    historyItemId: invItemId || null, fromActivity: !invItemId,
+  };
+  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', viewMode: 'list' });
+  openReportsGroup('stocks-group', `stock-${dir}`);
+  renderSsReturnBars();
+  window.scrollTo(0, 0);
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    const els = m.tx_ids.map(id => document.querySelector(`tr[data-sm-row="${dir}-${id}"]`)).filter(Boolean);
+    if (els.length || tries > 40) {
+      clearInterval(timer);
+      if (!els.length) { notify('That entry is no longer in the report (it may have been reversed).'); return; }
+      els.forEach(el => { const prev = el.style.background; el.style.transition = 'background 0.3s'; el.style.background = '#fde68a'; setTimeout(() => { el.style.background = prev; }, 2200); });
+      els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 150);
 }
 
 // Re-fetch whichever Stock In / Stock Out pane is on screen, so a Reverse
@@ -20524,6 +20601,9 @@ function renderStockMovement(direction, from, to) {
       tile(`Total ${direction === 'in' ? 'Stock In' : 'Stock Out'}`, pktReamHead, color, `${total.toLocaleString()} sheets · ${fmt(totalKg)} kg`)
     + tile('Transactions', txs.length.toLocaleString(), 'var(--text)', `${from || '(any)'} → ${to || '(any)'}`);
 
+  // Challan No. / Notes stay editable after the entry for whoever holds this
+  // direction's button (owner, 2026-10-05) - see saveTxRef.
+  const canEditRef = hasPerm(direction === 'in' ? 'inv_btn_stock_in' : 'inv_btn_stock_out');
   const rows = txs.map(t => {
     const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     // Date over time - same text, half the width.
@@ -20586,8 +20666,12 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${weightCell}</td>
       <td style="padding:8px 10px;">${esc(t.reason||'')}</td>
       <td style="padding:8px 10px;">${job}</td>
-      <td style="padding:8px 10px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td>
-      <td style="padding:8px 10px;">${esc(t.split_note || txDisplayNotes(t))}</td>
+      <td style="padding:8px 10px;">${canEditRef
+        ? `<input type="text" value="${esc(t.challan_no || '')}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveTxRef('${direction}', [${ids.join(',')}], 'challan_no', this.value)" title="Challan No. — edit and press Enter; the change is logged in this paper's History" class="sm-ref-input" style="width:90px;">`
+        : (t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>')}</td>
+      <td style="padding:8px 10px;">${canEditRef
+        ? `<input type="text" value="${esc(txNotesShown(t))}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)" title="Notes — edit and press Enter; the change is logged in this paper's History" class="sm-ref-input" style="width:100%;min-width:150px;">`
+        : esc(txNotesShown(t))}</td>
       <td style="padding:8px 10px;">${reverseCell}</td>
     </tr>`;
   }).join('');
@@ -22211,7 +22295,7 @@ function printStockMovement(direction) {
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
       <td ${tdL}>${job}</td>
-      <td ${tdL}>${esc(t.split_note || txDisplayNotes(t))}</td>
+      <td ${tdL}>${esc(txNotesShown(t))}</td>
     </tr>`;
   }).join('');
   const html = `
@@ -22300,7 +22384,7 @@ async function exportStockMovement(direction) {
       job,
       t.challan_no || '',
       t.user_email || '',
-      t.split_note || txDisplayNotes(t),
+      txNotesShown(t),
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
