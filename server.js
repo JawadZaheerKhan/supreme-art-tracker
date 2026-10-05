@@ -5267,7 +5267,7 @@ const JOB_DIFF_FIELDS = [
   ['name', 'Job Name'], ['client', 'Company'], ['jobcode', 'Code'], ['ref', 'P.O. No.'],
   ['dateissued', 'Date'], ['deadline', 'Deadline'], ['size', 'Size/GSM'], ['ups', 'Ups'],
   ['sheets', 'Sheets Qty'], ['qty', 'P.O. Qty'], ['paper', 'Paper'], ['machine', 'Machine'],
-  ['priority', 'Priority'], ['cartonqty', 'Unit Carton Qty'], ['notes', 'Notes'],
+  ['priority', 'Priority'], ['cartonqty', 'Printed UC Qty'], ['notes', 'Notes'],
   ['bno', 'Batch No.'], ['mfgdate', 'Mfg Date'], ['expdate', 'Exp Date'], ['mrp', 'MRP'],
   ['coatings_str', 'Coatings'], ['is_shade_card_str', 'Shade Card'], ['client_visible_str', 'Show to Client'],
 ];
@@ -9016,7 +9016,7 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       const t = String(req.body.value ?? '').replace(/,/g, '').trim();
       const num = t === '' ? null : Number(t);
       if (num !== null && (!Number.isFinite(num) || num < 0)) {
-        return res.status(400).json({ error: (which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage') + ' must be a non-negative number (or blank for the calculated figure).' });
+        return res.status(400).json({ error: (which === 'uc_qty' ? 'Printed UC Qty' : 'Wastage') + ' must be a non-negative number (or blank for the calculated figure).' });
       }
       const prev = list[ix] || {};
       const entry = { ...prev };
@@ -9027,7 +9027,7 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       if (droppedWastage !== undefined) delete entry.wastage_qty;
       list[ix] = entry;
       const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(list)} WHERE id = ${id} RETURNING *`;
-      const label = which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage';
+      const label = which === 'uc_qty' ? 'Printed UC Qty' : 'Wastage';
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
         summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"${droppedWastage !== undefined ? ` (typed Wastage ${droppedWastage} cleared - recalculated)` : ''}`,

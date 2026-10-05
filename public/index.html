@@ -5624,7 +5624,7 @@ function setMode(m) {
     exportBtn.style.display = '';
     if (refreshBtn) refreshBtn.style.display = '';
     render();
-    loadDailyStats();   // fills the Daily Unit Carton Qty card
+    loadDailyStats();   // fills the Daily Printed UC Qty card
   } else if (m === 'products') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -5995,7 +5995,7 @@ function renderStats() {
     stat('Pending Stock',          s.pending, s.pending>0?'warn':''),
     stat('In Progress',            s.active),
     stat('Ready to Deliver',        `${s.storage} · ${s.storageQty.toLocaleString()}`),
-    stat('Daily Unit Carton Qty',  cartonsCell),
+    stat('Daily Printed UC Qty',  cartonsCell),
   ].join('');
 }
 
@@ -14632,7 +14632,7 @@ function renderJobsReport() {
           <th ${th}>${jrColSearchHeaderHtml('invoice', 'Invoice No.')}</th>
           ${milMode ? `<th ${thR}>Mil Qty</th>` : ''}
           <th ${thR}>PO Qty</th>
-          <th ${thR}>Unit Carton Qty</th>
+          <th ${thR}>Printed UC Qty</th>
           <th ${thR}>Delivered Qty</th>
           <th ${thR}>Wastage</th>
           <th ${thR}>Ready Qty</th>
@@ -14673,7 +14673,7 @@ async function exportJobsReport() {
   const milMode = !!jobsReportState.milOnly;
   const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'PO Qty', 'Unit Carton Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings'];
+    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -14796,7 +14796,7 @@ function printJobsReport() {
           <th ${tdL}>Invoice No.</th>
           ${milMode ? `<th ${tdR}>Mil Qty</th>` : ''}
           <th ${tdR}>PO Qty</th>
-          <th ${tdR}>Unit Carton Qty</th>
+          <th ${tdR}>Printed UC Qty</th>
           <th ${tdR}>Delivered Qty</th>
           <th ${tdR}>Wastage</th>
           <th ${tdR}>Ready Qty</th>
@@ -17640,7 +17640,7 @@ function saleReportCols(tabOverride) {
       xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; },
       pr: r => r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
-    { key: 'cartonQty', label: 'Unit Carton Qty', right: true, total: 'cartonQty',
+    { key: 'cartonQty', label: 'Printed UC Qty', right: true, total: 'cartonQty',
       // The row's share, with the job's printed total beside it when they
       // differ ("300,000 / 1,350,000") - the typing box stays as it was.
       cell: (r, c) => (c && c.qtyCell && !r._merged)
@@ -17779,7 +17779,7 @@ function renderSaleReport() {
   const packetsCell = canEditFields ? (r) => {
     const shown = r.packetsShown !== undefined ? r.packetsShown : r.packets;
     const unit = r.packetsUnit === 'sheets' ? 'sheets' : 'packets';
-    const tip = `Type the ${unit} for this shipment - its Unit Carton Qty is worked out from them (1 UC = ${+(r.pkPerUc).toPrecision(4)} ${unit}). Clear the box to go back to the calculated figure.`;
+    const tip = `Type the ${unit} for this shipment - its Printed UC Qty is worked out from them (1 UC = ${+(r.pkPerUc).toPrecision(4)} ${unit}). Clear the box to go back to the calculated figure.`;
     return `<input type="number" min="0" step="any" value="${shown === null || shown === undefined ? '' : esc(String(+(+shown).toFixed(2)))}" placeholder="&mdash;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveShipmentPackets(${r.id}, ${r.deliveryIndex}, this.value, ${r.pkPerUc})" title="${esc(tip)}" style="width:80px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;font-size:12px;${r.ucTyped ? RATE_OVERRIDE_STYLE : ''}">`;
   } : null;
   const ctx = { editCell, rateCell, taxCell, qtyCell, packetsCell };
@@ -24922,7 +24922,7 @@ function particularsTable(p, job, opts) {
         // the admin edits the packet count — no full re-render needed.
         ? `<div id="wp-${r.key}" style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;${(wasteNewValue !== undefined && wasteNewValue > 0) ? '' : 'display:none;'}">${(wasteNewValue !== undefined && wasteNewValue > 0) ? wasteNewValue.toLocaleString() : ''}</div>`
         : (wasteNewValue !== undefined && wasteNewValue > 0)
-          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="New ${WASTAGE_ADJ_ROW_UNIT[r.key]} total from the wastage formula — (Unit Carton Qty − Delivered) ÷ Ups + manual adjustment, split by percentage. Ignores the operator's own entry above.">${wasteNewValue.toLocaleString()}</div>`
+          ? `<div style="color:#7c3aed;font-weight:700;font-size:14px;margin-top:2px;" title="New ${WASTAGE_ADJ_ROW_UNIT[r.key]} total from the wastage formula — (Printed UC Qty − Delivered) ÷ Ups + manual adjustment, split by percentage. Ignores the operator's own entry above.">${wasteNewValue.toLocaleString()}</div>`
           : '';
       // Production rows are the Station's to record: read-only on the job
       // card for everyone but a Super Admin (the server enforces it too) -
@@ -25230,7 +25230,7 @@ function jobForm(j={}, opts) {
         <td colspan="2"><span class="jc-lbl">P.O. No.</span><input type="text" id="f-ref" value="${v(j.ref)}" placeholder="Optional"></td>
         <td colspan="2"><span class="jc-lbl">Batch No.</span><input type="text" id="f-bno" value="${v(j.bno)}" placeholder="Batch"></td>
         <td colspan="1"><span class="jc-lbl">Code</span><input type="text" id="f-jobcode" value="${v(j.jobcode)}" placeholder="SA-2026-001"></td>
-        <td colspan="2"><span class="jc-lbl">Unit Carton Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}">
+        <td colspan="2"><span class="jc-lbl">Printed UC Qty</span><input type="text" id="f-cartonqty" value="${v(j.cartonqty)}">
           <div id="wp-top-cartonqty" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newCartonQty) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newCartonQty) ? topOverlay.newCartonQty.toLocaleString() : ''}</div>
 
         </td>
@@ -30452,7 +30452,7 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">P.O. No.</div><div class="pc-value">${v(j.ref)}</div></td>
         <td colspan="2"><div class="pc-label">Batch No.</div><div class="pc-value">${v(j.bno)}</div></td>
         <td colspan="1"><div class="pc-label">Code</div><div class="pc-value pc-code">${v(j.jobcode)}</div></td>
-        <td colspan="2"><div class="pc-label">Unit Carton Qty</div><div class="pc-value">${topOverlay ? topOverlay.newCartonQty.toLocaleString() : v(j.cartonqty)}</div></td>
+        <td colspan="2"><div class="pc-label">Printed UC Qty</div><div class="pc-value">${topOverlay ? topOverlay.newCartonQty.toLocaleString() : v(j.cartonqty)}</div></td>
       </tr>
       <tr>
         <td colspan="1"><div class="pc-label">Mfg Date</div><div class="pc-value">${fmt(j.mfgdate)}</div></td>
@@ -30718,7 +30718,7 @@ function printSelectedJobs() {
 
 async function exportCSV() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
-  const header = ['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Unit Carton Qty','Current Stage','Status','Created'];
+  const header = ['Job ID','Job Code','Job Name','Client','Date Issued','Size/GSM','Ups','Sheets Qty','PO Qty','Type of Paper','Machine','Coatings','Priority','Ref/PO','Deadline','Delivered PO Qty','Printed UC Qty','Current Stage','Status','Created'];
   // Was exporting the raw `jobs` global — every job in the system,
   // ignoring the search box, every dropdown filter, the date range, and
   // even which tab (New/CTP/Pending/Active/Storage/Partial/Done/Blocked)
@@ -32711,7 +32711,7 @@ function stationUpdateHtml() {
   const stationInfoGrid = `
     <div class="station-info-grid">
       <div class="station-info-item"><span class="sii-label">PO Qty</span><span class="sii-val">${infoVal(j.qty)}</span></div>
-      <div class="station-info-item"><span class="sii-label">Unit Carton Qty</span><span class="sii-val">${infoVal(j.cartonqty)}</span></div>
+      <div class="station-info-item"><span class="sii-label">Printed UC Qty</span><span class="sii-val">${infoVal(j.cartonqty)}</span></div>
       <div class="station-info-item"><span class="sii-label">Paper</span><span class="sii-val">${infoVal(j.paper_resolved || j.paper)}</span></div>
       <div class="station-info-item"><span class="sii-label">Size / GSM</span><span class="sii-val">${infoVal(j.size)}</span></div>
       <div class="station-info-item"><span class="sii-label">Cutting Size</span><span class="sii-val">${infoVal((j.particulars||{}).cutting_size_gsm)}</span></div>
