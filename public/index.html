@@ -20463,14 +20463,10 @@ async function loadStockMovement(direction) {
   if (to)   qs.set('to',   to);
   qs.set('direction', direction);
   if (state.challan) qs.set('challan', state.challan);
-  // A manual job-card issuance against an offcut item is still a real
-  // stock-out and belongs here, not just in Manual Consumption. The
-  // server hides ALL offcut movement from this endpoint by default
-  // (it's normally a side ledger); this flag is the one carve-out that
-  // lets manual-job-card rows through regardless of the item's offcut
-  // flag. Harmless for direction=in — manual-job-card is always a
-  // deduction, so it never matches an "in" row anyway.
-  qs.set('include_offcut_manual', '1');
+  // Offcut paper never shows here (owner, 2026-10-05): the server leaves
+  // offcut items out by default, and this report no longer asks for the
+  // Manual Job Card carve-out. Offcut stock-outs live in Offcut Consumption
+  // (and, for Manual Job Cards, in Manual Consumption too, marked OFFCUT).
   try {
     const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
     state.rows = txs;
@@ -21644,6 +21640,8 @@ async function loadManualConsumption() {
 // Groups filtered manual-job-card rows by (job card no. + paper type +
 // size + gsm) — brands merged, packet size varies per paper type so
 // different papers can't be summed into one physical unit anyway.
+// The sign on a Manual Consumption row taken from offcut paper.
+const MC_OFFCUT_BADGE = ' <span title="Taken from offcut paper - also in the Offcut Consumption report" style="display:inline-block;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;font-size:9.5px;font-weight:800;letter-spacing:0.04em;padding:0 6px;border-radius:999px;vertical-align:middle;">&#9986; OFFCUT</span>';
 function computeManualConsumptionRows() {
   const state = manualConsumptionState;
   const { from, to } = periodToDateRange(state.period, state.from, state.to);
@@ -21664,10 +21662,12 @@ function computeManualConsumptionRows() {
     const w  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     const ps = packetSize(t.paper_type || '');
     if (w !== null) totalKg += w * (amt / ps);
-    const key = [jobCardNo, t.paper_type || '', t.item_size || '', String(t.item_gsm || '')].join('||');
+    // Offcut paper is its own row (marked OFFCUT) - never merged with fresh.
+    const isOffcut = !!t.item_is_offcut;
+    const key = [jobCardNo, t.paper_type || '', t.item_size || '', String(t.item_gsm || ''), isOffcut ? 'offcut' : ''].join('||');
     if (!groups.has(key)) {
       groups.set(key, {
-        jobCardNo, paperType: t.paper_type || '', size: t.item_size || '', gsm: t.item_gsm || '',
+        jobCardNo, paperType: t.paper_type || '', size: t.item_size || '', gsm: t.item_gsm || '', isOffcut,
         brands: new Set(), totalSheets: 0, txCount: 0, txIds: [], latestMs: null, latestRaw: null, enteredBy: new Set(),
       });
     }
@@ -21696,7 +21696,7 @@ function computeManualConsumptionRows() {
     }
     const allocPct = g.totalSheets > 0 ? Math.min(100, Math.round(allocatedSheets / g.totalSheets * 100)) : 0;
     return {
-      jobCardNo: g.jobCardNo, paperType: g.paperType, size: g.size, gsm: g.gsm,
+      jobCardNo: g.jobCardNo, paperType: g.paperType, size: g.size, gsm: g.gsm, isOffcut: g.isOffcut,
       brand: [...g.brands].join(' / '), unit, txCount: g.txCount,
       txIds: g.txIds,
       totalSheets: g.totalSheets, totalPkts: g.totalSheets / ps,
@@ -21777,7 +21777,7 @@ function renderManualConsumption() {
           <tr class="row-hover-red${rowClick ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);${fillBg}"${rowClick}>
             <td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${(r.txIds||[]).every(id=>manualConsumptionState.selected.has(id))?'checked':''} onclick="event.stopPropagation()" onchange="toggleManualConsumptionRow([${(r.txIds||[]).join(',')}], this.checked)"></td>
             <td style="padding:6px 8px;font-weight:700;">${esc(r.jobCardNo)}${allocBadge}${jobRefs}</td>
-            <td style="padding:6px 8px;">${esc(r.paperType || '—')}</td>
+            <td style="padding:6px 8px;">${esc(r.paperType || '—')}${r.isOffcut ? MC_OFFCUT_BADGE : ''}</td>
             <td style="padding:6px 8px;">${esc(r.size || '—')}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm || '—')}</td>
             <td style="padding:6px 8px;">${esc(r.brand || '—')}</td>
@@ -21907,7 +21907,7 @@ async function exportManualConsumption() {
   const header = ['Manual Job Card No.', 'Paper Type', 'Size', 'GSM', 'Brand(s)', 'Transactions', 'Consumed (packets/reams)', 'Consumed (sheets)', 'Latest Entry', 'Entered By'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
-    aoa.push([r.jobCardNo, r.paperType, r.size, r.gsm, r.brand, r.txCount,
+    aoa.push([r.jobCardNo, r.paperType + (r.isOffcut ? ' (offcut)' : ''), r.size, r.gsm, r.brand, r.txCount,
       +r.totalPkts.toFixed(2), r.totalSheets, r.latestAt ? fmtDMYT(r.latestAt) : '', r.enteredBy]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -21933,7 +21933,7 @@ function printManualConsumption() {
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const bodyRows = rows.map(r => `<tr>
       <td ${tdL}>${esc(r.jobCardNo)}</td>
-      <td ${tdL}>${esc(r.paperType || '—')}</td>
+      <td ${tdL}>${esc(r.paperType || '—')}${r.isOffcut ? ' <b>(OFFCUT)</b>' : ''}</td>
       <td ${tdL}>${esc(r.size || '—')}</td>
       <td ${tdR}>${esc(r.gsm || '—')}</td>
       <td ${tdL}>${esc(r.brand || '—')}</td>
