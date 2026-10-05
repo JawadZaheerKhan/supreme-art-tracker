@@ -27791,6 +27791,18 @@ function openClientGroupJobsModal(groupName) {
   </div>`);
 }
 
+// Size / GSM is filled in FROM the paper (hidden on the form). A job saved
+// with no paper item saves no size - otherwise a removed paper's "20x30"
+// lingers on the print, the Station and the Sale Report (owner, 2026-10-05).
+// An old job that names its paper the pre-inventory way keeps its typed size.
+function jobFormSizeToSave(inventoryItemId) {
+  const typed = ((document.getElementById('f-size') || {}).value || '').trim();
+  if (inventoryItemId) return typed;
+  const edId = parseInt((document.getElementById('f-editing-id') || {}).value, 10);
+  const prior = Number.isFinite(edId) ? jobs.find(x => x.id === edId) : null;
+  const pt = prior && prior.particulars && prior.particulars.paper_types;
+  return (Array.isArray(pt) && pt.some(Boolean)) ? typed : '';
+}
 function getFormData() {
   const itemEl = document.getElementById('f-inventory-item');
   const inventory_item_id = itemEl && itemEl.value ? parseInt(itemEl.value, 10) : null;
@@ -27812,7 +27824,7 @@ function getFormData() {
     ref: document.getElementById('f-ref').value.trim(),
     dateissued: document.getElementById('f-dateissued').value,
     deadline: document.getElementById('f-deadline').value,
-    size: document.getElementById('f-size').value.trim(),
+    size: jobFormSizeToSave(inventory_item_id),
     ups: document.getElementById('f-ups').value.trim(),
     sheets: jobSecondPaperActive() ? String(jobFormTotalSheets()) : document.getElementById('f-sheets').value.trim(),
     qty: document.getElementById('f-qty').value.trim(),
@@ -28251,6 +28263,9 @@ function paperDropStaleChoice(searchId, hiddenId) {
   if (input.value.trim() === (it ? paperGroupLabel(it) : '')) return false;
   hidden.value = '';
   if (hidden.dataset) hidden.dataset.balance = '';
+  // The hidden Size / GSM was filled in FROM the main paper (paperSelect) -
+  // it goes with it, or the print keeps showing the old paper's size.
+  if (hiddenId === 'f-inventory-item') { const sz = document.getElementById('f-size'); if (sz) sz.value = ''; }
   return true;
 }
 // Closing a list with nothing chosen leaves no half-typed search behind.
@@ -29964,6 +29979,18 @@ async function toggleBlock(id) {
   showSaving(false);
 }
 
+// Size / GSM on the printed job card: the job's paper item (same text the
+// paper picker fills in); with no paper item, the typed size only for an old
+// job that still names its paper the pre-inventory way; otherwise blank -
+// a job with no paper prints no paper size (owner, 2026-10-05).
+function jobPrintSizeGsm(j, invItem) {
+  if (invItem) return `${invItem.size || ''}${invItem.size && invItem.gsm ? ' / ' : ''}${invItem.gsm ? invItem.gsm + 'gsm' : ''}`;
+  // Paper on the job but its record not loaded here: keep the stored size.
+  if (j && j.inventory_item_id) return String(j.size || '');
+  const p = (j && j.particulars) || {};
+  const legacyPaper = Array.isArray(p.paper_types) && p.paper_types.some(Boolean);
+  return legacyPaper ? String((j && j.size) || '') : '';
+}
 function buildPrintCard(j) {
   // Print template is sized for the shop's 8.5in × 12.5in job-card paper
   // (the original layout — restored after a brief experiment with a
@@ -30404,7 +30431,7 @@ function buildPrintCard(j) {
         <td colspan="2"><div class="pc-label">Company</div><div class="pc-value pc-company">${v(j.client)}</div></td>
       </tr>
       <tr>
-        <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(j.size)}</div></td>
+        <td colspan="2"><div class="pc-label">Size / GSM</div><div class="pc-value">${v(jobPrintSizeGsm(j, invItem))}</div></td>
         <td colspan="2"><div class="pc-label">Cutting Size / GSM</div><div class="pc-value">${v(p.cutting_size_gsm)}</div></td>
         <td colspan="1"><div class="pc-label">Sheets Qty</div><div class="pc-value">${topOverlay ? topOverlay.sheetsDisplay : v(j.sheets)}</div></td>
         <td colspan="2"><div class="pc-label">Quantity of Packets / Cut</div><div class="pc-value">${packetsCellHtml}</div></td>
