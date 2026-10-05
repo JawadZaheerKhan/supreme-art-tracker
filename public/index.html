@@ -6101,11 +6101,14 @@ function renderJobsCompact() {
   // the collapsing and shows the matched jobs as themselves.
   const searching = jobsSearchActive();
   el.innerHTML = elsewhere + filtered.map(j => {
-    if (j.stock_group_name && !searching) {
+    if (j.stock_group_name) {
       if (seenGroupsC.has(j.stock_group_name)) return '';
       seenGroupsC.add(j.stock_group_name);
       const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
-      return renderGroupTileCompact(j.stock_group_name, gJobs);
+      // A search shows the whole MIL, naming the member(s) it matched -
+      // see milSearchHitHtml (owner, 2026-10-05).
+      const hits = searching ? filtered.filter(x => x.stock_group_name === j.stock_group_name).map(x => x.id) : null;
+      return renderGroupTileCompact(j.stock_group_name, gJobs, hits);
     }
     return renderJobRowCompact(j);
   }).join('');
@@ -6402,11 +6405,12 @@ function renderJobsCards() {
   const seenGroups = new Set();
   const searching = jobsSearchActive();   // see renderJobsCompact
   el.innerHTML = elsewhere + filtered.map(j => {
-    if (j.stock_group_name && !searching) {
+    if (j.stock_group_name) {
       if (seenGroups.has(j.stock_group_name)) return '';
       seenGroups.add(j.stock_group_name);
       const gJobs = jobs.filter(x => x && x.stock_group_name === j.stock_group_name && !x.deleted_at);
-      return renderGroupTile(j.stock_group_name, gJobs);
+      const hits = searching ? filtered.filter(x => x.stock_group_name === j.stock_group_name).map(x => x.id) : null;
+      return renderGroupTile(j.stock_group_name, gJobs, hits);
     }
     return renderJobCard(j);
   }).join('');
@@ -26743,7 +26747,21 @@ function groupRecordDeliveryHtml(groupName) {
 // was color-clashing with the purple GROUP chip) and the tile-actions
 // (drops the ⋯ menu). Everything else — name, machine SVG animation,
 // stages ribbon, facts, side panel — stays exactly as the normal tile.
-function renderGroupTile(groupName, groupJobs) {
+// The line on a MIL group tile shown by a search: which member(s) matched,
+// each opening its own job card, and how many jobs the MIL holds. Without
+// it the searched job would seem missing - the tile shows the group.
+function milSearchHitHtml(hitIds, groupJobs) {
+  const ids = [...new Set((hitIds || []).filter(id => groupJobs.some(j => j.id === id)))].sort((a, b) => a - b);
+  if (!ids.length) return '';
+  const links = ids.map(id => `<a href="#" onclick="event.preventDefault(); event.stopPropagation(); openEdit(${id})" title="Open Job E-${id}" style="color:#5b21b6;font-weight:800;text-decoration:underline;text-underline-offset:2px;">E-${id}</a>`).join(', ');
+  return `<div class="mil-search-hit" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:-2px 0 8px;padding:4px 10px;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;font-size:12px;color:#4c1d95;">&#128269; Your search matches ${links} <span style="color:#6d28d9;">&middot; part of this MIL (${groupJobs.length} job${groupJobs.length === 1 ? '' : 's'})</span></div>`;
+}
+// Puts the search line just inside a tile's outer div.
+function withMilSearchHit(html, hitIds, groupJobs) {
+  const line = milSearchHitHtml(hitIds, groupJobs);
+  return line ? html.replace(/^(\s*<div\b[^>]*>)/, `$1${line}`) : html;
+}
+function renderGroupTile(groupName, groupJobs, hitIds) {
   if (!groupJobs.length) return '';
   const stats = groupStats(groupJobs);
   const repr = groupRepresentative(groupJobs);
@@ -26795,11 +26813,11 @@ function renderGroupTile(groupName, groupJobs) {
     const lastClose = html.lastIndexOf('</div>');
     html = html.slice(0, lastClose) + recordDelivery + '\n  </div>';
   }
-  return html;
+  return withMilSearchHit(html, hitIds, groupJobs);
 }
 
 // Compact (Jobs) view — same idea, different container classes.
-function renderGroupTileCompact(groupName, groupJobs) {
+function renderGroupTileCompact(groupName, groupJobs, hitIds) {
   if (!groupJobs.length) return '';
   const stats = groupStats(groupJobs);
   const repr = groupRepresentative(groupJobs);
@@ -26848,7 +26866,7 @@ function renderGroupTileCompact(groupName, groupJobs) {
     const pipelineRowEnd = html.lastIndexOf('</div>', html.lastIndexOf('</div>') - 1);
     html = html.slice(0, pipelineRowEnd) + groupDelivBtn + html.slice(pipelineRowEnd);
   }
-  return html;
+  return withMilSearchHit(html, hitIds, groupJobs);
 }
 
 // ── Group entity (stock_groups) — dedicated edit + duplicate flow ─────
