@@ -5284,6 +5284,8 @@ const PARTICULARS_LABELS = {
   sorted_cartons_qty: 'Sorted Cartons Qty', sorted_cartons_waste: 'Sorted Cartons Waste',
   pasted_cartons_qty: 'Pasted Cartons Qty', pasting_waste_qty: 'Pasting Waste Qty',
   delivered_cartons_qty: 'Ready to Delivery Qty',
+  // The number after " | " on that row - edits to it are logged too.
+  ready_packets_qty: 'Carton Shipper',
 };
 
 // UPDATE job details
