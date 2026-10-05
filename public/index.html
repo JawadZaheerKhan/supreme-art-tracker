@@ -25001,15 +25001,12 @@ function jobForm(j={}, opts) {
   const currentBalance = currentItem
     ? paperGroupMembers(currentItem).reduce((a, x) => a + (x.current_balance || 0), 0)
     : 0;
-  // MIL-group member (or a new sub job being seeded into one): the P.O.
-  // Qty field isn't a real per-job PO — it's the group's own standing
-  // MIL quantity, shared across every sub job. Relabel + pull the live
-  // value from the group entity so it can never drift from Edit Group.
-  const milGroupForQty = j.group_job_id ? stockGroupById(j.group_job_id) : null;
-  const qtyLabelHtml = milGroupForQty
-    ? `<span class="jc-lbl" style="color:#7c3aed;">MIL Qty</span>`
-    : `<span class="jc-lbl">P.O. Qty</span>`;
-  const qtyValueForForm = milGroupForQty ? (milGroupForQty.po_qty ?? j.qty) : j.qty;
+  // P.O. Qty is the job's own PO for every job - MIL members included
+  // (owner, 2026-10-05; it used to show the group's MIL Qty here). The
+  // group's standing MIL Qty lives on the GROUP's own edit card, which
+  // relabels this field itself (openGroupEdit).
+  const qtyLabelHtml = `<span class="jc-lbl">P.O. Qty</span>`;
+  const qtyValueForForm = j.qty;
   return `
     <img class="jc-watermark-screen" src="/logo.png" alt="">
     <input type="hidden" id="f-editing-id" value="${j.id ? esc(j.id) : ''}">
@@ -25050,7 +25047,7 @@ function jobForm(j={}, opts) {
       <tr>
         <td><span class="jc-lbl">Date</span><input type="date" id="f-dateissued" value="${v(j.dateissued || (j.id ? '' : localDateISO()))}"></td>
         <td><span class="jc-lbl">Deadline</span><input type="date" id="f-deadline" value="${v(j.deadline)}"></td>
-        <td colspan="2">${qtyLabelHtml}<input type="text" id="f-qty" value="${v(qtyValueForForm)}"${milGroupForQty ? ' style="color:#7c3aed;font-weight:700;"' : ''}></td>
+        <td colspan="2">${qtyLabelHtml}<input type="text" id="f-qty" value="${v(qtyValueForForm)}"></td>
         <td colspan="2">
           <span class="jc-lbl">Machine Name</span>
           <select id="f-machine"><option value="">—</option>${(printingMachines && printingMachines.length ? printingMachines : MACHINES).map(m=>`<option ${j.machine===m?'selected':''}>${esc(m)}</option>`).join('')}${j.machine && !((printingMachines && printingMachines.length ? printingMachines : MACHINES).includes(j.machine))?`<option selected>${esc(j.machine)}</option>`:''}</select>
@@ -30004,12 +30001,10 @@ function buildPrintCard(j) {
   const fmt = d => d ? fmtDMY(d) : '';
   const coatings = Array.isArray(j.coatings) ? j.coatings : [];
   const p = j.particulars || {};
-  // MIL-group member: print the group's standing MIL Qty (purple label),
-  // not the sub job's own PO Qty field — same rule the on-screen job
-  // card and Edit/View modal follow.
-  const milGroupForPrint = j.group_job_id ? stockGroupById(j.group_job_id) : null;
-  const poQtyLabelPrint = milGroupForPrint ? 'MIL Qty' : 'P.O. Qty';
-  const poQtyValuePrint = milGroupForPrint ? (milGroupForPrint.po_qty ?? j.qty) : j.qty;
+  // P.O. Qty prints the job's own PO - MIL members included (owner,
+  // 2026-10-05), same as the job card.
+  const poQtyLabelPrint = 'P.O. Qty';
+  const poQtyValuePrint = j.qty;
   // Same rule as the on-screen job card: the wastage adjustment overlay
   // only prints when printing from the Finalized tab, so the Delivered
   // tab (and any other context) always prints the untouched original card.
@@ -30434,7 +30429,7 @@ function buildPrintCard(j) {
       <tr>
         ${dateCell('Date', j.dateissued)}
         <td><div class="pc-label">Deadline</div><div class="pc-value pc-deadline">${fmt(j.deadline)}</div></td>
-        <td colspan="2"><div class="pc-label"${milGroupForPrint ? ' style="color:#7c3aed;"' : ''}>${poQtyLabelPrint}</div><div class="pc-value${milGroupForPrint ? ' pc-mil-qty' : ''}">${v(poQtyValuePrint)}</div></td>
+        <td colspan="2"><div class="pc-label">${poQtyLabelPrint}</div><div class="pc-value">${v(poQtyValuePrint)}</div></td>
         <td colspan="2"><div class="pc-label">Machine Name</div><div class="pc-value pc-machine">${v(j.machine)}</div></td>
         ${cell('Ups', j.ups)}
       </tr>
