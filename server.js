@@ -5035,6 +5035,7 @@ app.post('/api/jobs/:id/move-to-ctp', requirePermission('job_btn_stage_forward')
     // previous issuance is stale once the job resets.
     const cleanP = { ...(job.particulars || {}) };
     delete cleanP.partial_pending_sheets;
+    delete cleanP.paper_waived;   // needs paper again - drop "processed without paper"
     const updated = await sql`
       UPDATE jobs
          SET issuance_status='ctp',
@@ -5089,6 +5090,7 @@ app.post('/api/jobs/:id/move-to-pending-stock', requirePermission('job_btn_stage
     log.push({ stage: 'Pending Stock', status: 'active', notes: `Sent back to Pending Stock by ${by} (from ${STAGES[job.stage_index || 0]})`, by, time });
     const cleanP = { ...(job.particulars || {}) };
     delete cleanP.partial_pending_sheets;
+    delete cleanP.paper_waived;   // needs paper again - drop "processed without paper"
     const updated = await sql`
       UPDATE jobs
          SET issuance_status='pending',
@@ -5373,6 +5375,12 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       if (sigChanged)     remap(editedSig,     'operator');
       if (detailsChanged) remap(editedDetails, 'date', dmyToISO);
       newParticulars[key] = { ...newRow, entries: nextEntries };
+    }
+    // "Processed without paper" (Admin) is never a form field: keep it through
+    // a job-card save even if the page didn't send it back. Only the resets
+    // that send the job back to needing paper remove it.
+    if (priorParticulars.paper_waived && newParticulars.paper_waived === undefined) {
+      newParticulars.paper_waived = priorParticulars.paper_waived;
     }
     const STAGE_BY_KEY_PUT = {
       printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
@@ -5659,6 +5667,7 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     if (wasIssued && paperItemChanged) {
       const cleanP = { ...(job.particulars || {}) };
       delete cleanP.partial_pending_sheets;
+      delete cleanP.paper_waived;   // needs paper again - drop "processed without paper"
       delete cleanP.offcut_pre_consumed;
       const updated2 = await sql`
         UPDATE jobs
@@ -5733,6 +5742,70 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 // Dismiss pending stock for a delivered job. Admin-only. Clears the
 // issuance_status to 'issued' and removes any partial_pending_sheets
 // so the job drops out of the pending queue.
+// PROCESS WITHOUT PAPER (Admin only - owner, 2026-10-05). A job waiting for
+// paper (Pending Stock, part-issued, or 2nd paper still owed) goes into
+// production with NO stock issued: status 'issued', stage at least Printing,
+// nothing deducted. particulars.paper_waived records who / when and what was
+// owed, and makes primaryOwedSheets / secondaryOwedSheets (and the client's
+// twins) read 0, so it leaves Pending Stock and loses "Requires More Stock".
+// New and CTP jobs are refused: a CTP job comes to Pending Stock when its
+// plates are done.
+app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) => {
+  try {
+    if (!userHasRole(req.user, 'admin') && !userHasRole(req.user, 'super_admin')) return res.status(403).json({ error: 'Admin only' });
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const job = (await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const p0 = job.particulars || {};
+    if (p0.paper_waived) return res.status(400).json({ error: `Job E-${id} was already processed without paper.` });
+    const status = job.issuance_status;
+    if (status !== 'pending' && status !== 'issued') {
+      return res.status(400).json({ error: status === 'ctp'
+        ? `Job E-${id} is still at CTP - it comes to Pending Stock when its plates are done; process it from there.`
+        : `Job E-${id} is not waiting for paper.` });
+    }
+    const mainOwed = await primaryOwedSheets(sql, job);
+    const sec = p0.secondary_paper;
+    const secItem = (sec && sec.inventory_item_id) ? (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0] : null;
+    const secondOwed = secondaryOwedSheets(job, secItem);
+    if (status === 'issued' && mainOwed <= 0 && secondOwed <= 0) {
+      return res.status(400).json({ error: `Job E-${id} already has all its paper - nothing to process without.` });
+    }
+    const nowIso = new Date().toISOString();
+    const time = businessStamp();
+    const who = (req.user && (req.user.name || req.user.email)) || 'Admin';
+    const p = { ...p0 };
+    delete p.partial_pending_sheets;
+    p.paper_waived = { at: nowIso, by: (req.user && req.user.email) || null, by_name: who, from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed };
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    const owedTxt = [mainOwed > 0 ? `${mainOwed.toLocaleString()} sheets main paper` : '', secondOwed > 0 ? `${secondOwed.toLocaleString()} sheets 2nd paper` : ''].filter(Boolean).join(' + ');
+    log.push({ stage: 'Printing', status: 'active', notes: `Processed without paper by ${who} (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}`, by: `${who} (Admin)`, time });
+    const bumpedStage = Math.max(job.stage_index || 0, 1);
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status = 'issued',
+             stage_index     = ${bumpedStage},
+             issued_at       = COALESCE(issued_at, NOW()),
+             issued_by_id    = COALESCE(issued_by_id, ${(req.user && req.user.id) || null}),
+             particulars     = ${JSON.stringify(p)},
+             log             = ${JSON.stringify(log)}
+       WHERE id = ${id} AND deleted_at IS NULL AND issuance_status = ${status}
+       RETURNING *`;
+    if (!updated.length) return res.status(409).json({ error: `Job E-${id} changed while you were looking - refresh and try again.` });
+    await logAudit(sql, req, {
+      action: 'job.process_without_paper',
+      entityType: 'job',
+      entityId: id,
+      summary: `Processed Job E-${id}: ${job.name} without paper (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}. Was ${status === 'pending' ? 'in Pending Stock' : 'part-issued'}.`,
+      metadata: { from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed },
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pending'), async (req, res) => {
   try {
     await dbReady;
@@ -5776,6 +5849,9 @@ async function performIssueStock(sql, req, id, body) {
   // Stock and issues it independently of the primary.
   const source = String((body && body.source) || 'primary').toLowerCase();
   const isSecondary = source === 'secondary';
+  if (job.particulars && job.particulars.paper_waived) {
+    return { status: 400, error: `Job E-${id} was processed without paper by an Admin - nothing to issue. Send it back to Pending Stock first if paper should be issued.` };
+  }
   const secondaryRef = (job.particulars && job.particulars.secondary_paper) || null;
   if (isSecondary) {
     if (!secondaryRef || !secondaryRef.inventory_item_id) {
@@ -6213,6 +6289,8 @@ app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, requirePermiss
 // primary needSheets math. 0 when the job isn't waiting on its main paper.
 async function primaryOwedSheets(sql, job, itemsById) {
   if (!job.inventory_item_id) return 0;
+  // Processed without paper by an Admin - nothing is owed.
+  if (job.particulars && job.particulars.paper_waived) return 0;
   const p = job.particulars || {};
   const partialRaw = parseInt(p.partial_pending_sheets, 10);
   const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
@@ -6264,6 +6342,7 @@ function secondaryOwedSheets(job, secItem) {
   const p = job.particulars || {};
   const sec = p.secondary_paper;
   if (!sec || !sec.inventory_item_id || !secItem) return 0;
+  if (p.paper_waived) return 0;          // processed without paper by an Admin
   if (job.issuance_status !== 'pending' && job.issuance_status !== 'issued') return 0;
   const packets = parseFloat(sec.packets);
   if (!Number.isFinite(packets) || packets <= 0) return 0;
@@ -6589,6 +6668,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     // one issuance.
     const cleanParticulars = { ...(job.particulars || {}) };
     delete cleanParticulars.partial_pending_sheets;
+    delete cleanParticulars.paper_waived;   // needs paper again - drop "processed without paper"
     delete cleanParticulars.over_issue_pending;
     delete cleanParticulars.over_issue_decisions;
     if (Array.isArray(cleanParticulars.packets_topups)) {
@@ -9585,6 +9665,9 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     let jobFullyIssued = false;
     let partialRemaining = 0;
 
+    if (isJobIssuance && jobRow.particulars && jobRow.particulars.paper_waived) {
+      return res.status(400).json({ error: `Job E-${jobRow.id} was processed without paper by an Admin - no stock can be issued to it. Send it back to Pending Stock first if paper should be issued.` });
+    }
     if (isJobIssuance) {
       // Brand-agnostic: the job specifies a paper GROUP (type + size +
       // gsm + is_offcut). Store keeper is free to issue from any brand
@@ -9963,6 +10046,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
         // on a job whose over-issue had been "Use"-decided).
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.paper_waived;   // needs paper again - drop "processed without paper"
         delete cleanParticulars.over_issue_pending;
         delete cleanParticulars.over_issue_decisions;
         if (Array.isArray(cleanParticulars.packets_topups)) {
@@ -9987,6 +10071,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
         // routes to Pending Stock again instead of Printing.
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.paper_waived;   // needs paper again - drop "processed without paper"
         delete cleanParticulars.over_issue_pending;
         delete cleanParticulars.over_issue_decisions;
         if (Array.isArray(cleanParticulars.packets_topups)) {

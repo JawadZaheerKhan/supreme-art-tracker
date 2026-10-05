@@ -4777,6 +4777,7 @@ function issuedPrimarySheets(j) {
 // is not in the loaded inventory): there, recomputing would read "issued 0"
 // and ask for the whole job again, so the marker stands.
 function partialPendingSheets(j) {
+  if (j && j.particulars && j.particulars.paper_waived) return 0;   // processed without paper (Admin)
   const raw = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
   const marker = Number.isFinite(raw) && raw > 0 ? raw : 0;
   if (!marker) return 0;
@@ -4803,6 +4804,7 @@ function secondaryInPreConsumed(j) {
 function secondaryPendingSheets(j) {
   const sec = j && j.particulars && j.particulars.secondary_paper;
   if (!sec || !sec.inventory_item_id) return 0;
+  if (j.particulars.paper_waived) return 0;   // processed without paper (Admin)
   if (j.issuance_status !== 'pending' && j.issuance_status !== 'issued') return 0;
   if (secondaryInPreConsumed(j)) return 0;
   const packets = parseFloat(sec.packets);
@@ -4820,6 +4822,53 @@ function hasSecondaryPending(j) { return secondaryPendingSheets(j) > 0; }
 // stay visible in the queue so the store keeper knows to keep topping up,
 // even though the shop floor can already start processing them.
 function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || ctpAwaitingStock(j) || isPartialIssuance(j) || hasSecondaryPending(j)); }
+
+// ── Process without paper (Admin only - owner, 2026-10-05) ──────────
+// A job waiting for paper - Pending Stock, part-issued, or 2nd paper still
+// owed - can be sent into production with no stock issued. The server
+// stamps particulars.paper_waived; nothing is deducted. Not offered at CTP
+// (plates first - the job then comes to Pending Stock) or once waived.
+function canProcessWithoutPaper(j) {
+  if (!j || !(isAdmin() || isSuperAdmin())) return false;
+  if (j.particulars && j.particulars.paper_waived) return false;
+  if (j.issuance_status === 'pending') return true;
+  return j.issuance_status === 'issued' && (partialPendingSheets(j) > 0 || secondaryPendingSheets(j) > 0);
+}
+function processWithoutPaperBtnHtml(j) {
+  if (!canProcessWithoutPaper(j)) return '';
+  return `<button class="btn btn-sm" style="background:#fff7ed;border-color:#fdba74;color:#9a3412;font-weight:700;" onclick="event.stopPropagation(); processWithoutPaper(${j.id})" title="Admin only - start this job without issuing any paper. Nothing is deducted from stock.">&#9654; Process without paper</button>`;
+}
+// The small mark on a job that was processed without paper.
+function paperWaivedBadgeHtml(j) {
+  const w = j && j.particulars && j.particulars.paper_waived;
+  if (!w) return '';
+  const when = w.at ? fmtDMY(localDateISO(new Date(w.at))) : '';
+  return `<span class="badge" title="Processed without paper${w.by_name ? ' by ' + esc(w.by_name) : ''}${when ? ' on ' + when : ''} - no stock was issued" style="background:#ffedd5;color:#9a3412;font-weight:800;letter-spacing:0.04em;">NO PAPER</span>`;
+}
+async function processWithoutPaper(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j || !canProcessWithoutPaper(j)) return;
+  const main = j.issuance_status === 'pending' ? 'all of its paper' : (partialPendingSheets(j) > 0 ? `the ${partialPendingSheets(j).toLocaleString()} sheets still owed` : '');
+  const second = secondaryPendingSheets(j) > 0 ? `${secondaryPendingSheets(j).toLocaleString()} sheets of its 2nd paper` : '';
+  const owed = [main, second].filter(Boolean).join(' and ');
+  const ok = await confirmDialog({
+    title: `Process Job E-${id} without paper?`,
+    message: `${j.name || ''}\n\nThe job goes into production (Printing) WITHOUT issuing any paper${owed ? ' - ' + owed + ' will not be issued' : ''}. Nothing is deducted from stock and it leaves the Pending Stock queue.\n\nThis is written in the job's History. If paper should be issued later, send the job back to Pending Stock.`,
+    confirmText: 'Process without paper',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${id}/process-without-paper`);
+    const ix = jobs.findIndex(x => x.id === id);
+    if (ix >= 0) jobs[ix] = updated;
+    render();
+    notify(`Job E-${id} processed without paper`);
+  } catch (e) {
+    notify('Error: ' + e.message);
+  }
+  showSaving(false);
+}
 
 // Packets top-up helpers. An issued job may have extra packets requested
 // after issuance; each entry lives in particulars.packets_topups with a
@@ -6333,6 +6382,7 @@ function renderJobRowCompact(j, opts) {
             ${overDeliveredMarkHtml(j)}
             ${badge}
             ${linkedJobBadgeHtml(j, false)}
+            ${paperWaivedBadgeHtml(j)}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
             ${j.is_shade_card ? '<span class="badge" style="background:#dcfce7;color:#166534;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;">&#127912; Shade Card</span>' : ''}
           </div>
@@ -6358,6 +6408,7 @@ function renderJobRowCompact(j, opts) {
             ${isNew && canStageForward() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
             ${isCtp && canStageForward() ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
             ${partialDelv && canStageForward() ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
+            ${processWithoutPaperBtnHtml(j)}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
@@ -6864,6 +6915,7 @@ function renderJobCard(j, opts) {
            </span>${overDeliveredMarkHtml(j)}`}
       ${badge}
       ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
+      ${clientPreview ? '' : paperWaivedBadgeHtml(j)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
       ${j.is_shade_card ? '<span class="badge" style="background:#dcfce7;color:#166534;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;">&#127912; Shade Card</span>' : ''}
     </div>
@@ -6880,6 +6932,7 @@ function renderJobCard(j, opts) {
     ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
+      ${processWithoutPaperBtnHtml(j)}
       ${primary}
       ${updateBtn}
       ${more}
@@ -27936,6 +27989,9 @@ function collectParticulars() {
     // the extra-issuance workflow. Not touched by the form.
     if (priorP.over_issue_pending)   out.over_issue_pending   = priorP.over_issue_pending;
     if (priorP.over_issue_decisions) out.over_issue_decisions = priorP.over_issue_decisions;
+    // "Processed without paper" stamp (Admin) - not a form field either.
+    // Dropping it would silently put the job back to needing paper.
+    if (priorP.paper_waived) out.paper_waived = priorP.paper_waived;
   }
   return out;
 }
