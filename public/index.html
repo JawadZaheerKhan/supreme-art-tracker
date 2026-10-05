@@ -5241,17 +5241,71 @@ async function logout() {
   showLogin();
 }
 
-async function loadJobs() {
+// ── Jobs refresh ────────────────────────────────────────────────
+// The full list had grown to 3.86 MB / 1.4 s and was re-sent on every load
+// and every minute (owner, 2026-10-05: "the app has become very slow");
+// Vercel also refuses one response over 4.5 MB. So:
+//   - the FIRST load (and a safety reload every 30 min) fetches the list in
+//     pages of 250 jobs;
+//   - every load after that asks only for jobs changed since the last one
+//     (server-side updated_at) plus the live job numbers, and merges them.
+// Anything odd (a job number we don't have, an old server answering with the
+// plain list) falls back to the full load. Returns true when jobs changed.
+let jobsSyncAt = null;        // server time of the last successful load
+let jobsFullSyncAt = 0;       // when the last full (paged) load ran
+const JOBS_FULL_RELOAD_MS = 30 * 60 * 1000;
+let jobsSyncWho = null;       // who the loaded list belongs to (prices differ by role)
+async function fetchJobsSynced(forceFull) {
+  const who = currentUser ? `${currentUser.id || currentUser.email}:${myRoles().join(',')}` : '';
+  const full = forceFull || !jobsSyncAt || who !== jobsSyncWho || (Date.now() - jobsFullSyncAt) > JOBS_FULL_RELOAD_MS;
+  jobsSyncWho = who;
+  if (!full) {
+    const r = await api('GET', '/api/jobs?since=' + encodeURIComponent(jobsSyncAt));
+    if (Array.isArray(r)) { jobs = r; jobsSyncAt = null; return true; }          // old server: plain list
+    if (r && r.mode === 'delta' && Array.isArray(r.ids) && Array.isArray(r.jobs)) {
+      const live = new Set(r.ids);
+      const byId = new Map(jobs.map(j => [j.id, j]));
+      let changed = false;
+      for (const id of [...byId.keys()]) if (!live.has(id)) { byId.delete(id); changed = true; }   // archived elsewhere
+      for (const j of r.jobs) {
+        const old = byId.get(j.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(j)) { byId.set(j.id, j); changed = true; }
+      }
+      for (const id of live) if (!byId.has(id)) return fetchJobsSynced(true);         // missed one - reload all
+      jobsSyncAt = r.server_now;
+      if (changed) jobs = [...byId.values()].sort((a, b) => a.id - b.id);
+      return changed;
+    }
+  }
+  const all = [];
+  let after = 0, serverNow = null;
+  for (let guard = 0; guard < 200; guard++) {
+    const r = await api('GET', `/api/jobs?sync=1&after_id=${after}&limit=250`);
+    if (Array.isArray(r)) { jobs = r; jobsSyncAt = null; jobsFullSyncAt = Date.now(); return true; }   // old server
+    if (serverNow === null) serverNow = r.server_now;
+    all.push(...(r.jobs || []));
+    if (r.next_after_id == null) break;
+    after = r.next_after_id;
+  }
+  jobs = all;
+  jobsSyncAt = serverNow;
+  jobsFullSyncAt = Date.now();
+  return true;
+}
+// opts.fromPoll: the 1-minute background refresh - redraws only if a job or
+// a MIL group actually changed. Every other caller redraws as before.
+async function loadJobs(opts) {
   try {
     // Fetch jobs and stock groups in parallel — group entity data
     // (client / product / po_qty) drives group-tile rendering and is
     // independent of any single member, so we always want both fresh.
-    const [jobsRes] = await Promise.all([
-      api('GET', '/api/jobs'),
+    const groupsBefore = JSON.stringify(typeof stockGroups !== 'undefined' ? stockGroups : null);
+    const [jobsChanged] = await Promise.all([
+      fetchJobsSynced(false),
       loadStockGroups(),
     ]);
-    jobs = jobsRes;
-    render();
+    const groupsChanged = JSON.stringify(typeof stockGroups !== 'undefined' ? stockGroups : null) !== groupsBefore;
+    if (!(opts && opts.fromPoll) || jobsChanged || groupsChanged) render();
   } catch(e) {
     notify('Error loading jobs: ' + e.message);
   }
@@ -5459,14 +5513,18 @@ async function loadJobsForStation() {
   catch(e) { notify('Error loading jobs: ' + e.message); }
 }
 
-async function loadInventory() {
+async function loadInventory(opts) {
   try {
     // Fetch dropdown-hidden list in parallel — cheap and needed for the brand/
     // supplier suggestion filtering in invDistinct(). Non-blocking failure.
     const hiddenP = loadDropdownHidden();
-    inventoryAll = await api('GET', '/api/inventory');
+    const fresh = await api('GET', '/api/inventory');
+    // The 1-minute background refresh redraws nothing when stock is unchanged.
+    const sameAsBefore = !!(opts && opts.fromPoll) && JSON.stringify(fresh) === JSON.stringify(inventoryAll);
+    inventoryAll = fresh;
     inventory = inventoryAll.filter(i => !i.deleted_at);
     await hiddenP;
+    if (sameAsBefore) return;
     if (mode === 'inventory') {
       renderInventory();
       // Refresh daily stats whenever inventory reloads (after edits, deletes,
@@ -34833,8 +34891,8 @@ function pollTick() {
   if (document.visibilityState !== 'visible') return;       // hidden → let it sleep
   if (Date.now() - lastActivity > IDLE_LIMIT_MS) return;    // idle → let it sleep
   if (pollWouldDisrupt()) return;                            // mid-edit → skip this tick
-  loadJobs();
-  loadInventory();
+  loadJobs({ fromPoll: true });
+  loadInventory({ fromPoll: true });
 }
 function startSmartPolling() {
   if (isPreviewEnv()) return;   // preview: manual refresh only

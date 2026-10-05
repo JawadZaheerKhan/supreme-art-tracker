@@ -297,7 +297,9 @@ function getDb() {
 // entry from Stock In/Out moves it to the Archive - owner, 2026-10-01).
 // Bumped again for inventory_transactions.user_notes (Notes typed on the
 // Stock In / Stock Out reports - owner, 2026-10-05).
-const SCHEMA_VERSION = 'v2026-10-05-tx-user-notes';
+// Bumped again for jobs.updated_at + its trigger (changed-only job refresh -
+// owner, 2026-10-05: the app had become slow).
+const SCHEMA_VERSION = 'v2026-10-05-jobs-updated-at';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -669,6 +671,15 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS expdate     TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mrp         TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS particulars JSONB DEFAULT '{}'`;
+    // When a job last changed - kept by a trigger on EVERY update, so the app
+    // can refresh only the jobs that changed (GET /api/jobs?since=).
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+    await sql`
+      CREATE OR REPLACE FUNCTION jobs_touch_updated_at() RETURNS trigger AS $$
+      BEGIN NEW.updated_at := NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql`;
+    await sql`DROP TRIGGER IF EXISTS jobs_touch_updated_at ON jobs`;
+    await sql`CREATE TRIGGER jobs_touch_updated_at BEFORE UPDATE ON jobs FOR EACH ROW EXECUTE FUNCTION jobs_touch_updated_at()`;
+    await sql`CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at)`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS inventory_item_id INTEGER`;
     // Stock issuance workflow: jobs start 'pending' until a stock-role user
     // (or admin) issues stock, which deducts inventory and flips to 'issued'.
@@ -4266,6 +4277,35 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
     // Station manager's Issue Stock button (isOffcutJob() also needs the
     // unloaded `inventory` array client-side).
     const deliveredIdx = STAGES.length - 1;
+    const stripPricing = (rows) => { if (!canSeeFinanceData(req.user)) for (const j of rows) { delete j.rate; delete j.tax_pct; } return rows; };
+    // Changed-only refresh: jobs updated since ?since= (30 s overlap so a row
+    // written while the last refresh ran is never missed), plus every live id
+    // so archived jobs drop out on the page.
+    if (req.query.since) {
+      const since = new Date(String(req.query.since));
+      if (isNaN(since)) return res.status(400).json({ error: 'Bad since' });
+      const [{ now }] = await sql`SELECT NOW() AS now`;
+      const changed = await sql`
+        SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
+        FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL AND j.updated_at >= ${since.toISOString()}::timestamptz - INTERVAL '30 seconds'
+        ORDER BY j.id ASC`;
+      const ids = await sql`SELECT id FROM jobs WHERE deleted_at IS NULL ORDER BY id ASC`;
+      return res.json({ mode: 'delta', server_now: now, jobs: stripPricing(changed), ids: ids.map(r => r.id) });
+    }
+    // Full list in pages by id - no single response comes near Vercel's
+    // 4.5 MB cap however many jobs there are.
+    if (req.query.sync) {
+      const afterId = Math.max(0, parseInt(req.query.after_id, 10) || 0);
+      const limit = Math.min(500, Math.max(50, parseInt(req.query.limit, 10) || 250));
+      const [{ now }] = await sql`SELECT NOW() AS now`;
+      const page = await sql`
+        SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
+        FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL AND j.id > ${afterId}
+        ORDER BY j.id ASC LIMIT ${limit}`;
+      return res.json({ mode: 'page', server_now: now, jobs: stripPricing(page), next_after_id: page.length === limit ? page[page.length - 1].id : null });
+    }
     const jobs = req.query.active
       ? await sql`
           SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
