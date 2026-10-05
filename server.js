@@ -373,7 +373,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // What is typed saves itself into the job's delivery_draft; only the button
   // turns it into an actual delivery. Defaults match the button's own roles,
   // so nothing changes until someone takes the button away from a role.
-  job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Carton Shipper, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_delivery_details: { label: 'Delivery details — fill in Delivered UC Qty, Carton Shipper, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // The green/yellow dot beside a Job Card particulars row. Opens that
   // stage's Station entry with no station PIN asked, so the holder can fix
   // an operator's quantity from the job card. The entry can only edit the
