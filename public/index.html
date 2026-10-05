@@ -1198,6 +1198,8 @@
   .job-top { display: flex; align-items: flex-start; gap: 16px; }
   /* Recorded deliveries strip at the top of a job tile - same yellow as the
      job card's delivery ledger, small. See tileDeliveryRecordsHtml(). */
+  .sm-offcut-note { display:inline-flex; align-items:center; gap:4px; margin-top:4px; padding:1px 7px; font-size:11px; font-weight:600; color:#92400e; background:#fef3c7; border:1px solid #fcd34d; border-radius:999px; cursor:pointer; white-space:nowrap; }
+  .sm-offcut-note:hover { background:#fde68a; }
   .sm-ref-input { padding:3px 6px; border:1px solid var(--border); border-radius:5px; font-size:12px; background:var(--bg); box-sizing:border-box; }
   .sm-ref-input:focus { border-color:#A32D2D; outline:none; background:#fff; }
   .tdr { background:#fefce8; border:1px solid #fde68a; border-radius:8px; padding:5px 9px; margin-bottom:8px; font-size:11px; line-height:1.35; color:var(--text); }
@@ -7719,6 +7721,9 @@ function ssClearReturn() {
   if (r.direction) Object.assign(stockMovementStates[r.direction], r.restore);
   else if (r.target === 'offcut') Object.assign(offcutConsumptionState, r.restore);
   else Object.assign(invReportState, r.restore);
+  // A jump made from inside another jump (Stock Out -> its offcut) unwinds
+  // that one too, so no report is left on a jump's filters.
+  if (r.parent) { ssReturn = r.parent; ssClearReturn(); return; }
   renderSsReturnBars();
 }
 function renderSsReturnBars() {
@@ -7736,8 +7741,21 @@ function renderSsReturnBars() {
 }
 function ssReturnToSummary() {
   const back = ssReturn;
+  // A Stock Out -> offcut jump goes back to Stock Out with Stock Out's own
+  // jump (if it had one) still active - so keep that one out of the clear.
+  const parent = back && back.parent;
+  if (back) back.parent = null;
   ssClearReturn();                        // filters restored before we leave
   if (!back) return;
+  if (back.backToStockOut) {
+    ssReturn = parent || null;
+    renderSsReturnBars();
+    openReportsGroup('stocks-group', 'stock-out');
+    const y = back.scrollY || 0;
+    requestAnimationFrame(() => window.scrollTo(0, y));
+    setTimeout(() => window.scrollTo(0, y), 450);   // after Stock Out has re-rendered
+    return;
+  }
   // Opened from a job's History: back to the tab it was on, History reopened.
   if (back.historyJobId) { setMode(back.prevMode || 'jobs'); openHistory(back.historyJobId); return; }
   // Opened from a paper's History / the Activity Log (an edited entry).
@@ -7831,6 +7849,74 @@ function jhOpenIssuance(jobId, auditId) {
   }, 150);
 }
 // The same jump into the Offcut Consumption report, for offcut paper.
+// ── Stock Out "+ offcut" note ───────────────────────────────
+// A job that took both fresh and offcut paper: its Stock Out rows (fresh)
+// name the offcut too, and the offcut sign opens that issuance in Offcut
+// Consumption with a bar back to Stock Out (owner, 2026-10-05).
+// jobId -> { ids: [tx ids], parts: [{ label, sheets, ps, unit }] }
+function smOffcutIndex(txs) {
+  const byJob = new Map();
+  for (const t of Array.isArray(txs) ? txs : []) {
+    if (!t || !t.job_id || !t.item_is_offcut || !((+t.change || 0) < 0)) continue;
+    const e = byJob.get(t.job_id) || { ids: [], items: new Map() };
+    e.ids.push(t.id);
+    const key = [t.paper_type, t.item_size, t.item_gsm].join('|');
+    const it = e.items.get(key) || { label: [t.paper_type, t.item_size, t.item_gsm ? t.item_gsm + 'gsm' : ''].filter(Boolean).join(' '),
+      sheets: 0, ps: packetSize(t.paper_type || ''), unit: packetUnitLabel(t.paper_type || '').toLowerCase() };
+    it.sheets += Math.abs(+t.change || 0);
+    e.items.set(key, it);
+    byJob.set(t.job_id, e);
+  }
+  return byJob;
+}
+function smOffcutForJob(jobId) {
+  const m = stockMovementStates.out && stockMovementStates.out.offcutByJob;
+  return (jobId && m && m.get(jobId)) || null;
+}
+// Plain text, for print / Excel: "+ offcut: 40 packets bleach board 20x30 270gsm".
+function smOffcutText(direction, t) {
+  if (direction !== 'out' || !t || t.item_is_offcut) return '';
+  const o = smOffcutForJob(t.job_id);
+  if (!o) return '';
+  const pk = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  return '+ offcut: ' + [...o.items.values()].map(it => `${pk(it.sheets / it.ps)} ${it.unit} ${it.label}`).join(' + ');
+}
+function smOffcutNoteHtml(direction, t) {
+  const text = smOffcutText(direction, t);
+  if (!text) return '';
+  return `<div><span class="sm-offcut-note" onclick="event.stopPropagation(); smOpenOffcut(${t.job_id})" title="Job E-${t.job_id} also used offcut paper - click to open that issuance in the Offcut Consumption report">&#9986; ${esc(text)}</span></div>`;
+}
+function smOpenOffcut(jobId) {
+  const o = smOffcutForJob(jobId);
+  if (!o) return;
+  if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut Consumption report is not available for your role.'); return; }
+  // Stock Out may itself be a jump (e.g. from a job's History): keep that
+  // one as the parent instead of clearing it, so Back returns to it intact.
+  const parent = (ssReturn && ssReturn.direction === 'out') ? ssReturn : null;
+  if (ssReturn && !parent) ssClearReturn();
+  const st = offcutConsumptionState;
+  ssReturn = {
+    target: 'offcut', barId: 'oc-return-bar', pane: 'offcut-consumption',
+    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType, jobCard: st.jobCard },
+    label: `Job E-${jobId} · offcut issued`,
+    rangeText: 'all of this job\'s offcut issuance',
+    scrollY: window.scrollY || 0, backLabel: 'Stock Out', backToStockOut: true, parent,
+  };
+  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', jobCard: 'e-' + jobId });
+  openReportsGroup('stocks-group', 'offcut-consumption');
+  renderSsReturnBars();
+  window.scrollTo(0, 0);
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    const els = o.ids.map(id => document.querySelector(`tr[data-oc-row="${id}"]`)).filter(Boolean);
+    if (els.length || tries > 40) {
+      clearInterval(timer);
+      els.forEach(el => { const prev = el.style.background; el.style.transition = 'background 0.3s'; el.style.background = '#fde68a'; setTimeout(() => { el.style.background = prev; }, 2200); });
+      if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 150);
+}
 function jhOpenOffcutIssuance(jobId, a) {
   if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut Consumption report is not available for your role.'); return; }
   const txIds = (a.metadata && Array.isArray(a.metadata.tx_ids)) ? a.metadata.tx_ids : [];
@@ -20468,8 +20554,14 @@ async function loadStockMovement(direction) {
   // Manual Job Card carve-out. Offcut stock-outs live in Offcut Consumption
   // (and, for Manual Job Cards, in Manual Consumption too, marked OFFCUT).
   try {
-    const txs = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
+    // Stock Out also needs which jobs took offcut paper (any date), for the
+    // "+ offcut" note. A failure there never blocks the report itself.
+    const offcutP = direction === 'out'
+      ? api('GET', '/api/inventory/transactions?direction=out&include_offcut_auto=1&offcut_only=1').catch(() => [])
+      : Promise.resolve([]);
+    const [txs, offcutTxs] = await Promise.all([api('GET', `/api/inventory/transactions?${qs.toString()}`), offcutP]);
     state.rows = txs;
+    if (direction === 'out') state.offcutByJob = smOffcutIndex(offcutTxs);
     renderStockMovement(direction, from, to);
     if (state.viewMode === 'total') syncStockTotalFromMovement(direction);
   } catch (e) {
@@ -20667,7 +20759,7 @@ function renderStockMovement(direction, from, to) {
         : (t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>')}</td>
       <td style="padding:8px 10px;">${canEditRef
         ? `<input type="text" value="${esc(txNotesShown(t))}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)" title="Notes — edit and press Enter; the change is logged in this paper's History" class="sm-ref-input" style="width:100%;min-width:150px;">`
-        : esc(txNotesShown(t))}</td>
+        : esc(txNotesShown(t))}${smOffcutNoteHtml(direction, t)}</td>
       <td style="padding:8px 10px;">${reverseCell}</td>
     </tr>`;
   }).join('');
@@ -22295,7 +22387,7 @@ function printStockMovement(direction) {
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
       <td ${tdL}>${job}</td>
-      <td ${tdL}>${esc(txNotesShown(t))}</td>
+      <td ${tdL}>${esc(txNotesShown(t))}${smOffcutText(direction, t) ? `<br><i>${esc(smOffcutText(direction, t))}</i>` : ''}</td>
     </tr>`;
   }).join('');
   const html = `
@@ -22384,7 +22476,7 @@ async function exportStockMovement(direction) {
       job,
       t.challan_no || '',
       t.user_email || '',
-      txNotesShown(t),
+      [txNotesShown(t), smOffcutText(direction, t)].filter(Boolean).join(' | '),
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);

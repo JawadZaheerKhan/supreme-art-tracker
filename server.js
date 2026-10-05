@@ -10072,6 +10072,9 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
     // Offcut Consumption report only: include automatic E-job deductions
     // from offcut inventory while all other movement reports stay unchanged.
     const includeOffcutAuto = req.query.include_offcut_auto === '1';
+    // Stock Out's "+ offcut" note (with include_offcut_auto=1): only offcut
+    // items' stock-outs that belong to a job.
+    const offcutOnly = req.query.offcut_only === '1';
     // Manual Consumption only: hide rows it has archived. This used to ride
     // on include_offcut_manual, but Stock In/Out started sending that flag
     // too (for the offcut carve-out below), so archiving a row there made it
@@ -10168,6 +10171,7 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
         AND (${challanQ} = '' OR t.challan_no ILIKE ${'%' + challanQ + '%'})
+        AND (NOT ${offcutOnly} OR (COALESCE(i.is_offcut, false) = true AND t.job_id IS NOT NULL))
       ORDER BY t.created_at DESC, t.id DESC
     `;
     res.json(txs);
