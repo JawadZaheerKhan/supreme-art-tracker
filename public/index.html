@@ -5325,6 +5325,15 @@ async function loadProductRates() {
 // job into an existing product tile (Product Rate tab's "+" button). See
 // resolveProductKey()/buildProductGroups(). Loaded once at boot; refreshed
 // after adding an alias.
+// Product Special Colors (Products tab) - keyed by the tile's product name,
+// lowercased. Every NEW job of that product starts with them.
+async function loadProductSpecials() {
+  try {
+    productSpecials = await api('GET', '/api/product-specials');
+  } catch (e) {
+    productSpecials = [];
+  }
+}
 async function loadProductAliases() {
   try {
     productAliases = await api('GET', '/api/product-aliases');
@@ -24394,6 +24403,57 @@ function initSpecialsEditor() {
   let initial = [];
   try { initial = JSON.parse(wrap.dataset.specials || '[]'); } catch {}
   renderSpecials(initial);
+  if (isNewJobCardOpen()) wireProductSpecialsAutofill();
+}
+
+// New Job card (New Job, Duplicate, duplicate from a MIL group): once the
+// Job Name is a product with Special Colors set on the Products tab, the card
+// fills them in (owner, 2026-10-06). Once anyone touches the Special Colors
+// on the card, the card stops changing them - what they set is what saves.
+function isNewJobCardOpen() {
+  return !!document.querySelector('#modal-root button[onclick="saveAdd()"]');
+}
+let _productSpecialsTimer = null;
+function wireProductSpecialsAutofill() {
+  const wrap = document.getElementById('f-specials-wrap');
+  const nameEl = document.getElementById('f-name');
+  const row = wrap && wrap.closest('.jc-specials-editor');
+  if (!wrap || !nameEl || !row) return;
+  wrap.dataset.original = wrap.dataset.specials || '[]';
+  row.addEventListener('input', () => { wrap.dataset.touched = '1'; });
+  row.addEventListener('click', e => { if (e.target.closest('button')) wrap.dataset.touched = '1'; });
+  nameEl.addEventListener('input', () => { clearTimeout(_productSpecialsTimer); _productSpecialsTimer = setTimeout(applyProductSpecials, 400); });
+  nameEl.addEventListener('change', () => { clearTimeout(_productSpecialsTimer); applyProductSpecials(); });
+  applyProductSpecials();
+}
+async function applyProductSpecials() {
+  const wrap = document.getElementById('f-specials-wrap');
+  const nameEl = document.getElementById('f-name');
+  if (!wrap || !nameEl || wrap.dataset.touched === '1') return;
+  const name = nameEl.value.trim().toLowerCase();
+  if (wrap.dataset.lookedUp === name) return;
+  wrap.dataset.lookedUp = name;
+  let list = [];
+  if (name) {
+    try {
+      const r = await api('GET', '/api/product-specials/lookup?name=' + encodeURIComponent(name));
+      list = r && Array.isArray(r.special_colors) ? r.special_colors : [];
+    } catch (e) { wrap.dataset.lookedUp = ''; return; }
+  }
+  // The card may have closed, been touched, or the name changed meanwhile.
+  if (!document.body.contains(wrap) || wrap.dataset.touched === '1' || nameEl.value.trim().toLowerCase() !== name) return;
+  const hint = wrap.closest('.jc-specials-editor') && wrap.closest('.jc-specials-editor').querySelector('.f-specials-hint');
+  if (list.length) {
+    renderSpecials(list);
+    wrap.dataset.fromProduct = '1';
+    if (hint) hint.innerHTML = 'Up to 5. Each can have up to 4 mixes. <b style="color:#166534;">Filled in from this product (Products tab).</b>';
+  } else if (wrap.dataset.fromProduct === '1') {
+    let original = [];
+    try { original = JSON.parse(wrap.dataset.original || '[]'); } catch {}
+    renderSpecials(original);
+    wrap.dataset.fromProduct = '';
+    if (hint) hint.textContent = 'Up to 5. Each can have up to 4 mixes.';
+  }
 }
 
 function addSpecialColor() {
@@ -25767,6 +25827,7 @@ function companyInfoLine(j) {
 let productsFilter = loadPersistedFilters('products', { search: '', company: '', type: '', dateRange: '', dfrom: '', dto: '' });
 let __productGroupsAll = [];
 let __productGroupsCache = [];
+let productSpecials = [];
 
 // Syrup/Susp/Tab/Caps/Labels/Leaflets/Sachet/Sticker — Hamza's actual
 // product categories, detected as whole tokens in the product name so
@@ -25924,7 +25985,72 @@ function productTileHtml(g, i) {
       ${canSeeRevenue ? `<div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Revenue</div><div style="font-weight:700;">${g.revenue > 0 ? fmtRate(g.revenue) : '&mdash;'}</div></div>
       <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Avg Rate</div><div style="font-weight:700;">${avgRate ? fmtRate(avgRate) : '&mdash;'}</div></div>` : ''}
     </div>
+    ${productSpecialsTileRow(g, i)}
   </div>`;
+}
+// "Special Colors" line on a product tile. Set here, every NEW job of this
+// product starts with them (owner, 2026-10-06); existing jobs keep theirs.
+function productSpecialsFor(key) {
+  const row = (productSpecials || []).find(r => r.product_key === key);
+  return row && Array.isArray(row.special_colors) ? row.special_colors : [];
+}
+function specialColorsText(list) {
+  return (list || []).map(s => (s.name || '(no name)') + ((s.mix || []).length ? ' (' + s.mix.map(m => [m.color, m.pct ? m.pct + '%' : ''].filter(Boolean).join(' ')).join(' + ') + ')' : '')).join(', ');
+}
+function productSpecialsTileRow(g, i) {
+  if (!hasPerm('products_btn_specials', 'view')) return '';
+  const list = productSpecialsFor(g.key);
+  const canEdit = hasPerm('products_btn_specials', 'yes');
+  return `<div onclick="event.stopPropagation()" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);display:flex;align-items:center;gap:8px;font-size:11px;cursor:default;">
+      <span style="color:var(--text3);font-size:10px;text-transform:uppercase;white-space:nowrap;">Special Colors</span>
+      <span style="flex:1;min-width:0;color:${list.length ? 'var(--text)' : 'var(--text3)'};word-break:break-word;">${list.length ? esc(specialColorsText(list)) : '&mdash;'}</span>
+      ${canEdit ? `<button type="button" class="btn btn-sm" onclick="event.stopPropagation(); openProductSpecialsModal(${i})" title="Set the Special Colors every new job of this product starts with" style="padding:2px 8px;font-size:11px;">${list.length ? 'Edit' : '+ Add Special Color'}</button>` : ''}
+    </div>`;
+}
+let __productSpecialsKey = '';
+let __productSpecialsName = '';
+function openProductSpecialsModal(i) {
+  const g = __productGroupsCache[i];
+  if (!g) return;
+  __productSpecialsKey = g.key;
+  __productSpecialsName = g.name;
+  const list = productSpecialsFor(g.key);
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:720px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <h2 style="margin:0;font-size:17px;">Special Colors &middot; ${esc(g.name)}</h2>
+      <button class="btn btn-sm" onclick="closeModal()" style="padding:2px 8px;font-size:14px;line-height:1;">&times;</button>
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Every <b>new</b> job card of this product starts with these Special Colors (they can still be changed on that job card). Jobs already made are not changed.</div>
+    <div class="f-specials-head">
+      <span class="f-specials-title">Special Colors</span>
+      <span class="f-specials-hint">Up to 5. Each can have up to 4 mixes.</span>
+      <button type="button" class="btn btn-sm" onclick="addSpecialColor()" id="f-add-special">+ Add Special Color</button>
+    </div>
+    <div id="f-specials-wrap" data-specials="${esc(JSON.stringify(list))}"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveProductSpecials()">Save</button>
+    </div>
+  </div>`);
+  renderSpecials(list);
+}
+async function saveProductSpecials() {
+  const list = readSpecialsFromDOM()
+    .map(s => ({
+      name: (s.name || '').toLowerCase(),
+      mix: (s.mix || []).map(m => ({ color: (m.color || '').toLowerCase(), pct: (m.pct || '').trim() })).filter(m => m.color || m.pct),
+    }))
+    .filter(s => s.name || s.mix.length)
+    .slice(0, MAX_SPECIALS);
+  showSaving(true);
+  try {
+    await api('PUT', '/api/product-specials', { product: __productSpecialsName, special_colors: list });
+    await loadProductSpecials();
+    closeModal();
+    refilterProductsGrid();
+    notify(list.length ? 'Special Colors saved - new jobs of this product will start with them' : 'Special Colors removed from this product');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 async function saveProductRateInline(i, valueStr) {
   const g = __productGroupsCache[i];
@@ -28898,6 +29024,7 @@ function openDuplicateJob(id) {
   updateStockHint();
   if (typeof updateStockHint2 === 'function') updateStockHint2();
   renderCutPreview();
+  initSpecialsEditor();
 }
 
 async function saveAdd() {
@@ -28905,6 +29032,8 @@ async function saveAdd() {
   // New job — never pre-populate the legacy delivered-qty scalar (see
   // getFormData()). It's not delivered yet.
   data.delqty = '';
+  const specialsWrap = document.getElementById('f-specials-wrap');
+  if (data.particulars && !Array.isArray(data.particulars.special_colors) && specialsWrap && specialsWrap.dataset.touched === '1') data.particulars.special_colors = [];
   if (_pendingJobNumber) data.reuse_number = _pendingJobNumber;
   if (!data.name || !data.client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
   if (!(await checkStockBeforeSave(data))) return;
@@ -33766,6 +33895,7 @@ const ACC_PRODUCTS_TAB_ROWS = [
   { key: 'products_tab_access',  type: 'tab' },
   { key: 'products_btn_rate',    type: 'button' },
   { key: 'products_btn_revenue', type: 'button' },
+  { key: 'products_btn_specials', type: 'button' },
 ];
 // Station tab: one View/Hidden row for the whole tab.
 const ACC_STATION_TAB_ROWS = [
@@ -34872,7 +35002,7 @@ async function init() {
     const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster()];
     // Finance reference data (Product Rate / aliases / Company Settings), only for roles that can see any of it.
     if (hasPerm('products_tab_access', 'view') || hasPerm('rpt_sale_report', 'view') || hasPerm('job_btn_pricing', 'view')) {
-      loaders.push(loadProductRates(), loadProductAliases(), loadCompanySettings());
+      loaders.push(loadProductRates(), loadProductAliases(), loadCompanySettings(), loadProductSpecials());
     }
     if (!isOperator()) loaders.push(loadInventory());
     await Promise.all(loaders);

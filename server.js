@@ -299,7 +299,7 @@ function getDb() {
 // Stock In / Stock Out reports - owner, 2026-10-05).
 // Bumped again for jobs.updated_at + its trigger (changed-only job refresh -
 // owner, 2026-10-05: the app had become slow).
-const SCHEMA_VERSION = 'v2026-10-05-jobs-updated-at';
+const SCHEMA_VERSION = 'v2026-10-06-product-specials';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -496,6 +496,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_tab_access:  { label: 'Product Rate tab — view jobs grouped by product', levels: { ceo: 'view', finance: 'view' } },
   products_btn_rate:    { label: 'Rate — edit a Product Rate tile\'s default Rate, and use its "+" (fold another product in)', levels: { finance: 'yes', ceo: 'view' } },
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
+  products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (every NEW job of that product starts with them)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -1566,6 +1567,17 @@ async function initDb() {
         rate        NUMERIC NOT NULL,
         updated_by  TEXT,
         updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // A product's own Special Colors (Products tab). product_key = the tile's
+    // product name, lowercased (aliases already resolved). Every NEW job of
+    // that product starts with these; existing jobs are never touched.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.product_specials (
+        product_key    TEXT PRIMARY KEY,
+        special_colors JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_by     TEXT,
+        updated_at     TIMESTAMPTZ DEFAULT NOW()
       )
     `;
     await sql`
@@ -4969,6 +4981,14 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     // nothing. (See the catch below for the case an INSERT still fails.)
     if (!name)   return res.status(400).json({ error: 'Job name is required.' });
     if (!client) return res.status(400).json({ error: 'Company is required.' });
+    // Product Special Colors (Products tab) for a new job that didn't bring
+    // its own list. Never blocks creating the job.
+    if (!(particulars && typeof particulars === 'object' && Array.isArray(particulars.special_colors))) {
+      try {
+        const pc = await productSpecialColors(sql, name);
+        if (pc.length) particulars = { ...(particulars && typeof particulars === 'object' ? particulars : {}), special_colors: pc };
+      } catch (e) { console.error('product special colors:', e.message); }
+    }
     // Optional: issue this job a number that was spent but never used (from
     // the Job Number Register's Reuse button). Re-checked here rather than
     // trusted from the client - this is the one place a number can be given
@@ -7201,6 +7221,36 @@ async function productStandardRate(sql, jobName) {
   const rows = await sql`SELECT rate FROM finance.product_rates WHERE lower(btrim(product)) = ${key}`;
   return rows.length ? Number(rows[0].rate) : null;
 }
+// The product a job name counts as (Products tab), through its alias if it has one.
+async function productKeyFor(sql, jobName) {
+  const own = String(jobName || '').trim().toLowerCase();
+  if (!own) return '';
+  const al = await sql`SELECT canonical FROM finance.product_aliases WHERE alias = ${own}`;
+  return al.length ? String(al[0].canonical || '').trim().toLowerCase() : own;
+}
+// Same shape and limits as the job card's Special Colors editor: up to 5
+// colours, each with up to 4 mixes, lowercase, empty rows dropped.
+function normalizeSpecialColors(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter(s => s && typeof s === 'object')
+    .map(s => ({
+      name: String(s.name || '').trim().toLowerCase(),
+      mix: (Array.isArray(s.mix) ? s.mix : [])
+        .filter(m => m && typeof m === 'object')
+        .map(m => ({ color: String(m.color || '').trim().toLowerCase(), pct: String(m.pct || '').trim() }))
+        .filter(m => m.color || m.pct)
+        .slice(0, 4),
+    }))
+    .filter(s => s.name || s.mix.length)
+    .slice(0, 5);
+}
+// The Special Colors set on a job's product ([] when none).
+async function productSpecialColors(sql, jobName) {
+  const key = await productKeyFor(sql, jobName);
+  if (!key) return [];
+  const rows = await sql`SELECT special_colors FROM finance.product_specials WHERE product_key = ${key}`;
+  return rows.length ? normalizeSpecialColors(rows[0].special_colors) : [];
+}
 function isRateOverride(rate, standard) {
   return standard !== null && standard !== undefined && rate !== null && rate !== undefined && Math.abs(Number(rate) - Number(standard)) > RATE_EPS;
 }
@@ -7981,6 +8031,57 @@ app.delete('/api/product-aliases/:alias', requirePermission('products_btn_rate')
       summary: `Product Alias removed: "${alias}" no longer folds into "${deleted[0].canonical}"`,
     });
     res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Product Special Colors ─────────────────────────────────────────
+// Set on a Products tile; every NEW job of that product starts with them
+// (job card form fills them in as the name is typed; POST /api/jobs and the
+// group duplicate fill them server-side). Existing jobs are never changed.
+app.get('/api/product-specials', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT * FROM finance.product_specials ORDER BY product_key ASC`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// For the New Job card - anyone who can make a job may read these.
+app.get('/api/product-specials/lookup', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = String(req.query.name || '');
+    res.json({ product_key: await productKeyFor(sql, name), special_colors: await productSpecialColors(sql, name) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/product-specials', requirePermission('products_btn_specials'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = await productKeyFor(sql, req.body?.product);
+    if (!key) return res.status(400).json({ error: 'Product name is required.' });
+    if (req.body?.special_colors !== undefined && !Array.isArray(req.body.special_colors)) return res.status(400).json({ error: 'special_colors must be a list.' });
+    const list = normalizeSpecialColors(req.body?.special_colors);
+    const before = await sql`SELECT special_colors FROM finance.product_specials WHERE product_key = ${key}`;
+    const prior = before.length ? normalizeSpecialColors(before[0].special_colors) : [];
+    if (JSON.stringify(prior) === JSON.stringify(list)) return res.json({ ok: true, unchanged: true, product_key: key, special_colors: list });
+    if (list.length) {
+      await sql`
+        INSERT INTO finance.product_specials (product_key, special_colors, updated_by, updated_at)
+        VALUES (${key}, ${JSON.stringify(list)}::jsonb, ${req.user.email}, NOW())
+        ON CONFLICT (product_key) DO UPDATE SET special_colors = EXCLUDED.special_colors, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      `;
+    } else {
+      await sql`DELETE FROM finance.product_specials WHERE product_key = ${key}`;
+    }
+    const txt = l => l.length ? l.map(s => (s.name || '(no name)') + (s.mix.length ? ' [' + s.mix.map(m => [m.color, m.pct && m.pct + '%'].filter(Boolean).join(' ')).join(', ') + ']' : '')).join('; ') : 'none';
+    await logAudit(sql, req, {
+      // audit_log.entity_id is an INTEGER - the product goes in metadata instead.
+      action: 'product_specials.update', entityType: 'product_specials', entityId: null,
+      summary: `Special Colors for product "${key}": ${txt(prior)} -> ${txt(list)} (new jobs of this product start with these)`,
+      metadata: { product: key, before: prior, after: list },
+    });
+    res.json({ ok: true, product_key: key, special_colors: list });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -8805,6 +8906,12 @@ app.post('/api/stock-groups/:id/duplicate-into-job', requirePermission('job_btn_
     // the "duplicate" behaviour the owner wants.
     const seedParts = (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {};
     const particulars = JSON.parse(JSON.stringify(seedParts));
+    // The product's Special Colors (Products tab), when set, are what every
+    // new job of that product starts with.
+    try {
+      const pc = await productSpecialColors(sql, tpl.name || g.product);
+      if (pc.length) particulars.special_colors = pc;
+    } catch (e) { console.error('product special colors:', e.message); }
     // stock_group_name is set to the group's product too so every
     // client-side lookup that still groups by name continues to work
     // without having to refactor every reader in one go.
