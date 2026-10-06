@@ -2989,6 +2989,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 <div id="app-date" aria-hidden="true"></div>
 
 <div class="main" id="jobs-mode">
+  <div id="jobs-return-bar" style="display:none;"></div>
   <div class="stats-row" id="stats-row"></div>
   <div class="toolbar">
     <div class="tabs" id="tabs-wrap"></div>
@@ -5706,6 +5707,8 @@ function setMode(m) {
   // Leaving Inventory undoes the filters a report-row jump applied, however
   // the user leaves — Back button, top-bar tab, or a bounce above.
   if (m !== 'inventory') invClearReturn();
+  // Same for a jump into Jobs (Product Rate history -> a job).
+  if (m !== 'jobs') jobsClearReturn();
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
@@ -7736,6 +7739,57 @@ function invClearReturn() {
   if (box) box.value = f.text;
   invReturn = null;
   renderInvReturnBar();
+}
+// ── Back bar on the Jobs tab ──────────────────────────────────────
+// A job opened from somewhere else (Product Rate's shipment history) gets
+// a "Back to ..." bar on top of the Jobs tab, like the Inventory / report
+// jumps (owner, 2026-10-06). jobsReturn = { backLabel, label, reopen }.
+let jobsReturn = null;
+function jobsClearReturn() {
+  if (!jobsReturn) return;
+  jobsReturn = null;
+  renderJobsReturnBar();
+}
+function renderJobsReturnBar() {
+  const bar = document.getElementById('jobs-return-bar');
+  if (!bar) return;
+  if (!jobsReturn) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  bar.style.display = 'block';
+  bar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
+      <button class="btn btn-sm" onclick="jobsReturnBack()">&#8592; Back to ${esc(jobsReturn.backLabel)}</button>
+      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(jobsReturn.label)}</b>, opened from there.</span>
+    </div>`;
+}
+function jobsReturnBack() {
+  const back = jobsReturn;
+  jobsReturn = null;
+  renderJobsReturnBar();
+  if (typeof closeModal === 'function') closeModal();
+  if (back && back.reopen) back.reopen();
+}
+// Product Rate -> shipment history -> a job number: open the job on the
+// Jobs tab, with a Back bar that returns to the same product's history.
+function openJobFromProductHistory(jobNo, i) {
+  const g = __productGroupsCache[i];
+  const key = g ? g.key : null;
+  const scrollY = window.scrollY;
+  closeModal();
+  setMode('jobs');
+  jobsReturn = {
+    backLabel: 'Product Rate',
+    label: 'E-' + jobNo + (g ? ' · ' + g.name : ''),
+    reopen: () => {
+      setMode('products');
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+        const idx = key === null ? -1 : __productGroupsCache.findIndex(x => x.key === key);
+        if (idx >= 0) openProductHistoryModal(idx);
+      });
+    },
+  };
+  renderJobsReturnBar();
+  setTimeout(() => openEdit(jobNo), 50);
 }
 function renderInvReturnBar() {
   const bar = document.getElementById('inv-return-bar');
@@ -26323,7 +26377,7 @@ function openProductHistoryModal(i) {
       : `${esc(String(r.taxPct))}%`;
     return `<tr>
     <td style="padding:6px 8px;">${esc(r.date)}</td>
-    <td style="padding:6px 8px;"><a href="#" onclick="event.preventDefault(); closeModal(); setMode('jobs'); setTimeout(()=>openEdit(${r.jobId}),50);">E-${r.jobId}</a></td>
+    <td style="padding:6px 8px;"><a href="#" onclick="event.preventDefault(); openJobFromProductHistory(${r.jobId}, ${i});">E-${r.jobId}</a></td>
     <td style="padding:6px 8px;">${esc(r.client)}</td>
     <td style="padding:6px 8px;">${esc(r.po)}</td>
     <td style="padding:6px 8px;">${esc(r.fbr)}</td>
