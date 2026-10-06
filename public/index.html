@@ -2713,6 +2713,19 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .sticker.sticker-4x3 .sticker-row-label { padding: 3px 4px; font-size: 5.5pt; }
 .sticker.sticker-4x3 .sticker-row-icon { width: 11px; height: 11px; }
 .sticker.sticker-4x3 .sticker-row-value { padding: 3px 8px; }
+/* Special Colors sticker (Products tab): header + product row + two colour
+   columns side by side in the same 4x3 label. */
+.spc-sticker .spc-product-row { flex: 0 0 26px; }
+.spc-sticker .spc-product-row .sticker-row-label { width: 22%; }
+.spc-body { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+.spc-col { flex: 1 1 0; min-width: 0; padding: 4px 6px; box-sizing: border-box; overflow: hidden; font-size: 9pt; display: flex; flex-direction: column; gap: 2px; }
+.spc-divider { width: 2.5px; background: #000; flex: 0 0 auto; }
+.spc-col-title { font-size: 0.62em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.2px; color: #000; }
+.spc-name { font-size: 1.45em; font-weight: 900; text-transform: uppercase; line-height: 1.1; overflow-wrap: break-word; border-bottom: 1.5px solid #000; padding-bottom: 2px; }
+.spc-mix { width: 100%; border-collapse: collapse; }
+.spc-mix td { padding: 1px 0; font-weight: 700; text-transform: uppercase; line-height: 1.15; overflow-wrap: anywhere; }
+.spc-mix td.spc-pct { text-align: right; white-space: nowrap; padding-left: 6px; font-weight: 900; }
+.spc-nomix { font-style: italic; font-size: 0.85em; }
 /* Brand stacks onto its own lines (Supreme Art / Private Limited / Date)
    instead of sharing a line's width with anything else — the wider logo
    above leaves much less horizontal room, and stacking sidesteps needing
@@ -24433,57 +24446,6 @@ function initSpecialsEditor() {
   let initial = [];
   try { initial = JSON.parse(wrap.dataset.specials || '[]'); } catch {}
   renderSpecials(initial);
-  if (isNewJobCardOpen()) wireProductSpecialsAutofill();
-}
-
-// New Job card (New Job, Duplicate, duplicate from a MIL group): once the
-// Job Name is a product with Special Colors set on the Products tab, the card
-// fills them in (owner, 2026-10-06). Once anyone touches the Special Colors
-// on the card, the card stops changing them - what they set is what saves.
-function isNewJobCardOpen() {
-  return !!document.querySelector('#modal-root button[onclick="saveAdd()"]');
-}
-let _productSpecialsTimer = null;
-function wireProductSpecialsAutofill() {
-  const wrap = document.getElementById('f-specials-wrap');
-  const nameEl = document.getElementById('f-name');
-  const row = wrap && wrap.closest('.jc-specials-editor');
-  if (!wrap || !nameEl || !row) return;
-  wrap.dataset.original = wrap.dataset.specials || '[]';
-  row.addEventListener('input', () => { wrap.dataset.touched = '1'; });
-  row.addEventListener('click', e => { if (e.target.closest('button')) wrap.dataset.touched = '1'; });
-  nameEl.addEventListener('input', () => { clearTimeout(_productSpecialsTimer); _productSpecialsTimer = setTimeout(applyProductSpecials, 400); });
-  nameEl.addEventListener('change', () => { clearTimeout(_productSpecialsTimer); applyProductSpecials(); });
-  applyProductSpecials();
-}
-async function applyProductSpecials() {
-  const wrap = document.getElementById('f-specials-wrap');
-  const nameEl = document.getElementById('f-name');
-  if (!wrap || !nameEl || wrap.dataset.touched === '1') return;
-  const name = nameEl.value.trim().toLowerCase();
-  if (wrap.dataset.lookedUp === name) return;
-  wrap.dataset.lookedUp = name;
-  let list = [];
-  if (name) {
-    try {
-      const r = await api('GET', '/api/product-specials/lookup?name=' + encodeURIComponent(name));
-      list = r && Array.isArray(r.special_colors) ? r.special_colors : [];
-    } catch (e) { wrap.dataset.lookedUp = ''; return; }
-  }
-  // The card may have closed, been touched, or the name changed meanwhile.
-  if (!document.body.contains(wrap) || wrap.dataset.touched === '1' || nameEl.value.trim().toLowerCase() !== name) return;
-  const hint = wrap.closest('.jc-specials-editor') && wrap.closest('.jc-specials-editor').querySelector('.f-specials-hint');
-  if (list.length) {
-    renderSpecials(list);
-    wrap.dataset.fromProduct = '1';
-    if (hint) hint.innerHTML = 'Up to 5. Each can have up to 4 mixes. <b style="color:#166534;">Filled in from this product (Products tab).</b>';
-  } else if (wrap.dataset.fromProduct === '1') {
-    let original = [];
-    try { original = JSON.parse(wrap.dataset.original || '[]'); } catch {}
-    renderSpecials(original);
-    wrap.dataset.fromProduct = '';
-    if (hint) hint.textContent = 'Up to 5. Each can have up to 4 mixes.';
-  }
 }
 
 function addSpecialColor() {
@@ -26018,8 +25980,9 @@ function productTileHtml(g, i) {
     ${productSpecialsTileRow(g, i)}
   </div>`;
 }
-// "Special Colors" line on a product tile. Set here, every NEW job of this
-// product starts with them (owner, 2026-10-06); existing jobs keep theirs.
+// "Special Colors" line on a product tile. Kept with the product only -
+// never applied to any job (owner, 2026-10-06) - and printed from here as
+// 4x3 stickers, two colours per label.
 function productSpecialsFor(key) {
   const row = (productSpecials || []).find(r => r.product_key === key);
   return row && Array.isArray(row.special_colors) ? row.special_colors : [];
@@ -26034,7 +25997,8 @@ function productSpecialsTileRow(g, i) {
   return `<div onclick="event.stopPropagation()" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);display:flex;align-items:center;gap:8px;font-size:11px;cursor:default;">
       <span style="color:var(--text3);font-size:10px;text-transform:uppercase;white-space:nowrap;">Special Colors</span>
       <span style="flex:1;min-width:0;color:${list.length ? 'var(--text)' : 'var(--text3)'};word-break:break-word;">${list.length ? esc(specialColorsText(list)) : '&mdash;'}</span>
-      ${canEdit ? `<button type="button" class="btn btn-sm" onclick="event.stopPropagation(); openProductSpecialsModal(${i})" title="Set the Special Colors every new job of this product starts with" style="padding:2px 8px;font-size:11px;">${list.length ? 'Edit' : '+ Add Special Color'}</button>` : ''}
+      ${list.length ? `<button type="button" class="btn btn-sm" onclick="event.stopPropagation(); printProductSpecialsTile(${i})" title="Print these Special Colors as 4x3 stickers (2 colours per sticker)" style="padding:2px 8px;font-size:11px;">&#128424; Print</button>` : ''}
+      ${canEdit ? `<button type="button" class="btn btn-sm" onclick="event.stopPropagation(); openProductSpecialsModal(${i})" title="Set this product's Special Colors" style="padding:2px 8px;font-size:11px;">${list.length ? 'Edit' : '+ Add Special Color'}</button>` : ''}
     </div>`;
 }
 let __productSpecialsKey = '';
@@ -26050,7 +26014,7 @@ function openProductSpecialsModal(i) {
       <h2 style="margin:0;font-size:17px;">Special Colors &middot; ${esc(g.name)}</h2>
       <button class="btn btn-sm" onclick="closeModal()" style="padding:2px 8px;font-size:14px;line-height:1;">&times;</button>
     </div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Every <b>new</b> job card of this product starts with these Special Colors (they can still be changed on that job card). Jobs already made are not changed.</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">This product's Special Colors. They stay with the product only - no job card is changed. <b>Print</b> makes 4x3 stickers, two colours per sticker.</div>
     <div class="f-specials-head">
       <span class="f-specials-title">Special Colors</span>
       <span class="f-specials-hint">Up to 5. Each can have up to 4 mixes.</span>
@@ -26059,10 +26023,111 @@ function openProductSpecialsModal(i) {
     <div id="f-specials-wrap" data-specials="${esc(JSON.stringify(list))}"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="printProductSpecialsFromEditor()" title="Print what is in the boxes above (saved or not)">&#128424; Print</button>
       <button class="btn btn-primary" onclick="saveProductSpecials()">Save</button>
     </div>
   </div>`);
   renderSpecials(list);
+}
+// The editor's colours, tidied the way they are saved.
+function productSpecialsFromEditor() {
+  return readSpecialsFromDOM()
+    .map(s => ({
+      name: (s.name || '').toLowerCase(),
+      mix: (s.mix || []).map(m => ({ color: (m.color || '').toLowerCase(), pct: (m.pct || '').trim() })).filter(m => m.color || m.pct),
+    }))
+    .filter(s => s.name || s.mix.length)
+    .slice(0, MAX_SPECIALS);
+}
+function printProductSpecialsTile(i) {
+  const g = __productGroupsCache[i];
+  if (!g) return;
+  printSpecialColorStickers(g.name, productSpecialsFor(g.key));
+}
+function printProductSpecialsFromEditor() {
+  const list = productSpecialsFromEditor();
+  if (!list.length) { notify('Add a Special Color first.'); return; }
+  closeModal();
+  printSpecialColorStickers(__productSpecialsName, list);
+}
+// One 4x3 sticker (same label, border and header as the Stickers tab's
+// 4x3) holding up to TWO special colours side by side; a lone colour gets
+// the full width.
+function buildSpecialColorStickerHTML(product, pair, date, startNo, total) {
+  const col = (s, k) => `
+      <div class="spc-col">
+        <div class="spc-col-title">Special Color ${startNo + k} of ${total}</div>
+        <div class="spc-name">${esc(s.name || '(no name)')}</div>
+        ${(s.mix || []).length ? `<table class="spc-mix">${s.mix.map(m => `<tr><td>${esc(m.color || '')}</td><td class="spc-pct">${m.pct ? esc(m.pct) + '%' : ''}</td></tr>`).join('')}</table>` : '<div class="spc-nomix">No mix</div>'}
+      </div>`;
+  return `
+    <div class="sticker sticker-4x3 spc-sticker">
+      <div class="sticker-header">
+        <div class="sticker-logo" role="img" aria-label="Supreme Art"></div>
+        <div class="sticker-header-divider"></div>
+        <div class="sticker-header-right">
+          <div class="sticker-brand-main"><span class="sticker-brand-fit">Supreme Art</span></div>
+          <div class="sticker-brand-sub"><span class="sticker-brand-fit">Private Limited</span></div>
+          <div class="sticker-date">Date: <b>${esc(fmtStickerDate(date))}</b></div>
+        </div>
+      </div>
+      <div class="sticker-row spc-product-row">
+        <div class="sticker-row-label">Product</div>
+        <div class="sticker-row-value"><span class="sticker-fit">${esc(product || '')}</span></div>
+      </div>
+      <div class="spc-body${pair.length === 1 ? ' spc-single' : ''}">${pair.map(col).join('<div class="spc-divider"></div>')}</div>
+    </div>`;
+}
+// Shrinks each colour column's text until it fits its box.
+function fitSpecialColorStickers(root) {
+  root.querySelectorAll('.spc-col').forEach(c => {
+    let pt = 9;
+    c.style.fontSize = pt + 'pt';
+    while (pt > 5 && c.scrollHeight > c.clientHeight + 1) { pt -= 0.5; c.style.fontSize = pt + 'pt'; }
+  });
+}
+// Prints a product's Special Colors on 4in x 3in labels - the Stickers
+// tab's 4x3 format - two colours per label (owner, 2026-10-06).
+function printSpecialColorStickers(product, list) {
+  const colors = (list || []).filter(s => s && (s.name || (s.mix || []).length));
+  if (!colors.length) { notify('No Special Colors to print.'); return; }
+  const date = localDateISO();
+  const sheets = [];
+  for (let k = 0; k < colors.length; k += 2) {
+    sheets.push(`<div class="stickers-sheet size-4x3"><div class="stickers-sheet-grid">${buildSpecialColorStickerHTML(product, colors.slice(k, k + 2), date, k + 1, colors.length)}</div></div>`);
+  }
+  const area = document.getElementById('print-area');
+  area.innerHTML = sheets.join('');
+  // Same page set-up as the Stickers tab's 4x3 print.
+  document.querySelectorAll('#__jc-print-page, #__stk-print-page').forEach(el => el.remove());
+  const pageStyle = document.createElement('style');
+  pageStyle.id = '__stk-print-page';
+  pageStyle.textContent = '@media print {' +
+    '  @page { size: 4in 3in; margin: 0; }' +
+    '  #print-area { width: 4in !important; padding: 0 !important; }' +
+    '}';
+  document.head.appendChild(pageStyle);
+  const prevTitle = document.title;
+  document.title = ' ';
+  const restore = () => {
+    document.title = prevTitle;
+    if (pageStyle.parentNode) pageStyle.parentNode.removeChild(pageStyle);
+    window.removeEventListener('afterprint', restore);
+    clearTimeout(restoreFallback);
+  };
+  window.addEventListener('afterprint', restore);
+  const restoreFallback = setTimeout(restore, 30000);
+  waitForPrintImages(area).then(() => {
+    const prev = area.getAttribute('style') || '';
+    area.style.cssText = 'display:block; position:absolute; left:-10000px; top:0; width:auto;';
+    void area.offsetWidth;
+    fitStickerText(area);
+    fitStickerBrand(area);
+    fitSpecialColorStickers(area);
+    area.setAttribute('style', prev);
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
 }
 async function saveProductSpecials() {
   const list = readSpecialsFromDOM()
@@ -26078,7 +26143,7 @@ async function saveProductSpecials() {
     await loadProductSpecials();
     closeModal();
     refilterProductsGrid();
-    notify(list.length ? 'Special Colors saved - new jobs of this product will start with them' : 'Special Colors removed from this product');
+    notify(list.length ? 'Special Colors saved' : 'Special Colors removed from this product');
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -29054,7 +29119,6 @@ function openDuplicateJob(id) {
   updateStockHint();
   if (typeof updateStockHint2 === 'function') updateStockHint2();
   renderCutPreview();
-  initSpecialsEditor();
 }
 
 async function saveAdd() {
@@ -29062,8 +29126,6 @@ async function saveAdd() {
   // New job — never pre-populate the legacy delivered-qty scalar (see
   // getFormData()). It's not delivered yet.
   data.delqty = '';
-  const specialsWrap = document.getElementById('f-specials-wrap');
-  if (data.particulars && !Array.isArray(data.particulars.special_colors) && specialsWrap && specialsWrap.dataset.touched === '1') data.particulars.special_colors = [];
   if (_pendingJobNumber) data.reuse_number = _pendingJobNumber;
   if (!data.name || !data.client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
   if (!(await checkStockBeforeSave(data))) return;
