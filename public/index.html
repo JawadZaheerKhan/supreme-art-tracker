@@ -16868,6 +16868,11 @@ function jobShipmentFigures(j) {
   const cutPieces = jobCutPieces(j);
   const pkPerUnit = (upsNum > 0 && psJob > 0) ? 1 / (upsNum * psJob * cutPieces) : 0;
   const sheetUnit = ['labels', 'leaflets'].includes(saleReportTabFor(j)) && psJob > 0;
+  // Labels / Leaflets: the Sheets figure is the job card's own Sheets field
+  // (owner, 2026-10-06) - shared out over the shipments by their UC - not a
+  // figure worked back from the UC. Calculated only when the card has none.
+  const jobCardSheets = parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, ''));
+  const sheetCut      = String((j.particulars && j.particulars.sheet_cut) || '1/1');
   const ovNum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
   const ucBase = deliveriesList.map(d => { const o = ovNum(d && d.uc_qty); return o !== null ? o : (parseFloat(d && d.cartons) || 0); });
   // A shipment's own wastage: typed, else - when its UC is typed (or set
@@ -16896,11 +16901,21 @@ function jobShipmentFigures(j) {
     const rowPackets = pkPerUnit > 0
       ? cartonQty * pkPerUnit
       : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * cartonQty / cartonQtyNum : 0);
+    let rowSheets = rowPackets * psJob;
+    const fromJobCard = sheetUnit && jobCardSheets > 0;
+    if (fromJobCard) {
+      const share = (Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? cartonQty / cartonQtyNum
+        : (deliveriesList.length === 1 ? 1 : (deliveredTotal > 0 ? cartons / deliveredTotal : 0));
+      rowSheets = jobCardSheets * share;
+    }
     return {
       cartons, cartonQty, ucTyped: ucTyped !== null, ucCalc,
       wastage: wTyped !== null ? wTyped : wastageCalc, wastageTyped: wTyped !== null, wastageCalc,
       packets: rowPackets,
-      packetsShown: sheetUnit ? rowPackets * psJob : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
+      packetsShown: sheetUnit ? rowSheets : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
+      // Sheet rows: the packets those sheets make, and the cut - shown
+      // beside the sheets for reference ("713 sheets (1.43 pkts · 1/4)").
+      sheetsPackets: sheetUnit ? rowSheets / psJob : null, sheetCut: sheetUnit ? sheetCut : null, sheetsFromJobCard: fromJobCard,
     };
   });
   return { isMilJob, cartonQtyNum, allDelivered, closed: closedNormal, deliveredTotal, jobWastageAll, packets, pkPerUnit, psJob, upsNum, sheetUnit, rows };
@@ -16908,6 +16923,12 @@ function jobShipmentFigures(j) {
 // Packets cell text shared by both reports: plain packets, or for Labels /
 // Leaflets the sheets with their packets alongside for reference
 // ("4,200 sheets (42 pkts)").
+// Sale Report sheet rows: the reference beside the sheets - their packets
+// and the job's cut ("1.43 pkts · 1/4"; owner, 2026-10-06).
+function saleSheetsRefText(r, fmt) {
+  const pk = (r.sheetsPackets !== null && r.sheetsPackets !== undefined) ? r.sheetsPackets : r.packets;
+  return `${fmt(pk)} pkts${r.sheetCut ? ' &middot; ' + esc(r.sheetCut) : ''}`;
+}
 function shipmentPacketsText(packets, unit, sheets, fmt) {
   if (unit === 'sheets') return `${fmt(sheets)} sheets (${fmt(packets)} pkts)`;
   return fmt(packets);
@@ -17060,8 +17081,12 @@ function buildSaleReportRows(tabOverride) {
       // those sheets weighed at the SHEET SIZE's Packet/KG, no cut division
       // (owner's rule, E-586: 316.7 ÷ 100 × 14.63 = 46.34 kg):
       //   Wastage Weight = Wastage Sheets ÷ sheets-per-packet × Packet/KG.
-      const rowWastageSheets  = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
-      const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? rowWastageSheets / psJob : null;
+      const rowWastagePrinted = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
+      // Labels / Leaflets: Wastage Sheets in WHOLE sheets - the printed
+      // pieces divided by the cut (10.3 at 1/4 = 2.575; owner, 2026-10-06).
+      // The weight below still uses the printed pieces, unchanged.
+      const rowWastageSheets  = (rowWastagePrinted !== null && F.sheetUnit) ? rowWastagePrinted / jobCutPieces(j) : rowWastagePrinted;
+      const rowWastagePackets = (rowWastagePrinted !== null && psJob > 0) ? rowWastagePrinted / psJob : null;
       const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
       // A shipment's OWN wastage (its UC or wastage typed) is a % of its own
       // paper. Otherwise the wastage is the whole JOB's leftover, so its % is
@@ -17086,6 +17111,7 @@ function buildSaleReportRows(tabOverride) {
         ucJob: Number.isFinite(cartonQtyNum) ? cartonQtyNum : null,   // the job's printed total, shown beside the row's share
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
         packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
+        sheetsPackets: fig.sheetsPackets, sheetCut: fig.sheetCut, sheetsFromJobCard: fig.sheetsFromJobCard,
         // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
         pkPerUc: F.pkPerUnit > 0 ? (fig.packetsUnit === 'sheets' ? F.pkPerUnit * F.psJob : F.pkPerUnit) : 0,
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
@@ -17160,7 +17186,7 @@ const SALE_MERGE_ADDITIVE = [
   'wastageSheets', 'wastageKg', 'issuedKg', 'amountExTax', 'taxAmt', 'amountIncTax',
   // Per-delivery now, so they add like the rest - left out, two jobs'
   // packets were joined as text ("10 12.5") and the cell read NaN.
-  'packets', 'wastagePackets', 'packetsShown',
+  'packets', 'wastagePackets', 'packetsShown', 'sheetsPackets',
   // Linked jobs on one invoice: their printed totals add up too.
   'ucJob',
 ];
@@ -17697,15 +17723,19 @@ function saleReportCols(tabOverride) {
       // reference only - the total keeps them out of the packets figure.
       // Editable (owner, 2026-10-02): type the packets - or sheets - and the
       // shipment's Unit Carton Qty follows (UC = packets / packets-per-UC).
-      cell: (r, c) => (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
-        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}${r.packetsUnit === 'sheets' ? `<span style="font-size:10px;color:var(--text2);">sheets (${fmt(r.packets)} pkts)</span>` : ''}</div>`
+      // Sheet rows (owner, 2026-10-06): the sheets come from the job card, so
+      // they are not typed here (the shipment's UC is still typed in Printed
+      // UC Qty); the note carries the packets AND the cut ("1.43 pkts · 1/4").
+      cell: (r, c) => (c && c.packetsCell && !r._merged && r.pkPerUc > 0 && r.packetsUnit !== 'sheets')
+        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
         : r.packetsUnit === 'sheets'
-          ? `${fmt(r.packetsShown)} sheets <span style="font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>`
+          ? `<span title="${r.sheetsFromJobCard ? 'From the job card\'s Sheets' : 'The job card has no Sheets - worked out from the UC'}">${fmt(r.packetsShown)} sheets</span> <span style="font-size:10px;color:var(--text2);white-space:nowrap;">(${saleSheetsRefText(r, fmt)})</span>`
           : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets),
       totalCell: t => [t.packets ? fmt(t.packets) + (t.sheetsCount ? ' pkts' : '') : '',
         t.sheetsCount ? `${fmt(t.sheetsCount)} sheets (${fmt(t.sheetsPackets || 0)} pkts)` : ''].filter(Boolean).join(' + '),
       xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; },
-      pr: r => r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) },
+      // Print: sheet rows print the sheets only - no packets, no cut.
+      pr: r => r.packetsUnit === 'sheets' ? fmt(r.packetsShown) + (tab === 'all' ? ' sheets' : '') : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Printed UC Qty', right: true, total: 'cartonQty',
       // The row's share, with the job's printed total beside it when they
@@ -17803,7 +17833,7 @@ function renderSaleReport() {
       // Packets and sheets are different units - never added together.
       packets:        a.packets        + (r.packetsUnit === 'sheets' ? 0 : once('packets', +r.packets)),
       sheetsCount:    (a.sheetsCount || 0) + (r.packetsUnit === 'sheets' ? (+r.packetsShown || 0) : 0),
-      sheetsPackets:  (a.sheetsPackets || 0) + (r.packetsUnit === 'sheets' ? (+r.packets || 0) : 0),   // reference only
+      sheetsPackets:  (a.sheetsPackets || 0) + (r.packetsUnit === 'sheets' ? (+(r.sheetsPackets ?? r.packets) || 0) : 0),   // reference only
       wastageSheets:  a.wastageSheets  + once('wastageSheets', r.wastageSheets),
       wastagePackets: a.wastagePackets + once('wastagePackets', r.wastagePackets),
       wastageKg:      a.wastageKg      + once('wastageKg', r.wastageKg),
