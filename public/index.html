@@ -17000,7 +17000,9 @@ function jobShipmentFigures(j) {
     const rowPackets = pkPerUnit > 0
       ? cartonQty * pkPerUnit
       : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * cartonQty / cartonQtyNum : 0);
-    let rowSheets = rowPackets * psJob;
+    // Sheets = PRINTED (cut) pieces, the same unit as the job card's Sheets
+    // Qty (its Packets = Sheets / (packet size x cut)).
+    let rowSheets = rowPackets * psJob * cutPieces;
     const fromJobCard = sheetUnit && jobCardSheets > 0;
     if (fromJobCard) {
       const share = (Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? cartonQty / cartonQtyNum
@@ -17012,12 +17014,18 @@ function jobShipmentFigures(j) {
       wastage: wTyped !== null ? wTyped : wastageCalc, wastageTyped: wTyped !== null, wastageCalc,
       packets: rowPackets,
       packetsShown: sheetUnit ? rowSheets : rowPackets, packetsUnit: sheetUnit ? 'sheets' : 'packets',
-      // Sheet rows: the packets those sheets make, and the cut - shown
-      // beside the sheets for reference ("713 sheets (1.43 pkts · 1/4)").
-      sheetsPackets: sheetUnit ? rowSheets / psJob : null, sheetCut: sheetUnit ? sheetCut : null, sheetsFromJobCard: fromJobCard,
+      // Sheet rows: the packets those sheets make (pieces / (packet size x
+      // cut) - as the job card works it out), and the cut, shown beside the
+      // sheets for reference ("2,852 sheets (1.43 pkts · 1/4)").
+      sheetsPackets: sheetUnit ? rowSheets / (psJob * cutPieces) : null, sheetCut: sheetUnit ? sheetCut : null, sheetsFromJobCard: fromJobCard,
     };
   });
-  return { isMilJob, cartonQtyNum, allDelivered, closed: closedNormal, deliveredTotal, jobWastageAll, packets, pkPerUnit, psJob, upsNum, sheetUnit, rows };
+  // Labels / Leaflets: the packets the WHOLE job was issued - the job card's
+  // Sheets as packets, else worked out from its UC.
+  const sheetsTotalPackets = !sheetUnit ? null
+    : (jobCardSheets > 0 ? jobCardSheets / (psJob * cutPieces)
+      : ((pkPerUnit > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? cartonQtyNum * pkPerUnit : null));
+  return { isMilJob, cartonQtyNum, allDelivered, closed: closedNormal, deliveredTotal, jobWastageAll, packets, pkPerUnit, psJob, upsNum, sheetUnit, sheetsTotalPackets, cutPieces, rows };
 }
 // Packets cell text shared by both reports: plain packets, or for Labels /
 // Leaflets the sheets with their packets alongside for reference
@@ -17113,7 +17121,12 @@ function buildSaleReportRows(tabOverride) {
     // Packets Issued Weight = packets consumed x the same packet weight.
     const ptype        = j.paper_resolved || j.paper || (invItem && invItem.paper_type) || '';
     const upsNum       = parseFloat(j.ups);
-    const packKg       = packWeightKg(ptype, invItem ? invItem.size : j.size, invItem ? invItem.gsm : j.gsm);
+    // One packet's weight (packWeightKg weighs packetSize(ptype) sheets),
+    // scaled to the packet size this report counts in (F.psJob) - else a
+    // label job with no paper type on file, counted in 500-sheet reams, was
+    // weighed as a 100-sheet packet: 5x too light (owner, 2026-10-07).
+    const packKgBase   = packWeightKg(ptype, invItem ? invItem.size : j.size, invItem ? invItem.gsm : j.gsm);
+    const packKg       = (packKgBase !== null && F.psJob > 0 && packetSize(ptype) > 0) ? packKgBase * F.psJob / packetSize(ptype) : packKgBase;
     // (The whole kg chain is computed per shipment row below.)
     // Raw packets per Unit Carton: UC ÷ ups = printed (cut) sheets, ÷ cut
     // pieces = raw sheets, ÷ packet size = packets. The SAME factor turns
@@ -17122,9 +17135,11 @@ function buildSaleReportRows(tabOverride) {
     const psJob       = F.psJob;
     const pkPerUnit   = F.pkPerUnit;
     // Paper issued for the WHOLE job - what its wastage is a share of.
-    const jobIssuedKg = (pkPerUnit > 0 && packKg !== null && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0)
-      ? cartonQtyNum * pkPerUnit * packKg : null;
-    const packUnit       = packetUnitLabel(ptype).toLowerCase();   // 'packets' (cards) or 'reams' (papers)
+    // Labels / Leaflets: what the job card issued (its Sheets as packets).
+    const jobIssuedKg = packKg === null ? null
+      : (F.sheetUnit ? (F.sheetsTotalPackets !== null ? F.sheetsTotalPackets * packKg : null)
+        : ((pkPerUnit > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? cartonQtyNum * pkPerUnit * packKg : null));
+    const packUnit       = psJob === 500 ? 'reams' : 'packets';   // 500-sheet reams (papers) or 100-sheet packets (cards)
     // Labels and Leaflets are counted in SHEETS, not packets (owner): the
     // Packets column shows sheets of the Sheet Size for them (packets x
     // sheets per packet). The weight columns are unaffected.
@@ -17175,17 +17190,21 @@ function buildSaleReportRows(tabOverride) {
       const rowCartonQty = fig.cartonQty;
       const rowWastage   = fig.wastage;
       const rowPackets   = fig.packets;
-      const rowIssuedKg = (rowPackets > 0 && packKg !== null) ? rowPackets * packKg : null;
+      // Labels / Leaflets: the packets of the Sheets column (job card).
+      const rowIssuedPackets = F.sheetUnit ? (fig.sheetsPackets || 0) : rowPackets;
+      const rowIssuedKg = (rowIssuedPackets > 0 && packKg !== null) ? rowIssuedPackets * packKg : null;
       // Wastage Sheets = printed sheets (wastage ÷ ups). Wastage Weight is
       // those sheets weighed at the SHEET SIZE's Packet/KG, no cut division
       // (owner's rule, E-586: 316.7 ÷ 100 × 14.63 = 46.34 kg):
       //   Wastage Weight = Wastage Sheets ÷ sheets-per-packet × Packet/KG.
       const rowWastagePrinted = (rowWastage !== null && upsNum > 0) ? rowWastage / upsNum : null;
       // Labels / Leaflets: Wastage Sheets in WHOLE sheets - the printed
-      // pieces divided by the cut (10.3 at 1/4 = 2.575; owner, 2026-10-06).
-      // The weight below still uses the printed pieces, unchanged.
-      const rowWastageSheets  = (rowWastagePrinted !== null && F.sheetUnit) ? rowWastagePrinted / jobCutPieces(j) : rowWastagePrinted;
-      const rowWastagePackets = (rowWastagePrinted !== null && psJob > 0) ? rowWastagePrinted / psJob : null;
+      // pieces divided by the cut (10.3 at 1/4 = 2.575; owner, 2026-10-06) -
+      // and the weight is of those whole sheets too (owner, 2026-10-07: it
+      // was weighing the cut pieces as whole sheets, 4x too heavy at 1/4).
+      // Boxes keep the owner's no-cut rule above.
+      const rowWastageSheets  = (rowWastagePrinted !== null && F.sheetUnit) ? rowWastagePrinted / F.cutPieces : rowWastagePrinted;
+      const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? (F.sheetUnit ? rowWastageSheets : rowWastagePrinted) / psJob : null;
       const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
       // A shipment's OWN wastage (its UC or wastage typed) is a % of its own
       // paper. Otherwise the wastage is the whole JOB's leftover, so its % is
@@ -17771,7 +17790,11 @@ function saleReportWasteCols() {
 // list, so they can never drift apart. cell = screen HTML, xl = Excel value, pr = print HTML.
 // total: which totals figure sits under the column (screen totals row, shown with the totals permission).
 function saleReportCols(tabOverride) {
-  const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  // Figures keep up to 3 decimals (owner, 2026-10-07: 2.58345 -> 2.583, not
+  // 2.6) on screen, print and Excel; money stays at fmtRate's 2.
+  const srNum = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 3 });
+  const srXl  = n => +(+n).toFixed(3);
+  const fmt = n => !n && n !== 0 ? '' : srNum(n);
   // A merged row shows what each job contributed - "24,000 + 105,700" - so
   // whoever reads the screen can see where the figure came from. The export
   // and the print-out get the single total instead: a spreadsheet has to be
@@ -17783,8 +17806,7 @@ function saleReportCols(tabOverride) {
     return (p && p.length > 1) ? p.map(fmtOne).join(' + ') : null;
   };
   const dash = '\u2014';
-  const d1 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
-  const d2 = n => (+n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const d1 = srNum, d2 = srNum;   // were 1 and 2 decimals
   const sheetsText = r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : d1(r.wastageSheets);
   const nameWithBatch = r => String(r.name || '') + (r.batchNo ? ' — ' + r.batchNo : '');
   const tab = tabOverride || saleReportState.tab || 'all';
@@ -17832,7 +17854,7 @@ function saleReportCols(tabOverride) {
           : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets),
       totalCell: t => [t.packets ? fmt(t.packets) + (t.sheetsCount ? ' pkts' : '') : '',
         t.sheetsCount ? `${fmt(t.sheetsCount)} sheets (${fmt(t.sheetsPackets || 0)} pkts)` : ''].filter(Boolean).join(' + '),
-      xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; },
+      xl: r => { const v = r.packetsShown !== undefined ? r.packetsShown : r.packets; return v ? srXl(v) : ''; },
       // Print: sheet rows print the sheets only - no packets, no cut.
       pr: r => r.packetsUnit === 'sheets' ? fmt(r.packetsShown) + (tab === 'all' ? ' sheets' : '') : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
@@ -17852,7 +17874,7 @@ function saleReportCols(tabOverride) {
     // Weight of ONE packet: sheet length x width x gsm / 15500 (packWeightKg),
     // the same figure Wastage Weight and Packets Issued Weight are built from.
     { key: 'packetKg', label: 'Packet/KG', right: true,
-      cell: r => partsOf(r, 'packKg', v => d2(v)) || (r.packKg === null || r.packKg === undefined ? '&mdash;' : d2(r.packKg)), xl: r => r.packKg === null || r.packKg === undefined ? '' : +r.packKg.toFixed(2), pr: r => r.packKg === null || r.packKg === undefined ? dash : d2(r.packKg) },
+      cell: r => partsOf(r, 'packKg', v => d2(v)) || (r.packKg === null || r.packKg === undefined ? '&mdash;' : d2(r.packKg)), xl: r => r.packKg === null || r.packKg === undefined ? '' : srXl(r.packKg), pr: r => r.packKg === null || r.packKg === undefined ? dash : d2(r.packKg) },
     // Wastage and Ready share one cell, kept as two numbers: "20 + 430" - the green one is the Ready Qty (produced, not yet shipped).
     { key: 'wastage', label: 'Wastage', right: true, total: 'wastage',
       cell: (r, c) => (c && c.qtyCell && !r._merged) ? c.qtyCell(r, 'wastage_qty', r.wastage, r.wastageTyped, r.wastageCalc)
@@ -17862,18 +17884,18 @@ function saleReportCols(tabOverride) {
       pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:bold;">' + fmt(r.readyQty) + '</span>' : '') },
     { key: 'wastageSheets', label: 'Wastage Sheets', right: true,
       cell: r => partsOf(r, 'wastageSheets', v => d1(v)) || sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) : '',
-      xl: r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : +r.wastageSheets.toFixed(1), pr: r => sheetsText(r) },
+      xl: r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : srXl(r.wastageSheets), pr: r => sheetsText(r) },
     { key: 'wastageKg', label: 'Wastage Weight (kg)', right: true,
-      cell: r => partsOf(r, 'wastageKg', v => d2(v)) || (r.wastageKg === null ? '&mdash;' : d2(r.wastageKg)), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : +r.wastageKg.toFixed(2), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
+      cell: r => partsOf(r, 'wastageKg', v => d2(v)) || (r.wastageKg === null ? '&mdash;' : d2(r.wastageKg)), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : srXl(r.wastageKg), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
     // Wastage weight as a share of the paper issued: wastage kg x 100 / issued kg.
     // The total is the ratio of the two column totals, not a sum of percentages.
     { key: 'wastageKgPct', label: 'Wastage KGs %', right: true,
       cell: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '&mdash;' : d2(r.wastageKgPct) + '%',
       totalCell: t => t.issuedKg > 0 ? d2(t.wastageKg * 100 / t.issuedKg) + '%' : '',
-      xl: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '' : +r.wastageKgPct.toFixed(2),
+      xl: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '' : srXl(r.wastageKgPct),
       pr: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? dash : d2(r.wastageKgPct) + '%' },
     { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
-      cell: r => partsOf(r, 'issuedKg', v => d2(v)) || (r.issuedKg === null ? '&mdash;' : d2(r.issuedKg)), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : +r.issuedKg.toFixed(2), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
+      cell: r => partsOf(r, 'issuedKg', v => d2(v)) || (r.issuedKg === null ? '&mdash;' : d2(r.issuedKg)), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : srXl(r.issuedKg), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
     { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => xlNum(r.rate), pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
     { key: 'exTax', label: 'Rate Excl. Tax', right: true, total: 'amountExTax', totalPrint: true,
       cell: r => partsOf(r, 'amountExTax', v => fmtRate(v)) || (r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;'), xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
@@ -17894,7 +17916,7 @@ function renderSaleReport() {
   if (!el) return;
   if (saleReportState.tab === SALE_REPORT_WASTE_TAB) { renderSaleReportWasteTab(el); return; }
   if (!rows.length) { el.innerHTML = reportEmptyHtml('sale', 'No delivered jobs match these filters.'); return; }
-  const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
+  const fmt = n => !n && n !== 0 ? '' : (+n).toLocaleString(undefined, { maximumFractionDigits: 3 });   // 3 decimals, as saleReportCols
   const td  = 'style="padding:8px 10px;"';
   const tdR = 'style="padding:8px 10px;text-align:right;"';
   // poQty/cartonQty/wastage/readyQty/packets/cartonsPackets are all
