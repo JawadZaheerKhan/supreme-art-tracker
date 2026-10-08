@@ -7257,7 +7257,44 @@ async function deliveryPricing(sql, job, { hasPricing, rate, taxPct }) {
   const t = hasPricing ? taxPct : jt;
   return { rate: r, taxPct: t, override: isRateOverride(r, standard) };
 }
-function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing }) {
+// ── Carton Shipper per delivery ───────────────────────────────────
+// Each delivery entry carries its OWN cartons_packets (owner, 2026-10-08).
+// It used to be one job-level figure (jobs.cartons_packets) that every new
+// delivery overwrote, so recording a 3rd delivery with 5 showed 5 on the
+// first two as well. A job none of whose entries carry the key yet is a
+// legacy job: before any per-delivery value is written, each of its entries
+// keeps exactly what its card showed until now - the job-level figure (a
+// wrong one can then be corrected on that one card). With no job-level
+// figure, the station's Carton Shipper (a whole-job count) goes onto the
+// latest delivery only, so the total is not counted twice.
+function deliveryHasOwnShipper(d) {
+  return !!d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets');
+}
+function stationShipperTotal(job) {
+  const p = job && job.particulars && job.particulars.ready_packets_qty;
+  if (!p) return 0;
+  const num = s => { const n = parseFloat(String(s ?? '').replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) ? n : 0; };
+  if (Array.isArray(p.entries) && p.entries.length) return p.entries.reduce((a, e) => a + num(e && e.qty), 0);
+  return String(p.quantity || '').split('|').reduce((a, s) => a + num(s), 0);
+}
+function freezeLegacyShippers(list, job) {
+  const arr = Array.isArray(list) ? [...list] : [];
+  if (!arr.length || arr.some(deliveryHasOwnShipper)) return arr;
+  const own = (job.cartons_packets === null || job.cartons_packets === undefined || job.cartons_packets === '') ? null : Number(job.cartons_packets);
+  const station = stationShipperTotal(job);
+  const lastIx = arr.length - 1;
+  return arr.map((d, k) => ({
+    ...(d && typeof d === 'object' ? d : {}),
+    cartons_packets: Number.isFinite(own) ? own : ((k === lastIx && station > 0) ? station : null),
+  }));
+}
+// A typed Carton Shipper: null when blank, NaN when not a valid number.
+function parseShipperInput(raw) {
+  if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  return Number.isFinite(n) && n >= 0 ? n : NaN;
+}
+function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing, cartonsPackets }) {
   const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const priorTotal = sumDeliveryCartons(job.deliveries);
   const nextTotal  = priorTotal + cartonsN;
@@ -7271,9 +7308,11 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
     by: byEmail || 'unknown',
     at: new Date().toISOString(),
     linked_job_id: linkedJobId || null,
+    // This shipment's own Carton Shipper (null = none typed).
+    cartons_packets: (cartonsPackets === null || cartonsPackets === undefined || !Number.isFinite(Number(cartonsPackets))) ? null : Number(cartonsPackets),
   };
   if (pricing) { entry.rate = pricing.rate; entry.tax_pct = pricing.taxPct; entry.rate_override = !!pricing.override; }
-  const deliveries = [...freezeLegacyDeliveryRates(job.deliveries, job), entry];
+  const deliveries = [...freezeLegacyShippers(freezeLegacyDeliveryRates(job.deliveries, job), job), entry];
   // Stage/log timestamps reflect the delivery's OWN date (what the store
   // keeper picked, possibly backdated) rather than the instant this API
   // call happens to run — so Job History, "Day in production", and any
@@ -7388,6 +7427,9 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
       return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
     }
+    // This shipment's Carton Shipper (stored on the delivery itself).
+    let shipper = parseShipperInput(req.body.cartons_packets);
+    if (Number.isNaN(shipper)) return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
     // Rate/tax_pct optionally ride along with the delivery (the client's
     // Rate/Tax fields only render for a delivery_write holder — see
     // showPricingFields in deliveriesSection). Both keys must be present
@@ -7454,8 +7496,10 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // or less than the P.O. asked for (yield, over-run, customer top-up
     // request). Recording reality is the priority; the tile just shows
     // the running total against the booked qty for context.
+    // A Carton Shipper typed into the form's draft (by whoever filled it in).
+    if (shipper === null) { const ds = parseShipperInput(draft.cartons_packets); if (ds !== null && !Number.isNaN(ds)) shipper = ds; }
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
-      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }) });
+      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }), cartonsPackets: job.is_shade_card ? null : shipper });
     // Draft-sourced pricing never CLEARS a job-level value it did not set.
     const nextRate   = hasPricing ? ((pricingFromDraft && rate   === null) ? job.rate    : rate)   : job.rate;
     const nextTaxPct = hasPricing ? ((pricingFromDraft && taxPct === null) ? job.tax_pct : taxPct) : job.tax_pct;
@@ -7476,7 +7520,7 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
       action: 'job.delivery.add',
       entityType: 'job',
       entityId: id,
-      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
+      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons${entry.cartons_packets !== null ? `, Carton Shipper ${entry.cartons_packets}` : ''} for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
       metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined },
     });
     res.json(updated[0]);
@@ -7781,18 +7825,20 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     let cpLeft = cpTotal;
     for (let i = 0; i < plan.length; i++) {
       const { job, allocate } = plan[i];
+      // This job's share of the typed Carton Shipper, stored on its NEW
+      // delivery entry (not the job - that overwrote earlier shipments).
+      let cpShare = null;
+      if (cpTotal !== null) {
+        cpShare = i === plan.length - 1 ? cpLeft : Math.round(cpTotal * allocate / fulfilledCartons);
+        cpLeft -= cpShare;
+      }
       const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
         cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, msiNo, byEmail,
         pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }),
+        cartonsPackets: cpShare,
       });
       const nextRate = hasPricing ? rate   : job.rate;
       const nextTax  = hasPricing ? taxPct : job.tax_pct;
-      let nextCp = job.cartons_packets;
-      if (cpTotal !== null) {
-        const share = i === plan.length - 1 ? cpLeft : Math.round(cpTotal * allocate / fulfilledCartons);
-        cpLeft -= share;
-        nextCp = share;
-      }
       await sql`
         UPDATE jobs
            SET deliveries  = ${JSON.stringify(deliveries)},
@@ -7801,8 +7847,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
                stages      = ${JSON.stringify(stages)},
                log         = ${JSON.stringify(log)},
                rate        = ${nextRate},
-               tax_pct     = ${nextTax},
-               cartons_packets = ${nextCp}
+               tax_pct     = ${nextTax}
          WHERE id = ${job.id}`;
       deliveriesMade.push({ job_id: job.id, cartons: allocate });
     }
@@ -9151,6 +9196,22 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
         summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"${droppedWastage !== undefined ? ` (typed Wastage ${droppedWastage} cleared - recalculated)` : ''}`,
         metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, wastage_cleared: droppedWastage ?? null },
+      });
+      return res.json(upd[0]);
+    }
+    // This shipment's own Carton Shipper (blank clears it). The other
+    // shipments are untouched (owner, 2026-10-08).
+    if (req.body?.field === 'cartons_packets') {
+      const v = parseShipperInput(req.body.value);
+      if (Number.isNaN(v)) return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
+      const frozen = freezeLegacyShippers(list, job);
+      const prevV = frozen[ix] && deliveryHasOwnShipper(frozen[ix]) ? frozen[ix].cartons_packets : null;
+      frozen[ix] = { ...frozen[ix], cartons_packets: v };
+      const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(frozen)} WHERE id = ${id} RETURNING *`;
+      await logAudit(sql, req, {
+        action: 'job.delivery.edit', entityType: 'job', entityId: id,
+        summary: `Job E-${id} delivery #${ix + 1}: Carton Shipper "${prevV ?? ''}" -> "${v ?? ''}"`,
+        metadata: { index: ix, field: 'cartons_packets', before: prevV, after: v },
       });
       return res.json(upd[0]);
     }

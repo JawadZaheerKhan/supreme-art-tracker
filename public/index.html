@@ -4163,6 +4163,28 @@ function readyCartonsTotal(j) {
 // otherwise whatever the tracker's Pasting station recorded. The station's
 // own JSONB row is never overwritten — see the column's comment in
 // server.js for why.
+// One delivery's Carton Shipper (owner, 2026-10-08: it used to be one job
+// figure that every new delivery overwrote). Entries carry their own
+// cartons_packets once the job has any; a job none of whose entries do yet
+// (recorded before this) still shows the old job figure on each, as before.
+// Returns { value, legacy }.
+function jobHasPerDeliveryShipper(j) {
+  const list = Array.isArray(j && j.deliveries) ? j.deliveries : [];
+  return list.some(d => d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets'));
+}
+function deliveryShipper(j, i) {
+  if (!jobHasPerDeliveryShipper(j)) return { value: cartonsPacketsFor(j), legacy: true };
+  const d = (j.deliveries || [])[i];
+  const raw = d && d.cartons_packets;
+  const n = (raw === null || raw === undefined || raw === '') ? null : Number(raw);
+  return { value: Number.isFinite(n) ? n : null, legacy: false };
+}
+// The job's Carton Shipper in total: every delivery's own figure added up,
+// or the old job figure for a job recorded before per-delivery figures.
+function jobShipperTotal(j) {
+  if (!jobHasPerDeliveryShipper(j)) return cartonsPacketsFor(j);
+  return (j.deliveries || []).reduce((a, d, i) => a + (deliveryShipper(j, i).value || 0), 0);
+}
 function cartonsPacketsFor(j) {
   if (!j) return 0;
   if (j.cartons_packets !== null && j.cartons_packets !== undefined && j.cartons_packets !== '') {
@@ -6296,14 +6318,18 @@ function tileDeliveryRecordsHtml(j) {
   const booked = num(j.qty);
   const shipped = totalDeliveredCartons(j);
   const left = booked ? Math.max(0, booked - shipped) : 0;
-  const shipper = shade ? 0 : cartonsPacketsFor(j);
+  // Carton Shipper: each delivery's own (owner, 2026-10-08), added up; a job
+  // recorded before that keeps its one job figure (see deliveryShipper).
+  const ownShipper = d => { const n = (d && d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '') ? Number(d.cartons_packets) : NaN; return Number.isFinite(n) ? n : 0; };
+  const perShipper = !shade && list.some(d => d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets'));
+  const shipper = shade ? 0 : (perShipper ? list.reduce((a, d) => a + ownShipper(d), 0) : cartonsPacketsFor(j));
   const f = (label, val) => (val === '' || val === null || val === undefined) ? '' : `<span><span class="tdr-l">${label}</span> ${val}</span>`;
   const sorted = list.map((d, i) => ({ d, i })).sort((a, b) => {
     const ta = a.d && a.d.date ? new Date(a.d.date).getTime() : 0;
     const tb = b.d && b.d.date ? new Date(b.d.date).getTime() : 0;
     return (tb - ta) || (b.i - a.i);
   });
-  const row = ({ d }) => {
+  const row = ({ d, i }) => {
     const sp = seePricing && !shade ? shipmentPricing(j, d) : null;
     const inv = deliveryChallanText(d);
     return `<div class="tdr-row">
@@ -6313,6 +6339,7 @@ function tileDeliveryRecordsHtml(j) {
       ${shade ? '' : f('Batch', esc(d.batch_no || ''))}
       ${shade ? '' : f('E-FBR', esc(d.fbr_no || ''))}
       ${shade ? '' : f('MSI', esc(d.msi_no || ''))}
+      ${perShipper && ownShipper(d) > 0 ? f('Carton Shipper', ownShipper(d).toLocaleString()) : ''}
       ${f(shade ? 'Challan' : 'Invoice', esc(inv))}
       ${sp && sp.rate !== null ? f('Rate', `<span style="${sp.override ? RATE_OVERRIDE_STYLE : ''}">${fmtRate(sp.rate)}</span>`) : ''}
       ${sp ? f('Tax', esc(String(sp.tax)) + '%') : ''}
@@ -17164,8 +17191,13 @@ function buildSaleReportRows(tabOverride) {
     // full registered name — the job card's shorter one is only the lookup key.
     const cs = resolveCompanySettings(j.client);
     const companyName = (cs && cs.company) || j.client || '';
-    const cartonsPackets = cartonsPacketsFor(j);
+    // Carton Shipper: each shipment's own (owner, 2026-10-08); a job recorded
+    // before that shows its one job figure, counted once in the total.
+    const cpPerRow = deliveriesList.some(d => d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets'));
+    const cpJob = cpPerRow ? 0 : cartonsPacketsFor(j);
     deliveriesList.forEach((d, idx) => {
+      const cpOwn = (cpPerRow && d && d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '') ? Number(d.cartons_packets) : NaN;
+      const cartonsPackets = cpPerRow ? (Number.isFinite(cpOwn) ? cpOwn : 0) : cpJob;
       const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
       const batchNo = (d && d.batch_no ? String(d.batch_no).trim() : '') || (j.bno || '');
       const fbrNo   = (d && d.fbr_no ? String(d.fbr_no).trim() : '');
@@ -17226,7 +17258,7 @@ function buildSaleReportRows(tabOverride) {
         poNo, batchNo, fbrNo, msiNo, challan: invoice,
         // A MIL delivery IS its own PO: the row's PO Qty is what that
         // delivery shipped (owner spec) - normal jobs keep the job's PO Qty.
-        poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets,
+        poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets, cpPerRow,
         ucJob: Number.isFinite(cartonQtyNum) ? cartonQtyNum : null,   // the job's printed total, shown beside the row's share
         wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
         packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
@@ -17949,7 +17981,7 @@ function renderSaleReport() {
       poQty:          a.poQty          + once('poQty', parseFloat(String(r.poQty).replace(/[^0-9.\-]/g, ''))),
       cartonQty:      a.cartonQty      + once('cartonQty', parseFloat(String(r.cartonQty).replace(/[^0-9.\-]/g, ''))),
       cartons:        a.cartons        + (+r.cartons || 0),
-      cartonsPackets: a.cartonsPackets + once('cartonsPackets', +r.cartonsPackets),
+      cartonsPackets: a.cartonsPackets + (r.cpPerRow === true ? (+r.cartonsPackets || 0) : once('cartonsPackets', +r.cartonsPackets)),
       wastage:        a.wastage        + once('wastage', r.wastage),
       readyQty:       a.readyQty       + once('readyQty', +r.readyQty),
       // Packets and sheets are different units - never added together.
@@ -25552,7 +25584,8 @@ function deliveriesSection(j, opts) {
         const delBtn = isAdminUser
           ? `<button type="button" class="btn btn-sm" style="background:#fff;color:#991B1B;border-color:#fecaca;padding:2px 8px;font-size:11px;" onclick="removeDelivery(${j.id}, ${i})" title="Remove this delivery entry">&times;</button>`
           : '';
-        const shipper = String(cartonsPacketsFor(j) ?? '').trim();
+        const shipperV = deliveryShipper(j, i).value;
+        const shipper = shipperV > 0 ? String(shipperV) : '';
         return `<div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
             <div style="font-size:11px;color:var(--text2);">${esc(dt)}${by ? ' &middot; by ' + esc(by) : ''}${linkedTag}</div>
@@ -25604,7 +25637,7 @@ function deliveriesSection(j, opts) {
         </div>
         ${isShadeCard ? '' : `<div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Carton Shipper</label>
-          <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', cartonsPackets > 0 ? cartonsPackets : '')))}"${draftSave('cartons_packets')} data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it. Clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+          <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', ((j.deliveries || []).length === 0 && cartonsPackets > 0) ? cartonsPackets : '')))}"${draftSave('cartons_packets')} title="This shipment's own Carton Shipper. The first shipment starts at what the Pasting/Ready to Deliver station recorded." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
         </div>`}
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
@@ -25785,8 +25818,8 @@ function deliveriesSectionFinance(j, opts) {
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(95px,1fr));gap:10px;">
             ${fieldBox(countLabel, editCell(i, 'cartons', ctns, { title: 'Editing this changes Delivered Qty / stage — recompute is automatic.' }))}
             ${isShadeCard ? '' : fieldBox('Carton Shipper', canEditEntries
-              ? `<input type="number" min="0" step="any" value="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="&mdash;" title="Job-level figure — editing it here changes it for every shipment on this job. Clear the box to fall back to the Pasting station's own number." onchange="saveCartonsPackets(${j.id}, this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
-              : (cartonsPackets > 0 ? `<b>${cartonsPackets.toLocaleString()}</b>` : '&mdash;'))}
+              ? `<input type="number" min="0" step="any" data-dk="${i}:cartons_packets" value="${deliveryShipper(j, i).value > 0 ? deliveryShipper(j, i).value : ''}" placeholder="&mdash;" title="This shipment's own Carton Shipper - the other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'cartons_packets', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
+              : (deliveryShipper(j, i).value > 0 ? `<b>${deliveryShipper(j, i).value.toLocaleString()}</b>` : '&mdash;'))}
             ${isShadeCard ? '' : fieldBox('PO No.', editCell(i, 'po_no', po))}
             ${isShadeCard ? '' : fieldBox('Batch No.', editCell(i, 'batch_no', bat))}
             ${isShadeCard ? '' : fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
@@ -25837,7 +25870,7 @@ function deliveriesSectionFinance(j, opts) {
           ${isShadeCard ? '' : `
           <div style="min-width:0;">
             <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Carton Shipper</label>
-            <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', cartonsPackets > 0 ? cartonsPackets : '')))}"${draftSave('cartons_packets')} data-original="${cartonsPackets > 0 ? cartonsPackets : ''}" placeholder="" title="Defaults to what the Pasting/Ready to Deliver station recorded — type a different figure to override it for invoicing. Saved when you press Record Delivery; clear the box to go back to the station's number." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+            <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', ((j.deliveries || []).length === 0 && cartonsPackets > 0) ? cartonsPackets : '')))}"${draftSave('cartons_packets')} placeholder="" title="This shipment's own Carton Shipper, saved with it when you press Record Delivery. The first shipment starts at what the Pasting/Ready to Deliver station recorded." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
           </div>
           `}
           <div style="min-width:0;">
@@ -26702,13 +26735,10 @@ async function recordDelivery(jobId) {
     // shipment's PO / batch across a job that was split.
     const body = { cartons, date, notes, po_no: poNo, batch_no: batchNo, fbr_no: fbrNo, msi_no: msiNo };
     if (rateEl || taxEl) { body.rate = rate; body.tax_pct = taxPct; }
-    let updated = await api('POST', `/api/jobs/${jobId}/deliveries`, body);
-    // Cartons/Packets is a job-level figure, so it rides along here rather
-    // than saving the moment the box loses focus — doing that mid-entry used
-    // to reopen the card and wipe everything else already typed into this form.
-    if (cpEl && cpStr !== (cpEl.dataset.original || '')) {
-      updated = await api('PATCH', `/api/jobs/${jobId}/cartons-packets`, { cartons_packets: cpStr === '' ? null : cpStr });
-    }
+    // Carton Shipper is saved ON this shipment (owner, 2026-10-08) - it used
+    // to be one job figure, so each new shipment overwrote the earlier ones.
+    if (cpEl) body.cartons_packets = cpStr === '' ? null : cpStr;
+    const updated = await api('POST', `/api/jobs/${jobId}/deliveries`, body);
     const ix = jobs.findIndex(x => x.id === jobId);
     if (ix >= 0) jobs[ix] = updated;
     const place = captureJobEditPlace();
@@ -26802,7 +26832,7 @@ async function saveDeliveryEntryField(jobId, index, field, valueStr) {
     const n = parseFloat(String(valueStr).replace(/[^0-9.\-]/g, ''));
     if (!Number.isFinite(n) || n <= 0) { notify('Cartons must be a positive number'); render(); return; }
   }
-  if (field === 'uc_qty' || field === 'wastage_qty') {
+  if (field === 'uc_qty' || field === 'wastage_qty' || field === 'cartons_packets') {
     const t = String(valueStr).replace(/,/g, '').trim();
     const n = t === '' ? null : Number(t);
     if (n !== null && (!Number.isFinite(n) || n < 0)) { await alertDialog({ title: 'Enter a valid number', message: 'Or leave it blank for the calculated figure.', kind: 'warn' }); renderSaleReport(); return; }
