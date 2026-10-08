@@ -17175,11 +17175,6 @@ function buildSaleReportRows(tabOverride) {
     // wastage weight of every 1/2-cut job.
     const psJob       = F.psJob;
     const pkPerUnit   = F.pkPerUnit;
-    // Paper issued for the WHOLE job - what its wastage is a share of.
-    // Labels / Leaflets: what the job card issued (its Sheets as packets).
-    const jobIssuedKg = packKg === null ? null
-      : (F.sheetUnit ? (F.sheetsTotalPackets !== null ? F.sheetsTotalPackets * packKg : null)
-        : ((pkPerUnit > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? cartonQtyNum * pkPerUnit * packKg : null));
     const packUnit       = psJob === 500 ? 'reams' : 'packets';   // 500-sheet reams (papers) or 100-sheet packets (cards)
     // Labels and Leaflets are counted in SHEETS, not packets (owner): the
     // Packets column shows sheets of the Sheet Size for them (packets x
@@ -17253,13 +17248,11 @@ function buildSaleReportRows(tabOverride) {
       const rowWastageSheets  = (rowWastagePrinted !== null && F.sheetUnit) ? rowWastagePrinted / F.cutPieces : rowWastagePrinted;
       const rowWastagePackets = (rowWastageSheets !== null && psJob > 0) ? (F.sheetUnit ? rowWastageSheets / F.cutPieces : rowWastagePrinted) / psJob : null;
       const rowWastageKg      = (rowWastagePackets !== null && packKg !== null) ? rowWastagePackets * packKg : null;
-      // A shipment's OWN wastage (its UC or wastage typed) is a % of its own
-      // paper. Otherwise the wastage is the whole JOB's leftover, so its % is
-      // of the whole job's paper - not of the last delivery's slice (that
-      // overstated it 3-4x).
-      const ownWastage        = fig.ucTyped || fig.wastageTyped;
-      const pctBase           = (ownWastage && rowIssuedKg !== null) ? rowIssuedKg : (jobIssuedKg !== null ? jobIssuedKg : rowIssuedKg);
-      const rowWastageKgPct   = (rowWastageKg !== null && pctBase !== null && pctBase > 0) ? rowWastageKg * 100 / pctBase : null;
+      // Wastage KGs % = Wastage Weight x 100 / this row's Packets Issued
+      // Weight - always the same row's figures, box / labels / leaflets alike
+      // (owner, 2026-10-08; it used to divide the last shipment's whole-job
+      // wastage by the whole job's issued weight).
+      const rowWastageKgPct   = (rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null;
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       // The tax VALUE itself - 18% of a 2,000 base is Rs 360. The report
