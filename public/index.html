@@ -3013,6 +3013,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <span class="whole-toggle-text">&#127912; <span id="shade-card-toggle-label">Shade Cards</span></span>
       </button>
       <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilterDebounced(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
+      <input class="filter" type="text" id="code-filter" placeholder="Item Code" oninput="setCodeFilterDebounced(this.value)" style="width:130px;" title="Filter jobs by the job card's Code (item code) - part of it is enough">
+
     </div>
     <div class="jobs-filter-row">
       <select class="filter" id="stage-filter" onchange="setStageFilter(this.value)"><option value="">All stages</option></select>
@@ -3854,6 +3856,7 @@ let filterClient = '';
 // answering "what's running on / has been run on machine X."
 let filterMachine = '';
 let filterPO = '';
+let filterCode = '';   // Item Code box (the job card's Code), owner 2026-10-08
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
 let filterGroup = '';
@@ -5896,7 +5899,7 @@ async function explainMissingJob() {
 // renderJobsCompact / renderJobsCards); the tabs don't - matches in other
 // tabs are offered by searchElsewhereHtml().
 function jobsSearchActive() {
-  return !!String(filterText || '').trim() || !!String(filterPO || '').trim();
+  return !!String(filterText || '').trim() || !!String(filterPO || '').trim() || !!String(filterCode || '').trim();
 }
 // Search / PO / company / stage / machine / group / date filters - everything
 // except which tab the job sits in.
@@ -5916,6 +5919,12 @@ function jobPassesFilters(j) {
   if (filterPO) {
     const po = String(j.ref || '').toLowerCase();
     if (!po.includes(String(filterPO).toLowerCase())) return false;
+  }
+  // Item Code: part of the job card's Code; spaces ignored on both sides.
+  const codeNeedle = String(filterCode || '').toLowerCase().replace(/\s+/g, '');
+  if (codeNeedle) {
+    const code = String(j.jobcode || '').toLowerCase().replace(/\s+/g, '');
+    if (!code.includes(codeNeedle)) return false;
   }
   if (filterShadeCard === 'only' && !j.is_shade_card) return false;
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
@@ -7744,6 +7753,11 @@ function setPOFilter(v) {
 let _sfTimer = null, _poTimer = null;
 function setFilterDebounced(v)   { clearTimeout(_sfTimer);  _sfTimer  = setTimeout(() => setFilter(v),   120); }
 function setPOFilterDebounced(v) { clearTimeout(_poTimer);  _poTimer  = setTimeout(() => setPOFilter(v), 120); }
+// Item Code box: filters the open tab; matches in other tabs get the "Go"
+// buttons above the list (searchElsewhereHtml), like the main search.
+let _codeTimer = null;
+function setCodeFilter(v) { filterCode = v; renderJobs(); }
+function setCodeFilterDebounced(v) { clearTimeout(_codeTimer); _codeTimer = setTimeout(() => setCodeFilter(v), 120); }
 
 // Shade Cards toggle: '' = show everything, 'only' = show shade-card jobs.
 // The dedicated toggle button in the toolbar drives this — one click ON,
