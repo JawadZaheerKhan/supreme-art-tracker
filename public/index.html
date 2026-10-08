@@ -6624,11 +6624,12 @@ function renderJobsCards() {
 // The green "Issue Stock" / red "Waiting for Stock" button. Shared shape with
 // the compact view's inline logic: green when the linked inventory item has
 // enough sheets, red+warning when short, neutral hint when no paper linked.
-// Stock-state badge for a pending job. Shifts colour + label based on how
-// much paper is on hand vs how much the job needs:
-//   - on-hand >= need (or no inventory linked yet): green 'Pending Stock'
-//   - on-hand = 0:                                  red   'Out of Stock'
-//   - 0 < on-hand < need:                           yellow 'Low Stock'
+// Stock-state badge for a pending job. 'Pending Stock' always shows (so the
+// job still reads as pending - owner, 2026-10-08); a short paper adds a
+// second badge beside it:
+//   - on-hand >= need (or no inventory linked yet): 'Pending Stock' alone
+//   - on-hand = 0:                                  + red    'Out of Stock'
+//   - 0 < on-hand < need:                           + yellow 'Low Stock'
 function jobStockBadge(j) {
   // Partial-issued jobs already have real sheets on the floor — the shop
   // just needs more to finish. "Requires More Stock" reads clearly for
@@ -6645,13 +6646,12 @@ function jobStockBadge(j) {
   // ITS brand happened to be short, even with plenty in another brand.
   const have = invIt ? paperGroupMembers(invIt).reduce((a, x) => a + (x.current_balance || 0), 0) : 0;
   const need  = parseFloat(j.sheets) || 0;
-  if (!invIt || !need || have >= need) {
-    return '<span class="badge badge-pending">&#9201; Pending Stock</span>';
-  }
+  const pendingBadge = '<span class="badge badge-pending">&#9201; Pending Stock</span>';
+  if (!invIt || !need || have >= need) return pendingBadge;
   if (have <= 0) {
-    return '<span class="badge badge-out-of-stock">&#9888; Out of Stock</span>';
+    return pendingBadge + ' <span class="badge badge-out-of-stock">&#9888; Out of Stock</span>';
   }
-  return '<span class="badge badge-low-stock">&#9888; Low Stock</span>';
+  return pendingBadge + ' <span class="badge badge-low-stock">&#9888; Low Stock</span>';
 }
 
 function cardIssueStockBtn(j) {
