@@ -5292,7 +5292,7 @@ function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // paper issued = the Stock Out report's rows, sales and wastage = the Sale
 // Report's rows (buildSaleReportRows), job states = the Jobs tab's views.
 // "Right now" tiles ignore the date filter. View only.
-const ceoDash = { range: 'this-month', dfrom: '', dto: '', txs: null, imports: null, err: '' };
+const ceoDash = { range: 'this-month', dfrom: '', dto: '', txs: null, imports: null, prod: null, prodToday: null, err: '' };
 const CEO_DASH_RANGES = [['today', 'Today'], ['this-week', 'This week'], ['this-month', 'This month'], ['last-month', 'Last month'], ['this-year', 'This year'], ['', 'All time'], ['custom', 'Custom range…']];
 function ceoDashBounds() {
   if (ceoDash.range === 'today') { const d = localDateISO(); return resolveDateFilterBounds('custom', d, d); }
@@ -5311,15 +5311,24 @@ async function loadCeoDash() {
   const qs = new URLSearchParams({ direction: 'out' });
   if (b && b.from != null) qs.set('from', ceoDashIso(b.from));
   if (b && b.to != null)   qs.set('to', ceoDashIso(b.to));
-  ceoDash.txs = null; ceoDash.err = '';
+  ceoDash.txs = null; ceoDash.prod = null; ceoDash.prodToday = null; ceoDash.err = '';
   renderCeoDash();
+  // Production = the Production Report's own figures (Daily Production
+  // register). "All time" runs from an early start, like that report.
+  const today = localDateISO();
+  const pFrom = b && b.from != null ? ceoDashIso(b.from) : '2020-01-01';
+  const pTo   = b && b.to   != null ? ceoDashIso(b.to)   : today;
+  const prodOf = (from, to) => api('GET', `/api/reports/production?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).catch(e => ({ error: e.message }));
   try {
-    const [txs, imports] = await Promise.all([
+    const [txs, imports, prod, prodToday] = await Promise.all([
       api('GET', '/api/inventory/transactions?' + qs.toString()),
       api('GET', '/api/imports').catch(() => []),
+      prodOf(pFrom, pTo),
+      prodOf(today, today),
     ]);
     ceoDash.txs = Array.isArray(txs) ? txs : [];
     ceoDash.imports = Array.isArray(imports) ? imports : [];
+    ceoDash.prod = prod; ceoDash.prodToday = prodToday;
   } catch (e) { ceoDash.err = e.message; ceoDash.txs = []; }
   if (mode === 'dashboard') renderCeoDash();
 }
@@ -5402,7 +5411,41 @@ function ceoDashFigures() {
   }
   f.shortPapers = [...papers.values()].filter(e => e.have < e.need).sort((a, b) => (a.have > 0) - (b.have > 0) || (b.need - b.have) - (a.need - a.have));
   f.imports = (ceoDash.imports || []).filter(i => i.status === 'pending' || i.status === 'partial');
+  f.prod = ceoDashProduction(ceoDash.prod);
+  f.prodToday = ceoDashProduction(ceoDash.prodToday);
   return f;
+}
+// Per stage, from the Production Report's machine-day rows (each row is
+// tagged with its stage(s) by the operators roster): sheets (units for
+// Pasting), Printing's N-up physical total, wastage, jobs. null = loading,
+// { error } = could not load (e.g. no Production Report access).
+const CEO_DASH_STAGES = [['printing', 'Printing', 'sheets'], ['coatings', 'Coating', 'sheets'], ['diecut', 'Die Cutting', 'sheets'], ['pasting', 'Pasting', 'units']];
+function ceoDashProduction(data) {
+  if (!data) return null;
+  if (data.error) return { error: data.error };
+  const rows = Array.isArray(data.byMachineDaily) ? data.byMachineDaily : [];
+  const out = {};
+  for (const [key] of CEO_DASH_STAGES) {
+    const rs = rows.filter(r => Array.isArray(r.sections) && r.sections.includes(key));
+    out[key] = {
+      sheets: rs.reduce((a, r) => a + (+r.sheets || 0), 0),
+      mult: rs.reduce((a, r) => a + (+r.sheets_mult || 0), 0),
+      waste: rs.reduce((a, r) => a + (+r.waste || 0), 0),
+      jobs: rs.reduce((a, r) => a + (+r.jobs || 0), 0),
+    };
+  }
+  return out;
+}
+function ceoDashProdSection(title, p) {
+  const fmt = v => (+v || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
+  const body = !p ? '<div class="cd-sub">Loading…</div>'
+    : p.error ? `<div class="cd-sub">Production figures could not load (${esc(p.error)}).</div>`
+    : `<div class="cd-grid">${CEO_DASH_STAGES.map(([key, label, unit]) => {
+        const s = p[key] || { sheets: 0, mult: 0, waste: 0, jobs: 0 };
+        const nUp = key === 'printing' && s.mult > s.sheets ? ` · ${fmt(s.mult)} with N-up` : '';
+        return `<div class="cd-tile cd-prod"><div class="cd-label">${label}</div><div class="cd-value">${fmt(s.sheets)}</div><div class="cd-sub">${unit}${nUp} · wastage ${fmt(s.waste)} · ${fmt(s.jobs)} job${s.jobs === 1 ? '' : 's'}</div></div>`;
+      }).join('')}</div>`;
+  return `<div class="cd-sec">${title}</div>${body}`;
 }
 function renderCeoDash() {
   const el = document.getElementById('ceo-dash');
@@ -5434,7 +5477,7 @@ function renderCeoDash() {
 
     <div class="cd-sec">Headline <small>· for the period</small></div>
     <div class="cd-grid">
-      ${tile('new', 'New jobs', fmt(f.newJobs), 'created')}
+      ${tile('new', 'Jobs created', fmt(f.newJobs), 'new job cards')}
       ${tile('del', 'Jobs delivered', fmt(f.deliveredJobs), 'fully delivered')}
       ${tile('ship', 'UC delivered', fmt(f.uc), `${fmt(f.shipments)} shipment${f.shipments === 1 ? '' : 's'}`)}
       ${tile('stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…')}
@@ -5443,34 +5486,33 @@ function renderCeoDash() {
 
     <div class="cd-sec">Jobs <small>· right now</small></div>
     <div class="cd-grid">
-      ${tile('new', 'New jobs', fmt(f.stage.new), '')}
+      ${tile('new', 'New jobs', fmt(f.stage.new), 'waiting to start')}
       ${tile('new', 'CTP', fmt(f.stage.ctp), '')}
-      ${tile('stock', 'Pending Stock', fmt(f.stage.pending), '')}
       ${tile('prod', 'In progress', fmt(f.stage.active), '')}
       ${tile('ship', 'Ready to Deliver', fmt(f.stage.storage), '')}
-      ${tile('ship', 'Partly delivered', fmt(f.stage.partial), '')}
-      ${tile('block', 'Blocked', fmt(f.stage.blocked), '')}
       ${tile('out', 'Late jobs', fmt(f.late.length), list(f.late.slice(0, 6).map(j => `<div><span>${job(j)}</span><b>${esc(fmtDMY(String(j.deadline).slice(0, 10)) || '')}</b></div>`), 'None past deadline') + more(f.late, 6), true)}
-      ${tile('block', 'Blocked jobs', '', list(f.blocked.slice(0, 6).map(j => { const s = (j.stages || {})[j.stage_index || 0] || {}; return `<div><span>${job(j)}</span><b>${esc(STAGES[j.stage_index || 0] || '')}${s.notes ? ' · ' + esc(s.notes) : ''}</b></div>`; }), 'Nothing blocked') + more(f.blocked, 6), true)}
+      ${tile('block', 'Blocked', fmt(f.blocked.length), list(f.blocked.slice(0, 6).map(j => { const s = (j.stages || {})[j.stage_index || 0] || {}; return `<div><span>${job(j)}</span><b>${esc(STAGES[j.stage_index || 0] || '')}${s.notes ? ' · ' + esc(s.notes) : ''}</b></div>`; }), 'Nothing blocked') + more(f.blocked, 6), true)}
     </div>
+
+    ${ceoDashProdSection('Production <small>· for the period</small>', f.prod)}
+    ${b && ceoDashIso(b.from) === localDateISO() && ceoDashIso(b.to) === localDateISO() ? '' : ceoDashProdSection('Production <small>· today</small>', f.prodToday)}
 
     <div class="cd-sec">Deliveries &amp; sales</div>
     <div class="cd-grid">
       ${seeMoney ? tile('money', 'Sales by company <small style="text-transform:none;">· period, excl. tax</small>', '', list(f.salesByCompany.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmtRate(v)}</b></div>`), 'No sales in this period'), true) : ''}
       ${seeMoney ? tile('money', 'Sales by product <small style="text-transform:none;">· period, excl. tax</small>', '', list(f.salesByProduct.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmtRate(v)}</b></div>`), 'No sales in this period'), true) : ''}
-      ${tile('ship', 'Partly delivered <small style="text-transform:none;">· now, left to ship</small>', '', list(f.partial.slice(0, 8).map(x => `<div><span>${job(x.j)}</span><b>${fmt(x.left)}</b></div>`), 'None partly delivered') + more(f.partial, 8), true)}
+      ${tile('ship', 'Partly delivered <small style="text-transform:none;">· now, left to ship</small>', fmt(f.partial.length), list(f.partial.slice(0, 8).map(x => `<div><span>${job(x.j)}</span><b>${fmt(x.left)}</b></div>`), 'None partly delivered') + more(f.partial, 8), true)}
     </div>
 
     <div class="cd-sec">Stock <small>· right now</small></div>
     <div class="cd-grid">
       ${tile(f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), list(f.shortPapers.slice(0, 6).map(e => `<div><span>${esc(e.label)}</span><b>${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}</b></div>`), 'Enough paper for every pending job') + more(f.shortPapers, 6), true)}
-      ${tile('stock', 'Pending Stock queue', fmt(f.pendingQueue.length), 'jobs waiting for paper')}
+      ${tile('stock', 'Pending Stock', fmt(f.pendingQueue.length), 'jobs waiting for paper')}
       ${tile('import', 'Pending imports', fmt(f.imports.length), list(f.imports.slice(0, 5).map(i => `<div><span>${esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' '))}</span><b>${fmt(i.packets)}${i.expected_arrival ? ' · ' + esc(fmtDMY(String(i.expected_arrival).slice(0, 10)) || '') : ''}</b></div>`), 'None pending') + more(f.imports, 5), true)}
     </div>
 
     <div class="cd-sec">Wastage <small>· for the period (Wastage Weight × 100 ÷ Packets Issued Weight)</small></div>
     <div class="cd-grid">
-      ${tile('waste', 'Overall', f.wastagePct == null ? '—' : fmt(f.wastagePct) + '%', '')}
       ${tile('waste', 'By company <small style="text-transform:none;">· highest</small>', '', list(f.wasteByCompany.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmt(v)}%</b></div>`), 'No wastage recorded'), true)}
       ${tile('waste', 'By product <small style="text-transform:none;">· highest</small>', '', list(f.wasteByProduct.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmt(v)}%</b></div>`), 'No wastage recorded'), true)}
     </div>`;
