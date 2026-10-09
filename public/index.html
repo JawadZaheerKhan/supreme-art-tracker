@@ -2265,8 +2265,10 @@
   /* Back bar of a jump into Jobs (e.g. Product Rate -> a job): while a window
      (the job card) is open it floats ABOVE the overlay, top-left, so Back is
      one click from the job card itself (owner, 2026-10-06). */
-  body:has(#modal-root .overlay) #jobs-return-bar { position: fixed; top: 10px; left: 16px; z-index: 250; }
-  body:has(#modal-root .overlay) #jobs-return-bar > div { margin-bottom: 0 !important; box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
+  body:has(#modal-root .overlay) #jobs-return-bar,
+  body:has(#modal-root .overlay) #products-return-bar { position: fixed; top: 10px; left: 16px; z-index: 250; }
+  body:has(#modal-root .overlay) #jobs-return-bar > div,
+  body:has(#modal-root .overlay) #products-return-bar > div { margin-bottom: 0 !important; box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
   /* Branded dialogs (confirm / alert / prompt) — sit above the regular
      modal overlay (z-index 200) so a dialog can interrupt a form modal.
      The icon at the top is colour-coded by kind. Buttons live on the
@@ -3079,6 +3081,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 </div>
 
 <div class="main" id="products-mode" style="display:none;">
+  <div id="products-return-bar" style="display:none;"></div>
   <div class="toolbar">
     <div class="search-wrap">
       <input type="text" id="products-search" placeholder="Search product or company..." oninput="setProductsSearch(this.value)">
@@ -5786,7 +5789,7 @@ function setMode(m) {
   // the user leaves — Back button, top-bar tab, or a bounce above.
   if (m !== 'inventory') invClearReturn();
   // Same for a jump into Jobs (Product Rate history -> a job).
-  if (m !== 'jobs') jobsClearReturn();
+  if (jobsReturn && m !== (jobsReturn.where || 'jobs')) jobsClearReturn();
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
@@ -7849,10 +7852,16 @@ function jobsClearReturn() {
   jobsReturn = null;
   renderJobsReturnBar();
 }
+// The bar sits on the tab the jump was made on: jobsReturn.where = 'jobs'
+// (default) or 'products'.
 function renderJobsReturnBar() {
-  const bar = document.getElementById('jobs-return-bar');
+  const where = jobsReturn ? (jobsReturn.where || 'jobs') : null;
+  for (const id of ['jobs-return-bar', 'products-return-bar']) {
+    const b = document.getElementById(id);
+    if (b && id !== where + '-return-bar') { b.style.display = 'none'; b.innerHTML = ''; }
+  }
+  const bar = where ? document.getElementById(where + '-return-bar') : null;
   if (!bar) return;
-  if (!jobsReturn) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
   bar.style.display = 'block';
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid #A32D2D;border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
@@ -7867,24 +7876,21 @@ function jobsReturnBack() {
   if (typeof closeModal === 'function') closeModal();
   if (back && back.reopen) back.reopen();
 }
-// Product Rate -> shipment history -> a job number: open the job on the
-// Jobs tab, with a Back bar that returns to the same product's history.
+// Product Rate -> a product's window -> a job number (job or shipment): the
+// job card opens right there on the Products tab (owner, 2026-10-09 - it
+// used to switch to the Jobs tab), with a Back bar - floating above the
+// card while it is open - that reopens the same product's window.
 function openJobFromProductHistory(jobNo, i) {
   const g = __productGroupsCache[i];
   const key = g ? g.key : null;
-  const scrollY = window.scrollY;
   closeModal();
-  setMode('jobs');
   jobsReturn = {
-    backLabel: 'Product Rate',
-    label: 'E-' + jobNo + (g ? ' · ' + g.name : ''),
+    where: 'products',
+    backLabel: g ? g.name : 'the product',
+    label: 'E-' + jobNo,
     reopen: () => {
-      setMode('products');
-      requestAnimationFrame(() => {
-        window.scrollTo(0, scrollY);
-        const idx = key === null ? -1 : __productGroupsCache.findIndex(x => x.key === key);
-        if (idx >= 0) openProductHistoryModal(idx);
-      });
+      const idx = key === null ? -1 : __productGroupsCache.findIndex(x => x.key === key);
+      if (idx >= 0) openProductHistoryModal(idx);
     },
   };
   renderJobsReturnBar();
