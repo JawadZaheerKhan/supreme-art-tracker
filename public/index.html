@@ -2625,6 +2625,38 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .jc-extras .form-label { font-size: 11px; }
 
 /* Print job card — A4 portrait, matches paper layout */
+/* ── CEO Dashboard tiles: small, phone / tablet friendly; colours follow the
+   app's sign families (delivery yellow/orange, stock green, production
+   blue, offcut cyan, imports pale amber, blocked red). */
+.cd-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:4px 0 12px; }
+.cd-bar .cd-range-label { font-size:12px; color:var(--text2); }
+.cd-sec { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:var(--text2); margin:14px 0 6px; }
+.cd-sec small { font-weight:600; text-transform:none; letter-spacing:0; color:var(--text3); }
+.cd-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; }
+.cd-tile { --c:#475569; --t:#f8fafc; background:var(--t); border:1px solid var(--border); border-left:4px solid var(--c); border-radius:10px; padding:8px 10px; min-width:0; }
+.cd-tile.cd-wide { grid-column:span 2; }
+.cd-label { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--text2); }
+.cd-value { font-size:20px; font-weight:800; color:var(--text); line-height:1.25; word-break:break-word; }
+.cd-sub { font-size:11px; color:var(--text2); line-height:1.35; }
+.cd-list { margin-top:4px; font-size:11.5px; }
+.cd-list div { display:flex; justify-content:space-between; gap:8px; padding:2px 0; border-top:1px dashed var(--border); }
+.cd-list div:first-child { border-top:none; }
+.cd-list span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cd-list b { flex-shrink:0; max-width:62%; text-align:right; overflow-wrap:anywhere; }
+.cd-list a { color:var(--text); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
+.cd-new    { --c:#2563eb; --t:#eff6ff; }
+.cd-prod   { --c:#0C447C; --t:#E6F1FB; }
+.cd-del    { --c:#eab308; --t:#fefce8; }
+.cd-ship   { --c:#f59e0b; --t:#fff8ed; }
+.cd-stock  { --c:#65a30d; --t:rgba(132,204,22,0.14); }
+.cd-low    { --c:#10b981; --t:#d1fae5; }
+.cd-out    { --c:#dc2626; --t:#FCEBEB; }
+.cd-block  { --c:#791F1F; --t:#FCEBEB; }
+.cd-import { --c:#d97706; --t:#fef3c7; }
+.cd-money  { --c:#1a1a18; --t:#f8fafc; }
+.cd-waste  { --c:#475569; --t:#f1f5f9; }
+/* Phones: two small tiles a row; list tiles take the full width. */
+@media (max-width: 380px) { .cd-grid { grid-template-columns:1fr 1fr; } }
 #print-area { display: none; }
 @media print {
   html, body { margin: 0; padding: 0; background: #fff; height: auto; }
@@ -2975,6 +3007,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   </div>
   <div class="mode-switch" id="mode-switch">
     <button class="mode-btn active" data-mode="jobs" id="mode-jobs-btn" onclick="setMode('jobs')">Jobs</button>
+    <button class="mode-btn" data-mode="dashboard" id="mode-dashboard-btn" onclick="setMode('dashboard')" style="display:none;">&#128202; Dashboard</button>
     <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="setMode('reports')">Reports</button>
@@ -3521,6 +3554,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   </div>
 </div>
 
+<!-- CEO Dashboard (owner, 2026-10-09): view-only tiles with one date filter. -->
+<div class="main" id="dashboard-mode" style="display:none;">
+  <div id="ceo-dash"></div>
+</div>
 <div class="main" id="users-mode" style="display:none;">
   <!-- Super Admin-only sub-tab switcher — hidden entirely for everyone else,
        so a non-Super-Admin's Users tab looks exactly as it did before. -->
@@ -5243,11 +5280,201 @@ function tabAllowed(m) {
     case 'station':     return hasPerm('station_access', 'view');
     case 'users':       return hasPerm('user_tab_access', 'view');
     case 'client-view': return hasPerm('client_view_preview', 'view');
+    case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     default:            return true;
   }
 }
-const TAB_ORDER = ['jobs', 'products', 'inventory', 'reports', 'stickers', 'station', 'users', 'client-view'];
+const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'reports', 'stickers', 'station', 'users', 'client-view'];
 function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
+// ── CEO Dashboard ─────────────────────────────────────────────────
+// Owner, 2026-10-09: one place where the CEO sees everything, in small
+// tiles, for any period. Figures come from the same code as the reports:
+// paper issued = the Stock Out report's rows, sales and wastage = the Sale
+// Report's rows (buildSaleReportRows), job states = the Jobs tab's views.
+// "Right now" tiles ignore the date filter. View only.
+const ceoDash = { range: 'this-month', dfrom: '', dto: '', txs: null, imports: null, err: '' };
+const CEO_DASH_RANGES = [['today', 'Today'], ['this-week', 'This week'], ['this-month', 'This month'], ['last-month', 'Last month'], ['this-year', 'This year'], ['', 'All time'], ['custom', 'Custom range…']];
+function ceoDashBounds() {
+  if (ceoDash.range === 'today') { const d = localDateISO(); return resolveDateFilterBounds('custom', d, d); }
+  return resolveDateFilterBounds(ceoDash.range, ceoDash.dfrom, ceoDash.dto);
+}
+function ceoDashIso(ms) { return ms == null ? '' : localDateISO(new Date(ms)); }
+function enterCeoDashboard() { renderCeoDash(); loadCeoDash(); }
+function setCeoDashRange(v) { ceoDash.range = v; if (v !== 'custom') { ceoDash.dfrom = ''; ceoDash.dto = ''; } renderCeoDash(); if (v !== 'custom') loadCeoDash(); }
+function setCeoDashCustom() {
+  ceoDash.dfrom = (document.getElementById('cd-dfrom') || {}).value || '';
+  ceoDash.dto   = (document.getElementById('cd-dto')   || {}).value || '';
+  loadCeoDash();
+}
+async function loadCeoDash() {
+  const b = ceoDashBounds();
+  const qs = new URLSearchParams({ direction: 'out' });
+  if (b && b.from != null) qs.set('from', ceoDashIso(b.from));
+  if (b && b.to != null)   qs.set('to', ceoDashIso(b.to));
+  ceoDash.txs = null; ceoDash.err = '';
+  renderCeoDash();
+  try {
+    const [txs, imports] = await Promise.all([
+      api('GET', '/api/inventory/transactions?' + qs.toString()),
+      api('GET', '/api/imports').catch(() => []),
+    ]);
+    ceoDash.txs = Array.isArray(txs) ? txs : [];
+    ceoDash.imports = Array.isArray(imports) ? imports : [];
+  } catch (e) { ceoDash.err = e.message; ceoDash.txs = []; }
+  if (mode === 'dashboard') renderCeoDash();
+}
+// The Sale Report's own rows for this period (filters cleared), so the
+// dashboard's sales and wastage are the report's figures exactly.
+function ceoDashSaleRows(b) {
+  const saved = JSON.parse(JSON.stringify(saleReportState));
+  try {
+    const cf = Object.fromEntries(Object.keys(saved.colFilters || {}).map(k => [k, []]));
+    Object.assign(saleReportState, { client: '', q: '', poSearch: '', challanSearch: '', milOnly: false, tab: 'all', colFilters: cf, colSearch: {},
+      dateRange: b ? 'custom' : '', dfrom: b ? ceoDashIso(b.from) : '', dto: b ? ceoDashIso(b.to) : '' });
+    return buildSaleReportRows('all') || [];
+  } catch (e) { return []; }
+  finally { for (const k of Object.keys(saleReportState)) delete saleReportState[k]; Object.assign(saleReportState, saved); }
+}
+function ceoDashFigures() {
+  const b = ceoDashBounds();
+  const inRange = ms => ms != null && Number.isFinite(ms) && (!b || ((b.from == null || ms >= b.from) && (b.to == null || ms <= b.to)));
+  const n = v => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
+  const all = jobs || [];
+  const f = {};
+  // 1. headline (period)
+  f.newJobs = all.filter(j => inRange(j.created_at ? new Date(j.created_at).getTime() : (j.dateissued ? new Date(j.dateissued + 'T12:00:00').getTime() : null))).length;
+  f.deliveredJobs = all.filter(j => isDone(j) && inRange(jobDeliveredAnchorMs(j))).length;
+  f.uc = 0; f.shipments = 0;
+  for (const j of all) {
+    if (j.is_shade_card) continue;
+    for (const d of (Array.isArray(j.deliveries) ? j.deliveries : [])) {
+      if (!inRange(deliveryEntryMs(d))) continue;
+      f.uc += n(d && d.cartons); f.shipments++;
+    }
+  }
+  f.paperLoaded = Array.isArray(ceoDash.txs);
+  f.packets = 0; f.reams = 0; f.paperKg = 0;
+  for (const t of (ceoDash.txs || [])) {
+    if (!(t.change < 0)) continue;
+    const sheets = Math.abs(t.change), ps = packetSize(t.paper_type || '');
+    const units = sheets / ps;
+    if (isReamPaper(t.paper_type)) f.reams += units; else f.packets += units;
+    const w = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
+    if (w !== null) f.paperKg += units * w;
+  }
+  // 3 + 5. sales and wastage (period) - the Sale Report's rows
+  const rows = ceoDashSaleRows(b);
+  const sumBy = (keyOf, valOf) => { const m = new Map(); for (const r of rows) { const k = keyOf(r); const v = valOf(r); if (!k || v == null) continue; m.set(k, (m.get(k) || 0) + v); } return m; };
+  f.salesByCompany = [...sumBy(r => r.client, r => r.amountExTax)].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  f.salesByProduct = [...sumBy(r => resolveProductKey(String(r.name || '').trim()).name, r => r.amountExTax)].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const wk = rows.reduce((a, r) => a + (+r.wastageKg || 0), 0), ik = rows.reduce((a, r) => a + (+r.issuedKg || 0), 0);
+  f.wastagePct = ik > 0 ? wk * 100 / ik : null; f.wastageKg = wk; f.issuedKg = ik;
+  const pctBy = keyOf => {
+    const m = new Map();
+    for (const r of rows) { const k = keyOf(r); if (!k) continue; const e = m.get(k) || { w: 0, i: 0 }; e.w += +r.wastageKg || 0; e.i += +r.issuedKg || 0; m.set(k, e); }
+    return [...m].filter(([, e]) => e.i > 0 && e.w > 0).map(([k, e]) => [k, e.w * 100 / e.i]).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  };
+  f.wasteByCompany = pctBy(r => r.client);
+  f.wasteByProduct = pctBy(r => resolveProductKey(String(r.name || '').trim()).name);
+  // 2. jobs right now
+  const live = all.filter(j => !_finalizedJobIds.has(j.id));
+  f.stage = {};
+  for (const v of ['new', 'ctp', 'pending', 'active', 'storage', 'partial', 'blocked']) f.stage[v] = live.filter(j => jobInView(j, v)).length;
+  const today = localDateISO();
+  f.late = live.filter(j => !isDone(j) && j.deadline && String(j.deadline).slice(0, 10) < today)
+    .sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)));
+  f.blocked = live.filter(j => isBlocked(j));
+  f.partial = live.filter(j => isPartialDelivery(j) && !isDone(j))
+    .map(j => ({ j, left: Math.max(0, n(j.qty) - totalDeliveredCartons(j)) }))
+    .sort((a, b) => b.left - a.left);
+  // 4. stock right now
+  const pend = live.filter(j => jobInView(j, 'pending'));
+  f.pendingQueue = pend;
+  const papers = new Map();
+  for (const j of pend) {
+    const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+    const need = n(j.sheets);
+    if (!it || !need) continue;
+    const key = [it.paper_type, it.size, it.gsm].join('|');
+    const e = papers.get(key) || { label: [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' '), need: 0, have: paperGroupMembers(it).reduce((a, x) => a + (x.current_balance || 0), 0), ps: packetSize(it.paper_type), jobs: 0 };
+    e.need += need; e.jobs++;
+    papers.set(key, e);
+  }
+  f.shortPapers = [...papers.values()].filter(e => e.have < e.need).sort((a, b) => (a.have > 0) - (b.have > 0) || (b.need - b.have) - (a.need - a.have));
+  f.imports = (ceoDash.imports || []).filter(i => i.status === 'pending' || i.status === 'partial');
+  return f;
+}
+function renderCeoDash() {
+  const el = document.getElementById('ceo-dash');
+  if (!el || mode !== 'dashboard') return;
+  const fmt = v => (+v || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
+  const opts = CEO_DASH_RANGES.map(([v, l]) => `<option value="${v}" ${ceoDash.range === v ? 'selected' : ''}>${l}</option>`).join('');
+  const custom = ceoDash.range === 'custom' ? `
+      <input type="date" id="cd-dfrom" class="filter" value="${esc(ceoDash.dfrom)}" onchange="setCeoDashCustom()" style="padding:6px;">
+      <span style="color:var(--text2);font-size:12px;">to</span>
+      <input type="date" id="cd-dto" class="filter" value="${esc(ceoDash.dto)}" onchange="setCeoDashCustom()" style="padding:6px;">` : '';
+  const b = ceoDashBounds();
+  const rangeText = !b ? 'All time' : (b.from != null && b.to != null && ceoDashIso(b.from) === ceoDashIso(b.to)) ? fmtDMY(ceoDashIso(b.from))
+    : `${b.from != null ? fmtDMY(ceoDashIso(b.from)) : '…'} – ${b.to != null ? fmtDMY(ceoDashIso(b.to)) : '…'}`;
+  const f = ceoDashFigures();
+  const tile = (fam, label, value, sub, wide) => `<div class="cd-tile cd-${fam}${wide ? ' cd-wide' : ''}"><div class="cd-label">${label}</div>${value !== '' ? `<div class="cd-value">${value}</div>` : ''}${sub ? `<div class="cd-sub">${sub}</div>` : ''}</div>`;
+  const job = j => `<a onclick="openEdit(${j.id})">E-${j.id}</a> ${esc(j.name || '')}`;
+  const list = (items, empty) => items.length ? `<div class="cd-list">${items.join('')}</div>` : `<div class="cd-sub">${empty}</div>`;
+  const more = (arr, max) => arr.length > max ? `<div class="cd-sub">+${arr.length - max} more</div>` : '';
+  const seeMoney = isSuperAdmin() || hasPerm('job_btn_pricing', 'view') || hasPerm('rpt_sale_report', 'view') || hasPerm('products_btn_revenue', 'view');
+  const paperVal = !f.paperLoaded ? '…' : [f.packets ? fmt(f.packets) + ' pkts' : '', f.reams ? fmt(f.reams) + ' reams' : ''].filter(Boolean).join(' · ') || '0';
+  el.innerHTML = `
+    <div class="cd-bar">
+      <select class="filter" onchange="setCeoDashRange(this.value)">${opts}</select>
+      ${custom}
+      <button class="btn btn-sm" onclick="loadCeoDash()" title="Load the latest figures">&#8635;</button>
+      <span class="cd-range-label">${esc(rangeText)}</span>
+    </div>
+    ${ceoDash.err ? `<div class="cd-sub" style="color:#991b1b;">Paper figures could not load: ${esc(ceoDash.err)}</div>` : ''}
+
+    <div class="cd-sec">Headline <small>· for the period</small></div>
+    <div class="cd-grid">
+      ${tile('new', 'New jobs', fmt(f.newJobs), 'created')}
+      ${tile('del', 'Jobs delivered', fmt(f.deliveredJobs), 'fully delivered')}
+      ${tile('ship', 'UC delivered', fmt(f.uc), `${fmt(f.shipments)} shipment${f.shipments === 1 ? '' : 's'}`)}
+      ${tile('stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…')}
+      ${tile('waste', 'Wastage', f.wastagePct == null ? '—' : fmt(f.wastagePct) + '%', f.issuedKg ? `${fmt(f.wastageKg)} of ${fmt(f.issuedKg)} kg` : 'no deliveries')}
+    </div>
+
+    <div class="cd-sec">Jobs <small>· right now</small></div>
+    <div class="cd-grid">
+      ${tile('new', 'New jobs', fmt(f.stage.new), '')}
+      ${tile('new', 'CTP', fmt(f.stage.ctp), '')}
+      ${tile('stock', 'Pending Stock', fmt(f.stage.pending), '')}
+      ${tile('prod', 'In progress', fmt(f.stage.active), '')}
+      ${tile('ship', 'Ready to Deliver', fmt(f.stage.storage), '')}
+      ${tile('ship', 'Partly delivered', fmt(f.stage.partial), '')}
+      ${tile('block', 'Blocked', fmt(f.stage.blocked), '')}
+      ${tile('out', 'Late jobs', fmt(f.late.length), list(f.late.slice(0, 6).map(j => `<div><span>${job(j)}</span><b>${esc(fmtDMY(String(j.deadline).slice(0, 10)) || '')}</b></div>`), 'None past deadline') + more(f.late, 6), true)}
+      ${tile('block', 'Blocked jobs', '', list(f.blocked.slice(0, 6).map(j => { const s = (j.stages || {})[j.stage_index || 0] || {}; return `<div><span>${job(j)}</span><b>${esc(STAGES[j.stage_index || 0] || '')}${s.notes ? ' · ' + esc(s.notes) : ''}</b></div>`; }), 'Nothing blocked') + more(f.blocked, 6), true)}
+    </div>
+
+    <div class="cd-sec">Deliveries &amp; sales</div>
+    <div class="cd-grid">
+      ${seeMoney ? tile('money', 'Sales by company <small style="text-transform:none;">· period, excl. tax</small>', '', list(f.salesByCompany.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmtRate(v)}</b></div>`), 'No sales in this period'), true) : ''}
+      ${seeMoney ? tile('money', 'Sales by product <small style="text-transform:none;">· period, excl. tax</small>', '', list(f.salesByProduct.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmtRate(v)}</b></div>`), 'No sales in this period'), true) : ''}
+      ${tile('ship', 'Partly delivered <small style="text-transform:none;">· now, left to ship</small>', '', list(f.partial.slice(0, 8).map(x => `<div><span>${job(x.j)}</span><b>${fmt(x.left)}</b></div>`), 'None partly delivered') + more(f.partial, 8), true)}
+    </div>
+
+    <div class="cd-sec">Stock <small>· right now</small></div>
+    <div class="cd-grid">
+      ${tile(f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), list(f.shortPapers.slice(0, 6).map(e => `<div><span>${esc(e.label)}</span><b>${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}</b></div>`), 'Enough paper for every pending job') + more(f.shortPapers, 6), true)}
+      ${tile('stock', 'Pending Stock queue', fmt(f.pendingQueue.length), 'jobs waiting for paper')}
+      ${tile('import', 'Pending imports', fmt(f.imports.length), list(f.imports.slice(0, 5).map(i => `<div><span>${esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' '))}</span><b>${fmt(i.packets)}${i.expected_arrival ? ' · ' + esc(fmtDMY(String(i.expected_arrival).slice(0, 10)) || '') : ''}</b></div>`), 'None pending') + more(f.imports, 5), true)}
+    </div>
+
+    <div class="cd-sec">Wastage <small>· for the period (Wastage Weight × 100 ÷ Packets Issued Weight)</small></div>
+    <div class="cd-grid">
+      ${tile('waste', 'Overall', f.wastagePct == null ? '—' : fmt(f.wastagePct) + '%', '')}
+      ${tile('waste', 'By company <small style="text-transform:none;">· highest</small>', '', list(f.wasteByCompany.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmt(v)}%</b></div>`), 'No wastage recorded'), true)}
+      ${tile('waste', 'By product <small style="text-transform:none;">· highest</small>', '', list(f.wasteByProduct.map(([k, v]) => `<div><span>${esc(k)}</span><b>${fmt(v)}%</b></div>`), 'No wastage recorded'), true)}
+    </div>`;
+}
 function renderUserChip() {
   const chip = document.getElementById('user-chip');
   if (!currentUser) { chip.style.display = 'none'; return; }
@@ -5268,6 +5495,7 @@ function renderUserChip() {
     el.style.display = tabAllowed(m) ? '' : 'none';
   };
   showTab('mode-jobs-btn', 'jobs');
+  showTab('mode-dashboard-btn', 'dashboard');
   showTab('mode-products-btn', 'products');
   showTab('mode-inventory-btn', 'inventory');
   showTab('mode-reports-btn', 'reports');
@@ -5814,6 +6042,8 @@ function setMode(m) {
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
   document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
   document.getElementById('users-mode').style.display     = m === 'users' ? 'block' : 'none';
+  const dashEl = document.getElementById('dashboard-mode');
+  if (dashEl) dashEl.style.display = m === 'dashboard' ? 'block' : 'none';
   document.getElementById('station-mode').style.display   = m === 'station' ? 'block' : 'none';
   const clientViewEl = document.getElementById('client-view-mode');
   if (clientViewEl) clientViewEl.style.display = m === 'client-view' ? 'block' : 'none';
@@ -5864,6 +6094,11 @@ function setMode(m) {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     loadUsersAndAudit();
+  } else if (m === 'dashboard') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    enterCeoDashboard();
   } else if (m === 'client-view') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -7805,6 +8040,8 @@ function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked, e
 function render() {
   const _t0 = performance.now();
   renderStats(); renderTabs(); renderJobs();
+  // The CEO Dashboard follows job changes too (the 1-minute refresh etc.).
+  if (mode === 'dashboard' && typeof renderCeoDash === 'function') renderCeoDash();
   const _ms = performance.now() - _t0;
   if (_ms > 300) speedLog('Jobs list redraw', _ms, { detail: (typeof view !== 'undefined' ? view : '') + ' tab' });
 }
@@ -34242,6 +34479,7 @@ async function setUsersSubTab(tab) {
 let _accRegTab = 'jobs';
 const ACC_REG_TABS = [
   ['jobs', 'Jobs'],
+  ['dashboard', 'Dashboard'],
   ['products', 'Products'],
   ['inventory', 'Inventory'],
   ['reports', 'Reports'],
@@ -34350,6 +34588,9 @@ const ACC_USERS_TAB_ROWS = [
 // Client View tab: one View/Hidden row for the whole tab. The gate itself
 // (client_view_preview) was already live on both sides — this only puts it
 // in the register so it can be changed without editing code.
+const ACC_DASHBOARD_TAB_ROWS = [
+  { key: 'dashboard_tab_access', type: 'tab' },
+];
 const ACC_CLIENT_VIEW_TAB_ROWS = [
   { key: 'client_view_preview', type: 'tab' },
 ];
@@ -34357,7 +34598,7 @@ const ACC_CLIENT_VIEW_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
+const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));

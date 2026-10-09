@@ -496,6 +496,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_tab_access:  { label: 'Product Rate tab — view jobs grouped by product', levels: { ceo: 'view', finance: 'view' } },
   products_btn_rate:    { label: 'Rate — edit a Product Rate tile\'s default Rate, and use its "+" (fold another product in)', levels: { finance: 'yes', ceo: 'view' } },
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
+  dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, stock and wastage tiles with a date filter (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
