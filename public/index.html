@@ -26516,10 +26516,43 @@ function openProductHistoryModal(i) {
     <td style="text-align:right;padding:6px 8px;">${r.rate != null ? fmtRate(r.cartons * r.rate) : '&mdash;'}</td>
   </tr>`;
   }).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--text3);font-style:italic;padding:16px;">No shipments recorded yet.</td></tr>`;
+  // Every JOB of this product too - not only the shipped ones (owner,
+  // 2026-10-09): number, date, PO, quantities and where it is now.
+  const num = v => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
+  const status = j => {
+    if (isDone(j)) return 'Delivered';
+    if (isBlocked(j)) return 'Blocked';
+    if (isNewJob(j)) return 'New Job';
+    if (isCtpQueue(j)) return ctpAwaitingStock(j) ? 'CTP · Pending Stock' : 'CTP';
+    if (j.issuance_status === 'pending') return 'Pending Stock';
+    if (isPartialDelivery(j)) return 'Partly delivered';
+    return STAGES[j.stage_index || 0] || '—';
+  };
+  const jobRows = [...g.jobs].sort((a, b) => b.id - a.id).map(j => {
+    const shipped = totalDeliveredCartons(j);
+    return `<tr>
+    <td style="padding:6px 8px;"><a href="#" onclick="event.preventDefault(); openJobFromProductHistory(${j.id}, ${i});">E-${j.id}</a></td>
+    <td style="padding:6px 8px;">${esc(j.dateissued || '')}</td>
+    <td style="padding:6px 8px;">${esc(j.client || '')}</td>
+    <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
+    <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
+    <td style="text-align:right;padding:6px 8px;">${num(j.qty) ? num(j.qty).toLocaleString() : '&mdash;'}</td>
+    <td style="text-align:right;padding:6px 8px;">${num(j.cartonqty) ? num(j.cartonqty).toLocaleString() : '&mdash;'}</td>
+    <td style="text-align:right;padding:6px 8px;">${shipped ? shipped.toLocaleString() : '&mdash;'}</td>
+    <td style="padding:6px 8px;">${esc(status(j))}</td>
+  </tr>`;
+  }).join('');
+  const th = a => `<th style="text-align:${a};padding:6px 8px;">`;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:960px;">
     <h2 style="margin:0 0 4px;">${esc(g.name)}</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Every shipment across every job with this product name.${defaultRate !== null ? ' <span style="color:#ca8a04;font-weight:700;">Yellow</span> rate = this shipment was priced differently from the product\'s standard rate when it was recorded.' : ''}${canEdit ? ' Rate/Sale Tax % are editable per shipment — a change applies to that shipment only.' : ''}</div>
-    <div style="max-height:60vh;overflow:auto;">
+    <div style="max-height:62vh;overflow:auto;">
+    <div style="font-weight:700;font-size:13px;margin:4px 0 6px;">Jobs (${g.jobs.length})</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px;">
+      <thead><tr style="background:#f3f4f6;">${th('left')}Job</th>${th('left')}Date</th>${th('left')}Company</th>${th('left')}PO No.</th>${th('left')}Item Code</th>${th('right')}PO Qty</th>${th('right')}Printed UC Qty</th>${th('right')}Delivered</th>${th('left')}Status</th></tr></thead>
+      <tbody>${jobRows}</tbody>
+    </table>
+    <div style="font-weight:700;font-size:13px;margin:4px 0 2px;">Shipments (${rows.length})</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Every shipment across every job with this product name.${defaultRate !== null ? ' <span style="color:#ca8a04;font-weight:700;">Yellow</span> rate = this shipment was priced differently from the product\'s standard rate when it was recorded.' : ''}${canEdit ? ' Rate/Sale Tax % are editable per shipment — a change applies to that shipment only.' : ''}</div>
     <table style="width:100%;border-collapse:collapse;font-size:12px;">
       <thead><tr style="background:#f3f4f6;">
         <th style="text-align:left;padding:6px 8px;">Date</th>
