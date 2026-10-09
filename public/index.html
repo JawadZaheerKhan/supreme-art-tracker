@@ -32639,21 +32639,26 @@ function stationQueueHtml() {
   // and a numeric keypad is far quicker on a tablet than a full keyboard.
   // Scope is unchanged: this searches what the operator can already work on,
   // so it cannot open a job their stage has no business in.
+  // Search tab: the same queue, narrowed by job name, company, job number
+  // or item code (stationJobMatches - same rules as the Jobs tab). Scope is
+  // unchanged: it searches what the operator can already work on, so it
+  // cannot open a job their stage has no business in.
   const searching = stationQueueTab === 'search';
-  const sq = String(stationQueueSearch || '').replace(/\D/g, '');
-  if (searching) queue = sq ? queue.filter(j => String(j.id).includes(sq)) : [];
-  // A number that is real but not in this queue would otherwise look like a
-  // broken search, so say where it actually is. Read-only: no way in from here.
-  const elsewhere = (searching && sq && !queue.length)
-    ? jobs.find(j => String(j.id) === sq)
-    : null;
+  const sq = String(stationQueueSearch || '').trim();
+  if (searching) queue = sq ? queue.filter(j => stationJobMatches(j, sq)) : [];
+  // A real job that is not in this queue would otherwise look like a broken
+  // search, so say where it actually is. Read-only: no way in from here.
+  const elsewhereAll = (searching && sq && !queue.length) ? jobs.filter(j => stationJobMatches(j, sq)) : [];
+  const elsewhere = elsewhereAll.length === 1 ? elsewhereAll[0] : null;
   const emptyMsg = !searching
     ? `Nothing waiting at ${esc(stageName)} right now.`
     : !sq
-      ? 'Type a job number.'
+      ? 'Type a job number, name or item code.'
       : elsewhere
         ? `Job #${elsewhere.id} \u2014 ${esc(elsewhere.name || '')} \u2014 is not in your queue. It is at ${esc(STAGES[elsewhere.stage_index || 0] || '')}.`
-        : `No job #${esc(sq)} in your queue.`;
+        : elsewhereAll.length
+          ? `${elsewhereAll.length} jobs match "${esc(sq)}", none of them in your queue.`
+          : `No job matches "${esc(sq)}" in your queue.`;
   const rows = queue.length ? queue.map(j => {
     // Unheard notes get a loud badge so the operator opens that job first.
     const notes = stationNotes.filter(n => n.job_id === j.id);
@@ -32701,14 +32706,14 @@ function stationQueueHtml() {
   const tabs = `
     <div style="display:flex;gap:8px;padding:10px 16px 0;">
       <button class="btn btn-sm${!searching ? ' btn-primary' : ''}" onclick="stationQueueSetTab('queue')">${esc(stageName)}</button>
-      <button class="btn btn-sm${searching ? ' btn-primary' : ''}" onclick="stationQueueSetTab('search')">&#128269; Job No.</button>
+      <button class="btn btn-sm${searching ? ' btn-primary' : ''}" onclick="stationQueueSetTab('search')">&#128269; Search</button>
     </div>`;
-  // inputmode="numeric" is what makes a tablet open its number keypad instead
-  // of the full keyboard; type stays "text" so no spinner or scroll-to-change.
+  // Full keyboard now (names and item codes have letters); still big and
+  // centred for a tablet.
   const searchBox = searching ? `
     <div style="padding:12px 16px;">
-      <input type="text" id="station-queue-search-input" inputmode="numeric" pattern="[0-9]*"
-             value="${esc(stationQueueSearch)}" placeholder="Job number\u2026"
+      <input type="text" id="station-queue-search-input" inputmode="search" autocomplete="off"
+             value="${esc(stationQueueSearch)}" placeholder="Job no., name or item code\u2026"
              oninput="stationQueueSearchInput(this.value)"
              style="width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-size:20px;font-weight:700;letter-spacing:0.05em;text-align:center;">
     </div>` : '';
@@ -32722,6 +32727,21 @@ function stationQueueHtml() {
     ${searchBox}
     <div class="station-queue">${rows}</div>`;
 }
+// Station search, both the operator's queue and the manager's Search tab -
+// the same rules as the Jobs tab search (owner, 2026-10-09): job name,
+// company, job number ("350", "E-350", "e350") and item code (spaces
+// ignored).
+function stationJobMatches(j, query) {
+  const t = String(query || '').trim().toLowerCase();
+  if (!t) return false;
+  const id = String(j.id);
+  const idNeedle = t.replace(/^e[-\s]?/, '');
+  if (id === idNeedle || (/^\d+$/.test(idNeedle) && id.includes(idNeedle))) return true;
+  if (String(j.name || '').toLowerCase().includes(t)) return true;
+  if (String(j.client || '').toLowerCase().includes(t)) return true;
+  const sq = t.replace(/\s+/g, '');
+  return !!sq && String(j.jobcode || '').toLowerCase().replace(/\s+/g, '').includes(sq);
+}
 function stationQueueSetTab(t) {
   stationQueueTab = t;
   if (t !== 'search') stationQueueSearch = '';
@@ -32729,9 +32749,7 @@ function stationQueueSetTab(t) {
   if (t === 'search') stationQueueFocusSearch();
 }
 function stationQueueSearchInput(v) {
-  // Digits only, whatever the device sends - a stray letter would just make
-  // the search fail silently.
-  stationQueueSearch = String(v || '').replace(/\D/g, '');
+  stationQueueSearch = String(v || '');
   stationRender();
   stationQueueFocusSearch();
 }
@@ -32910,14 +32928,10 @@ function stationManagerQueueHtml() {
   let listHtml;
   if (stationManagerTab === 'search') {
     const q = stationManagerSearch.trim().toLowerCase();
-    const results = q ? jobs.filter(j => !isNewJob(j) && (
-      String(j.id).includes(q) ||
-      (j.name && j.name.toLowerCase().includes(q)) ||
-      (j.client && j.client.toLowerCase().includes(q))
-    )) : [];
+    const results = q ? jobs.filter(j => !isNewJob(j) && stationJobMatches(j, q)) : [];
     listHtml = `
       <div style="padding:12px 16px;">
-        <input type="text" id="station-mgr-search-input" value="${esc(stationManagerSearch)}" placeholder="Search by job #, name or client…" oninput="stationManagerSearchInput(this.value)" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:15px;">
+        <input type="text" id="station-mgr-search-input" value="${esc(stationManagerSearch)}" placeholder="Search by job #, name, company or item code…" oninput="stationManagerSearchInput(this.value)" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:15px;">
       </div>
       <div class="station-queue">${
         q ? (results.length ? results.map(j => stationManagerJobRow(j)).join('') : `<div class="empty">No jobs match "${esc(stationManagerSearch)}".</div>`)
