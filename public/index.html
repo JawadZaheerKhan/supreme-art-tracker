@@ -3084,6 +3084,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <input type="text" id="products-search" placeholder="Search product or company..." oninput="setProductsSearch(this.value)">
       <span class="search-icon">&#128269;</span>
     </div>
+    <input class="filter" type="text" id="products-code-filter" placeholder="Item Code" oninput="setProductsCodeFilter(this.value)" style="width:130px;" title="Products with a job whose Code (item code) contains this - part of it is enough">
     <select class="filter" id="products-company-filter" onchange="setProductsCompanyFilter(this.value)"><option value="">All companies</option></select>
     <select class="filter" id="products-type-filter" onchange="setProductsTypeFilter(this.value)">
       <option value="">All types</option>
@@ -26017,7 +26018,7 @@ function companyInfoLine(j) {
 // cartons × each job's own effective rate) / Avg Rate, with the default
 // Rate editable inline for delivery_write holders. Click a tile for its
 // full shipment history across every job with that name.
-let productsFilter = loadPersistedFilters('products', { search: '', company: '', type: '', dateRange: '', dfrom: '', dto: '' });
+let productsFilter = loadPersistedFilters('products', { search: '', code: '', company: '', type: '', dateRange: '', dfrom: '', dto: '' });
 let __productGroupsAll = [];
 let __productGroupsCache = [];
 let productSpecials = [];
@@ -26095,6 +26096,8 @@ function renderProductsTab() {
   if (companySel) companySel.innerHTML = '<option value="">All companies</option>' + clientCompanyOptions(productsFilter.company);
   const searchEl = document.getElementById('products-search');
   if (searchEl && searchEl.value !== productsFilter.search) searchEl.value = productsFilter.search;
+  const codeEl = document.getElementById('products-code-filter');
+  if (codeEl && codeEl.value !== (productsFilter.code || '')) codeEl.value = productsFilter.code || '';
   const typeSel = document.getElementById('products-type-filter');
   if (typeSel) typeSel.value = productsFilter.type;
   const dateSel = document.getElementById('products-date-range');
@@ -26111,8 +26114,12 @@ function refilterProductsGrid() {
   const search = (productsFilter.search || '').trim().toLowerCase();
   const company = (productsFilter.company || '').trim().toLowerCase();
   const type = productsFilter.type || '';
+  // Item Code (owner, 2026-10-09): a product shows when any of its jobs'
+  // Code contains it; spaces ignored on both sides.
+  const codeNeedle = String(productsFilter.code || '').toLowerCase().replace(/\s+/g, '');
   const filtered = __productGroupsAll.filter(g => {
     if (type && g.type !== type) return false;
+    if (codeNeedle && !(g.jobs || []).some(j => String(j.jobcode || '').toLowerCase().replace(/\s+/g, '').includes(codeNeedle))) return false;
     if (company && ![...g.companies].some(c => c.toLowerCase() === company)) return false;
     if (search && !(g.name.toLowerCase().includes(search) || [...g.companies].some(c => c.toLowerCase().includes(search)))) return false;
     return true;
@@ -26128,6 +26135,7 @@ function refilterProductsGrid() {
 }
 function _persistProductsFilter() { persistFilters('products', productsFilter); }
 function setProductsSearch(v) { productsFilter.search = v; _persistProductsFilter(); refilterProductsGrid(); }
+function setProductsCodeFilter(v) { productsFilter.code = v; _persistProductsFilter(); refilterProductsGrid(); }
 function setProductsCompanyFilter(v) { productsFilter.company = v; _persistProductsFilter(); refilterProductsGrid(); }
 function setProductsTypeFilter(v) { productsFilter.type = v; _persistProductsFilter(); refilterProductsGrid(); }
 // Date range changes which JOBS feed the aggregation in the first place
