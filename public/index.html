@@ -6304,7 +6304,10 @@ function playActionToggle(btn) {
 function renderNewJobsBulkBar() {
   const bar = document.getElementById('new-jobs-bulk');
   if (!bar) return;
-  if ((view !== 'new' && view !== 'ctp') || !canPrintJobCard()) {
+  // Bulk Process to CTP (New Jobs only) for whoever may process jobs forward.
+  const canBulkCtp = view === 'new' && canStageForward();
+  const canPrint = canPrintJobCard();
+  if ((view !== 'new' && view !== 'ctp') || (!canPrint && !canBulkCtp)) {
     bar.style.display = 'none';
     bar.innerHTML = '';
     return;
@@ -6321,8 +6324,42 @@ function renderNewJobsBulkBar() {
     <div class="njb-inner">
       <span class="njb-count">${n} selected${total ? ` of ${total}` : ''}</span>
       <button class="btn btn-sm" onclick="${allSelected ? 'clearNewJobSelection()' : 'selectAllNewJobs()'}" ${total ? '' : 'disabled'}>${allSelected ? 'Clear' : 'Select All'}</button>
-      <button class="btn btn-sm btn-primary" onclick="printSelectedJobs()" ${n ? '' : 'disabled'} title="Print every ticked job card in one dialog">&#128424; Print Selected${n ? ' ('+n+')' : ''}</button>
+      ${canPrint ? `<button class="btn btn-sm btn-primary" onclick="printSelectedJobs()" ${n ? '' : 'disabled'} title="Print every ticked job card in one dialog">&#128424; Print Selected${n ? ' ('+n+')' : ''}</button>` : ''}
+      ${canBulkCtp ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processSelectedToCtp()" ${n ? '' : 'disabled'} title="Move every ticked job into the CTP queue">&rarr; Process Selected to CTP${n ? ' ('+n+')' : ''}</button>` : ''}
     </div>`;
+}
+
+// Bulk "Process to CTP" (owner, 2026-10-09): every ticked New Job, one
+// confirmation, the same server call as the single button, one job at a
+// time; any that fail are named at the end and stay ticked.
+async function processSelectedToCtp() {
+  if (!canStageForward()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
+  const ids = [...selectedNewJobIds].filter(id => { const j = jobs.find(x => x.id === id); return j && isNewJob(j); });
+  if (!ids.length) { notify('Tick the New Jobs to process first.'); return; }
+  const ok = await confirmDialog({
+    title: `Process ${ids.length} job${ids.length === 1 ? '' : 's'} to CTP?`,
+    message: `${ids.map(id => 'E-' + id).join(', ')}\n\nThey will move into the CTP queue. The CTP operator can then pick them up and start making plates.`,
+    confirmText: 'Process to CTP',
+  });
+  if (!ok) return;
+  showSaving(true);
+  const done = [], failed = [];
+  for (const id of ids) {
+    try {
+      const updated = await api('POST', `/api/jobs/${id}/process-to-ctp`);
+      const idx = jobs.findIndex(x => x.id === id);
+      if (idx >= 0) jobs[idx] = updated;
+      selectedNewJobIds.delete(id);
+      done.push(id);
+    } catch (e) { failed.push(`E-${id}: ${e.message}`); }
+  }
+  showSaving(false);
+  render();
+  if (failed.length) {
+    await alertDialog({ title: `${done.length} moved to CTP, ${failed.length} not moved`, message: failed.join('\n'), kind: 'warn' });
+  } else {
+    notify(`${done.length} job${done.length === 1 ? '' : 's'} moved to CTP queue`);
+  }
 }
 
 function toggleJobSelect(id, on) {
@@ -6583,8 +6620,8 @@ function renderJobRowCompact(j, opts) {
     // the CTP tab (view === 'ctp'), and only for users who can print. Lets
     // the PM pick several jobs and batch-print them in one dialog. See
     // printSelectedJobs().
-    const selBox = (((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
-      ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
+    const selBox = (((isNew && view === 'new') && (canPrintJobCard() || canStageForward())) || ((isCtp && view === 'ctp') && canPrintJobCard()))
+      ? `<label class="job-select" title="Select this job for batch print / Process to CTP"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
       : (view === 'finalized' && _finalizedJobIds.has(j.id) && canWastageAdjust())
         ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
         : '';
@@ -7048,8 +7085,8 @@ function renderJobCard(j, opts) {
 
   // Batch-print select box — same logic as the compact view. Renders on
   // the New Jobs tab and the CTP tab, and only for users who can print job cards.
-  const selBox = (!clientPreview && ((isNew && view === 'new') || (isCtp && view === 'ctp')) && canPrintJobCard())
-    ? `<label class="job-select" title="Select this job for batch print"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
+  const selBox = (!clientPreview && (((isNew && view === 'new') && (canPrintJobCard() || canStageForward())) || ((isCtp && view === 'ctp') && canPrintJobCard())))
+    ? `<label class="job-select" title="Select this job for batch print / Process to CTP"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleJobSelect(${j.id}, this.checked)" ${selectedNewJobIds.has(j.id) ? 'checked' : ''}></label>`
     : (!clientPreview && view === 'finalized' && _finalizedJobIds.has(j.id) && canWastageAdjust())
       ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
       : '';
