@@ -4581,10 +4581,57 @@ function notify(msg) {
 }
 
 // ── API calls ─────────────────────────────────────────────────
+// ── Speed log ─────────────────────────────────────────────────────
+// Owner, 2026-10-09: on an old PC, after a few job cards, saving one took
+// 5-10 minutes. This keeps the time each slow step took (server calls over
+// 1.5 s, list redraws over 0.3 s, every job-card save and print), with the
+// page's memory and size at that moment, in THIS browser only (last 100).
+// Ctrl+Shift+L shows them. Never sent anywhere; never breaks the app.
+const SPEED_LOG_KEY = 'sa_speed_log';
+function speedLog(step, ms, extra) {
+  try {
+    const mem = (performance && performance.memory) ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
+    const rows = JSON.parse(localStorage.getItem(SPEED_LOG_KEY) || '[]');
+    rows.push({ t: new Date().toISOString(), step, ms: Math.round(ms), mem, nodes: document.getElementsByTagName('*').length, ...(extra || {}) });
+    localStorage.setItem(SPEED_LOG_KEY, JSON.stringify(rows.slice(-100)));
+  } catch (e) { /* storage blocked or full - the log is optional */ }
+}
+function openSpeedLog() {
+  let rows = [];
+  try { rows = JSON.parse(localStorage.getItem(SPEED_LOG_KEY) || '[]'); } catch (e) {}
+  const s = ms => ms >= 60000 ? (ms / 60000).toFixed(1) + ' min' : (ms / 1000).toFixed(2) + ' s';
+  const body = rows.slice().reverse().map(r => `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:4px 8px;white-space:nowrap;">${esc(fmtDMYT(new Date(r.t)))}</td>
+      <td style="padding:4px 8px;">${esc(r.step)}${r.detail ? ` <span style="color:var(--text2);font-size:11px;">${esc(r.detail)}</span>` : ''}</td>
+      <td style="padding:4px 8px;text-align:right;font-weight:700;${r.ms >= 5000 ? 'color:#b91c1c;' : ''}">${s(r.ms)}</td>
+      <td style="padding:4px 8px;text-align:right;">${r.mem == null ? '-' : r.mem + ' MB'}</td>
+      <td style="padding:4px 8px;text-align:right;">${(r.nodes || 0).toLocaleString()}</td>
+    </tr>`).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:860px;">
+    <h2 style="margin:0 0 6px;font-size:17px;">Speed log (this computer)</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">Slow steps on this browser, newest first: server calls over 1.5 s, list redraws over 0.3 s, and every job card save and print. Memory and page size show if the page is growing.</div>
+    <div style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:8px;">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr style="background:var(--bg2);text-align:left;"><th style="padding:6px 8px;">When</th><th style="padding:6px 8px;">Step</th><th style="padding:6px 8px;text-align:right;">Took</th><th style="padding:6px 8px;text-align:right;">Memory</th><th style="padding:6px 8px;text-align:right;">Page size</th></tr></thead>
+        <tbody>${body || '<tr><td colspan="5" style="padding:14px;text-align:center;color:var(--text3);">Nothing slow recorded yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="try { localStorage.removeItem('${SPEED_LOG_KEY}'); } catch (e) {} closeModal(); notify('Speed log cleared');">Clear</button>
+      <button class="btn btn-primary" onclick="closeModal()">Close</button>
+    </div>
+  </div>`);
+}
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.shiftKey && (e.key === 'L' || e.key === 'l')) { e.preventDefault(); openSpeedLog(); }
+});
 async function api(method, path, body) {
   const opts = { method, headers: {'Content-Type':'application/json'}, credentials: 'same-origin' };
   if (body) opts.body = JSON.stringify(body);
+  const _t0 = performance.now();
   const res = await fetch(path, opts);
+  const _ms = performance.now() - _t0;
+  if (_ms > 1500) speedLog('Server call ' + method + ' ' + String(path).split('?')[0], _ms);
   if (res.status === 401 && currentUser) {
     // Session expired mid-use — drop back to the login screen.
     currentUser = null;
@@ -7699,7 +7746,12 @@ function stageMachineSVG(stageIndex, { pending, clientPreview, isNew, blocked, e
   }
 }
 
-function render() { renderStats(); renderTabs(); renderJobs(); }
+function render() {
+  const _t0 = performance.now();
+  renderStats(); renderTabs(); renderJobs();
+  const _ms = performance.now() - _t0;
+  if (_ms > 300) speedLog('Jobs list redraw', _ms, { detail: (typeof view !== 'undefined' ? view : '') + ' tab' });
+}
 function setView(v) {
   // Batch-print selection is a New Jobs / CTP feature — drop any ticks
   // when the user leaves both tabs so an accidental Print Selected can't
@@ -29279,10 +29331,13 @@ async function saveAdd() {
   if (!data.name || !data.client) { await alertDialog({ title: 'Job name and company are required', kind: 'warn' }); return; }
   if (!(await checkStockBeforeSave(data))) return;
   showSaving(true);
+  const _t0 = performance.now();
   try {
     const newJob = await api('POST', '/api/jobs', data);
+    const _tSaved = performance.now();
     jobs.push(newJob);
     await loadInventory();   // refresh balances after server-side deduction
+    const _tStock = performance.now();
     // Auto-assign to group if this job was created via "Create Next Job in Group"
     if (_pendingGroupName) {
       const gn = _pendingGroupName;
@@ -29297,7 +29352,10 @@ async function saveAdd() {
       notify('Job created!');
     }
     _pendingJobNumber = null;
+    const _tClose = performance.now();
     closeModal(); render();
+    const _tDone = performance.now();
+    speedLog('Save new job card E-' + newJob.id, _tDone - _t0, { detail: `server ${((_tSaved - _t0) / 1000).toFixed(1)}s, stock ${((_tStock - _tSaved) / 1000).toFixed(1)}s, redraw ${((_tDone - _tClose) / 1000).toFixed(1)}s` });
     // The register is showing a gap that has just been filled.
     if (document.getElementById('rt-job-numbers') && document.getElementById('rt-job-numbers').style.display !== 'none') openJobNumbers();
     setTimeout(() => printJobCard(newJob.id), 100);
@@ -31009,6 +31067,7 @@ function fitPrintCardText() {
 function printJobCard(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
+  const _tPrint = performance.now();
   // Fire-and-forget: bump the server-side print count so the UI dot
   // flips on for everyone. Patch the local cache too so the dot
   // appears on this client without waiting for the next refresh.
@@ -31071,6 +31130,7 @@ function printJobCard(id) {
   // title never linger and haunt the next print.
   const restoreFallback = setTimeout(restoreTitle, 30000);
   waitForPrintImages(area).then(() => {
+    speedLog('Print job card E-' + id + ' (getting it ready)', performance.now() - _tPrint);
     window.print();
     setTimeout(() => { area.innerHTML = ''; document.title = prevTitle; }, 500);
   });
