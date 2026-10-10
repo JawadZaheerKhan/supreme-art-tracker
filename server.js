@@ -7295,6 +7295,17 @@ function parseShipperInput(raw) {
   const n = Number(String(raw).replace(/,/g, '').trim());
   return Number.isFinite(n) && n >= 0 ? n : NaN;
 }
+// The shipped total at which a job counts as fully delivered: its booked
+// qty - except a job sent back from Delivered because Ready cartons were
+// still unshipped (client undoFinalizeDelivery stamps stages[6].reopened),
+// which closes once those Ready cartons are shipped, not at the booked qty
+// it had already passed. Used by delivery create and edit alike.
+function deliveryTargetQty(job, stageIndex, stages, bookedQty) {
+  const reopened = !!(stageIndex === 6 && stages && stages[6] && stages[6].reopened);
+  return reopened
+    ? Math.max(bookedQty, readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty))
+    : bookedQty;
+}
 function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing, cartonsPackets }) {
   const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const priorTotal = sumDeliveryCartons(job.deliveries);
@@ -7336,10 +7347,11 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
   // recorded shipment counts as the whole delivery rather than leaving
   // the job stuck at "Ready to Deliver" forever waiting to clear a
   // booked qty of 0.
-  const deliveryComplete = bookedQty ? nextTotal >= bookedQty : nextTotal > 0;
+  const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+  const deliveryComplete = target ? nextTotal >= target : nextTotal > 0;
   if (deliveryComplete && stage_index < 7) {
     // Mark 6 done, move to 7.
-    stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+    stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
     stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
     stage_index = 7;
     log.push({ stage: STAGES[7], status: 'done', notes: bookedQty ? `All ${bookedQty.toLocaleString()} pcs delivered` : `${nextTotal.toLocaleString()} delivered (no booked qty set)`, by: `${by} (${STAGES[7]})`, time });
@@ -9250,9 +9262,10 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       // Same forward/back rules as computeDeliveryUpdate (create) and the
       // DELETE route (remove) — an edit can cross the completion threshold
       // in either direction, so both are handled here.
-      const deliveryComplete = bookedQty ? totalCartons >= bookedQty : totalCartons > 0;
+      const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+      const deliveryComplete = target ? totalCartons >= target : totalCartons > 0;
       if (deliveryComplete && stage_index < 7) {
-        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
         stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
         stage_index = 7;
       } else if (!deliveryComplete && stage_index === 7) {
