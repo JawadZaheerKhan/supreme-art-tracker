@@ -7007,6 +7007,7 @@ function renderJobRowCompact(j, opts) {
             ${isNew && canStageForward() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
             ${isCtp && canStageForward() ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
             ${partialDelv && canStageForward() ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
+            ${isFinalizedDelivery(j) && canStageForward() ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Finalized by mistake? Send this job back to Partially Delivered so the remaining cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
             ${processWithoutPaperBtnHtml(j)}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
@@ -7403,7 +7404,9 @@ function renderJobCard(j, opts) {
       ? `<button class="btn btn-sm" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
       : (partialDelv && canStageForward())
         ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
-        : '';
+        : (isFinalizedDelivery(j) && canStageForward())
+          ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Finalized by mistake? Send this job back to Partially Delivered so the remaining cartons can be shipped.">&#8617; Back to Partial Delivery</button>`
+          : '';
   const more = clientPreview ? '' : `
     <details class="job-more">
       <summary class="btn btn-sm" title="More actions">⋯</summary>
@@ -30004,7 +30007,9 @@ function openEdit(id, opts) {
       ? `<button class="btn ceo-hide" style="background:#1e40af;border-color:#1e40af;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
       : (isPartialDelivery(j) && canStageForward())
         ? `<button class="btn ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
-        : '';
+        : (isFinalizedDelivery(j) && canStageForward())
+          ? `<button class="btn ceo-hide" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Finalized by mistake? Send this job back to Partially Delivered so the remaining cartons can be shipped.">&#8617; Back to Partial Delivery</button>`
+          : '';
   const managerBanner = managerMode
     ? `<div style="margin:-4px 0 12px;padding:10px 14px;background:#f5f3ff;color:#5b21b6;border:1px solid #ddd6fe;border-radius:10px;font-weight:600;font-size:13px;text-align:center;">
         &#128100; Manager view — only Machine and the Particulars table below are editable.
@@ -30436,6 +30441,46 @@ async function finalizeAsDelivered(id) {
   closeModal();
   render();
   notify(`Job E-${id} finalized as Delivered`);
+}
+
+// Undo of finalizeAsDelivered() (owner, 2026-10-10): a job finalized by
+// mistake goes back to Partially Delivered - stage back to Ready to
+// Deliver, the Delivered stage entry (with its finalized stamp) removed,
+// so the remaining cartons can be shipped again. The Ready to Deliver
+// entry goes back to open only when Finalize itself closed it.
+function isFinalizedDelivery(j) { return !!(j && (j.stage_index || 0) === 7 && j.stages && j.stages[7] && j.stages[7].finalized); }
+async function undoFinalizeDelivery(id) {
+  if (!canStageForward()) { notify('Only Production Manager / Admin can undo a finalized delivery.'); return; }
+  const j = jobs.find(x => x.id === id);
+  if (!j || !isFinalizedDelivery(j)) { notify('This job was not finalized as Delivered.'); return; }
+  if (_finalizedJobIds.has(id)) { notify('This job has a wastage adjustment - un-adjust it first.'); return; }
+  const booked = parseFloat(String(j.qty || '').replace(/[^0-9.-]/g, '')) || 0;
+  const shipped = totalDeliveredCartons(j) || (parseFloat(String(j.delqty || '').replace(/[^0-9.-]/g, '')) || 0);
+  const remaining = booked ? Math.max(0, booked - shipped) : 0;
+  const ok = await confirmDialog({
+    title: `Send Job E-${id} back to Partial Delivery?`,
+    message: `"${j.name}" was finalized with ${shipped.toLocaleString()} of ${booked.toLocaleString()} cartons shipped.
+
+This undoes the Finalize: the job goes back to Partially Delivered and the remaining ${remaining.toLocaleString()} cartons can be shipped again.`,
+    confirmText: 'Back to Partial Delivery',
+  });
+  if (!ok) return;
+  const ready = STAGES.indexOf('Ready to Deliver');
+  const stages = { ...(j.stages || {}) };
+  const fin = stages[7] || {};
+  if (stages[ready] && stages[ready].by === STAGES[7] && stages[ready].at === fin.at) stages[ready] = { ...stages[ready], status: 'active' };
+  delete stages[7];
+  const who = (currentUser && (currentUser.name || currentUser.email)) || 'Admin';
+  const log = [...(j.log || []), { stage: STAGES[ready], status: 'active', notes: `Finalize undone by ${who} - back to Partial Delivery (${remaining.toLocaleString()} cartons still to ship)`, by: who, time: fmtDMYT(new Date()) }];
+  showSaving(true);
+  try {
+    const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: ready, stages, log });
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+  } catch (e) { notify('Error: ' + e.message); showSaving(false); return; }
+  showSaving(false);
+  closeModal();
+  render();
+  notify(`Job E-${id} is back in Partially Delivered`);
 }
 
 async function processJobToCtp(id) {
