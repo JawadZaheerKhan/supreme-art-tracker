@@ -5504,8 +5504,15 @@ function ceoDashFigures() {
     e.ups += +r.wastage || 0;
     wasteJobs.set(key, e);
   }
+  // Wastage Sheets = Wastage UPS ÷ the job's ups (blank when ups is not set).
+  for (const e of wasteJobs.values()) {
+    const jj = all.find(x => x.id === e.id);
+    const upsN = parseFloat(jj && jj.ups);
+    e.sheets = upsN > 0 ? e.ups / upsN : null;
+  }
   f.wasteJobs = [...wasteJobs.values()].filter(e => e.ups).sort((x, y) => y.ups - x.ups);
   f.wasteUps = f.wasteJobs.reduce((a, e) => a + e.ups, 0);
+  f.wasteSheets = f.wasteJobs.reduce((a, e) => a + (e.sheets || 0), 0);
   // 2. jobs right now
   const live = all.filter(j => !_finalizedJobIds.has(j.id));
   f.stage = {}; f.views = {};
@@ -5690,7 +5697,7 @@ function renderCeoDash() {
           `<div class="cd-sub">Wastage Weight × 100 ÷ Packets Issued Weight</div>`
           + head('By company · highest first') + list(f.wasteByCompany.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded')
           + head('By product · highest first') + list(f.wasteByProduct.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded'))}
-      ${tile('waste-ups', 'waste', 'Wastage UPS', fmt(f.wasteUps), `${fmt(f.wasteJobs.length)} job${f.wasteJobs.length === 1 ? '' : 's'} · Jobs Report`, () => `<div class="cd-sub">The Jobs Report's Wastage UPS (Delivered, this period): printed cartons not delivered, counted when a job closes - highest first.</div>` + list(f.wasteJobs.map(e => row(`<a onclick="ceoDashOpenJob(${e.id})">${esc(e.idDisplay)}</a> ${esc(e.name || '')}`, fmt(e.ups))), 'No wastage in this period'))}
+      ${tile('waste-ups', 'waste', 'Wastage UPS', fmt(f.wasteUps), `${fmt(f.wasteSheets)} sheets · ${fmt(f.wasteJobs.length)} job${f.wasteJobs.length === 1 ? '' : 's'}`, () => `<div class="cd-sub">The Jobs Report's Wastage UPS (Delivered, this period): printed cartons not delivered, counted when a job closes - highest first. Wastage Sheets = Wastage UPS ÷ the job's ups.</div>` + list(f.wasteJobs.map(e => row(`<a onclick="ceoDashOpenJob(${e.id})">${esc(e.idDisplay)}</a> ${esc(e.name || '')}`, `${fmt(e.ups)} UPS · ${e.sheets === null ? '— sheets' : fmt(e.sheets) + ' sheets'}`)), 'No wastage in this period'))}
     </div>
     </div>
 
