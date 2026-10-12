@@ -5552,7 +5552,7 @@ function ceoDashFigures() {
 // Pasting), Printing's N-up physical total, wastage, jobs, and the same per
 // machine for See more. null = loading, { error } = could not load (e.g. no
 // Production Report access).
-const CEO_DASH_STAGES = [['printing', 'Printing', 'sheets'], ['coatings', 'Coating', 'sheets'], ['diecut', 'Die Cutting', 'sheets'], ['pasting', 'Pasting', 'units']];
+const CEO_DASH_STAGES = [['printing', 'Printing', 'sheets', 'sheets printed'], ['coatings', 'Coating', 'sheets', 'sheets coated'], ['diecut', 'Die Cutting', 'sheets', 'sheets die-cut'], ['pasting', 'Pasting', 'units', 'units pasted']];
 function ceoDashProduction(data) {
   if (!data) return null;
   if (data.error) return { error: data.error };
@@ -5639,11 +5639,11 @@ function renderCeoDash() {
   const p = f.prod;
   const prodTiles = !p ? '<div class="cd-tile cd-prod"><div class="cd-label">Production</div><div class="cd-sub">Loading…</div></div>'
     : p.error ? `<div class="cd-tile cd-prod"><div class="cd-label">Production</div><div class="cd-sub">Could not load (${esc(p.error)}).</div></div>`
-    : `${CEO_DASH_STAGES.map(([key, label, unit]) => {
+    : `${CEO_DASH_STAGES.map(([key, label, unit, doneText]) => {
         const s = p[key];
         const nUp = key === 'printing' && s.mult > s.sheets ? ` · ${fmt(s.mult)} with N-up` : '';
         const jobsTxt = x => `${fmt(x)} job${x === 1 ? '' : 's'}`;
-        return tile('prod-' + key, 'prod', label, fmt(s.sheets), unit + nUp, () =>
+        return tile('prod-' + key, 'prod', label, fmt(s.sheets), doneText + nUp, () =>
           list(s.machines.map(m => row(esc(m.machine), `${fmt(m.sheets)} ${unit}${key === 'printing' && m.mult > m.sheets ? ` (${fmt(m.mult)} N-up)` : ''} · wastage ${fmt(m.waste)} · ${jobsTxt(m.jobs)}`)), 'Nothing recorded')
           + `<div class="cd-sub" style="margin-top:8px;">Total: ${fmt(s.sheets)} ${unit}${nUp} · wastage ${fmt(s.waste)} · ${jobsTxt(s.jobs)}</div>`);
       }).join('')}`;
@@ -5672,6 +5672,7 @@ function renderCeoDash() {
     <div class="cd-grid">
       ${tile('v-new', 'new', 'New jobs', fmt(f.stage.new), 'waiting to start', jobList(f.views.new, due, 'None'))}
       ${tile('v-ctp', 'new', 'CTP', fmt(f.stage.ctp), '', jobList(f.views.ctp, due, 'None'))}
+      ${tile('pending', 'stock', 'Pending Stock', fmt(f.pendingQueue.length), 'jobs waiting for paper', jobList(f.pendingQueue, j => j.sheets ? fmt(j.sheets) + ' sheets' : '', 'None'))}
       ${tile('v-active', 'prod', 'In progress', fmt(f.stage.active), '', jobList(f.views.active, j => esc(STAGES[j.stage_index || 0] || ''), 'None'))}
       ${tile('v-storage', 'ready', 'Ready to Deliver', fmt(f.stage.storage), '', jobList(f.views.storage, due, 'None'))}
       ${tile('partial', 'ship', 'Partly delivered', fmt(f.partial.length), 'left to ship', () => list(f.partial.map(x => row(job(x.j), fmt(x.left) + ' left')), 'None partly delivered'))}
@@ -5703,7 +5704,6 @@ function renderCeoDash() {
     <div class="cd-subsec">Today</div>
     <div class="cd-grid">
       ${tile('short', f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), 'papers short', () => list(f.shortPapers.map(e => row(esc(e.label), `${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}`)), 'Enough paper for every pending job'))}
-      ${tile('pending', 'stock', 'Pending Stock', fmt(f.pendingQueue.length), 'jobs waiting for paper', jobList(f.pendingQueue, j => j.sheets ? fmt(j.sheets) + ' sheets' : '', 'None'))}
       ${tile('imports', 'import', 'Pending imports', fmt(f.imports.length), '', () => list(f.imports.map(i => row(esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(i.packets)}${i.expected_arrival ? ' · ' + dmy(i.expected_arrival) : ''}`)), 'None pending'))}
       ${tile('imports-soon', 'import', 'Imports due this week', fmt(f.importsSoon.length), f.importsOverdue ? `${fmt(f.importsOverdue)} past their date` : 'next 7 days', () => list(f.importsSoon.map(x => row(esc([x.i.paper_type, x.i.size, x.i.gsm ? x.i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(x.i.packets)} · ${dmy(x.d)}${x.d < localDateISO() ? ' <b style="color:#dc2626;">late</b>' : ''}`)), 'Nothing due in the next 7 days'))}
       ${tile('offcut', 'offcut', 'Offcut stock', fmt(f.offcutSheets), `sheets · ${fmt(f.offcuts.length)} papers`, () => list(f.offcuts.map(e => row(esc(e.label), fmt(e.sheets) + ' sheets')), 'No offcut paper on hand'))}
