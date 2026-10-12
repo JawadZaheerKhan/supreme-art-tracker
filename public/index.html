@@ -11669,8 +11669,12 @@ async function loadInvAuditContent(id) {
 // issuance at once). The server logs it on the paper's History.
 async function saveTxRef(direction, ids, field, value) {
   try {
+    if (field === 'date' && !value) { loadStockMovement(direction); return; }
     const r = await api('POST', '/api/inventory/tx-ref', { ids, field, value });
     if (r && r.unchanged) return;
+    // A new date can move the row in or out of the period and re-sorts the
+    // list, so reload it (also refreshes the Late entry tag).
+    if (field === 'date') { notify('Date saved'); loadStockMovement(direction); return; }
     const st = stockMovementStates[direction];
     for (const row of (r && r.rows) || []) {
       const t = (st.rows || []).find(x => x.id === row.id);
@@ -21530,7 +21534,9 @@ function renderStockMovement(direction, from, to) {
       : '';
     return `<tr data-sm-row="${direction}-${t.id}" class="row-hover-red ${historyItemId ? 'cv-summary-row' : ''} ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);"${rowClick}>
       <td class="bulk-td"><input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); ${clickHandler}"></td>
-      <td style="padding:8px 10px;white-space:nowrap;">${date}${lateEntryTagHtml(t)}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${canEditRef
+        ? `<input type="date" value="${localDateISO(new Date(t.created_at))}" max="${localDateISO()}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveTxRef('${direction}', [${ids.join(',')}], 'date', this.value)" title="Date - change it and it is saved; the change is logged in this paper's History" class="sm-ref-input" style="width:128px;"><div style="font-size:11px;color:var(--text2);margin-top:2px;">${esc(fmtTime12(t.created_at))}</div>`
+        : date}${lateEntryTagHtml(t)}</td>
       <td style="padding:8px 10px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
       <td style="padding:8px 10px;font-weight:600;" class="${cls}">${fmt(Math.abs(pkts))} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
       <td style="padding:8px 10px;">${balCell}</td>

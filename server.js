@@ -10122,9 +10122,12 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
 //   • The transaction is itself a reversal (no chain reversals)
 //   • The reason isn't one of the reversible kinds (delivery, job-consumed,
 //     job-edit-apply, job-edit-revert, job-offcut, adjustment)
-// EDIT a stock entry's Challan No. or Notes after the fact (Stock In / Stock
-// Out reports - owner, 2026-10-05). Body: { ids: [txId, ...], field:
-// 'challan_no' | 'notes', value }. Several ids = one split issuance shown as
+// EDIT a stock entry's Challan No., Notes or Date after the fact (Stock In /
+// Stock Out reports - owner, 2026-10-05; Date 2026-10-12). Body: { ids:
+// [txId, ...], field: 'challan_no' | 'notes' | 'date', value }. A Date
+// (YYYY-MM-DD, not in the future) moves created_at to that day at the same
+// clock time; recorded_at keeps the real moment it was typed in (the "Late
+// entry" tag), and clears again if the date goes back to that day. Several ids = one split issuance shown as
 // one row; they all get the same value. Needs the Stock In button for a
 // stock-in row and Stock Out for a stock-out row. Quantities never change.
 // Each edit is logged on the paper (entity inventory) so it shows in that
@@ -10134,13 +10137,17 @@ app.post('/api/inventory/tx-ref', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const field = req.body && req.body.field;
-    if (field !== 'challan_no' && field !== 'notes') return res.status(400).json({ error: 'field must be challan_no or notes' });
+    if (field !== 'challan_no' && field !== 'notes' && field !== 'date') return res.status(400).json({ error: 'field must be challan_no, notes or date' });
     const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(x => parseInt(x, 10)).filter(Number.isFinite))];
     if (!ids.length || ids.length > 20) return res.status(400).json({ error: 'Give the entry id(s) to edit.' });
     const raw = String(req.body.value ?? '').trim();
     if (raw.length > 300) return res.status(400).json({ error: 'Too long - keep it under 300 characters.' });
+    if (field === 'date') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(raw) || isNaN(new Date(raw + 'T00:00:00Z'))) return res.status(400).json({ error: 'Pick a valid date.' });
+      if (raw > businessDateISO()) return res.status(400).json({ error: 'The date cannot be in the future.' });
+    }
     const txs = await sql`
-      SELECT t.id, t.item_id, t.change, t.reason, t.job_id, t.challan_no, t.notes, t.user_notes, t.created_at, t.deleted_at,
+      SELECT t.id, t.item_id, t.change, t.reason, t.job_id, t.challan_no, t.notes, t.user_notes, t.created_at, t.recorded_at, t.deleted_at,
              i.paper_type, i.size, i.gsm, i.brand
         FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
        WHERE t.id = ANY(${ids})`;
@@ -10152,16 +10159,31 @@ app.post('/api/inventory/tx-ref', requireAuth, async (req, res) => {
     // What the reports showed before (Notes: the typed note, else the
     // system note - hidden on job-consumed rows).
     const shownNotes = (t) => t.user_notes !== null && t.user_notes !== undefined ? t.user_notes : (t.reason === 'job-consumed' ? '' : (t.notes || ''));
-    const before = field === 'challan_no' ? (txs[0].challan_no || '') : shownNotes(txs[0]);
-    const after = raw;
-    if (txs.every(t => (field === 'challan_no' ? (t.challan_no || '') : shownNotes(t)) === after)) return res.json({ ok: true, unchanged: true });
+    const dmy = iso => iso.split('-').reverse().join('/');
+    const valueOf = (t) => field === 'challan_no' ? (t.challan_no || '') : field === 'date' ? businessDateISO(new Date(t.created_at)) : shownNotes(t);
+    const before = field === 'date' ? dmy(valueOf(txs[0])) : valueOf(txs[0]);
+    const after = field === 'date' ? dmy(raw) : raw;
+    if (txs.every(t => valueOf(t) === raw)) return res.json({ ok: true, unchanged: true });
     if (field === 'challan_no') await sql`UPDATE inventory_transactions SET challan_no = ${after || null} WHERE id = ANY(${ids})`;
-    else await sql`UPDATE inventory_transactions SET user_notes = ${after} WHERE id = ANY(${ids})`;
+    else if (field === 'notes') await sql`UPDATE inventory_transactions SET user_notes = ${after} WHERE id = ANY(${ids})`;
+    else {
+      const [y, mo, d] = raw.split('-').map(Number);
+      for (const t of txs) {
+        // Same clock time (business-local) on the new day.
+        const parts = {};
+        for (const p of new Intl.DateTimeFormat('en-US', { timeZone: BUSINESS_TZ, hour12: false, hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(t.created_at))) parts[p.type] = p.value;
+        const hh = parts.hour === '24' ? 0 : +parts.hour;
+        const nextAt = new Date(businessWallClockToMs(y, mo, d, hh, +parts.minute));
+        const realAt = new Date(t.recorded_at || t.created_at);   // when it was really typed in
+        const nextRecorded = businessDateISO(realAt) === raw ? null : realAt.toISOString();
+        await sql`UPDATE inventory_transactions SET created_at = ${nextAt.toISOString()}, recorded_at = ${nextRecorded} WHERE id = ${t.id}`;
+      }
+    }
     const t0 = txs[0];
     const direction = t0.change > 0 ? 'in' : 'out';
     const sheets = txs.reduce((a, t) => a + Math.abs(t.change), 0);
     const paper = [t0.paper_type, t0.size, t0.gsm ? t0.gsm + 'gsm' : '', t0.brand].filter(Boolean).join(' ');
-    const label = field === 'challan_no' ? 'Challan No.' : 'Notes';
+    const label = field === 'challan_no' ? 'Challan No.' : field === 'date' ? 'Date' : 'Notes';
     const day = businessDateISO(new Date(t0.created_at)).split('-').reverse().join('/');
     for (const itemId of [...new Set(txs.map(t => t.item_id))]) {
       await logAudit(sql, req, {
@@ -10172,7 +10194,7 @@ app.post('/api/inventory/tx-ref', requireAuth, async (req, res) => {
         metadata: { tx_ids: ids, direction, field, before, after, tx_created_at: t0.created_at },
       });
     }
-    const rows = await sql`SELECT id, challan_no, notes, user_notes FROM inventory_transactions WHERE id = ANY(${ids})`;
+    const rows = await sql`SELECT id, challan_no, notes, user_notes, created_at, recorded_at FROM inventory_transactions WHERE id = ANY(${ids})`;
     res.json({ ok: true, rows });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
