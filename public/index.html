@@ -11602,6 +11602,87 @@ async function renderInvHistory(id) {
 // per-User Activity so all three read the same way.
 // opts.jobId (a job's History): stock-issue entries name the paper and open
 // that issuance in the Stock Out report (jhOpenIssuance).
+// ── Job History: Reverse (owner, 2026-10-12) ──────────────────────
+// Lines that can be undone get a Reverse button; the reverse is logged as a
+// new line (metadata.reverses_audit_id) and the original then shows
+// "Reversed". A reverse itself is not reversible - make the change again.
+let jhRevRows = {};
+const JH_REVERSIBLE = {
+  'job.delivery.remove':        { perm: 'job_btn_delete_delivery', ok: m => !!(m.removed && typeof m.removed === 'object'), what: 'puts this delivery back on the job' },
+  'job.delivery.add':           { perm: 'job_btn_delete_delivery', ok: m => m.cartons !== undefined, what: 'removes this delivery from the job again' },
+  'job.delivery.edit':          { perm: 'job_btn_pricing',         ok: m => !!m.field && m.index !== undefined && m.index !== null, what: 'puts the old value back on that delivery' },
+  'job.pricing.update':         { perm: 'job_btn_pricing',         ok: m => 'prior_tax_pct' in m, what: 'puts the old rate and sale tax back' },
+  'job.cartons_packets.update': { perm: 'job_btn_pricing',         ok: m => 'prior' in m, what: 'puts the old Carton Shipper back' },
+  'job.update':                 { perm: 'job_btn_edit',            ok: m => !!(m.revert && m.revert.reversible), what: 'puts the job card fields back as they were' },
+};
+// One delivery entry in words (cartons, Carton Shipper, Invoice No., PO, Batch, date).
+function deliveryFactsLine(d) {
+  if (!d || typeof d !== 'object') return '';
+  const n = parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, ''));
+  const inv = deliveryChallanText(d);
+  return [
+    `${Number.isFinite(n) ? n.toLocaleString() : (d.cartons || '?')} cartons`,
+    d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '' ? `Carton Shipper ${d.cartons_packets}` : '',
+    inv ? `Invoice No. ${inv}` : '',
+    d.po_no ? `PO ${d.po_no}` : '',
+    d.batch_no ? `Batch ${d.batch_no}` : '',
+    d.date ? `dated ${fmtDMY(String(d.date).slice(0, 10))}` : '',
+  ].filter(Boolean).join(' · ');
+}
+function jhReverseHtml(jobId, a, reversedIds) {
+  const m = (a && a.metadata) || {};
+  // Older delivery lines only said "#3" - show what that delivery was.
+  const facts = a.action === 'job.delivery.remove' && m.removed && !/Invoice No\.|Carton Shipper|cartons,/.test(a.summary || '')
+    ? `<div style="font-size:12px;color:var(--text);margin-top:2px;">Delivery: <b>${esc(deliveryFactsLine(m.removed))}</b></div>` : '';
+  if (m.reverses_audit_id) return facts;
+  if (reversedIds.has(Number(a.id))) return facts + '<div style="margin-top:3px;"><span style="display:inline-block;background:#e5e7eb;color:#374151;font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:999px;">&#8634; Reversed</span></div>';
+  const r = JH_REVERSIBLE[a.action];
+  if (!r) return facts;
+  if (a.action === 'job.update' && m.revert && !m.revert.reversible) {
+    return facts + `<div style="font-size:11px;color:var(--text2);margin-top:2px;">Can't be reversed here - ${esc(m.revert.why || 'it moved stock')}; change it back on the job card.</div>`;
+  }
+  if (!r.ok(m) || !(isSuperAdmin() || hasPerm(r.perm))) return facts;
+  return facts + `<div style="margin-top:4px;"><button class="btn btn-sm ceo-hide" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:2px 9px;font-size:11px;" onclick="event.stopPropagation(); reverseJobHistory(${jobId}, ${a.id})" title="Undo this change - ${esc(r.what)}">&#8634; Reverse</button></div>`;
+}
+async function reverseJobHistory(jobId, auditId) {
+  const a = jhRevRows[auditId];
+  if (!a) return;
+  const m = a.metadata || {};
+  const r = JH_REVERSIBLE[a.action] || {};
+  const ok = await confirmDialog({
+    title: 'Reverse this change?',
+    message: `${a.summary}\n\nThis ${r.what || 'undoes it'}. The reverse is recorded in History too.`,
+    confirmText: 'Reverse',
+    danger: true,
+  });
+  if (!ok) return;
+  const norm = v => (v === null || v === undefined) ? '' : String(v).trim();
+  showSaving(true);
+  try {
+    let updated;
+    if (a.action === 'job.delivery.edit') {
+      const j = jobs.find(x => x.id === jobId);
+      const d = j && Array.isArray(j.deliveries) ? j.deliveries[m.index] : null;
+      if (!d) throw new Error('That delivery is no longer on the job.');
+      const cur = norm(d[m.field]), after = norm(m.after);
+      const same = cur === after || (cur !== '' && after !== '' && Number(cur) === Number(after));
+      if (!same) throw new Error('That delivery was changed again since - change it back on the job card instead.');
+      updated = await apiWithReason('PATCH', `/api/jobs/${jobId}/deliveries/${m.index}`, { field: m.field, value: norm(m.before), reverses_audit_id: a.id });
+    } else if (a.action === 'job.pricing.update') {
+      updated = await api('PATCH', `/api/jobs/${jobId}/pricing`, { rate: m.prior_rate ?? '', tax_pct: m.prior_tax_pct ?? 0, reverses_audit_id: a.id });
+    } else if (a.action === 'job.cartons_packets.update') {
+      updated = await api('PATCH', `/api/jobs/${jobId}/cartons-packets`, { cartons_packets: m.prior ?? '', reverses_audit_id: a.id });
+    } else {
+      updated = await apiWithReason('POST', `/api/jobs/${jobId}/history/${a.id}/reverse`, {});
+    }
+    if (updated && updated.id) jobs = jobs.map(x => x.id === jobId ? { ...x, ...updated } : x);
+    notify('Reversed');
+    render();
+    openHistory(jobId);
+  } catch (e) { notify(e.cancelled ? e.message : 'Error: ' + e.message); }
+  showSaving(false);
+}
+
 function renderAuditFeed(rows, opts) {
   if (!rows || !rows.length) return '<div class="empty">No activity yet.</div>';
   const jobId = opts && opts.jobId;
@@ -11610,6 +11691,10 @@ function renderAuditFeed(rows, opts) {
   const isTxEdit = a => a && a.action === 'inventory.tx.edit' && a.metadata && Array.isArray(a.metadata.tx_ids) && a.metadata.tx_ids.length;
   rows.forEach(a => { if (isTxEdit(a)) txEditAuditRows[a.id] = a; });
   if (jobId) { jhAuditRows = {}; rows.forEach(a => { if (jhIsIssueEntry(a)) jhAuditRows[a.id] = a; }); }
+  // Job History: which lines were already reversed, and the Reverse button.
+  const reversedIds = new Set(rows.map(a => a && a.metadata && a.metadata.reverses_audit_id).filter(Boolean).map(Number));
+  if (jobId) rows.forEach(a => { jhRevRows[a.id] = a; });
+  const revExtra = (a) => jobId ? jhReverseHtml(jobId, a, reversedIds) : '';
   const issueExtra = (a) => {
     if (!jobId || !jhIsIssueEntry(a)) return '';
     const job = (typeof jobs !== 'undefined' ? jobs : []).find(j => j.id === jobId);
@@ -11640,7 +11725,7 @@ function renderAuditFeed(rows, opts) {
       <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
         <div><span class="audit-tag-badge">${esc(String(a.action || '').toUpperCase())}</span></div>
-        <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span>${issueExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
+        <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
       </div>`;
       }).join('')}
     </div>`).join('')}</div>`;

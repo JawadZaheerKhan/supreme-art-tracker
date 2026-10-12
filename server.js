@@ -2108,6 +2108,33 @@ async function logSystemAudit(sql, { action, entityType, entityId, summary, meta
   }
 }
 
+// Job History "Reverse" (owner, 2026-10-12): a request that undoes one
+// History line carries reverses_audit_id; the new audit row records it, so
+// that line shows as Reversed and can never be undone twice.
+function reversesAuditIdOf(req) {
+  const v = parseInt((req.body && req.body.reverses_audit_id) ?? (req.query && req.query.reverses_audit_id), 10);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+async function alreadyReversed(sql, auditId) {
+  const r = await sql`SELECT id FROM audit_log WHERE metadata->>'reverses_audit_id' = ${String(auditId)} LIMIT 1`;
+  return r.length > 0;
+}
+// One delivery entry in words, for History lines: cartons, Carton Shipper,
+// Invoice No., PO, Batch and the delivery date.
+function deliveryFactsText(d) {
+  if (!d || typeof d !== 'object') return '';
+  const n = parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, ''));
+  const inv = String(d.notes || '').trim();
+  const parts = [
+    `${Number.isFinite(n) ? n.toLocaleString() : (d.cartons || '?')} cartons`,
+    d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '' ? `Carton Shipper ${d.cartons_packets}` : '',
+    inv && inv !== 'Backfilled from legacy delqty on schema upgrade' ? `Invoice No. ${inv}` : '',
+    d.po_no ? `PO ${d.po_no}` : '',
+    d.batch_no ? `Batch ${d.batch_no}` : '',
+    d.date ? `dated ${String(d.date).slice(0, 10).split('-').reverse().join('/')}` : '',
+  ];
+  return parts.filter(Boolean).join(', ');
+}
 async function logAudit(sql, req, { action, entityType, entityId, summary, metadata }) {
   if (!req.user) return;
   try {
@@ -5316,6 +5343,9 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
 // Field-level audit diff for a job edit. Booleans/arrays are pre-flattened
 // to comparable strings by the caller (coatings_str / is_shade_card_str /
 // client_visible_str) before being passed through diffFields.
+// Plain job columns a job-card edit can be reversed on (History "Reverse").
+const JOB_REVERT_COLS = ['name', 'client', 'jobcode', 'ref', 'dateissued', 'deadline', 'size', 'ups', 'sheets', 'qty', 'paper', 'machine',
+  'coatings', 'priority', 'cartonqty', 'notes', 'bno', 'mfgdate', 'expdate', 'mrp', 'cut_size', 'is_shade_card', 'client_visible'];
 const JOB_DIFF_FIELDS = [
   ['name', 'Job Name'], ['client', 'Company'], ['jobcode', 'Code'], ['ref', 'P.O. No.'],
   ['dateissued', 'Date'], ['deadline', 'Deadline'], ['size', 'Size/GSM'], ['ups', 'Ups'],
@@ -5831,10 +5861,27 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
         summary: `Paper changed on Job E-${job.id} after issuance — sent back to Pending Stock for re-issuance. Old paper ledger left untouched; store keeper must enter any manual return.`,
       });
     }
+    // What Reverse needs: every changed plain column and particulars row,
+    // before and after. Not reversible when the edit moved paper stock,
+    // changed the stage or cleaned production log lines - those must be
+    // changed back on the job card so stock and stages stay right.
+    const sameVal = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+    const revCols = {};
+    for (const c of JOB_REVERT_COLS) if (!sameVal(prior[0][c], job[c])) revCols[c] = { before: prior[0][c] ?? null, after: job[c] ?? null };
+    const revParts = {};
+    const pAfter = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+    for (const k of new Set([...Object.keys(priorParticulars || {}), ...Object.keys(pAfter)])) {
+      if (!sameVal((priorParticulars || {})[k], pAfter[k])) revParts[k] = { before: (priorParticulars || {})[k] ?? null, after: pAfter[k] ?? null };
+    }
+    const revBlock = paperItemChanged ? 'the paper was changed'
+      : (wasIssued && oldSheets !== newSheets) ? 'it changed issued paper'
+      : (oldOffcutSize !== newOffcutSize) ? 'it changed the offcut'
+      : ((prior[0].stage_index || 0) !== (job.stage_index || 0)) ? 'it moved the job to another stage'
+      : finalLog ? 'it changed the production log' : null;
     await logAudit(sql, req, {
       action: 'job.update', entityType: 'job', entityId: job.id,
       summary: `Edited Job E-${job.id}: ${job.name}${allChanges.length ? ' — ' + allChanges.join('; ') : ''}`,
-      metadata: { changes: allChanges },
+      metadata: { changes: allChanges, revert: { reversible: !revBlock, why: revBlock, cols: revCols, particulars: revParts } },
     });
     // Quantity of Packets (or the 2nd paper's share) changed on a job whose
     // paper already went out, same paper: if more went out than it now needs,
@@ -7340,7 +7387,7 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
   let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
   let log = Array.isArray(job.log) ? [...job.log] : [];
   log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-    notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
+    notes: `Delivery recorded: ${deliveryFactsText(entry)}`,
     by: `${by} (${STAGES[stage_index] || '?'})`, time });
   // With no booked P.O. Qty (bookedQty falsy — routine for shade cards,
   // which never carry one) there's no target to compare against, so any
@@ -7533,8 +7580,8 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
       action: 'job.delivery.add',
       entityType: 'job',
       entityId: id,
-      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons${entry.cartons_packets !== null ? `, Carton Shipper ${entry.cartons_packets}` : ''} for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
-      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined },
+      summary: `Recorded delivery for Job E-${id}: ${deliveryFactsText(entry)} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
+      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined, at: entry.at, entry },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7593,7 +7640,7 @@ app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission(
       entityType: 'job',
       entityId: id,
       summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (shade card) from Station by manager ${v.operator.name} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
-      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
+      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, at: entry.at, entry },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7886,6 +7933,8 @@ app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (
   try {
     await dbReady;
     const sql = getDb();
+    const revId = reversesAuditIdOf(req);
+    if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const rateRaw = req.body?.rate;
     const taxRaw  = req.body?.tax_pct;
@@ -7910,8 +7959,8 @@ app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (
       action: 'job.pricing.update',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%`,
-      metadata: { rate, tax_pct: taxPct, prior_rate: rows[0].rate, prior_tax_pct: rows[0].tax_pct },
+      summary: `${revId ? 'Reversed - ' : ''}Job E-${id} pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%`,
+      metadata: { reverses_audit_id: revId || undefined, rate, tax_pct: taxPct, prior_rate: rows[0].rate, prior_tax_pct: rows[0].tax_pct },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7925,6 +7974,8 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
   try {
     await dbReady;
     const sql = getDb();
+    const revId = reversesAuditIdOf(req);
+    if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const raw = req.body?.cartons_packets;
     const value = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
@@ -7942,8 +7993,8 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
       action: 'job.cartons_packets.update',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} Carton Shipper set to ${value === null ? '— (station figure)' : value}`,
-      metadata: { cartons_packets: value, prior: rows[0].cartons_packets },
+      summary: `${revId ? 'Reversed - ' : ''}Job E-${id} Carton Shipper set to ${value === null ? '— (station figure)' : value}`,
+      metadata: { reverses_audit_id: revId || undefined, cartons_packets: value, prior: rows[0].cartons_packets },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -9107,7 +9158,7 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       stage_index = 6;
     }
     log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-      notes: `Delivery entry removed (was ${(removed && removed.cartons) || '?'} cartons on ${(removed && removed.date) || '?'})`,
+      notes: `Delivery entry removed: ${deliveryFactsText(removed) || '?'}`,
       by: `${by} (${STAGES[stage_index] || '?'})`, time });
     const updated = await sql`
       UPDATE jobs
@@ -9123,8 +9174,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       action: 'job.delivery.remove',
       entityType: 'job',
       entityId: id,
-      summary: `Removed delivery entry #${ix + 1} from Job E-${id}${guardNote(delGuard)}`,
-      metadata: { removed, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
+      summary: `Removed delivery entry #${ix + 1} from Job E-${id}: ${deliveryFactsText(removed)}${guardNote(delGuard)}`,
+      metadata: { removed, index: ix, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -9137,10 +9188,129 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
 // (and the DELETE route does on removal), since the entry's own cartons
 // value is what those derive from. Used by both the job card's Deliveries
 // ledger (inline-editable) and the Sale Report table.
+// REVERSE one line of a job's History (owner, 2026-10-12): a removed
+// delivery goes back in its old place, a recorded delivery comes out again,
+// and a job-card edit puts the old values back - only if it moved no paper
+// stock or stage and nothing has changed those fields since. Delivery-entry,
+// pricing and Carton Shipper edits are reversed through their own routes
+// (reverses_audit_id). Each reverse is logged with reverses_audit_id.
+app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10), auditId = parseInt(req.params.auditId, 10);
+    if (!Number.isFinite(id) || !Number.isFinite(auditId)) return res.status(400).json({ error: 'Invalid id' });
+    const [a] = await sql`SELECT * FROM audit_log WHERE id = ${auditId} AND entity_type = 'job' AND entity_id = ${id}`;
+    if (!a) return res.status(404).json({ error: 'History line not found' });
+    const m = (a.metadata && typeof a.metadata === 'object') ? a.metadata : {};
+    if (m.reverses_audit_id) return res.status(400).json({ error: 'A reverse cannot itself be reversed - make the change again instead.' });
+    if (await alreadyReversed(sql, auditId)) return res.status(409).json({ error: 'That change was already reversed.' });
+    const can = key => userHasRole(req.user, 'super_admin') || roleHasPermission(req.user, key, 'yes');
+    const [job] = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const by = req.user?.email || 'unknown';
+    const time = businessStamp();
+    const nowIso = new Date().toISOString();
+    const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    let stage_index = job.stage_index || 0;
+    const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
+    const saveDeliveries = async (total) => (await sql`
+      UPDATE jobs SET deliveries = ${JSON.stringify(list)}, delqty = ${total ? String(total) : null},
+             stage_index = ${stage_index}, stages = ${JSON.stringify(stages)}, log = ${JSON.stringify(log)}
+       WHERE id = ${id} RETURNING *`)[0];
+
+    if (a.action === 'job.delivery.remove') {
+      if (!can('job_btn_delete_delivery')) return res.status(403).json({ error: 'Not allowed' });
+      const entry = m.removed;
+      if (!entry || typeof entry !== 'object') return res.status(400).json({ error: 'This removal did not keep the delivery, so it cannot be put back.' });
+      const was = m.index !== undefined && m.index !== null ? +m.index : (parseInt((String(a.summary).match(/#(\d+)/) || [])[1], 10) - 1);
+      const ix = Number.isFinite(was) ? Math.max(0, Math.min(list.length, was)) : list.length;
+      list.splice(ix, 0, entry);
+      const total = sumDeliveryCartons(list);
+      const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+      if ((target ? total >= target : total > 0) && stage_index < 7) {
+        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
+        stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
+        stage_index = 7;
+      }
+      log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+        notes: `Delivery entry put back (reverse of its removal): ${deliveryFactsText(entry)}`, by: `${by} (${STAGES[stage_index] || '?'})`, time });
+      const upd = await saveDeliveries(total);
+      await logAudit(sql, req, { action: 'job.delivery.restore', entityType: 'job', entityId: id,
+        summary: `Reversed - put back delivery entry #${ix + 1} on Job E-${id}: ${deliveryFactsText(entry)} (total ${total.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
+        metadata: { reverses_audit_id: auditId, index: ix, restored: entry, total } });
+      return res.json(upd);
+    }
+
+    if (a.action === 'job.delivery.add') {
+      if (!can('job_btn_delete_delivery')) return res.status(403).json({ error: 'Not allowed' });
+      let ix = m.at ? list.findIndex(d => d && d.at === m.at) : -1;
+      if (ix < 0 && !m.at) {
+        for (let i = list.length - 1; i >= 0; i--) {
+          const d = list[i];
+          if (d && String(d.cartons) === String(m.cartons) && String(d.date || '') === String(m.date || '')) { ix = i; break; }
+        }
+      }
+      if (ix < 0) return res.status(409).json({ error: 'That delivery is no longer on the job (it was removed or changed since).' });
+      const removed = list.splice(ix, 1)[0];
+      const guard = await paidInvoiceGuard(sql, removed && removed.notes, (req.body && req.body.reason) || req.query.reason);
+      if (guard.error) return res.status(409).json(guard.error);
+      const total = sumDeliveryCartons(list);
+      const shouldRevert = bookedQty ? total < bookedQty : total <= 0;
+      if (stage_index === 7 && shouldRevert) {
+        stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
+        delete stages[7];
+        stage_index = 6;
+      }
+      log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+        notes: `Delivery entry removed (reverse of recording it): ${deliveryFactsText(removed)}`, by: `${by} (${STAGES[stage_index] || '?'})`, time });
+      const upd = await saveDeliveries(total);
+      await logAudit(sql, req, { action: 'job.delivery.remove', entityType: 'job', entityId: id,
+        summary: `Reversed - removed delivery entry #${ix + 1} from Job E-${id}: ${deliveryFactsText(removed)}${guardNote(guard)}`,
+        metadata: { reverses_audit_id: auditId, removed, index: ix, remaining_total: total, reason: guard.reason, paid_via: guard.receipts } });
+      return res.json(upd);
+    }
+
+    if (a.action === 'job.update') {
+      if (!can('job_btn_edit')) return res.status(403).json({ error: 'Not allowed' });
+      const rv = m.revert;
+      if (!rv) return res.status(400).json({ error: 'This edit was saved before Reverse existed - change it back on the job card.' });
+      if (!rv.reversible) return res.status(400).json({ error: `This edit cannot be reversed here because ${rv.why || 'it moved stock'} - change it back on the job card.` });
+      const sameVal = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+      const cols = rv.cols || {}, parts = rv.particulars || {};
+      const pNow = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const moved = [...Object.keys(cols).filter(c => !sameVal(job[c], cols[c].after)), ...Object.keys(parts).filter(k => !sameVal(pNow[k], parts[k].after))];
+      if (moved.length) return res.status(409).json({ error: `Changed again since this edit (${moved.join(', ')}) - change it back on the job card instead.` });
+      const v = { ...job };
+      for (const c of Object.keys(cols)) v[c] = cols[c].before;
+      const particulars = { ...pNow };
+      for (const k of Object.keys(parts)) { if (parts[k].before === null || parts[k].before === undefined) delete particulars[k]; else particulars[k] = parts[k].before; }
+      const [upd] = await sql`
+        UPDATE jobs SET name = ${v.name}, client = ${v.client}, jobcode = ${v.jobcode}, ref = ${v.ref},
+               dateissued = ${v.dateissued}, deadline = ${v.deadline}, size = ${v.size}, ups = ${v.ups}, sheets = ${v.sheets},
+               qty = ${v.qty}, paper = ${v.paper}, machine = ${v.machine}, coatings = ${v.coatings || []}, priority = ${v.priority},
+               cartonqty = ${v.cartonqty}, notes = ${v.notes}, bno = ${v.bno}, mfgdate = ${v.mfgdate}, expdate = ${v.expdate},
+               mrp = ${v.mrp}, cut_size = ${v.cut_size}, is_shade_card = ${!!v.is_shade_card}, client_visible = ${!!v.client_visible},
+               particulars = ${JSON.stringify(particulars)}
+         WHERE id = ${id} RETURNING *`;
+      const undone = (Array.isArray(m.changes) ? m.changes : []).map(s => String(s).replace(/^(.*?): ([\s\S]*) -> ([\s\S]*)$/, '$1: $3 -> $2'));
+      await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: id,
+        summary: `Reversed - Job E-${id} edit put back${undone.length ? ': ' + undone.join('; ') : ''}`,
+        metadata: { reverses_audit_id: auditId, changes: undone } });
+      return res.json(upd);
+    }
+    return res.status(400).json({ error: 'This kind of change cannot be reversed from History.' });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
+    const revId = reversesAuditIdOf(req);
+    if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const ix = parseInt(req.params.index, 10);
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
@@ -9179,8 +9349,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       `;
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}${guardNote(guard)}`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override, reason: guard.reason, paid_via: guard.receipts },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}${guardNote(guard)}`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override, reason: guard.reason, paid_via: guard.receipts },
       });
       return res.json(upd[0]);
     }
@@ -9207,8 +9377,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       const label = which === 'uc_qty' ? 'Printed UC Qty' : 'Wastage';
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"${droppedWastage !== undefined ? ` (typed Wastage ${droppedWastage} cleared - recalculated)` : ''}`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, wastage_cleared: droppedWastage ?? null },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"${droppedWastage !== undefined ? ` (typed Wastage ${droppedWastage} cleared - recalculated)` : ''}`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: which, before: prev[which] ?? null, after: num, wastage_cleared: droppedWastage ?? null },
       });
       return res.json(upd[0]);
     }
@@ -9223,8 +9393,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(frozen)} WHERE id = ${id} RETURNING *`;
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: Carton Shipper "${prevV ?? ''}" -> "${v ?? ''}"`,
-        metadata: { index: ix, field: 'cartons_packets', before: prevV, after: v },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: Carton Shipper "${prevV ?? ''}" -> "${v ?? ''}"`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: 'cartons_packets', before: prevV, after: v },
       });
       return res.json(upd[0]);
     }
@@ -9291,8 +9461,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
         action: 'job.delivery.edit',
         entityType: 'job',
         entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"${guardNote(cartonsGuard)}`,
-        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN), reason: cartonsGuard.reason, paid_via: cartonsGuard.receipts },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"${guardNote(cartonsGuard)}`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN), reason: cartonsGuard.reason, paid_via: cartonsGuard.receipts },
       });
       return res.json(updated[0]);
     }
@@ -9308,8 +9478,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       action: 'job.delivery.edit',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} delivery #${ix + 1}: ${field} "${before[field] || ''}" → "${value || ''}"`,
-      metadata: { index: ix, field, before: before[field] || null, after: value },
+      summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: ${field} "${before[field] || ''}" → "${value || ''}"`,
+      metadata: { reverses_audit_id: revId || undefined, index: ix, field, before: before[field] || null, after: value },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
