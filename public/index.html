@@ -6383,7 +6383,11 @@ function jobInView(j, view) {
   // look missing until you found the right tab.
   return true;
 }
+// One MIL group shown alone on the Jobs tab - its tile, opened from the MIL
+// Products report (cleared by a Jobs tab click, Back, or leaving the tab).
+let jobsMilFocus = null;
 function getFiltered() {
+  if (jobsMilFocus) return jobs.filter(j => j && j.stock_group_name === jobsMilFocus && !j.deleted_at);
   return jobs.filter(j => jobPassesFilters(j) && jobInView(j, view));
 }
 
@@ -8171,6 +8175,7 @@ function render() {
   if (_ms > 300) speedLog('Jobs list redraw', _ms, { detail: (typeof view !== 'undefined' ? view : '') + ' tab' });
 }
 function setView(v) {
+  jobsMilFocus = null;   // a tab click shows that tab again, not the one MIL group
   // Batch-print selection is a New Jobs / CTP feature — drop any ticks
   // when the user leaves both tabs so an accidental Print Selected can't
   // send stale ids that are no longer on screen.
@@ -8264,6 +8269,7 @@ let jobsReturn = null;
 function jobsClearReturn() {
   if (!jobsReturn) return;
   jobsReturn = null;
+  jobsMilFocus = null;
   renderJobsReturnBar();
 }
 // The bar sits on the tab the jump was made on: jobsReturn.where = 'jobs'
@@ -8286,6 +8292,7 @@ function renderJobsReturnBar() {
 function jobsReturnBack() {
   const back = jobsReturn;
   jobsReturn = null;
+  jobsMilFocus = null;
   renderJobsReturnBar();
   if (typeof closeModal === 'function') closeModal();
   if (back && back.reopen) back.reopen();
@@ -15621,7 +15628,7 @@ function renderJrMil() {
   const cell = (r, i, field, shown, align) => (canEdit && r.groupId)
     ? `<input type="text" class="sm-ref-input" value="${esc(shown)}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" title="Edit and press Enter - saved on the MIL group" style="width:${field === 'po_qty' ? '110px' : '100px'};text-align:${align};">`
     : (esc(shown) || '<span style="color:var(--text3)">—</span>');
-  const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="jrOpenMilGroup(${i})" title="Open this MIL product's jobs in the Jobs report">
+  const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="jrOpenMilGroup(${i})" title="Open this MIL product's tile in the Jobs tab">
       <td style="padding:7px 10px;">${cell(r, i, 'jobcode', r.code, 'left')}</td>
       <td style="padding:7px 10px;font-weight:700;">${esc(r.product)}<div style="font-size:11px;color:var(--text2);font-weight:400;">${esc(r.client)} · ${r.jobCount} job${r.jobCount === 1 ? '' : 's'}</div></td>
       <td style="padding:7px 10px;text-align:right;">${cell(r, i, 'po_qty', r.milQty ? String(r.milQty) : '', 'right')}</td>
@@ -15631,7 +15638,7 @@ function renderJrMil() {
         : '0'}</td>
     </tr>`).join('');
   el.innerHTML = `
-    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready (on the shelf) and Shipped (up to the day) as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its jobs, a Shipped figure for its deliveries.</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready (on the shelf) and Shipped (up to the day) as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its tile in the Jobs tab, a Shipped figure for its deliveries.</div>
     <div class="report-scroll-wrap">
       <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead><tr style="background:var(--bg2);">
@@ -15674,9 +15681,28 @@ function jrMilLeave(gName, mode, period, dfrom, dto) {
   setReportsTab('jobs-report');
   window.scrollTo(0, 0);
 }
+// Row -> that MIL group's tile on the Jobs tab, alone, with a Back bar.
 function jrOpenMilGroup(i) {
   const r = jrMilRowsCache[i]; if (!r) return;
-  jrMilLeave(r.gName, 'created', 'all', '', '');
+  if (typeof tabAllowed === 'function' && !tabAllowed('jobs')) { notify('The Jobs tab is not available for your role.'); return; }
+  const scrollY = window.scrollY || 0;
+  jobsReturn = {
+    where: 'jobs',
+    backLabel: 'MIL Products report',
+    label: r.product + ' (MIL)',
+    reopen: () => {
+      setMode('reports');
+      openReportsGroup('jobs-group', 'mil-products');
+      requestAnimationFrame(() => window.scrollTo(0, scrollY));
+    },
+  };
+  view = 'all';
+  jobsMilFocus = r.gName;
+  setMode('jobs');
+  renderTabs();
+  renderJobs();
+  renderJobsReturnBar();
+  window.scrollTo(0, 0);
 }
 function jrOpenMilShipments(i) {
   const r = jrMilRowsCache[i]; if (!r) return;
