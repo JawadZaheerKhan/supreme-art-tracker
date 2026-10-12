@@ -5425,6 +5425,19 @@ function ceoDashSaleRows(b) {
   } catch (e) { return []; }
   finally { for (const k of Object.keys(saleReportState)) delete saleReportState[k]; Object.assign(saleReportState, saved); }
 }
+// The Jobs Report's own rows (Delivered, this period, every filter cleared),
+// so the Dashboard's wastage per job is the report's Wastage UPS column.
+function ceoDashJobsReportRows(b) {
+  if (typeof buildJobsReportRows !== 'function' || typeof jobsReportState === 'undefined') return [];
+  const saved = JSON.parse(JSON.stringify(jobsReportState));
+  try {
+    const cf = Object.fromEntries(Object.keys(saved.colFilters || {}).map(k => [k, []]));
+    Object.assign(jobsReportState, { mode: 'delivered', client: '', q: '', poSearch: '', challanSearch: '', milOnly: false, shadeOnly: false, milGroup: '', tab: 'all',
+      colFilters: cf, colSearch: {}, period: b ? 'custom' : 'all', dfrom: b && b.from != null ? ceoDashIso(b.from) : '', dto: b && b.to != null ? ceoDashIso(b.to) : '' });
+    return buildJobsReportRows() || [];
+  } catch (e) { return []; }
+  finally { for (const k of Object.keys(jobsReportState)) delete jobsReportState[k]; Object.assign(jobsReportState, saved); }
+}
 function ceoDashFigures() {
   const b = ceoDashBounds();
   const inRange = ms => ms != null && Number.isFinite(ms) && (!b || ((b.from == null || ms >= b.from) && (b.to == null || ms <= b.to)));
@@ -5480,6 +5493,19 @@ function ceoDashFigures() {
   };
   f.wasteByCompany = pctBy(r => r.client);
   f.wasteByProduct = pctBy(r => resolveProductKey(String(r.name || '').trim()).name);
+  // Wastage as a plain figure, per job: the Jobs Report's Wastage UPS column
+  // (Delivered, this period) - printed cartons not delivered, on a job's
+  // closing delivery. A MIL delivery merged across jobs stays one line.
+  const wasteJobs = new Map();
+  for (const r of ceoDashJobsReportRows(b)) {
+    if (r.wastage === null || r.wastage === undefined) continue;
+    const key = r.idDisplay || ('E-' + r.id);
+    const e = wasteJobs.get(key) || { id: r.id, idDisplay: key, name: r.name, ups: 0 };
+    e.ups += +r.wastage || 0;
+    wasteJobs.set(key, e);
+  }
+  f.wasteJobs = [...wasteJobs.values()].filter(e => e.ups).sort((x, y) => y.ups - x.ups);
+  f.wasteUps = f.wasteJobs.reduce((a, e) => a + e.ups, 0);
   // 2. jobs right now
   const live = all.filter(j => !_finalizedJobIds.has(j.id));
   f.stage = {}; f.views = {};
@@ -5664,6 +5690,7 @@ function renderCeoDash() {
           `<div class="cd-sub">Wastage Weight × 100 ÷ Packets Issued Weight</div>`
           + head('By company · highest first') + list(f.wasteByCompany.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded')
           + head('By product · highest first') + list(f.wasteByProduct.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded'))}
+      ${tile('waste-ups', 'waste', 'Wastage UPS', fmt(f.wasteUps), `${fmt(f.wasteJobs.length)} job${f.wasteJobs.length === 1 ? '' : 's'} · Jobs Report`, () => `<div class="cd-sub">The Jobs Report's Wastage UPS (Delivered, this period): printed cartons not delivered, counted when a job closes - highest first.</div>` + list(f.wasteJobs.map(e => row(`<a onclick="ceoDashOpenJob(${e.id})">${esc(e.idDisplay)}</a> ${esc(e.name || '')}`, fmt(e.ups))), 'No wastage in this period'))}
     </div>
     </div>
 
