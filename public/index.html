@@ -1393,19 +1393,20 @@
     pointer-events: none;
   }
   .jr-mode-slider {
-    position:relative; display:grid; grid-template-columns:1fr 1fr;
-    min-width:176px; padding:3px; overflow:hidden;
+    position:relative; display:grid; grid-template-columns:1fr 1fr 1fr;
+    min-width:264px; padding:3px; overflow:hidden;
     background:#fff; border:1px solid #d8c5c5; border-radius:10px;
     box-shadow:0 2px 8px rgba(91,33,33,.12);
   }
   .jr-mode-slider::before {
     content:""; position:absolute; top:3px; bottom:3px; left:3px;
-    width:calc(50% - 3px); border-radius:7px; background:#A32D2D;
+    width:calc((100% - 6px) / 3); border-radius:7px; background:#A32D2D;
     box-shadow:0 2px 7px rgba(0,0,0,.24);
     transform:translateX(0);
     transition:transform .38s cubic-bezier(.34,1.2,.64,1);
   }
   .jr-mode-slider.mode-created::before { transform:translateX(100%); }
+  .jr-mode-slider.mode-mil::before { transform:translateX(200%); background:#7c3aed; }
   .jr-mode-toggle-btn {
     position:relative; z-index:1; display:inline-flex; align-items:center;
     justify-content:center; min-width:82px; padding:6px 12px;
@@ -14144,6 +14145,10 @@ function printImports() {
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
 const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, period: 'all', sortBy: '', sortDir: 'desc',
+  // MIL Products view (mode 'mil'): "As on" date ('' = today); milGroup
+  // narrows Delivered / Created to one MIL product after a click from it,
+  // milReturn is what "Back to MIL Products" puts back.
+  milAsOf: '', milGroup: '', milReturn: null,
   tab: 'all',   // All / Box / Labels / Leaflets - the same split as the Sale Report's tabs
   // Excel-style column filters, same machinery as the Sale Report:
   // dropdown pickers for the low-cardinality columns, a search box for
@@ -14363,6 +14368,7 @@ function openJobsReport() {
   // is still in-progress (not yet delivered) — otherwise those companies
   // would be missing from the picker in Created mode.
   const mode = jobsReportState.mode || 'delivered';
+  if (mode === 'mil') { openJrMilView(pane); return; }
   const scopeJobs = mode === 'delivered'
     ? jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1)
     : jobs;
@@ -14385,10 +14391,7 @@ function openJobsReport() {
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
         <div class="dash-flbl">Show</div>
-        <div class="jr-mode-slider mode-${mode}">
-          <button class="jr-mode-toggle-btn ${mode==='delivered'?'is-selected':''}" onclick="setJrMode('delivered')">Delivered</button>
-          <button class="jr-mode-toggle-btn ${mode==='created'?'is-selected':''}" onclick="setJrMode('created')">Created</button>
-        </div>
+        ${jrModeSliderHtml(mode)}
       </div>
       <div>
         <div class="dash-flbl">Search (Job No. / Name)</div>
@@ -14464,6 +14467,7 @@ function openJobsReport() {
         <button class="btn btn-sm" onclick="resetReportFilters('jobs')" title="Clear every filter and search, including the column filters">&#8634; Reset filters</button>
       </div>
     </div>
+    ${jrMilReturnBarHtml()}
     <div id="jr-tabs" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
       ${JOBS_REPORT_TABS().map(t => `<button class="btn btn-sm sr-tab-btn${(jobsReportState.tab || 'all') === t.key ? ' is-on' : ''}" onclick="setJrTab('${t.key}')">${esc(t.label)}</button>`).join('')}
     </div>
@@ -14531,6 +14535,10 @@ function setJrShadeOnly(v) {
 }
 // Flip between Delivered-only and every Created job. Re-renders the whole
 // pane so the header/labels/company dropdown all reflect the new mode.
+const JR_MODES = [['delivered', 'Delivered'], ['created', 'Created'], ['mil', 'MIL Products']];
+function jrModeSliderHtml(mode) {
+  return `<div class="jr-mode-slider mode-${mode}">${JR_MODES.map(([k, l]) => `<button class="jr-mode-toggle-btn ${mode === k ? 'is-selected' : ''}" onclick="setJrMode('${k}')">${l}</button>`).join('')}</div>`;
+}
 function setJrMode(m) {
   jobsReportState.sortBy = '';   // Sort by follows the mode again: Delivered Date for Delivered, Created Date for Created
   if (jobsReportState.mode === m) return;
@@ -14538,10 +14546,9 @@ function setJrMode(m) {
   jobsReportSel.clear();
   const slider = document.querySelector('#rt-jobs-report .jr-mode-slider');
   if (slider) {
-    slider.classList.toggle('mode-created', m === 'created');
-    slider.classList.toggle('mode-delivered', m === 'delivered');
+    for (const [k] of JR_MODES) slider.classList.toggle('mode-' + k, m === k);
     slider.querySelectorAll('.jr-mode-toggle-btn').forEach((btn, i) => {
-      btn.classList.toggle('is-selected', (m === 'delivered' && i === 0) || (m === 'created' && i === 1));
+      btn.classList.toggle('is-selected', (JR_MODES[i] || [])[0] === m);
     });
     setTimeout(openJobsReport, 380);
   } else {
@@ -14755,6 +14762,7 @@ function buildJobsReportRows() {
     if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
     if (client && j.client !== client) continue;
     if (milOnly && !j.stock_group_name) continue;
+    if (jobsReportState.milGroup && j.stock_group_name !== jobsReportState.milGroup) continue;
     // Shade cards live behind their own toggle: OFF = real jobs only,
     // ON = shade cards only. The two never mix in one list.
     if (shadeOnly ? !j.is_shade_card : j.is_shade_card) continue;
@@ -15223,6 +15231,7 @@ function jrGoToShipment(jobId, idx) {
   notify(`E-${jobId}: ${(parseFloat(d.cartons) || 0).toLocaleString()} shipped on ${fmtDMY(d.date)}${inv ? ' · invoice ' + inv : ''} - outside the date filter, so not in this list.`);
 }
 function renderJobsReport() {
+  if (jobsReportState.mode === 'mil') { renderJrMil(); return; }
   const rows = buildJobsReportRows();
   const el = document.getElementById('jr-content');
   if (!el) return;
@@ -15481,6 +15490,242 @@ async function exportJobsReport() {
   notify('Exported!');
 }
 
+// ── Jobs Report: MIL Products (owner, 2026-10-12) ─────────────────
+// One row per MIL product: Code, Product, MIL Qty, Ready and Shipped AS ON a
+// date, so any past day can be read back. On today's date the figures are
+// the Client View's Mil Products numbers: Ready = what is in hand + what has
+// shipped; In Hand = Ready - Shipped. For a past date only the Ready to
+// Delivery (else Pasting) entries and deliveries dated up to that day count,
+// and a job closed by then holds nothing in hand. Row -> that MIL product's
+// jobs (Created); Shipped -> its deliveries up to that date (Delivered).
+function jrMilAsOf() { return jobsReportState.milAsOf || localDateISO(); }
+function jrMilEntryIso(d) {
+  const s = String(d || '').trim();
+  const m = s.match(/^(\d{2})[\/-](\d{2})[\/-](\d{4})/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : s.slice(0, 10);
+}
+// A particulars row's qty up to the date (entries dated later are left out;
+// an old row with no dated entries counts whole).
+function jrMilRowQtyUpTo(row, asOf) {
+  if (!row) return 0;
+  const n = v => { const x = parseFloat(String(v || '').replace(/[^0-9.\-]/g, '')); return Number.isFinite(x) ? x : 0; };
+  if (Array.isArray(row.entries) && row.entries.length) {
+    return row.entries.reduce((a, e) => { const d = jrMilEntryIso(e && e.date); return (d && d > asOf) ? a : a + n(e && e.qty); }, 0);
+  }
+  return String(row.quantity || '').split('|').reduce((a, s) => a + n(s), 0);
+}
+function jrMilJobFigures(j, asOf) {
+  const endMs = new Date(asOf + 'T23:59:59').getTime();
+  const shipped = (Array.isArray(j.deliveries) ? j.deliveries : []).reduce((a, d) => {
+    const ms = deliveryEntryMs(d);
+    return (isFinite(ms) && ms > endMs) ? a : a + (parseFloat(String((d && d.cartons) || '').replace(/[^0-9.\-]/g, '')) || 0);
+  }, 0);
+  const p = j.particulars || {};
+  const si = j.stage_index || 0;
+  let made = 0;
+  // Same rule as the group tile (groupStats): at Ready or later, QC's Ready
+  // to Delivery Qty; still in production (issued), QC's figure else Pasting's.
+  if (si >= 6) made = jrMilRowQtyUpTo(p.delivered_cartons_qty, asOf);
+  else if (!isNewJob(j) && j.issuance_status !== 'pending' && si >= 1) made = jrMilRowQtyUpTo(p.delivered_cartons_qty, asOf) || jrMilRowQtyUpTo(p.pasted_cartons_qty, asOf);
+  const closed = isDone(j) && (() => { const t = jobDeliveredAnchorMs(j); return !isFinite(t) || t <= endMs; })();
+  const inHand = closed ? 0 : Math.max(0, made - shipped);
+  return { shipped, inHand };
+}
+function jrMilRows() {
+  const asOf = jrMilAsOf();
+  const qn = String(jobsReportState.q || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const groups = new Map();
+  for (const j of (jobs || [])) {
+    if (!j || !j.stock_group_name) continue;
+    if (!groups.has(j.stock_group_name)) groups.set(j.stock_group_name, []);
+    groups.get(j.stock_group_name).push(j);
+  }
+  const out = [];
+  for (const [gName, gJobs] of groups) {
+    const groupId = (gJobs.find(j => j && j.group_job_id) || {}).group_job_id || null;
+    const ent = groupId ? stockGroupById(groupId) : null;
+    const repr = groupRepresentative(gJobs) || gJobs[0];
+    const product = (ent && ent.product) || gName;
+    const code = (ent && ent.jobcode) || (repr && repr.jobcode) || '';
+    const client = (repr && repr.client) || '';
+    if (jobsReportState.client && client !== jobsReportState.client) continue;
+    if (qn && !(String(product).toLowerCase().replace(/\s+/g, ' ').includes(qn) || String(code).toLowerCase().includes(qn) || String(gName).toLowerCase().includes(qn))) continue;
+    const milQty = ent
+      ? (parseFloat(String(ent.po_qty || '').replace(/[^0-9.\-]/g, '')) || 0)
+      : gJobs.reduce((s, j) => s + (parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0), 0);
+    let shipped = 0, inHand = 0;
+    for (const j of gJobs) { const f = jrMilJobFigures(j, asOf); shipped += f.shipped; inHand += f.inHand; }
+    out.push({ gName, product, code, client, milQty, ready: inHand + shipped, shipped, inHand, jobCount: gJobs.length });
+  }
+  return out.sort((a, b) => String(a.product).localeCompare(String(b.product)));
+}
+function openJrMilView(pane) {
+  const clients = [...new Set((jobs || []).filter(j => j && j.stock_group_name).map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-size:20px;">Jobs Report</h2>
+      <span style="color:var(--text2);font-size:12px;">MIL products — MIL Qty, Ready and Shipped as on a date.</span>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportJrMil()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printJrMil()">&#128424; Print Report</button>
+      </div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Show</div>
+        ${jrModeSliderHtml('mil')}
+      </div>
+      <div>
+        <div class="dash-flbl">Search (Product / Code)</div>
+        <input class="filter" type="text" id="jr-q" value="${esc(jobsReportState.q)}" placeholder="e.g. norbac or 120186" oninput="setJrQ(this.value)" style="min-width:180px;">
+      </div>
+      <div>
+        <div class="dash-flbl">Ready &amp; Shipped as on</div>
+        <input class="filter" type="date" id="jr-mil-asof" value="${jrMilAsOf()}" max="${localDateISO()}" onchange="setJrMilAsOf(this.value)">
+      </div>
+      <div>
+        <div class="dash-flbl">Company</div>
+        <select class="filter" id="jr-client" onchange="setJrClient(this.value)">
+          <option value="">All companies</option>
+          ${clients.map(c => `<option value="${esc(c)}"${jobsReportState.client===c?' selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <button class="btn btn-sm" onclick="jobsReportState.milAsOf=''; jobsReportState.q=''; jobsReportState.client=''; openJobsReport();" title="Back to today, all companies, no search">&#8634; Reset filters</button>
+      </div>
+    </div>
+    <div id="jr-content" style="font-size:12px;"></div>`;
+  renderJrMil();
+}
+function setJrMilAsOf(v) { jobsReportState.milAsOf = (v && v < localDateISO()) ? v : ''; renderJrMil(); }
+function renderJrMil() {
+  const el = document.getElementById('jr-content');
+  if (!el) return;
+  const rows = jrMilRows();
+  const asOf = jrMilAsOf();
+  const fmtN = n => (+n || 0).toLocaleString();
+  if (!rows.length) { el.innerHTML = '<div class="empty">No MIL products match these filters.</div>'; return; }
+  const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;"';
+  const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;"';
+  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, shipped: a.shipped + r.shipped, inHand: a.inHand + r.inHand }), { milQty: 0, ready: 0, shipped: 0, inHand: 0 });
+  const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;" onclick="jrOpenMilGroup(${i})" title="Open this MIL product's jobs in this report">
+      <td style="padding:7px 10px;">${esc(r.code) || '<span style="color:var(--text3)">—</span>'}</td>
+      <td style="padding:7px 10px;font-weight:700;">${esc(r.product)}<div style="font-size:11px;color:var(--text2);font-weight:400;">${esc(r.client)} · ${r.jobCount} job${r.jobCount === 1 ? '' : 's'}</div></td>
+      <td style="padding:7px 10px;text-align:right;">${fmtN(r.milQty)}</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:600;color:#166534;">${fmtN(r.ready)}</td>
+      <td style="padding:7px 10px;text-align:right;">${r.shipped
+        ? `<span onclick="event.stopPropagation(); jrOpenMilShipments(${i})" title="See these shipments in the Delivered list, up to ${esc(fmtDMY(asOf))}" style="color:#9a3412;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;">${fmtN(r.shipped)}</span>`
+        : '0'}</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:600;">${fmtN(r.inHand)}</td>
+    </tr>`).join('');
+  jrMilRowsCache = rows;
+  el.innerHTML = `
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready and Shipped as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its jobs, a Shipped figure for its deliveries.</div>
+    <div class="report-scroll-wrap">
+      <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead><tr style="background:var(--bg2);">
+          <th ${th}>Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>Shipped Qty</th><th ${thR}>In Hand</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+        <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
+          <td colspan="2" style="padding:8px 10px;text-align:right;color:var(--text2);">Totals</td>
+          <td style="padding:8px 10px;text-align:right;">${fmtN(t.milQty)}</td>
+          <td style="padding:8px 10px;text-align:right;color:#166534;">${fmtN(t.ready)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmtN(t.shipped)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmtN(t.inHand)}</td>
+        </tr></tfoot>
+      </table>
+    </div>`;
+}
+let jrMilRowsCache = [];
+// Leaving the MIL view for one product: remember how to come back.
+function jrMilLeave(gName, mode, period, dfrom, dto) {
+  const st = jobsReportState;
+  st.milReturn = { asOf: st.milAsOf, q: st.q, client: st.client, period: st.period, dfrom: st.dfrom, dto: st.dto, tab: st.tab, milOnly: st.milOnly, scrollY: window.scrollY, product: gName };
+  Object.assign(st, { mode, milGroup: gName, q: '', poSearch: '', challanSearch: '', client: '', tab: 'all', milOnly: false, shadeOnly: false, period, dfrom, dto, sortBy: '' });
+  jobsReportSel.clear();
+  openJobsReport();
+  window.scrollTo(0, 0);
+}
+function jrOpenMilGroup(i) {
+  const r = jrMilRowsCache[i]; if (!r) return;
+  jrMilLeave(r.gName, 'created', 'all', '', '');
+}
+function jrOpenMilShipments(i) {
+  const r = jrMilRowsCache[i]; if (!r) return;
+  jrMilLeave(r.gName, 'delivered', 'custom', '', jrMilAsOf());
+}
+function jrMilReturnBarHtml() {
+  const st = jobsReportState;
+  if (!st.milReturn || !st.milGroup || st.mode === 'mil') return '';
+  return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:#f3e8ff;border:1px solid #c084fc;border-radius:8px;color:#5b21b6;font-size:12.5px;">
+      <button class="btn btn-sm" style="background:#7c3aed;color:#fff;border-color:#7c3aed;" onclick="jrBackToMil()">&larr; Back to MIL Products</button>
+      <span>Showing <b>${esc(st.milGroup)}</b>${st.mode === 'delivered' ? ` · deliveries up to <b>${esc(fmtDMY(st.dto) || 'today')}</b>` : ' · all its jobs'}</span>
+    </div>`;
+}
+function jrBackToMil() {
+  const st = jobsReportState, r = st.milReturn || {};
+  Object.assign(st, { mode: 'mil', milGroup: '', milAsOf: r.asOf || '', q: r.q || '', client: r.client || '', period: r.period || 'all', dfrom: r.dfrom || '', dto: r.dto || '', tab: r.tab || 'all', milOnly: !!r.milOnly, milReturn: null, sortBy: '' });
+  openJobsReport();
+  setTimeout(() => window.scrollTo(0, r.scrollY || 0), 30);
+}
+function printJrMil() {
+  const rows = jrMilRows();
+  if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
+  const asOf = jrMilAsOf();
+  const tdL = 'style="border:1px solid #000;padding:4px;"';
+  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+  const f = n => (+n || 0).toLocaleString();
+  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, shipped: a.shipped + r.shipped, inHand: a.inHand + r.inHand }), { milQty: 0, ready: 0, shipped: 0, inHand: 0 });
+  const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: 'JOBS REPORT — MIL PRODUCTS',
+        scope: [jobsReportState.client || 'All companies', `${rows.length} MIL product${rows.length === 1 ? '' : 's'}`, jobsReportState.q ? 'Search: ' + jobsReportState.q : ''].filter(Boolean).join(' · '),
+        dateText: `Ready & Shipped as on: ${fmtDMY(asOf)}`,
+        note: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
+      <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#f7f1ea;">
+          <th ${tdL}>Product Code</th><th ${tdL}>Product Name</th><th ${tdR}>MIL Qty</th><th ${tdR}>Ready Qty</th><th ${tdR}>Shipped Qty</th><th ${tdR}>In Hand</th>
+        </tr>
+        ${rows.map(r => `<tr><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.shipped)}</td><td ${tdR}>${f(r.inHand)}</td></tr>`).join('')}
+        <tr style="background:#f7f1ea;font-weight:bold;"><td ${tdL} colspan="2" align="right">Totals</td><td ${tdR}>${f(t.milQty)}</td><td ${tdR}>${f(t.ready)}</td><td ${tdR}>${f(t.shipped)}</td><td ${tdR}>${f(t.inHand)}</td></tr>
+      </table>
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
+}
+async function exportJrMil() {
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const rows = jrMilRows();
+  if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
+  const asOf = jrMilAsOf();
+  const header = ['Product Code', 'Product Name', 'MIL Qty', 'Ready Qty', 'Shipped Qty', 'In Hand'];
+  const aoa = reportExcelAoa(header);
+  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.shipped, r.inHand]);
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, header, {
+    title: 'JOBS REPORT — MIL PRODUCTS',
+    scope: [jobsReportState.client || 'All companies', `${rows.length} MIL products`].join(' · '),
+    dateText: `Ready & Shipped as on: ${fmtDMY(asOf)}`,
+  });
+  applyReportExcelCols(ws, header, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'MIL Products');
+  XLSX.writeFile(wb, `supreme-art-mil-products-as-on-${asOf}.xlsx`);
+  notify('Exported!');
+}
+
 // Print the Jobs Report — A4 landscape.
 // Scope / date lines shared by this report's print and Excel headings. The
 // date line reads jobsReportState.dfrom/dto, which is exactly what
@@ -15627,6 +15872,7 @@ function reportActiveFilters(kind) {
   }
   if (st.client)    out.push({ key: 'client', label: 'Company: ' + st.client });
   if (st.milOnly)   out.push({ key: 'milOnly', label: 'MIL Products only' });
+  if (!isSale && st.milGroup) out.push({ key: 'milGroup', label: 'MIL product: ' + st.milGroup });
   if (st.shadeOnly) out.push({ key: 'shadeOnly', label: 'Shade Cards only' });
   const dropLabels   = isSale ? SALE_REPORT_COL_LABELS : Object.fromEntries(Object.entries(JR_COL_DROPDOWN_FIELDS).map(([k, d]) => [k, d.label]));
   const searchLabels = isSale ? SALE_COL_SEARCH_FIELDS : JR_COL_SEARCH_FIELDS;
@@ -15675,7 +15921,7 @@ function resetReportFilters(kind) {
   const isSale = kind === 'sale';
   const st = isSale ? saleReportState : jobsReportState;
   Object.assign(st, { q: '', poSearch: '', challanSearch: '', client: '', milOnly: false, dfrom: '', dto: '', colSearch: {} });
-  if (isSale) st.dateRange = ''; else { st.period = 'all'; st.shadeOnly = false; }
+  if (isSale) st.dateRange = ''; else { st.period = 'all'; st.shadeOnly = false; st.milGroup = ''; st.milAsOf = ''; }
   for (const k of Object.keys(st.colFilters || {})) st.colFilters[k] = [];
   if (isSale) openSaleReport(); else openJobsReport();
 }
