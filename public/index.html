@@ -3035,7 +3035,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="dashboard" id="mode-dashboard-btn" onclick="setMode('dashboard')" style="display:none;">&#128202; Dashboard</button>
     <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
-    <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="setMode('reports')">Reports</button>
+    <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
@@ -6080,6 +6080,23 @@ function syncFlowingTabIndicator(containerOrId) {
 // Vertical version of the shared liquid selector for every Reports group.
 // It measures the active row so section headings and role-hidden rows do not
 // disturb the travel distance.
+// The Reports tab button takes you back to the report you left (Stock Out,
+// Sale Report...) exactly as it was - filters, scroll, figures. Nothing is
+// fetched: the report is still on the page, only hidden (owner, 2026-10-12).
+// Clicking Reports while already in Reports, or after "Back" to the report
+// cards, shows the cards as before.
+let lastReportsGroup = null;
+function openReportsTab() {
+  if (mode === 'reports') { setMode('reports'); return; }
+  const g = lastReportsGroup;
+  setMode('reports');
+  const el = g ? document.getElementById(g) : null;
+  if (!el || mode !== 'reports') return;
+  const landing = document.getElementById('reports-landing');
+  if (landing) landing.style.display = 'none';
+  el.style.display = 'block';
+  requestAnimationFrame(syncReportsFlowIndicators);
+}
 function syncReportsFlowIndicators() {
   document.querySelectorAll('#reports-mode .reports-sidebar').forEach(sidebar => {
     if (sidebar.offsetParent === null) return;
@@ -6151,6 +6168,11 @@ function setMode(m) {
   if (!tabAllowed(m)) m = firstAllowedTab();
   // Leaving Reports clears the Sale Report's per-column filters (session-scoped).
   if (mode === 'reports' && m !== 'reports') srResetColFilters();
+  // ...and remembers which report was open, for the Reports button.
+  if (mode === 'reports' && m !== 'reports') {
+    const open = [...document.querySelectorAll('#reports-mode .reports-group')].find(g => g.style.display !== 'none');
+    lastReportsGroup = open ? open.id : null;
+  }
   // Leaving Inventory undoes the filters a report-row jump applied, however
   // the user leaves — Back button, top-bar tab, or a bounce above.
   if (m !== 'inventory') invClearReturn();
