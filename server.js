@@ -8933,9 +8933,14 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     if (clientVisible !== cur.client_visible) {
       await sql`UPDATE jobs SET stock_group_visible = ${clientVisible}, client_visible = (client_visible OR ${clientVisible}) WHERE group_job_id = ${id} AND deleted_at IS NULL`;
     }
+    // Name what changed (Code / MIL Qty edits come from the MIL Products report).
+    const groupChanges = [];
+    if (String(cur.jobcode || '') !== String(jobcode || '')) groupChanges.push(`Code "${cur.jobcode || ''}" -> "${jobcode || ''}"`);
+    if (String(cur.po_qty || '') !== String(poQty || '')) groupChanges.push(`MIL Qty "${cur.po_qty || ''}" -> "${poQty || ''}"`);
     await logAudit(sql, req, {
       action: 'group.update', entityType: 'group', entityId: id,
-      summary: `Updated group "${product}"`,
+      summary: `Updated group "${product}"${groupChanges.length ? ': ' + groupChanges.join('; ') : ''}`,
+      metadata: groupChanges.length ? { jobcode: { before: cur.jobcode, after: jobcode }, po_qty: { before: cur.po_qty, after: poQty } } : undefined,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
