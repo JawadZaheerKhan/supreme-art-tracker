@@ -2668,6 +2668,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-mil    { --c:#7c3aed; --t:#f5f3ff; }
 /* Two figures side by side in one tile, same size (MIL ready & shipped). */
 .cd-pair { display:flex; flex-wrap:wrap; gap:4px 18px; }
+.cd-grid.cd-fill { grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); }
+.cd-subsec { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--text2); margin:10px 0 5px; }
+.cd-subsec small { font-weight:600; text-transform:none; letter-spacing:0; color:var(--text3); }
+@media (max-width: 380px) { .cd-grid.cd-fill { grid-template-columns:1fr 1fr; } }
 .cd-pair small { font-size:10px; font-weight:600; color:var(--text2); }
 /* Dashboard blocks: each group of tiles on its own shade of yellow, so the
    ones sharing a date filter read as one block (owner, 2026-10-12). */
@@ -5647,12 +5651,10 @@ function renderCeoDash() {
       ${seeMoney ? tile('sales', 'money', 'Sales', fmtRate(f.salesTotal), 'excl. tax', () =>
           head('By company · highest first') + list(f.salesByCompany.map(([k, v]) => row(esc(k), fmtRate(v))), 'No sales')
           + head('By product · highest first') + list(f.salesByProduct.map(([k, v]) => row(esc(k), fmtRate(v))), 'No sales')) : ''}
-      ${tile('paper', 'stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…', f.paperLoaded ? () => list(f.paperBy.map(e => row(esc(e.label), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
       ${tile('waste', 'waste', 'Wastage', f.wastagePct == null ? '—' : fmt(f.wastagePct) + '%', f.issuedKg ? `${fmt(f.wastageKg)} of ${fmt(f.issuedKg)} kg` : 'no deliveries', () =>
           `<div class="cd-sub">Wastage Weight × 100 ÷ Packets Issued Weight</div>`
           + head('By company · highest first') + list(f.wasteByCompany.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded')
           + head('By product · highest first') + list(f.wasteByProduct.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded'))}
-      ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
     </div>
     </div>
 
@@ -5670,17 +5672,26 @@ function renderCeoDash() {
     </div>
 
     <div class="cd-zone cd-zone-3">
-    <div class="cd-sec">Production &amp; MIL <small>· one date filter for both · MIL as on ${esc(fmtDMY(f.milAsOf || localDateISO()))}${f.milAsOf ? '' : ' (today)'}</small></div>
+    <div class="cd-sec">Production &amp; MIL <small>· one date filter for both</small></div>
     ${ceoDashRangeBar('cd-p', ceoDash.prange, ceoDash.pdfrom, ceoDash.pdto, 'setCeoDashProdRange', 'setCeoDashProdCustom', 'loadCeoDashProd')}
-    <div class="cd-grid">
+    <div class="cd-grid cd-fill">
       ${prodTiles}
+    </div>
+    <div class="cd-subsec">MIL <small>· as on ${esc(fmtDMY(f.milAsOf || localDateISO()))}${f.milAsOf ? '' : ' (today)'}</small></div>
+    <div class="cd-grid cd-fill">
       ${tile('mil-rs', 'mil cd-wide', 'MIL ready &amp; shipped', `<span class="cd-pair"><span><b style="color:#15803d;">${fmt(f.milTot.ready)}</b> <small>ready</small></span><span><b style="color:#ca8a04;">${fmt(f.milTot.shipped)}</b> <small>shipped</small></span></span>`, `${fmt(f.mil.length)} MIL products · MIL Qty in See more`, () => ceoDashMilTable(f.mil) + ceoDashMilLink())}
       ${tile('mil-low', f.milLow.length ? 'out' : 'mil', 'Needs refill', fmt(f.milLow.length), 'ready below MIL Qty', () => `<div class="cd-sub">Ready on the shelf is below the MIL Qty.</div>` + list(f.milLow.map(r => row(esc(r.product), `ready ${fmt(r.ready)} of ${fmt(r.milQty)} · <b style="color:#dc2626;">short ${fmt(r.short)}</b>`)), 'Every MIL product has its MIL Qty ready') + ceoDashMilLink())}
     </div>
     </div>
 
     <div class="cd-zone cd-zone-4">
-    <div class="cd-sec">Stock <small>· today</small></div>
+    <div class="cd-sec">Stock</div>
+    <div class="cd-subsec">Paper issued <small>· for the period (top date filter)</small></div>
+    <div class="cd-grid cd-fill">
+      ${tile('paper', 'stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…', f.paperLoaded ? () => list(f.paperBy.map(e => row(esc(e.label), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
+      ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
+    </div>
+    <div class="cd-subsec">Today</div>
     <div class="cd-grid">
       ${tile('short', f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), 'papers short', () => list(f.shortPapers.map(e => row(esc(e.label), `${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}`)), 'Enough paper for every pending job'))}
       ${tile('pending', 'stock', 'Pending Stock', fmt(f.pendingQueue.length), 'jobs waiting for paper', jobList(f.pendingQueue, j => j.sheets ? fmt(j.sheets) + ' sheets' : '', 'None'))}
