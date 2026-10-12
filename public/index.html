@@ -2666,6 +2666,15 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-money  { --c:#1a1a18; --t:#f8fafc; }
 .cd-waste  { --c:#475569; --t:#f1f5f9; }
 .cd-mil    { --c:#7c3aed; --t:#f5f3ff; }
+/* Dashboard blocks: each group of tiles on its own shade of yellow, so the
+   ones sharing a date filter read as one block (owner, 2026-10-12). */
+.cd-block { border:1px solid; border-radius:14px; padding:10px 14px 14px; margin:12px 0; }
+.cd-block > .cd-sec:first-child { margin-top:0; }
+.cd-block-1 { background:#fffbe8; border-color:#fbe7a1; }
+.cd-block-2 { background:#fff6cc; border-color:#f7dc6f; }
+.cd-block-3 { background:#fdefb2; border-color:#eecb4d; }
+.cd-block-4 { background:#fbe9a6; border-color:#e3bd3c; }
+@media (max-width: 380px) { .cd-block { padding:8px 8px 10px; } }
 .cd-offcut { --c:#0891b2; --t:#ecfeff; }
 .cd-over   { --c:#9f1239; --t:#ffe4e6; }
 /* "See more": the tile stays small; its details open in a pop-up. */
@@ -5481,14 +5490,19 @@ function ceoDashFigures() {
   }
   f.shortPapers = [...papers.values()].filter(e => e.have < e.need).sort((x, y) => (x.have > 0) - (y.have > 0) || (y.need - y.have) - (x.need - x.have));
   f.imports = (ceoDash.imports || []).filter(i => i.status === 'pending' || i.status === 'partial');
-  // MIL, right now - the MIL Products report's own figures (no filters).
-  f.mil = typeof jrMilRows === 'function' ? jrMilRows({ asOf: '', q: '', client: '' }) : [];
+  // MIL - the MIL Products report's own figures, as on the END of the
+  // Production date filter (the two share one block and one filter; never
+  // later than today). MIL Qty is the level to keep ready on the shelf
+  // (the Mill Quantities sheet's REFILL = READY - MIL): a product whose
+  // ready is below it needs refilling.
+  const pb = ceoDashProdBounds();
+  const milEnd = pb && pb.to != null ? ceoDashIso(pb.to) : '';
+  f.milAsOf = milEnd && milEnd < localDateISO() ? milEnd : '';
+  f.mil = typeof jrMilRows === 'function' ? jrMilRows({ asOf: f.milAsOf, q: '', client: '' }) : [];
   f.milTot = f.mil.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, shipped: a.shipped + r.shipped }), { milQty: 0, ready: 0, shipped: 0 });
-  // MIL nearly used up: made (ready on the shelf + shipped) is 90% or more of
-  // the MIL Qty - time to look at the next MIL order.
-  f.milLow = f.mil.filter(r => r.milQty > 0 && (r.ready + r.shipped) >= 0.9 * r.milQty)
-    .map(r => ({ ...r, made: r.ready + r.shipped, pct: (r.ready + r.shipped) * 100 / r.milQty }))
-    .sort((x, y) => y.pct - x.pct);
+  f.milLow = f.mil.filter(r => r.milQty > 0 && r.ready < r.milQty)
+    .map(r => ({ ...r, short: r.milQty - r.ready }))
+    .sort((x, y) => y.short - x.short);
   // Offcut paper on hand, biggest first.
   f.offcuts = (inventoryAll || []).filter(i => i && i.is_offcut && (+i.current_balance || 0) > 0)
     .map(i => ({ label: [i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : '', i.brand].filter(Boolean).join(' '), sheets: +i.current_balance || 0 }))
@@ -5537,6 +5551,29 @@ function ceoDashProduction(data) {
     out[key] = Object.assign(rs.reduce(add, blank()), { machines: [...machines].map(([machine, e]) => ({ machine, ...e })).sort((x, y) => y.sheets - x.sheets) });
   }
   return out;
+}
+// Per MIL product: MIL Qty, Ready (on the shelf) and Shipped. A product whose
+// ready is below its MIL Qty sits in a see-through red band (needs refill).
+function ceoDashMilTable(rows) {
+  if (!rows.length) return '<div class="cd-sub">No MIL products</div>';
+  const n = v => (+v || 0).toLocaleString();
+  const red = 'rgba(220,38,38,0.35)';
+  const body = rows.map(r => {
+    const low = r.milQty > 0 && r.ready < r.milQty;
+    const bg = low ? 'background:rgba(220,38,38,0.10);' : '';
+    const edge = low ? `border-top:1px solid ${red};border-bottom:1px solid ${red};` : 'border-bottom:1px dashed var(--border);';
+    return `<tr title="${low ? 'Ready is below the MIL Qty - needs refill' : ''}">
+      <td style="padding:5px 6px;${bg}${edge}${low ? `border-left:1px solid ${red};border-radius:6px 0 0 6px;` : ''}">${esc(r.product)}</td>
+      <td style="padding:5px 6px;text-align:right;${bg}${edge}">${n(r.milQty)}</td>
+      <td style="padding:5px 6px;text-align:right;font-weight:700;color:${low ? '#b91c1c' : '#166534'};${bg}${edge}">${n(r.ready)}</td>
+      <td style="padding:5px 6px;text-align:right;${bg}${edge}${low ? `border-right:1px solid ${red};border-radius:0 6px 6px 0;` : ''}">${n(r.shipped)}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="cd-sub" style="margin-bottom:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:rgba(220,38,38,0.10);border:1px solid ${red};vertical-align:-1px;"></span> ready below the MIL Qty — needs refill</div>
+    <table style="width:100%;border-collapse:separate;border-spacing:0 3px;font-size:12.5px;">
+      <thead><tr style="color:var(--text2);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;">
+        <th style="text-align:left;padding:2px 6px;">Product</th><th style="text-align:right;padding:2px 6px;">MIL Qty</th><th style="text-align:right;padding:2px 6px;">Ready</th><th style="text-align:right;padding:2px 6px;">Shipped</th>
+      </tr></thead><tbody>${body}</tbody></table>`;
 }
 // MIL pop-ups end with a way into the MIL Products report.
 function ceoDashMilLink() {
@@ -5598,6 +5635,7 @@ function renderCeoDash() {
     ${ceoDashRangeBar('cd-', ceoDash.range, ceoDash.dfrom, ceoDash.dto, 'setCeoDashRange', 'setCeoDashCustom', 'loadCeoDash')}
     ${ceoDash.err ? `<div class="cd-sub" style="color:#991b1b;">Paper figures could not load: ${esc(ceoDash.err)}</div>` : ''}
 
+    <div class="cd-block cd-block-1">
     <div class="cd-sec">Headline <small>· for the period</small></div>
     <div class="cd-grid">
       ${tile('created', 'new', 'Jobs created', fmt(f.newJobs), 'new job cards', () => list(f.createdList.map(x => row(job(x.j), date(x.ms))), 'No jobs created'))}
@@ -5613,8 +5651,10 @@ function renderCeoDash() {
           + head('By product · highest first') + list(f.wasteByProduct.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded'))}
       ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
     </div>
+    </div>
 
-    <div class="cd-sec">Jobs <small>· right now</small></div>
+    <div class="cd-block cd-block-2">
+    <div class="cd-sec">Jobs <small>· today</small></div>
     <div class="cd-grid">
       ${tile('v-new', 'new', 'New jobs', fmt(f.stage.new), 'waiting to start', jobList(f.views.new, due, 'None'))}
       ${tile('v-ctp', 'new', 'CTP', fmt(f.stage.ctp), '', jobList(f.views.ctp, due, 'None'))}
@@ -5624,20 +5664,22 @@ function renderCeoDash() {
       ${tile('late', 'out', 'Late jobs', fmt(f.late.length), 'past deadline', jobList(f.late, j => dmy(j.deadline), 'None past deadline'))}
       ${tile('blocked', 'block', 'Blocked', fmt(f.blocked.length), '', jobList(f.blocked, j => { const s = (j.stages || {})[j.stage_index || 0] || {}; return esc(STAGES[j.stage_index || 0] || '') + (s.notes ? ' · ' + esc(s.notes) : ''); }, 'Nothing blocked'))}
     </div>
-
-    <div class="cd-sec">Production <small>· own date filter</small></div>
-    ${ceoDashRangeBar('cd-p', ceoDash.prange, ceoDash.pdfrom, ceoDash.pdto, 'setCeoDashProdRange', 'setCeoDashProdCustom', 'loadCeoDashProd')}
-    ${prodTiles}
-
-    <div class="cd-sec">MIL <small>· right now</small></div>
-    <div class="cd-grid">
-      ${tile('mil-qty', 'mil', 'MIL Qty', fmt(f.milTot.milQty), `${fmt(f.mil.length)} MIL products`, () => list(f.mil.map(r => row(esc(r.product), fmt(r.milQty))), 'No MIL products') + ceoDashMilLink())}
-      ${tile('mil-ready', 'mil', 'MIL ready', fmt(f.milTot.ready), 'on the shelf', () => list(f.mil.filter(r => r.ready > 0).sort((x, y) => y.ready - x.ready).map(r => row(esc(r.product), fmt(r.ready))), 'Nothing ready') + ceoDashMilLink())}
-      ${tile('mil-shipped', 'mil', 'MIL shipped', fmt(f.milTot.shipped), 'to date', () => list(f.mil.filter(r => r.shipped > 0).sort((x, y) => y.shipped - x.shipped).map(r => row(esc(r.product), fmt(r.shipped))), 'Nothing shipped') + ceoDashMilLink())}
-      ${tile('mil-low', f.milLow.some(r => r.pct >= 100) ? 'out' : 'mil', 'MIL nearly used', fmt(f.milLow.length), 'made 90%+ of MIL Qty', () => `<div class="cd-sub">Made = ready on the shelf + shipped, against the MIL Qty.</div>` + list(f.milLow.map(r => row(esc(r.product), `${fmt(r.made)} of ${fmt(r.milQty)} · <span style="color:${r.pct >= 100 ? '#dc2626' : '#6d28d9'};">${fmt(Math.round(r.pct))}%</span>`)), 'No MIL product is near its MIL Qty') + ceoDashMilLink())}
     </div>
 
-    <div class="cd-sec">Stock <small>· right now</small></div>
+    <div class="cd-block cd-block-3">
+    <div class="cd-sec">Production &amp; MIL <small>· one date filter for both</small></div>
+    ${ceoDashRangeBar('cd-p', ceoDash.prange, ceoDash.pdfrom, ceoDash.pdto, 'setCeoDashProdRange', 'setCeoDashProdCustom', 'loadCeoDashProd')}
+    ${prodTiles}
+    <div class="cd-sec" style="margin-top:12px;">MIL <small>· as on ${esc(fmtDMY(f.milAsOf || localDateISO()))}${f.milAsOf ? '' : ' (today)'}</small></div>
+    <div class="cd-grid">
+      ${tile('mil-qty', 'mil', 'MIL Qty', fmt(f.milTot.milQty), `${fmt(f.mil.length)} MIL products`, () => ceoDashMilTable(f.mil) + ceoDashMilLink())}
+      ${tile('mil-rs', 'mil', 'MIL ready &amp; shipped', fmt(f.milTot.ready), `ready · ${fmt(f.milTot.shipped)} shipped`, () => ceoDashMilTable(f.mil) + ceoDashMilLink())}
+      ${tile('mil-low', f.milLow.length ? 'out' : 'mil', 'Needs refill', fmt(f.milLow.length), 'ready below MIL Qty', () => `<div class="cd-sub">Ready on the shelf is below the MIL Qty.</div>` + list(f.milLow.map(r => row(esc(r.product), `ready ${fmt(r.ready)} of ${fmt(r.milQty)} · <b style="color:#dc2626;">short ${fmt(r.short)}</b>`)), 'Every MIL product has its MIL Qty ready') + ceoDashMilLink())}
+    </div>
+    </div>
+
+    <div class="cd-block cd-block-4">
+    <div class="cd-sec">Stock <small>· today</small></div>
     <div class="cd-grid">
       ${tile('short', f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), 'papers short', () => list(f.shortPapers.map(e => row(esc(e.label), `${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}`)), 'Enough paper for every pending job'))}
       ${tile('pending', 'stock', 'Pending Stock', fmt(f.pendingQueue.length), 'jobs waiting for paper', jobList(f.pendingQueue, j => j.sheets ? fmt(j.sheets) + ' sheets' : '', 'None'))}
@@ -5645,6 +5687,7 @@ function renderCeoDash() {
       ${tile('imports-soon', 'import', 'Imports due this week', fmt(f.importsSoon.length), f.importsOverdue ? `${fmt(f.importsOverdue)} past their date` : 'next 7 days', () => list(f.importsSoon.map(x => row(esc([x.i.paper_type, x.i.size, x.i.gsm ? x.i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(x.i.packets)} · ${dmy(x.d)}${x.d < localDateISO() ? ' <b style="color:#dc2626;">late</b>' : ''}`)), 'Nothing due in the next 7 days'))}
       ${tile('offcut', 'offcut', 'Offcut stock', fmt(f.offcutSheets), `sheets · ${fmt(f.offcuts.length)} papers`, () => list(f.offcuts.map(e => row(esc(e.label), fmt(e.sheets) + ' sheets')), 'No offcut paper on hand'))}
       ${tile('over-issued', 'over', 'Over-issued paper', fmt(f.overIssued.length), 'waiting for a decision', jobList(f.overIssued, j => { const p = overIssuePending(j) || {}; return `${esc(String(p.total_packets ?? ''))} ${esc(p.unit || 'packets')}${p.challan_no ? ' · challan ' + esc(p.challan_no) : ''}`; }, 'Nothing over-issued'))}
+    </div>
     </div>`;
   const open = ceoDash.open && details[ceoDash.open];
   const pop = !open ? '' : `<div class="cd-pop-bg" onclick="if (event.target === this) ceoDashCloseMore()">
