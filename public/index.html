@@ -2665,6 +2665,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-import { --c:#dc2626; --t:#fee2e2; }
 .cd-money  { --c:#1a1a18; --t:#f8fafc; }
 .cd-waste  { --c:#475569; --t:#f1f5f9; }
+.cd-mil    { --c:#7c3aed; --t:#f5f3ff; }
+.cd-offcut { --c:#0891b2; --t:#ecfeff; }
+.cd-over   { --c:#9f1239; --t:#ffe4e6; }
 /* "See more": the tile stays small; its details open in a pop-up. */
 .cd-foot { margin-top:auto; padding-top:6px; }
 .cd-more { padding:2px 8px; font-size:11px; font-weight:700; border:1px solid var(--c); color:var(--c); background:var(--bg); border-radius:6px; cursor:pointer; }
@@ -5478,6 +5481,39 @@ function ceoDashFigures() {
   }
   f.shortPapers = [...papers.values()].filter(e => e.have < e.need).sort((x, y) => (x.have > 0) - (y.have > 0) || (y.need - y.have) - (x.need - x.have));
   f.imports = (ceoDash.imports || []).filter(i => i.status === 'pending' || i.status === 'partial');
+  // MIL, right now - the MIL Products report's own figures (no filters).
+  f.mil = typeof jrMilRows === 'function' ? jrMilRows({ asOf: '', q: '', client: '' }) : [];
+  f.milTot = f.mil.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, shipped: a.shipped + r.shipped }), { milQty: 0, ready: 0, shipped: 0 });
+  // MIL nearly used up: made (ready on the shelf + shipped) is 90% or more of
+  // the MIL Qty - time to look at the next MIL order.
+  f.milLow = f.mil.filter(r => r.milQty > 0 && (r.ready + r.shipped) >= 0.9 * r.milQty)
+    .map(r => ({ ...r, made: r.ready + r.shipped, pct: (r.ready + r.shipped) * 100 / r.milQty }))
+    .sort((x, y) => y.pct - x.pct);
+  // Offcut paper on hand, biggest first.
+  f.offcuts = (inventoryAll || []).filter(i => i && i.is_offcut && (+i.current_balance || 0) > 0)
+    .map(i => ({ label: [i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : '', i.brand].filter(Boolean).join(' '), sheets: +i.current_balance || 0 }))
+    .sort((x, y) => y.sheets - x.sheets);
+  f.offcutSheets = f.offcuts.reduce((a, e) => a + e.sheets, 0);
+  // Imports due in the next 7 days, plus any already past their date.
+  const in7 = localDateISO(new Date(Date.now() + 7 * 864e5));
+  f.importsSoon = f.imports.filter(i => i.expected_arrival && String(i.expected_arrival).slice(0, 10) <= in7)
+    .map(i => ({ i, d: String(i.expected_arrival).slice(0, 10) }))
+    .sort((x, y) => x.d.localeCompare(y.d));
+  f.importsOverdue = f.importsSoon.filter(x => x.d < today).length;
+  // Paper issued in the period, by paper type.
+  const byType = new Map();
+  for (const t of (ceoDash.txs || [])) {
+    if (!(t.change < 0)) continue;
+    const type = String(t.paper_type || '—');
+    const units = Math.abs(t.change) / packetSize(t.paper_type || '');
+    const w = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
+    const k = byType.get(type) || { type, units: 0, kg: 0, ream: isReamPaper(t.paper_type) };
+    k.units += units; if (w !== null) k.kg += units * w;
+    byType.set(type, k);
+  }
+  f.paperByType = [...byType.values()].sort((x, y) => y.kg - x.kg || y.units - x.units);
+  // Over-issued: more paper went out than the job needs, decision pending.
+  f.overIssued = typeof hasOverIssuePending === 'function' ? live.filter(j => hasOverIssuePending(j)) : [];
   f.prod = ceoDashProduction(ceoDash.prod);
   return f;
 }
@@ -5502,6 +5538,12 @@ function ceoDashProduction(data) {
   }
   return out;
 }
+// MIL pop-ups end with a way into the MIL Products report.
+function ceoDashMilLink() {
+  if (typeof tabAllowed === 'function' && !tabAllowed('reports')) return '';
+  return '<div style="margin-top:10px;"><button class="btn btn-sm" style="background:#7c3aed;border-color:#7c3aed;color:#fff;font-weight:700;" onclick="ceoDashOpenMilReport()">Open the MIL Products report &rarr;</button></div>';
+}
+function ceoDashOpenMilReport() { ceoDash.open = ''; setMode('reports'); openReportsGroup('jobs-group', 'mil-products'); }
 function ceoDashMore(key) { ceoDash.open = key; renderCeoDash(); }
 function ceoDashCloseMore() { ceoDash.open = ''; renderCeoDash(); }
 function ceoDashOpenJob(id) { ceoDash.open = ''; renderCeoDash(); openEdit(id); }
@@ -5569,6 +5611,7 @@ function renderCeoDash() {
           `<div class="cd-sub">Wastage Weight × 100 ÷ Packets Issued Weight</div>`
           + head('By company · highest first') + list(f.wasteByCompany.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded')
           + head('By product · highest first') + list(f.wasteByProduct.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded'))}
+      ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
     </div>
 
     <div class="cd-sec">Jobs <small>· right now</small></div>
@@ -5586,11 +5629,22 @@ function renderCeoDash() {
     ${ceoDashRangeBar('cd-p', ceoDash.prange, ceoDash.pdfrom, ceoDash.pdto, 'setCeoDashProdRange', 'setCeoDashProdCustom', 'loadCeoDashProd')}
     ${prodTiles}
 
+    <div class="cd-sec">MIL <small>· right now</small></div>
+    <div class="cd-grid">
+      ${tile('mil-qty', 'mil', 'MIL Qty', fmt(f.milTot.milQty), `${fmt(f.mil.length)} MIL products`, () => list(f.mil.map(r => row(esc(r.product), fmt(r.milQty))), 'No MIL products') + ceoDashMilLink())}
+      ${tile('mil-ready', 'mil', 'MIL ready', fmt(f.milTot.ready), 'on the shelf', () => list(f.mil.filter(r => r.ready > 0).sort((x, y) => y.ready - x.ready).map(r => row(esc(r.product), fmt(r.ready))), 'Nothing ready') + ceoDashMilLink())}
+      ${tile('mil-shipped', 'mil', 'MIL shipped', fmt(f.milTot.shipped), 'to date', () => list(f.mil.filter(r => r.shipped > 0).sort((x, y) => y.shipped - x.shipped).map(r => row(esc(r.product), fmt(r.shipped))), 'Nothing shipped') + ceoDashMilLink())}
+      ${tile('mil-low', f.milLow.some(r => r.pct >= 100) ? 'out' : 'mil', 'MIL nearly used', fmt(f.milLow.length), 'made 90%+ of MIL Qty', () => `<div class="cd-sub">Made = ready on the shelf + shipped, against the MIL Qty.</div>` + list(f.milLow.map(r => row(esc(r.product), `${fmt(r.made)} of ${fmt(r.milQty)} · <span style="color:${r.pct >= 100 ? '#dc2626' : '#6d28d9'};">${fmt(Math.round(r.pct))}%</span>`)), 'No MIL product is near its MIL Qty') + ceoDashMilLink())}
+    </div>
+
     <div class="cd-sec">Stock <small>· right now</small></div>
     <div class="cd-grid">
       ${tile('short', f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), 'papers short', () => list(f.shortPapers.map(e => row(esc(e.label), `${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}`)), 'Enough paper for every pending job'))}
       ${tile('pending', 'stock', 'Pending Stock', fmt(f.pendingQueue.length), 'jobs waiting for paper', jobList(f.pendingQueue, j => j.sheets ? fmt(j.sheets) + ' sheets' : '', 'None'))}
       ${tile('imports', 'import', 'Pending imports', fmt(f.imports.length), '', () => list(f.imports.map(i => row(esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(i.packets)}${i.expected_arrival ? ' · ' + dmy(i.expected_arrival) : ''}`)), 'None pending'))}
+      ${tile('imports-soon', 'import', 'Imports due this week', fmt(f.importsSoon.length), f.importsOverdue ? `${fmt(f.importsOverdue)} past their date` : 'next 7 days', () => list(f.importsSoon.map(x => row(esc([x.i.paper_type, x.i.size, x.i.gsm ? x.i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(x.i.packets)} · ${dmy(x.d)}${x.d < localDateISO() ? ' <b style="color:#dc2626;">late</b>' : ''}`)), 'Nothing due in the next 7 days'))}
+      ${tile('offcut', 'offcut', 'Offcut stock', fmt(f.offcutSheets), `sheets · ${fmt(f.offcuts.length)} papers`, () => list(f.offcuts.map(e => row(esc(e.label), fmt(e.sheets) + ' sheets')), 'No offcut paper on hand'))}
+      ${tile('over-issued', 'over', 'Over-issued paper', fmt(f.overIssued.length), 'waiting for a decision', jobList(f.overIssued, j => { const p = overIssuePending(j) || {}; return `${esc(String(p.total_packets ?? ''))} ${esc(p.unit || 'packets')}${p.challan_no ? ' · challan ' + esc(p.challan_no) : ''}`; }, 'Nothing over-issued'))}
     </div>`;
   const open = ceoDash.open && details[ceoDash.open];
   const pop = !open ? '' : `<div class="cd-pop-bg" onclick="if (event.target === this) ceoDashCloseMore()">
@@ -15575,9 +15629,10 @@ function jrMilJobFigures(j, asOf) {
   const inHand = closed ? 0 : Math.max(0, made - shipped);
   return { shipped, inHand };
 }
-function jrMilRows() {
-  const asOf = jrMilAsOf();
-  const qn = String(milRptState.q || '').trim().toLowerCase().replace(/\s+/g, ' ');
+function jrMilRows(opts) {
+  const o = opts || milRptState;
+  const asOf = o.asOf || localDateISO();
+  const qn = String(o.q || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const groups = new Map();
   for (const j of (jobs || [])) {
     if (!j || !j.stock_group_name) continue;
@@ -15592,7 +15647,7 @@ function jrMilRows() {
     const product = (ent && ent.product) || gName;
     const code = (ent && ent.jobcode) || (repr && repr.jobcode) || '';
     const client = (repr && repr.client) || '';
-    if (milRptState.client && client !== milRptState.client) continue;
+    if (o.client && client !== o.client) continue;
     if (qn && !(String(product).toLowerCase().replace(/\s+/g, ' ').includes(qn) || String(code).toLowerCase().includes(qn) || String(gName).toLowerCase().includes(qn))) continue;
     const milQty = ent
       ? (parseFloat(String(ent.po_qty || '').replace(/[^0-9.\-]/g, '')) || 0)
