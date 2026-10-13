@@ -715,6 +715,10 @@
   .ledger-compact th, .ledger-compact td { padding: 6px 6px; }
   .ledger-compact td { word-break: break-word; vertical-align: top; }
   .ss-table th     { color: var(--text); font-weight: 700; }
+  /* Current Balance Summary, Offcut only: every column hugs its contents and
+     the empty column at the end takes the spare width. */
+  .ir-offcut-compact th, .ir-offcut-compact td { width: 1%; white-space: nowrap; }
+  .ir-offcut-compact .ir-blank-col { width: auto; min-width: 160px; }
   /* Compact "who did what" activity feed — used for Job audit log, Inventory
      audit log, and per-User activity. Grouped by day, one line per event:
      time + action-tag badge + short bold summary + "by <person>". */
@@ -12827,6 +12831,10 @@ function renderInventoryReport() {
   const consumedHead = showConsumed ? `<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed (${esc(periodLabel)})</th>` : '';
   // Offcut only: no Import column - offcuts are never imported (owner, 2026-10-13).
   const showImport = invReportState.offcutMode !== 'offcut';
+  // Offcut only: every row is an offcut, so no Fresh / Offcut column; columns
+  // hug their contents and an empty column after Weight takes the spare width
+  // (owner, 2026-10-13).
+  const offcutOnly = invReportState.offcutMode === 'offcut';
   const importHead   = showImport ? `<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Import</th>` : '';
   const brandCell    = (r) => showBrand    ? `<td style="padding:6px 8px;">${esc(r.brand)    || '—'}</td>` : '';
   const supplierCell = (r) => showSupplier ? `<td style="padding:6px 8px;">${esc(r.supplier) || '—'}</td>` : '';
@@ -12842,7 +12850,7 @@ function renderInventoryReport() {
         ? `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received. Click to open it on the Imports page."><span onclick="event.stopPropagation(); irOpenImports(${i})" style="cursor:pointer;">${importPill(r.importPkts)}</span></td>`
         : `<td style="padding:6px 8px;text-align:right;" title="Pending import — not yet received">${importPill(r.importPkts)}</td>`)
     : `<td style="padding:6px 8px;text-align:right;color:var(--text3);">—</td>`;
-  const totalSpan = 4 + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
+  const totalSpan = (offcutOnly ? 3 : 4) + (showBrand ? 1 : 0) + (showSupplier ? 1 : 0);
   const canJump = tabAllowed('inventory');
   el.innerHTML = `
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">
@@ -12850,13 +12858,13 @@ function renderInventoryReport() {
       ${total.sheets.toLocaleString()} sheets total &middot; ${fmtKg(total.weight)} kg total
     </div>
     <div class="report-scroll-wrap">
-    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+    <table class="ss-table${offcutOnly ? ' ir-offcut-compact' : ''}" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead>
         <tr style="background:var(--bg2);">
           <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Paper Type</th>
           <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Size</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">GSM</th>
-          <th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Fresh / Offcut</th>
+          ${offcutOnly ? '' : '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Fresh / Offcut</th>'}
           ${brandHead}${supplierHead}
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Items</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Packets / Reams</th>
@@ -12864,6 +12872,7 @@ function renderInventoryReport() {
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Weight (kg)</th>
           ${consumedHead}
           ${importHead}
+          ${offcutOnly ? '<th class="ir-blank-col" style="padding:8px;"></th>' : ''}
         </tr>
       </thead>
       <tbody>
@@ -12881,7 +12890,7 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;">${esc(r.paperType)}</td>
             <td style="padding:6px 8px;">${esc(r.size) || '—'}</td>
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm) || '—'}</td>
-            <td style="padding:6px 8px;">${r.isOffcut ? '<span style="color:#155e75;font-weight:600;">Offcut</span>' : 'Fresh'}</td>
+            ${offcutOnly ? '' : `<td style="padding:6px 8px;">${r.isOffcut ? '<span style="color:#155e75;font-weight:600;">Offcut</span>' : 'Fresh'}</td>`}
             ${brandCell(r)}${supplierCell(r)}
             <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.itemCount}</td>
             <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.packets, {keepZero:true})}</td>
@@ -12889,6 +12898,7 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>
             ${consumedCell(r)}
             ${importCell(r, i)}
+            ${offcutOnly ? '<td class="ir-blank-col"></td>' : ''}
           </tr>`;
         }).join('')}
       </tbody>
@@ -12901,6 +12911,7 @@ function renderInventoryReport() {
           <td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>
           ${showConsumed ? `<td style="padding:8px;text-align:right;color:#A32D2D;">${fmtPkts(rows.reduce((a,r) => a + r.consumedPkts, 0))}</td>` : ''}
           ${showImport ? `<td style="padding:8px;text-align:right;">${importPill(rows.reduce((a,r) => a + r.importPkts, 0))}</td>` : ''}
+          ${offcutOnly ? '<td class="ir-blank-col"></td>' : ''}
         </tr>
       </tfoot>
     </table>
@@ -12969,7 +12980,7 @@ async function exportInventoryReport() {
 // Sizing the wrapper to its widest child makes the two line up; min-width
 // keeps a narrow table's heading full-width.
 const REPORT_PRINT_WRAP = 'font-family:Arial,sans-serif;color:#000;width:max-content;min-width:100%;';
-function reportPrintHeading({ title, formCode, scope, dateText, note }) {
+function reportPrintHeading({ title, formCode, scope, dateText, note, tag, tagColor }) {
   return `
       <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
         <div style="display:grid;grid-template-columns:150px 1fr 150px;align-items:center;gap:5px;">
@@ -12979,6 +12990,7 @@ function reportPrintHeading({ title, formCode, scope, dateText, note }) {
           </div>
           <div style="text-align:center;">
             <div style="font-size:14pt;color:#a32d2d;">${esc(title || '')}</div>
+            ${tag ? `<div style="font-size:11pt;font-weight:bold;letter-spacing:1px;color:${tagColor || '#155e75'};">${esc(tag)}</div>` : ''}
             ${formCode ? `<div style="font-size:8pt;margin-top:1px;">${esc(formCode)}</div>` : ''}
             ${scope ? `<div style="font-size:8pt;margin-top:1px;">${esc(scope)}</div>` : ''}
           </div>
@@ -13099,8 +13111,14 @@ function printInventoryReport() {
                   : showBrand                 ? 'By Brand'
                   : showSupplier              ? 'By Supplier'
                   :                             'Ignoring Brand & Supplier';
-  const tdL = 'style="border:1px solid #000;padding:4px;"';
-  const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
+  // Offcut only: no Fresh / Offcut column (OFFCUT is written under the title),
+  // columns hug their contents, and an empty column after Weight takes the
+  // spare width to write on (owner, 2026-10-13).
+  const offcutOnly = invReportState.offcutMode === 'offcut';
+  const fit = offcutOnly ? 'width:1%;white-space:nowrap;' : '';
+  const tdL = `style="border:1px solid #000;padding:4px;${fit}"`;
+  const tdR = `style="border:1px solid #000;padding:4px;text-align:right;${fit}"`;
+  const blankTd = offcutOnly ? '<td style="border:1px solid #000;padding:4px;"></td>' : '';
   const fmt = n => n === null || n === undefined ? '—' : (Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString());
   const tableRows = rows.map(r => {
     const brandTd    = showBrand    ? `<td ${tdL}>${esc(r.brand    || '—')}</td>` : '';
@@ -13111,7 +13129,7 @@ function printInventoryReport() {
     const shortfall = showConsumed && r.consumedPkts > 0 && r.packets < r.consumedPkts;
     const rowStyle = shortfall ? 'background:#fee2e2;' : '';
     const consumedTd = showConsumed
-      ? `<td style="border:1px solid #000;padding:4px;text-align:right;color:#A32D2D;font-weight:bold;">${fmt(+r.consumedPkts.toFixed(2))}</td>`
+      ? `<td style="border:1px solid #000;padding:4px;text-align:right;color:#A32D2D;font-weight:bold;${fit}">${fmt(+r.consumedPkts.toFixed(2))}</td>`
       : '';
     const importTd = invReportState.offcutMode === 'offcut' ? '' : r.importPkts
       ? `<td style="border:1px solid #000;padding:4px;text-align:right;"><span style="display:inline-block;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;font-weight:bold;padding:1px 7px;border-radius:8px;">${fmt(+r.importPkts.toFixed(2))}</span></td>`
@@ -13120,7 +13138,7 @@ function printInventoryReport() {
       <td ${tdL}>${esc(r.paperType)}</td>
       <td ${tdL}>${esc(r.size || '—')}</td>
       <td ${tdL}>${esc(r.gsm || '—')}</td>
-      <td ${tdL}>${r.isOffcut ? '<span style="color:#155e75;font-weight:bold;">Offcut</span>' : 'Fresh'}</td>
+      ${offcutOnly ? '' : `<td ${tdL}>${r.isOffcut ? '<span style="color:#155e75;font-weight:bold;">Offcut</span>' : 'Fresh'}</td>`}
       ${brandTd}${supplierTd}
       <td ${tdR}>${r.itemCount}</td>
       <td ${tdR}>${fmt(+r.packets.toFixed(2))}</td>
@@ -13128,14 +13146,16 @@ function printInventoryReport() {
       <td ${tdR}>${fmt(r.weightKg)}</td>
       ${consumedTd}
       ${importTd}
+      ${blankTd}
     </tr>`;
   }).join('');
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
-    <div style="${REPORT_PRINT_WRAP}">
+    <div style="${REPORT_PRINT_WRAP}${offcutOnly ? 'width:100%;' : ''}">
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'CURRENT BALANCE SUMMARY',
-        scope: `${modeLabel} · Paper: ${paperType || 'All'} · ${irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
+        tag: offcutOnly ? 'OFFCUT' : '',
+        scope: `${modeLabel} · Paper: ${paperType || 'All'}${offcutOnly ? '' : ' · ' + irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
         dateText: `Generated: ${fmtDMYT(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
@@ -13143,7 +13163,7 @@ function printInventoryReport() {
           <th ${tdL}>Paper Type</th>
           <th ${tdL}>Size</th>
           <th ${tdL}>GSM</th>
-          <th ${tdL}>Fresh / Offcut</th>
+          ${offcutOnly ? '' : `<th ${tdL}>Fresh / Offcut</th>`}
           ${showBrand    ? `<th ${tdL}>Brand</th>`    : ''}
           ${showSupplier ? `<th ${tdL}>Supplier</th>` : ''}
           <th ${tdR}>Items</th>
@@ -13152,6 +13172,7 @@ function printInventoryReport() {
           <th ${tdR}>Weight (kg)</th>
           ${showConsumed ? `<th ${tdR}>Consumed (${esc(periodLabel)})</th>` : ''}
           ${invReportState.offcutMode === 'offcut' ? '' : `<th ${tdR}>Import</th>`}
+          ${offcutOnly ? '<th style="border:1px solid #000;padding:4px;"></th>' : ''}
         </tr>
         ${tableRows}
       </table>
