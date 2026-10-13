@@ -7452,12 +7452,13 @@ function deliveryHasOwnShipper(d) {
 function stationShipperTotal(job) {
   const p = job && job.particulars && job.particulars.ready_packets_qty;
   if (!p) return 0;
-  const num = s => {
-    const t = String(s ?? '').trim();
+  // One entry may hold several lines: "1600x20+1400x3" = 23 cartons.
+  const one = t => {
     const m = /^([\d.]+)\s*[x×*]\s*([\d.]+)$/i.exec(t);
     if (m) return parseFloat(m[2]) || 0;
     const n = parseFloat(t.replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) ? n : 0;
   };
+  const num = s => String(s ?? '').split('+').map(x => x.trim()).filter(Boolean).reduce((a, x) => a + one(x), 0);
   if (Array.isArray(p.entries) && p.entries.length) return p.entries.reduce((a, e) => a + num(e && e.qty), 0);
   return String(p.quantity || '').split('|').reduce((a, s) => a + num(s), 0);
 }

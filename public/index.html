@@ -2026,6 +2026,12 @@
   body.station-fixed .station-field .station-shipper-pair input { font-size: 20px; padding: 10px 4px; }
   .station-shipper-x { font-size: 20px; font-weight: 800; color: var(--text2); }
   .station-shipper-hint { font-size: 10px; color: var(--text3); }
+  .station-field--shipper { gap: 5px; }
+  .station-shipper-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .station-shipper-plus, .station-shipper-minus { flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%; border: none; cursor: pointer; font-size: 20px; font-weight: 800; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
+  .station-shipper-plus { background: #7f1d1d; color: #fff; box-shadow: 0 2px 6px rgba(127,29,29,0.35); }
+  .station-shipper-minus { background: #f3f4f6; color: var(--text2); border: 1px solid var(--border2); width: 22px; height: 22px; font-size: 16px; position: absolute; right: -9px; top: -9px; z-index: 1; }
+  .station-shipper-pair { position: relative; }
   .station-field.station-field--shipper label { font-size: 13px; white-space: nowrap; }
   .station-field-grid--3up .station-field label { font-size: 12px; }
   .station-field-grid--3up .station-field input { font-size: 20px; padding: 10px 6px; border-radius: 8px; }
@@ -4346,13 +4352,19 @@ function shipperParse(raw) {
   const n = parseFloat(s.replace(/[^0-9.\-]/g, ''));
   return { per: 0, cartons: Number.isFinite(n) ? n : 0 };
 }
-// Cartons in a shipper row: its entries (or pipe-joined quantity) added up.
+// One entry can hold several lines joined by "+" ("1600x20+1400x3" - two
+// kinds of shipper carton the same day).
+function shipperLines(raw) {
+  return String(raw ?? '').split('+').map(s => s.trim()).filter(Boolean).map(shipperParse);
+}
+// Cartons in a shipper row: its entries (or pipe-joined quantity), every
+// line of each, added up.
 function shipperCartonsOf(row) {
   if (!row) return 0;
   const parts = Array.isArray(row.entries) && row.entries.length
     ? row.entries.map(e => (e && e.qty) || '')
     : String(row.quantity || '').split('|');
-  return parts.reduce((a, s) => a + shipperParse(s).cartons, 0);
+  return parts.reduce((a, s) => a + shipperLines(s).reduce((b, l) => b + l.cartons, 0), 0);
 }
 // ── Linked Jobs (pairwise) ────────────────────────────────────────
 // Resolve a job by id from whichever cache is loaded — the admin `jobs`
@@ -34247,6 +34259,8 @@ function stationUpdateHtml() {
   if (stationJobPassKey !== j.id) {
     stationPassCount = Math.max(1, existingPassCount);
     stationJobPassKey = j.id;
+    stationShipperLineCount = {};
+    stationShipperOverride = {};
   } else if (stationPassCount < Math.max(1, existingPassCount)) {
     // After a save the entries[] may grow on the server; sync up so the
     // next render shows every persisted pass.
@@ -34398,21 +34412,26 @@ function stationUpdateHtml() {
     // together in a hidden field as "1600x20" (stationShipperSync).
     const shipperFields = fields.filter(f => f.type === 'shipper');
     const laptopAttrs = `inputmode="decimal"`;
+    // Each field can hold several lines (its own +), saved "1600x20+1400x3".
     const shipperHtml = shipperFields.length ? `<div class="station-shipper-row">${shipperFields.map(f => {
       const inputId = `sf-${f.key}-p${passIdx}`;
-      const cur = passValue(f, passIdx);
-      const has = String(cur || '').trim() !== '';
-      const parts = shipperParse(cur);
-      const dq = stationDraftValues[inputId + '-q'], dn = stationDraftValues[inputId + '-n'];
-      const qv = dq !== undefined ? dq : (has && parts.per ? String(parts.per) : '');
-      const nv = dn !== undefined ? dn : (has ? String(parts.cartons || '') : '');
-      const box = (suffix, ph, val, padLabel) => `<input type="text" ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('${inputId}-${suffix}', '${padLabel}')"` : laptopAttrs} class="numpad-target station-shipper-in" id="${inputId}-${suffix}" value="${esc(val)}" placeholder="${ph}">`;
+      const cur = stationShipperOverride[inputId] !== undefined ? stationShipperOverride[inputId] : passValue(f, passIdx);
+      const saved = shipperLines(cur);
+      const count = stationShipperLineCount[inputId] !== undefined ? Math.max(1, stationShipperLineCount[inputId]) : Math.max(1, saved.length);
+      const box = (k, suffix, ph, val, padLabel) => `<input type="text" ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('${inputId}-${suffix}${k}', '${padLabel}')"` : laptopAttrs} class="numpad-target station-shipper-in" id="${inputId}-${suffix}${k}" value="${esc(val)}" placeholder="${ph}">`;
+      const lines = Array.from({ length: count }, (_, k) => {
+        const s = saved[k];
+        const dq = stationDraftValues[`${inputId}-q${k}`], dn = stationDraftValues[`${inputId}-n${k}`];
+        const qv = dq !== undefined ? dq : (s && s.per ? String(s.per) : '');
+        const nv = dn !== undefined ? dn : (s ? String(s.cartons || '') : '');
+        return `<div class="station-shipper-pair">${box(k, 'q', 'Qty', qv, f.label + ' - qty in each carton')}<span class="station-shipper-x">&times;</span>${box(k, 'n', 'Cartons', nv, f.label + ' - number of cartons')}${k > 0 ? `<button type="button" class="station-shipper-minus" onclick="stationShipperRemoveLine('${inputId}', ${k})" title="Remove this line">&minus;</button>` : ''}</div>`;
+      }).join('');
       return `
         <div class="station-field station-field--shipper">
-          <label>${esc(f.label)}</label>
-          <div class="station-shipper-pair">${box('q', 'Qty', qv, f.label + ' - qty in each carton')}<span class="station-shipper-x">&times;</span>${box('n', 'Cartons', nv, f.label + ' - number of cartons')}</div>
+          <div class="station-shipper-head"><label>${esc(f.label)}</label><button type="button" class="station-shipper-plus" onclick="stationShipperAddLine('${inputId}')" title="Another ${esc(f.label)} line (a different qty in each carton)">+</button></div>
+          ${lines}
           <div class="station-shipper-hint">qty in each &times; cartons</div>
-          <input type="hidden" class="station-shipper-val" id="${inputId}" data-key="${esc(f.key)}" data-pass="${passIdx}" value="${esc(cur)}">
+          <input type="hidden" class="station-shipper-val" id="${inputId}" data-key="${esc(f.key)}" data-pass="${passIdx}" data-lines="${count}" value="${esc(cur)}">
         </div>`;
     }).join('')}</div>` : '';
     // Printing only: third column, "this qty was printed Nx" instead of the
@@ -34628,10 +34647,49 @@ function stationShipperCombine(q, n) {
 }
 function stationShipperSync() {
   document.querySelectorAll('input.station-shipper-val').forEach(h => {
-    const q = document.getElementById(h.id + '-q'), n = document.getElementById(h.id + '-n');
-    if (q && n) h.value = stationShipperCombine(q.value, n.value);
+    const n = parseInt(h.dataset.lines, 10) || 1;
+    const parts = [];
+    for (let k = 0; k < n; k++) {
+      const q = document.getElementById(`${h.id}-q${k}`), c = document.getElementById(`${h.id}-n${k}`);
+      if (q && c) { const v = stationShipperCombine(q.value, c.value); if (v) parts.push(v); }
+    }
+    h.value = parts.join('+');
   });
 }
+// Lines shown per shipper field (by its field id), beyond what is saved.
+let stationShipperLineCount = {};
+function stationShipperAddLine(fieldId) {
+  stationSnapshotDraft();
+  const h = document.getElementById(fieldId);
+  stationShipperLineCount[fieldId] = ((h && parseInt(h.dataset.lines, 10)) || 1) + 1;
+  stationRender();
+}
+// Drop line k: the lines under it move up one (their typed values too).
+function stationShipperRemoveLine(fieldId, k) {
+  stationSnapshotDraft();
+  const h = document.getElementById(fieldId);
+  const n = (h && parseInt(h.dataset.lines, 10)) || 1;
+  for (let i = k; i < n - 1; i++) {
+    for (const s of ['q', 'n']) {
+      const next = document.getElementById(`${fieldId}-${s}${i + 1}`);
+      stationDraftValues[`${fieldId}-${s}${i}`] = next ? next.value : '';
+    }
+  }
+  delete stationDraftValues[`${fieldId}-q${n - 1}`]; delete stationDraftValues[`${fieldId}-n${n - 1}`];
+  stationShipperLineCount[fieldId] = Math.max(1, n - 1);
+  // A saved line removed: the field's saved value must not bring it back.
+  if (h) {
+    const parts = [];
+    for (let i = 0; i < n - 1; i++) {
+      const v = stationShipperCombine(stationDraftValues[`${fieldId}-q${i}`], stationDraftValues[`${fieldId}-n${i}`]);
+      if (v) parts.push(v);
+    }
+    stationShipperOverride[fieldId] = parts.join('+');
+  }
+  stationRender();
+}
+// After a line is removed, what the field holds until it is saved.
+let stationShipperOverride = {};
 function stationSnapshotDraft() {
   stationShipperSync();
   document.querySelectorAll('.station-update [id^="sf-"]').forEach(el => {
@@ -35264,6 +35322,7 @@ async function stationSubmit(advance, skipTo) {
       // would flood an Emboss operator's view with empty rows once
       // hidden UV entries piled up.
       stationPassCount = stationPassCount + 1;
+      stationShipperOverride = {};   // saved now - the field holds it
       // Only refetch notes if the operator actually sent something — Save
       // without a note doesn't change the inbound list, so we save a round-
       // trip and re-render straight from local state.
