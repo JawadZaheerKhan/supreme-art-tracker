@@ -2018,6 +2018,15 @@
      wrapping to two. Selector specificity matches body.station-fixed's
      input-size override further down so this actually wins there too. */
   .station-field-grid--3up { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  /* Carton Shipper + Loose Carton Shipper: their own full-width row, side by
+     side; each is "qty x cartons" in two boxes (2026-10-13). */
+  .station-shipper-row { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .station-shipper-pair { display: flex; align-items: center; gap: 6px; }
+  .station-field .station-shipper-pair input { flex: 1; min-width: 0; font-size: 20px; padding: 10px 4px; }
+  body.station-fixed .station-field .station-shipper-pair input { font-size: 20px; padding: 10px 4px; }
+  .station-shipper-x { font-size: 20px; font-weight: 800; color: var(--text2); }
+  .station-shipper-hint { font-size: 10px; color: var(--text3); }
+  .station-field.station-field--shipper label { font-size: 13px; white-space: nowrap; }
   .station-field-grid--3up .station-field label { font-size: 12px; }
   .station-field-grid--3up .station-field input { font-size: 20px; padding: 10px 6px; border-radius: 8px; }
   body.station-fixed .station-field-grid--3up .station-field input { font-size: 20px; padding: 10px 6px; }
@@ -4325,18 +4334,25 @@ function cartonsPacketsFor(j) {
 // already recorded.
 function readyPacketsQtyTotal(j) {
   if (!j) return 0;
-  const p = j.particulars && j.particulars.ready_packets_qty;
-  if (!p) return 0;
-  if (Array.isArray(p.entries) && p.entries.length) {
-    return p.entries.reduce((a, e) => {
-      const n = parseFloat(String((e && e.qty) || '').replace(/[^0-9.\-]/g, ''));
-      return a + (Number.isFinite(n) ? n : 0);
-    }, 0);
-  }
-  return String(p.quantity || '').split('|').reduce((a, s) => {
-    const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
-    return a + (Number.isFinite(n) ? n : 0);
-  }, 0);
+  return shipperCartonsOf(j.particulars && j.particulars.ready_packets_qty);
+}
+// Carton Shipper / Loose Carton Shipper are written "1600x20" - 20 cartons
+// with 1600 in each (owner, 2026-10-13). Older entries are a plain carton
+// count ("6"). per = qty in each carton (0 when not given), cartons = count.
+function shipperParse(raw) {
+  const s = String(raw ?? '').trim();
+  const m = /^([\d.]+)\s*[x×*]\s*([\d.]+)$/i.exec(s);
+  if (m) return { per: parseFloat(m[1]) || 0, cartons: parseFloat(m[2]) || 0 };
+  const n = parseFloat(s.replace(/[^0-9.\-]/g, ''));
+  return { per: 0, cartons: Number.isFinite(n) ? n : 0 };
+}
+// Cartons in a shipper row: its entries (or pipe-joined quantity) added up.
+function shipperCartonsOf(row) {
+  if (!row) return 0;
+  const parts = Array.isArray(row.entries) && row.entries.length
+    ? row.entries.map(e => (e && e.qty) || '')
+    : String(row.quantity || '').split('|');
+  return parts.reduce((a, s) => a + shipperParse(s).cartons, 0);
 }
 // ── Linked Jobs (pairwise) ────────────────────────────────────────
 // Resolve a job by id from whichever cache is loaded — the admin `jobs`
@@ -26325,7 +26341,8 @@ function particularsTable(p, job, opts) {
   const rows = jobParticularsRows
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
     .flatMap(r => r.key === 'delivered_cartons_qty'
-      ? [r, { key: 'ready_packets_qty', label: 'Carton Shipper', stageOf: 'delivered_cartons_qty' }]
+      ? [r, { key: 'ready_packets_qty', label: 'Carton Shipper', stageOf: 'delivered_cartons_qty' },
+            { key: 'loose_shipper_qty', label: 'Loose Carton Shipper', stageOf: 'delivered_cartons_qty' }]
       : [r])
     .map(r => {
       const stage = PARTICULARS_STAGE_MAP[r.stageOf || r.key];
@@ -29626,15 +29643,14 @@ function collectParticulars() {
       out[r.key] = { ...priorRow, ...rowPatch };
     }
   });
-  // Carton Shipper row (its own row under Ready to Delivery Qty): same
-  // keep / merge / blank-to-delete rules as the rows above.
-  const shipperQtyEl = document.getElementById('p-ready_packets_qty-quantity');
-  if (shipperQtyEl) {
-    const cell = sub => (document.getElementById(`p-ready_packets_qty-${sub}`)||{}).value || '';
+  // Carton Shipper + Loose Carton Shipper rows (their own rows under Ready
+  // to Delivery Qty): same keep / merge / blank-to-delete rules as above.
+  for (const sk of ['ready_packets_qty', 'loose_shipper_qty']) {
+    if (!document.getElementById(`p-${sk}-quantity`)) continue;
+    const cell = sub => (document.getElementById(`p-${sk}-${sub}`)||{}).value || '';
     const rowPatch = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
-    const priorRow = (priorParticularsCP.ready_packets_qty && typeof priorParticularsCP.ready_packets_qty === 'object')
-      ? priorParticularsCP.ready_packets_qty : {};
-    if (rowPatch.details || rowPatch.quantity || rowPatch.name || rowPatch.signature) out.ready_packets_qty = { ...priorRow, ...rowPatch };
+    const priorRow = (priorParticularsCP[sk] && typeof priorParticularsCP[sk] === 'object') ? priorParticularsCP[sk] : {};
+    if (rowPatch.details || rowPatch.quantity || rowPatch.name || rowPatch.signature) out[sk] = { ...priorRow, ...rowPatch };
   }
   // Row-7 (CTP setup) — writes back onto the same particulars keys so
   // reports + the print card stay compatible with legacy data. Prior
@@ -29729,6 +29745,7 @@ function collectParticulars() {
     // card without its Carton Shipper row on screen (none of this form's
     // rows reach it) keeps the prior value instead of wiping it on save.
     if (!document.getElementById('p-ready_packets_qty-quantity') && !out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
+    if (!document.getElementById('p-loose_shipper_qty-quantity') && !out.loose_shipper_qty && priorP.loose_shipper_qty) out.loose_shipper_qty = priorP.loose_shipper_qty;
     // offcut_pre_consumed is written by the server on CTP forward and
     // read on Issue Stock. NOT surfaced in this form. Preserve so an
     // admin edit after CTP doesn't wipe the record — losing it would
@@ -33018,7 +33035,8 @@ const STATION_STAGE_FIELDS = {
   5: [
     { key: 'pasted_cartons_qty', label: 'Pasted Cartons Qty' },
     { key: 'pasting_waste_qty', label: 'Pasting Waste Qty' },
-    { key: 'ready_packets_qty', label: 'Carton Shipper' },
+    { key: 'ready_packets_qty', label: 'Carton Shipper', type: 'shipper' },
+    { key: 'loose_shipper_qty', label: 'Loose Carton Shipper', type: 'shipper' },
   ],
   // Ready to Deliver has TWO inputs — Ready Cartons Qty AND
   // Packets/Cartons. Both are saved to particulars separately; the
@@ -33026,7 +33044,8 @@ const STATION_STAGE_FIELDS = {
   // the "Ready to Delivery Qty" row.
   6: [
     { key: 'delivered_cartons_qty', label: 'Ready Cartons Qty' },
-    { key: 'ready_packets_qty',     label: 'Carton Shipper' },
+    { key: 'ready_packets_qty',     label: 'Carton Shipper', type: 'shipper' },
+    { key: 'loose_shipper_qty',     label: 'Loose Carton Shipper', type: 'shipper' },
   ],
 };
 // Coatings (stage 2) fields depend on which section the operator belongs
@@ -34343,6 +34362,7 @@ function stationUpdateHtml() {
     // Non-last passes have no +, so pin − to the rightmost slot instead.
     const minusRightOverride = isLast ? '' : 'right:-8px;';
     const inputs = fields.map(f => {
+      if (f.type === 'shipper') return '';   // drawn together below (shipperHtml)
       const cur = passValue(f, passIdx);
       const inputId = `sf-${f.key}-p${passIdx}`;
       // Checkbox fields (e.g. Shade Card at CTP): render a big touchable
@@ -34373,6 +34393,28 @@ function stationUpdateHtml() {
                  value="${esc(shownVal)}" placeholder="0">
         </div>`;
     }).join('');
+    // Carton Shipper + Loose Carton Shipper, side by side on their own row:
+    // each is two boxes - qty in each carton x number of cartons - kept
+    // together in a hidden field as "1600x20" (stationShipperSync).
+    const shipperFields = fields.filter(f => f.type === 'shipper');
+    const laptopAttrs = `inputmode="decimal"`;
+    const shipperHtml = shipperFields.length ? `<div class="station-shipper-row">${shipperFields.map(f => {
+      const inputId = `sf-${f.key}-p${passIdx}`;
+      const cur = passValue(f, passIdx);
+      const has = String(cur || '').trim() !== '';
+      const parts = shipperParse(cur);
+      const dq = stationDraftValues[inputId + '-q'], dn = stationDraftValues[inputId + '-n'];
+      const qv = dq !== undefined ? dq : (has && parts.per ? String(parts.per) : '');
+      const nv = dn !== undefined ? dn : (has ? String(parts.cartons || '') : '');
+      const box = (suffix, ph, val, padLabel) => `<input type="text" ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('${inputId}-${suffix}', '${padLabel}')"` : laptopAttrs} class="numpad-target station-shipper-in" id="${inputId}-${suffix}" value="${esc(val)}" placeholder="${ph}">`;
+      return `
+        <div class="station-field station-field--shipper">
+          <label>${esc(f.label)}</label>
+          <div class="station-shipper-pair">${box('q', 'Qty', qv, f.label + ' - qty in each carton')}<span class="station-shipper-x">&times;</span>${box('n', 'Cartons', nv, f.label + ' - number of cartons')}</div>
+          <div class="station-shipper-hint">qty in each &times; cartons</div>
+          <input type="hidden" class="station-shipper-val" id="${inputId}" data-key="${esc(f.key)}" data-pass="${passIdx}" value="${esc(cur)}">
+        </div>`;
+    }).join('')}</div>` : '';
     // Printing only: third column, "this qty was printed Nx" instead of the
     // operator adding N separate pass rows. Encoded into the saved qty
     // string as "1200x3" (see parseQtyMult) — the sheets input above always
@@ -34388,8 +34430,8 @@ function stationUpdateHtml() {
     return `
       <div class="station-pass">
         ${label ? `<div class="station-pass-label">${label}</div>` : ''}
-        <div class="station-field-grid${(fields.length === 3 || stIdx === 1) ? ' station-field-grid--3up' : ''}">
-          ${inputs}${multHtml}
+        <div class="station-field-grid${(fields.filter(f => f.type !== 'shipper').length === 3 || stIdx === 1) ? ' station-field-grid--3up' : ''}">
+          ${inputs}${multHtml}${shipperHtml}
           ${isLast && allowMultiPass ? `<button type="button" class="station-pass-add" onclick="stationAddPass()" title="Add another day's entry">+</button>` : ''}
           ${showMinus && allowMultiPass ? `<button type="button" class="station-pass-remove" style="${minusRightOverride}" onclick="${minusOnClick}" title="${minusTitle}">&minus;</button>` : ''}
         </div>
@@ -34574,7 +34616,24 @@ let stationPadKey = null;   // the full DOM id of the field currently being edit
 // "sf-") so a re-render (from add/remove pass) doesn't wipe it. Skips
 // nothing — every field id is unique per pass, so this naturally handles
 // Coating Sheets Qty, Waste Sheets, and the CTP checkbox alike.
+// Carton Shipper boxes -> their hidden "qty x cartons" field. A "+" typed on
+// the pad adds up ("800+800" = 1600). Qty with no carton count = 1 carton;
+// a count alone stays a plain count.
+function stationShipperCombine(q, n) {
+  const num = s => { const t = String(s || '').trim(); if (!t) return ''; const v = t.split('+').reduce((a, x) => a + (parseFloat(x) || 0), 0); return v ? String(+v.toFixed(3)) : ''; };
+  const qq = num(q), nn = num(n);
+  if (qq && nn) return `${qq}x${nn}`;
+  if (qq) return `${qq}x1`;
+  return nn;
+}
+function stationShipperSync() {
+  document.querySelectorAll('input.station-shipper-val').forEach(h => {
+    const q = document.getElementById(h.id + '-q'), n = document.getElementById(h.id + '-n');
+    if (q && n) h.value = stationShipperCombine(q.value, n.value);
+  });
+}
 function stationSnapshotDraft() {
+  stationShipperSync();
   document.querySelectorAll('.station-update [id^="sf-"]').forEach(el => {
     stationDraftValues[el.id] = el.type === 'checkbox' ? el.checked : el.value;
   });
@@ -35004,6 +35063,7 @@ async function stationSubmit(advance, skipTo) {
   if (!j || !stationOperator) return;
   const stIdx = stationOperator.stage_index;
   const fields = stIdx === 2 ? stationCoatingsFields(stationOperator, j) : (STATION_STAGE_FIELDS[stIdx] || []);
+  stationShipperSync();
   const patch = {};
   // Decide whether to use the legacy single-string payload or the new
   // array-of-passes payload. If the job already has entries[] for any

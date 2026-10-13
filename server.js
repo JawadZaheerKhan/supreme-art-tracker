@@ -1905,7 +1905,7 @@ const STATION_LOCKED_PARTICULARS = [
   'die_cutting_sheets', 'die_cutting_waste',
   'sorted_cartons_qty', 'sorted_cartons_waste',
   'pasted_cartons_qty', 'pasting_waste_qty',
-  'delivered_cartons_qty', 'ready_packets_qty',
+  'delivered_cartons_qty', 'ready_packets_qty', 'loose_shipper_qty',
 ];
 function userHasRole(user, ...want) {
   if (!user) return false;
@@ -5409,6 +5409,7 @@ const PARTICULARS_LABELS = {
   delivered_cartons_qty: 'Ready to Delivery Qty',
   // The number after " | " on that row - edits to it are logged too.
   ready_packets_qty: 'Carton Shipper',
+  loose_shipper_qty: 'Loose Carton Shipper',
 };
 
 // UPDATE job details
@@ -7446,10 +7447,17 @@ async function deliveryPricing(sql, job, { hasPricing, rate, taxPct }) {
 function deliveryHasOwnShipper(d) {
   return !!d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets');
 }
+// Carton Shipper is written "1600x20" = 20 cartons of 1600 (owner,
+// 2026-10-13); older entries are a plain carton count. Counts cartons.
 function stationShipperTotal(job) {
   const p = job && job.particulars && job.particulars.ready_packets_qty;
   if (!p) return 0;
-  const num = s => { const n = parseFloat(String(s ?? '').replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) ? n : 0; };
+  const num = s => {
+    const t = String(s ?? '').trim();
+    const m = /^([\d.]+)\s*[x×*]\s*([\d.]+)$/i.exec(t);
+    if (m) return parseFloat(m[2]) || 0;
+    const n = parseFloat(t.replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) ? n : 0;
+  };
   if (Array.isArray(p.entries) && p.entries.length) return p.entries.reduce((a, e) => a + num(e && e.qty), 0);
   return String(p.quantity || '').split('|').reduce((a, s) => a + num(s), 0);
 }
