@@ -26250,12 +26250,19 @@ function particularsTable(p, job, opts) {
   const canEntryDot = !opts.preview && job.id && hasPerm('job_btn_operator_entry');
   // Locked for all but Super Admin (owner, 2026-10-01) - see the row below.
   const jcStageRowsLocked = !isSuperAdmin();
+  // Carton Shipper (ready_packets_qty, recorded by Ready to Deliver) has its
+  // own row under Ready to Delivery Qty - it used to share that row's
+  // Quantity as "cartons | shipper" (owner, 2026-10-13). App only: the
+  // printed job card still shows them together.
   const rows = jobParticularsRows
     .filter(r => !CTP_PARTICULARS_KEYS.has(r.key))
+    .flatMap(r => r.key === 'delivered_cartons_qty'
+      ? [r, { key: 'ready_packets_qty', label: 'Carton Shipper', stageOf: 'delivered_cartons_qty' }]
+      : [r])
     .map(r => {
-      const stage = PARTICULARS_STAGE_MAP[r.key];
+      const stage = PARTICULARS_STAGE_MAP[r.stageOf || r.key];
       const entryDot = (canEntryDot && stage)
-        ? ` <span onclick="openStationEntryFromJob(${job.id}, '${r.key}')" title="Open the ${esc(stage)} operator entry at the Station — edit this quantity there and come straight back" style="color:#16a34a;font-weight:900;font-size:26px;line-height:1;margin-left:6px;vertical-align:middle;cursor:pointer;">&#9656;</span>`
+        ? ` <span onclick="openStationEntryFromJob(${job.id}, '${r.stageOf || r.key}')" title="Open the ${esc(stage)} operator entry at the Station — edit this quantity there and come straight back" style="color:#16a34a;font-weight:900;font-size:26px;line-height:1;margin-left:6px;vertical-align:middle;cursor:pointer;">&#9656;</span>`
         : '';
       const op = logOperatorForStage(log, stage);
       // Only fill Name/Signature once the operator has actually submitted at
@@ -26274,18 +26281,7 @@ function particularsTable(p, job, opts) {
         ? [...new Set(entriesForRow.map(e => e && e.date ? fmtDMY(e.date) : '').filter(Boolean))].join(' | ')
         : '';
       const detailsVal = detailsFromEntries ? esc(detailsFromEntries) : (get(r.key, 'details') || esc(op.time));
-      // Ready to Delivery Qty row joins two station fields — cartons on
-      // the left of the pipe, packets/cartons on the right — so a single
-      // Quantity cell reads e.g. "20000 | 6" without cluttering the table
-      // with a second row. Admin edits the joined string directly; the
-      // station form still writes the two keys separately (used by
-      // reports and by the delivery-cap check).
-      let qtyDisplay = get(r.key, 'quantity');
-      if (r.key === 'delivered_cartons_qty') {
-        const cartons = String(raw(r.key, 'quantity') || '').trim();
-        const packets = String(raw('ready_packets_qty', 'quantity') || '').trim();
-        qtyDisplay = esc(packets ? `${cartons} | ${packets}` : cartons);
-      }
+      const qtyDisplay = get(r.key, 'quantity');
       const isWasteRow = WASTAGE_ADJ_ROW_UNIT[r.key] !== undefined;
       // A wastage row with nothing recorded yet still needs a visible base
       // so the purple total below reads as "original → new" rather than a
@@ -26329,7 +26325,7 @@ function particularsTable(p, job, opts) {
         <input type="text" id="p-${r.key}-details" value="${detailsVal}"${lockAttr}>
         ${locked ? '' : `<button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>`}
       </td>
-      <td><div style="display:flex;align-items:center;"><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"${qtyPlaceholder ? ` placeholder="${qtyPlaceholder}"` : ''}${lockAttr} style="flex:1;min-width:0;">${entryDot}</div>${r.key === 'delivered_cartons_qty' ? '<div style="font-size:10px;color:var(--text2);margin-top:2px;">Ready cartons | Carton Shipper</div>' : ''}${wasteExtraHtml}</td>
+      <td><div style="display:flex;align-items:center;"><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"${qtyPlaceholder ? ` placeholder="${qtyPlaceholder}"` : ''}${lockAttr} style="flex:1;min-width:0;">${entryDot}</div>${wasteExtraHtml}</td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId && !locked ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"${lockAttr}><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"${locked ? '' : ` list="${personsListId}"`}${lockAttr}></td>
     </tr>`;
@@ -29547,19 +29543,6 @@ function collectParticulars() {
     if (CTP_PARTICULARS_KEYS.has(r.key)) return;
     const cell = sub => (document.getElementById(`p-${r.key}-${sub}`)||{}).value || '';
     const rowPatch = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
-    // Ready to Delivery Qty is a joined "cartons | packets" input. Split
-    // it back into the two underlying particulars keys so the value the
-    // station wrote (and any admin edit) round-trips cleanly.
-    if (r.key === 'delivered_cartons_qty' && rowPatch.quantity.includes('|')) {
-      const [cartonsPart, packetsPart] = rowPatch.quantity.split('|').map(s => s.trim());
-      rowPatch.quantity = cartonsPart || '';
-      const pkt = (packetsPart || '').trim();
-      if (pkt) {
-        const priorRP = (priorParticularsCP.ready_packets_qty && typeof priorParticularsCP.ready_packets_qty === 'object')
-          ? priorParticularsCP.ready_packets_qty : {};
-        out.ready_packets_qty = { ...priorRP, quantity: pkt };
-      }
-    }
     const priorRow = (priorParticularsCP[r.key] && typeof priorParticularsCP[r.key] === 'object')
       ? priorParticularsCP[r.key] : {};
     // Admin-blanked ALL 4 display cells is the explicit "delete this
@@ -29575,6 +29558,16 @@ function collectParticulars() {
       out[r.key] = { ...priorRow, ...rowPatch };
     }
   });
+  // Carton Shipper row (its own row under Ready to Delivery Qty): same
+  // keep / merge / blank-to-delete rules as the rows above.
+  const shipperQtyEl = document.getElementById('p-ready_packets_qty-quantity');
+  if (shipperQtyEl) {
+    const cell = sub => (document.getElementById(`p-ready_packets_qty-${sub}`)||{}).value || '';
+    const rowPatch = { details: cell('details').trim(), quantity: cell('quantity').trim(), name: cell('name').trim(), signature: cell('signature').trim() };
+    const priorRow = (priorParticularsCP.ready_packets_qty && typeof priorParticularsCP.ready_packets_qty === 'object')
+      ? priorParticularsCP.ready_packets_qty : {};
+    if (rowPatch.details || rowPatch.quantity || rowPatch.name || rowPatch.signature) out.ready_packets_qty = { ...priorRow, ...rowPatch };
+  }
   // Row-7 (CTP setup) — writes back onto the same particulars keys so
   // reports + the print card stay compatible with legacy data. Prior
   // state is merged so the Station-stamped .name (and any entries[]) is
@@ -29664,12 +29657,10 @@ function collectParticulars() {
     // Partial-issuance marker lives outside the form fields — preserve it
     // so an unrelated Edit doesn't wipe the store keeper's partial issue.
     if (priorP.partial_pending_sheets) out.partial_pending_sheets = priorP.partial_pending_sheets;
-    // ready_packets_qty is written by the Ready-to-Deliver station and
-    // shown on the "Ready to Delivery Qty" row joined as "cartons |
-    // packets". When the admin edits without touching that row, the
-    // split branch above doesn't fire, so preserve the prior value here
-    // instead of wiping it on save.
-    if (!out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
+    // ready_packets_qty is written by the Ready-to-Deliver station. A job
+    // card without its Carton Shipper row on screen (none of this form's
+    // rows reach it) keeps the prior value instead of wiping it on save.
+    if (!document.getElementById('p-ready_packets_qty-quantity') && !out.ready_packets_qty && priorP.ready_packets_qty) out.ready_packets_qty = priorP.ready_packets_qty;
     // offcut_pre_consumed is written by the server on CTP forward and
     // read on Issue Stock. NOT surfaced in this form. Preserve so an
     // admin edit after CTP doesn't wipe the record — losing it would
