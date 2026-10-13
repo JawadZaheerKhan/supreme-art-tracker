@@ -29701,6 +29701,14 @@ function jobDisplayBrands(j) {
   return brands.join(', ');
 }
 
+// Job card paper pickers: every word typed must appear, in any order, and
+// "offcut" / "fresh" find those papers (owner, 2026-10-13 - typing
+// "offcut" used to match only papers whose brand/supplier said so).
+function paperPickerHit(it, q) {
+  if (!q) return true;
+  const hay = `${it.paper_type || ''} ${it.size || ''} ${it.gsm || ''} ${it.gsm ? it.gsm + 'gsm' : ''} ${it.brand || ''} ${it.supplier || ''} ${it.is_offcut ? 'offcut' : 'fresh'}`.toLowerCase();
+  return String(q).toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w));
+}
 // Group key used everywhere in the picker + the availability hint.
 function paperGroupKey(it) {
   return [it.paper_type || '', it.size || '', String(it.gsm || ''), it.is_offcut ? 'offcut' : 'fresh'].join('||');
@@ -29865,11 +29873,7 @@ function paperFilter2() {
   if (!input || !list) return;
   if (paperDropStaleChoice('paper-search-2', 'f-inventory-item-2') && typeof refreshSecondPaperWarning === 'function') refreshSecondPaperWarning();
   const q = (input.value || '').toLowerCase().trim();
-  const filtered = inventory.filter(it => {
-    if (!q) return true;
-    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
-    return hay.includes(q);
-  });
+  const filtered = inventory.filter(it => paperPickerHit(it, q));
   if (!filtered.length) {
     list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
     return;
@@ -29944,11 +29948,7 @@ function paperFilter() {
   // Filter first — brand is intentionally searchable (some PMs still
   // hunt by brand when they know they've ordered from a specific one),
   // but the RESULT is grouped so the picker only shows the paper GROUP.
-  const filtered = inventory.filter(it => {
-    if (!q) return true;
-    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
-    return hay.includes(q);
-  });
+  const filtered = inventory.filter(it => paperPickerHit(it, q));
   if (!filtered.length) {
     list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
     return;
