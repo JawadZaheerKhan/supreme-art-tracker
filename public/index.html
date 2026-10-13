@@ -26083,10 +26083,12 @@ function computeWastageAdjTopFieldOverlay(job, manualSheets, manualPackets, ups)
   let sheetsDisplay = newSheets.toLocaleString();
   let packetsDisplay = newPackets.toLocaleString();
   if (hasSecond) {
-    const primItem = job.inventory_item_id ? inventoryAll.find(i => i.id === job.inventory_item_id) : null;
-    const psForm = primItem ? packetSize(primItem.paper_type) : 100;
+    // The 2nd paper's own packet size and its own cut (never the main paper's).
+    const secItem = inventoryAll.find(i => i.id === sec.inventory_item_id) || (job.inventory_item_id ? inventoryAll.find(i => i.id === job.inventory_item_id) : null);
+    const psSec = secItem ? packetSize(secItem.paper_type) : 100;
+    const secCut = parseInt(String(sec.sheet_cut || '1/1').split('/')[1], 10) || 1;
     const secPackets = parseFloat(sec.packets) || 0;
-    const secSheets  = Math.round(secPackets * psForm * jobCutPieces(job));
+    const secSheets  = Math.round(secPackets * psSec * secCut);
     const primPackets = Math.max(0, totalPackets - secPackets);
     const primSheets  = Math.max(0, totalSheets - secSheets);
     sheetsDisplay  = applyOverlayToPipeEntries(`${primSheets} | ${secSheets}`, mSheets).replace(' | ', ' + ');
@@ -26424,7 +26426,7 @@ function jobForm(j={}, opts) {
           const secPkts  = sec ? (parseFloat(sec.packets) || 0) : 0;
           const totalPk  = parseFloat(partsP.quantity_of_packets) || 0;
           const primPk   = Math.max(0, totalPk - secPkts);
-          const secSh    = Math.round(secPkts * psForm * secondaryCutPieces(j));
+          const secSh    = Math.round(secPkts * secondaryPacketSheets(j) * secondaryCutPieces(j));
           const totalSh  = parseFloat(j.sheets) || 0;
           const primSh   = Math.max(0, totalSh - secSh);
           const sheetsPrimVal  = hasSecond ? (primSh || '') : (j.sheets != null ? j.sheets : '');
@@ -29807,12 +29809,16 @@ function refreshSecondPaperWarning() {
   const cuttingSize = (cuttingRaw.split('/')[0] || '').trim();
   const paperMatch = (p.paper_type || '') === (s.paper_type || '');
   const gsmMatch   = String(p.gsm || '') === String(s.gsm || '');
-  const primarySizeMatch = (p.size || '') === (s.size || '');
-  const cuttingSizeMatch = cuttingSize && (s.size || '') === cuttingSize;
+  const primarySizeMatch = (p.size || '').toLowerCase() === (s.size || '').toLowerCase();
+  // An offcut / sheet at least as big as the cutting size, either way round,
+  // can be cut to it (13.5x22 covers 22x13) - not only an exact size match.
+  const dims = t => { const m = String(t || '').toLowerCase().match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/); return m ? [parseFloat(m[1]), parseFloat(m[2])] : null; };
+  const fits = (have, want) => { const a = dims(have), b = dims(want); return !!(a && b && ((a[0] >= b[0] && a[1] >= b[1]) || (a[0] >= b[1] && a[1] >= b[0]))); };
+  const cuttingSizeMatch = !!cuttingSize && fits(s.size, cuttingSize);
   const specsMatch = paperMatch && gsmMatch && (primarySizeMatch || cuttingSizeMatch);
   if (!specsMatch) {
     const wantedSizes = [p.size || '', cuttingSize].filter(Boolean).join(' or ');
-    warn.innerHTML = `&#9888; 2ND PAPER SPECS DO NOT MATCH — primary is ${esc(p.paper_type)} ${esc(p.size||'')} ${p.gsm ? esc(p.gsm)+'gsm' : ''}${cuttingSize ? ` (cutting size ${esc(cuttingSize)})` : ''}, 2nd is ${esc(s.paper_type)} ${esc(s.size||'')} ${s.gsm ? esc(s.gsm)+'gsm' : ''}. Should be ${esc(p.paper_type)} ${p.gsm ? esc(p.gsm)+'gsm' : ''} at ${esc(wantedSizes)}.`;
+    warn.innerHTML = `&#9888; 2ND PAPER SPECS DO NOT MATCH (or too small) — primary is ${esc(p.paper_type)} ${esc(p.size||'')} ${p.gsm ? esc(p.gsm)+'gsm' : ''}${cuttingSize ? ` (cutting size ${esc(cuttingSize)})` : ''}, 2nd is ${esc(s.paper_type)} ${esc(s.size||'')} ${s.gsm ? esc(s.gsm)+'gsm' : ''}. Should be ${esc(p.paper_type)} ${p.gsm ? esc(p.gsm)+'gsm' : ''} at ${esc(wantedSizes)}${cuttingSize ? ' (or any size big enough to cut ' + esc(cuttingSize) + ')' : ''}.`;
   }
 }
 // Availability hint below the 2nd paper picker — mirrors the primary
@@ -30093,6 +30099,19 @@ function jobSheetsPrimaryEdited() {
 // Pieces per sheet for the 2nd paper: the form's own picker while the card is
 // open, else whatever was saved on it. Falls back to 1/1, never to the main
 // paper's cut - the two papers are cut independently.
+// Sheets per packet of the 2nd paper itself (its own paper type), with NO
+// cut - the 2nd paper's own cut is applied by the caller (owner, 2026-10-13:
+// 28 packets of a 1/1 offcut read 5,600 sheets because the main paper's 1/2
+// cut was folded in through jobFormPs()).
+function secondaryPacketSheets(j) {
+  const el = document.getElementById('f-inventory-item-2');
+  const id = parseInt((el && el.value) || (j && j.particulars && j.particulars.secondary_paper && j.particulars.secondary_paper.inventory_item_id), 10);
+  const it2 = Number.isFinite(id) ? inventoryAll.find(x => x.id === id) : null;
+  if (it2) return packetSize(it2.paper_type);
+  const mainEl = document.getElementById('f-inventory-item');
+  const it1 = mainEl ? inventoryAll.find(x => x.id === parseInt(mainEl.value, 10)) : (j && j.inventory_item_id ? inventoryAll.find(x => x.id === j.inventory_item_id) : null);
+  return it1 ? packetSize(it1.paper_type) : 100;
+}
 function secondaryCutPieces(j) {
   const el = document.getElementById('f-sheet-cut-2');
   const raw = (el && el.value)
@@ -30106,7 +30125,7 @@ function jobSecondaryCutChanged() {
   jobSecondaryPacketsEdited();
 }
 function jobSecondaryPacketsEdited() {
-  const ps = jobFormPs() * secondaryCutPieces();
+  const ps = secondaryPacketSheets() * secondaryCutPieces();
   const secPk = parseFloat((document.getElementById('f-packets-2')||{}).value) || 0;
   const secSh = secPk > 0 ? Math.round(secPk * ps) : 0;
   const sh2 = document.getElementById('f-sheets-2');
@@ -30127,7 +30146,7 @@ function jobSecondaryPacketsEdited() {
 // Secondary SHEETS edited — back-compute secondary packets, then run the
 // same mode logic via the packets handler.
 function jobSecondarySheetsEdited() {
-  const ps = jobFormPs() * secondaryCutPieces();
+  const ps = secondaryPacketSheets() * secondaryCutPieces();
   const secSh = parseFloat((document.getElementById('f-sheets-2')||{}).value) || 0;
   const pk2 = document.getElementById('f-packets-2');
   if (pk2) pk2.value = (secSh > 0 && ps > 0) ? String(+(secSh / ps).toFixed(2)) : '';
