@@ -304,7 +304,8 @@ function getDb() {
 // Bumped again for op_locks + the one-reversal-per-entry index (2026-10-13).
 // Bumped again to seed the new Access Register rows job_btn_history_reverse,
 // job_btn_process_without_paper and rpt_mil_products (2026-10-13).
-const SCHEMA_VERSION = 'v2026-10-13-acc-rows';
+// Bumped again for stock_groups.shipper_note / loose_note (2026-10-13).
+const SCHEMA_VERSION = 'v2026-10-13-mil-cartons';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -829,6 +830,10 @@ async function initDb() {
     // priority / packets / MRP / etc.). Sub jobs created via
     // duplicate-into-job spread this template into their own columns.
     await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS template JSONB DEFAULT '{}'`;
+    // MIL Products report: the cartons on hand, typed by hand ("1400x5 +
+    // 1500x10") - which sizes ship isn't recorded anywhere (2026-10-13).
+    await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS shipper_note TEXT`;
+    await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS loose_note TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -9056,6 +9061,8 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     const specs         = 'specs' in body && body.specs && typeof body.specs === 'object' ? body.specs : cur.specs;
     let template        = 'template' in body && body.template && typeof body.template === 'object' ? body.template : cur.template;
     const clientVisible = 'client_visible' in body ? !!body.client_visible : cur.client_visible;
+    const shipperNote   = 'shipper_note' in body ? (String(body.shipper_note || '').trim().slice(0, 200) || null) : (cur.shipper_note ?? null);
+    const looseNote     = 'loose_note' in body ? (String(body.loose_note || '').trim().slice(0, 200) || null) : (cur.loose_note ?? null);
     // Sanitize secondary_paper on the template — issued_sheets is a
     // per-sub-job runtime counter, must not live on the group's
     // template (otherwise duplicating from group would leak stale
@@ -9073,6 +9080,8 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
              specs = ${JSON.stringify(specs || {})},
              template = ${JSON.stringify(template || {})},
              client_visible = ${clientVisible},
+             shipper_note = ${shipperNote},
+             loose_note = ${looseNote},
              updated_at = NOW()
        WHERE id = ${id}
        RETURNING *
@@ -9095,6 +9104,8 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     const groupChanges = [];
     if (String(cur.jobcode || '') !== String(jobcode || '')) groupChanges.push(`Code "${cur.jobcode || ''}" -> "${jobcode || ''}"`);
     if (String(cur.po_qty || '') !== String(poQty || '')) groupChanges.push(`MIL Qty "${cur.po_qty || ''}" -> "${poQty || ''}"`);
+    if (String(cur.shipper_note || '') !== String(shipperNote || '')) groupChanges.push(`Carton Shipper "${cur.shipper_note || ''}" -> "${shipperNote || ''}"`);
+    if (String(cur.loose_note || '') !== String(looseNote || '')) groupChanges.push(`Loose Carton Shipper "${cur.loose_note || ''}" -> "${looseNote || ''}"`);
     await logAudit(sql, req, {
       action: 'group.update', entityType: 'group', entityId: id,
       summary: `Updated group "${product}"${groupChanges.length ? ': ' + groupChanges.join('; ') : ''}`,
