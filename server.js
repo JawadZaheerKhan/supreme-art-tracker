@@ -11185,8 +11185,19 @@ app.post('/api/imports/:id/cancel', requirePermission('inv_btn_add_import'), asy
     const rows = await sql`
       UPDATE inventory_imports SET status='cancelled' WHERE id=${id} AND status='pending' AND deleted_at IS NULL RETURNING *
     `;
-    if (!rows.length) return res.status(400).json({ error: 'Only pending imports can be cancelled' });
-    res.json(rows[0]);
+    if (rows.length) return res.json(rows[0]);
+    // Partly received: close it (owner, 2026-10-13) - what arrived stays in
+    // stock, the rest is not coming. Same end state as "Final delivery".
+    const closed = await sql`
+      UPDATE inventory_imports SET status='received' WHERE id=${id} AND status='partial' AND deleted_at IS NULL RETURNING *
+    `;
+    if (!closed.length) return res.status(400).json({ error: 'Only pending or partly received imports can be cancelled' });
+    const im = closed[0];
+    await logAudit(sql, req, {
+      action: 'import.close_short', entityType: 'import', entityId: im.id,
+      summary: `Import closed: ${(+im.received_packets || 0).toLocaleString()} of ${(+im.packets || 0).toLocaleString()} arrived (${[im.paper_type, im.size, im.gsm ? im.gsm + 'gsm' : '', im.brand].filter(Boolean).join(' ')}); the rest is not coming`,
+    });
+    res.json(im);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

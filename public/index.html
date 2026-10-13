@@ -10427,7 +10427,7 @@ function openInvRemoveStock(id, opts) {
     <div id="stockout-warn-wrap" style="display:none;margin-bottom:8px;">
       <div class="bulkout-warn-banner bulkout-warn-banner--over" id="stockout-warn-banner">
         <span class="split-footer-icon">&#9888;</span>
-        <span id="stockout-warn-msg">Over-issuing — extra will be added to offcut stock.</span>
+        <span id="stockout-warn-msg">Over the jobs' need — extra issuance is not allowed.</span>
         <span class="split-footer-tally" id="stockout-warn-tally"></span>
       </div>
     </div>
@@ -10549,7 +10549,7 @@ function stockOutLoadPendingChips(itemId) {
       // the tile. Now shows 1.5 as 1.5 and any integer as an integer.
       const needPktsRaw = ps ? (need / ps) : 0;
       const needPkts = Number.isInteger(needPktsRaw) ? needPktsRaw : +needPktsRaw.toFixed(2);
-      return `<button type="button" class="jobchip" data-jobid="${c.jobId}" data-need="${need}" data-source="${c.source}"
+      return `<button type="button" class="jobchip" data-jobid="${c.jobId}" data-need="${need}" data-source="${c.source}" data-topupid="${esc(c.topupId || '')}"
         onclick="stockOutToggleChip(this, ${ps})"
         title="${esc(c.label)} · ${needPkts} ${unit} needed${c.source === 'secondary' ? ' (2nd paper)' : ''}"
         style="padding:5px 10px;border:1.5px solid var(--border);border-radius:999px;background:#fff;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">${esc(c.label)} (${needPkts} ${unit.toLowerCase()})</button>`;
@@ -10595,6 +10595,7 @@ async function saveInvRemoveStock(id) {
       jobId: parseInt(c.dataset.jobid, 10),
       needSheets: parseInt(c.dataset.need, 10) || 0,
       source: c.dataset.source || 'primary',
+      topupId: c.dataset.topupid || null,
     })).filter(j => Number.isFinite(j.jobId));
     if (!selected.length) { await alertDialog({ title: 'Pick at least one pending job', message: 'Tick one or more pending-stock jobs for this paper — or switch the reason to Manual Job Card.', kind: 'warn' }); return; }
     // Pre-submit over-issue confirm — mirrors the bulk-out flow: LAST
@@ -10616,17 +10617,18 @@ async function saveInvRemoveStock(id) {
       }
       remaining -= share;
     }
+    // Over a job's need is a stop (the server refuses over-issue) - owner, 2026-10-13.
     if (overageWarnings.length) {
-      const ok = await confirmDialog({
-        title: 'Over-issuance detected',
-        message: `These jobs will receive more stock than they need — the excess will be added to offcut inventory:\n\n${overageWarnings.join('\n')}\n\nProceed?`,
-        confirmText: 'Issue with overage',
+      await alertDialog({
+        title: 'More than the jobs need',
+        message: `Extra issuance is not allowed. Reduce the quantity to what these jobs need:\n\n${overageWarnings.join('\n')}`,
+        kind: 'warn',
       });
-      if (!ok) return;
+      return;
     }
 
     showSaving(true);
-    let flipped = 0, partials = 0, errored = 0;
+    let flipped = 0, partials = 0, errored = 0, topupsApproved = 0;
     remaining = qty;
     try {
       for (let ji = 0; ji < selected.length; ji++) {
@@ -10636,14 +10638,22 @@ async function saveInvRemoveStock(id) {
         const share = isLast ? remaining : Math.min(remaining, j.needSheets);
         if (share <= 0) continue;
         try {
-          const result = await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
-            splits: [{ item_id: id, sheets: share }],
-            challan_no: challanNo,
-            entry_date: entryDate,
-            source: j.source || 'primary',
-          });
+          // A TOP-UP chip is approved through the top-up route, like Stock
+          // Out (Bulk) and Pending Stock do (owner, 2026-10-13: it was sent as
+          // a normal issue and failed on jobs already issued).
+          const result = (j.source === 'topup' && j.topupId)
+            ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, {
+                splits: [{ item_id: id, sheets: share }], challan_no: challanNo, entry_date: entryDate,
+              })
+            : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
+                splits: [{ item_id: id, sheets: share }],
+                challan_no: challanNo,
+                entry_date: entryDate,
+                source: j.source || 'primary',
+              });
           remaining -= share;
-          if (result && result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
+          if (j.source === 'topup') topupsApproved++;
+          else if (result && result.issuance_status === 'issued' && !(result.particulars && result.particulars.partial_pending_sheets)) flipped++;
           else if (result && result.particulars && result.particulars.partial_pending_sheets) partials++;
         } catch (e) { console.error('Issue for E-' + j.jobId + ' failed:', e); errored++; }
       }
@@ -10654,6 +10664,7 @@ async function saveInvRemoveStock(id) {
       const bits = [];
       if (flipped) bits.push(`${flipped} job${flipped === 1 ? '' : 's'} fully issued`);
       if (partials) bits.push(`${partials} partial`);
+      if (topupsApproved) bits.push(`${topupsApproved} top-up${topupsApproved === 1 ? '' : 's'} approved`);
       if (errored)  bits.push(`${errored} failed`);
       notify(`−${qty.toLocaleString()} sheets removed${bits.length ? ' · ' + bits.join(', ') : ''}`);
     } catch(e) { notify('Error: ' + e.message); }
@@ -11054,7 +11065,7 @@ function bulkOutRowHtml(idx) {
       <td class="bulkout-warn-cell" colspan="6">
         <div class="bulkout-warn-banner bulkout-warn-banner--over">
           <span class="split-footer-icon">&#9888;</span>
-          <span class="bulkout-warn-msg">Over-issuing — extra will be added to offcut stock.</span>
+          <span class="bulkout-warn-msg">Over the jobs' need — extra issuance is not allowed.</span>
           <span class="split-footer-tally bulkout-warn-tally"></span>
         </div>
       </td>
@@ -11097,7 +11108,7 @@ function bulkOutRecomputeWarning(idx) {
   banner.classList.toggle('bulkout-warn-banner--over',    diff > 0);
   banner.classList.toggle('bulkout-warn-banner--partial', diff < 0);
   if (diff > 0) {
-    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra will be added to offcut stock.`;
+    if (msgEl)   msgEl.textContent   = `Over by ${fmt(diff)} ${unit} — extra issuance is not allowed. Reduce it to the jobs' need.`;
     if (tallyEl) tallyEl.textContent = `Jobs need ${fmt(needSheets)} · issuing ${fmt(sheets)} ${unit}`;
   } else {
     // diff < 0: under-issued → partial issuance, remaining stays on the
@@ -11585,13 +11596,16 @@ async function saveBulkStockOutRun() {
       remainingRow -= jobShare;
     }
   }
+  // A job can never be issued more than it needs (the server refuses it) -
+  // stop here with the jobs that are over, instead of offering "issue with
+  // overage" (owner, 2026-10-13).
   if (overageWarnings.length) {
-    const ok = await confirmDialog({
-      title: 'Over-issuance detected',
-      message: `These jobs will receive more stock than they need — the excess will be added to offcut inventory:\n\n${overageWarnings.join('\n')}\n\nProceed?`,
-      confirmText: 'Issue with overage',
+    await alertDialog({
+      title: 'More than the jobs need',
+      message: `Extra issuance is not allowed. Reduce the quantity to what these jobs need:\n\n${overageWarnings.join('\n')}`,
+      kind: 'warn',
     });
-    if (!ok) return;
+    return;
   }
 
   showSaving(true);
@@ -24905,7 +24919,17 @@ function renderDashboard() {
 }
 
 async function cancelImport(id) {
-  const ok = await confirmDialog({
+  // A partly received import is closed instead (owner, 2026-10-13): what
+  // arrived stays in stock, the rest is not coming - it shows as Received.
+  const imp = (importsCache || []).find(i => i.id === id);
+  const partial = imp && imp.status === 'partial';
+  const ok = await confirmDialog(partial ? {
+    title: 'Close this import?',
+    message: `${(+imp.received_packets || 0).toLocaleString()} of ${(+imp.packets || 0).toLocaleString()} arrived. That stays in stock; the rest is marked as not coming and the import shows as Received.`,
+    danger: true,
+    confirmText: 'Close import',
+    cancelText: 'Keep',
+  } : {
     title: 'Cancel this import?',
     message: 'You can still see it later under the Cancelled filter.',
     danger: true,
@@ -24915,7 +24939,7 @@ async function cancelImport(id) {
   if (!ok) return;
   try {
     await api('POST', `/api/imports/${id}/cancel`);
-    notify('Import cancelled');
+    notify(partial ? 'Import closed - the rest is not coming' : 'Import cancelled');
     await loadImports();
     renderImportsTable();
   } catch (e) { notify('Error: ' + e.message); }
@@ -25014,11 +25038,13 @@ async function bulkReceiveImports() {
 
 async function bulkCancelImports() {
   const ids = [...importsBulkSel];
-  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status === 'pending');
+  const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && (i.status === 'pending' || i.status === 'partial'));
   if (!rows.length) { notify('No pending rows selected.'); return; }
+  const nPartial = rows.filter(r => r.status === 'partial').length;
   const ok = await confirmDialog({
     title: `Cancel ${rows.length} import${rows.length===1?'':'s'}?`,
-    message: 'They\'ll move to the Cancelled tab. No stock is touched (they hadn\'t arrived yet).',
+    message: 'Pending ones move to the Cancelled tab. No stock is touched (they hadn\'t arrived yet).'
+      + (nPartial ? `\n\n${nPartial} partly received: closed instead - what arrived stays in stock, the rest is not coming (shows as Received).` : ''),
     danger: true,
     confirmText: 'Cancel them',
     cancelText: 'Keep',
