@@ -10860,13 +10860,18 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
        ORDER BY id
     ` : [{ id: anchor.id, brand: anchor.brand, current_balance: anchor.current_balance }];
     const memberIds = members.map(x => x.id);
+    // A reversal row carries no job / challan of its own; rev_* name the
+    // entry it undid so History can show them (owner, 2026-10-13).
     const txs = await sql`
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
         i.brand AS item_brand,
-        EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed
+        EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed,
+        o.job_id AS rev_job_id, o.challan_no AS rev_challan_no, oj.name AS rev_job_name, oj.jobcode AS rev_job_code
       FROM inventory_transactions t
       JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN jobs j ON j.id = t.job_id
+      LEFT JOIN inventory_transactions o ON o.id = t.reverses_tx_id
+      LEFT JOIN jobs oj ON oj.id = o.job_id
       WHERE t.item_id = ANY(${memberIds})
       ORDER BY t.created_at DESC, t.id DESC
     `;
