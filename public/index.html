@@ -6496,6 +6496,38 @@ async function explainMissingJob() {
   } catch (e) { /* leave the plain message - never break the list on this */ }
 }
 
+// ── Search matching, used by every search box and picker ──────────────────
+// Spaces, case and the order of a size don't matter (owner, 2026-10-13):
+// "refixa10mg" finds "Refixa 10 mg", and "16x25", "25x16", "25 X 16" all
+// find a 16x25 paper. Several words typed are each looked for, in any order
+// ("board 230 16x25"). searchMatch(text, typed) -> true / false.
+function searchKey(s) {
+  return String(s ?? '').toLowerCase()
+    .replace(/(\d)\s*[x×*]\s*(?=\d)/g, '$1x')   // "16 X 25" / "16×25" -> "16x25"
+    .replace(/\s+/g, '');
+}
+const _searchHayCache = new Map();
+function searchHayKey(text) {
+  const s = String(text ?? '');
+  let k = _searchHayCache.get(s);
+  if (k !== undefined) return k;
+  // Each size is also kept the other way round, so 25x16 finds 16x25.
+  const turned = [];
+  s.toLowerCase().replace(/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/g, (m, a, b) => { turned.push(b + 'x' + a); return m; });
+  k = searchKey(s) + (turned.length ? '|' + turned.join('|') : '');
+  if (_searchHayCache.size > 20000) _searchHayCache.clear();
+  _searchHayCache.set(s, k);
+  return k;
+}
+function searchMatch(text, typed) {
+  const q = String(typed ?? '').trim();
+  if (!q) return true;
+  const hay = searchHayKey(text);
+  if (hay.includes(searchKey(q))) return true;
+  const words = q.split(/\s+/).map(searchKey).filter(Boolean);
+  return words.length > 1 && words.every(w => hay.includes(w));
+}
+
 // True when either search box has something in it. A search is a request for
 // specific jobs, so the MIL group collapsing steps aside for it (see
 // renderJobsCompact / renderJobsCards); the tabs don't - matches in other
@@ -6511,23 +6543,16 @@ function jobPassesFilters(j) {
   // everywhere in the app, so the search box has to accept it written that way.
   const idNeedle = t.replace(/^e[-\s]?/, '');
   if (t) {
-    const name   = String(j.name   || '').toLowerCase();
-    const client = String(j.client || '').toLowerCase();
     const id     = String(j.id);
-    if (!name.includes(t) && !client.includes(t) && id !== idNeedle && !id.includes(idNeedle)) return false;
+    if (!searchMatch(`${j.name || ''} ${j.client || ''}`, t) && id !== idNeedle && !id.includes(idNeedle)) return false;
   }
   if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
   if (filterClient && j.client !== filterClient) return false;
   if (filterPO) {
-    const po = String(j.ref || '').toLowerCase();
-    if (!po.includes(String(filterPO).toLowerCase())) return false;
+    if (!searchMatch(j.ref, filterPO)) return false;
   }
   // Item Code: part of the job card's Code; spaces ignored on both sides.
-  const codeNeedle = String(filterCode || '').toLowerCase().replace(/\s+/g, '');
-  if (codeNeedle) {
-    const code = String(j.jobcode || '').toLowerCase().replace(/\s+/g, '');
-    if (!code.includes(codeNeedle)) return false;
-  }
+  if (String(filterCode || '').trim() && !searchMatch(j.jobcode, filterCode)) return false;
   if (filterShadeCard === 'only' && !j.is_shade_card) return false;
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
@@ -8387,7 +8412,7 @@ function setPOFilter(v) {
   // Smart PO search: find that job across all stages and auto-switch the tab
   if (v && jobs.length) {
     const poLower = String(v).trim().toLowerCase();
-    const found = jobs.find(j => String(j.ref || '').toLowerCase().includes(poLower));
+    const found = jobs.find(j => searchMatch(j.ref, poLower));
     if (found) {
       // Map the job to its correct tab view id
       let targetView = 'all';
@@ -9015,8 +9040,7 @@ function getInventoryFiltered() {
   const filtered = inventory.filter(it => {
     const t = invFilterText.toLowerCase();
     if (t) {
-      const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''}`.toLowerCase();
-      if (!hay.includes(t)) return false;
+      if (!searchMatch(`${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''}`, t)) return false;
     }
     if (invFilterType && it.paper_type !== invFilterType) return false;
     if (invFilterSize && (it.size||'') !== invFilterSize) return false;
@@ -10612,8 +10636,7 @@ function bulkComboFilter(prefix, idx, positiveOnly) {
   const items = (inventory || []).filter(it => {
     if (positiveOnly && (it.current_balance || 0) <= 0) return false;
     if (!q) return true;
-    const hay = `${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`.toLowerCase();
-    return hay.includes(q);
+    return searchMatch(`${it.paper_type} ${it.size||''} ${it.gsm||''} ${it.brand||''} ${it.supplier||''}`, q);
   });
   if (!items.length) {
     list.innerHTML = '<div class="combo-empty">No matching paper found</div>';
@@ -12690,10 +12713,8 @@ function buildInventoryReportRows() {
     // appear somewhere across the item's fields, so "25x36 230" (size +
     // gsm, two different fields) matches. The old whole-string-in-one-
     // field check could never isolate a single gsm of one size.
-    const words = search.toLowerCase().split(/\s+/).filter(Boolean);
     items = items.filter(i => {
-      const hay = [i.paper_type, i.size, i.gsm, i.brand, i.supplier].filter(Boolean).join(' ').toLowerCase();
-      return words.every(w => hay.includes(w));
+      return searchMatch([i.paper_type, i.size, i.gsm, i.brand, i.supplier].filter(Boolean).join(' '), search);
     });
   }
   if (stockLevel === 'out') items = items.filter(i => balanceOf(i) <= 0);
@@ -13340,11 +13361,10 @@ function computeSummaryRows() {
   // like "22x28 230" (size + gsm, spanning two different fields) could never
   // match anything even though the item genuinely exists, since neither the
   // size field alone nor the gsm field alone contains that whole phrase.
-  const searchWords = (stockSummaryState.search || '').toLowerCase().split(/\s+/).filter(Boolean);
-  const items = searchWords.length
+  const summarySearch = String(stockSummaryState.search || '').trim();
+  const items = summarySearch
     ? stockSummaryState.items.filter(i => {
-        const hay = [i.paper_type, i.size, i.gsm, i.brand, i.supplier].filter(Boolean).join(' ').toLowerCase();
-        return searchWords.every(w => hay.includes(w));
+        return searchMatch([i.paper_type, i.size, i.gsm, i.brand, i.supplier].filter(Boolean).join(' '), summarySearch);
       })
     : stockSummaryState.items;
   const buckets = buildSummaryBuckets(from, to, granularity);
@@ -14908,7 +14928,7 @@ function jrRowPassesColFilters(r) {
   }
   for (const [f, def] of Object.entries(JR_COL_SEARCH_FIELDS)) {
     const q = String(cs[f] || '').trim().toLowerCase();
-    if (q && !String(def.get(r) ?? '').toLowerCase().includes(q)) return false;
+    if (q && !searchMatch(def.get(r), q)) return false;
   }
   return true;
 }
@@ -15020,7 +15040,7 @@ function buildJobsReportRows() {
     let searchHit = true;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
-      const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
+      const nameHit = searchMatch(j.name, qNorm);
       if (!idHit && !nameHit) searchHit = false;
     }
     // Delivery date(s) — for jobs shipped via the deliveries ledger, join
@@ -15169,8 +15189,8 @@ function buildJobsReportRows() {
     // filtering Created mode too, since the state isn't cleared on toggle
     // (same as every other Jobs Report filter).
     if (!isCreatedMode) {
-      if (poSearchNorm      && !poNoJoined.toLowerCase().includes(poSearchNorm))    searchHit = false;
-      if (challanSearchNorm && !challans.toLowerCase().includes(challanSearchNorm)) searchHit = false;
+      if (poSearchNorm      && !searchMatch(poNoJoined, poSearchNorm))    searchHit = false;
+      if (challanSearchNorm && !searchMatch(challans, challanSearchNorm)) searchHit = false;
     }
     // Partial when there's at least one shipment but the running total
     // is still short of the booked qty. Uses the deliveries ledger, but
@@ -15807,7 +15827,7 @@ function jrMilRows(opts) {
     const code = (ent && ent.jobcode) || (repr && repr.jobcode) || '';
     const client = (repr && repr.client) || '';
     if (o.client && client !== o.client) continue;
-    if (qn && !(String(product).toLowerCase().replace(/\s+/g, ' ').includes(qn) || String(code).toLowerCase().includes(qn) || String(gName).toLowerCase().includes(qn))) continue;
+    if (qn && !(searchMatch(product, qn) || searchMatch(code, qn) || searchMatch(gName, qn))) continue;
     const milQty = ent
       ? (parseFloat(String(ent.po_qty || '').replace(/[^0-9.\-]/g, '')) || 0)
       : gJobs.reduce((s, j) => s + (parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0), 0);
@@ -17712,7 +17732,7 @@ function renderChartAccountsTable() {
   const q = chartState.q.trim().toLowerCase();
   let tree = chartTree(chartState.rows);
   if (!chartState.showInactive) tree = tree.filter(r => r.active !== false);
-  if (q) tree = tree.filter(r => [r.code, r.name, r.company].filter(Boolean).join(' ').toLowerCase().includes(q));
+  if (q) tree = tree.filter(r => searchMatch([r.code, r.name, r.company].filter(Boolean).join(' '), q));
   if (!tree.length) { el.innerHTML = `<div class="empty">${q ? 'No account matches that search.' : 'No accounts yet.'}</div>`; return; }
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   el.innerHTML = `<div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -18227,7 +18247,7 @@ function buildSaleReportRows(tabOverride) {
     let searchHit = true;
     if (qNorm) {
       const idHit   = qIsNum && String(j.id) === qId;
-      const nameHit = String(j.name || '').toLowerCase().includes(qNorm);
+      const nameHit = searchMatch(j.name, qNorm);
       if (!idHit && !nameHit) searchHit = false;
     }
     // Unit Carton Qty, Wastage and Packets per delivery come from
@@ -18318,8 +18338,8 @@ function buildSaleReportRows(tabOverride) {
       const msiNo   = (d && d.msi_no ? String(d.msi_no).trim() : '');
       const invoice = deliveryChallanText(d);
       const rowHit = searchHit
-        && (!poSearchNorm      || poNo.toLowerCase().includes(poSearchNorm))
-        && (!challanSearchNorm || invoice.toLowerCase().includes(challanSearchNorm));
+        && (!poSearchNorm      || searchMatch(poNo, poSearchNorm))
+        && (!challanSearchNorm || searchMatch(invoice, challanSearchNorm));
       const refMs = deliveryEntryMs(d);
       const refMsOk = isFinite(refMs) ? refMs : null;
       if (bounds) {
@@ -18687,7 +18707,7 @@ function saleReportRowPassesNewFilters(r) {
   }
   for (const [f, def] of Object.entries(SALE_COL_SEARCH_FIELDS)) {
     const q = String(cs[f] || '').trim().toLowerCase();
-    if (q && !String(def.get(r) ?? '').toLowerCase().includes(q)) return false;
+    if (q && !searchMatch(def.get(r), q)) return false;
   }
   return true;
 }
@@ -18771,7 +18791,7 @@ function colSearchSuggest() {
   if (!ctx || !el || !list) return;
   const q = el.value.trim().toLowerCase();
   // Nothing typed: no list (the column can hold hundreds of values).
-  const hits = q ? ctx.values.filter(v => v.toLowerCase().includes(q)) : [];
+  const hits = q ? ctx.values.filter(v => searchMatch(v, q)) : [];
   ctx.shown = hits.slice(0, 60);
   const mark = (v) => {
     const i = v.toLowerCase().indexOf(q);
@@ -18799,7 +18819,7 @@ function colSearchPickerApply() {
   const el = document.getElementById('srcs-input');
   if (!ctx || !el) return;
   const q = el.value.trim();
-  if (q && !ctx.values.some(v => v.toLowerCase().includes(q.toLowerCase()))) return;   // nothing there - stay put
+  if (q && !ctx.values.some(v => searchMatch(v, q))) return;   // nothing there - stay put
   colSearchPickerSet(q);
 }
 function colSearchPickerSet(v) {
@@ -18849,7 +18869,7 @@ function srColFilterSearch(q) {
   const term = String(q || '').trim().toLowerCase();
   let visible = 0;
   document.querySelectorAll('.srcf-opt-row').forEach(row => {
-    const match = !term || (row.dataset.text || '').includes(term);
+    const match = !term || searchMatch(row.dataset.text, term);
     row.style.display = match ? '' : 'none';
     if (match) visible++;
   });
@@ -21911,7 +21931,7 @@ function txMatchesJobCardSearch(t, qLower) {
   if (!qLower) return true;
   if (t.job_id != null && (`e-${t.job_id}`.includes(qLower) || String(t.job_id).includes(qLower))) return true;
   const mcNo = extractManualJobCardNo(t.notes);
-  if (mcNo && mcNo !== '(no reference)' && mcNo.toLowerCase().includes(qLower)) return true;
+  if (mcNo && mcNo !== '(no reference)' && searchMatch(mcNo, qLower)) return true;
   return false;
 }
 function resetMovementFilters(dir) {
@@ -23169,7 +23189,7 @@ function computeManualConsumptionRows() {
        (!state.paperType || t.paper_type === state.paperType)
     && (!state.size      || (t.item_size || '') === state.size)
     && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
-    && (!searchL          || extractManualJobCardNo(t.notes).toLowerCase().includes(searchL))
+    && (!searchL          || searchMatch(extractManualJobCardNo(t.notes), searchL))
   );
   let total = 0, totalKg = 0;
   const groups = new Map();
@@ -24048,8 +24068,8 @@ function filterStickerJobs() {
       j.name || '',
       j.client || '',
       j.ref || '',
-    ].join(' ').toLowerCase();
-    return hay.includes(q);
+    ].join(' ');
+    return searchMatch(hay, q);
   }).slice(0, 50); // cap at 50 results — keeps the dropdown snappy on huge job lists
 
   if (!matches.length) {
@@ -24652,7 +24672,7 @@ function renderDashboard() {
   const rows = [...byItem.values()].sort((a, b) => (b.in + b.out) - (a.in + a.out));
   const q = (dashboardState.search || '').trim().toLowerCase();
   const filtered = q
-    ? rows.filter(r => [r.paper, r.size, r.gsm, r.brand].filter(Boolean).join(' ').toLowerCase().includes(q))
+    ? rows.filter(r => searchMatch([r.paper, r.size, r.gsm, r.brand].filter(Boolean).join(' '), q))
     : rows;
 
   const listEl = document.getElementById('dash-items-list');
@@ -25404,8 +25424,7 @@ function jdRender() {
     if (client && j.client !== client) return false;
     if (product && detectJobProductType(j.name) !== product) return false;
     if (!q) return true;
-    const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
-    return hay.includes(q);
+    return searchMatch(`${j.name||''} ${j.client||''} ${j.jobcode||''}`, q);
   }).sort((a,b) => b.id - a.id);
 
   if (!matches.length) {
@@ -25492,8 +25511,7 @@ function hlkRender() {
   // most recent jobs so the user can browse without a query.
   const matches = jobs.filter(j => {
     if (!q) return true;
-    const hay = `${j.name||''} ${j.client||''} ${j.jobcode||''}`.toLowerCase();
-    return hay.includes(q);
+    return searchMatch(`${j.name||''} ${j.client||''} ${j.jobcode||''}`, q);
   }).sort((a,b) => b.id - a.id);
 
   if (!matches.length) {
@@ -27183,9 +27201,9 @@ function refilterProductsGrid() {
   const codeNeedle = String(productsFilter.code || '').toLowerCase().replace(/\s+/g, '');
   const filtered = __productGroupsAll.filter(g => {
     if (type && g.type !== type) return false;
-    if (codeNeedle && !(g.jobs || []).some(j => String(j.jobcode || '').toLowerCase().replace(/\s+/g, '').includes(codeNeedle))) return false;
+    if (codeNeedle && !(g.jobs || []).some(j => searchMatch(j.jobcode, codeNeedle))) return false;
     if (company && ![...g.companies].some(c => c.toLowerCase() === company)) return false;
-    if (search && !(g.name.toLowerCase().includes(search) || [...g.companies].some(c => c.toLowerCase().includes(search)))) return false;
+    if (search && !searchMatch([g.name, ...g.companies].join(' '), search)) return false;
     return true;
   });
   filtered.sort((a, b) => b.revenue - a.revenue || b.cartons - a.cartons || a.name.localeCompare(b.name));
@@ -27532,7 +27550,7 @@ function filterAddToProductList() {
   const needle = q.trim().toLowerCase();
   document.querySelectorAll('.add-to-product-row').forEach(row => {
     const hay = row.getAttribute('data-hay') || '';
-    row.style.display = (!needle || hay.includes(needle)) ? '' : 'none';
+    row.style.display = (!needle || searchMatch(hay, needle)) ? '' : 'none';
   });
 }
 async function addProductAlias(ci) {
@@ -29104,8 +29122,7 @@ function cgpFilter() {
   const idNeedle = raw.replace(/^e[-\s]?/, '');
   const hits = !raw ? _cgpJobs : _cgpJobs.filter(j =>
     String(j.id) === idNeedle || String(j.id).includes(idNeedle)
-    || String(j.name || '').toLowerCase().includes(raw)
-    || String(j.client || '').toLowerCase().includes(raw));
+    || searchMatch(`${j.name || ''} ${j.client || ''}`, raw));
   // Exact job number first, then newest first.
   const sorted = [...hits].sort((a, b) => (String(b.id) === idNeedle) - (String(a.id) === idNeedle) || b.id - a.id);
   const SHOW = 300;
@@ -29760,8 +29777,7 @@ function jobDisplayBrands(j) {
 // "offcut" used to match only papers whose brand/supplier said so).
 function paperPickerHit(it, q) {
   if (!q) return true;
-  const hay = `${it.paper_type || ''} ${it.size || ''} ${it.gsm || ''} ${it.gsm ? it.gsm + 'gsm' : ''} ${it.brand || ''} ${it.supplier || ''} ${it.is_offcut ? 'offcut' : 'fresh'}`.toLowerCase();
-  return String(q).toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w));
+  return searchMatch(`${it.paper_type || ''} ${it.size || ''} ${it.gsm || ''} ${it.gsm ? it.gsm + 'gsm' : ''} ${it.brand || ''} ${it.supplier || ''} ${it.is_offcut ? 'offcut' : 'fresh'}`, q);
 }
 // Group key used everywhere in the picker + the availability hint.
 function paperGroupKey(it) {
@@ -33506,7 +33522,7 @@ function stationOffcutFilter(q) {
   const needle = String(q || '').trim().toLowerCase();
   let shown = 0;
   document.querySelectorAll('#station-offcut-list [data-search]').forEach(row => {
-    const hit = !needle || row.dataset.search.includes(needle);
+    const hit = !needle || searchMatch(row.dataset.search, needle);
     row.style.display = hit ? '' : 'none';
     if (hit) shown++;
   });
@@ -33525,7 +33541,7 @@ function stationOffcutInventoryHtml() {
           const ps = packetSize(it.paper_type);
           const unit = packetUnitLabel(it.paper_type).toLowerCase();
           const search = [it.paper_type, it.size, it.gsm, it.brand, it.supplier].filter(Boolean).join(' ').toLowerCase();
-          const hidden = needle && !search.includes(needle);
+          const hidden = needle && !searchMatch(search, needle);
           return `
           <div class="station-job" data-search="${esc(search)}" style="${hidden ? 'display:none;' : ''}cursor:default;padding:10px 16px;gap:12px;border-left:4px solid #0891b2;">
             <div class="sj-main" style="flex:1;min-width:0;">
@@ -33868,10 +33884,7 @@ function stationJobMatches(j, query) {
   const id = String(j.id);
   const idNeedle = t.replace(/^e[-\s]?/, '');
   if (id === idNeedle || (/^\d+$/.test(idNeedle) && id.includes(idNeedle))) return true;
-  if (String(j.name || '').toLowerCase().includes(t)) return true;
-  if (String(j.client || '').toLowerCase().includes(t)) return true;
-  const sq = t.replace(/\s+/g, '');
-  return !!sq && String(j.jobcode || '').toLowerCase().replace(/\s+/g, '').includes(sq);
+  return searchMatch(`${j.name || ''} ${j.client || ''}`, t) || searchMatch(j.jobcode, t);
 }
 function stationQueueSetTab(t) {
   stationQueueTab = t;
@@ -35790,8 +35803,8 @@ function filterClientJobs(rows, text) {
       j.name, j.ref, j.bno,
       j.deadline, fmtSafe(j.deadline),
       j.dateissued, fmtSafe(j.dateissued),
-    ].map(v => String(v || '').toLowerCase()).join(' ');
-    return hay.includes(q);
+    ].map(v => String(v || '')).join(' ');
+    return searchMatch(hay, q);
   });
 }
 function onClientPortalSearch(v) {
