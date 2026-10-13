@@ -7459,7 +7459,11 @@ function deliveryHasOwnShipper(d) {
 // Carton Shipper is written "1600x20" = 20 cartons of 1600 (owner,
 // 2026-10-13); older entries are a plain carton count. Counts cartons.
 function stationShipperTotal(job) {
-  const p = job && job.particulars && job.particulars.ready_packets_qty;
+  // Total cartons = Carton Shipper + Loose Carton Shipper (2026-10-13).
+  const pp = (job && job.particulars) || {};
+  return stationShipperRowTotal(pp.ready_packets_qty) + stationShipperRowTotal(pp.loose_shipper_qty);
+}
+function stationShipperRowTotal(p) {
   if (!p) return 0;
   // One entry may hold several lines: "1600x20+1400x3" = 23 cartons.
   const one = t => {
