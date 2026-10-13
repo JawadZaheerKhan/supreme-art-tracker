@@ -10797,7 +10797,17 @@ function bulkRemoveRow(idx) {
   }
   row.remove();
 }
+// Same once-at-a-time rule as Stock Out (Bulk).
+let _bulkInSaving = false;
 async function saveBulkStockIn() {
+  if (_bulkInSaving) return;
+  _bulkInSaving = true;
+  const btns = [...document.querySelectorAll('button[onclick*="saveBulkStockIn"]')];
+  btns.forEach(b => { b.disabled = true; b.style.opacity = '0.6'; });
+  try { return await saveBulkStockInRun(); }
+  finally { _bulkInSaving = false; btns.forEach(b => { b.disabled = false; b.style.opacity = ''; }); }
+}
+async function saveBulkStockInRun() {
   const tbody = document.getElementById('bulk-rows');
   if (!tbody) return;
   const ref      = document.getElementById('bulk-ref').value.trim();
@@ -11296,7 +11306,19 @@ function bulkOutRemoveRow(idx) {
   const sht = row.querySelector('.bulkout-qty');     if (sht) sht.readOnly = false;
   if (warnRow) warnRow.style.display = 'none';
 }
+// Saving runs once at a time: a second click (or Enter) while the first save
+// is still working is ignored - it used to save every row again (challan
+// 1176, 2026-10-13). The Save button greys out meanwhile.
+let _bulkOutSaving = false;
 async function saveBulkStockOut() {
+  if (_bulkOutSaving) return;
+  _bulkOutSaving = true;
+  const btns = [...document.querySelectorAll('button[onclick*="saveBulkStockOut"]')];
+  btns.forEach(b => { b.disabled = true; b.style.opacity = '0.6'; });
+  try { return await saveBulkStockOutRun(); }
+  finally { _bulkOutSaving = false; btns.forEach(b => { b.disabled = false; b.style.opacity = ''; }); }
+}
+async function saveBulkStockOutRun() {
   const tbody = document.getElementById('bulkout-rows');
   if (!tbody) return;
   const ref     = document.getElementById('bulkout-ref').value.trim();

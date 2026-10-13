@@ -299,7 +299,9 @@ function getDb() {
 // Stock In / Stock Out reports - owner, 2026-10-05).
 // Bumped again for jobs.updated_at + its trigger (changed-only job refresh -
 // owner, 2026-10-05: the app had become slow).
-const SCHEMA_VERSION = 'v2026-10-06-product-specials';
+// Bumped again for issue_locks (one stock issue per job at a time - owner,
+// 2026-10-13: a double-saved Stock Out issued three jobs twice).
+const SCHEMA_VERSION = 'v2026-10-13-issue-locks';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1712,6 +1714,16 @@ async function initDb() {
         canonical   TEXT NOT NULL,
         updated_by  TEXT,
         updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+
+    // One stock issue per job at a time: performIssueStock claims the job's row
+    // here while it works, so a second request for the same job (a double
+    // click, a retry on a slow line) is refused instead of issuing twice.
+    await sql`
+      CREATE TABLE IF NOT EXISTS issue_locks (
+        job_id INTEGER PRIMARY KEY,
+        at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
 
@@ -6053,7 +6065,25 @@ app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pen
 // of a parallel re-implementation that could drift out of sync. Returns
 // { status, error } on any rejection, or { job } on success — the caller
 // decides how to respond (res.json vs. res.status(...).json(...)).
+// Issue stock to a job - one at a time per job. Two identical requests that
+// arrive together (Stock Out (Bulk) saved twice, challan 1176 on 2026-10-13:
+// E-913 / E-915 / E-863 were issued twice) both passed the "already fully
+// issued" check before either was written. The second now waits its turn:
+// it is refused while the first holds the job's lock (a lock older than 60s
+// is treated as left over from a crash and taken over).
 async function performIssueStock(sql, req, id, body) {
+  const got = await sql`
+    INSERT INTO issue_locks (job_id, at) VALUES (${id}, NOW())
+    ON CONFLICT (job_id) DO UPDATE SET at = NOW() WHERE issue_locks.at < NOW() - INTERVAL '60 seconds'
+    RETURNING job_id`;
+  if (!got.length) return { status: 409, error: `Job E-${id} is being issued right now (a second save of the same issue?) - refresh in a moment before issuing again.` };
+  try {
+    return await performIssueStockUnlocked(sql, req, id, body);
+  } finally {
+    try { await sql`DELETE FROM issue_locks WHERE job_id = ${id}`; } catch (e) { console.error('issue lock release failed', e.message); }
+  }
+}
+async function performIssueStockUnlocked(sql, req, id, body) {
   const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
   if (!rows.length) return { status: 404, error: 'Job not found' };
   const job = rows[0];
