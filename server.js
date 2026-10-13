@@ -302,7 +302,9 @@ function getDb() {
 // Bumped again for issue_locks (one stock issue per job at a time - owner,
 // 2026-10-13: a double-saved Stock Out issued three jobs twice).
 // Bumped again for op_locks + the one-reversal-per-entry index (2026-10-13).
-const SCHEMA_VERSION = 'v2026-10-13-op-locks';
+// Bumped again to seed the new Access Register rows job_btn_history_reverse,
+// job_btn_process_without_paper and rpt_mil_products (2026-10-13).
+const SCHEMA_VERSION = 'v2026-10-13-acc-rows';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -363,15 +365,19 @@ const ROLE_PERMISSION_DEFAULTS = {
   // at all. Every job_btn_* is 3-state (yes=Edit / view=View, disabled /
   // hidden=not shown) — one row per button on the Jobs tab.
   job_tab_access:          { label: 'Jobs tab — view the job list and every status tab', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
-  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), and Add/Remove Job from Group', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', finance: 'view', store_manager: 'view', operator: 'view' } },
+  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), Add/Remove Job from Group, and a MIL product\'s Code / MIL Qty on the MIL Products report', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', finance: 'view', store_manager: 'view', operator: 'view' } },
   job_btn_history:         { label: 'History button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
+  // Job History's Reverse button (2026-10-12). Also needs the row for that
+  // kind of change (Delete Delivery / Invoicing fields / Edit). Defaults =
+  // the roles that could already use it, so nobody loses it on upgrade.
+  job_btn_history_reverse: { label: 'History — Reverse button: undo a delivery added / removed / edited, a Rate / Sale Tax / Carton Shipper change, or a job card edit (also needs the row for that kind of change)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   job_btn_link:            { label: 'Link Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_print:           { label: 'Print button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
   job_btn_block:           { label: 'Block button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_delete:          { label: 'Delete button', levels: { admin: 'yes' } },
   job_btn_create_mil:      { label: 'Create Mil Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing and Finalize as Delivered', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing, Finalize as Delivered and Back to Partial Delivery', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
@@ -385,6 +391,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // numbers — advancing/skipping the stage stays PIN-only.
   job_btn_operator_entry:  { label: 'Operator Entry dot — open a particulars row\'s Station entry from the Job Card (no station PIN) to edit its quantities', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
+  // Was hard-wired to Admin (2026-10-05); now its own row, Admin by default.
+  job_btn_process_without_paper: { label: 'Process without paper — send a job that is waiting for paper into production with no stock issued', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
   // Distinct from the existing wastage_adjustment group above (which also
   // covers the Finalized Jobs tab and the Manual Job Card Consumption
@@ -411,8 +419,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // keep enforcing exactly as before in the meantime.
   inventory_tab_access:    { label: 'Inventory tab — view the paper list', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   imports_tab_access:      { label: 'Imports — view the booked-shipments report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
-  inv_btn_stock_in:        { label: 'Stock In button — also covers Stock In (Bulk) and receiving a shipment in Imports', levels: { admin: 'yes', store_manager: 'yes' } },
-  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk), Issue Stock in the Pending Stock queue, and Approve/Reject a packet top-up request', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_stock_in:        { label: 'Stock In button — also covers Stock In (Bulk), receiving a shipment in Imports, and editing a Stock In entry\'s Date / Challan No. / Notes', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk), Issue Stock in the Pending Stock queue, Approve/Reject a packet top-up request, and editing a Stock Out entry\'s Date / Challan No. / Notes', levels: { admin: 'yes', store_manager: 'yes' } },
   inv_btn_offcut_issuance: { label: 'Offcut Issuance button', levels: { admin: 'yes', store_manager: 'yes' } },
   inv_btn_history:         { label: 'History button', levels: { admin: 'yes', ceo: 'view', production_manager: 'view', store_manager: 'yes', finance: 'view' } },
   inv_btn_edit:            { label: 'Edit button', levels: { admin: 'yes', store_manager: 'yes' } },
@@ -443,6 +451,9 @@ const ROLE_PERMISSION_DEFAULTS = {
   // (only Super Admin gets this today).
   rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
   rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  // Its own row (2026-10-13); it rode on the Jobs Report before, so it starts
+  // with the same roles.
+  rpt_mil_products:                { label: 'MIL Products report — MIL Qty, Ready, In Process, Shipped and Carton Shipper per MIL product (editing Code / MIL Qty there needs the Edit button row)', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_production_report:           { label: 'Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   // Its own row rather than riding on the Jobs Report: this one accounts for
   // deleted and never-used job numbers, which is an audit question, not a
@@ -499,7 +510,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_tab_access:  { label: 'Product Rate tab — view jobs grouped by product', levels: { ceo: 'view', finance: 'view' } },
   products_btn_rate:    { label: 'Rate — edit a Product Rate tile\'s default Rate, and use its "+" (fold another product in)', levels: { finance: 'yes', ceo: 'view' } },
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
-  dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, stock and wastage tiles with a date filter (view only)', levels: { ceo: 'view' } },
+  dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
@@ -5997,7 +6008,7 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 // plates are done.
 app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) => {
   try {
-    if (!userHasRole(req.user, 'admin') && !userHasRole(req.user, 'super_admin')) return res.status(403).json({ error: 'Admin only' });
+    if (!userHasBtn(req.user, 'job_btn_process_without_paper')) return res.status(403).json({ error: 'Not allowed - Process without paper is off for your role.' });
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
@@ -8057,6 +8068,7 @@ app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (
     await dbReady;
     const sql = getDb();
     const revId = reversesAuditIdOf(req);
+    if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
     if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const rateRaw = req.body?.rate;
@@ -8098,6 +8110,7 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
     await dbReady;
     const sql = getDb();
     const revId = reversesAuditIdOf(req);
+    if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
     if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const raw = req.body?.cartons_packets;
@@ -9351,6 +9364,7 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
     if (m.reverses_audit_id) return res.status(400).json({ error: 'A reverse cannot itself be reversed - make the change again instead.' });
     if (await alreadyReversed(sql, auditId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const can = key => userHasRole(req.user, 'super_admin') || roleHasPermission(req.user, key, 'yes');
+    if (!can('job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
     const [job] = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!job) return res.status(404).json({ error: 'Job not found' });
     const by = req.user?.email || 'unknown';
@@ -9456,6 +9470,7 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
     await dbReady;
     const sql = getDb();
     const revId = reversesAuditIdOf(req);
+    if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
     if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
 

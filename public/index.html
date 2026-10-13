@@ -3249,7 +3249,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <div class="report-card-title">Sale Report</div>
         <div class="report-card-desc">Every delivered job with full invoicing detail — PO/Batch/E-FBR/Invoice No., quantities, paper/machine/coatings, Rate, Sale Tax %, and Company/Destination/NTN. With totals row, print + Excel export.</div>
       </button>
-      <button class="report-card sm-hide" data-rpt="rpt_jobs_report|rpt_production_report" onclick="openJobsReportPage()">
+      <button class="report-card sm-hide" data-rpt="rpt_jobs_report|rpt_mil_products|rpt_production_report" onclick="openJobsReportPage()">
         <div class="report-card-icon">&#128196;</div>
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
@@ -3332,7 +3332,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item active" data-rpt="rpt_jobs_report" data-rt="jobs-report" onclick="setReportsTab('jobs-report')">
           <span class="rsb-icon">&#128196;</span> Jobs
         </button>
-        <button class="rsb-item rsb-item-mil" data-rpt="rpt_jobs_report" data-rt="mil-products" onclick="setReportsTab('mil-products')">
+        <button class="rsb-item rsb-item-mil" data-rpt="rpt_mil_products" data-rt="mil-products" onclick="setReportsTab('mil-products')">
           <span class="rsb-icon">&#128230;</span> MIL Products
         </button>
         <button class="rsb-item" data-rpt="rpt_production_report" data-rt="prod-report" onclick="setReportsTab('prod-report')">
@@ -5086,7 +5086,7 @@ function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || 
 // stamps particulars.paper_waived; nothing is deducted. Not offered at CTP
 // (plates first - the job then comes to Pending Stock) or once waived.
 function canProcessWithoutPaper(j) {
-  if (!j || !(isAdmin() || isSuperAdmin())) return false;
+  if (!j || !(isSuperAdmin() || hasPerm('job_btn_process_without_paper'))) return false;
   if (j.particulars && j.particulars.paper_waived) return false;
   if (j.issuance_status === 'pending') return true;
   return j.issuance_status === 'issued' && (partialPendingSheets(j) > 0 || secondaryPendingSheets(j) > 0);
@@ -5307,6 +5307,7 @@ const BTN_FN_ROWS = {
   moveJobToCtp: ['job_btn_stage_forward', 'yes'], moveJobToPendingStock: ['job_btn_stage_forward', 'yes'], moveToStage: ['job_btn_stage_forward', 'yes'],
   openEditWithDelivery: ['job_btn_record_delivery', 'yes'], openDeliverLinkedModal: ['job_btn_record_delivery', 'yes'], openDeliverGroupModal: ['job_btn_record_delivery', 'yes'],
   removeDelivery: ['job_btn_delete_delivery', 'yes'],
+  undoFinalizeDelivery: ['job_btn_stage_forward', 'yes'], processWithoutPaper: ['job_btn_process_without_paper', 'yes'], reverseJobHistory: ['job_btn_history_reverse', 'yes'],
   openAdjustModal: ['job_btn_adjust', 'yes'], removeAdjustment: ['job_btn_adjust', 'yes'],
   // Inventory
   openInvHistory: ['inv_btn_history', 'view'], openInvHistoryAt: ['inv_btn_history', 'view'],
@@ -11955,7 +11956,7 @@ function jhReverseHtml(jobId, a, reversedIds) {
   if (a.action === 'job.update' && m.revert && !m.revert.reversible) {
     return facts + `<div style="font-size:11px;color:var(--text2);margin-top:2px;">Can't be reversed here - ${esc(m.revert.why || 'it moved stock')}; change it back on the job card.</div>`;
   }
-  if (!r.ok(m) || !(isSuperAdmin() || hasPerm(r.perm))) return facts;
+  if (!r.ok(m) || !(isSuperAdmin() || (hasPerm(r.perm) && hasPerm('job_btn_history_reverse')))) return facts;
   return facts + `<div style="margin-top:4px;"><button class="btn btn-sm ceo-hide" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:2px 9px;font-size:11px;" onclick="event.stopPropagation(); reverseJobHistory(${jobId}, ${a.id})" title="Undo this change - ${esc(r.what)}">&#8634; Reverse</button></div>`;
 }
 async function reverseJobHistory(jobId, auditId) {
@@ -35417,6 +35418,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_tab_access',          type: 'tab' },
   { key: 'job_btn_edit',            type: 'button' },
   { key: 'job_btn_history',         type: 'button' },
+  { key: 'job_btn_history_reverse', type: 'button' },
   { key: 'job_btn_link',            type: 'button' },
   { key: 'job_btn_print',           type: 'button' },
   { key: 'job_btn_block',           type: 'button' },
@@ -35425,6 +35427,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_create_mil',      type: 'button' },
   { key: 'job_btn_new_job',         type: 'button' },
   { key: 'job_btn_stage_forward',   type: 'button' },
+  { key: 'job_btn_process_without_paper', type: 'button' },
   { key: 'job_btn_record_delivery', type: 'button' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'button' },
@@ -35463,6 +35466,7 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_offcut_consumption',          type: 'tab' },
   { key: 'rpt_manual_job_card_consumption', type: 'tab' },
   { key: 'rpt_jobs_report',                 type: 'tab' },
+  { key: 'rpt_mil_products',                type: 'tab' },
   { key: 'rpt_production_report',           type: 'tab' },
   { key: 'rpt_job_number_register',         type: 'tab' },
   { key: 'rpt_job_number_reuse',            type: 'button' },
