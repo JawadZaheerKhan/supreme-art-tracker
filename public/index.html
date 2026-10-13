@@ -15948,9 +15948,13 @@ function jrMilJobFigures(j, asOf) {
     const booked = parseFloat(String(j.cartonqty || '').replace(/[^0-9.]/g, '')) || 0;
     inProcess = Math.max(0, booked - made);
   }
-  // Packed at the Station up to the date: Carton Shipper and Loose lines.
-  const packLines = shipperLinesUpTo(p.ready_packets_qty, asOf);
-  const looseLines = shipperLinesUpTo(p.loose_shipper_qty, asOf);
+  // Cartons on hand: packed at the Station up to the date (Carton Shipper,
+  // Loose), less this job's shipped cartons - full cartons first, oldest
+  // entry first, then loose. A job delivered (closed) by the date holds none.
+  let left = shipper;
+  const takeOff = lines => lines.map(l => { const t = Math.min(l.cartons, left); left -= t; return { ...l, cartons: l.cartons - t }; }).filter(l => l.cartons > 0);
+  const packLines = closed ? [] : takeOff(shipperLinesUpTo(p.ready_packets_qty, asOf));
+  const looseLines = closed ? [] : takeOff(shipperLinesUpTo(p.loose_shipper_qty, asOf));
   return { shipped, inHand, inProcess, shipper, packLines, looseLines };
 }
 function jrMilRows(opts) {
@@ -15979,14 +15983,13 @@ function jrMilRows(opts) {
     let shipped = 0, ready = 0, inProcess = 0, shipper = 0;
     const packLines = [], looseLines = [];
     for (const j of gJobs) { const f = jrMilJobFigures(j, asOf); shipped += f.shipped; ready += f.inHand; inProcess += f.inProcess; shipper += f.shipper; packLines.push(...f.packLines); looseLines.push(...f.looseLines); }
-    // Cartons (owner, 2026-10-13): packed = Carton Shipper + Loose lines;
-    // shipped = the shipments' Carton Shipper; remaining = packed - shipped.
+    // Cartons on hand (owner, 2026-10-13): what is left of Carton Shipper +
+    // Loose after the shipments (see jrMilJobFigures), every size written.
     const packedCartons = [...packLines, ...looseLines].reduce((a, l) => a + l.cartons, 0);
-    const remainingCartons = Math.max(0, packedCartons - shipper);
     const shipperText = shipperLinesText(packLines), looseText = shipperLinesText(looseLines);
     // Short: even with what is being made, the shelf stays below the MIL Qty.
     const short = milQty > 0 && ready + inProcess < milQty;
-    out.push({ gName, groupId: ent ? ent.id : null, product, code, client, milQty, ready, inProcess, shipped, shipper, short, jobCount: gJobs.length, shipperText, looseText, packedCartons, remainingCartons });
+    out.push({ gName, groupId: ent ? ent.id : null, product, code, client, milQty, ready, inProcess, shipped, shipper, short, jobCount: gJobs.length, shipperText, looseText, packedCartons });
   }
   return out.sort((a, b) => String(a.product).localeCompare(String(b.product)));
 }
@@ -16039,7 +16042,7 @@ function renderJrMil() {
   if (!rows.length) { el.innerHTML = '<div class="empty">No MIL products match these filters.</div>'; return; }
   const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;"';
-  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons, remaining: a.remaining + r.remainingCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, shipper: 0, packed: 0, remaining: 0 });
+  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, shipper: 0, packed: 0 });
   const canEdit = canEditMilGroup();
   const shortBg = 'background:rgba(220,38,38,0.12);';
   // Code and MIL Qty are the MIL group's own fields: typed here, saved on the
@@ -16060,15 +16063,14 @@ function renderJrMil() {
       <td style="padding:7px 10px;white-space:nowrap;">${esc(r.looseText) || '<span style="color:var(--text3)">—</span>'}</td>
       <td style="padding:7px 10px;text-align:right;font-weight:600;">${fmtN(r.packedCartons)}</td>
       <td style="padding:7px 10px;text-align:right;color:#9a3412;">${fmtN(r.shipper)}</td>
-      <td style="padding:7px 10px;text-align:right;font-weight:700;color:#166534;">${fmtN(r.remainingCartons)}</td>
     </tr>`).join('');
   el.innerHTML = `
-    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready (on the shelf), Shipped and the cartons (packed and shipped, up to the day) as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its tile in the Jobs tab, a Shipped figure for its deliveries.
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready (on the shelf), the cartons on hand (Carton Shipper / Loose / Total, after the shipments) and Shipped (up to the day) as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its tile in the Jobs tab, a Shipped figure for its deliveries.
       <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${shortBg}border:1px solid rgba(220,38,38,0.45);"></span>Red = Ready + In Process below the MIL Qty</span></div>
     <div class="report-scroll-wrap">
       <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead><tr style="background:var(--bg2);">
-          <th ${th}>Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR}>Shipped Qty</th><th ${th} title="Packed at the Station (qty in each carton x cartons), up to the date">Carton Shipper</th><th ${th} title="Loose cartons packed at the Station, up to the date">Loose Carton Shipper</th><th ${thR} title="Carton Shipper + Loose cartons">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th><th ${thR} title="Total Cartons - Shipped Cartons">Remaining Cartons</th>
+          <th ${th}>Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR}>Shipped Qty</th><th ${th} title="On hand: packed at the Station (qty in each carton x cartons) less what was shipped, as on the date">Carton Shipper</th><th ${th} title="On hand: loose cartons packed at the Station less what was shipped, as on the date">Loose Carton Shipper</th><th ${thR} title="On hand: Carton Shipper + Loose cartons left after the shipments">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th>
         </tr></thead>
         <tbody>${body}</tbody>
         <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
@@ -16080,7 +16082,6 @@ function renderJrMil() {
           <td></td><td></td>
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.packed)}</td>
           <td style="padding:8px 10px;text-align:right;color:#9a3412;">${fmtN(t.shipper)}</td>
-          <td style="padding:8px 10px;text-align:right;color:#166534;">${fmtN(t.remaining)}</td>
         </tr></tfoot>
       </table>
     </div>`;
@@ -16162,7 +16163,7 @@ function printJrMil() {
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const f = n => (+n || 0).toLocaleString();
-  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons, remaining: a.remaining + r.remainingCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, shipper: 0, packed: 0, remaining: 0 });
+  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, shipper: 0, packed: 0 });
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
@@ -16174,10 +16175,10 @@ function printJrMil() {
       })}</div>
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">
-          <th ${tdL}>Product Code</th><th ${tdL}>Product Name</th><th ${tdR}>MIL Qty</th><th ${tdR}>Ready Qty</th><th ${tdR}>In Process</th><th ${tdR}>Shipped Qty</th><th ${tdL}>Carton Shipper</th><th ${tdL}>Loose Carton Shipper</th><th ${tdR}>Total Cartons</th><th ${tdR}>Shipped Cartons</th><th ${tdR}>Remaining Cartons</th>
+          <th ${tdL}>Product Code</th><th ${tdL}>Product Name</th><th ${tdR}>MIL Qty</th><th ${tdR}>Ready Qty</th><th ${tdR}>In Process</th><th ${tdR}>Shipped Qty</th><th ${tdL}>Carton Shipper</th><th ${tdL}>Loose Carton Shipper</th><th ${tdR}>Total Cartons</th><th ${tdR}>Shipped Cartons</th>
         </tr>
-        ${rows.map(r => `<tr${r.short ? ' style="background:#fde2e2;"' : ''}><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.inProcess)}</td><td ${tdR}>${f(r.shipped)}</td><td ${tdL}>${esc(r.shipperText) || '—'}</td><td ${tdL}>${esc(r.looseText) || '—'}</td><td ${tdR}>${f(r.packedCartons)}</td><td ${tdR}>${f(r.shipper)}</td><td ${tdR}>${f(r.remainingCartons)}</td></tr>`).join('')}
-        <tr style="background:#f7f1ea;font-weight:bold;"><td ${tdL} colspan="2" align="right">Totals</td><td ${tdR}>${f(t.milQty)}</td><td ${tdR}>${f(t.ready)}</td><td ${tdR}>${f(t.inProcess)}</td><td ${tdR}>${f(t.shipped)}</td><td ${tdL}></td><td ${tdL}></td><td ${tdR}>${f(t.packed)}</td><td ${tdR}>${f(t.shipper)}</td><td ${tdR}>${f(t.remaining)}</td></tr>
+        ${rows.map(r => `<tr${r.short ? ' style="background:#fde2e2;"' : ''}><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.inProcess)}</td><td ${tdR}>${f(r.shipped)}</td><td ${tdL}>${esc(r.shipperText) || '—'}</td><td ${tdL}>${esc(r.looseText) || '—'}</td><td ${tdR}>${f(r.packedCartons)}</td><td ${tdR}>${f(r.shipper)}</td></tr>`).join('')}
+        <tr style="background:#f7f1ea;font-weight:bold;"><td ${tdL} colspan="2" align="right">Totals</td><td ${tdR}>${f(t.milQty)}</td><td ${tdR}>${f(t.ready)}</td><td ${tdR}>${f(t.inProcess)}</td><td ${tdR}>${f(t.shipped)}</td><td ${tdL}></td><td ${tdL}></td><td ${tdR}>${f(t.packed)}</td><td ${tdR}>${f(t.shipper)}</td></tr>
       </table>
     </div>`;
   const area = document.getElementById('print-area');
@@ -16195,9 +16196,9 @@ async function exportJrMil() {
   const rows = jrMilRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const asOf = jrMilAsOf();
-  const header = ['Product Code', 'Product Name', 'MIL Qty', 'Ready Qty', 'In Process', 'Shipped Qty', 'Carton Shipper', 'Loose Carton Shipper', 'Total Cartons', 'Shipped Cartons', 'Remaining Cartons', 'Below MIL'];
+  const header = ['Product Code', 'Product Name', 'MIL Qty', 'Ready Qty', 'In Process', 'Shipped Qty', 'Carton Shipper', 'Loose Carton Shipper', 'Total Cartons', 'Shipped Cartons', 'Below MIL'];
   const aoa = reportExcelAoa(header);
-  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.inProcess, r.shipped, r.shipperText, r.looseText, r.packedCartons, r.shipper, r.remainingCartons, r.short ? 'YES' : '']);
+  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.inProcess, r.shipped, r.shipperText, r.looseText, r.packedCartons, r.shipper, r.short ? 'YES' : '']);
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
     title: 'MIL PRODUCTS REPORT',
