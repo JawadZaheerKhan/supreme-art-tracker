@@ -10505,11 +10505,24 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
       // owed again (owner, E-489, 2026-10-01: reversing a 41.5-packet top-up
       // sent the job back to "505 needed"). Same for every way an issue is
       // reversed - one row, a bulk reversal, a split - all come through here.
+      // Only issues of the job's CURRENT paper count (main or 2nd paper, any
+      // brand): after a paper change the old paper's issue stays in the
+      // ledger by design, but it is no longer this job's issuance (owner,
+      // E-989, 2026-10-13: an old 25x30 issue kept the job "Requires More
+      // Stock" after its 16x23 offcut issue was reversed).
+      const curSec = job && job.particulars && job.particulars.secondary_paper && job.particulars.secondary_paper.inventory_item_id;
       const standingRows = await sql`
         SELECT COALESCE(SUM(-t.change), 0) AS sheets FROM inventory_transactions t
+          JOIN inventory_items i ON i.id = t.item_id
         WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-consumed'
           AND t.reverses_tx_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)`;
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+          AND EXISTS (SELECT 1 FROM inventory_items c
+                       WHERE c.id IN (${(job && job.inventory_item_id) || 0}, ${curSec || 0})
+                         AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '')
+                         AND COALESCE(c.size, '') = COALESCE(i.size, '')
+                         AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '')
+                         AND COALESCE(c.is_offcut, false) = COALESCE(i.is_offcut, false))`;
       const standingSheets = parseFloat(standingRows[0] && standingRows[0].sheets) || 0;
       if (job && (job.issuance_status === 'issued' || (job.issuance_status === 'ctp' && job.issued_at)) && standingSheets > 0) {
         const sheetsBack = Math.round(Math.abs(parseFloat(tx.change) || 0));
