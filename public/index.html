@@ -4745,7 +4745,26 @@ function openSpeedLog() {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.shiftKey && (e.key === 'L' || e.key === 'l')) { e.preventDefault(); openSpeedLog(); }
 });
+// A save (anything but GET) already on its way to the server with the same
+// address and the same data is not sent again: a double click, a second
+// Enter or a double-fired handler while it is still saving gets "already
+// saving" instead of a second copy (owner, 2026-10-13 - challan 1176 was a
+// Stock Out saved twice). The server refuses doubles too (op_locks).
+const _apiInFlight = new Set();
 async function api(method, path, body) {
+  const m = String(method || 'GET').toUpperCase();
+  if (m === 'GET') return apiSend(method, path, body);
+  const key = m + ' ' + path + ' ' + (body ? JSON.stringify(body) : '');
+  if (_apiInFlight.has(key)) {
+    const err = new Error('Already saving this - please wait a moment');
+    err.duplicate = true;
+    throw err;
+  }
+  _apiInFlight.add(key);
+  try { return await apiSend(method, path, body); }
+  finally { _apiInFlight.delete(key); }
+}
+async function apiSend(method, path, body) {
   const opts = { method, headers: {'Content-Type':'application/json'}, credentials: 'same-origin' };
   if (body) opts.body = JSON.stringify(body);
   const _t0 = performance.now();
@@ -10581,6 +10600,8 @@ async function saveInvRemoveStock(id) {
   if (reason === 'manual-job-card' || reason === 'adjustment') {
     jobCard = (document.getElementById('stockout-jobcard').value || '').trim() || null;
   }
+  const mjcWarn = jobCard ? manualJobCardWarning(jobCard, id) : '';
+  if (mjcWarn && !(await confirmDialog({ title: 'This will not issue the job', message: mjcWarn, confirmText: 'Save as Manual Job Card anyway' }))) return;
   const data = {
     change: -qty,
     reason: reason,
@@ -10608,6 +10629,26 @@ async function saveInvRemoveStock(id) {
     notify(`−${qty.toLocaleString()} sheets removed${tail}`);
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+
+// A Manual Job Card (or Adjustment) entry whose Job Card No. is an app job
+// still waiting in Pending Stock takes the paper out of stock but does NOT
+// issue that job - it stays in Pending Stock and a later issue takes paper
+// again (owner, 2026-10-13, E-1039). Returns the warning text, or ''.
+function manualJobCardWarning(ref, itemId) {
+  const m = String(ref || '').trim().match(/^E?-?\s*(\d+)$/i);
+  if (!m) return '';
+  const j = (jobs || []).find(x => x && x.id === parseInt(m[1], 10));
+  if (!j || !isPendingIssuance(j)) return '';
+  const lbl = it => it ? [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : '', it.is_offcut ? 'offcut' : ''].filter(Boolean).join(' ') : 'no paper set';
+  const grp = it => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : '';
+  const jobPaper = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+  const pick = inventoryAll.find(i => i.id === itemId);
+  const other = jobPaper && pick && grp(jobPaper) !== grp(pick);
+  return `E-${j.id} (${j.name}) is an app job waiting in Pending Stock for ${lbl(jobPaper)}.\n\n`
+    + `A Manual Job Card entry takes the paper out of stock but does NOT issue this job - it stays in Pending Stock, and issuing it later takes paper again.\n\n`
+    + `To issue it, use the reason "Job Card (pending)".`
+    + (other ? `\n\nAlso: you picked ${lbl(pick)}, but its job card says ${lbl(jobPaper)}. If that is the paper it really uses, change the paper on the job card first.` : '');
 }
 
 // ── Bulk Stock In (search-based) ─────────────────────────────
@@ -11440,6 +11481,10 @@ async function saveBulkStockOutRun() {
     plan.push({ match, reason, jobCard, qty, selectedJobs, brandSplits });
   }
   if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
+  // Manual Job Card / Adjustment rows naming an app job in Pending Stock.
+  const mjcWarns = plan.filter(p => p.reason !== 'job-card' && p.jobCard)
+    .map(p => manualJobCardWarning(p.jobCard, p.match && p.match.id)).filter(Boolean);
+  if (mjcWarns.length && !(await confirmDialog({ title: 'This will not issue the job', message: mjcWarns.join('\n\n────────\n\n'), confirmText: 'Save as Manual Job Card anyway' }))) return;
 
   // Pre-flight over-issuance check — mirrors the jobShare math in the
   // submit loop below (LAST selected job on each row absorbs whatever's
@@ -11814,7 +11859,7 @@ async function renderInvHistory(id) {
       const canReverse = canReverseTx(t);
       const reverseTooltip = t.change > 0
         ? `Undo this stock-in entry. Creates a -${packets} ${unit} correction.`
-        : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and flips Job E-${t.job_id} back to Pending Stock if it's still at CTP.` : '.'}`;
+        : `Refund this stock-OUT entry. Creates a +${packets.replace(/^-/, '')} ${unit} correction${t.reason === 'job-consumed' && t.job_id ? `, and Job E-${t.job_id} owes these sheets again (back in Pending Stock).` : '.'}`;
       const reverseBtn = canReverse
         ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:3px 8px;font-size:11px;white-space:nowrap;" onclick="reverseStockTxGroup([${t._tx_ids.join(',')}], ${id})" title="${esc(reverseTooltip)}">&#8634; Reverse</button>`
         : (hasBeenReversed

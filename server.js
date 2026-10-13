@@ -301,7 +301,8 @@ function getDb() {
 // owner, 2026-10-05: the app had become slow).
 // Bumped again for issue_locks (one stock issue per job at a time - owner,
 // 2026-10-13: a double-saved Stock Out issued three jobs twice).
-const SCHEMA_VERSION = 'v2026-10-13-issue-locks';
+// Bumped again for op_locks + the one-reversal-per-entry index (2026-10-13).
+const SCHEMA_VERSION = 'v2026-10-13-op-locks';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1726,6 +1727,22 @@ async function initDb() {
         at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+
+    // Shared "one at a time" locks for saves that must never run twice at
+    // once (see takeOpLocks). A row is the lock; a crash leaves it to be
+    // taken over after 60 seconds.
+    await sql`
+      CREATE TABLE IF NOT EXISTS op_locks (
+        key TEXT PRIMARY KEY,
+        at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    // An entry can be reversed only once - even two reverse clicks that
+    // reach the server together. Skipped (logged) if old data already has a
+    // doubled reversal, so start-up never fails on it.
+    try {
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_inv_tx_reverses_once ON inventory_transactions (reverses_tx_id) WHERE reverses_tx_id IS NOT NULL`;
+    } catch (e) { console.error('ux_inv_tx_reverses_once not created (an entry already has two reversals):', e.message); }
 
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
@@ -6071,16 +6088,56 @@ app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pen
 // issued" check before either was written. The second now waits its turn:
 // it is refused while the first holds the job's lock (a lock older than 60s
 // is treated as left over from a crash and taken over).
+// ── One at a time (owner, 2026-10-13) ───────────────────────────────
+// takeOpLocks claims every key or none: a key held by another request means
+// "the same thing is being saved right now" - a double click, a retry on a
+// slow line, two people at once. By default that second request is refused
+// (409) so nothing is ever saved twice; { wait: true } instead waits its turn
+// (up to ~8s) - for edits, where the second one is a different change that
+// must not overwrite the first. A lock older than 60s is a crash leftover and
+// is taken over. Keys: job-stock:<id> (paper issued / reversed for a job),
+// job-delivery:<id>, tx-reverse:<txId>, audit-reverse:<auditId>,
+// item-tx:<itemId>.
+async function takeOpLocks(sql, keys, opts) {
+  const want = [...new Set((keys || []).filter(Boolean).map(String))].sort();
+  const until = Date.now() + ((opts && opts.wait) ? 8000 : 0);
+  for (;;) {
+    const held = [];
+    let busy = false;
+    for (const k of want) {
+      const got = await sql`
+        INSERT INTO op_locks (key, at) VALUES (${k}, NOW())
+        ON CONFLICT (key) DO UPDATE SET at = NOW() WHERE op_locks.at < NOW() - INTERVAL '60 seconds'
+        RETURNING key`;
+      if (!got.length) { busy = true; break; }
+      held.push(k);
+    }
+    if (!busy) return held;
+    await releaseOpLocks(sql, held);
+    if (Date.now() >= until) return null;
+    await new Promise(r => setTimeout(r, 150 + Math.floor(Math.random() * 100)));
+  }
+}
+async function releaseOpLocks(sql, held) {
+  for (const k of held || []) {
+    try { await sql`DELETE FROM op_locks WHERE key = ${k}`; } catch (e) { console.error('op lock release failed', k, e.message); }
+  }
+}
+const OP_BUSY = 'This is being saved right now (a second click, or someone else at the same moment) - refresh in a moment and check before trying again.';
+
+// Issue stock to a job - one at a time per job. Two identical requests that
+// arrive together (Stock Out (Bulk) saved twice, challan 1176 on 2026-10-13:
+// E-913 / E-915 / E-863 were issued twice) both passed the "already fully
+// issued" check before either was written. The second is now refused while
+// the first holds the job's lock. Reversing a job's issue takes the same
+// lock, so an issue and a reverse can't cross either.
 async function performIssueStock(sql, req, id, body) {
-  const got = await sql`
-    INSERT INTO issue_locks (job_id, at) VALUES (${id}, NOW())
-    ON CONFLICT (job_id) DO UPDATE SET at = NOW() WHERE issue_locks.at < NOW() - INTERVAL '60 seconds'
-    RETURNING job_id`;
-  if (!got.length) return { status: 409, error: `Job E-${id} is being issued right now (a second save of the same issue?) - refresh in a moment before issuing again.` };
+  const held = await takeOpLocks(sql, [`job-stock:${id}`]);
+  if (!held) return { status: 409, error: `Job E-${id} is being issued right now (a second save of the same issue?) - refresh in a moment before issuing again.` };
   try {
     return await performIssueStockUnlocked(sql, req, id, body);
   } finally {
-    try { await sql`DELETE FROM issue_locks WHERE job_id = ${id}`; } catch (e) { console.error('issue lock release failed', e.message); }
+    await releaseOpLocks(sql, held);
   }
 }
 async function performIssueStockUnlocked(sql, req, id, body) {
@@ -6842,6 +6899,11 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-stock:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -6860,13 +6922,27 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     // reverses the whole split. Each refund links back via reverses_tx_id
     // so the report's pair-hiding drops both sides cleanly. Do the same
     // for the (per-source-brand) job-offcut rows.
-    const consumedRows = await sql`
-      SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+    // Only issues of the job's CURRENT paper (main or 2nd, any brand): an
+    // old paper's issue from before a paper change stays with production by
+    // design and is not this job's issuance any more (owner, E-989 class,
+    // 2026-10-13).
+    const curSecRI = job.particulars && job.particulars.secondary_paper && job.particulars.secondary_paper.inventory_item_id;
+    const consumedAll = await sql`
+      SELECT t.id, t.item_id, t.change, t.created_at,
+             EXISTS (SELECT 1 FROM inventory_items c
+                      WHERE c.id IN (${job.inventory_item_id || 0}, ${curSecRI || 0})
+                        AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '')
+                        AND COALESCE(c.size, '') = COALESCE(i.size, '')
+                        AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '')
+                        AND COALESCE(c.is_offcut, false) = COALESCE(i.is_offcut, false)) AS current_paper
+        FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
       WHERE t.job_id = ${job.id} AND t.reason = 'job-consumed'
         AND t.reverses_tx_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
       ORDER BY t.id ASC
     `;
+    const consumedRows = consumedAll.filter(r => r.current_paper);
+    const oldPaperKept = consumedAll.length > consumedRows.length;
     for (const row of consumedRows) {
       await applyInventoryChange(sql, {
         itemId: row.item_id,
@@ -6878,13 +6954,17 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
         reversesTxId: row.id,
       });
     }
-    const offcutRows = await sql`
-      SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+    const offcutAll = await sql`
+      SELECT t.id, t.item_id, t.change, t.created_at FROM inventory_transactions t
       WHERE t.job_id = ${job.id} AND t.reason = 'job-offcut'
         AND t.reverses_tx_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
       ORDER BY t.id ASC
     `;
+    // With an old paper's issue left standing, only the offcut returns
+    // written with the issues being undone (same moment) are pulled back.
+    const offcutRows = !oldPaperKept ? offcutAll : offcutAll.filter(o => consumedRows.some(c =>
+      Math.abs(new Date(o.created_at) - new Date(c.created_at)) <= 10000 && o.id > c.id));
     for (const row of offcutRows) {
       await applyInventoryChange(sql, {
         itemId: row.item_id,
@@ -6939,6 +7019,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
       summary: `Reversed stock issuance for Job E-${id}: ${job.name}`,
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -6994,6 +7075,11 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const topupId = req.params.topupId;
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-stock:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -7073,6 +7159,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
       summary: `Approved +${t.qty} extra packets for Job E-${id}: ${sheets} sheets deducted`,
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7502,6 +7589,11 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-delivery:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const cartons = String(req.body.cartons ?? '').trim();
     const date    = String(req.body.date    ?? '').trim() || businessDateISO();
     let notes     = String(req.body.notes   ?? '').trim() || null;
@@ -7614,6 +7706,7 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
       metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined, at: entry.at, entry },
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -9091,6 +9184,11 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
     const challanNo = String(req.body?.challan_no ?? '').trim() || null;
     const date = String(req.body?.date ?? '').trim() || businessDateISO();
     const entriesIn = Array.isArray(req.body?.entries) ? req.body.entries : [];
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [id, ...entriesIn.map(e => parseInt(e && e.job_id, 10))].filter(Number.isFinite).map(x => `job-delivery:${x}`));
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     if (entriesIn.length !== 2) {
       return res.status(400).json({ error: 'Linked delivery needs exactly 2 job entries.' });
     }
@@ -9150,6 +9248,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
       metadata: { challan_no: challanNo, date, a: { job_id: id, cartons: cartonsA }, b: { job_id: partnerId, cartons: cartonsB } },
     });
     res.json({ job: rowA, partner: rowB });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -9162,6 +9261,11 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
     const sql = getDb();
     const id  = parseInt(req.params.id, 10);
     const ix  = parseInt(req.params.index, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-delivery:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -9213,6 +9317,7 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       metadata: { removed, index: ix, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -9235,6 +9340,11 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
     const sql = getDb();
     const id = parseInt(req.params.id, 10), auditId = parseInt(req.params.auditId, 10);
     if (!Number.isFinite(id) || !Number.isFinite(auditId)) return res.status(400).json({ error: 'Invalid id' });
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`audit-reverse:${auditId}`, `job-delivery:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const [a] = await sql`SELECT * FROM audit_log WHERE id = ${auditId} AND entity_type = 'job' AND entity_id = ${id}`;
     if (!a) return res.status(404).json({ error: 'History line not found' });
     const m = (a.metadata && typeof a.metadata === 'object') ? a.metadata : {};
@@ -9337,6 +9447,7 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
       return res.json(upd);
     }
     return res.status(400).json({ error: 'This kind of change cannot be reversed from History.' });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -9347,6 +9458,11 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
     const revId = reversesAuditIdOf(req);
     if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-delivery:${id}`], { wait: true });
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const ix = parseInt(req.params.index, 10);
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -9517,6 +9633,7 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       metadata: { reverses_audit_id: revId || undefined, index: ix, field, before: before[field] || null, after: value },
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -10127,6 +10244,11 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     const occurredAt = entry.at;
     if (!userHasBtn(req.user, delta > 0 ? 'inv_btn_stock_in' : 'inv_btn_stock_out')) return res.status(403).json({ error: 'Not allowed' });
     const itemId = parseInt(id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`item-tx:${itemId}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
     const sourceItem = itemRows[0];
     if (!sourceItem) return res.status(404).json({ error: 'Inventory item not found' });
@@ -10177,6 +10299,36 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     let finalReason = reason || (delta > 0 ? 'delivery' : 'adjustment');
     let jobFullyIssued = false;
     let partialRemaining = 0;
+
+    // "Job Card" with a real job: issued through performIssueStock - the
+    // same routine as Pending Stock - so the need (offcut taken at CTP, the
+    // 2nd paper), the paper check, the offcut return, the job's issued list
+    // and the one-at-a-time lock are all the same (owner, 2026-10-13: this
+    // path had its own copy of the rules, which counted old-paper issues
+    // and kept no issued list). The 2nd paper is issued as the 2nd paper.
+    if (isJobIssuance) {
+      const sec = jobRow.particulars && jobRow.particulars.secondary_paper;
+      const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id IN (${itemId}, ${jobRow.inventory_item_id || 0}, ${(sec && sec.inventory_item_id) || 0})`;
+      const byId = new Map(grp.map(x => [x.id, x]));
+      const key = it => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
+      const mine = key(byId.get(itemId));
+      const source = (sec && sec.inventory_item_id && mine === key(byId.get(sec.inventory_item_id)) && mine !== key(byId.get(jobRow.inventory_item_id))) ? 'secondary' : 'primary';
+      const r = await performIssueStock(sql, req, jobRow.id, { splits: [{ item_id: itemId, sheets: Math.abs(delta) }], challan_no: challan_no == null ? null : String(challan_no), entry_date, source });
+      if (r.error) return res.status(r.status || 400).json({ error: r.error });
+      const after = r.job || {};
+      const owed = source === 'secondary'
+        ? Math.max(0, Math.round((+((after.particulars || {}).secondary_paper || {}).packets || 0) * packetSize(sourceItem.paper_type || '')) - (parseInt(((after.particulars || {}).secondary_paper || {}).issued_sheets, 10) || 0))
+        : (parseInt((after.particulars || {}).partial_pending_sheets, 10) || 0);
+      const [itNow] = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
+      return res.json({
+        ...(itNow || {}),
+        job_flipped: jobRow.issuance_status === 'pending' && after.issuance_status === 'issued' && !owed,
+        linked_job_id: jobRow.id,
+        job_partial_remaining: owed,
+        job_fully_issued: !owed,
+        offcut_item_id: null,
+      });
+    }
 
     if (isJobIssuance && jobRow.particulars && jobRow.particulars.paper_waived) {
       return res.status(400).json({ error: `Job E-${jobRow.id} was processed without paper by an Admin - no stock can be issued to it. Send it back to Pending Stock first if paper should be issued.` });
@@ -10305,6 +10457,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       job_fully_issued: isJobIssuance && jobFullyIssued,
       offcut_item_id: offcutItem?.id || null,
     });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -10417,6 +10570,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     if (!rows[0]) return res.status(404).json({ error: 'Transaction not found' });
     const tx = rows[0];
 
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`tx-reverse:${txId}`, tx.job_id ? `job-stock:${tx.job_id}` : null]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     // Reasons we never reverse — these are bookkeeping rows that don't
     // represent a real, undo-able event. 'correction' is itself a reversal
     // class; reversing one would create an infinite loop of corrections.
@@ -10674,6 +10831,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     });
 
     res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, job_partial: jobPartial, offcut_refunded_sheets: offcutRefundedSheets });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
