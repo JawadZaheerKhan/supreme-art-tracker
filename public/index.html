@@ -5180,12 +5180,17 @@ function overIssueBannerHtml(j) {
     : String(pkts || '');
   const unit = p.unit || 'packets';
   const challan = p.challan_no ? ` · challan ${esc(p.challan_no)}` : '';
-  const canDecide = isAdmin() || isProductionManager();
+  const canDecide = isAdmin() || isProductionManager() || isSuperAdmin();
+  // Ignore: Super Admin only, in the Super Admin black (owner, 2026-10-13).
+  const ignoreBtn = isSuperAdmin()
+    ? `<button class="btn btn-sm" style="background:#111827;border-color:#111827;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'ignore')" title="Super Admin: clear this without moving any stock or adding to the job - e.g. the offcut was already entered by hand.">&#10005; Ignore</button>`
+    : '';
   const actions = canDecide
     ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'use')" title="Add these extras to the job's packet count (existing top-up system). No inventory movement — sheets were already deducted at issuance.">&#10003; Use in job</button>
         <button class="btn btn-sm" style="background:#0891b2;border-color:#0e7490;color:#ffffff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'offcut')" title="Credit the extras to the matching offcut item — the same automatic behaviour the app used to do at issuance.">&#128230; Add to Offcut</button>
         <button class="btn btn-sm" style="background:#6b7280;border-color:#4b5563;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'return')" title="Mark the extras as sent back to the store. Store keeper handles the physical return manually.">&#8630; Send Back</button>
+        ${ignoreBtn}
       </div>`
     : `<div style="font-size:11px;color:#9f1239;font-style:italic;">Waiting for Admin / Production Manager to decide (Use in job · Add to Offcut · Send Back).</div>`;
   return `<div class="over-issue-banner" style="background:#ffe4e6;border:1px solid #fda4af;border-radius:8px;padding:8px 10px;font-size:12px;color:#9f1239;margin:6px 0;">
@@ -31706,7 +31711,8 @@ async function approvePacketsTopup(jobId, topupId) {
 //   offcut → credits the matching offcut item (what the old auto behaviour did)
 //   return → logs "sent back"; store keeper handles the physical return manually
 async function decideOverIssue(jobId, decision) {
-  if (!(isAdmin() || isProductionManager())) {
+  if (decision === 'ignore' && !isSuperAdmin()) { notify('Only a Super Admin can ignore an over-issue.'); return; }
+  if (!(isAdmin() || isProductionManager() || isSuperAdmin())) {
     notify('Only admin / production manager can decide over-issued sheets.');
     return;
   }
@@ -31719,11 +31725,12 @@ async function decideOverIssue(jobId, decision) {
     ? (Number.isInteger(pkts) ? pkts.toString() : pkts.toFixed(2))
     : String(pkts || '');
   const unit = p.unit || 'packets';
-  const labels = { use: 'Use in job', offcut: 'Add to Offcut', return: 'Send Back' };
+  const labels = { use: 'Use in job', offcut: 'Add to Offcut', return: 'Send Back', ignore: 'Ignore' };
   const messages = {
     use: `The extra ${pktsStr} ${unit} will be added to Job E-${jobId} as an approved packet top-up. No inventory movement — the sheets were already deducted at issuance.`,
     offcut: `The extra ${pktsStr} ${unit} will be credited to the matching offcut item (same behaviour the app used to do automatically at issuance).`,
     return: `The extra ${pktsStr} ${unit} will be marked as sent back to the store. Store keeper handles the physical return manually.`,
+    ignore: `The warning is cleared and nothing else happens: no stock moves and nothing is added to Job E-${jobId} (e.g. the extra ${pktsStr} ${unit} was already put into offcut by hand). It is written in the job's History.`,
   };
   const ok = await confirmDialog({
     title: `${labels[decision]} · ${pktsStr} ${unit}?`,

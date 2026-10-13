@@ -7216,6 +7216,10 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_b
 //                (per-split findOrCreateOffcutItem + applyInventoryChange).
 //   • return  → logs the decision only. Store keeper does the physical
 //                return through the normal manual inventory tools.
+//   • ignore  → Super Admin only (owner, 2026-10-13): nothing moves and
+//                nothing is added - e.g. the PM already put the extra into
+//                offcut by hand. Archived like the others, so the same
+//                extra is never raised again.
 // The source item's original deduction stays untouched, so the inventory
 // report keeps recording the extra issuance exactly as it did before.
 app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), async (req, res) => {
@@ -7224,8 +7228,11 @@ app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), a
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const decision = String((req.body && req.body.decision) || '').trim();
-    if (!['use', 'offcut', 'return'].includes(decision)) {
-      return res.status(400).json({ error: 'decision must be use, offcut, or return' });
+    if (!['use', 'offcut', 'return', 'ignore'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be use, offcut, return or ignore' });
+    }
+    if (decision === 'ignore' && !userHasRole(req.user, 'super_admin')) {
+      return res.status(403).json({ error: 'Only a Super Admin can ignore an over-issue.' });
     }
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -7272,6 +7279,8 @@ app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), a
         });
       }
       summary = `Job E-${id}: over-issued ${totalPackets} ${unit} credited to offcut (PM: Add to Offcut)`;
+    } else if (decision === 'ignore') {
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} ignored by Super Admin - no stock change and nothing added to the job (e.g. the offcut was already entered by hand)`;
     } else {
       // return — no inventory transaction; ledger note comes from the
       // audit log line below.
