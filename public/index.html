@@ -1060,6 +1060,12 @@
 .carton-job-none { font-size: 12px; color: var(--text2); padding: 6px 4px; }
 .bulk-table td.cbo-for { min-width: 190px; }
 .bulk-table.carton-bulk .col-qty { width: 90px; }
+/* Station: carton type under each Carton Shipper line (owner, 2026-10-14). */
+.station-shipper-type { display: block; width: 100%; box-sizing: border-box; margin: 4px 0 10px; padding: 9px 10px; font-size: 15px; font-weight: 600; border: 1.5px solid var(--border2); border-radius: 8px; background: #fff; color: var(--text); font-family: var(--font); }
+.station-shipper-type.is-missing { border-color: #dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,0.15); }
+.station-shipper-type-none { font-size: 12px; color: var(--text2); margin: 4px 0 10px; }
+.carton-below-banner { background: #fee2e2; border: 1px solid #fca5a5; color: #991b1b; border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
+.carton-tag-neg { background: #991b1b; color: #fff; }
 /* Carton Shippers on a phone (owner, 2026-10-14): sub-tabs 2 x 2, the
    action buttons share one row, each carton type is a small card (name and
    on hand on top, size / ply / reorder under it, buttons below), and each
@@ -6676,6 +6682,7 @@ function canCartonStockIn() { return isSuperAdmin() || hasPerm('carton_btn_stock
 function canCartonIssue()   { return isSuperAdmin() || hasPerm('carton_btn_issue'); }
 function canReverseCartonTx(t) {
   if (!t || t.kind === 'correction' || t.reverses_tx_id || t.reversed_by) return false;
+  if (t.source === 'station') return false;   // the Station's count controls it - change it there
   if (isSuperAdmin()) return true;
   const lvl = permLevel('carton_btn_reverse');
   if (lvl === 'yes') return true;
@@ -6684,12 +6691,13 @@ function canReverseCartonTx(t) {
 const cartonNum = n => (Number(n) || 0).toLocaleString();
 function cartonTypeById(id) { return cartonTypes.find(t => String(t.id) === String(id)); }
 function cartonTypeText(t) { return t ? [t.name, t.size, t.ply].filter(Boolean).join(' · ') : '—'; }
-function cartonIsLow(t) { return t && t.reorder_level != null && (Number(t.current_balance) || 0) <= Number(t.reorder_level); }
+function cartonIsLow(t) { return !!t && ((Number(t.current_balance) || 0) < 0 || (t.reorder_level != null && (Number(t.current_balance) || 0) <= Number(t.reorder_level))); }
+function cartonIsBelowZero(t) { return !!t && (Number(t.current_balance) || 0) < 0; }
 // What an Out row was for, in words.
 function cartonForText(t) {
   if (t.kind === 'correction') return `Reversal of entry #${t.reverses_tx_id}`;
   if (t.kind === 'in') return '';
-  if (t.reason === 'e-job') return `E-${t.job_id || '?'}${t.job_name ? ' · ' + t.job_name : ''}`;
+  if (t.reason === 'e-job') return `E-${t.job_id || '?'}${t.job_name ? ' · ' + t.job_name : ''}${t.source === 'station' ? (t.change > 0 ? ' · Station (returned)' : ' · Station') : ''}`;
   if (t.reason === 'manual-job') return `Manual job ${t.manual_job || ''}`.trim();
   return `Other: ${t.other_reason || ''}`;
 }
@@ -6744,7 +6752,10 @@ function renderCartonStockList() {
     return;
   }
   if (!rows.length) { el.innerHTML = `<div class="empty">No carton types match.</div>`; return; }
+  // The Station never stops on short stock - it can take a type below zero.
+  const below = cartonTypes.filter(t => !t.hidden && cartonIsBelowZero(t));
   el.innerHTML = `
+    ${below.length ? `<div class="carton-below-banner">&#9888; <b>Below zero:</b> ${below.map(t => `${esc(cartonTypeText(t))} (<b>${cartonNum(t.current_balance)}</b>)`).join(', ')} — the Station used more cartons than were in stock. Stock In the cartons to correct it.</div>` : ''}
     <div class="carton-tablewrap">
       <table class="carton-table carton-stock-table">
         <thead><tr>
@@ -6754,10 +6765,10 @@ function renderCartonStockList() {
         <tbody>${rows.map(t => {
           const lowRow = !t.hidden && cartonIsLow(t);
           return `<tr class="${lowRow ? 'carton-low' : ''}${t.hidden ? ' carton-hidden' : ''}">
-            <td class="cs-name"><b>${esc(t.name)}</b>${t.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}${lowRow ? ' <span class="carton-tag carton-tag-low">LOW</span>' : ''}</td>
+            <td class="cs-name"><b>${esc(t.name)}</b>${t.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}${cartonIsBelowZero(t) ? ' <span class="carton-tag carton-tag-neg">BELOW ZERO</span>' : lowRow ? ' <span class="carton-tag carton-tag-low">LOW</span>' : ''}</td>
             <td class="cs-size" style="white-space:nowrap;">${esc(t.size || '—')}</td>
             <td class="cs-ply" style="white-space:nowrap;">${esc(t.ply || '—')}</td>
-            <td class="num cs-onhand"><b>${cartonNum(t.current_balance)}</b></td>
+            <td class="num cs-onhand"${cartonIsBelowZero(t) ? ' style="color:#991b1b;"' : ''}><b>${cartonNum(t.current_balance)}</b></td>
             <td class="num cs-reorder">${t.reorder_level != null ? cartonNum(t.reorder_level) : '—'}</td>
             <td class="carton-actions">
               ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
@@ -6943,8 +6954,9 @@ function computeCartonSummary() {
     let running = opening;
     const periods = buckets.map(b => {
       const inB = txs.filter(t => t.at >= b.start && t.at < b.end);
-      const inn = inB.filter(t => isMove(t) && t.change > 0).reduce((a, t) => a + t.change, 0);
-      const out = inB.filter(t => isMove(t) && t.change < 0).reduce((a, t) => a - t.change, 0);
+      // By kind: a Station return (an "out" row adding cartons back) lowers OUT.
+      const inn = inB.filter(t => isMove(t) && t.kind === 'in').reduce((a, t) => a + t.change, 0);
+      const out = inB.filter(t => isMove(t) && t.kind === 'out').reduce((a, t) => a - t.change, 0);
       running += inB.reduce((a, t) => a + t.change, 0);
       return { in: inn, out, balance: running };
     });
@@ -35318,6 +35330,8 @@ function stationManagerQueueHtml() {
 function stationOpenJob(id) {
   stationJobId = id;
   stationView = 'update';
+  // Pasting / QC pick a carton type per Carton Shipper line - fresh list each job.
+  if (stationOperator && (stationOperator.stage_index === 5 || stationOperator.stage_index === 6)) stationCartonTypes = null;
   stationRecBlobs = [];
   stationDraftValues = {};
   stationPrintMult = {};
@@ -35397,6 +35411,14 @@ function stationUpdateHtml() {
   // numeric input always shows just the base number; the "x3" lives in the
   // multiplier buttons instead. Every other field's raw qty passes through.
   const stripMult = (f, raw) => (f.key === 'printed_sheets_qty' && raw) ? String(parseQtyMult(raw).base) : raw;
+  // Carton type ids saved on this pass's Carton Shipper lines ([] if none).
+  const shipperSavedTypes = (f, passIdx) => {
+    const ent = entriesOf(f);
+    if (!ent) return [];
+    const realIdx = visibleIdxsOf(f)[passIdx];
+    const e = realIdx !== undefined ? ent[realIdx] : null;
+    return e && Array.isArray(e.carton_types) ? e.carton_types : [];
+  };
   const passValue = (f, passIdx) => {
     const part = j.particulars && j.particulars[f.key];
     if (!part) return '';
@@ -35546,12 +35568,29 @@ function stationUpdateHtml() {
       const saved = shipperLines(cur);
       const count = stationShipperLineCount[inputId] !== undefined ? Math.max(1, stationShipperLineCount[inputId]) : Math.max(1, saved.length);
       const box = (k, suffix, ph, val, padLabel) => `<input type="text" ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('${inputId}-${suffix}${k}', '${padLabel}')"` : laptopAttrs} class="numpad-target station-shipper-in" id="${inputId}-${suffix}${k}" value="${esc(val)}" placeholder="${ph}">`;
+      // Carton type per line (owner, 2026-10-14): picked from the Carton
+      // Shippers types; the saved stock follows it. A Loose line starts on
+      // the first Carton Shipper line's type until the operator changes it.
+      const savedTypes = shipperSavedTypes(f, passIdx);
+      const typeOf = (k) => {
+        const d = stationDraftValues[`${inputId}-t${k}`];
+        if (d !== undefined) return { v: String(d || ''), follow: false };
+        if (savedTypes[k]) return { v: String(savedTypes[k]), follow: false };
+        if (f.key === 'loose_shipper_qty') {
+          const first = stationDraftValues[`sf-ready_packets_qty-p${passIdx}-t0`];
+          const firstSaved = shipperSavedTypes({ key: 'ready_packets_qty' }, passIdx)[0];
+          return { v: String(first !== undefined ? (first || '') : (firstSaved || '')), follow: true };
+        }
+        return { v: '', follow: false };
+      };
       const lines = Array.from({ length: count }, (_, k) => {
         const s = saved[k];
         const dq = stationDraftValues[`${inputId}-q${k}`], dn = stationDraftValues[`${inputId}-n${k}`];
         const qv = dq !== undefined ? dq : (s && s.per ? String(s.per) : '');
         const nv = dn !== undefined ? dn : (s ? String(s.cartons || '') : '');
-        return `<div class="station-shipper-pair">${box(k, 'q', 'Qty', qv, f.label + ' - qty in each carton')}<span class="station-shipper-x">&times;</span>${box(k, 'n', 'Cartons', nv, f.label + ' - number of cartons')}${k > 0 ? `<button type="button" class="station-shipper-minus" onclick="stationShipperRemoveLine('${inputId}', ${k})" title="Remove this line">&minus;</button>` : ''}</div>`;
+        const ty = typeOf(k);
+        return `<div class="station-shipper-pair">${box(k, 'q', 'Qty', qv, f.label + ' - qty in each carton')}<span class="station-shipper-x">&times;</span>${box(k, 'n', 'Cartons', nv, f.label + ' - number of cartons')}${k > 0 ? `<button type="button" class="station-shipper-minus" onclick="stationShipperRemoveLine('${inputId}', ${k})" title="Remove this line">&minus;</button>` : ''}</div>
+          ${stationCartonTypeSelectHtml(`${inputId}-t${k}`, ty.v, ty.follow, f.key === 'ready_packets_qty' && k === 0 ? passIdx : null)}`;
       }).join('');
       return `
         <div class="station-field station-field--shipper">
@@ -35775,13 +35814,73 @@ function stationShipperCombine(q, n) {
 function stationShipperSync() {
   document.querySelectorAll('input.station-shipper-val').forEach(h => {
     const n = parseInt(h.dataset.lines, 10) || 1;
-    const parts = [];
+    const parts = [], types = [];
+    let missing = false;
     for (let k = 0; k < n; k++) {
       const q = document.getElementById(`${h.id}-q${k}`), c = document.getElementById(`${h.id}-n${k}`);
-      if (q && c) { const v = stationShipperCombine(q.value, c.value); if (v) parts.push(v); }
+      const t = document.getElementById(`${h.id}-t${k}`);
+      if (q && c) {
+        const v = stationShipperCombine(q.value, c.value);
+        if (v) {
+          parts.push(v);
+          const id = t ? (parseInt(t.value, 10) || null) : null;
+          types.push(id);
+          if (!id) missing = true;
+        }
+        if (t) t.classList.toggle('is-missing', !!v && !(parseInt(t.value, 10) > 0) && t.dataset.check === '1');
+      }
     }
     h.value = parts.join('+');
+    // One carton type id per saved line, in the same order (see stationSubmit).
+    h.dataset.types = JSON.stringify(types);
+    h.dataset.missing = missing ? '1' : '';
   });
+}
+// ── Station carton types (owner, 2026-10-14) ──────────────────
+// Each Carton Shipper / Loose line picks its carton type; saving makes the
+// Carton Shippers stock follow (server: syncStationCartons).
+let stationCartonTypes = null;       // [{id, name, size, ply, hidden}] - null until loaded
+let stationCartonTypesLoading = false;
+async function stationLoadCartonTypes() {
+  if (stationCartonTypesLoading) return;
+  stationCartonTypesLoading = true;
+  try { stationCartonTypes = await api('GET', '/api/station/carton-types'); }
+  catch { stationCartonTypes = []; }
+  stationCartonTypesLoading = false;
+  if (stationView === 'update') { stationSnapshotDraft(); stationRender(); }
+}
+function stationCartonTypeText(t) { return [t.name, t.size, t.ply].filter(Boolean).join(' · '); }
+// firstOfPass: set on the first Carton Shipper line, whose pick the Loose
+// lines of the same pass follow (data-follow) until changed by hand.
+function stationCartonTypeSelectHtml(id, value, follow, firstOfPass) {
+  if (stationCartonTypes === null) {
+    stationLoadCartonTypes();
+    return `<select class="station-shipper-type" id="${id}" disabled><option value="">Loading carton types…</option></select>`;
+  }
+  const list = stationCartonTypes.filter(t => !t.hidden || String(t.id) === String(value));
+  if (!list.length) return `<div class="station-shipper-type-none">No carton types yet — add them in Carton Shippers</div>`;
+  // Just the name in the narrow box (size / ply on hover).
+  return `<select class="station-shipper-type" id="${id}" data-check="0"${follow ? ' data-follow="1"' : ''}${firstOfPass !== null ? ` data-first-of-pass="${firstOfPass}"` : ''} onchange="stationCartonTypeChanged(this)">
+    <option value="">Carton type…</option>
+    ${list.map(t => `<option value="${t.id}" title="${esc(stationCartonTypeText(t))}"${String(t.id) === String(value) ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}
+  </select>`;
+}
+function stationCartonTypeChanged(el) {
+  el.dataset.follow = '';
+  el.classList.remove('is-missing');
+  // The first Carton Shipper line: Loose lines still following it move too.
+  if (el.dataset.firstOfPass !== undefined) {
+    document.querySelectorAll(`select.station-shipper-type[data-follow="1"][id^="sf-loose_shipper_qty-p${el.dataset.firstOfPass}-t"]`)
+      .forEach(s => { s.value = el.value; });
+  }
+}
+// Shown after a save: carton types the Station took below zero, or a sync
+// problem. Plain text - notify() shows text, not HTML.
+function stationCartonNote(updated) {
+  if (!updated) return '';
+  if (updated.carton_error) return ` · ⚠ carton stock not updated (${updated.carton_error})`;
+  const below = Array.isArray(updated.carton_warning) ? updated.carton_warning : [];
+  return below.length ? ` · ⚠ below zero in carton stock: ${below.map(b => `${b.name} (${Number(b.balance).toLocaleString()})`).join(', ')}` : '';
 }
 // Lines shown per shipper field (by its field id), beyond what is saved.
 let stationShipperLineCount = {};
@@ -35797,12 +35896,12 @@ function stationShipperRemoveLine(fieldId, k) {
   const h = document.getElementById(fieldId);
   const n = (h && parseInt(h.dataset.lines, 10)) || 1;
   for (let i = k; i < n - 1; i++) {
-    for (const s of ['q', 'n']) {
+    for (const s of ['q', 'n', 't']) {
       const next = document.getElementById(`${fieldId}-${s}${i + 1}`);
       stationDraftValues[`${fieldId}-${s}${i}`] = next ? next.value : '';
     }
   }
-  delete stationDraftValues[`${fieldId}-q${n - 1}`]; delete stationDraftValues[`${fieldId}-n${n - 1}`];
+  delete stationDraftValues[`${fieldId}-q${n - 1}`]; delete stationDraftValues[`${fieldId}-n${n - 1}`]; delete stationDraftValues[`${fieldId}-t${n - 1}`];
   stationShipperLineCount[fieldId] = Math.max(1, n - 1);
   // A saved line removed: the field's saved value must not bring it back.
   if (h) {
@@ -35820,6 +35919,8 @@ let stationShipperOverride = {};
 function stationSnapshotDraft() {
   stationShipperSync();
   document.querySelectorAll('.station-update [id^="sf-"]').forEach(el => {
+    if (el.dataset.follow === '1') return;   // a Loose type still following the first Carton Shipper line
+    if (el.tagName === 'SELECT' && el.disabled) return;   // carton types still loading - nothing picked yet
     stationDraftValues[el.id] = el.type === 'checkbox' ? el.checked : el.value;
   });
 }
@@ -36326,6 +36427,23 @@ async function stationSubmit(advance, skipTo) {
       if (el) patch[f.key] = (el.value || '').trim();
     }
   });
+  // Carton type per Carton Shipper line, one list per pass in the same order
+  // as the lines (owner, 2026-10-14). Every line with cartons needs its type.
+  const cartonTypesPatch = {};
+  let cartonTypeMissing = false;
+  fields.filter(f => f.type === 'shipper' && f.key in patch).forEach(f => {
+    const hs = Array.from(document.querySelectorAll(`input.station-shipper-val[data-key="${CSS.escape(f.key)}"]`))
+      .sort((a, b) => Number(a.dataset.pass) - Number(b.dataset.pass));
+    const per = hs.map(h => { try { return JSON.parse(h.dataset.types || '[]'); } catch { return []; } });
+    if (hs.some(h => h.dataset.missing === '1')) cartonTypeMissing = true;
+    cartonTypesPatch[f.key] = Array.isArray(patch[f.key]) ? per.slice(0, patch[f.key].length) : [per[0] || []];
+  });
+  if (cartonTypeMissing && (stationCartonTypes || []).some(t => !t.hidden)) {
+    document.querySelectorAll('select.station-shipper-type').forEach(s => { s.dataset.check = '1'; });
+    stationShipperSync();
+    await alertDialog({ title: 'Pick the carton type', message: 'Every Carton Shipper and Loose Carton Shipper line with cartons needs its carton type (the box under it).', kind: 'warn' });
+    return;
+  }
   // Printing only: fold the per-pass Nx multiplier into the qty string
   // ("1200" -> "1200x3") before it's sent — the input itself only ever
   // holds the base number (see passValue's stripMult in stationUpdateHtml).
@@ -36408,6 +36526,7 @@ async function stationSubmit(advance, skipTo) {
       ? { via_job_card: true, machine_name: stationOperator.machine, stage_index: stationOperator.stage_index, particulars_patch: patch, advance: false }
       : { pin: stationOperator.pin, particulars_patch: patch, advance };
     if (stationPerson && stationPerson.name) stationBody.person_name = stationPerson.name;
+    if (Object.keys(cartonTypesPatch).length) stationBody.carton_types_patch = cartonTypesPatch;
     if (Number.isInteger(skipTo)) stationBody.skip_to = skipTo;
     if (finishKind) {
       stationBody.finish_kind = finishKind;
@@ -36416,7 +36535,7 @@ async function stationSubmit(advance, skipTo) {
     const updated = await api('POST', `/api/jobs/${j.id}/station-update`, stationBody);
     jobs = jobs.map(x => x.id === j.id ? { ...x, ...updated } : x);
     const sent = (pendingText ? 1 : 0) + pendingClips.length;
-    const sentTxt = sent ? ` &middot; ${sent} note${sent === 1 ? '' : 's'} sent` : '';
+    const sentTxt = (sent ? ` · ${sent} note${sent === 1 ? '' : 's'} sent` : '') + stationCartonNote(updated);
     if (advance) {
       // When skipping, name the target stage in the toast so the operator
       // sees their pick actually landed (e.g. 'Sent to Die Cutting').
@@ -36450,6 +36569,10 @@ async function stationSubmit(advance, skipTo) {
       // hidden UV entries piled up.
       stationPassCount = stationPassCount + 1;
       stationShipperOverride = {};   // saved now - the field holds it
+      // Kept-while-redrawing values are saved now too. Left in place they
+      // would redraw over the saved numbers (e.g. boxes kept empty when the
+      // carton types finished loading) and the next save would blank them.
+      stationDraftValues = {};
       // Only refetch notes if the operator actually sent something — Save
       // without a note doesn't change the inbound list, so we save a round-
       // trip and re-render straight from local state.

@@ -309,7 +309,8 @@ function getDb() {
 // Bumped again for inventory_transactions.actor_name (2026-10-14).
 // Bumped again for the Carton Shippers tables, their Access Register rows and
 // the Procurement role in users_role_check (2026-10-14).
-const SCHEMA_VERSION = 'v2026-10-14-carton-shippers';
+// Bumped again for carton_transactions.source (Station carton issues, 2026-10-14).
+const SCHEMA_VERSION = 'v2026-10-14-station-cartons';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1826,6 +1827,9 @@ async function initDb() {
         recorded_at    TIMESTAMPTZ
       )
     `;
+    // 'station' = issued / returned by the Station's carton sync (Pasting / QC
+    // carton type per Carton Shipper line); NULL = typed in the Carton Shippers tab.
+    await sql`ALTER TABLE carton_transactions ADD COLUMN IF NOT EXISTS source TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS carton_tx_type_idx ON carton_transactions(type_id)`;
     await sql`CREATE INDEX IF NOT EXISTS carton_tx_job_idx ON carton_transactions(job_id)`;
     try {
@@ -7042,8 +7046,10 @@ function cartonTypeLabel(t) {
 }
 // One carton row + its balance. The balance moves first, in one statement
 // that refuses to go below zero, so two issues at once can never overdraw.
-async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, manualJob, otherReason, issuedTo, supplier, challanNo, notes, user, occurredAt, reversesTxId }) {
-  const moved = change < 0
+async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, manualJob, otherReason, issuedTo, supplier, challanNo, notes, user, occurredAt, reversesTxId, source, allowNegative }) {
+  // allowNegative: the Station never stops on short stock (owner, 2026-10-14)
+  // - the count goes below zero and the Carton Shippers tab flags it.
+  const moved = change < 0 && !allowNegative
     ? await sql`UPDATE carton_types SET current_balance = current_balance + ${change} WHERE id = ${typeId} AND current_balance + ${change} >= 0 RETURNING current_balance`
     : await sql`UPDATE carton_types SET current_balance = current_balance + ${change} WHERE id = ${typeId} RETURNING current_balance`;
   if (!moved.length) {
@@ -7055,10 +7061,10 @@ async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, man
   try {
     const row = (await sql`
       INSERT INTO carton_transactions (type_id, change, kind, reason, job_id, manual_job, other_reason, issued_to, supplier, challan_no, notes,
-                                       user_id, user_email, actor_name, reverses_tx_id, created_at, recorded_at)
+                                       user_id, user_email, actor_name, reverses_tx_id, source, created_at, recorded_at)
       VALUES (${typeId}, ${change}, ${kind}, ${reason || null}, ${jobId || null}, ${manualJob || null}, ${otherReason || null}, ${issuedTo || null},
               ${supplier || null}, ${challanNo || null}, ${notes || null},
-              ${(user && user.id) || null}, ${(user && user.email) || null}, ${(user && user.station_actor) || null}, ${reversesTxId || null},
+              ${(user && user.id) || null}, ${(user && user.email) || null}, ${(user && user.station_actor) || null}, ${reversesTxId || null}, ${source || null},
               COALESCE(${occurredIso}::timestamptz, NOW()),
               CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
       RETURNING id`)[0];
@@ -7074,6 +7080,76 @@ async function cartonTypeOr404(sql, id, res) {
   if (!t) { res.status(404).json({ error: 'Carton type not found.' }); return null; }
   return t;
 }
+
+// ── Station carton types (owner, 2026-10-14) ──────────────────
+// Each Carton Shipper / Loose Carton Shipper line at Pasting and QC names
+// its carton type (particulars.<key>.entries[i].carton_types, one id per
+// "qty x cartons" line). After every Station save the job's cartons per type
+// are compared with what the Station has already taken for that job, and
+// the difference is issued (or returned) - so Pasting and QC editing the
+// same rows never count twice, and a lowered count goes back to stock.
+const STATION_CARTON_KEYS = ['ready_packets_qty', 'loose_shipper_qty'];
+// Cartons per type the job's Carton Shipper rows hold: Map(typeId -> count).
+function stationCartonsWanted(particulars) {
+  const want = new Map();
+  for (const key of STATION_CARTON_KEYS) {
+    const p = particulars && particulars[key];
+    const entries = p && Array.isArray(p.entries) ? p.entries : [];
+    for (const e of entries) {
+      const types = e && Array.isArray(e.carton_types) ? e.carton_types : [];
+      String((e && e.qty) || '').split('+').map(s => s.trim()).filter(Boolean).forEach((line, k) => {
+        const t = parseInt(types[k], 10);
+        if (!(t > 0)) return;
+        const m = /^([\d.]+)\s*[x×*]\s*([\d.]+)$/i.exec(line);
+        const n = Math.round(m ? parseFloat(m[2]) : parseFloat(line.replace(/[^0-9.]/g, '')));
+        if (n > 0) want.set(t, (want.get(t) || 0) + n);
+      });
+    }
+  }
+  return want;
+}
+// Bring the job's Station carton issues in line with its rows. Returns the
+// carton types now below zero (for the operator's message).
+async function syncStationCartons(sql, jobId, particulars, user, issuedTo) {
+  const held = await takeOpLocks(sql, [`job-cartons:${jobId}`], { wait: true });
+  if (!held) throw new Error('Carton stock is being updated for this job - save again in a moment.');
+  try {
+    const want = stationCartonsWanted(particulars);
+    const rows = await sql`SELECT type_id, -SUM(change)::int AS taken FROM carton_transactions WHERE job_id = ${jobId} AND source = 'station' GROUP BY type_id`;
+    const taken = new Map(rows.map(r => [r.type_id, Number(r.taken) || 0]));
+    const ids = [...new Set([...want.keys(), ...taken.keys()])];
+    if (!ids.length) return [];
+    const types = new Map((await sql`SELECT * FROM carton_types WHERE id = ANY(${ids})`).map(t => [t.id, t]));
+    const moved = [];
+    for (const id of ids) {
+      const t = types.get(id);
+      if (!t) continue;
+      const diff = (want.get(id) || 0) - (taken.get(id) || 0);
+      if (!diff) continue;
+      const r = await applyCartonChange(sql, {
+        typeId: id, change: -diff, kind: 'out', reason: 'e-job', jobId, issuedTo, user, source: 'station', allowNegative: true,
+        notes: diff > 0 ? null : `Station count lowered - ${(-diff).toLocaleString()} back to stock`,
+      });
+      if (r.error) throw new Error(r.error);
+      moved.push({ type: t, diff, balance: r.balance });
+    }
+    if (moved.length) {
+      await logAudit(sql, { user }, {
+        action: 'carton.station', entityType: 'job', entityId: jobId,
+        summary: `Job E-${jobId}: Station cartons ${moved.map(m => `${m.diff > 0 ? '-' : '+'}${Math.abs(m.diff).toLocaleString()} ${cartonTypeLabel(m.type)}`).join(', ')}`,
+      });
+    }
+    return moved.filter(m => m.balance < 0).map(m => ({ id: m.type.id, name: cartonTypeLabel(m.type), balance: m.balance }));
+  } finally { await releaseOpLocks(sql, held); }
+}
+// The Station's carton type list (operators can't read /api/cartons).
+app.get('/api/station/carton-types', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT id, name, size, ply, hidden FROM carton_types ORDER BY lower(name)`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 
 // One Issue line (single or bulk): quantity, who took them, and what for -
 // an E-Job (must exist), a manual job, or other.
@@ -7346,6 +7422,7 @@ app.post('/api/cartons/transactions/:id/reverse', requireAuth, async (req, res) 
     const tx = (await sql`SELECT * FROM carton_transactions WHERE id = ${txId}`)[0];
     if (!tx) return res.status(404).json({ error: 'Entry not found.' });
     if (tx.kind === 'correction' || tx.reverses_tx_id) return res.status(400).json({ error: 'A reversal cannot itself be reversed.' });
+    if (tx.source === 'station') return res.status(400).json({ error: 'This was taken by the Station - change the Carton Shipper count or type at the Station (or the green ▶ on the job card) and the stock follows.' });
     if (tier === '30-day' && Date.now() - new Date(tx.recorded_at || tx.created_at).getTime() > 30 * 86400000) {
       return res.status(403).json({ error: 'Only entries from the last 30 days can be reversed with your access.' });
     }
@@ -12219,6 +12296,8 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
               date:     old.date     || null,
               operator: old.operator || operator.name,
               machine:  old.machine  || operator.machine || null,
+              // Carton type per line (Carton Shipper rows) rides along.
+              ...(Array.isArray(old.carton_types) ? { carton_types: old.carton_types } : {}),
             };
           }
           return { qty, date: todayISO, operator: operator.name, machine: operator.machine || null };
@@ -12261,6 +12340,22 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         };
       }
     }
+
+    // Carton type per Carton Shipper line (owner, 2026-10-14): one id list
+    // per pass, one id per "qty x cartons" line. A pass the client didn't
+    // send keeps what it had.
+    const cartonTypesPatch = req.body.carton_types_patch && typeof req.body.carton_types_patch === 'object' ? req.body.carton_types_patch : {};
+    for (const key of STATION_CARTON_KEYS) {
+      if (!(key in particularsPatch) || !Array.isArray(cartonTypesPatch[key])) continue;
+      const p = particulars[key];
+      if (!p || !Array.isArray(p.entries)) continue;
+      p.entries = p.entries.map((e, i) => {
+        const want = cartonTypesPatch[key][i];
+        if (!Array.isArray(want)) return e;
+        return { ...e, carton_types: want.slice(0, 50).map(x => parseInt(x, 10) > 0 ? parseInt(x, 10) : null) };
+      });
+    }
+    const touchesCartons = STATION_CARTON_KEYS.some(k => k in particularsPatch);
 
     // Byline used by every log entry below. The stage in parentheses must
     // reflect the stage the WORK is being done at (curStage), NOT the
@@ -12481,7 +12576,20 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         : `Job E-${id} numbers recorded by ${operator.name} at ${STAGES[curStage]}`,
       metadata: { operator_id: operator.id, operator_name: operator.name, stage_index: curStage, advance, target_stage: stage_index, skipped: skippedCount },
     });
-    res.json(updated[0]);
+    // Carton stock follows the job's Carton Shipper rows. The numbers are
+    // already saved, so a problem here is reported, never a failed save.
+    let cartonWarning = null, cartonError = null;
+    if (touchesCartons) {
+      try {
+        const stationUser = { ...req.user, station_actor: person.name || operator.name };
+        const below = await syncStationCartons(sql, id, particulars, stationUser, person.name || operator.name);
+        if (below.length) cartonWarning = below;
+      } catch (e) {
+        console.error('station carton sync', e);
+        cartonError = e.message || 'Carton stock was not updated.';
+      }
+    }
+    res.json({ ...updated[0], ...(cartonWarning ? { carton_warning: cartonWarning } : {}), ...(cartonError ? { carton_error: cartonError } : {}) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
