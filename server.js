@@ -305,7 +305,8 @@ function getDb() {
 // Bumped again to seed the new Access Register rows job_btn_history_reverse,
 // job_btn_process_without_paper and rpt_mil_products (2026-10-13).
 // Bumped again for stock_groups.shipper_note / loose_note (2026-10-13).
-const SCHEMA_VERSION = 'v2026-10-13-mil-cartons';
+// Bumped again to seed the Access Register row job_btn_particulars (2026-10-14).
+const SCHEMA_VERSION = 'v2026-10-14-particulars-row';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -391,6 +392,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   // an operator's quantity from the job card. The entry can only edit the
   // numbers — advancing/skipping the stage stays PIN-only.
   job_btn_operator_entry:  { label: 'Operator Entry dot — open a particulars row\'s Station entry from the Job Card (no station PIN) to edit its quantities', levels: { admin: 'yes', production_manager: 'yes' } },
+  // The production rows on the job card (owner, 2026-10-14): View for every
+  // role by default - numbers are changed at the Station or through the green
+  // ▶ (Operator Entry row). Edit lets a role type them straight in; Super
+  // Admin always can. Two levels only (EDIT / VIEW).
+  job_btn_particulars:     { label: 'Particulars — type the production rows on the job card directly (sheets, waste, cartons, Ready Qty, Carton Shipper…); View = read only, change them through the green ▶ Station entry', levels: { admin: 'view', production_manager: 'view', store_manager: 'view', finance: 'view', ceo: 'view', operator: 'view' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
   // Was hard-wired to Admin (2026-10-05); now its own row, Admin by default.
   job_btn_process_without_paper: { label: 'Process without paper — send a job that is waiting for paper into production with no stock issued', levels: { admin: 'yes' } },
@@ -1901,8 +1907,9 @@ function normalizeUserRoles(src) {
   }
   return out;
 }
-// Job-card particulars rows recorded at the Station - locked to Super Admin
-// on the job card (see PUT /api/jobs/:id).
+// Job-card particulars rows recorded at the Station - read only on the job
+// card unless the role has the Particulars row at Edit (Super Admin always);
+// see PUT /api/jobs/:id.
 const STATION_LOCKED_PARTICULARS = [
   'printed_sheets_qty', 'printed_waste_sheets',
   'coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets',
@@ -5485,7 +5492,7 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     // what an operator has since recorded.
     const newParticularsRaw = (() => {
       const incoming = (particulars && typeof particulars === 'object') ? particulars : {};
-      if (userHasRole(req.user, 'super_admin')) return incoming;
+      if (userHasBtn(req.user, 'job_btn_particulars')) return incoming;   // Particulars row at Edit (Super Admin always)
       const out = { ...incoming };
       for (const k of STATION_LOCKED_PARTICULARS) {
         if (priorParticulars[k] !== undefined) out[k] = priorParticulars[k];
