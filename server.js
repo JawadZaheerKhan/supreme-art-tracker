@@ -306,7 +306,7 @@ function getDb() {
 // job_btn_process_without_paper and rpt_mil_products (2026-10-13).
 // Bumped again for stock_groups.shipper_note / loose_note (2026-10-13).
 // Bumped again to seed the Access Register row job_btn_particulars (2026-10-14).
-const SCHEMA_VERSION = 'v2026-10-14-particulars-row';
+const SCHEMA_VERSION = 'v2026-10-14-tx-actor-name';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1051,6 +1051,9 @@ async function initDb() {
     // is safer and we already denormalize the email anyway.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_id    INTEGER`;
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_email TEXT`;
+    // Station entries: the operator's name (all operators share one login,
+    // so the email alone does not say who it was). Shown instead of the email.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS actor_name TEXT`;
     // Challan No. — supplier delivery / customer challan reference for
     // bulk stock-in and bulk stock-out. Shown as a column + filter in
     // the Stock In / Stock Out reports. Nullable — single-item entries
@@ -4935,12 +4938,13 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   }
   const userId    = user && user.id    ? user.id    : null;
   const userEmail = user && user.email ? user.email : null;
+  const actorName = user && user.station_actor ? String(user.station_actor).slice(0, 120) : null;
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
   // Backdated (occurredAt): created_at = that day, recorded_at = now.
   const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at)
-    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan},
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, actor_name, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at)
+    VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${actorName}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan},
             COALESCE(${occurredIso}::timestamptz, NOW()),
             CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
     RETURNING id
@@ -6399,7 +6403,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
       change: -s.sheets,
       reason: 'job-consumed',
       jobId: job.id,
-      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${fmtPack(packs)} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${req.user.email}${overNote}`,
+      notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${fmtPack(packs)} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${stockWho(req.user)}${overNote}`,
       user: req.user,
       challanNo,
       occurredAt,
@@ -6591,6 +6595,7 @@ app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, requirePermiss
     const id = parseInt(req.params.id, 10);
     const v = await verifyManagerPin(sql, String(req.body.pin || '').trim());
     if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -6757,6 +6762,7 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
     const v = await verifyPapercutPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
     const op = v.operator;
+    await withStationActor(sql, req, op);
     const source = req.body.source === 'secondary' ? 'secondary' : 'primary';
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -6804,12 +6810,36 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Who did a Station stock entry: the person picked on the Station (checked
+// against the machine's people, then anyone active - same as station-update),
+// else the machine's only person, else the machine's name. Stored on the
+// stock row as actor_name (owner, 2026-10-14: all operators share one login).
+async function stationActorName(sql, machine, rawPerson) {
+  const want = String(rawPerson || '').trim();
+  const list = Array.isArray(machine && machine.persons) ? machine.persons : [];
+  if (want) {
+    if (list.some(p => p && p.name === want)) return want;
+    const others = await sql`SELECT persons FROM operators WHERE active AND persons IS NOT NULL`;
+    if (others.some(r => Array.isArray(r.persons) && r.persons.some(p => p && p.name === want))) return want;
+  }
+  if (list.length === 1 && list[0] && list[0].name) return list[0].name;
+  return (machine && machine.name) || null;
+}
+async function withStationActor(sql, req, machine) {
+  req.user = { ...req.user, station_actor: await stationActorName(sql, machine, req.body && req.body.person_name) };
+}
+// Name for a stock row's note: the Station operator, else the login's email.
+function stockWho(user) {
+  if (user && user.station_actor) return user.station_actor + ' (Station)';
+  return (user && user.email) || 'unknown';
+}
+
 // PIN must belong to an active machine with the Paper Cutting role, or be a
 // Manager PIN. Never trust the client's own role flag.
 async function verifyPapercutPin(sql, rawPin) {
   const pin = String(rawPin || '').trim();
   if (!validPin(pin)) return { status: 400, error: 'Enter a 3-digit PIN' };
-  const op = (await sql`SELECT id, name, roles, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+  const op = (await sql`SELECT id, name, roles, is_manager, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
   if (!op) return { status: 401, error: 'PIN not recognized' };
   if (!op.is_manager && !(Array.isArray(op.roles) && op.roles.includes('papercut'))) {
     return { status: 403, error: 'This PIN is not a Paper Cutting station.' };
@@ -6847,6 +6877,7 @@ app.post('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const sql = getDb();
     const v = await verifyPapercutPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
     const clean = (x) => { const s = String(x || '').trim().toLowerCase(); return s || null; };
     const paperType = clean(req.body.paper_type);
     const size = clean(req.body.size);
@@ -6890,6 +6921,7 @@ app.post('/api/station/offcut-items/:id/stock-in', requireStationUser, async (re
     const sql = getDb();
     const v = await verifyPapercutPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
     const itemId = parseInt(req.params.id, 10);
     const item = (await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`)[0];
     if (!item) return res.status(404).json({ error: 'Offcut item not found' });
@@ -10678,7 +10710,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     const item     = itemRows[0];
     const label    = item ? `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}` : `item ${tx.item_id}`;
     const origNote = tx.notes ? ` (orig note: "${tx.notes}")` : '';
-    const origBy   = tx.user_email ? ` entered by ${tx.user_email}` : '';
+    const origBy   = (tx.actor_name || tx.user_email) ? ` entered by ${tx.actor_name || tx.user_email}` : '';
     // Format the original timestamp as dd/mm/yyyy hh:mm for the audit note —
     // matches the app-wide dd/mm/yyyy display convention, in business-local
     // time (the server's own clock is UTC).
@@ -12032,7 +12064,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 // crafted request against a non-manager PIN is always rejected the same way.
 async function verifyManagerPin(sql, pin) {
   if (!validPin(pin)) return { error: 'Enter a 3-digit PIN', status: 400 };
-  const ops = await sql`SELECT id, name, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+  const ops = await sql`SELECT id, name, is_manager, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
   if (!ops.length || !ops[0].is_manager) return { error: 'PIN not recognized as a manager', status: 401 };
   return { operator: ops[0] };
 }

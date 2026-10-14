@@ -6602,6 +6602,11 @@ async function explainMissingJob() {
 // "refixa10mg" finds "Refixa 10 mg", and "16x25", "25x16", "25 X 16" all
 // find a 16x25 paper. Several words typed are each looked for, in any order
 // ("board 230 16x25"). searchMatch(text, typed) -> true / false.
+// Who made a stock row: a Station entry carries the operator's name
+// (actor_name - everyone at the Station shares one login); otherwise the
+// login's email (owner, 2026-10-14).
+function txByName(t) { return (t && (t.actor_name || t.user_email)) || ''; }
+function txByTitle(t) { return t && t.actor_name ? 'At the Station' + (t.user_email ? ' - signed in as ' + t.user_email : '') : ((t && t.user_email) || ''); }
 function searchKey(s) {
   return String(s ?? '').toLowerCase()
     .replace(/(\d)\s*[x×*]\s*(?=\d)/g, '$1x')   // "16 X 25" / "16×25" -> "16x25"
@@ -11805,7 +11810,7 @@ async function readStockEntryDate(id) {
 // typed on the day.
 function lateEntryTagHtml(t) {
   if (!t || !t.recorded_at) return '';
-  const tip = `Late entry — filed on ${fmtDMY(t.created_at)}, actually entered ${fmtDMY(t.recorded_at)} ${fmtTime12(t.recorded_at)}${t.user_email ? ' by ' + t.user_email : ''}`;
+  const tip = `Late entry — filed on ${fmtDMY(t.created_at)}, actually entered ${fmtDMY(t.recorded_at)} ${fmtTime12(t.recorded_at)}${txByName(t) ? ' by ' + txByName(t) : ''}`;
   return `<div title="${esc(tip)}" style="display:inline-block;margin-top:2px;background:#fef3c7;color:#92400e;font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:999px;white-space:nowrap;">LATE &middot; entered ${esc(fmtDMY(t.recorded_at))}</div>`;
 }
 function canReverseTx(t) {
@@ -11904,6 +11909,7 @@ async function renderInvHistory(id) {
         && !t.reverses_tx_id && !prev.reverses_tx_id
         && (t.challan_no || '') === (prev.challan_no || '')
         && (t.user_email || '') === (prev.user_email || '')
+        && (t.actor_name || '') === (prev.actor_name || '')
         && Math.abs(new Date(prev.created_at) - new Date(t.created_at)) <= 5000;
       if (sameSplitIssue) {
         prev.change += t.change;
@@ -11963,8 +11969,9 @@ async function renderInvHistory(id) {
             : '');
 
       // Emails are the widest thing in the table — show the part before
-      // the @ and keep the full address on hover.
-      const by = t.user_email ? `<span title="${esc(t.user_email)}">${esc(String(t.user_email).split('@')[0])}</span>` : '—';
+      // the @ and keep the full address on hover. A Station entry shows the
+      // operator's name instead (they all share one login).
+      const by = t.actor_name ? `<span title="${esc(txByTitle(t))}">${esc(t.actor_name)}</span>` : t.user_email ? `<span title="${esc(t.user_email)}">${esc(String(t.user_email).split('@')[0])}</span>` : '—';
       // Faded look for the original row that has been undone, so the eye
       // immediately reads "this didn't actually count".
       const rowStyle = hasBeenReversed
@@ -23426,7 +23433,7 @@ function computeManualConsumptionRows() {
     if (t.item_brand) g.brands.add(t.item_brand);
     g.totalSheets += amt;
     g.txCount++;
-    if (t.user_email) g.enteredBy.add(t.user_email);
+    if (txByName(t)) g.enteredBy.add(txByName(t));
     const ms = t.created_at ? new Date(t.created_at).getTime() : null;
     // The latest tx doubles as the row's click target in the item History.
     if (ms != null && (g.latestMs == null || ms > g.latestMs)) { g.latestMs = ms; g.latestRaw = t.created_at; g.latestTxId = t.id; g.latestItemId = t.item_id; }
@@ -23867,7 +23874,7 @@ function renderOffcutConsumption() {
           <td style="padding:6px 8px;">${esc(t.item_gsm || '—')}</td>
           <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
           <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
-          <td style="padding:6px 8px;white-space:nowrap;">${esc(t.user_email || '—')}</td>
+          <td style="padding:6px 8px;white-space:nowrap;"${t.actor_name ? ` title="${esc(txByTitle(t))}"` : ''}>${esc(txByName(t) || '—')}</td>
           ${canDelete ? `<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button></td>` : ''}
         </tr>`;
       }).join('')}</tbody>
@@ -23957,7 +23964,7 @@ async function exportOffcutConsumption() {
   const rows=offcutConsumptionRows(); if(!rows.length){notify('Nothing to export.');return;}
   const header=['When','E-Job No.','Reason','Paper Type','Size','GSM','Brand','Consumed Sheets','Consumed Packets/Reams','Issued By'];
   const aoa=reportExcelAoa(header);
-  rows.forEach(t=>aoa.push([fmtDMYT(t.created_at),offcutRowJobText(t),offcutRowReason(t),t.paper_type||'',t.item_size||'',t.item_gsm||'',t.item_brand||'',Math.abs(t.change),+(Math.abs(t.change)/packetSize(t.paper_type||'')).toFixed(2),t.user_email||'']));
+  rows.forEach(t=>aoa.push([fmtDMYT(t.created_at),offcutRowJobText(t),offcutRowReason(t),t.paper_type||'',t.item_size||'',t.item_gsm||'',t.item_brand||'',Math.abs(t.change),+(Math.abs(t.change)/packetSize(t.paper_type||'')).toFixed(2),txByName(t)]));
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
     title: 'OFFCUT CONSUMPTION REPORT',
@@ -24133,7 +24140,7 @@ async function exportStockMovement(direction) {
       t.reason || '',
       job,
       t.challan_no || '',
-      t.user_email || '',
+      txByName(t),
       [txNotesShown(t), smOffcutText(direction, t)].filter(Boolean).join(' | '),
     ]);
   }
