@@ -306,7 +306,10 @@ function getDb() {
 // job_btn_process_without_paper and rpt_mil_products (2026-10-13).
 // Bumped again for stock_groups.shipper_note / loose_note (2026-10-13).
 // Bumped again to seed the Access Register row job_btn_particulars (2026-10-14).
-const SCHEMA_VERSION = 'v2026-10-14-tx-actor-name';
+// Bumped again for inventory_transactions.actor_name (2026-10-14).
+// Bumped again for the Carton Shippers tables, their Access Register rows and
+// the Procurement role in users_role_check (2026-10-14).
+const SCHEMA_VERSION = 'v2026-10-14-carton-shippers';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -519,6 +522,15 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
+
+  // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
+  // every role until a Super Admin turns it on, except Procurement, whose tab
+  // this is (and who sees nothing else by default).
+  carton_tab_access:   { label: 'Carton Shippers tab — the carton shipper stock list and its In / Out log', levels: { procurement: 'view' } },
+  carton_btn_types:    { label: '+ Carton Type — also covers Edit and Hide on a type', levels: { procurement: 'yes' } },
+  carton_btn_stock_in: { label: 'Stock In — cartons received from a supplier', levels: { procurement: 'yes' } },
+  carton_btn_issue:    { label: 'Issue — cartons given out for an E-Job, a manual job or other', levels: { procurement: 'yes' } },
+  carton_btn_reverse:  { label: 'Reverse — undo a wrong carton entry', levels: { procurement: '30-day' }, extra: ['30-day'] },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -608,6 +620,21 @@ function effectiveLevelFor(user, key) {
     const lvl = group[r] || 'no';
     if (lvl === 'yes') return 'yes';
     if (permLevelAtLeast(lvl, 'view') && best !== 'yes' && !permLevelAtLeast(best, 'view')) best = lvl;
+  }
+  return best;
+}
+// Carton Shippers' Reverse row: same 3 tiers, no automatic Admin bypass
+// (only Super Admin), since the row starts hidden for everyone.
+function cartonReverseTier(user) {
+  if (userHasRole(user, 'client')) return 'no';
+  if (userHasRole(user, 'super_admin')) return 'yes';
+  const group = ROLE_PERMS.carton_btn_reverse || ROLE_PERMISSION_DEFAULTS.carton_btn_reverse.levels;
+  const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
+  let best = 'no';
+  for (const r of roles) {
+    const lvl = group[r] || 'no';
+    if (lvl === 'yes') return 'yes';
+    if (lvl === '30-day') best = '30-day';
   }
   return best;
 }
@@ -1152,11 +1179,11 @@ async function initDb() {
     // each cold start. Own try/catch so a stale list can never do that again.
     try {
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin','procurement'))`;
       await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
       await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin','procurement'))`;
     } catch (roleErr) {
       // Log loudly but keep going — the migrations below must still run.
       console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
@@ -1762,6 +1789,50 @@ async function initDb() {
         at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    // Carton Shippers (owner, 2026-10-14): carton shipper types (own name,
+    // size, ply) and every in / out, kept apart from paper. Whole cartons.
+    await sql`
+      CREATE TABLE IF NOT EXISTS carton_types (
+        id              SERIAL PRIMARY KEY,
+        name            TEXT NOT NULL,
+        size            TEXT,
+        ply             TEXT,
+        reorder_level   INTEGER,
+        current_balance INTEGER NOT NULL DEFAULT 0,
+        hidden          BOOLEAN NOT NULL DEFAULT false,
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        created_by      TEXT
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS carton_transactions (
+        id             SERIAL PRIMARY KEY,
+        type_id        INTEGER NOT NULL REFERENCES carton_types(id) ON DELETE CASCADE,
+        change         INTEGER NOT NULL,
+        kind           TEXT NOT NULL,
+        reason         TEXT,
+        job_id         INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+        manual_job     TEXT,
+        other_reason   TEXT,
+        issued_to      TEXT,
+        supplier       TEXT,
+        challan_no     TEXT,
+        notes          TEXT,
+        user_id        INTEGER,
+        user_email     TEXT,
+        actor_name     TEXT,
+        reverses_tx_id INTEGER REFERENCES carton_transactions(id) ON DELETE SET NULL,
+        created_at     TIMESTAMPTZ DEFAULT NOW(),
+        recorded_at    TIMESTAMPTZ
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS carton_tx_type_idx ON carton_transactions(type_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS carton_tx_job_idx ON carton_transactions(job_id)`;
+    try {
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_tx_reverses_once ON carton_transactions (reverses_tx_id) WHERE reverses_tx_id IS NOT NULL`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_types_name ON carton_types (lower(name))`;
+    } catch (e) { console.error('carton unique indexes not created:', e.message); }
+
     // An entry can be reversed only once - even two reverse clicks that
     // reach the server together. Skipped (logged) if old data already has a
     // doubled reversal, so start-up never fails on it.
@@ -2385,7 +2456,9 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
+// 'procurement' (owner, 2026-10-14): the carton shipper buyer - by default
+// sees only the Carton Shippers tab.
+const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'procurement', 'operator', 'client'];
 // actingUser: only a Super Admin can grant or keep the super_admin role on
 // anyone (including themselves) — a plain Admin submitting 'super_admin' in
 // the payload (by tampering with the request, since the checkbox is hidden
@@ -2674,7 +2747,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 // hard client-role block above; letting it appear in the editor would
 // invite a mistaken edit into something that actually can't take effect
 // safely, which is worse than just not offering it.
-const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator'];
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement'];
 
 // Every signed-in user needs to know their OWN effective permissions
 // (client-side canWriteJobs() etc. read this at boot) — this is not
@@ -2686,7 +2759,9 @@ app.get('/api/role-permissions/effective', requireAuth, async (req, res) => {
     for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) {
       // inventory_reverse has its own tier logic (30-day) the generic
       // level-lookup doesn't know about.
-      effective[key] = (key === 'inventory_reverse' || key === 'inv_btn_reverse') ? reverseTierFor(req.user) : effectiveLevelFor(req.user, key);
+      effective[key] = (key === 'inventory_reverse' || key === 'inv_btn_reverse') ? reverseTierFor(req.user)
+        : key === 'carton_btn_reverse' ? cartonReverseTier(req.user)
+        : effectiveLevelFor(req.user, key);
     }
     res.json(effective);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -6941,6 +7016,237 @@ app.post('/api/station/offcut-items/:id/stock-in', requireStationUser, async (re
       summary: `+${sheets.toLocaleString()} sheets offcut stock-in from Station by ${who}: ${label}`,
     });
     res.json((await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`)[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Carton Shippers (owner, 2026-10-14) ───────────────────────
+// Carton shipper stock: types (own name, size L x W x H, ply) and every
+// Stock In / Issue / reversal. Issued from the Carton Shippers tab now (to an
+// E-Job, a manual job, or other); the Pasting Station comes later.
+const CARTON_REASONS = { 'e-job': 'E-Job', 'manual-job': 'Manual Job', other: 'Other' };
+function cartonQty(v) {
+  const n = Number(String(v == null ? '' : v).replace(/,/g, '').trim());
+  return Number.isInteger(n) && n > 0 && n <= 10000000 ? n : null;
+}
+function cartonText(v, max = 200) {
+  const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  return s ? s.slice(0, max) : null;
+}
+// "18 X 12 x 10" -> "18x12x10" (same spelling everywhere, so search matches).
+function cartonSize(v) {
+  const s = cartonText(v, 60);
+  return s ? s.toLowerCase().replace(/\s*[x×*]\s*/g, 'x') : null;
+}
+function cartonTypeLabel(t) {
+  return [t.name, t.size, t.ply].filter(Boolean).join(' · ');
+}
+// One carton row + its balance. The balance moves first, in one statement
+// that refuses to go below zero, so two issues at once can never overdraw.
+async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, manualJob, otherReason, issuedTo, supplier, challanNo, notes, user, occurredAt, reversesTxId }) {
+  const moved = change < 0
+    ? await sql`UPDATE carton_types SET current_balance = current_balance + ${change} WHERE id = ${typeId} AND current_balance + ${change} >= 0 RETURNING current_balance`
+    : await sql`UPDATE carton_types SET current_balance = current_balance + ${change} WHERE id = ${typeId} RETURNING current_balance`;
+  if (!moved.length) {
+    const t = (await sql`SELECT current_balance FROM carton_types WHERE id = ${typeId}`)[0];
+    if (!t) return { status: 404, error: 'Carton type not found.' };
+    return { status: 400, error: `Only ${(t.current_balance || 0).toLocaleString()} on hand - cannot take out ${Math.abs(change).toLocaleString()}.` };
+  }
+  const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
+  try {
+    const row = (await sql`
+      INSERT INTO carton_transactions (type_id, change, kind, reason, job_id, manual_job, other_reason, issued_to, supplier, challan_no, notes,
+                                       user_id, user_email, actor_name, reverses_tx_id, created_at, recorded_at)
+      VALUES (${typeId}, ${change}, ${kind}, ${reason || null}, ${jobId || null}, ${manualJob || null}, ${otherReason || null}, ${issuedTo || null},
+              ${supplier || null}, ${challanNo || null}, ${notes || null},
+              ${(user && user.id) || null}, ${(user && user.email) || null}, ${(user && user.station_actor) || null}, ${reversesTxId || null},
+              COALESCE(${occurredIso}::timestamptz, NOW()),
+              CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
+      RETURNING id`)[0];
+    return { id: row.id, balance: moved[0].current_balance };
+  } catch (e) {
+    await sql`UPDATE carton_types SET current_balance = current_balance - ${change} WHERE id = ${typeId}`;
+    if (/ux_carton_tx_reverses_once/.test(e.message || '')) return { status: 409, error: 'This entry was already reversed.' };
+    throw e;
+  }
+}
+async function cartonTypeOr404(sql, id, res) {
+  const t = (await sql`SELECT * FROM carton_types WHERE id = ${parseInt(id, 10) || 0}`)[0];
+  if (!t) { res.status(404).json({ error: 'Carton type not found.' }); return null; }
+  return t;
+}
+
+app.get('/api/cartons', requirePermission('carton_tab_access', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const types = await sql`SELECT * FROM carton_types ORDER BY lower(name)`;
+    const transactions = await sql`
+      SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+             (SELECT r.id FROM carton_transactions r WHERE r.reverses_tx_id = t.id LIMIT 1) AS reversed_by
+        FROM carton_transactions t
+        LEFT JOIN jobs j ON j.id = t.job_id
+       ORDER BY t.created_at DESC, t.id DESC`;
+    res.json({ types, transactions });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+function readCartonTypeBody(body) {
+  const name = cartonText(body && body.name, 80);
+  if (!name) return { error: 'Give the carton type a name.' };
+  const rl = String((body && body.reorder_level) == null ? '' : body.reorder_level).trim();
+  const reorder = rl === '' ? null : cartonQty(rl);
+  if (rl !== '' && reorder === null) return { error: 'Reorder level must be a whole number above zero (or left blank).' };
+  return { name, size: cartonSize(body.size), ply: cartonText(body.ply, 30), reorder };
+}
+app.post('/api/cartons/types', requirePermission('carton_btn_types'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = readCartonTypeBody(req.body || {});
+    if (b.error) return res.status(400).json({ error: b.error });
+    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name})`;
+    if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
+    const t = (await sql`
+      INSERT INTO carton_types (name, size, ply, reorder_level, created_by)
+      VALUES (${b.name}, ${b.size}, ${b.ply}, ${b.reorder}, ${req.user.email})
+      RETURNING *`)[0];
+    await logAudit(sql, req, { action: 'carton.type_create', entityType: 'carton_type', entityId: t.id, summary: `Carton type added: ${cartonTypeLabel(t)}` });
+    res.json(t);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/cartons/types/:id', requirePermission('carton_btn_types'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const cur = await cartonTypeOr404(sql, req.params.id, res);
+    if (!cur) return;
+    const b = readCartonTypeBody(req.body || {});
+    if (b.error) return res.status(400).json({ error: b.error });
+    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND id <> ${cur.id}`;
+    if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
+    const hidden = !!(req.body && req.body.hidden);
+    const t = (await sql`
+      UPDATE carton_types SET name = ${b.name}, size = ${b.size}, ply = ${b.ply}, reorder_level = ${b.reorder}, hidden = ${hidden}
+       WHERE id = ${cur.id} RETURNING *`)[0];
+    const what = cur.hidden !== hidden ? (hidden ? 'hidden' : 'shown again') : 'edited';
+    await logAudit(sql, req, { action: 'carton.type_edit', entityType: 'carton_type', entityId: t.id, summary: `Carton type ${what}: ${cartonTypeLabel(cur)}${what === 'edited' ? ' -> ' + cartonTypeLabel(t) : ''}` });
+    res.json(t);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/cartons/stock-in', requirePermission('carton_btn_stock_in'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const type = await cartonTypeOr404(sql, b.type_id, res);
+    if (!type) return;
+    const qty = cartonQty(b.qty);
+    if (!qty) return res.status(400).json({ error: 'Quantity must be a whole number of cartons above zero.' });
+    const supplier = cartonText(b.supplier, 120);
+    if (!supplier) return res.status(400).json({ error: 'Enter the supplier.' });
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const held = await takeOpLocks(sql, [`carton-type:${type.id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const r = await applyCartonChange(sql, {
+        typeId: type.id, change: +qty, kind: 'in', supplier, challanNo: cartonText(b.challan_no, 60),
+        notes: cartonText(b.notes, 300), user: req.user, occurredAt: entry.at,
+      });
+      if (r.error) return res.status(r.status || 400).json({ error: r.error });
+      await logAudit(sql, req, {
+        action: 'carton.stock_in', entityType: 'carton_type', entityId: type.id,
+        summary: `+${qty.toLocaleString()} cartons in: ${cartonTypeLabel(type)} from ${supplier}${b.challan_no ? ' · challan ' + cartonText(b.challan_no, 60) : ''}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+      });
+      res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/cartons/issue', requirePermission('carton_btn_issue'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const type = await cartonTypeOr404(sql, b.type_id, res);
+    if (!type) return;
+    const qty = cartonQty(b.qty);
+    if (!qty) return res.status(400).json({ error: 'Quantity must be a whole number of cartons above zero.' });
+    const issuedTo = cartonText(b.issued_to, 120);
+    if (!issuedTo) return res.status(400).json({ error: 'Enter who the cartons are issued to.' });
+    const reason = String(b.reason || '');
+    if (!CARTON_REASONS[reason]) return res.status(400).json({ error: 'Pick a reason: E-Job, Manual Job or Other.' });
+    let jobId = null, manualJob = null, otherReason = null, jobLabel = '';
+    if (reason === 'e-job') {
+      const job = (await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(b.job_id, 10) || 0} AND deleted_at IS NULL`)[0];
+      if (!job) return res.status(400).json({ error: 'Pick the job (E-number) these cartons are for.' });
+      jobId = job.id; jobLabel = `E-${job.id} ${job.name || ''}`.trim();
+    } else if (reason === 'manual-job') {
+      manualJob = cartonText(b.manual_job, 120);
+      if (!manualJob) return res.status(400).json({ error: 'Enter the manual job number / name.' });
+      jobLabel = 'manual job ' + manualJob;
+    } else {
+      otherReason = cartonText(b.other_reason, 200);
+      if (!otherReason) return res.status(400).json({ error: 'Write what the cartons are for.' });
+      jobLabel = otherReason;
+    }
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const held = await takeOpLocks(sql, [`carton-type:${type.id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const r = await applyCartonChange(sql, {
+        typeId: type.id, change: -qty, kind: 'out', reason, jobId, manualJob, otherReason, issuedTo,
+        notes: cartonText(b.notes, 300), user: req.user, occurredAt: entry.at,
+      });
+      if (r.error) return res.status(r.status || 400).json({ error: r.error });
+      await logAudit(sql, req, {
+        action: 'carton.issue', entityType: 'carton_type', entityId: type.id,
+        summary: `-${qty.toLocaleString()} cartons issued: ${cartonTypeLabel(type)} to ${issuedTo} for ${jobLabel}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+        metadata: { tx_id: r.id, job_id: jobId },
+      });
+      res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Undo a wrong entry with an opposite "correction" row (both stay in the
+// log). 'yes' = any entry, any age; '30-day' = entries from the last 30 days.
+app.post('/api/cartons/transactions/:id/reverse', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const tier = cartonReverseTier(req.user);
+    if (tier === 'no') return res.status(403).json({ error: 'Not allowed' });
+    const txId = parseInt(req.params.id, 10);
+    const tx = (await sql`SELECT * FROM carton_transactions WHERE id = ${txId}`)[0];
+    if (!tx) return res.status(404).json({ error: 'Entry not found.' });
+    if (tx.kind === 'correction' || tx.reverses_tx_id) return res.status(400).json({ error: 'A reversal cannot itself be reversed.' });
+    if (tier === '30-day' && Date.now() - new Date(tx.recorded_at || tx.created_at).getTime() > 30 * 86400000) {
+      return res.status(403).json({ error: 'Only entries from the last 30 days can be reversed with your access.' });
+    }
+    const held = await takeOpLocks(sql, [`carton-tx:${tx.id}`, `carton-type:${tx.type_id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const already = await sql`SELECT id FROM carton_transactions WHERE reverses_tx_id = ${tx.id}`;
+      if (already.length) return res.status(409).json({ error: 'This entry was already reversed.' });
+      const type = (await sql`SELECT * FROM carton_types WHERE id = ${tx.type_id}`)[0];
+      const r = await applyCartonChange(sql, {
+        typeId: tx.type_id, change: -tx.change, kind: 'correction', reversesTxId: tx.id, user: req.user,
+        notes: `Reversal of entry #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change})`,
+      });
+      if (r.error) {
+        const msg = tx.change > 0 ? r.error.replace(/\.$/, '') + ' - some of these cartons were already issued.' : r.error;
+        return res.status(r.status || 400).json({ error: msg });
+      }
+      await logAudit(sql, req, {
+        action: 'carton.reverse', entityType: 'carton_type', entityId: tx.type_id,
+        summary: `Carton entry #${tx.id} reversed (${tx.change > 0 ? '+' : ''}${tx.change.toLocaleString()} ${type ? cartonTypeLabel(type) : ''})`,
+        metadata: { tx_id: tx.id, reversal_tx_id: r.id },
+      });
+      res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

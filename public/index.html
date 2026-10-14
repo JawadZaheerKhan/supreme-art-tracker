@@ -1020,6 +1020,27 @@
     .hero-watermark { display: none; }
   }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 1.25rem; }
+/* Carton Shippers tab (owner, 2026-10-14). */
+.carton-toolbar { align-items: center; }
+.carton-tablewrap { overflow-x: auto; background: var(--bg, #fff); border: 1px solid var(--border); border-radius: 10px; }
+.carton-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.carton-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); background: var(--bg2); padding: 8px 10px; white-space: nowrap; }
+.carton-table td { padding: 8px 10px; border-top: 1px solid var(--border); vertical-align: top; }
+.carton-table .num { text-align: right; white-space: nowrap; }
+.carton-table tr.carton-low td { background: #fee2e2; }
+.carton-table tr.carton-hidden td, .carton-table tr.carton-reversed td { opacity: 0.55; }
+.carton-table tr.carton-correction td { background: #fff7ed; }
+.carton-actions { white-space: nowrap; text-align: right; }
+.carton-actions .btn { margin-left: 4px; }
+.carton-tag { display: inline-block; font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--bg2); color: var(--text2); vertical-align: middle; }
+.carton-tag-low { background: #fecaca; color: #991b1b; }
+.carton-reason { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; }
+.carton-reason label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.carton-job-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; max-height: 220px; overflow-y: auto; }
+.carton-job-hit { text-align: left; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
+.carton-job-hit:hover { border-color: var(--brand); }
+.carton-job-chip { display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; background: #dcfce7; color: #166534; font-weight: 600; font-size: 13px; padding: 4px 10px; border-radius: 999px; }
+.carton-job-chip button { border: none; background: none; color: inherit; font-size: 16px; cursor: pointer; line-height: 1; }
   .stat {
     background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 14px 16px;
@@ -3092,6 +3113,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="dashboard" id="mode-dashboard-btn" onclick="setMode('dashboard')" style="display:none;">&#128202; Dashboard</button>
     <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
+    <button class="mode-btn" data-mode="carton-shippers" id="mode-carton-shippers-btn" onclick="setMode('carton-shippers')" style="display:none;">&#128230; Carton Shippers</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
@@ -3642,6 +3664,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   </div>
 </div>
 
+<!-- Carton Shippers (owner, 2026-10-14): carton shipper stock, Stock In, Issue and the In / Out log. -->
+<div class="main" id="carton-shippers-mode" style="display:none;">
+  <div id="carton-shippers-root"></div>
+</div>
 <!-- CEO Dashboard (owner, 2026-10-09): view-only tiles with one date filter. -->
 <div class="main" id="dashboard-mode" style="display:none;">
   <div id="ceo-dash"></div>
@@ -5066,6 +5092,7 @@ function roleLabel(role) {
     store_manager: 'Store Manager',
     finance: 'Finance',
     operator: 'Operator',
+    procurement: 'Procurement',
     client: 'Client',
     // Legacy role names that may still appear on un-migrated user rows.
     user: 'Production Manager',
@@ -5446,10 +5473,11 @@ function tabAllowed(m) {
     case 'users':       return hasPerm('user_tab_access', 'view');
     case 'client-view': return hasPerm('client_view_preview', 'view');
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
+    case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
     default:            return true;
   }
 }
-const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'reports', 'stickers', 'station', 'users', 'client-view'];
+const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'carton-shippers', 'reports', 'stickers', 'station', 'users', 'client-view'];
 function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // ── CEO Dashboard ─────────────────────────────────────────────────
 // Owner, 2026-10-09: one place where the CEO sees everything, in small
@@ -5878,6 +5906,7 @@ function renderUserChip() {
   showTab('mode-dashboard-btn', 'dashboard');
   showTab('mode-products-btn', 'products');
   showTab('mode-inventory-btn', 'inventory');
+  showTab('mode-carton-shippers-btn', 'carton-shippers');
   showTab('mode-reports-btn', 'reports');
   showTab('mode-stickers-btn', 'stickers');
   showTab('mode-station-btn', 'station');
@@ -5973,6 +6002,7 @@ async function onGoogleCredential(response) {
     await Promise.all(loaders);
     if (isOperator())            setMode('station');
     else if (isStoreManager())   setMode('inventory');
+    else if (!tabAllowed('jobs')) setMode(firstAllowedTab());   // e.g. Procurement -> Carton Shippers
     hideLoadingScreen();
   } catch (e) {
     const err = document.getElementById('login-error');
@@ -6441,6 +6471,8 @@ function setMode(m) {
   document.getElementById('jobs-mode').style.display      = m === 'jobs' ? 'block' : 'none';
   document.getElementById('products-mode').style.display  = m === 'products' ? 'block' : 'none';
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
+  const cartonEl = document.getElementById('carton-shippers-mode');
+  if (cartonEl) cartonEl.style.display = m === 'carton-shippers' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
   document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
   document.getElementById('users-mode').style.display     = m === 'users' ? 'block' : 'none';
@@ -6496,6 +6528,11 @@ function setMode(m) {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
     loadUsersAndAudit();
+  } else if (m === 'carton-shippers') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    enterCartonShippers();
   } else if (m === 'dashboard') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -6534,6 +6571,515 @@ function refreshCurrent() {
   else if (mode === 'users') loadUsersAndAudit();
   else if (mode === 'station') loadJobs().then(stationRender);
   else if (mode === 'client-view') loadClientViewJobs(true);
+  else if (mode === 'carton-shippers') loadCartons();
+}
+
+// ── Carton Shippers tab (owner, 2026-10-14) ───────────────────
+// Carton shipper stock, kept apart from paper: types (own name, size, ply),
+// Stock In from a supplier, Issue (to an E-Job, a manual job or other) and a
+// log of every in / out with Reverse. Server: /api/cartons*. Each button
+// follows its own Access Register row (Carton Shippers tab).
+let cartonTypes = [];
+let cartonTx = [];
+let cartonView = 'stock';          // 'stock' | 'log'
+let cartonSearch = '';
+let cartonShowHidden = false;
+let cartonLogF = { type: '', dir: '', reason: '', from: '', to: '', q: '' };
+let cartonPeople = null;           // operator names, for the "Issued to" suggestions
+let cartonIssueJobId = null;
+let cartonLoaded = false;
+
+function enterCartonShippers() {
+  renderCartons();
+  loadCartons();
+  loadCartonPeople();
+}
+async function loadCartons() {
+  try {
+    const d = await api('GET', '/api/cartons');
+    cartonTypes = Array.isArray(d.types) ? d.types : [];
+    cartonTx = Array.isArray(d.transactions) ? d.transactions : [];
+    cartonLoaded = true;
+  } catch (e) { notify('Error loading carton shippers: ' + e.message); }
+  if (mode === 'carton-shippers') renderCartons();
+}
+async function loadCartonPeople() {
+  if (cartonPeople) return;
+  try {
+    const rows = await api('GET', '/api/operators/all-persons');
+    cartonPeople = [...new Set((rows || []).map(r => String((r && r.name) || '').trim()).filter(Boolean))];
+  } catch { cartonPeople = []; }
+}
+function canCartonTypes()   { return isSuperAdmin() || hasPerm('carton_btn_types'); }
+function canCartonStockIn() { return isSuperAdmin() || hasPerm('carton_btn_stock_in'); }
+function canCartonIssue()   { return isSuperAdmin() || hasPerm('carton_btn_issue'); }
+function canReverseCartonTx(t) {
+  if (!t || t.kind === 'correction' || t.reverses_tx_id || t.reversed_by) return false;
+  if (isSuperAdmin()) return true;
+  const lvl = permLevel('carton_btn_reverse');
+  if (lvl === 'yes') return true;
+  return lvl === '30-day' && Date.now() - new Date(t.recorded_at || t.created_at).getTime() <= 30 * 86400000;
+}
+const cartonNum = n => (Number(n) || 0).toLocaleString();
+function cartonTypeById(id) { return cartonTypes.find(t => String(t.id) === String(id)); }
+function cartonTypeText(t) { return t ? [t.name, t.size, t.ply].filter(Boolean).join(' · ') : '—'; }
+function cartonIsLow(t) { return t && t.reorder_level != null && (Number(t.current_balance) || 0) <= Number(t.reorder_level); }
+// What an Out row was for, in words.
+function cartonForText(t) {
+  if (t.kind === 'correction') return `Reversal of entry #${t.reverses_tx_id}`;
+  if (t.kind === 'in') return '';
+  if (t.reason === 'e-job') return `E-${t.job_id || '?'}${t.job_name ? ' · ' + t.job_name : ''}`;
+  if (t.reason === 'manual-job') return `Manual job ${t.manual_job || ''}`.trim();
+  return `Other: ${t.other_reason || ''}`;
+}
+// Last real In / Out per type (reversed entries and reversals left out).
+function cartonLastDates() {
+  const out = new Map();
+  for (const t of cartonTx) {
+    if (t.kind === 'correction' || t.reversed_by) continue;
+    const o = out.get(t.type_id) || {};
+    const k = t.kind === 'in' ? 'in' : 'out';
+    if (!o[k] || new Date(t.created_at) > new Date(o[k])) o[k] = t.created_at;
+    out.set(t.type_id, o);
+  }
+  return out;
+}
+
+function renderCartons() {
+  const root = document.getElementById('carton-shippers-root');
+  if (!root) return;
+  const live = cartonTypes.filter(t => !t.hidden);
+  const today = localDateISO();
+  const sumToday = kind => cartonTx.filter(t => t.kind === kind && !t.reversed_by && localDateISO(new Date(t.created_at)) === today)
+    .reduce((a, t) => a + Math.abs(Number(t.change) || 0), 0);
+  const low = live.filter(cartonIsLow).length;
+  const stat = (label, value, cls) => `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls || ''}">${value}</div></div>`;
+  root.innerHTML = `
+    <div class="stats-row">
+      ${stat('Carton Types', cartonNum(live.length))}
+      ${stat('Cartons on Hand', cartonNum(live.reduce((a, t) => a + (Number(t.current_balance) || 0), 0)))}
+      ${stat('Low Stock', cartonNum(low), low ? 'warn' : '')}
+      ${stat('In Today', cartonNum(sumToday('in')))}
+      ${stat('Issued Today', cartonNum(sumToday('out')))}
+    </div>
+    <div class="toolbar carton-toolbar">
+      <div class="tabs">
+        <button class="tab ${cartonView === 'stock' ? 'active' : ''}" onclick="setCartonView('stock')">&#128230; Stock</button>
+        <button class="tab ${cartonView === 'log' ? 'active' : ''}" onclick="setCartonView('log')">&#128203; In / Out Log</button>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+        ${canCartonTypes() ? `<button class="btn" onclick="openCartonTypeModal()">+ Carton Type</button>` : ''}
+        ${canCartonStockIn() ? `<button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="openCartonStockIn()">&#128229; Stock In</button>` : ''}
+        ${canCartonIssue() ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonIssue()">&#128228; Issue</button>` : ''}
+      </div>
+    </div>
+    ${cartonView === 'stock' ? cartonStockViewHtml() : cartonLogViewHtml()}`;
+  if (cartonView === 'stock') renderCartonStockList(); else renderCartonLogList();
+}
+function setCartonView(v) { cartonView = v === 'log' ? 'log' : 'stock'; renderCartons(); }
+
+// ---- Stock view ----
+function cartonStockViewHtml() {
+  return `
+    <div class="toolbar">
+      <div class="search-wrap">
+        <input type="text" id="carton-search-input" placeholder="Search name, size, ply..." value="${esc(cartonSearch)}" oninput="cartonSearch = this.value; renderCartonStockList();">
+        <span class="search-icon">&#128269;</span>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);cursor:pointer;">
+        <input type="checkbox" ${cartonShowHidden ? 'checked' : ''} onchange="cartonShowHidden = this.checked; renderCartonStockList();"> Show hidden types
+      </label>
+    </div>
+    <div id="carton-stock-list"></div>`;
+}
+function renderCartonStockList() {
+  const el = document.getElementById('carton-stock-list');
+  if (!el) return;
+  if (!cartonLoaded) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
+  const last = cartonLastDates();
+  const rows = cartonTypes
+    .filter(t => cartonShowHidden || !t.hidden)
+    .filter(t => !cartonSearch.trim() || searchMatch([t.name, t.size, t.ply].filter(Boolean).join(' '), cartonSearch));
+  if (!cartonTypes.length) {
+    el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;">No carton types yet.${canCartonTypes() ? ' Click <b>+ Carton Type</b> to add the first one.' : ''}</div>`;
+    return;
+  }
+  if (!rows.length) { el.innerHTML = `<div class="empty">No carton types match.</div>`; return; }
+  el.innerHTML = `
+    <div class="carton-tablewrap">
+      <table class="carton-table">
+        <thead><tr>
+          <th>Carton Type</th><th>Size (L × W × H)</th><th>Ply</th>
+          <th class="num">On Hand</th><th class="num">Reorder At</th>
+          <th>Last In</th><th>Last Out</th><th></th>
+        </tr></thead>
+        <tbody>${rows.map(t => {
+          const d = last.get(t.id) || {};
+          const lowRow = !t.hidden && cartonIsLow(t);
+          return `<tr class="${lowRow ? 'carton-low' : ''}${t.hidden ? ' carton-hidden' : ''}">
+            <td><b>${esc(t.name)}</b>${t.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}${lowRow ? ' <span class="carton-tag carton-tag-low">LOW</span>' : ''}</td>
+            <td style="white-space:nowrap;">${esc(t.size || '—')}</td>
+            <td style="white-space:nowrap;">${esc(t.ply || '—')}</td>
+            <td class="num"><b>${cartonNum(t.current_balance)}</b></td>
+            <td class="num">${t.reorder_level != null ? cartonNum(t.reorder_level) : '—'}</td>
+            <td>${d.in ? esc(fmtDMY(d.in)) : '—'}</td>
+            <td>${d.out ? esc(fmtDMY(d.out)) : '—'}</td>
+            <td class="carton-actions">
+              ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
+              ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
+              <button class="btn btn-sm" title="This type's In / Out log" onclick="openCartonTypeLog(${t.id})">Log</button>
+              ${canCartonTypes() ? `<button class="btn btn-sm" title="Edit or hide this type" onclick="openCartonTypeModal(${t.id})">Edit</button>` : ''}
+            </td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+}
+function openCartonTypeLog(id) {
+  cartonLogF = { type: String(id), dir: '', reason: '', from: '', to: '', q: '' };
+  setCartonView('log');
+}
+
+// ---- In / Out log ----
+function cartonLogViewHtml() {
+  const f = cartonLogF;
+  const typeOpts = cartonTypes.map(t => `<option value="${t.id}" ${String(t.id) === f.type ? 'selected' : ''}>${esc(cartonTypeText(t))}${t.hidden ? ' (hidden)' : ''}</option>`).join('');
+  const sel = (key, opts) => `<select class="filter" onchange="cartonLogF.${key} = this.value; renderCartonLogList();">${opts}</select>`;
+  const o = (v, l, cur) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
+  return `
+    <div class="toolbar" style="flex-wrap:wrap;">
+      <div class="search-wrap">
+        <input type="text" id="carton-log-search" placeholder="Search supplier, issued to, challan, job..." value="${esc(f.q)}" oninput="cartonLogF.q = this.value; renderCartonLogList();">
+        <span class="search-icon">&#128269;</span>
+      </div>
+      <select class="filter" onchange="cartonLogF.type = this.value; renderCartonLogList();"><option value="">All carton types</option>${typeOpts}</select>
+      ${sel('dir', o('', 'In and Out', f.dir) + o('in', 'In only', f.dir) + o('out', 'Out only', f.dir) + o('correction', 'Reversals', f.dir))}
+      ${sel('reason', o('', 'Every reason', f.reason) + o('e-job', 'E-Job', f.reason) + o('manual-job', 'Manual Job', f.reason) + o('other', 'Other', f.reason))}
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">From <input type="date" value="${esc(f.from)}" onchange="cartonLogF.from = this.value; renderCartonLogList();"></label>
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">To <input type="date" value="${esc(f.to)}" onchange="cartonLogF.to = this.value; renderCartonLogList();"></label>
+      <button class="btn btn-sm" onclick="clearCartonLogFilters()">Clear</button>
+      <div style="margin-left:auto;display:flex;gap:6px;">
+        <button class="btn btn-sm" onclick="printCartonLog()">&#128424; Print</button>
+        <button class="btn btn-sm" onclick="exportCartonLog()">&#128202; Excel</button>
+      </div>
+    </div>
+    <div id="carton-log-list"></div>`;
+}
+function clearCartonLogFilters() { cartonLogF = { type: '', dir: '', reason: '', from: '', to: '', q: '' }; renderCartons(); }
+function cartonLogRows() {
+  const f = cartonLogF;
+  return cartonTx.filter(t => {
+    if (f.type && String(t.type_id) !== f.type) return false;
+    if (f.dir && t.kind !== f.dir) return false;
+    if (f.reason && t.reason !== f.reason) return false;
+    const day = localDateISO(new Date(t.created_at));
+    if (f.from && day < f.from) return false;
+    if (f.to && day > f.to) return false;
+    if (f.q.trim()) {
+      const ty = cartonTypeById(t.type_id);
+      const hay = [cartonTypeText(ty), t.supplier, t.issued_to, t.challan_no, t.notes, cartonForText(t), t.job_code, txByName(t), '#' + t.id].filter(Boolean).join(' ');
+      if (!searchMatch(hay, f.q)) return false;
+    }
+    return true;
+  }).sort((a, b) => (new Date(b.created_at) - new Date(a.created_at)) || (b.id - a.id));   // a backdated entry sits on its own day
+}
+function renderCartonLogList() {
+  const el = document.getElementById('carton-log-list');
+  if (!el) return;
+  if (!cartonLoaded) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
+  const rows = cartonLogRows();
+  if (!rows.length) { el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;">No entries${cartonTx.length ? ' match these filters' : ' yet'}.</div>`; return; }
+  const tin = rows.filter(t => t.change > 0).reduce((a, t) => a + t.change, 0);
+  const tout = rows.filter(t => t.change < 0).reduce((a, t) => a - t.change, 0);
+  el.innerHTML = `
+    <div style="font-size:12px;color:var(--text2);margin:0 0 6px;">${rows.length.toLocaleString()} entr${rows.length === 1 ? 'y' : 'ies'} · In <b style="color:#166534;">${cartonNum(tin)}</b> · Out <b style="color:#B91C1C;">${cartonNum(tout)}</b></div>
+    <div class="carton-tablewrap">
+      <table class="carton-table">
+        <thead><tr>
+          <th>When</th><th>Carton Type</th><th class="num">In</th><th class="num">Out</th>
+          <th>Supplier / Issued To</th><th>For</th><th>Challan</th><th>Notes</th><th>Entered By</th><th></th>
+        </tr></thead>
+        <tbody>${rows.map(t => {
+          const ty = cartonTypeById(t.type_id);
+          const rev = !!t.reversed_by;
+          const corr = t.kind === 'correction';
+          return `<tr class="${rev ? 'carton-reversed' : ''}${corr ? ' carton-correction' : ''}">
+            <td style="white-space:nowrap;">${esc(fmtDMYT(t.created_at))}${lateEntryTagHtml(t)}</td>
+            <td>${esc(cartonTypeText(ty))}</td>
+            <td class="num" style="color:#166534;font-weight:700;">${t.change > 0 ? cartonNum(t.change) : ''}</td>
+            <td class="num" style="color:#B91C1C;font-weight:700;">${t.change < 0 ? cartonNum(-t.change) : ''}</td>
+            <td>${esc(t.kind === 'in' ? (t.supplier || '—') : t.kind === 'out' ? (t.issued_to || '—') : '—')}</td>
+            <td>${esc(cartonForText(t) || '—')}</td>
+            <td>${esc(t.challan_no || '—')}</td>
+            <td style="max-width:220px;">${esc(t.kind === 'correction' ? '' : t.notes || '')}</td>
+            <td style="white-space:nowrap;"><span title="${esc(txByTitle(t))}">${esc(t.actor_name || String(t.user_email || '—').split('@')[0])}</span></td>
+            <td style="white-space:nowrap;">${rev ? `<span class="carton-tag">REVERSED</span>` : canReverseCartonTx(t) ? `<button class="btn btn-sm btn-danger" onclick="reverseCartonTx(${t.id})">&#8634; Reverse</button>` : ''}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+}
+async function reverseCartonTx(id) {
+  const t = cartonTx.find(x => x.id === id);
+  if (!t) return;
+  const ty = cartonTypeById(t.type_id);
+  const ok = await confirmDialog({
+    title: `Reverse this ${t.kind === 'in' ? 'Stock In' : 'Issue'}?`,
+    message: `${t.change > 0 ? '+' : '−'}${cartonNum(Math.abs(t.change))} × ${cartonTypeText(ty)} on ${fmtDMY(t.created_at)}${t.kind === 'out' ? ` to ${t.issued_to || '—'} (${cartonForText(t)})` : t.supplier ? ` from ${t.supplier}` : ''}.\n\nThe cartons go ${t.change > 0 ? 'out of' : 'back into'} stock. Both lines stay in the log.`,
+    danger: true, confirmText: 'Reverse',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('POST', `/api/cartons/transactions/${id}/reverse`);
+    notify('Entry reversed');
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Could not reverse', message: e.message, kind: 'warn' }); }
+  showSaving(false);
+}
+
+// ---- Type modal ----
+function openCartonTypeModal(id) {
+  const t = id ? cartonTypeById(id) : null;
+  const plyOpts = ['', '3-ply', '5-ply', '7-ply'];
+  if (t && t.ply && !plyOpts.includes(t.ply)) plyOpts.push(t.ply);
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>${t ? 'Edit Carton Type' : 'New Carton Type'}</h2>
+    <div class="form-group"><label class="form-label">Name *</label><input type="text" id="ct-name" value="${esc(t ? t.name : '')}" placeholder="Your name for it, e.g. Small 5-ply"></div>
+    <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div class="form-group"><label class="form-label">Size (L × W × H)</label><input type="text" id="ct-size" value="${esc(t ? t.size || '' : '')}" placeholder="18 x 12 x 10"></div>
+      <div class="form-group"><label class="form-label">Ply</label><select id="ct-ply" class="form-select">${plyOpts.map(p => `<option value="${esc(p)}" ${(t ? t.ply || '' : '') === p ? 'selected' : ''}>${p ? esc(p) : '—'}</option>`).join('')}</select></div>
+    </div>
+    <div class="form-group"><label class="form-label">Reorder At <span style="font-weight:400;color:var(--text2);">(optional — the row turns red at or below this)</span></label><input type="number" id="ct-reorder" min="1" step="1" value="${t && t.reorder_level != null ? t.reorder_level : ''}"></div>
+    ${t ? `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:4px 0 8px;"><input type="checkbox" id="ct-hidden" ${t.hidden ? 'checked' : ''}> Hide this type (kept with its log; can't be picked for Stock In / Issue)</label>` : ''}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveCartonType(${t ? t.id : 'null'})">Save</button>
+    </div>
+  </div>`);
+  setTimeout(() => document.getElementById('ct-name')?.focus(), 50);
+}
+async function saveCartonType(id) {
+  const val = k => (document.getElementById(k)?.value || '').trim();
+  const body = { name: val('ct-name'), size: val('ct-size'), ply: val('ct-ply'), reorder_level: val('ct-reorder') };
+  if (!body.name) { await alertDialog({ title: 'Give the carton type a name', kind: 'warn' }); return; }
+  if (id) body.hidden = !!document.getElementById('ct-hidden')?.checked;
+  showSaving(true);
+  try {
+    await api(id ? 'PUT' : 'POST', id ? `/api/cartons/types/${id}` : '/api/cartons/types', body);
+    closeModal();
+    notify(id ? 'Carton type saved' : 'Carton type added');
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Could not save', message: e.message, kind: 'warn' }); }
+  showSaving(false);
+}
+
+// ---- Stock In / Issue ----
+function cartonTypeSelectHtml(id, selectedId, withBalance) {
+  const live = cartonTypes.filter(t => !t.hidden);
+  return `<select id="${id}" class="form-select"><option value="">Pick a carton type…</option>${live.map(t =>
+    `<option value="${t.id}" ${String(t.id) === String(selectedId || '') ? 'selected' : ''}>${esc(cartonTypeText(t))}${withBalance ? ` — ${cartonNum(t.current_balance)} on hand` : ''}</option>`).join('')}</select>`;
+}
+function cartonDatalist(id, values) {
+  return `<datalist id="${id}">${[...new Set(values.filter(Boolean).map(v => String(v).trim()))].sort((a, b) => a.localeCompare(b)).map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
+}
+async function cartonNeedTypes() {
+  if (cartonTypes.some(t => !t.hidden)) return true;
+  await alertDialog({ title: 'No carton types yet', message: canCartonTypes() ? 'Add a carton type first (+ Carton Type).' : 'Ask for a carton type to be added first.', kind: 'warn' });
+  return false;
+}
+async function openCartonStockIn(typeId) {
+  if (!(await cartonNeedTypes())) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>&#128229; Carton Stock In</h2>
+    <div class="form-group"><label class="form-label">Carton Type *</label>${cartonTypeSelectHtml('ci-type', typeId, true)}</div>
+    <div class="form-group"><label class="form-label">Quantity (cartons) *</label><input type="number" id="ci-qty" min="1" step="1" inputmode="numeric"></div>
+    <div class="form-group"><label class="form-label">Supplier *</label><input type="text" id="ci-supplier" list="ci-supplier-list" autocomplete="off">${cartonDatalist('ci-supplier-list', cartonTx.map(t => t.supplier))}</div>
+    <div class="form-group"><label class="form-label">Challan No.</label><input type="text" id="ci-challan"></div>
+    ${stockEntryDateHtml('ci-date')}
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="ci-notes"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#166534;border-color:#166534;" onclick="saveCartonStockIn()">Save Stock In</button>
+    </div>
+  </div>`);
+  setTimeout(() => document.getElementById(typeId ? 'ci-qty' : 'ci-type')?.focus(), 50);
+}
+async function saveCartonStockIn() {
+  const val = k => (document.getElementById(k)?.value || '').trim();
+  const qty = Number(val('ci-qty'));
+  if (!val('ci-type')) { await alertDialog({ title: 'Pick the carton type', kind: 'warn' }); return; }
+  if (!Number.isInteger(qty) || qty <= 0) { await alertDialog({ title: 'Enter a whole number of cartons above zero', kind: 'warn' }); return; }
+  if (!val('ci-supplier')) { await alertDialog({ title: 'Enter the supplier', kind: 'warn' }); return; }
+  const entryDate = await readStockEntryDate('ci-date');
+  if (entryDate === false) return;
+  showSaving(true);
+  try {
+    await api('POST', '/api/cartons/stock-in', { type_id: +val('ci-type'), qty, supplier: val('ci-supplier'), challan_no: val('ci-challan'), entry_date: entryDate, notes: val('ci-notes') });
+    closeModal();
+    notify(`+${cartonNum(qty)} cartons in`);
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Could not save', message: e.message, kind: 'warn' }); }
+  showSaving(false);
+}
+async function openCartonIssue(typeId) {
+  if (!(await cartonNeedTypes())) return;
+  cartonIssueJobId = null;
+  const people = (cartonPeople || []).concat(cartonTx.map(t => t.issued_to));
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>&#128228; Issue Carton Shippers</h2>
+    <div class="form-group"><label class="form-label">Carton Type *</label>${cartonTypeSelectHtml('co-type', typeId, true)}</div>
+    <div class="form-group"><label class="form-label">Quantity (cartons) *</label><input type="number" id="co-qty" min="1" step="1" inputmode="numeric"></div>
+    <div class="form-group"><label class="form-label">Issued To *</label><input type="text" id="co-to" list="co-to-list" autocomplete="off" placeholder="Who took them">${cartonDatalist('co-to-list', people)}</div>
+    <div class="form-group"><label class="form-label">For *</label>
+      <div class="carton-reason" id="co-reason">
+        <label><input type="radio" name="co-reason" value="e-job" onchange="cartonReasonChanged()" checked> E-Job</label>
+        <label><input type="radio" name="co-reason" value="manual-job" onchange="cartonReasonChanged()"> Manual Job</label>
+        <label><input type="radio" name="co-reason" value="other" onchange="cartonReasonChanged()"> Other</label>
+      </div>
+      <div id="co-reason-field" style="margin-top:8px;"></div>
+    </div>
+    ${stockEntryDateHtml('co-date')}
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="co-notes"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="saveCartonIssue()">Issue</button>
+    </div>
+  </div>`);
+  cartonReasonChanged();
+  setTimeout(() => document.getElementById(typeId ? 'co-qty' : 'co-type')?.focus(), 50);
+}
+function cartonReasonValue() { return document.querySelector('input[name="co-reason"]:checked')?.value || 'e-job'; }
+function cartonReasonChanged() {
+  const el = document.getElementById('co-reason-field');
+  if (!el) return;
+  const r = cartonReasonValue();
+  cartonIssueJobId = null;
+  if (r === 'e-job') {
+    el.innerHTML = `<input type="text" id="co-job-search" autocomplete="off" placeholder="&#128269; Search job no., name or company…" oninput="cartonJobSearch(this.value)" onfocus="cartonJobSearch(this.value)">
+      <div id="co-job-picked"></div><div id="co-job-list" class="carton-job-list"></div>`;
+  } else if (r === 'manual-job') {
+    el.innerHTML = `<input type="text" id="co-manual" placeholder="Manual job card no. / name">`;
+  } else {
+    el.innerHTML = `<input type="text" id="co-other" placeholder="What are they for?">`;
+  }
+}
+function cartonJobLabel(j) { return `E-${j.id}${j.jobcode ? ' · ' + j.jobcode : ''} — ${j.name || ''}${j.client ? ' (' + j.client + ')' : ''}`; }
+function cartonJobSearch(q) {
+  const list = document.getElementById('co-job-list');
+  if (!list) return;
+  const s = String(q || '').trim();
+  if (!s) { list.innerHTML = ''; return; }
+  const hits = (jobs || []).filter(j => !j.deleted_at && searchMatch(['e-' + j.id, j.id, j.jobcode, j.name, j.client, j.ref].filter(v => v != null).join(' '), s))
+    .sort((a, b) => b.id - a.id).slice(0, 8);
+  list.innerHTML = hits.length
+    ? hits.map(j => `<button type="button" class="carton-job-hit" onclick="cartonPickJob(${j.id})">${esc(cartonJobLabel(j))}</button>`).join('')
+    : `<div style="font-size:12px;color:var(--text2);padding:6px 2px;">No job matches.</div>`;
+}
+function cartonPickJob(id) {
+  const j = (jobs || []).find(x => x.id === id);
+  if (!j) return;
+  cartonIssueJobId = id;
+  const search = document.getElementById('co-job-search');
+  if (search) search.value = '';
+  document.getElementById('co-job-list').innerHTML = '';
+  document.getElementById('co-job-picked').innerHTML = `<div class="carton-job-chip">&#10003; ${esc(cartonJobLabel(j))} <button type="button" onclick="cartonIssueJobId = null; this.parentElement.remove();" title="Pick another job">&times;</button></div>`;
+}
+async function saveCartonIssue() {
+  const val = k => (document.getElementById(k)?.value || '').trim();
+  const qty = Number(val('co-qty'));
+  const type = cartonTypeById(val('co-type'));
+  if (!type) { await alertDialog({ title: 'Pick the carton type', kind: 'warn' }); return; }
+  if (!Number.isInteger(qty) || qty <= 0) { await alertDialog({ title: 'Enter a whole number of cartons above zero', kind: 'warn' }); return; }
+  if (qty > (Number(type.current_balance) || 0)) {
+    await alertDialog({ title: 'Not enough on hand', message: `Only ${cartonNum(type.current_balance)} × ${cartonTypeText(type)} on hand.`, kind: 'warn' });
+    return;
+  }
+  if (!val('co-to')) { await alertDialog({ title: 'Enter who the cartons are issued to', kind: 'warn' }); return; }
+  const reason = cartonReasonValue();
+  const body = { type_id: type.id, qty, issued_to: val('co-to'), reason, notes: val('co-notes') };
+  if (reason === 'e-job') {
+    if (!cartonIssueJobId) { await alertDialog({ title: 'Pick the job', message: 'Search the job by number or name and click it.', kind: 'warn' }); return; }
+    body.job_id = cartonIssueJobId;
+  } else if (reason === 'manual-job') {
+    if (!val('co-manual')) { await alertDialog({ title: 'Enter the manual job number / name', kind: 'warn' }); return; }
+    body.manual_job = val('co-manual');
+  } else {
+    if (!val('co-other')) { await alertDialog({ title: 'Write what the cartons are for', kind: 'warn' }); return; }
+    body.other_reason = val('co-other');
+  }
+  const entryDate = await readStockEntryDate('co-date');
+  if (entryDate === false) return;
+  body.entry_date = entryDate;
+  showSaving(true);
+  try {
+    await api('POST', '/api/cartons/issue', body);
+    closeModal();
+    notify(`${cartonNum(qty)} cartons issued`);
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Could not issue', message: e.message, kind: 'warn' }); }
+  showSaving(false);
+}
+
+// ---- Print / Excel of the log (what the filters show) ----
+function cartonLogScopeText() {
+  const f = cartonLogF;
+  const ty = f.type ? cartonTypeById(f.type) : null;
+  return [
+    ty ? cartonTypeText(ty) : 'All carton types',
+    { in: 'In only', out: 'Out only', correction: 'Reversals' }[f.dir] || 'In and Out',
+    { 'e-job': 'E-Job', 'manual-job': 'Manual Job', other: 'Other' }[f.reason] || '',
+    f.from || f.to ? `${f.from ? fmtDMY(f.from) : '…'} to ${f.to ? fmtDMY(f.to) : '…'}` : '',
+    f.q.trim() ? `Search: ${f.q.trim()}` : '',
+  ].filter(Boolean).join(' · ');
+}
+function cartonLogExportRow(t) {
+  const ty = cartonTypeById(t.type_id);
+  return [
+    fmtDMYT(t.created_at), ty ? ty.name : '', ty ? ty.size || '' : '', ty ? ty.ply || '' : '',
+    t.change > 0 ? t.change : '', t.change < 0 ? -t.change : '',
+    t.kind === 'in' ? (t.supplier || '') : t.kind === 'out' ? (t.issued_to || '') : '',
+    cartonForText(t), t.challan_no || '', [t.kind === 'correction' ? '' : t.notes, t.reversed_by ? 'REVERSED' : ''].filter(Boolean).join(' · '), txByName(t),
+  ];
+}
+const CARTON_LOG_HEADER = ['When', 'Carton Type', 'Size', 'Ply', 'In', 'Out', 'Supplier / Issued To', 'For', 'Challan', 'Notes', 'Entered By'];
+async function exportCartonLog() {
+  const rows = cartonLogRows();
+  if (!rows.length) { notify('Nothing to export.'); return; }
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const aoa = reportExcelAoa(CARTON_LOG_HEADER);
+  rows.forEach(t => aoa.push(cartonLogExportRow(t)));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, CARTON_LOG_HEADER, { title: 'CARTON SHIPPERS IN / OUT', scope: cartonLogScopeText(), dateText: `Generated: ${fmtDMYT(new Date())}` });
+  applyReportExcelCols(ws, CARTON_LOG_HEADER, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Carton Shippers');
+  XLSX.writeFile(wb, `supreme-art-carton-shippers-${localDateISO()}.xlsx`);
+  notify('Exported!');
+}
+function printCartonLog() {
+  const rows = cartonLogRows();
+  if (!rows.length) { notify('Nothing to print.'); return; }
+  const td = 'style="border:1px solid #000;padding:3px 5px;"';
+  const tdR = 'style="border:1px solid #000;padding:3px 5px;text-align:right;"';
+  const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'CARTON SHIPPERS IN / OUT', scope: cartonLogScopeText(), dateText: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      <table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
+        <tr style="background:#f7f1ea;">${CARTON_LOG_HEADER.map((h, i) => `<th ${i === 4 || i === 5 ? tdR : td}>${esc(h)}</th>`).join('')}</tr>
+        ${rows.map(t => `<tr${t.reversed_by ? ' style="color:#777;"' : ''}>${cartonLogExportRow(t).map((v, i) => `<td ${i === 4 || i === 5 ? tdR : td}>${esc(typeof v === 'number' ? v.toLocaleString() : v)}</td>`).join('')}</tr>`).join('')}
+      </table>
+    </div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
 }
 
 // ── Filtering ─────────────────────────────────────────────────
@@ -35528,7 +36074,7 @@ function renderUsersTab() {
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(visibleRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
-                ${(isSuperAdmin() ? [['super_admin','Super Admin']] : []).concat([['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['operator','Operator'],['client','Client']]).map(([r,lbl]) => `
+                ${(isSuperAdmin() ? [['super_admin','Super Admin']] : []).concat([['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['procurement','Procurement'],['operator','Operator'],['client','Client']]).map(([r,lbl]) => `
                   <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
                     <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
                            ${isMe && (r==='admin' || r==='super_admin') ? 'disabled' : ''}
@@ -35649,6 +36195,7 @@ const ACC_REG_TABS = [
   ['dashboard', 'Dashboard'],
   ['products', 'Products'],
   ['inventory', 'Inventory'],
+  ['carton-shippers', 'Carton Shippers'],
   ['reports', 'Reports'],
   ['station', 'Station'],
   ['users', 'Users'],
@@ -35759,6 +36306,15 @@ const ACC_USERS_TAB_ROWS = [
 // Client View tab: one View/Hidden row for the whole tab. The gate itself
 // (client_view_preview) was already live on both sides — this only puts it
 // in the register so it can be changed without editing code.
+// Carton Shippers tab (owner, 2026-10-14) - hidden for every role until
+// turned on here, except Procurement.
+const ACC_CARTON_TAB_ROWS = [
+  { key: 'carton_tab_access',   type: 'tab' },
+  { key: 'carton_btn_types',    type: 'button' },
+  { key: 'carton_btn_stock_in', type: 'button' },
+  { key: 'carton_btn_issue',    type: 'button' },
+  { key: 'carton_btn_reverse',  type: 'button-30day' },
+];
 const ACC_DASHBOARD_TAB_ROWS = [
   { key: 'dashboard_tab_access', type: 'tab' },
 ];
@@ -35769,7 +36325,7 @@ const ACC_CLIENT_VIEW_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
+const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, 'carton-shippers': ACC_CARTON_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
@@ -35824,7 +36380,7 @@ async function cycleRolePermission(key, role) {
 // Column order for every row — Super Admin and Client stay locked (Super
 // Admin always has full access; Client is never part of this system at
 // all — see roleHasPermission's hard client block server-side).
-const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'client'];
+const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'client'];
 // Rows where every role except Super Admin is force-locked to HIDDEN,
 // no matter what's saved in the DB — currently just the Access Register
 // row itself, so no role can ever grant itself (or another role) a way
@@ -35871,6 +36427,7 @@ function renderAccessRegisterHtml(matrixData) {
               <th>Store<br>Manager</th>
               <th>Finance</th>
               <th>Operator</th>
+              <th>Procure-<br>ment</th>
               <th>Client</th>
             </tr>
           </thead>
@@ -35898,7 +36455,7 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
       <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
-        ${(isSuperAdmin() ? [['super_admin','Super Admin',false]] : []).concat([['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]]).map(([r,lbl,def]) => `
+        ${(isSuperAdmin() ? [['super_admin','Super Admin',false]] : []).concat([['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['procurement','Procurement (Carton Shippers only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]]).map(([r,lbl,def]) => `
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
             <input type="checkbox" value="${r}" ${def?'checked':''} onchange="onInviteRolesChanged()"> ${lbl}
           </label>`).join('')}
@@ -36855,6 +37412,7 @@ async function init() {
     // store managers onto the default Jobs view.
     if (isOperator())          setMode('station');
     else if (isStoreManager()) setMode('inventory');
+    else if (!tabAllowed('jobs')) setMode(firstAllowedTab());   // e.g. Procurement -> Carton Shippers
     startSmartPolling();
   } finally {
     hideLoadingScreen();
