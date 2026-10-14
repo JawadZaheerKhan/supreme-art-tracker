@@ -122,6 +122,21 @@
     .topbar > div:first-child { flex: 1 1 100%; order: 0; }
     .mode-switch { flex: 1 1 100%; order: 1; margin-left: 0; }
     .topbar-right { flex: 1 1 100%; order: 2; margin-left: 0; }
+    /* Tablet / phone (owner, 2026-10-14): the tabs ran off the right of the
+       maroon bar (white text on the page, sideways page scroll). One row
+       you swipe sideways instead; the open tab scrolls into view (see
+       syncFlowingTabIndicator). */
+    #mode-switch { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; padding: 4px; }
+    #mode-switch::-webkit-scrollbar { display: none; }
+    #mode-switch > .flowing-tab-indicator { top: 4px; bottom: 4px; }
+  }
+  /* Jobs status tabs (All, New Jobs, CTP ...) - same swipe row on a phone
+     or tablet instead of running off the screen. */
+  @media (max-width: 900px) {
+    #jobs-mode .toolbar > #tabs-wrap { flex: 1 1 100%; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; padding: 3px 2px; }
+    #tabs-wrap::-webkit-scrollbar { display: none; }
+    #tabs-wrap > .tab { flex: 0 0 auto; white-space: nowrap; }
+    #jobs-mode .toolbar > #tabs-wrap > .flowing-tab-indicator { top: 3px; bottom: 3px; }
   }
   @media (max-width: 640px) {
     .topbar-brand-main { font-size: 13px; }
@@ -1045,6 +1060,37 @@
 .carton-job-none { font-size: 12px; color: var(--text2); padding: 6px 4px; }
 .bulk-table td.cbo-for { min-width: 190px; }
 .bulk-table.carton-bulk .col-qty { width: 90px; }
+/* Carton Shippers on a phone (owner, 2026-10-14): sub-tabs 2 x 2, the
+   action buttons share one row, each carton type is a small card (name and
+   on hand on top, size / ply / reorder under it, buttons below), and each
+   bulk-form line is a stacked card instead of a too-wide table row. */
+@media (max-width: 640px) {
+  .carton-toolbar .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
+  .carton-toolbar .tabs .tab { white-space: nowrap; text-align: center; justify-content: center; }
+  .carton-top-actions { margin-left: 0 !important; width: 100%; flex-wrap: nowrap !important; }
+  .carton-top-actions .btn { flex: 1 1 0; min-width: 0; padding-left: 6px; padding-right: 6px; font-size: 12px; white-space: normal; line-height: 1.2; }
+  .carton-stock-table thead { display: none; }
+  .carton-stock-table, .carton-stock-table tbody { display: block; width: 100%; }
+  .carton-stock-table tr { display: flex; flex-wrap: wrap; align-items: baseline; padding: 10px 12px; border-top: 1px solid var(--border); }
+  .carton-stock-table tbody tr:first-child { border-top: none; }
+  .carton-stock-table td { display: block; border: none; padding: 0; background: transparent !important; }
+  .carton-stock-table td.cs-name { order: 1; flex: 0 0 calc(100% - 120px); font-size: 15px; }
+  .carton-stock-table td.cs-onhand { order: 2; flex: 0 0 120px; font-size: 18px; text-align: right; }
+  .carton-stock-table td.cs-onhand::after { content: ' on hand'; font-size: 11px; font-weight: 400; color: var(--text2); }
+  .carton-stock-table td.cs-size, .carton-stock-table td.cs-ply, .carton-stock-table td.cs-reorder { order: 3; flex: 0 0 auto; font-size: 12px; color: var(--text2); text-align: left; margin-right: 10px; margin-top: 2px; }
+  .carton-stock-table td.cs-reorder::before { content: 'Reorder at '; }
+  .carton-stock-table td.carton-actions { order: 4; flex: 1 1 100%; display: flex; gap: 6px; margin-top: 8px; text-align: left; }
+  .carton-stock-table td.carton-actions .btn { flex: 1 1 0; margin-left: 0; }
+  .carton-stock-table tr.carton-low { background: #fee2e2; }
+  .bulk-table.carton-bulk thead { display: none; }
+  .bulk-table.carton-bulk, .bulk-table.carton-bulk tbody { display: block; width: 100%; }
+  .bulk-table.carton-bulk tr { display: grid; grid-template-columns: 1fr 1fr 32px; gap: 6px; padding: 8px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); }
+  .bulk-table.carton-bulk td { display: block; padding: 0; width: auto !important; min-width: 0 !important; }
+  .bulk-table.carton-bulk td:first-child { grid-column: 1 / 3; }
+  .bulk-table.carton-bulk td.col-del { grid-column: 3; grid-row: 1; align-self: center; }
+  .bulk-table.carton-bulk td:not(:first-child):not(.col-del) { grid-column: 1 / -1; }
+  .bulk-table.carton-bulk .col-qty input { text-align: left; }
+}
   .stat {
     background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 14px 16px;
@@ -6355,6 +6401,13 @@ function syncFlowingTabIndicator(containerOrId) {
   box.style.setProperty('--flow-x', `${x}px`);
   box.style.setProperty('--flow-w', `${w}px`);
   box.dataset.flowX = String(x);
+  // On a phone / tablet the tabs are a sideways-scrolling row: bring the
+  // open tab into view (centred) so it is never hidden off the edge.
+  if (box.scrollWidth > box.clientWidth + 1) {
+    const target = Math.max(0, Math.round(x - (box.clientWidth - w) / 2));
+    // A direct jump: a smooth scroll gets cut short by the tab's own grow animation.
+    if (Math.abs(box.scrollLeft - target) > 4) box.scrollLeft = target;
+  }
   if (moved) {
     box.classList.remove('is-flowing');
     void box.offsetWidth;
@@ -6652,7 +6705,7 @@ function renderCartons() {
         <button class="tab ${cartonView === 'out' ? 'active' : ''}" onclick="setCartonView('out')">&#128228; Stock Out</button>
         <button class="tab ${cartonView === 'summary' ? 'active' : ''}" onclick="setCartonView('summary')">&#128202; Summary</button>
       </div>
-      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+      <div class="carton-top-actions" style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
         ${canCartonTypes() ? `<button class="btn" onclick="openCartonTypeModal()">+ Carton Type</button>` : ''}
         ${canCartonStockIn() ? `<button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="openCartonBulkIn()">&#128230; Stock In (Bulk)</button>` : ''}
         ${canCartonIssue() ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonBulkOut()">&#128228; Stock Out (Bulk)</button>` : ''}
@@ -6693,7 +6746,7 @@ function renderCartonStockList() {
   if (!rows.length) { el.innerHTML = `<div class="empty">No carton types match.</div>`; return; }
   el.innerHTML = `
     <div class="carton-tablewrap">
-      <table class="carton-table">
+      <table class="carton-table carton-stock-table">
         <thead><tr>
           <th>Carton Type</th><th>Size (L × W × H)</th><th>Ply</th>
           <th class="num">On Hand</th><th class="num">Reorder At</th><th></th>
@@ -6701,11 +6754,11 @@ function renderCartonStockList() {
         <tbody>${rows.map(t => {
           const lowRow = !t.hidden && cartonIsLow(t);
           return `<tr class="${lowRow ? 'carton-low' : ''}${t.hidden ? ' carton-hidden' : ''}">
-            <td><b>${esc(t.name)}</b>${t.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}${lowRow ? ' <span class="carton-tag carton-tag-low">LOW</span>' : ''}</td>
-            <td style="white-space:nowrap;">${esc(t.size || '—')}</td>
-            <td style="white-space:nowrap;">${esc(t.ply || '—')}</td>
-            <td class="num"><b>${cartonNum(t.current_balance)}</b></td>
-            <td class="num">${t.reorder_level != null ? cartonNum(t.reorder_level) : '—'}</td>
+            <td class="cs-name"><b>${esc(t.name)}</b>${t.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}${lowRow ? ' <span class="carton-tag carton-tag-low">LOW</span>' : ''}</td>
+            <td class="cs-size" style="white-space:nowrap;">${esc(t.size || '—')}</td>
+            <td class="cs-ply" style="white-space:nowrap;">${esc(t.ply || '—')}</td>
+            <td class="num cs-onhand"><b>${cartonNum(t.current_balance)}</b></td>
+            <td class="num cs-reorder">${t.reorder_level != null ? cartonNum(t.reorder_level) : '—'}</td>
             <td class="carton-actions">
               ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
               ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
@@ -6963,7 +7016,7 @@ async function exportCartonSummary() {
   const aoa = reportExcelAoa(header);
   body.forEach(r => aoa.push(r));
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  applyReportExcelHeading(ws, header, { title: 'CARTON SHIPPERS STOCK SUMMARY', scope: cartonSummaryScope(), dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}` });
+  applyReportExcelHeading(ws, header, { title: 'CARTON SHIPPERS STOCK SUMMARY REPORT', scope: cartonSummaryScope(), dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}` });
   applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Carton Summary');
@@ -6980,7 +7033,12 @@ function printCartonSummary() {
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area tbody td { white-space:nowrap; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
-      <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'CARTON SHIPPERS STOCK SUMMARY', scope: cartonSummaryScope(), dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}` })}</div>
+      <div style="margin-bottom:6px;">${reportPrintHeading({
+        title: 'CARTON SHIPPERS STOCK SUMMARY REPORT',
+        scope: `${cartonSummaryScope()} · ${rows.length} type${rows.length === 1 ? '' : 's'} · units: cartons`,
+        dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}`,
+        note: `${asOfPast ? `Stock shown as on ${fmtDMY(cartonSumF.to)} · ` : ''}Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:8pt;line-height:1.15;border:1px solid #000;border-collapse:collapse;">
         <thead style="display:table-header-group;"><tr>
           <th rowspan="2" ${th}>Carton Type</th><th rowspan="2" ${th}>Size</th><th rowspan="2" ${th}>Ply</th><th rowspan="2" ${th}>Opening</th>
@@ -7245,7 +7303,7 @@ function cartonBulkInRowHtml(i) {
   return `
     <tr data-row="${i}">
       <td>${cartonTypeSelectHtml('cbi-type-' + i, '', true)}</td>
-      <td class="col-qty"><input type="number" id="cbi-qty-${i}" min="1" step="1" inputmode="numeric" placeholder="0"></td>
+      <td class="col-qty"><input type="number" id="cbi-qty-${i}" min="1" step="1" inputmode="numeric" placeholder="Qty"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="cartonBulkRemoveRow('cbi', ${i})" title="Remove row">×</button></td>
     </tr>`;
 }
@@ -7253,7 +7311,7 @@ function cartonBulkOutRowHtml(i) {
   return `
     <tr data-row="${i}">
       <td>${cartonTypeSelectHtml('cbo-type-' + i, '', true)}</td>
-      <td class="col-qty"><input type="number" id="cbo-qty-${i}" min="1" step="1" inputmode="numeric" placeholder="0"></td>
+      <td class="col-qty"><input type="number" id="cbo-qty-${i}" min="1" step="1" inputmode="numeric" placeholder="Qty"></td>
       <td><input type="text" id="cbo-to-${i}" list="cbo-people" autocomplete="off" placeholder="Who took them"></td>
       <td><select id="cbo-reason-${i}" class="form-select" onchange="cartonBulkOutReason(${i})"><option value="e-job">E-Job</option><option value="manual-job">Manual Job</option><option value="other">Other</option></select></td>
       <td id="cbo-for-${i}" class="cbo-for">${cartonJobComboHtml('cbo' + i)}</td>
@@ -7415,9 +7473,13 @@ function cartonLogScopeText(kind) {
   return [
     ty ? cartonTypeText(ty) : 'All carton types',
     { 'e-job': 'E-Job', 'manual-job': 'Manual Job', other: 'Other' }[f.reason] || '',
-    f.from || f.to ? `${f.from ? fmtDMY(f.from) : '…'} to ${f.to ? fmtDMY(f.to) : '…'}` : '',
     f.q.trim() ? `Search: ${f.q.trim()}` : '',
   ].filter(Boolean).join(' · ');
+}
+// Same heading layout as the other reports: "Date: from to to" on the right.
+function cartonLogDateText(kind) {
+  const f = cartonLogF[kind];
+  return `Date: ${f.from ? fmtDMY(f.from) : '(any)'} to ${f.to ? fmtDMY(f.to) : '(any)'}`;
 }
 function cartonLogHeader(kind) {
   return kind === 'in'
@@ -7433,7 +7495,7 @@ function cartonLogExportRow(t, kind) {
     ? [...head, corr ? `Reversal of entry #${t.reverses_tx_id}` : t.supplier || '', t.challan_no || '', notes, txByName(t)]
     : [...head, corr ? '' : t.issued_to || '', cartonForText(t), t.challan_no || '', notes, txByName(t)];
 }
-const cartonLogTitle = kind => kind === 'in' ? 'CARTON SHIPPERS STOCK IN' : 'CARTON SHIPPERS STOCK OUT';
+const cartonLogTitle = kind => kind === 'in' ? 'CARTON SHIPPERS STOCK IN REPORT' : 'CARTON SHIPPERS STOCK OUT REPORT';
 async function exportCartonLog(kind) {
   const rows = cartonLogRows(kind);
   if (!rows.length) { notify('Nothing to export.'); return; }
@@ -7442,7 +7504,7 @@ async function exportCartonLog(kind) {
   const aoa = reportExcelAoa(header);
   rows.forEach(t => aoa.push(cartonLogExportRow(t, kind)));
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  applyReportExcelHeading(ws, header, { title: cartonLogTitle(kind), scope: cartonLogScopeText(kind), dateText: `Generated: ${fmtDMYT(new Date())}` });
+  applyReportExcelHeading(ws, header, { title: cartonLogTitle(kind), scope: cartonLogScopeText(kind), dateText: cartonLogDateText(kind) });
   applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, kind === 'in' ? 'Carton Stock In' : 'Carton Stock Out');
@@ -7459,7 +7521,12 @@ function printCartonLog(kind) {
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
-      <div style="margin-bottom:8px;">${reportPrintHeading({ title: cartonLogTitle(kind), scope: cartonLogScopeText(kind), dateText: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({
+        title: cartonLogTitle(kind),
+        scope: `${cartonLogScopeText(kind)} · ${rows.length.toLocaleString()} entr${rows.length === 1 ? 'y' : 'ies'} · ${total.toLocaleString()} cartons`,
+        dateText: cartonLogDateText(kind),
+        note: `Generated: ${fmtDMYT(new Date())}`,
+      })}</div>
       <table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">${header.map((h, i) => `<th ${i === 4 ? tdR : td}>${esc(h)}</th>`).join('')}</tr>
         ${rows.map(t => `<tr${t.reversed_by ? ' style="color:#777;"' : ''}>${cartonLogExportRow(t, kind).map((v, i) => `<td ${i === 4 ? tdR : td}>${esc(typeof v === 'number' ? v.toLocaleString() : v)}</td>`).join('')}</tr>`).join('')}
