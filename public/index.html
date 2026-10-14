@@ -6588,10 +6588,12 @@ function refreshCurrent() {
 // follows its own Access Register row (Carton Shippers tab).
 let cartonTypes = [];
 let cartonTx = [];
-let cartonView = 'stock';          // 'stock' | 'log'
+let cartonView = 'stock';          // 'stock' | 'in' | 'out' | 'summary'
 let cartonSearch = '';
 let cartonShowHidden = false;
-let cartonLogF = { type: '', dir: '', reason: '', from: '', to: '', q: '' };
+const cartonLogBlank = () => ({ type: '', reason: '', from: '', to: '', q: '' });
+let cartonLogF = { in: cartonLogBlank(), out: cartonLogBlank() };   // Stock In / Stock Out tabs, each its own filters
+let cartonSumF = { type: '', q: '', period: 'month', from: '', to: '', granularity: 'monthly' };
 let cartonPeople = null;           // operator names, for the "Issued to" suggestions
 let cartonLoaded = false;
 
@@ -6646,7 +6648,9 @@ function renderCartons() {
     <div class="toolbar carton-toolbar">
       <div class="tabs">
         <button class="tab ${cartonView === 'stock' ? 'active' : ''}" onclick="setCartonView('stock')">&#128230; Stock</button>
-        <button class="tab ${cartonView === 'log' ? 'active' : ''}" onclick="setCartonView('log')">&#128203; In / Out Log</button>
+        <button class="tab ${cartonView === 'in' ? 'active' : ''}" onclick="setCartonView('in')">&#128229; Stock In</button>
+        <button class="tab ${cartonView === 'out' ? 'active' : ''}" onclick="setCartonView('out')">&#128228; Stock Out</button>
+        <button class="tab ${cartonView === 'summary' ? 'active' : ''}" onclick="setCartonView('summary')">&#128202; Summary</button>
       </div>
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
         ${canCartonTypes() ? `<button class="btn" onclick="openCartonTypeModal()">+ Carton Type</button>` : ''}
@@ -6654,10 +6658,12 @@ function renderCartons() {
         ${canCartonIssue() ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonBulkOut()">&#128228; Stock Out (Bulk)</button>` : ''}
       </div>
     </div>
-    ${cartonView === 'stock' ? cartonStockViewHtml() : cartonLogViewHtml()}`;
-  if (cartonView === 'stock') renderCartonStockList(); else renderCartonLogList();
+    ${cartonView === 'stock' ? cartonStockViewHtml() : cartonView === 'summary' ? cartonSummaryViewHtml() : cartonLogViewHtml(cartonView)}`;
+  if (cartonView === 'stock') renderCartonStockList();
+  else if (cartonView === 'summary') renderCartonSummary();
+  else renderCartonLogList(cartonView);
 }
-function setCartonView(v) { cartonView = v === 'log' ? 'log' : 'stock'; renderCartons(); }
+function setCartonView(v) { cartonView = ['in', 'out', 'summary'].includes(v) ? v : 'stock'; renderCartons(); }
 
 // ---- Stock view ----
 function cartonStockViewHtml() {
@@ -6711,38 +6717,48 @@ function renderCartonStockList() {
     </div>`;
 }
 
-// ---- In / Out log ----
-function cartonLogViewHtml() {
-  const f = cartonLogF;
+// ---- Stock In / Stock Out tabs ----
+// Each tab lists its own entries; a reversal sits in the tab of the entry it
+// undid (shown as a minus quantity), so each tab adds up on its own.
+function cartonBaseTx(t) {
+  return t.kind === 'correction' ? (cartonTx.find(x => x.id === t.reverses_tx_id) || null) : t;
+}
+function cartonTxTab(t) {
+  const base = cartonBaseTx(t);
+  return base ? base.kind : (t.change > 0 ? 'out' : 'in');   // undoing an issue puts cartons back
+}
+// Quantity as the tab counts it: + for the entry, - for its reversal.
+function cartonTabQty(t, kind) { return kind === 'in' ? t.change : -t.change; }
+function cartonLogViewHtml(kind) {
+  const f = cartonLogF[kind];
   const typeOpts = cartonTypes.map(t => `<option value="${t.id}" ${String(t.id) === f.type ? 'selected' : ''}>${esc(cartonTypeText(t))}${t.hidden ? ' (hidden)' : ''}</option>`).join('');
-  const sel = (key, opts) => `<select class="filter" onchange="cartonLogF.${key} = this.value; renderCartonLogList();">${opts}</select>`;
-  const o = (v, l, cur) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
+  const o = (v, l) => `<option value="${v}" ${f.reason === v ? 'selected' : ''}>${l}</option>`;
   return `
     <div class="toolbar" style="flex-wrap:wrap;">
       <div class="search-wrap">
-        <input type="text" id="carton-log-search" placeholder="Search supplier, issued to, challan, job..." value="${esc(f.q)}" oninput="cartonLogF.q = this.value; renderCartonLogList();">
+        <input type="text" id="carton-log-search" placeholder="${kind === 'in' ? 'Search supplier, challan, notes...' : 'Search issued to, job, challan, notes...'}" value="${esc(f.q)}" oninput="setCartonLogF('${kind}', 'q', this.value)">
         <span class="search-icon">&#128269;</span>
       </div>
-      <select class="filter" onchange="cartonLogF.type = this.value; renderCartonLogList();"><option value="">All carton types</option>${typeOpts}</select>
-      ${sel('dir', o('', 'In and Out', f.dir) + o('in', 'In only', f.dir) + o('out', 'Out only', f.dir) + o('correction', 'Reversals', f.dir))}
-      ${sel('reason', o('', 'Every reason', f.reason) + o('e-job', 'E-Job', f.reason) + o('manual-job', 'Manual Job', f.reason) + o('other', 'Other', f.reason))}
-      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">From <input type="date" value="${esc(f.from)}" onchange="cartonLogF.from = this.value; renderCartonLogList();"></label>
-      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">To <input type="date" value="${esc(f.to)}" onchange="cartonLogF.to = this.value; renderCartonLogList();"></label>
-      <button class="btn btn-sm" onclick="clearCartonLogFilters()">Clear</button>
+      <select class="filter" onchange="setCartonLogF('${kind}', 'type', this.value)"><option value="">All carton types</option>${typeOpts}</select>
+      ${kind === 'out' ? `<select class="filter" onchange="setCartonLogF('out', 'reason', this.value)">${o('', 'Every reason') + o('e-job', 'E-Job') + o('manual-job', 'Manual Job') + o('other', 'Other')}</select>` : ''}
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">From <input type="date" value="${esc(f.from)}" onchange="setCartonLogF('${kind}', 'from', this.value)"></label>
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">To <input type="date" value="${esc(f.to)}" onchange="setCartonLogF('${kind}', 'to', this.value)"></label>
+      <button class="btn btn-sm" onclick="clearCartonLogFilters('${kind}')">Clear</button>
       <div style="margin-left:auto;display:flex;gap:6px;">
-        <button class="btn btn-sm" onclick="printCartonLog()">&#128424; Print</button>
-        <button class="btn btn-sm" onclick="exportCartonLog()">&#128202; Excel</button>
+        <button class="btn btn-sm" onclick="printCartonLog('${kind}')">&#128424; Print</button>
+        <button class="btn btn-sm" onclick="exportCartonLog('${kind}')">&#128202; Excel</button>
       </div>
     </div>
     <div id="carton-log-list"></div>`;
 }
-function clearCartonLogFilters() { cartonLogF = { type: '', dir: '', reason: '', from: '', to: '', q: '' }; renderCartons(); }
-function cartonLogRows() {
-  const f = cartonLogF;
+function setCartonLogF(kind, key, v) { cartonLogF[kind][key] = v; renderCartonLogList(kind); }
+function clearCartonLogFilters(kind) { cartonLogF[kind] = cartonLogBlank(); renderCartons(); }
+function cartonLogRows(kind) {
+  const f = cartonLogF[kind];
   return cartonTx.filter(t => {
+    if (cartonTxTab(t) !== kind) return false;
     if (f.type && String(t.type_id) !== f.type) return false;
-    if (f.dir && t.kind !== f.dir) return false;
-    if (f.reason && t.reason !== f.reason) return false;
+    if (f.reason && (cartonBaseTx(t) || {}).reason !== f.reason) return false;
     const day = localDateISO(new Date(t.created_at));
     if (f.from && day < f.from) return false;
     if (f.to && day > f.to) return false;
@@ -6754,41 +6770,245 @@ function cartonLogRows() {
     return true;
   }).sort((a, b) => (new Date(b.created_at) - new Date(a.created_at)) || (b.id - a.id));   // a backdated entry sits on its own day
 }
-function renderCartonLogList() {
+function renderCartonLogList(kind) {
   const el = document.getElementById('carton-log-list');
   if (!el) return;
   if (!cartonLoaded) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
-  const rows = cartonLogRows();
-  if (!rows.length) { el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;">No entries${cartonTx.length ? ' match these filters' : ' yet'}.</div>`; return; }
-  const tin = rows.filter(t => t.change > 0).reduce((a, t) => a + t.change, 0);
-  const tout = rows.filter(t => t.change < 0).reduce((a, t) => a - t.change, 0);
+  const rows = cartonLogRows(kind);
+  const isIn = kind === 'in';
+  if (!rows.length) { el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;">No ${isIn ? 'stock in' : 'stock out'} entries${cartonTx.length ? ' match these filters' : ' yet'}.</div>`; return; }
+  const total = rows.reduce((a, t) => a + cartonTabQty(t, kind), 0);
+  const color = isIn ? '#166534' : '#B91C1C';
   el.innerHTML = `
-    <div style="font-size:12px;color:var(--text2);margin:0 0 6px;">${rows.length.toLocaleString()} entr${rows.length === 1 ? 'y' : 'ies'} · In <b style="color:#166534;">${cartonNum(tin)}</b> · Out <b style="color:#B91C1C;">${cartonNum(tout)}</b></div>
+    <div style="font-size:12px;color:var(--text2);margin:0 0 6px;">${rows.length.toLocaleString()} entr${rows.length === 1 ? 'y' : 'ies'} · Total ${isIn ? 'In' : 'Out'} <b style="color:${color};">${cartonNum(total)}</b></div>
     <div class="carton-tablewrap">
       <table class="carton-table">
         <thead><tr>
-          <th>When</th><th>Carton Type</th><th class="num">In</th><th class="num">Out</th>
-          <th>Supplier / Issued To</th><th>For</th><th>Challan</th><th>Notes</th><th>Entered By</th><th></th>
+          <th>When</th><th>Carton Type</th><th class="num">Quantity</th>
+          ${isIn ? '<th>Supplier</th>' : '<th>Issued To</th><th>For</th>'}<th>Challan</th><th>Notes</th><th>Entered By</th><th></th>
         </tr></thead>
         <tbody>${rows.map(t => {
           const ty = cartonTypeById(t.type_id);
           const rev = !!t.reversed_by;
           const corr = t.kind === 'correction';
+          const q = cartonTabQty(t, kind);
           return `<tr class="${rev ? 'carton-reversed' : ''}${corr ? ' carton-correction' : ''}">
             <td style="white-space:nowrap;">${esc(fmtDMYT(t.created_at))}${lateEntryTagHtml(t)}</td>
             <td>${esc(cartonTypeText(ty))}</td>
-            <td class="num" style="color:#166534;font-weight:700;">${t.change > 0 ? cartonNum(t.change) : ''}</td>
-            <td class="num" style="color:#B91C1C;font-weight:700;">${t.change < 0 ? cartonNum(-t.change) : ''}</td>
-            <td>${esc(t.kind === 'in' ? (t.supplier || '—') : t.kind === 'out' ? (t.issued_to || '—') : '—')}</td>
-            <td>${esc(cartonForText(t) || '—')}</td>
+            <td class="num" style="color:${corr ? '#9a3412' : color};font-weight:700;">${q < 0 ? '&minus;' : ''}${cartonNum(Math.abs(q))}</td>
+            ${isIn
+              ? `<td>${esc(corr ? `Reversal of entry #${t.reverses_tx_id}` : t.supplier || '—')}</td>`
+              : `<td>${esc(corr ? '—' : t.issued_to || '—')}</td><td>${esc(cartonForText(t) || '—')}</td>`}
             <td>${esc(t.challan_no || '—')}</td>
-            <td style="max-width:220px;">${esc(t.kind === 'correction' ? '' : t.notes || '')}</td>
+            <td style="max-width:220px;">${esc(corr ? '' : t.notes || '')}</td>
             <td style="white-space:nowrap;"><span title="${esc(txByTitle(t))}">${esc(t.actor_name || String(t.user_email || '—').split('@')[0])}</span></td>
             <td style="white-space:nowrap;">${rev ? `<span class="carton-tag">REVERSED</span>` : canReverseCartonTx(t) ? `<button class="btn btn-sm btn-danger" onclick="reverseCartonTx(${t.id})">&#8634; Reverse</button>` : ''}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
     </div>`;
+}
+
+// ---- Summary (same layout as Reports → Stock Summary) ----
+// Per carton type: Opening at the start of the period, then IN / OUT / Bal
+// for each month or week, Total Out, the stock at the end, Reorder At and
+// Status (how many short of Reorder At, or + over it). IN / OUT count real
+// movements only; a reversed entry and its reversal still move the balance.
+function cartonSummaryViewHtml() {
+  const f = cartonSumF;
+  if (f.period !== 'custom') {
+    const r = periodToDateRange(f.period);
+    f.from = r.from || f.from || localDateISO();
+    f.to = r.to || f.to || localDateISO();
+  }
+  const typeOpts = cartonTypes.map(t => `<option value="${t.id}" ${String(t.id) === f.type ? 'selected' : ''}>${esc(cartonTypeText(t))}${t.hidden ? ' (hidden)' : ''}</option>`).join('');
+  const periodOpts = [['today', 'Today'], ['week', 'This Week'], ['month', 'This Month'], ['custom', 'Custom range…']]
+    .map(([v, l]) => `<option value="${v}"${f.period === v ? ' selected' : ''}>${l}</option>`).join('');
+  return `
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div>
+        <div class="dash-flbl">Carton Type</div>
+        <select class="filter" onchange="setCartonSum('type', this.value)"><option value="">All carton types</option>${typeOpts}</select>
+      </div>
+      <div style="min-width:220px;">
+        <div class="dash-flbl">Search</div>
+        <div class="search-wrap">
+          <input type="text" id="carton-sum-search" value="${esc(f.q)}" placeholder="Name, size, ply…" oninput="setCartonSum('q', this.value)">
+          <span class="search-icon">&#128269;</span>
+        </div>
+      </div>
+      <div>
+        <div class="dash-flbl">Period</div>
+        <select class="filter" onchange="setCartonSum('period', this.value)">${periodOpts}</select>
+      </div>
+      <div style="display:${f.period === 'custom' ? 'flex' : 'none'};gap:14px;">
+        <div><div class="dash-flbl">From</div><input class="filter" type="date" value="${esc(f.from)}" onchange="setCartonSum('from', this.value)"></div>
+        <div><div class="dash-flbl">To</div><input class="filter" type="date" value="${esc(f.to)}" onchange="setCartonSum('to', this.value)"></div>
+      </div>
+      <div>
+        <div class="dash-flbl">Group by</div>
+        <select class="filter" onchange="setCartonSum('granularity', this.value)">
+          <option value="monthly"${f.granularity === 'monthly' ? ' selected' : ''}>Monthly</option>
+          <option value="weekly"${f.granularity === 'weekly' ? ' selected' : ''}>Weekly</option>
+        </select>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="exportCartonSummary()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="printCartonSummary()">&#128424; Print Summary</button>
+      </div>
+    </div>
+    <div id="carton-sum-content" style="font-size:12px;overflow-x:auto;"></div>`;
+}
+function setCartonSum(key, v) {
+  cartonSumF[key] = v;
+  if (key === 'q') { renderCartonSummary(); return; }
+  if (key === 'period' || key === 'from' || key === 'to') {
+    // A picked From / To turns the period into a custom range; re-draw so
+    // the From / To boxes show or hide.
+    if (key !== 'period') cartonSumF.period = 'custom';
+    renderCartons();
+    return;
+  }
+  renderCartonSummary();
+}
+function cartonSummaryStockLabel(asOfPast) { return asOfPast ? `Stock on ${fmtDMY(cartonSumF.to)}` : 'Stock Now'; }
+function computeCartonSummary() {
+  const { from, to, granularity, type, q } = cartonSumF;
+  const buckets = buildSummaryBuckets(from, to, granularity);
+  const fromD = new Date(from + 'T00:00:00');
+  const endD = new Date(to + 'T00:00:00'); endD.setDate(endD.getDate() + 1);
+  const reversedIds = new Set(cartonTx.filter(t => t.reverses_tx_id).map(t => t.reverses_tx_id));
+  const isMove = t => t.kind !== 'correction' && !reversedIds.has(t.id);
+  const moved = new Set(cartonTx.map(t => t.type_id));
+  const types = cartonTypes
+    .filter(t => !t.hidden || moved.has(t.id))
+    .filter(t => !type || String(t.id) === type)
+    .filter(t => !String(q || '').trim() || searchMatch([t.name, t.size, t.ply].filter(Boolean).join(' '), q));
+  const rows = types.map(ty => {
+    const txs = cartonTx.filter(t => t.type_id === ty.id).map(t => ({ ...t, at: new Date(t.created_at) }));
+    const opening = txs.filter(t => t.at < fromD).reduce((a, t) => a + t.change, 0);
+    let running = opening;
+    const periods = buckets.map(b => {
+      const inB = txs.filter(t => t.at >= b.start && t.at < b.end);
+      const inn = inB.filter(t => isMove(t) && t.change > 0).reduce((a, t) => a + t.change, 0);
+      const out = inB.filter(t => isMove(t) && t.change < 0).reduce((a, t) => a - t.change, 0);
+      running += inB.reduce((a, t) => a + t.change, 0);
+      return { in: inn, out, balance: running };
+    });
+    const stockEnd = txs.filter(t => t.at < endD).reduce((a, t) => a + t.change, 0);
+    const reorder = ty.reorder_level != null ? Number(ty.reorder_level) : null;
+    return {
+      type: ty, opening, periods, stockEnd, reorder,
+      totalOut: periods.reduce((a, p) => a + p.out, 0),
+      status: reorder == null ? null : reorder - stockEnd,   // + short of Reorder At, - over it
+    };
+  });
+  return { rows, buckets, asOfPast: !!to && to < localDateISO() };
+}
+function cartonStatusText(n) { return n == null ? '—' : n > 0 ? cartonNum(n) : n < 0 ? '+' + cartonNum(-n) : '0'; }
+function cartonStatusColor(n) { return n > 0 ? '#A32D2D' : n < 0 ? '#166534' : 'inherit'; }
+function renderCartonSummary() {
+  const el = document.getElementById('carton-sum-content');
+  if (!el) return;
+  if (!cartonLoaded) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
+  const { rows, buckets, asOfPast } = computeCartonSummary();
+  if (!rows.length) { el.innerHTML = `<div class="empty">No carton types${cartonSumF.q.trim() || cartonSumF.type ? ' match' : ' yet'}.</div>`; return; }
+  const n = v => v ? cartonNum(v) : '';
+  el.innerHTML = `
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${esc(cartonSummaryScope())} · ${esc(fmtDMY(cartonSumF.from))} to ${esc(fmtDMY(cartonSumF.to))} · ${rows.length} type${rows.length === 1 ? '' : 's'} · units: cartons</div>
+    <div class="report-scroll-wrap">
+    <table class="ledger-table" style="font-size:12px;min-width:max-content;">
+      <thead>
+        <tr>
+          <th rowspan="2">Carton Type</th><th rowspan="2">Size</th><th rowspan="2">Ply</th><th rowspan="2">Opening</th>
+          ${buckets.map(b => `<th colspan="3" style="text-align:center;background:var(--bg2);">${esc(b.label)}</th>`).join('')}
+          <th rowspan="2">Total Out</th><th rowspan="2">${esc(cartonSummaryStockLabel(asOfPast))}</th><th rowspan="2">Reorder At</th><th rowspan="2">Status</th>
+        </tr>
+        <tr>${buckets.map(() => '<th>IN</th><th>OUT</th><th>Bal</th>').join('')}</tr>
+      </thead>
+      <tbody>${rows.map(r => `<tr class="row-hover-red">
+        <td><b>${esc(r.type.name)}</b>${r.type.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}</td>
+        <td style="white-space:nowrap;">${esc(r.type.size || '—')}</td>
+        <td style="white-space:nowrap;">${esc(r.type.ply || '—')}</td>
+        <td style="text-align:right;">${cartonNum(r.opening)}</td>
+        ${r.periods.map(p => `<td style="text-align:right;color:#166534;font-weight:600;">${n(p.in)}</td><td style="text-align:right;color:#A32D2D;font-weight:600;">${n(p.out)}</td><td style="text-align:right;font-weight:600;">${cartonNum(p.balance)}</td>`).join('')}
+        <td style="text-align:right;font-weight:600;color:#A32D2D;">${n(r.totalOut)}</td>
+        <td style="text-align:right;font-weight:600;">${cartonNum(r.stockEnd)}</td>
+        <td style="text-align:right;">${r.reorder != null ? cartonNum(r.reorder) : '—'}</td>
+        <td style="text-align:right;font-weight:600;color:${cartonStatusColor(r.status)};">${cartonStatusText(r.status)}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+    </div>`;
+}
+function cartonSummaryScope() {
+  const ty = cartonSumF.type ? cartonTypeById(cartonSumF.type) : null;
+  return [ty ? cartonTypeText(ty) : 'All carton types', cartonSumF.q.trim() ? `Search: ${cartonSumF.q.trim()}` : ''].filter(Boolean).join(' · ');
+}
+function cartonSummaryAoa() {
+  const { rows, buckets, asOfPast } = computeCartonSummary();
+  const header = ['Carton Type', 'Size', 'Ply', 'Opening'];
+  for (const b of buckets) header.push(`${b.label} IN`, `${b.label} OUT`, `${b.label} Bal`);
+  header.push('Total Out', cartonSummaryStockLabel(asOfPast), 'Reorder At', 'Status');
+  const body = rows.map(r => [
+    r.type.name, r.type.size || '', r.type.ply || '', r.opening,
+    ...r.periods.flatMap(p => [p.in, p.out, p.balance]),
+    r.totalOut, r.stockEnd, r.reorder == null ? '' : r.reorder, r.status == null ? '' : r.status,   // same as Stock Summary: + short, - over
+  ]);
+  return { header, body, rows, buckets, asOfPast };
+}
+async function exportCartonSummary() {
+  const { header, body } = cartonSummaryAoa();
+  if (!body.length) { notify('Nothing to export.'); return; }
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  const aoa = reportExcelAoa(header);
+  body.forEach(r => aoa.push(r));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  applyReportExcelHeading(ws, header, { title: 'CARTON SHIPPERS STOCK SUMMARY', scope: cartonSummaryScope(), dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}` });
+  applyReportExcelCols(ws, header, aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Carton Summary');
+  XLSX.writeFile(wb, `supreme-art-carton-summary-${cartonSumF.from}-to-${cartonSumF.to}.xlsx`);
+  notify('Exported!');
+}
+function printCartonSummary() {
+  const { rows, buckets, asOfPast } = computeCartonSummary();
+  if (!rows.length) { notify('Nothing to print.'); return; }
+  const th = 'style="border:1px solid #000;padding:1px 3px;background:#f7f1ea;"';
+  const tdL = 'style="border:1px solid #000;padding:1px 3px;"';
+  const tdR = (c, b) => `style="border:1px solid #000;padding:1px 3px;text-align:right;${c ? 'color:' + c + ';' : ''}${b ? 'font-weight:bold;' : ''}"`;
+  const n = v => v ? cartonNum(v) : '';
+  const html = `
+    <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } #print-area tbody td { white-space:nowrap; } }</style>
+    <div style="${REPORT_PRINT_WRAP}">
+      <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'CARTON SHIPPERS STOCK SUMMARY', scope: cartonSummaryScope(), dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}` })}</div>
+      <table style="width:100%;font-size:8pt;line-height:1.15;border:1px solid #000;border-collapse:collapse;">
+        <thead style="display:table-header-group;"><tr>
+          <th rowspan="2" ${th}>Carton Type</th><th rowspan="2" ${th}>Size</th><th rowspan="2" ${th}>Ply</th><th rowspan="2" ${th}>Opening</th>
+          ${buckets.map(b => `<th colspan="3" ${th}>${esc(b.label)}</th>`).join('')}
+          <th rowspan="2" ${th}>Total<br>Out</th><th rowspan="2" ${th}>${asOfPast ? `Stock on<br>${esc(fmtDMY(cartonSumF.to))}` : 'Stock<br>Now'}</th><th rowspan="2" ${th}>Reorder<br>At</th><th rowspan="2" ${th}>Status</th>
+        </tr>
+        <tr>${buckets.map(() => `<th ${th}>IN</th><th ${th}>OUT</th><th ${th}>Bal</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td ${tdL}>${esc(r.type.name)}</td><td ${tdL}>${esc(r.type.size || '—')}</td><td ${tdL}>${esc(r.type.ply || '—')}</td>
+          <td ${tdR()}>${cartonNum(r.opening)}</td>
+          ${r.periods.map(p => `<td ${tdR('#166534', true)}>${n(p.in)}</td><td ${tdR('#A32D2D', true)}>${n(p.out)}</td><td ${tdR()}>${cartonNum(p.balance)}</td>`).join('')}
+          <td ${tdR('#A32D2D', true)}>${n(r.totalOut)}</td><td ${tdR('', true)}>${cartonNum(r.stockEnd)}</td>
+          <td ${tdR()}>${r.reorder != null ? cartonNum(r.reorder) : '—'}</td><td ${tdR(cartonStatusColor(r.status), true)}>${cartonStatusText(r.status)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  cartonPrintHtml(html);
+}
+function cartonPrintHtml(html) {
+  const area = document.getElementById('print-area');
+  area.innerHTML = html;
+  reportPrintPrepare(area, 'landscape');
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
+    window.print();
+    setTimeout(() => { area.innerHTML = ''; }, 500);
+  });
 }
 async function reverseCartonTx(id) {
   const t = cartonTx.find(x => x.id === id);
@@ -7188,65 +7408,65 @@ async function saveCartonBulkOut() {
     r => `${cartonNum(r.total)} cartons issued (${rows.length} line${rows.length === 1 ? '' : 's'})`);
 }
 
-// ---- Print / Excel of the log (what the filters show) ----
-function cartonLogScopeText() {
-  const f = cartonLogF;
+// ---- Print / Excel of the Stock In / Stock Out tabs (what the filters show) ----
+function cartonLogScopeText(kind) {
+  const f = cartonLogF[kind];
   const ty = f.type ? cartonTypeById(f.type) : null;
   return [
     ty ? cartonTypeText(ty) : 'All carton types',
-    { in: 'In only', out: 'Out only', correction: 'Reversals' }[f.dir] || 'In and Out',
     { 'e-job': 'E-Job', 'manual-job': 'Manual Job', other: 'Other' }[f.reason] || '',
     f.from || f.to ? `${f.from ? fmtDMY(f.from) : '…'} to ${f.to ? fmtDMY(f.to) : '…'}` : '',
     f.q.trim() ? `Search: ${f.q.trim()}` : '',
   ].filter(Boolean).join(' · ');
 }
-function cartonLogExportRow(t) {
-  const ty = cartonTypeById(t.type_id);
-  return [
-    fmtDMYT(t.created_at), ty ? ty.name : '', ty ? ty.size || '' : '', ty ? ty.ply || '' : '',
-    t.change > 0 ? t.change : '', t.change < 0 ? -t.change : '',
-    t.kind === 'in' ? (t.supplier || '') : t.kind === 'out' ? (t.issued_to || '') : '',
-    cartonForText(t), t.challan_no || '', [t.kind === 'correction' ? '' : t.notes, t.reversed_by ? 'REVERSED' : ''].filter(Boolean).join(' · '), txByName(t),
-  ];
+function cartonLogHeader(kind) {
+  return kind === 'in'
+    ? ['When', 'Carton Type', 'Size', 'Ply', 'Quantity', 'Supplier', 'Challan', 'Notes', 'Entered By']
+    : ['When', 'Carton Type', 'Size', 'Ply', 'Quantity', 'Issued To', 'For', 'Challan', 'Notes', 'Entered By'];
 }
-const CARTON_LOG_HEADER = ['When', 'Carton Type', 'Size', 'Ply', 'In', 'Out', 'Supplier / Issued To', 'For', 'Challan', 'Notes', 'Entered By'];
-async function exportCartonLog() {
-  const rows = cartonLogRows();
+function cartonLogExportRow(t, kind) {
+  const ty = cartonTypeById(t.type_id);
+  const corr = t.kind === 'correction';
+  const notes = [corr ? '' : t.notes, t.reversed_by ? 'REVERSED' : ''].filter(Boolean).join(' · ');
+  const head = [fmtDMYT(t.created_at), ty ? ty.name : '', ty ? ty.size || '' : '', ty ? ty.ply || '' : '', cartonTabQty(t, kind)];
+  return kind === 'in'
+    ? [...head, corr ? `Reversal of entry #${t.reverses_tx_id}` : t.supplier || '', t.challan_no || '', notes, txByName(t)]
+    : [...head, corr ? '' : t.issued_to || '', cartonForText(t), t.challan_no || '', notes, txByName(t)];
+}
+const cartonLogTitle = kind => kind === 'in' ? 'CARTON SHIPPERS STOCK IN' : 'CARTON SHIPPERS STOCK OUT';
+async function exportCartonLog(kind) {
+  const rows = cartonLogRows(kind);
   if (!rows.length) { notify('Nothing to export.'); return; }
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
-  const aoa = reportExcelAoa(CARTON_LOG_HEADER);
-  rows.forEach(t => aoa.push(cartonLogExportRow(t)));
+  const header = cartonLogHeader(kind);
+  const aoa = reportExcelAoa(header);
+  rows.forEach(t => aoa.push(cartonLogExportRow(t, kind)));
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  applyReportExcelHeading(ws, CARTON_LOG_HEADER, { title: 'CARTON SHIPPERS IN / OUT', scope: cartonLogScopeText(), dateText: `Generated: ${fmtDMYT(new Date())}` });
-  applyReportExcelCols(ws, CARTON_LOG_HEADER, aoa);
+  applyReportExcelHeading(ws, header, { title: cartonLogTitle(kind), scope: cartonLogScopeText(kind), dateText: `Generated: ${fmtDMYT(new Date())}` });
+  applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Carton Shippers');
-  XLSX.writeFile(wb, `supreme-art-carton-shippers-${localDateISO()}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, ws, kind === 'in' ? 'Carton Stock In' : 'Carton Stock Out');
+  XLSX.writeFile(wb, `supreme-art-carton-stock-${kind}-${localDateISO()}.xlsx`);
   notify('Exported!');
 }
-function printCartonLog() {
-  const rows = cartonLogRows();
+function printCartonLog(kind) {
+  const rows = cartonLogRows(kind);
   if (!rows.length) { notify('Nothing to print.'); return; }
+  const header = cartonLogHeader(kind);
   const td = 'style="border:1px solid #000;padding:3px 5px;"';
   const tdR = 'style="border:1px solid #000;padding:3px 5px;text-align:right;"';
+  const total = rows.reduce((a, t) => a + cartonTabQty(t, kind), 0);
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
-      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'CARTON SHIPPERS IN / OUT', scope: cartonLogScopeText(), dateText: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({ title: cartonLogTitle(kind), scope: cartonLogScopeText(kind), dateText: `Generated: ${fmtDMYT(new Date())}` })}</div>
       <table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
-        <tr style="background:#f7f1ea;">${CARTON_LOG_HEADER.map((h, i) => `<th ${i === 4 || i === 5 ? tdR : td}>${esc(h)}</th>`).join('')}</tr>
-        ${rows.map(t => `<tr${t.reversed_by ? ' style="color:#777;"' : ''}>${cartonLogExportRow(t).map((v, i) => `<td ${i === 4 || i === 5 ? tdR : td}>${esc(typeof v === 'number' ? v.toLocaleString() : v)}</td>`).join('')}</tr>`).join('')}
+        <tr style="background:#f7f1ea;">${header.map((h, i) => `<th ${i === 4 ? tdR : td}>${esc(h)}</th>`).join('')}</tr>
+        ${rows.map(t => `<tr${t.reversed_by ? ' style="color:#777;"' : ''}>${cartonLogExportRow(t, kind).map((v, i) => `<td ${i === 4 ? tdR : td}>${esc(typeof v === 'number' ? v.toLocaleString() : v)}</td>`).join('')}</tr>`).join('')}
+        <tr style="background:#f7f1ea;font-weight:bold;"><td ${td} colspan="4">Total</td><td ${tdR}>${esc(total.toLocaleString())}</td><td ${td} colspan="${header.length - 5}"></td></tr>
       </table>
     </div>`;
-  const area = document.getElementById('print-area');
-  area.innerHTML = html;
-  reportPrintPrepare(area, 'landscape');
-  const imgs = Array.from(area.querySelectorAll('img'));
-  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
-  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => {
-    window.print();
-    setTimeout(() => { area.innerHTML = ''; }, 500);
-  });
+  cartonPrintHtml(html);
 }
 
 // ── Filtering ─────────────────────────────────────────────────
