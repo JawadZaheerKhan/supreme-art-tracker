@@ -1039,8 +1039,12 @@
 .carton-job-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; max-height: 220px; overflow-y: auto; }
 .carton-job-hit { text-align: left; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
 .carton-job-hit:hover { border-color: var(--brand); }
-.carton-job-chip { display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; background: #dcfce7; color: #166534; font-weight: 600; font-size: 13px; padding: 4px 10px; border-radius: 999px; }
-.carton-job-chip button { border: none; background: none; color: inherit; font-size: 16px; cursor: pointer; line-height: 1; }
+.carton-job-combo { position: relative; }
+.carton-job-combo .cjc-list:not(:empty) { position: absolute; left: 0; right: 0; top: 100%; z-index: 40; min-width: 260px; background: #fff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); padding: 4px; }
+.carton-job-combo .cjc-search.cjc-picked { background: #dcfce7; border-color: #86efac; color: #166534; font-weight: 600; }
+.carton-job-none { font-size: 12px; color: var(--text2); padding: 6px 4px; }
+.bulk-table td.cbo-for { min-width: 190px; }
+.bulk-table.carton-bulk .col-qty { width: 90px; }
   .stat {
     background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 14px 16px;
@@ -6589,7 +6593,6 @@ let cartonSearch = '';
 let cartonShowHidden = false;
 let cartonLogF = { type: '', dir: '', reason: '', from: '', to: '', q: '' };
 let cartonPeople = null;           // operator names, for the "Issued to" suggestions
-let cartonIssueJobId = null;
 let cartonLoaded = false;
 
 function enterCartonShippers() {
@@ -6635,36 +6638,11 @@ function cartonForText(t) {
   if (t.reason === 'manual-job') return `Manual job ${t.manual_job || ''}`.trim();
   return `Other: ${t.other_reason || ''}`;
 }
-// Last real In / Out per type (reversed entries and reversals left out).
-function cartonLastDates() {
-  const out = new Map();
-  for (const t of cartonTx) {
-    if (t.kind === 'correction' || t.reversed_by) continue;
-    const o = out.get(t.type_id) || {};
-    const k = t.kind === 'in' ? 'in' : 'out';
-    if (!o[k] || new Date(t.created_at) > new Date(o[k])) o[k] = t.created_at;
-    out.set(t.type_id, o);
-  }
-  return out;
-}
 
 function renderCartons() {
   const root = document.getElementById('carton-shippers-root');
   if (!root) return;
-  const live = cartonTypes.filter(t => !t.hidden);
-  const today = localDateISO();
-  const sumToday = kind => cartonTx.filter(t => t.kind === kind && !t.reversed_by && localDateISO(new Date(t.created_at)) === today)
-    .reduce((a, t) => a + Math.abs(Number(t.change) || 0), 0);
-  const low = live.filter(cartonIsLow).length;
-  const stat = (label, value, cls) => `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls || ''}">${value}</div></div>`;
   root.innerHTML = `
-    <div class="stats-row">
-      ${stat('Carton Types', cartonNum(live.length))}
-      ${stat('Cartons on Hand', cartonNum(live.reduce((a, t) => a + (Number(t.current_balance) || 0), 0)))}
-      ${stat('Low Stock', cartonNum(low), low ? 'warn' : '')}
-      ${stat('In Today', cartonNum(sumToday('in')))}
-      ${stat('Issued Today', cartonNum(sumToday('out')))}
-    </div>
     <div class="toolbar carton-toolbar">
       <div class="tabs">
         <button class="tab ${cartonView === 'stock' ? 'active' : ''}" onclick="setCartonView('stock')">&#128230; Stock</button>
@@ -6672,8 +6650,8 @@ function renderCartons() {
       </div>
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
         ${canCartonTypes() ? `<button class="btn" onclick="openCartonTypeModal()">+ Carton Type</button>` : ''}
-        ${canCartonStockIn() ? `<button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="openCartonStockIn()">&#128229; Stock In</button>` : ''}
-        ${canCartonIssue() ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonIssue()">&#128228; Issue</button>` : ''}
+        ${canCartonStockIn() ? `<button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="openCartonBulkIn()">&#128230; Stock In (Bulk)</button>` : ''}
+        ${canCartonIssue() ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonBulkOut()">&#128228; Stock Out (Bulk)</button>` : ''}
       </div>
     </div>
     ${cartonView === 'stock' ? cartonStockViewHtml() : cartonLogViewHtml()}`;
@@ -6699,7 +6677,6 @@ function renderCartonStockList() {
   const el = document.getElementById('carton-stock-list');
   if (!el) return;
   if (!cartonLoaded) { el.innerHTML = `<div class="empty">Loading…</div>`; return; }
-  const last = cartonLastDates();
   const rows = cartonTypes
     .filter(t => cartonShowHidden || !t.hidden)
     .filter(t => !cartonSearch.trim() || searchMatch([t.name, t.size, t.ply].filter(Boolean).join(' '), cartonSearch));
@@ -6713,11 +6690,9 @@ function renderCartonStockList() {
       <table class="carton-table">
         <thead><tr>
           <th>Carton Type</th><th>Size (L × W × H)</th><th>Ply</th>
-          <th class="num">On Hand</th><th class="num">Reorder At</th>
-          <th>Last In</th><th>Last Out</th><th></th>
+          <th class="num">On Hand</th><th class="num">Reorder At</th><th></th>
         </tr></thead>
         <tbody>${rows.map(t => {
-          const d = last.get(t.id) || {};
           const lowRow = !t.hidden && cartonIsLow(t);
           return `<tr class="${lowRow ? 'carton-low' : ''}${t.hidden ? ' carton-hidden' : ''}">
             <td><b>${esc(t.name)}</b>${t.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}${lowRow ? ' <span class="carton-tag carton-tag-low">LOW</span>' : ''}</td>
@@ -6725,22 +6700,15 @@ function renderCartonStockList() {
             <td style="white-space:nowrap;">${esc(t.ply || '—')}</td>
             <td class="num"><b>${cartonNum(t.current_balance)}</b></td>
             <td class="num">${t.reorder_level != null ? cartonNum(t.reorder_level) : '—'}</td>
-            <td>${d.in ? esc(fmtDMY(d.in)) : '—'}</td>
-            <td>${d.out ? esc(fmtDMY(d.out)) : '—'}</td>
             <td class="carton-actions">
-              ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
-              ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
-              <button class="btn btn-sm" title="This type's In / Out log" onclick="openCartonTypeLog(${t.id})">Log</button>
+              ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
+              ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
               ${canCartonTypes() ? `<button class="btn btn-sm" title="Edit or hide this type" onclick="openCartonTypeModal(${t.id})">Edit</button>` : ''}
             </td>
           </tr>`;
         }).join('')}</tbody>
       </table>
     </div>`;
-}
-function openCartonTypeLog(id) {
-  cartonLogF = { type: String(id), dir: '', reason: '', from: '', to: '', q: '' };
-  setCartonView('log');
 }
 
 // ---- In / Out log ----
@@ -6927,7 +6895,6 @@ async function saveCartonStockIn() {
 }
 async function openCartonIssue(typeId) {
   if (!(await cartonNeedTypes())) return;
-  cartonIssueJobId = null;
   const people = (cartonPeople || []).concat(cartonTx.map(t => t.issued_to));
   openModal(`<div class="modal" onclick="event.stopPropagation()">
     <h2>&#128228; Issue Carton Shippers</h2>
@@ -6957,10 +6924,8 @@ function cartonReasonChanged() {
   const el = document.getElementById('co-reason-field');
   if (!el) return;
   const r = cartonReasonValue();
-  cartonIssueJobId = null;
   if (r === 'e-job') {
-    el.innerHTML = `<input type="text" id="co-job-search" autocomplete="off" placeholder="&#128269; Search job no., name or company…" oninput="cartonJobSearch(this.value)" onfocus="cartonJobSearch(this.value)">
-      <div id="co-job-picked"></div><div id="co-job-list" class="carton-job-list"></div>`;
+    el.innerHTML = cartonJobComboHtml('co');
   } else if (r === 'manual-job') {
     el.innerHTML = `<input type="text" id="co-manual" placeholder="Manual job card no. / name">`;
   } else {
@@ -6968,26 +6933,51 @@ function cartonReasonChanged() {
   }
 }
 function cartonJobLabel(j) { return `E-${j.id}${j.jobcode ? ' · ' + j.jobcode : ''} — ${j.name || ''}${j.client ? ' (' + j.client + ')' : ''}`; }
-function cartonJobSearch(q) {
-  const list = document.getElementById('co-job-list');
-  if (!list) return;
-  const s = String(q || '').trim();
+// E-Job search box (Issue form and each Stock Out (Bulk) row): type a job
+// number, name or company and click the job. Typing again un-picks it.
+function cartonJobComboHtml(key) {
+  return `<div class="carton-job-combo" id="cjc-${key}">
+    <input type="text" class="cjc-search" autocomplete="off" placeholder="&#128269; Job no., name or company…" oninput="cartonJobComboSearch('${key}', true)" onfocus="cartonJobComboSearch('${key}', false)">
+    <input type="hidden" class="cjc-id" value="">
+    <div class="carton-job-list cjc-list"></div>
+  </div>`;
+}
+function cartonJobComboSearch(key, typed) {
+  const box = document.getElementById('cjc-' + key);
+  if (!box) return;
+  const input = box.querySelector('.cjc-search'), list = box.querySelector('.cjc-list'), idEl = box.querySelector('.cjc-id');
+  if (!typed && idEl.value) return;          // focusing a picked job keeps it
+  idEl.value = '';
+  input.classList.remove('cjc-picked');
+  const s = input.value.trim();
   if (!s) { list.innerHTML = ''; return; }
   const hits = (jobs || []).filter(j => !j.deleted_at && searchMatch(['e-' + j.id, j.id, j.jobcode, j.name, j.client, j.ref].filter(v => v != null).join(' '), s))
     .sort((a, b) => b.id - a.id).slice(0, 8);
   list.innerHTML = hits.length
-    ? hits.map(j => `<button type="button" class="carton-job-hit" onclick="cartonPickJob(${j.id})">${esc(cartonJobLabel(j))}</button>`).join('')
-    : `<div style="font-size:12px;color:var(--text2);padding:6px 2px;">No job matches.</div>`;
+    ? hits.map(j => `<button type="button" class="carton-job-hit" onmousedown="event.preventDefault()" onclick="cartonJobComboPick('${key}', ${j.id})">${esc(cartonJobLabel(j))}</button>`).join('')
+    : `<div class="carton-job-none">No job matches.</div>`;
 }
-function cartonPickJob(id) {
+function cartonJobComboPick(key, id) {
+  const box = document.getElementById('cjc-' + key);
   const j = (jobs || []).find(x => x.id === id);
-  if (!j) return;
-  cartonIssueJobId = id;
-  const search = document.getElementById('co-job-search');
-  if (search) search.value = '';
-  document.getElementById('co-job-list').innerHTML = '';
-  document.getElementById('co-job-picked').innerHTML = `<div class="carton-job-chip">&#10003; ${esc(cartonJobLabel(j))} <button type="button" onclick="cartonIssueJobId = null; this.parentElement.remove();" title="Pick another job">&times;</button></div>`;
+  if (!box || !j) return;
+  const input = box.querySelector('.cjc-search');
+  input.value = cartonJobLabel(j);
+  input.classList.add('cjc-picked');
+  box.querySelector('.cjc-id').value = String(id);
+  box.querySelector('.cjc-list').innerHTML = '';
 }
+function cartonJobComboValue(key) {
+  const box = document.getElementById('cjc-' + key);
+  const v = box ? parseInt(box.querySelector('.cjc-id').value, 10) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+// A click anywhere else closes an open job list.
+document.addEventListener('mousedown', (e) => {
+  document.querySelectorAll('.carton-job-combo .cjc-list').forEach(list => {
+    if (list.innerHTML && !list.parentElement.contains(e.target)) list.innerHTML = '';
+  });
+});
 async function saveCartonIssue() {
   const val = k => (document.getElementById(k)?.value || '').trim();
   const qty = Number(val('co-qty'));
@@ -7002,8 +6992,9 @@ async function saveCartonIssue() {
   const reason = cartonReasonValue();
   const body = { type_id: type.id, qty, issued_to: val('co-to'), reason, notes: val('co-notes') };
   if (reason === 'e-job') {
-    if (!cartonIssueJobId) { await alertDialog({ title: 'Pick the job', message: 'Search the job by number or name and click it.', kind: 'warn' }); return; }
-    body.job_id = cartonIssueJobId;
+    const jobId = cartonJobComboValue('co');
+    if (!jobId) { await alertDialog({ title: 'Pick the job', message: 'Search the job by number or name and click it.', kind: 'warn' }); return; }
+    body.job_id = jobId;
   } else if (reason === 'manual-job') {
     if (!val('co-manual')) { await alertDialog({ title: 'Enter the manual job number / name', kind: 'warn' }); return; }
     body.manual_job = val('co-manual');
@@ -7022,6 +7013,179 @@ async function saveCartonIssue() {
     await loadCartons();
   } catch (e) { await alertDialog({ title: 'Could not issue', message: e.message, kind: 'warn' }); }
   showSaving(false);
+}
+
+// ---- Stock In (Bulk) / Stock Out (Bulk) ----
+// Same layout as Inventory's bulk forms: shared details on top, one line per
+// carton type below. Blank lines are skipped; nothing is saved unless every
+// filled line is right (the server checks again, and the stock per type).
+let cartonBulkSeq = 0;
+let _cartonBulkSaving = false;
+function cartonBulkInRowHtml(i) {
+  return `
+    <tr data-row="${i}">
+      <td>${cartonTypeSelectHtml('cbi-type-' + i, '', true)}</td>
+      <td class="col-qty"><input type="number" id="cbi-qty-${i}" min="1" step="1" inputmode="numeric" placeholder="0"></td>
+      <td class="col-del"><button type="button" class="bulk-row-del" onclick="cartonBulkRemoveRow('cbi', ${i})" title="Remove row">×</button></td>
+    </tr>`;
+}
+function cartonBulkOutRowHtml(i) {
+  return `
+    <tr data-row="${i}">
+      <td>${cartonTypeSelectHtml('cbo-type-' + i, '', true)}</td>
+      <td class="col-qty"><input type="number" id="cbo-qty-${i}" min="1" step="1" inputmode="numeric" placeholder="0"></td>
+      <td><input type="text" id="cbo-to-${i}" list="cbo-people" autocomplete="off" placeholder="Who took them"></td>
+      <td><select id="cbo-reason-${i}" class="form-select" onchange="cartonBulkOutReason(${i})"><option value="e-job">E-Job</option><option value="manual-job">Manual Job</option><option value="other">Other</option></select></td>
+      <td id="cbo-for-${i}" class="cbo-for">${cartonJobComboHtml('cbo' + i)}</td>
+      <td class="col-del"><button type="button" class="bulk-row-del" onclick="cartonBulkRemoveRow('cbo', ${i})" title="Remove row">×</button></td>
+    </tr>`;
+}
+function cartonBulkOutReason(i) {
+  const cell = document.getElementById('cbo-for-' + i);
+  if (!cell) return;
+  const r = document.getElementById('cbo-reason-' + i)?.value || 'e-job';
+  cell.innerHTML = r === 'e-job' ? cartonJobComboHtml('cbo' + i)
+    : `<input type="text" id="cbo-text-${i}" placeholder="${r === 'manual-job' ? 'Manual job card no. / name' : 'What are they for?'}">`;
+}
+function cartonBulkAddRow(p) {
+  const tb = document.getElementById(p + '-rows');
+  if (tb) tb.insertAdjacentHTML('beforeend', p === 'cbi' ? cartonBulkInRowHtml(cartonBulkSeq++) : cartonBulkOutRowHtml(cartonBulkSeq++));
+}
+function cartonBulkRemoveRow(p, i) {
+  const tb = document.getElementById(p + '-rows');
+  const row = tb && tb.querySelector(`tr[data-row="${i}"]`);
+  if (!row) return;
+  if (tb.querySelectorAll('tr[data-row]').length > 1) { row.remove(); return; }
+  row.querySelectorAll('input').forEach(x => { x.value = ''; });
+  row.querySelectorAll('select').forEach(x => { x.selectedIndex = 0; });
+  if (p === 'cbo') cartonBulkOutReason(i);
+}
+async function openCartonBulkIn() {
+  if (!(await cartonNeedTypes())) return;
+  cartonBulkSeq = 0;
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>&#128230; Carton Stock In · Bulk</h2>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Supplier *</label><input type="text" id="cbi-supplier" list="cbi-supplier-list" autocomplete="off">${cartonDatalist('cbi-supplier-list', cartonTx.map(t => t.supplier))}</div>
+      <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="cbi-challan"></div>
+    </div>
+    <div class="form-row">
+      ${stockEntryDateHtml('cbi-date')}
+      <div class="form-group"><label class="form-label">Notes (applied to every row)</label><input type="text" id="cbi-notes"></div>
+    </div>
+    <table class="bulk-table carton-bulk">
+      <thead><tr><th>Carton Type</th><th style="text-align:right;">Quantity (cartons)</th><th></th></tr></thead>
+      <tbody id="cbi-rows">${[0, 1, 2].map(() => cartonBulkInRowHtml(cartonBulkSeq++)).join('')}</tbody>
+    </table>
+    <div style="margin-top:8px;"><button class="btn btn-sm" onclick="cartonBulkAddRow('cbi')">+ Add Row</button></div>
+    <div class="bulk-summary">One line per carton type in this delivery. Blank lines are skipped. A type that isn't listed yet: add it with <b>+ Carton Type</b> first.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="saveCartonBulkIn()">Save All</button>
+    </div>
+  </div>`);
+}
+async function openCartonBulkOut() {
+  if (!(await cartonNeedTypes())) return;
+  cartonBulkSeq = 0;
+  const people = (cartonPeople || []).concat(cartonTx.map(t => t.issued_to));
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2 style="color:#991B1B;">&#128228; Carton Stock Out · Bulk</h2>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Challan No. (optional)</label><input type="text" id="cbo-challan"></div>
+      ${stockEntryDateHtml('cbo-date')}
+    </div>
+    <div class="form-group"><label class="form-label">Notes (applied to every row)</label><input type="text" id="cbo-notes"></div>
+    ${cartonDatalist('cbo-people', people)}
+    <table class="bulk-table carton-bulk">
+      <thead><tr><th>Carton Type</th><th style="text-align:right;">Quantity</th><th>Issued To</th><th>For</th><th>Job / Details</th><th></th></tr></thead>
+      <tbody id="cbo-rows">${[0, 1, 2].map(() => cartonBulkOutRowHtml(cartonBulkSeq++)).join('')}</tbody>
+    </table>
+    <div style="margin-top:8px;"><button class="btn btn-sm" onclick="cartonBulkAddRow('cbo')">+ Add Row</button></div>
+    <div class="bulk-summary">For <b>E-Job</b> — search the job by number or name and click it. <b>Manual Job</b> — type the job card no. <b>Other</b> — write what they are for. Blank lines are skipped; nothing is saved if any type doesn't have enough on hand.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" style="background:#DC2626;border-color:#DC2626;" onclick="saveCartonBulkOut()">Remove All</button>
+    </div>
+  </div>`);
+}
+// The filled lines of a bulk form, in screen order ({ n, i, tr }); blank ones skipped.
+function cartonBulkLines(p) {
+  const out = [];
+  [...document.querySelectorAll(`#${p}-rows tr[data-row]`)].forEach((tr, pos) => {
+    const filled = [...tr.querySelectorAll('input:not([type="hidden"])')].some(x => String(x.value || '').trim())
+      || !!(tr.querySelector(`#${p}-type-${tr.dataset.row}`) || {}).value;
+    if (filled) out.push({ n: pos + 1, i: tr.dataset.row, tr });
+  });
+  return out;
+}
+async function cartonBulkSave(path, body, done) {
+  if (_cartonBulkSaving) return;
+  _cartonBulkSaving = true;
+  showSaving(true);
+  try {
+    const r = await api('POST', path, body);
+    closeModal();
+    notify(done(r));
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Nothing saved', message: e.message, kind: 'warn' }); }
+  finally { _cartonBulkSaving = false; showSaving(false); }
+}
+async function saveCartonBulkIn() {
+  const val = id => (document.getElementById(id)?.value || '').trim();
+  const warn = (title, message) => alertDialog({ title, message, kind: 'warn' });
+  if (!val('cbi-supplier')) { await warn('Enter the supplier'); return; }
+  const lines = cartonBulkLines('cbi');
+  if (!lines.length) { await warn('Add at least one carton type and quantity'); return; }
+  const rows = [];
+  for (const { n, i } of lines) {
+    const type = val('cbi-type-' + i), qty = Number(val('cbi-qty-' + i));
+    if (!type) { await warn(`Row ${n}: pick the carton type`); return; }
+    if (!Number.isInteger(qty) || qty <= 0) { await warn(`Row ${n}: enter a whole number of cartons above zero`); return; }
+    rows.push({ type_id: +type, qty });
+  }
+  const entryDate = await readStockEntryDate('cbi-date');
+  if (entryDate === false) return;
+  await cartonBulkSave('/api/cartons/bulk-in',
+    { supplier: val('cbi-supplier'), challan_no: val('cbi-challan'), entry_date: entryDate, notes: val('cbi-notes'), rows },
+    r => `+${cartonNum(r.total)} cartons in (${rows.length} line${rows.length === 1 ? '' : 's'})`);
+}
+async function saveCartonBulkOut() {
+  const val = id => (document.getElementById(id)?.value || '').trim();
+  const warn = (title, message) => alertDialog({ title, message, kind: 'warn' });
+  const lines = cartonBulkLines('cbo');
+  if (!lines.length) { await warn('Add at least one carton type and quantity'); return; }
+  const rows = [];
+  const need = new Map();
+  for (const { n, i } of lines) {
+    const type = cartonTypeById(val('cbo-type-' + i)), qty = Number(val('cbo-qty-' + i));
+    if (!type) { await warn(`Row ${n}: pick the carton type`); return; }
+    if (!Number.isInteger(qty) || qty <= 0) { await warn(`Row ${n}: enter a whole number of cartons above zero`); return; }
+    if (!val('cbo-to-' + i)) { await warn(`Row ${n}: enter who the cartons are issued to`); return; }
+    const reason = val('cbo-reason-' + i) || 'e-job';
+    const row = { type_id: type.id, qty, issued_to: val('cbo-to-' + i), reason };
+    if (reason === 'e-job') {
+      row.job_id = cartonJobComboValue('cbo' + i);
+      if (!row.job_id) { await warn(`Row ${n}: pick the job`, 'Search the job by number or name and click it.'); return; }
+    } else if (!val('cbo-text-' + i)) {
+      await warn(`Row ${n}: ${reason === 'manual-job' ? 'enter the manual job number / name' : 'write what the cartons are for'}`); return;
+    } else if (reason === 'manual-job') row.manual_job = val('cbo-text-' + i);
+    else row.other_reason = val('cbo-text-' + i);
+    need.set(type.id, (need.get(type.id) || 0) + qty);
+    rows.push(row);
+  }
+  for (const [id, n] of need) {
+    const t = cartonTypeById(id);
+    if (n > (Number(t.current_balance) || 0)) {
+      await warn('Not enough on hand', `Only ${cartonNum(t.current_balance)} × ${cartonTypeText(t)} on hand — these rows need ${cartonNum(n)}.`);
+      return;
+    }
+  }
+  const entryDate = await readStockEntryDate('cbo-date');
+  if (entryDate === false) return;
+  await cartonBulkSave('/api/cartons/bulk-out',
+    { challan_no: val('cbo-challan'), entry_date: entryDate, notes: val('cbo-notes'), rows },
+    r => `${cartonNum(r.total)} cartons issued (${rows.length} line${rows.length === 1 ? '' : 's'})`);
 }
 
 // ---- Print / Excel of the log (what the filters show) ----

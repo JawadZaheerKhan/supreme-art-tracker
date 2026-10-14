@@ -7075,6 +7075,38 @@ async function cartonTypeOr404(sql, id, res) {
   return t;
 }
 
+// One Issue line (single or bulk): quantity, who took them, and what for -
+// an E-Job (must exist), a manual job, or other.
+async function readCartonIssueRow(sql, b) {
+  const qty = cartonQty(b.qty);
+  if (!qty) return { error: 'Quantity must be a whole number of cartons above zero.' };
+  const issuedTo = cartonText(b.issued_to, 120);
+  if (!issuedTo) return { error: 'Enter who the cartons are issued to.' };
+  const reason = String(b.reason || '');
+  if (!CARTON_REASONS[reason]) return { error: 'Pick a reason: E-Job, Manual Job or Other.' };
+  let jobId = null, manualJob = null, otherReason = null, jobLabel = '';
+  if (reason === 'e-job') {
+    const job = (await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(b.job_id, 10) || 0} AND deleted_at IS NULL`)[0];
+    if (!job) return { error: 'Pick the job (E-number) these cartons are for.' };
+    jobId = job.id; jobLabel = `E-${job.id} ${job.name || ''}`.trim();
+  } else if (reason === 'manual-job') {
+    manualJob = cartonText(b.manual_job, 120);
+    if (!manualJob) return { error: 'Enter the manual job number / name.' };
+    jobLabel = 'manual job ' + manualJob;
+  } else {
+    otherReason = cartonText(b.other_reason, 200);
+    if (!otherReason) return { error: 'Write what the cartons are for.' };
+    jobLabel = otherReason;
+  }
+  return { qty, issuedTo, reason, jobId, manualJob, otherReason, jobLabel };
+}
+// The carton types a bulk form names, by id.
+async function cartonTypesFor(sql, raw) {
+  const ids = [...new Set(raw.map(r => parseInt(r && r.type_id, 10)).filter(n => n > 0))];
+  const rows = ids.length ? await sql`SELECT * FROM carton_types WHERE id = ANY(${ids})` : [];
+  return new Map(rows.map(t => [t.id, t]));
+}
+
 app.get('/api/cartons', requirePermission('carton_tab_access', 'view'), async (req, res) => {
   try {
     await dbReady;
@@ -7171,26 +7203,9 @@ app.post('/api/cartons/issue', requirePermission('carton_btn_issue'), async (req
     const b = req.body || {};
     const type = await cartonTypeOr404(sql, b.type_id, res);
     if (!type) return;
-    const qty = cartonQty(b.qty);
-    if (!qty) return res.status(400).json({ error: 'Quantity must be a whole number of cartons above zero.' });
-    const issuedTo = cartonText(b.issued_to, 120);
-    if (!issuedTo) return res.status(400).json({ error: 'Enter who the cartons are issued to.' });
-    const reason = String(b.reason || '');
-    if (!CARTON_REASONS[reason]) return res.status(400).json({ error: 'Pick a reason: E-Job, Manual Job or Other.' });
-    let jobId = null, manualJob = null, otherReason = null, jobLabel = '';
-    if (reason === 'e-job') {
-      const job = (await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(b.job_id, 10) || 0} AND deleted_at IS NULL`)[0];
-      if (!job) return res.status(400).json({ error: 'Pick the job (E-number) these cartons are for.' });
-      jobId = job.id; jobLabel = `E-${job.id} ${job.name || ''}`.trim();
-    } else if (reason === 'manual-job') {
-      manualJob = cartonText(b.manual_job, 120);
-      if (!manualJob) return res.status(400).json({ error: 'Enter the manual job number / name.' });
-      jobLabel = 'manual job ' + manualJob;
-    } else {
-      otherReason = cartonText(b.other_reason, 200);
-      if (!otherReason) return res.status(400).json({ error: 'Write what the cartons are for.' });
-      jobLabel = otherReason;
-    }
+    const row = await readCartonIssueRow(sql, b);
+    if (row.error) return res.status(400).json({ error: row.error });
+    const { qty, issuedTo, reason, jobId, manualJob, otherReason, jobLabel } = row;
     const entry = stockEntryInstant(b.entry_date);
     if (entry.error) return res.status(400).json({ error: entry.error });
     const held = await takeOpLocks(sql, [`carton-type:${type.id}`]);
@@ -7207,6 +7222,114 @@ app.post('/api/cartons/issue', requirePermission('carton_btn_issue'), async (req
         metadata: { tx_id: r.id, job_id: jobId },
       });
       res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Stock In (Bulk): several carton types from one delivery - one supplier,
+// challan, entry date and note for every row. Every row is checked before
+// anything is saved.
+app.post('/api/cartons/bulk-in', requirePermission('carton_btn_stock_in'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const raw = Array.isArray(b.rows) ? b.rows : [];
+    if (!raw.length) return res.status(400).json({ error: 'Add at least one row.' });
+    if (raw.length > 100) return res.status(400).json({ error: 'At most 100 rows at a time.' });
+    const supplier = cartonText(b.supplier, 120);
+    if (!supplier) return res.status(400).json({ error: 'Enter the supplier.' });
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const types = await cartonTypesFor(sql, raw);
+    const rows = [];
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i] || {};
+      const t = types.get(parseInt(r.type_id, 10));
+      if (!t) return res.status(400).json({ error: `Row ${i + 1}: pick a carton type.` });
+      if (t.hidden) return res.status(400).json({ error: `Row ${i + 1}: ${t.name} is hidden - show it again first.` });
+      const qty = cartonQty(r.qty);
+      if (!qty) return res.status(400).json({ error: `Row ${i + 1}: quantity must be a whole number of cartons above zero.` });
+      rows.push({ type: t, qty });
+    }
+    const held = await takeOpLocks(sql, [...new Set(rows.map(r => `carton-type:${r.type.id}`))]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const challanNo = cartonText(b.challan_no, 60);
+      const notes = cartonText(b.notes, 300);
+      const ids = [];
+      for (const r of rows) {
+        const x = await applyCartonChange(sql, { typeId: r.type.id, change: +r.qty, kind: 'in', supplier, challanNo, notes, user: req.user, occurredAt: entry.at });
+        if (x.error) return res.status(x.status || 400).json({ error: x.error + (ids.length ? ` (${ids.length} earlier row(s) were saved - check the log)` : '') });
+        ids.push(x.id);
+      }
+      const total = rows.reduce((a, r) => a + r.qty, 0);
+      await logAudit(sql, req, {
+        action: 'carton.stock_in', entityType: 'carton_type', entityId: null,
+        summary: `+${total.toLocaleString()} cartons in (bulk) from ${supplier}${challanNo ? ' · challan ' + challanNo : ''}: ${rows.map(r => r.qty.toLocaleString() + ' ' + cartonTypeLabel(r.type)).join(', ')}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+        metadata: { tx_ids: ids },
+      });
+      res.json({ ok: true, ids, total });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Stock Out (Bulk): several lines, each with its own type, quantity, issued
+// to and what for; one challan, entry date and note for all. Nothing is
+// saved unless every row is valid and every type has enough on hand for the
+// rows that take from it.
+app.post('/api/cartons/bulk-out', requirePermission('carton_btn_issue'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const raw = Array.isArray(b.rows) ? b.rows : [];
+    if (!raw.length) return res.status(400).json({ error: 'Add at least one row.' });
+    if (raw.length > 100) return res.status(400).json({ error: 'At most 100 rows at a time.' });
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const types = await cartonTypesFor(sql, raw);
+    const rows = [];
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i] || {};
+      const t = types.get(parseInt(r.type_id, 10));
+      if (!t) return res.status(400).json({ error: `Row ${i + 1}: pick a carton type.` });
+      if (t.hidden) return res.status(400).json({ error: `Row ${i + 1}: ${t.name} is hidden - show it again first.` });
+      const line = await readCartonIssueRow(sql, r);
+      if (line.error) return res.status(400).json({ error: `Row ${i + 1}: ${line.error}` });
+      rows.push({ type: t, ...line });
+    }
+    const typeIds = [...new Set(rows.map(r => r.type.id))];
+    const held = await takeOpLocks(sql, typeIds.map(id => `carton-type:${id}`));
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const fresh = await sql`SELECT id, current_balance FROM carton_types WHERE id = ANY(${typeIds})`;
+      const need = new Map();
+      for (const r of rows) need.set(r.type.id, (need.get(r.type.id) || 0) + r.qty);
+      for (const f of fresh) {
+        const n = need.get(f.id) || 0;
+        if (n > (Number(f.current_balance) || 0)) {
+          return res.status(400).json({ error: `Only ${(Number(f.current_balance) || 0).toLocaleString()} × ${cartonTypeLabel(types.get(f.id))} on hand - these rows need ${n.toLocaleString()}. Nothing was saved.` });
+        }
+      }
+      const challanNo = cartonText(b.challan_no, 60);
+      const notes = cartonText(b.notes, 300);
+      const ids = [];
+      for (const r of rows) {
+        const x = await applyCartonChange(sql, {
+          typeId: r.type.id, change: -r.qty, kind: 'out', reason: r.reason, jobId: r.jobId, manualJob: r.manualJob, otherReason: r.otherReason,
+          issuedTo: r.issuedTo, challanNo, notes, user: req.user, occurredAt: entry.at,
+        });
+        if (x.error) return res.status(x.status || 400).json({ error: x.error + (ids.length ? ` (${ids.length} earlier row(s) were saved - check the log)` : '') });
+        ids.push(x.id);
+      }
+      const total = rows.reduce((a, r) => a + r.qty, 0);
+      await logAudit(sql, req, {
+        action: 'carton.issue', entityType: 'carton_type', entityId: null,
+        summary: `-${total.toLocaleString()} cartons issued (bulk)${challanNo ? ' · challan ' + challanNo : ''}: ${rows.map(r => `${r.qty.toLocaleString()} ${cartonTypeLabel(r.type)} to ${r.issuedTo} for ${r.jobLabel}`).join('; ')}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+        metadata: { tx_ids: ids, job_ids: [...new Set(rows.map(r => r.jobId).filter(Boolean))] },
+      });
+      res.json({ ok: true, ids, total });
     } finally { await releaseOpLocks(sql, held); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
