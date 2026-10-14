@@ -2595,7 +2595,7 @@
 .jc-part input[type="text"]:focus, .jc-part textarea:focus { background: #fff7d6; }
 /* Production rows recorded at the Station: read-only on the job card except
    for a Super Admin - edited through the green ▶ in Quantity instead. */
-.jc-part tr.jc-row-locked input[readonly] { cursor: not-allowed; }
+.jc-part tr.jc-row-locked input[readonly] { cursor: not-allowed; background: rgba(120,100,80,0.06); }
 .jc-part tr.jc-row-locked input[readonly]:focus { background: transparent; }
 .jc-part textarea { min-height: 38px; }
 /* Details column: the plain text input stays exactly as it was so the
@@ -26460,8 +26460,10 @@ function particularsTable(p, job, opts) {
   // stage's Station entry (no PIN) for holders of the job_btn_operator_entry
   // Access Register row. Not in preview mode (finalized view is read-only).
   const canEntryDot = !opts.preview && job.id && hasPerm('job_btn_operator_entry');
-  // Locked for all but Super Admin (owner, 2026-10-01) - see the row below.
-  const jcStageRowsLocked = !isSuperAdmin();
+  // Read only unless the Particulars row is at Edit (Super Admin always) -
+  // owner, 2026-10-14; it was Super Admin only (2026-10-01). Changes go
+  // through the green ▶ Station entry.
+  const jcStageRowsLocked = !(isSuperAdmin() || hasPerm('job_btn_particulars'));
   // Carton Shipper (ready_packets_qty, recorded by Ready to Deliver) has its
   // own row under Ready to Delivery Qty - it used to share that row's
   // Quantity as "cartons | shipper" (owner, 2026-10-13). App only: the
@@ -35672,6 +35674,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_record_delivery', type: 'button' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'button' },
+  { key: 'job_btn_particulars',     type: 'edit-view' },
   { key: 'job_btn_delete_delivery', type: 'button' },
   { key: 'job_btn_adjust',          type: 'button' },
   { key: 'job_btn_stickers',        type: 'button' },
@@ -35781,6 +35784,8 @@ function nextAccLevelButton(current) {
   const idx = order.indexOf(current);
   return order[(idx + 1) % order.length] || order[0];
 }
+// 'edit-view': a row with just EDIT / VIEW (e.g. Particulars - always seen).
+function nextAccLevelEditView(current) { return current === 'yes' ? 'view' : 'yes'; }
 function nextAccLevelButton30(current) {
   const order = ['yes', '30-day', 'view', 'hidden'];
   const idx = order.indexOf(current);
@@ -35798,7 +35803,7 @@ async function cycleRolePermission(key, role) {
   if (!groupDef) return;
   const rowType = ACC_ROW_TYPE[key] || 'button';
   const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'hidden';
-  const next = rowType === 'tab' ? nextAccLevelTab(current) : rowType === 'button-30day' ? nextAccLevelButton30(current) : nextAccLevelButton(current);
+  const next = rowType === 'tab' ? nextAccLevelTab(current) : rowType === 'button-30day' ? nextAccLevelButton30(current) : rowType === 'edit-view' ? nextAccLevelEditView(current) : nextAccLevelButton(current);
   showSaving(true);
   try {
     await api('PUT', '/api/role-permissions', { key, role, level: next });
@@ -35841,6 +35846,7 @@ function accGroupRow(matrixData, key, rowType) {
     if (ACC_SUPER_ADMIN_ONLY_ROWS.has(key)) return `<td class="acc-cell deny locked" title="Access Register is Super Admin only — this can't be changed">HIDDEN</td>`;
     let level = group[role] || 'hidden';
     if (rowType === 'tab' && level === 'yes') level = 'view';   // older 'yes' rows (e.g. station_access) mean the tab is visible
+    if (rowType === 'edit-view' && level !== 'yes') level = 'view';   // EDIT / VIEW only - never hidden
     return `<td class="acc-cell ${cellClass(level)} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
   });
   return `<tr class="acc-group-row"><th class="acc-rowlabel">${label}</th>${cells.join('')}</tr>`;
