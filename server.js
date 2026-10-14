@@ -291,7 +291,21 @@ function getDb() {
 // Bumped again for automatic voucher numbers (finance.voucher_counters).
 // Bumped again to trim the Chart of Accounts to Cash + Bank Account (owner:
 // "we only have cash and bank account") - see the one-time clean-up in initDb.
-const SCHEMA_VERSION = 'v2026-09-26-chart-cash-bank-only';
+// Bumped again for inventory_items.deleted_at (deleting a paper item keeps
+// its stock history, reports and job links - owner, 2026-10-01).
+// Bumped again for inventory_transactions.deleted_scope (deleting a stock
+// entry from Stock In/Out moves it to the Archive - owner, 2026-10-01).
+// Bumped again for inventory_transactions.user_notes (Notes typed on the
+// Stock In / Stock Out reports - owner, 2026-10-05).
+// Bumped again for jobs.updated_at + its trigger (changed-only job refresh -
+// owner, 2026-10-05: the app had become slow).
+// Bumped again for issue_locks (one stock issue per job at a time - owner,
+// 2026-10-13: a double-saved Stock Out issued three jobs twice).
+// Bumped again for op_locks + the one-reversal-per-entry index (2026-10-13).
+// Bumped again to seed the new Access Register rows job_btn_history_reverse,
+// job_btn_process_without_paper and rpt_mil_products (2026-10-13).
+// Bumped again for stock_groups.shipper_note / loose_note (2026-10-13).
+const SCHEMA_VERSION = 'v2026-10-13-mil-cartons';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -352,28 +366,34 @@ const ROLE_PERMISSION_DEFAULTS = {
   // at all. Every job_btn_* is 3-state (yes=Edit / view=View, disabled /
   // hidden=not shown) — one row per button on the Jobs tab.
   job_tab_access:          { label: 'Jobs tab — view the job list and every status tab', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
-  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), and Add/Remove Job from Group', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', finance: 'view', store_manager: 'view', operator: 'view' } },
+  job_btn_edit:            { label: 'Edit button — also covers Add Special Color, Request Extra Packets, Show to Client, Edit Group, View Jobs (in a group), Add/Remove Job from Group, and a MIL product\'s Code / MIL Qty on the MIL Products report', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', finance: 'view', store_manager: 'view', operator: 'view' } },
   job_btn_history:         { label: 'History button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'view', store_manager: 'view', finance: 'view', operator: 'view' } },
+  // Job History's Reverse button (2026-10-12). Also needs the row for that
+  // kind of change (Delete Delivery / Invoicing fields / Edit). Defaults =
+  // the roles that could already use it, so nobody loses it on upgrade.
+  job_btn_history_reverse: { label: 'History — Reverse button: undo a delivery added / removed / edited, a Rate / Sale Tax / Carton Shipper change, or a job card edit (also needs the row for that kind of change)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   job_btn_link:            { label: 'Link Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_print:           { label: 'Print button', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
   job_btn_block:           { label: 'Block button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_delete:          { label: 'Delete button', levels: { admin: 'yes' } },
   job_btn_create_mil:      { label: 'Create Mil Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing and Finalize as Delivered', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing, Finalize as Delivered and Back to Partial Delivery', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
   // What is typed saves itself into the job's delivery_draft; only the button
   // turns it into an actual delivery. Defaults match the button's own roles,
   // so nothing changes until someone takes the button away from a role.
-  job_btn_delivery_details: { label: 'Delivery details — fill in Unit Cartons, Carton Shipper, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_delivery_details: { label: 'Delivery details — fill in Delivered UC Qty, Carton Shipper, Date, PO No., Batch No. and Invoice No. (saves as a draft; recording it is the row above)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // The green/yellow dot beside a Job Card particulars row. Opens that
   // stage's Station entry with no station PIN asked, so the holder can fix
   // an operator's quantity from the job card. The entry can only edit the
   // numbers — advancing/skipping the stage stays PIN-only.
   job_btn_operator_entry:  { label: 'Operator Entry dot — open a particulars row\'s Station entry from the Job Card (no station PIN) to edit its quantities', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_delete_delivery: { label: 'Delete Delivery button', levels: { admin: 'yes' } },
+  // Was hard-wired to Admin (2026-10-05); now its own row, Admin by default.
+  job_btn_process_without_paper: { label: 'Process without paper — send a job that is waiting for paper into production with no stock issued', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
   // Distinct from the existing wastage_adjustment group above (which also
   // covers the Finalized Jobs tab and the Manual Job Card Consumption
@@ -400,8 +420,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // keep enforcing exactly as before in the meantime.
   inventory_tab_access:    { label: 'Inventory tab — view the paper list', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   imports_tab_access:      { label: 'Imports — view the booked-shipments report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
-  inv_btn_stock_in:        { label: 'Stock In button — also covers Stock In (Bulk) and receiving a shipment in Imports', levels: { admin: 'yes', store_manager: 'yes' } },
-  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk), Issue Stock in the Pending Stock queue, and Approve/Reject a packet top-up request', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_stock_in:        { label: 'Stock In button — also covers Stock In (Bulk), receiving a shipment in Imports, and editing a Stock In entry\'s Date / Challan No. / Notes', levels: { admin: 'yes', store_manager: 'yes' } },
+  inv_btn_stock_out:       { label: 'Stock Out button — also covers Stock Out (Bulk), Issue Stock in the Pending Stock queue, Approve/Reject a packet top-up request, and editing a Stock Out entry\'s Date / Challan No. / Notes', levels: { admin: 'yes', store_manager: 'yes' } },
   inv_btn_offcut_issuance: { label: 'Offcut Issuance button', levels: { admin: 'yes', store_manager: 'yes' } },
   inv_btn_history:         { label: 'History button', levels: { admin: 'yes', ceo: 'view', production_manager: 'view', store_manager: 'yes', finance: 'view' } },
   inv_btn_edit:            { label: 'Edit button', levels: { admin: 'yes', store_manager: 'yes' } },
@@ -432,6 +452,9 @@ const ROLE_PERMISSION_DEFAULTS = {
   // (only Super Admin gets this today).
   rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
   rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  // Its own row (2026-10-13); it rode on the Jobs Report before, so it starts
+  // with the same roles.
+  rpt_mil_products:                { label: 'MIL Products report — MIL Qty, Ready, In Process, Shipped and Carton Shipper per MIL product (editing Code / MIL Qty there needs the Edit button row)', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   rpt_production_report:           { label: 'Production Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   // Its own row rather than riding on the Jobs Report: this one accounts for
   // deleted and never-used job numbers, which is an audit question, not a
@@ -488,12 +511,27 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_tab_access:  { label: 'Product Rate tab — view jobs grouped by product', levels: { ceo: 'view', finance: 'view' } },
   products_btn_rate:    { label: 'Rate — edit a Product Rate tile\'s default Rate, and use its "+" (fold another product in)', levels: { finance: 'yes', ceo: 'view' } },
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
+  dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
+  products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
 // round trip — refreshRolePermissions() is awaited right after every
 // successful PUT.
 let ROLE_PERMS = {};
+// When this copy of the server last read the table. Vercel runs several
+// copies at once and a save only refreshes the copy that handled it, so
+// the others re-read it once it is older than ROLE_PERMS_MAX_AGE_MS -
+// otherwise two people with the same role could get different buttons
+// depending on which copy answered them (Store Managers #8 / #19, 2026-10-01).
+let ROLE_PERMS_LOADED_AT = 0;
+let ROLE_PERMS_INFLIGHT = null;
+const ROLE_PERMS_MAX_AGE_MS = 30 * 1000;
+function ensureRolePermsFresh() {
+  if (Date.now() - ROLE_PERMS_LOADED_AT < ROLE_PERMS_MAX_AGE_MS) return Promise.resolve();
+  if (!ROLE_PERMS_INFLIGHT) ROLE_PERMS_INFLIGHT = refreshRolePermissions().finally(() => { ROLE_PERMS_INFLIGHT = null; });
+  return ROLE_PERMS_INFLIGHT;
+}
 async function refreshRolePermissions() {
   try {
     await dbReady;
@@ -506,6 +544,7 @@ async function refreshRolePermissions() {
       next[r.permission_key][r.role] = r.level;
     }
     ROLE_PERMS = next;
+    ROLE_PERMS_LOADED_AT = Date.now();
   } catch (e) {
     console.error('refreshRolePermissions failed:', e.message);
   }
@@ -649,6 +688,15 @@ async function initDb() {
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS expdate     TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mrp         TEXT`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS particulars JSONB DEFAULT '{}'`;
+    // When a job last changed - kept by a trigger on EVERY update, so the app
+    // can refresh only the jobs that changed (GET /api/jobs?since=).
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+    await sql`
+      CREATE OR REPLACE FUNCTION jobs_touch_updated_at() RETURNS trigger AS $$
+      BEGIN NEW.updated_at := NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql`;
+    await sql`DROP TRIGGER IF EXISTS jobs_touch_updated_at ON jobs`;
+    await sql`CREATE TRIGGER jobs_touch_updated_at BEFORE UPDATE ON jobs FOR EACH ROW EXECUTE FUNCTION jobs_touch_updated_at()`;
+    await sql`CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at)`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS inventory_item_id INTEGER`;
     // Stock issuance workflow: jobs start 'pending' until a stock-role user
     // (or admin) issues stock, which deducts inventory and flips to 'issued'.
@@ -782,6 +830,10 @@ async function initDb() {
     // priority / packets / MRP / etc.). Sub jobs created via
     // duplicate-into-job spread this template into their own columns.
     await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS template JSONB DEFAULT '{}'`;
+    // MIL Products report: the cartons on hand, typed by hand ("1400x5 +
+    // 1500x10") - which sizes ship isn't recorded anywhere (2026-10-13).
+    await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS shipper_note TEXT`;
+    await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS loose_note TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -950,6 +1002,12 @@ async function initDb() {
     // cut from (e.g. "24x32"). Set on first create; not overwritten on
     // subsequent matches — the first source stays as the canonical origin.
     await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS cut_from_size TEXT`;
+    // Deleting a paper item only hides it (owner, 2026-10-01): it leaves the
+    // Inventory list and pickers, but its stock movements, the reports and
+    // the jobs that used it keep it. Adding the same paper again, or stock
+    // coming back into it, brings it back.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
 
     // (paper_type, size, gsm, brand, is_offcut) uniquely identifies an
     // inventory line. COALESCE keeps NULLs from defeating uniqueness —
@@ -1005,6 +1063,17 @@ async function initDb() {
     // hides the row from movement reports.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    // Where an archived stock entry was deleted from: 'manual' (Manual
+    // Consumption only - still counts in Stock In/Out) or 'history' (Stock
+    // In/Out or Offcut Consumption - leaves those reports). NULL on an
+    // archived row = 'manual' (the only kind before 2026-10-01). Either way
+    // the balance is unchanged and the paper's History keeps the row.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS deleted_scope TEXT`;
+    // Notes typed later on the Stock In / Stock Out reports. Kept apart from
+    // the system `notes` (which carry references like "Job Card: 4237" that
+    // the Job column and Manual Consumption read). NULL = never edited;
+    // '' = cleared on purpose.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS user_notes TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_deleted_at_idx ON inventory_transactions(deleted_at) WHERE deleted_at IS NOT NULL`;
 
     // Inventory imports: booked-but-not-yet-arrived shipments. Status flows
@@ -1520,6 +1589,17 @@ async function initDb() {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // A product's own Special Colors (Products tab). product_key = the tile's
+    // product name, lowercased (aliases already resolved). Kept with the
+    // product only - never copied onto a job.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.product_specials (
+        product_key    TEXT PRIMARY KEY,
+        special_colors JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_by     TEXT,
+        updated_at     TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.company_settings (
         id          SERIAL PRIMARY KEY,
@@ -1654,6 +1734,32 @@ async function initDb() {
       )
     `;
 
+    // One stock issue per job at a time: performIssueStock claims the job's row
+    // here while it works, so a second request for the same job (a double
+    // click, a retry on a slow line) is refused instead of issuing twice.
+    await sql`
+      CREATE TABLE IF NOT EXISTS issue_locks (
+        job_id INTEGER PRIMARY KEY,
+        at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Shared "one at a time" locks for saves that must never run twice at
+    // once (see takeOpLocks). A row is the lock; a crash leaves it to be
+    // taken over after 60 seconds.
+    await sql`
+      CREATE TABLE IF NOT EXISTS op_locks (
+        key TEXT PRIMARY KEY,
+        at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    // An entry can be reversed only once - even two reverse clicks that
+    // reach the server together. Skipped (logged) if old data already has a
+    // doubled reversal, so start-up never fails on it.
+    try {
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_inv_tx_reverses_once ON inventory_transactions (reverses_tx_id) WHERE reverses_tx_id IS NOT NULL`;
+    } catch (e) { console.error('ux_inv_tx_reverses_once not created (an entry already has two reversals):', e.message); }
+
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
@@ -1739,6 +1845,8 @@ async function authMiddleware(req, res, next) {
       // Invalid/expired token — leave req.user undefined.
     }
   }
+  // Signed-in requests are the ones checked against the Permissions table.
+  if (req.user) await ensureRolePermsFresh();
   next();
 }
 // Best-effort User-Agent → short human label for the Users tab's session
@@ -1793,6 +1901,17 @@ function normalizeUserRoles(src) {
   }
   return out;
 }
+// Job-card particulars rows recorded at the Station - locked to Super Admin
+// on the job card (see PUT /api/jobs/:id).
+const STATION_LOCKED_PARTICULARS = [
+  'printed_sheets_qty', 'printed_waste_sheets',
+  'coating_sheets_qty', 'coating_waste_sheets', 'uv_waste_sheets',
+  'embellish_sheets_qty', 'embellish_waste_sheets',
+  'die_cutting_sheets', 'die_cutting_waste',
+  'sorted_cartons_qty', 'sorted_cartons_waste',
+  'pasted_cartons_qty', 'pasting_waste_qty',
+  'delivered_cartons_qty', 'ready_packets_qty', 'loose_shipper_qty',
+];
 function userHasRole(user, ...want) {
   if (!user) return false;
   const rs = normalizeUserRoles(Array.isArray(user.roles) && user.roles.length ? user.roles : user.role);
@@ -2034,6 +2153,33 @@ async function logSystemAudit(sql, { action, entityType, entityId, summary, meta
   }
 }
 
+// Job History "Reverse" (owner, 2026-10-12): a request that undoes one
+// History line carries reverses_audit_id; the new audit row records it, so
+// that line shows as Reversed and can never be undone twice.
+function reversesAuditIdOf(req) {
+  const v = parseInt((req.body && req.body.reverses_audit_id) ?? (req.query && req.query.reverses_audit_id), 10);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+async function alreadyReversed(sql, auditId) {
+  const r = await sql`SELECT id FROM audit_log WHERE metadata->>'reverses_audit_id' = ${String(auditId)} LIMIT 1`;
+  return r.length > 0;
+}
+// One delivery entry in words, for History lines: cartons, Carton Shipper,
+// Invoice No., PO, Batch and the delivery date.
+function deliveryFactsText(d) {
+  if (!d || typeof d !== 'object') return '';
+  const n = parseFloat(String(d.cartons || '').replace(/[^0-9.\-]/g, ''));
+  const inv = String(d.notes || '').trim();
+  const parts = [
+    `${Number.isFinite(n) ? n.toLocaleString() : (d.cartons || '?')} cartons`,
+    d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '' ? `Carton Shipper ${d.cartons_packets}` : '',
+    inv && inv !== 'Backfilled from legacy delqty on schema upgrade' ? `Invoice No. ${inv}` : '',
+    d.po_no ? `PO ${d.po_no}` : '',
+    d.batch_no ? `Batch ${d.batch_no}` : '',
+    d.date ? `dated ${String(d.date).slice(0, 10).split('-').reverse().join('/')}` : '',
+  ];
+  return parts.filter(Boolean).join(', ');
+}
 async function logAudit(sql, req, { action, entityType, entityId, summary, metadata }) {
   if (!req.user) return;
   try {
@@ -4216,6 +4362,35 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
     // Station manager's Issue Stock button (isOffcutJob() also needs the
     // unloaded `inventory` array client-side).
     const deliveredIdx = STAGES.length - 1;
+    const stripPricing = (rows) => { if (!canSeeFinanceData(req.user)) for (const j of rows) { delete j.rate; delete j.tax_pct; } return rows; };
+    // Changed-only refresh: jobs updated since ?since= (30 s overlap so a row
+    // written while the last refresh ran is never missed), plus every live id
+    // so archived jobs drop out on the page.
+    if (req.query.since) {
+      const since = new Date(String(req.query.since));
+      if (isNaN(since)) return res.status(400).json({ error: 'Bad since' });
+      const [{ now }] = await sql`SELECT NOW() AS now`;
+      const changed = await sql`
+        SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
+        FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL AND j.updated_at >= ${since.toISOString()}::timestamptz - INTERVAL '30 seconds'
+        ORDER BY j.id ASC`;
+      const ids = await sql`SELECT id FROM jobs WHERE deleted_at IS NULL ORDER BY id ASC`;
+      return res.json({ mode: 'delta', server_now: now, jobs: stripPricing(changed), ids: ids.map(r => r.id) });
+    }
+    // Full list in pages by id - no single response comes near Vercel's
+    // 4.5 MB cap however many jobs there are.
+    if (req.query.sync) {
+      const afterId = Math.max(0, parseInt(req.query.after_id, 10) || 0);
+      const limit = Math.min(500, Math.max(50, parseInt(req.query.limit, 10) || 250));
+      const [{ now }] = await sql`SELECT NOW() AS now`;
+      const page = await sql`
+        SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
+        FROM jobs j LEFT JOIN inventory_items inv ON inv.id = j.inventory_item_id
+        WHERE j.deleted_at IS NULL AND j.id > ${afterId}
+        ORDER BY j.id ASC LIMIT ${limit}`;
+      return res.json({ mode: 'page', server_now: now, jobs: stripPricing(page), next_after_id: page.length === limit ? page[page.length - 1].id : null });
+    }
     const jobs = req.query.active
       ? await sql`
           SELECT j.*, COALESCE(j.paper, inv.paper_type) AS paper_resolved, COALESCE(inv.is_offcut, false) AS paper_is_offcut
@@ -4632,6 +4807,97 @@ function jobDeductionSheets({ paperType, particulars }) {
   return Math.round(packets * ps);
 }
 
+// How many sheets of the job's MAIN paper went out beyond what the job now
+// needs and nobody has decided about yet - or null when none (owner,
+// 2026-10-05: E-588's cut went 1/2 -> 1/4 after 200 sheets were issued;
+// it needs 100). Read from the stock ledger itself:
+//   issued  = the job's stock-outs from its main paper GROUP (type / size /
+//             gsm / offcut - any brand), net of refunds; reversed entries
+//             and reversal rows are left out (they cancel).
+//   needed  = Quantity of Packets x sheets per packet, less a 2nd paper of
+//             another group (it is issued apart), plus approved top-ups
+//             (not the ones a "Use" decision created - see below).
+//   settled = every earlier over-issue decision + one still pending. A
+//             "Use" decision both adds a top-up and is settled, so its
+//             top-ups are not counted in needed. "Add to Offcut" credits
+//             (job-offcut) are not counted in issued for the same reason.
+// The extra is split over the brands it came from, like an over-issue at
+// issue time, so the existing decision route can handle it unchanged.
+const OVER_ISSUE_LEDGER_REASONS = ['job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund', 'job-issuance-reversed'];
+async function jobMainPaperOverIssue(sql, job) {
+  const p = job.particulars || {};
+  if (!job.inventory_item_id || p.paper_waived) return null;
+  const anchor = (await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`)[0];
+  if (!anchor) return null;
+  const paperType = anchor.paper_type || '';
+  const ps = packetSize(paperType);
+  const total = jobDeductionSheets({ paperType, particulars: p });
+  if (total <= 0) return null;
+  const sameGroup = (a, b) => (a.paper_type || '') === (b.paper_type || '') && (a.size || '') === (b.size || '')
+    && String(a.gsm || '') === String(b.gsm || '') && !!a.is_offcut === !!b.is_offcut;
+  let secSheets = 0;
+  const sec = p.secondary_paper;
+  if (sec && sec.inventory_item_id && parseFloat(sec.packets) > 0) {
+    const secItem = (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0];
+    if (secItem && !sameGroup(secItem, anchor)) secSheets = Math.round(parseFloat(sec.packets) * packetSize(secItem.paper_type || ''));
+  }
+  const topupSheets = (Array.isArray(p.packets_topups) ? p.packets_topups : [])
+    .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile')
+    .reduce((a, t) => a + Math.round((parseFloat(t.qty) || 0) * ps), 0);
+  const needed = Math.max(0, total - secSheets) + topupSheets;
+  const rows = await sql`
+    SELECT t.item_id, t.change, i.brand
+      FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
+     WHERE t.job_id = ${job.id}
+       AND t.reason = ANY(${OVER_ISSUE_LEDGER_REASONS})
+       AND t.reverses_tx_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+       AND COALESCE(i.paper_type, '') = ${anchor.paper_type || ''}
+       AND COALESCE(i.size, '') = ${anchor.size || ''}
+       AND COALESCE(i.gsm::text, '') = ${String(anchor.gsm || '')}
+       AND COALESCE(i.is_offcut, false) = ${!!anchor.is_offcut}`;
+  const byItem = new Map();
+  for (const r of rows) {
+    const e = byItem.get(r.item_id) || { item_id: r.item_id, brand: r.brand || null, sheets: 0 };
+    e.sheets += -(Number(r.change) || 0);
+    byItem.set(r.item_id, e);
+  }
+  const issued = [...byItem.values()].reduce((a, e) => a + e.sheets, 0);
+  const settled = (Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions : []).reduce((a, d) => a + (Number(d && d.total_sheets) || 0), 0)
+    + (p.over_issue_pending ? (Number(p.over_issue_pending.total_sheets) || 0) : 0);
+  const over = Math.round(issued - needed - settled);
+  if (over < 1) return null;
+  // Split the extra over the brands it came from (largest last takes the rounding).
+  const src = [...byItem.values()].filter(e => e.sheets > 0).sort((a, b) => a.sheets - b.sheets);
+  const srcTotal = src.reduce((a, e) => a + e.sheets, 0);
+  if (!srcTotal) return null;
+  let left = over;
+  const splits = src.map((e, i) => {
+    const sh = i === src.length - 1 ? left : Math.min(left, Math.round(over * e.sheets / srcTotal));
+    left -= sh;
+    return { source_item_id: e.item_id, brand: e.brand, sheets: sh, packets: sh / ps };
+  }).filter(x => x.sheets > 0);
+  return { overSheets: over, issued, needed, settled, ps, unit: packetUnitLabelSrv(paperType), splits };
+}
+// The over_issue_pending record for an extra found AFTER issue (the same
+// shape issue-stock writes, plus why it arose).
+function overIssuePendingFrom(oi, email, why) {
+  return {
+    id: 'oi' + Date.now() + Math.floor(Math.random() * 1000),
+    total_sheets: oi.overSheets,
+    total_packets: oi.overSheets / oi.ps,
+    unit: oi.unit,
+    ps: oi.ps,
+    splits: oi.splits,
+    challan_no: null,
+    issued_by_email: email || null,
+    issued_at: new Date().toISOString(),
+    reason: why,
+    issued_sheets: oi.issued,
+    needed_sheets: oi.needed,
+  };
+}
+
 // Helper: apply a stock change (+/-) and write a ledger row. Must be called
 // after dbReady. Assumes the item exists. Updates current_balance atomically
 // in the same UPDATE so balance always matches the sum of ledger changes.
@@ -4655,7 +4921,8 @@ function stockEntryInstant(rawDate) {
 async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt }) {
   if (!itemId || !change) return null;
   if (change < 0) {
-    const [item] = await sql`SELECT current_balance FROM inventory_items WHERE id = ${itemId}`;
+    const [item] = await sql`SELECT current_balance, deleted_at FROM inventory_items WHERE id = ${itemId}`;
+    if (item && item.deleted_at) throw new Error('This paper item was deleted from Inventory - add the same paper again to bring it back, then retry.');
     const bal = item ? parseFloat(item.current_balance) || 0 : 0;
     if (bal + change < 0) throw new Error(`Insufficient stock: only ${bal} sheets available, cannot deduct ${Math.abs(change)}`);
   }
@@ -4671,8 +4938,12 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
             CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
     RETURNING id
   `;
+  // Stock coming back into a deleted item (a reversal, a receive) brings it back to Inventory.
   await sql`
-    UPDATE inventory_items SET current_balance = current_balance + ${change} WHERE id = ${itemId}
+    UPDATE inventory_items SET current_balance = current_balance + ${change},
+           deleted_at = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_at END,
+           deleted_by = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_by END
+     WHERE id = ${itemId}
   `;
   return inserted[0] ? inserted[0].id : null;
 }
@@ -4706,6 +4977,22 @@ async function reverseAutoConsumeOffcut(sql, job, user) {
   return particulars;
 }
 
+// A deleted item with exactly this paper (same match as the add-paper
+// duplicate check) comes back - with its history - instead of a new row.
+async function restoreDeletedItem(sql, { paper_type, size, gsm, brand, isOffcut }) {
+  const rows = await sql`
+    UPDATE inventory_items SET deleted_at = NULL, deleted_by = NULL
+     WHERE id = (SELECT id FROM inventory_items
+                  WHERE deleted_at IS NOT NULL AND is_offcut = ${!!isOffcut}
+                    AND lower(trim(paper_type))         = lower(trim(${paper_type}))
+                    AND lower(trim(COALESCE(size,'')))  = lower(trim(COALESCE(${size||null},  '')))
+                    AND lower(trim(COALESCE(gsm,'')))   = lower(trim(COALESCE(${gsm||null},   '')))
+                    AND lower(trim(COALESCE(brand,''))) = lower(trim(COALESCE(${brand||null}, '')))
+                  ORDER BY id LIMIT 1)
+    RETURNING *`;
+  return rows[0] || null;
+}
+
 async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
   const existing = await sql`
     SELECT * FROM inventory_items
@@ -4716,7 +5003,12 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
       AND is_offcut = true
     LIMIT 1
   `;
-  if (existing[0]) return existing[0];
+  if (existing[0]) {
+    if (existing[0].deleted_at) {
+      return (await sql`UPDATE inventory_items SET deleted_at = NULL, deleted_by = NULL WHERE id = ${existing[0].id} RETURNING *`)[0];
+    }
+    return existing[0];
+  }
   const inserted = await sql`
     INSERT INTO inventory_items (paper_type, size, gsm, brand, unit, supplier, is_offcut, cut_from_size, reorder_threshold)
     VALUES (${sourceItem.paper_type}, ${offcutSize||null}, ${sourceItem.gsm||null}, ${sourceItem.brand||null}, ${sourceItem.unit||'sheets'}, ${sourceItem.supplier||null}, true, ${sourceItem.size||null}, 0)
@@ -4959,6 +5251,7 @@ app.post('/api/jobs/:id/move-to-ctp', requirePermission('job_btn_stage_forward')
     // previous issuance is stale once the job resets.
     const cleanP = { ...(job.particulars || {}) };
     delete cleanP.partial_pending_sheets;
+    delete cleanP.paper_waived;   // needs paper again - drop "processed without paper"
     const updated = await sql`
       UPDATE jobs
          SET issuance_status='ctp',
@@ -5013,6 +5306,7 @@ app.post('/api/jobs/:id/move-to-pending-stock', requirePermission('job_btn_stage
     log.push({ stage: 'Pending Stock', status: 'active', notes: `Sent back to Pending Stock by ${by} (from ${STAGES[job.stage_index || 0]})`, by, time });
     const cleanP = { ...(job.particulars || {}) };
     delete cleanP.partial_pending_sheets;
+    delete cleanP.paper_waived;   // needs paper again - drop "processed without paper"
     const updated = await sql`
       UPDATE jobs
          SET issuance_status='pending',
@@ -5094,11 +5388,14 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
 // Field-level audit diff for a job edit. Booleans/arrays are pre-flattened
 // to comparable strings by the caller (coatings_str / is_shade_card_str /
 // client_visible_str) before being passed through diffFields.
+// Plain job columns a job-card edit can be reversed on (History "Reverse").
+const JOB_REVERT_COLS = ['name', 'client', 'jobcode', 'ref', 'dateissued', 'deadline', 'size', 'ups', 'sheets', 'qty', 'paper', 'machine',
+  'coatings', 'priority', 'cartonqty', 'notes', 'bno', 'mfgdate', 'expdate', 'mrp', 'cut_size', 'is_shade_card', 'client_visible'];
 const JOB_DIFF_FIELDS = [
   ['name', 'Job Name'], ['client', 'Company'], ['jobcode', 'Code'], ['ref', 'P.O. No.'],
   ['dateissued', 'Date'], ['deadline', 'Deadline'], ['size', 'Size/GSM'], ['ups', 'Ups'],
   ['sheets', 'Sheets Qty'], ['qty', 'P.O. Qty'], ['paper', 'Paper'], ['machine', 'Machine'],
-  ['priority', 'Priority'], ['cartonqty', 'Unit Carton Qty'], ['notes', 'Notes'],
+  ['priority', 'Priority'], ['cartonqty', 'Printed UC Qty'], ['notes', 'Notes'],
   ['bno', 'Batch No.'], ['mfgdate', 'Mfg Date'], ['expdate', 'Exp Date'], ['mrp', 'MRP'],
   ['coatings_str', 'Coatings'], ['is_shade_card_str', 'Shade Card'], ['client_visible_str', 'Show to Client'],
 ];
@@ -5115,6 +5412,9 @@ const PARTICULARS_LABELS = {
   sorted_cartons_qty: 'Sorted Cartons Qty', sorted_cartons_waste: 'Sorted Cartons Waste',
   pasted_cartons_qty: 'Pasted Cartons Qty', pasting_waste_qty: 'Pasting Waste Qty',
   delivered_cartons_qty: 'Ready to Delivery Qty',
+  // The number after " | " on that row - edits to it are logged too.
+  ready_packets_qty: 'Carton Shipper',
+  loose_shipper_qty: 'Loose Carton Shipper',
 };
 
 // UPDATE job details
@@ -5177,7 +5477,22 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     // ghost waste count in the daily-production coatings report.
     const priorParticulars = (prior[0]?.particulars && typeof prior[0].particulars === 'object')
       ? prior[0].particulars : {};
-    const newParticularsRaw = (particulars && typeof particulars === 'object') ? particulars : {};
+    // Production numbers (Printed Sheets … Ready to Delivery) belong to the
+    // Station: only a Super Admin may change them on the job card. For anyone
+    // else the stored rows stand whatever the form sent - a PM corrects them
+    // at the operator station, so no entry goes missing (owner, 2026-10-01).
+    // This also stops a job card left open from writing old numbers back over
+    // what an operator has since recorded.
+    const newParticularsRaw = (() => {
+      const incoming = (particulars && typeof particulars === 'object') ? particulars : {};
+      if (userHasRole(req.user, 'super_admin')) return incoming;
+      const out = { ...incoming };
+      for (const k of STATION_LOCKED_PARTICULARS) {
+        if (priorParticulars[k] !== undefined) out[k] = priorParticulars[k];
+        else delete out[k];
+      }
+      return out;
+    })();
     // Admin job-card edits to Quantity/Name/Signature only ever patch the
     // flat display strings (see collectParticulars() on the client) — the
     // underlying entries[] that every report/tile actually reads from was
@@ -5282,6 +5597,12 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       if (sigChanged)     remap(editedSig,     'operator');
       if (detailsChanged) remap(editedDetails, 'date', dmyToISO);
       newParticulars[key] = { ...newRow, entries: nextEntries };
+    }
+    // "Processed without paper" (Admin) is never a form field: keep it through
+    // a job-card save even if the page didn't send it back. Only the resets
+    // that send the job back to needing paper remove it.
+    if (priorParticulars.paper_waived && newParticulars.paper_waived === undefined) {
+      newParticulars.paper_waived = priorParticulars.paper_waived;
     }
     const STAGE_BY_KEY_PUT = {
       printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
@@ -5568,6 +5889,7 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     if (wasIssued && paperItemChanged) {
       const cleanP = { ...(job.particulars || {}) };
       delete cleanP.partial_pending_sheets;
+      delete cleanP.paper_waived;   // needs paper again - drop "processed without paper"
       delete cleanP.offcut_pre_consumed;
       const updated2 = await sql`
         UPDATE jobs
@@ -5585,11 +5907,51 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
         summary: `Paper changed on Job E-${job.id} after issuance — sent back to Pending Stock for re-issuance. Old paper ledger left untouched; store keeper must enter any manual return.`,
       });
     }
+    // What Reverse needs: every changed plain column and particulars row,
+    // before and after. Not reversible when the edit moved paper stock,
+    // changed the stage or cleaned production log lines - those must be
+    // changed back on the job card so stock and stages stay right.
+    const sameVal = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+    const revCols = {};
+    for (const c of JOB_REVERT_COLS) if (!sameVal(prior[0][c], job[c])) revCols[c] = { before: prior[0][c] ?? null, after: job[c] ?? null };
+    const revParts = {};
+    const pAfter = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+    for (const k of new Set([...Object.keys(priorParticulars || {}), ...Object.keys(pAfter)])) {
+      if (!sameVal((priorParticulars || {})[k], pAfter[k])) revParts[k] = { before: (priorParticulars || {})[k] ?? null, after: pAfter[k] ?? null };
+    }
+    const revBlock = paperItemChanged ? 'the paper was changed'
+      : (wasIssued && oldSheets !== newSheets) ? 'it changed issued paper'
+      : (oldOffcutSize !== newOffcutSize) ? 'it changed the offcut'
+      : ((prior[0].stage_index || 0) !== (job.stage_index || 0)) ? 'it moved the job to another stage'
+      : finalLog ? 'it changed the production log' : null;
     await logAudit(sql, req, {
       action: 'job.update', entityType: 'job', entityId: job.id,
       summary: `Edited Job E-${job.id}: ${job.name}${allChanges.length ? ' — ' + allChanges.join('; ') : ''}`,
-      metadata: { changes: allChanges },
+      metadata: { changes: allChanges, revert: { reversible: !revBlock, why: revBlock, cols: revCols, particulars: revParts } },
     });
+    // Quantity of Packets (or the 2nd paper's share) changed on a job whose
+    // paper already went out, same paper: if more went out than it now needs,
+    // raise the over-issue decision for the extra (see jobMainPaperOverIssue).
+    try {
+      const pq = (o) => String((o && o.quantity_of_packets) ?? '').trim();
+      const sp = (o) => String((o && o.secondary_paper && o.secondary_paper.packets) ?? '').trim();
+      const jp = job.particulars || {};
+      const needChanged = pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp);
+      if (needChanged && oldItemId === newItemId && !jp.over_issue_pending
+          && (job.issuance_status === 'issued' || job.issuance_status === 'ctp')) {
+        const oi = await jobMainPaperOverIssue(sql, job);
+        if (oi) {
+          const np = { ...jp, over_issue_pending: overIssuePendingFrom(oi, req.user && req.user.email, 'packets-lowered') };
+          const upd = await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)} WHERE id = ${job.id} RETURNING *`;
+          if (upd[0]) Object.assign(job, upd[0]);
+          await logAudit(sql, req, {
+            action: 'job.over_issue.raised', entityType: 'job', entityId: job.id,
+            summary: `Job E-${job.id}: Quantity of Packets lowered after its paper was issued - ${oi.issued.toLocaleString()} sheets went out, it now needs ${oi.needed.toLocaleString()}; ${oi.overSheets.toLocaleString()} sheets (${+(oi.overSheets / oi.ps).toFixed(2)} ${oi.unit}) extra waiting for a decision (Use in job / Add to Offcut / Send Back).`,
+            metadata: { issued_sheets: oi.issued, needed_sheets: oi.needed, over_sheets: oi.overSheets },
+          });
+        }
+      }
+    } catch (e) { console.error('over-issue check after save failed:', e.message); }   // never fails the save itself
     res.json(job);
   } catch (err) {
     console.error(err);
@@ -5642,6 +6004,70 @@ app.post('/api/jobs/:id/printed', requireAuth, async (req, res) => {
 // Dismiss pending stock for a delivered job. Admin-only. Clears the
 // issuance_status to 'issued' and removes any partial_pending_sheets
 // so the job drops out of the pending queue.
+// PROCESS WITHOUT PAPER (Admin only - owner, 2026-10-05). A job waiting for
+// paper (Pending Stock, part-issued, or 2nd paper still owed) goes into
+// production with NO stock issued: status 'issued', stage at least Printing,
+// nothing deducted. particulars.paper_waived records who / when and what was
+// owed, and makes primaryOwedSheets / secondaryOwedSheets (and the client's
+// twins) read 0, so it leaves Pending Stock and loses "Requires More Stock".
+// New and CTP jobs are refused: a CTP job comes to Pending Stock when its
+// plates are done.
+app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) => {
+  try {
+    if (!userHasBtn(req.user, 'job_btn_process_without_paper')) return res.status(403).json({ error: 'Not allowed - Process without paper is off for your role.' });
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const job = (await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const p0 = job.particulars || {};
+    if (p0.paper_waived) return res.status(400).json({ error: `Job E-${id} was already processed without paper.` });
+    const status = job.issuance_status;
+    if (status !== 'pending' && status !== 'issued') {
+      return res.status(400).json({ error: status === 'ctp'
+        ? `Job E-${id} is still at CTP - it comes to Pending Stock when its plates are done; process it from there.`
+        : `Job E-${id} is not waiting for paper.` });
+    }
+    const mainOwed = await primaryOwedSheets(sql, job);
+    const sec = p0.secondary_paper;
+    const secItem = (sec && sec.inventory_item_id) ? (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0] : null;
+    const secondOwed = secondaryOwedSheets(job, secItem);
+    if (status === 'issued' && mainOwed <= 0 && secondOwed <= 0) {
+      return res.status(400).json({ error: `Job E-${id} already has all its paper - nothing to process without.` });
+    }
+    const nowIso = new Date().toISOString();
+    const time = businessStamp();
+    const who = (req.user && (req.user.name || req.user.email)) || 'Admin';
+    const p = { ...p0 };
+    delete p.partial_pending_sheets;
+    p.paper_waived = { at: nowIso, by: (req.user && req.user.email) || null, by_name: who, from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed };
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    const owedTxt = [mainOwed > 0 ? `${mainOwed.toLocaleString()} sheets main paper` : '', secondOwed > 0 ? `${secondOwed.toLocaleString()} sheets 2nd paper` : ''].filter(Boolean).join(' + ');
+    log.push({ stage: 'Printing', status: 'active', notes: `Processed without paper by ${who} (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}`, by: `${who} (Admin)`, time });
+    const bumpedStage = Math.max(job.stage_index || 0, 1);
+    const updated = await sql`
+      UPDATE jobs
+         SET issuance_status = 'issued',
+             stage_index     = ${bumpedStage},
+             issued_at       = COALESCE(issued_at, NOW()),
+             issued_by_id    = COALESCE(issued_by_id, ${(req.user && req.user.id) || null}),
+             particulars     = ${JSON.stringify(p)},
+             log             = ${JSON.stringify(log)}
+       WHERE id = ${id} AND deleted_at IS NULL AND issuance_status = ${status}
+       RETURNING *`;
+    if (!updated.length) return res.status(409).json({ error: `Job E-${id} changed while you were looking - refresh and try again.` });
+    await logAudit(sql, req, {
+      action: 'job.process_without_paper',
+      entityType: 'job',
+      entityId: id,
+      summary: `Processed Job E-${id}: ${job.name} without paper (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}. Was ${status === 'pending' ? 'in Pending Stock' : 'part-issued'}.`,
+      metadata: { from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed },
+    });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pending'), async (req, res) => {
   try {
     await dbReady;
@@ -5673,7 +6099,65 @@ app.post('/api/jobs/:id/dismiss-pending', requirePermission('inv_btn_dismiss_pen
 // of a parallel re-implementation that could drift out of sync. Returns
 // { status, error } on any rejection, or { job } on success — the caller
 // decides how to respond (res.json vs. res.status(...).json(...)).
+// Issue stock to a job - one at a time per job. Two identical requests that
+// arrive together (Stock Out (Bulk) saved twice, challan 1176 on 2026-10-13:
+// E-913 / E-915 / E-863 were issued twice) both passed the "already fully
+// issued" check before either was written. The second now waits its turn:
+// it is refused while the first holds the job's lock (a lock older than 60s
+// is treated as left over from a crash and taken over).
+// ── One at a time (owner, 2026-10-13) ───────────────────────────────
+// takeOpLocks claims every key or none: a key held by another request means
+// "the same thing is being saved right now" - a double click, a retry on a
+// slow line, two people at once. By default that second request is refused
+// (409) so nothing is ever saved twice; { wait: true } instead waits its turn
+// (up to ~8s) - for edits, where the second one is a different change that
+// must not overwrite the first. A lock older than 60s is a crash leftover and
+// is taken over. Keys: job-stock:<id> (paper issued / reversed for a job),
+// job-delivery:<id>, tx-reverse:<txId>, audit-reverse:<auditId>,
+// item-tx:<itemId>.
+async function takeOpLocks(sql, keys, opts) {
+  const want = [...new Set((keys || []).filter(Boolean).map(String))].sort();
+  const until = Date.now() + ((opts && opts.wait) ? 8000 : 0);
+  for (;;) {
+    const held = [];
+    let busy = false;
+    for (const k of want) {
+      const got = await sql`
+        INSERT INTO op_locks (key, at) VALUES (${k}, NOW())
+        ON CONFLICT (key) DO UPDATE SET at = NOW() WHERE op_locks.at < NOW() - INTERVAL '60 seconds'
+        RETURNING key`;
+      if (!got.length) { busy = true; break; }
+      held.push(k);
+    }
+    if (!busy) return held;
+    await releaseOpLocks(sql, held);
+    if (Date.now() >= until) return null;
+    await new Promise(r => setTimeout(r, 150 + Math.floor(Math.random() * 100)));
+  }
+}
+async function releaseOpLocks(sql, held) {
+  for (const k of held || []) {
+    try { await sql`DELETE FROM op_locks WHERE key = ${k}`; } catch (e) { console.error('op lock release failed', k, e.message); }
+  }
+}
+const OP_BUSY = 'This is being saved right now (a second click, or someone else at the same moment) - refresh in a moment and check before trying again.';
+
+// Issue stock to a job - one at a time per job. Two identical requests that
+// arrive together (Stock Out (Bulk) saved twice, challan 1176 on 2026-10-13:
+// E-913 / E-915 / E-863 were issued twice) both passed the "already fully
+// issued" check before either was written. The second is now refused while
+// the first holds the job's lock. Reversing a job's issue takes the same
+// lock, so an issue and a reverse can't cross either.
 async function performIssueStock(sql, req, id, body) {
+  const held = await takeOpLocks(sql, [`job-stock:${id}`]);
+  if (!held) return { status: 409, error: `Job E-${id} is being issued right now (a second save of the same issue?) - refresh in a moment before issuing again.` };
+  try {
+    return await performIssueStockUnlocked(sql, req, id, body);
+  } finally {
+    await releaseOpLocks(sql, held);
+  }
+}
+async function performIssueStockUnlocked(sql, req, id, body) {
   const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
   if (!rows.length) return { status: 404, error: 'Job not found' };
   const job = rows[0];
@@ -5685,6 +6169,9 @@ async function performIssueStock(sql, req, id, body) {
   // Stock and issues it independently of the primary.
   const source = String((body && body.source) || 'primary').toLowerCase();
   const isSecondary = source === 'secondary';
+  if (job.particulars && job.particulars.paper_waived) {
+    return { status: 400, error: `Job E-${id} was processed without paper by an Admin - nothing to issue. Send it back to Pending Stock first if paper should be issued.` };
+  }
   const secondaryRef = (job.particulars && job.particulars.secondary_paper) || null;
   if (isSecondary) {
     if (!secondaryRef || !secondaryRef.inventory_item_id) {
@@ -5898,7 +6385,9 @@ async function performIssueStock(sql, req, id, body) {
     const overNote = overThis > 0
       ? ` · ${fmtPack(overPacks)} ${unit} added to offcut (over-issued)`
       : '';
-    await applyInventoryChange(sql, {
+    // The stock-out row's id rides on the job's History entry, so a click
+    // there opens exactly this issuance in the Stock Out report.
+    const issueTxId = await applyInventoryChange(sql, {
       itemId: s.item_id,
       change: -s.sheets,
       reason: 'job-consumed',
@@ -5933,7 +6422,8 @@ async function performIssueStock(sql, req, id, body) {
     // Source deduction stays unchanged (still the -s.sheets applied
     // above), so the inventory report keeps recording the extra
     // issuance exactly as before.
-    issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets });
+    issuedItems.push({ item_id: s.item_id, brand: it.brand || '', sheets: s.sheets, tx_id: issueTxId || null,
+      paper: [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' ') });
   }
   // Build the pending decision record from every split that got extras.
   const overIssueSplits = [];
@@ -6047,14 +6537,18 @@ async function performIssueStock(sql, req, id, body) {
          WHERE id = ${id}
          RETURNING *
       `;
-  const brandList = issuedItems.map(x => x.brand || 'no brand').join(', ');
+  // WHICH paper went out - type, size, gsm and brand - not just the qty
+  // (owner, 2026-10-01): "... of bleach board 25x36 270gsm · silverpack".
+  const paperList = issuedItems.map(x => `${x.paper || 'paper'}${x.brand ? ' · ' + x.brand : ''}`).join(' + ');
   await logAudit(sql, req, {
     action: 'job.issue_stock',
     entityType: 'job',
     entityId: id,
+    // tx_ids: the stock-out rows this issuance wrote, for the History click.
+    metadata: { tx_ids: issuedItems.map(x => x.tx_id).filter(Boolean), items: issuedItems, secondary: isSecondary },
     // Issued amount in packets first; what is still NEEDED stays in sheets as
     // well, since that is the figure the rest of the app quotes back.
-    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} for Job E-${id}: ${job.name} (${brandList})${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
+    summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} of ${paperList} for Job E-${id}: ${job.name}${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
   });
   return { job: updated[0] };
 }
@@ -6115,6 +6609,8 @@ app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, requirePermiss
 // primary needSheets math. 0 when the job isn't waiting on its main paper.
 async function primaryOwedSheets(sql, job, itemsById) {
   if (!job.inventory_item_id) return 0;
+  // Processed without paper by an Admin - nothing is owed.
+  if (job.particulars && job.particulars.paper_waived) return 0;
   const p = job.particulars || {};
   const partialRaw = parseInt(p.partial_pending_sheets, 10);
   const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
@@ -6166,6 +6662,7 @@ function secondaryOwedSheets(job, secItem) {
   const p = job.particulars || {};
   const sec = p.secondary_paper;
   if (!sec || !sec.inventory_item_id || !secItem) return 0;
+  if (p.paper_waived) return 0;          // processed without paper by an Admin
   if (job.issuance_status !== 'pending' && job.issuance_status !== 'issued') return 0;
   const packets = parseFloat(sec.packets);
   if (!Number.isFinite(packets) || packets <= 0) return 0;
@@ -6192,7 +6689,7 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
       WHERE deleted_at IS NULL
         AND issuance_status IN ('pending', 'issued', 'ctp')
       ORDER BY id ASC`;
-    const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true`;
+    const offcuts = await sql`SELECT * FROM inventory_items WHERE is_offcut = true AND deleted_at IS NULL`;
     const itemsById = new Map(offcuts.map(it => [it.id, it]));
     const onHandByGroup = new Map();
     for (const it of offcuts) {
@@ -6271,7 +6768,7 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
     if (owed <= 0) return res.status(400).json({ error: 'Nothing pending to issue for this job.' });
     const group = (await sql`
       SELECT * FROM inventory_items
-      WHERE is_offcut = true AND current_balance > 0
+      WHERE is_offcut = true AND current_balance > 0 AND deleted_at IS NULL
         AND COALESCE(paper_type,'') = ${anchor.paper_type || ''}
         AND COALESCE(size,'') = ${anchor.size || ''}
         AND COALESCE(gsm::text,'') = ${String(anchor.gsm || '')}
@@ -6322,7 +6819,7 @@ app.get('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const sql = getDb();
     const items = await sql`
       SELECT id, paper_type, size, gsm, brand, supplier, current_balance, cut_from_size
-      FROM inventory_items WHERE is_offcut = true
+      FROM inventory_items WHERE is_offcut = true AND deleted_at IS NULL
       ORDER BY lower(paper_type), lower(COALESCE(size,'')), COALESCE(gsm,''), lower(COALESCE(brand,''))`;
     const all = await sql`SELECT paper_type, size, gsm, brand, supplier FROM inventory_items`;
     const distinct = (k) => [...new Set(all.map(r => String(r[k] || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
@@ -6354,7 +6851,8 @@ app.post('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const opening = parseSheets(req.body.opening_sheets);
     if (opening < 0) return res.status(400).json({ error: 'Opening quantity cannot be negative' });
     const who = `Paper Cutting ${v.operator.name}${req.body.person_name ? ' · ' + String(req.body.person_name).trim() : ''}`;
-    const item = (await sql`
+    const restored = await restoreDeletedItem(sql, { paper_type: paperType, size, gsm, brand, isOffcut: true });
+    const item = restored || (await sql`
       INSERT INTO inventory_items (paper_type, size, gsm, brand, reorder_threshold, supplier, is_offcut)
       VALUES (${paperType}, ${size}, ${gsm}, ${brand}, 0, ${supplier}, true)
       RETURNING *`)[0];
@@ -6369,7 +6867,7 @@ app.post('/api/station/offcut-items', requireStationUser, async (req, res) => {
     const label = `${paperType} ${size}${gsm ? ' ' + gsm + 'gsm' : ''}${brand ? ' · ' + brand : ''}`;
     await logAudit(sql, req, {
       action: 'inventory.create', entityType: 'inventory', entityId: item.id,
-      summary: `Added offcut item from Station by ${who}: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}`,
+      summary: `${restored ? 'Restored deleted offcut item' : 'Added offcut item'} from Station by ${who}: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}`,
     });
     res.json((await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`)[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -6418,6 +6916,11 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-stock:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -6436,13 +6939,27 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     // reverses the whole split. Each refund links back via reverses_tx_id
     // so the report's pair-hiding drops both sides cleanly. Do the same
     // for the (per-source-brand) job-offcut rows.
-    const consumedRows = await sql`
-      SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+    // Only issues of the job's CURRENT paper (main or 2nd, any brand): an
+    // old paper's issue from before a paper change stays with production by
+    // design and is not this job's issuance any more (owner, E-989 class,
+    // 2026-10-13).
+    const curSecRI = job.particulars && job.particulars.secondary_paper && job.particulars.secondary_paper.inventory_item_id;
+    const consumedAll = await sql`
+      SELECT t.id, t.item_id, t.change, t.created_at,
+             EXISTS (SELECT 1 FROM inventory_items c
+                      WHERE c.id IN (${job.inventory_item_id || 0}, ${curSecRI || 0})
+                        AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '')
+                        AND COALESCE(c.size, '') = COALESCE(i.size, '')
+                        AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '')
+                        AND COALESCE(c.is_offcut, false) = COALESCE(i.is_offcut, false)) AS current_paper
+        FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
       WHERE t.job_id = ${job.id} AND t.reason = 'job-consumed'
         AND t.reverses_tx_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
       ORDER BY t.id ASC
     `;
+    const consumedRows = consumedAll.filter(r => r.current_paper);
+    const oldPaperKept = consumedAll.length > consumedRows.length;
     for (const row of consumedRows) {
       await applyInventoryChange(sql, {
         itemId: row.item_id,
@@ -6454,13 +6971,17 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
         reversesTxId: row.id,
       });
     }
-    const offcutRows = await sql`
-      SELECT t.id, t.item_id, t.change FROM inventory_transactions t
+    const offcutAll = await sql`
+      SELECT t.id, t.item_id, t.change, t.created_at FROM inventory_transactions t
       WHERE t.job_id = ${job.id} AND t.reason = 'job-offcut'
         AND t.reverses_tx_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
       ORDER BY t.id ASC
     `;
+    // With an old paper's issue left standing, only the offcut returns
+    // written with the issues being undone (same moment) are pulled back.
+    const offcutRows = !oldPaperKept ? offcutAll : offcutAll.filter(o => consumedRows.some(c =>
+      Math.abs(new Date(o.created_at) - new Date(c.created_at)) <= 10000 && o.id > c.id));
     for (const row of offcutRows) {
       await applyInventoryChange(sql, {
         itemId: row.item_id,
@@ -6490,6 +7011,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     // one issuance.
     const cleanParticulars = { ...(job.particulars || {}) };
     delete cleanParticulars.partial_pending_sheets;
+    delete cleanParticulars.paper_waived;   // needs paper again - drop "processed without paper"
     delete cleanParticulars.over_issue_pending;
     delete cleanParticulars.over_issue_decisions;
     if (Array.isArray(cleanParticulars.packets_topups)) {
@@ -6514,6 +7036,7 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
       summary: `Reversed stock issuance for Job E-${id}: ${job.name}`,
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -6569,6 +7092,11 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const topupId = req.params.topupId;
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-stock:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -6648,6 +7176,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
       summary: `Approved +${t.qty} extra packets for Job E-${id}: ${sheets} sheets deducted`,
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -6692,6 +7221,10 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_b
 //                (per-split findOrCreateOffcutItem + applyInventoryChange).
 //   • return  → logs the decision only. Store keeper does the physical
 //                return through the normal manual inventory tools.
+//   • ignore  → Super Admin only (owner, 2026-10-13): nothing moves and
+//                nothing is added - e.g. the PM already put the extra into
+//                offcut by hand. Archived like the others, so the same
+//                extra is never raised again.
 // The source item's original deduction stays untouched, so the inventory
 // report keeps recording the extra issuance exactly as it did before.
 app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), async (req, res) => {
@@ -6700,8 +7233,11 @@ app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), a
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const decision = String((req.body && req.body.decision) || '').trim();
-    if (!['use', 'offcut', 'return'].includes(decision)) {
-      return res.status(400).json({ error: 'decision must be use, offcut, or return' });
+    if (!['use', 'offcut', 'return', 'ignore'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be use, offcut, return or ignore' });
+    }
+    if (decision === 'ignore' && !userHasRole(req.user, 'super_admin')) {
+      return res.status(403).json({ error: 'Only a Super Admin can ignore an over-issue.' });
     }
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -6748,6 +7284,8 @@ app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), a
         });
       }
       summary = `Job E-${id}: over-issued ${totalPackets} ${unit} credited to offcut (PM: Add to Offcut)`;
+    } else if (decision === 'ignore') {
+      summary = `Job E-${id}: over-issued ${totalPackets} ${unit} ignored by Super Admin - no stock change and nothing added to the job (e.g. the offcut was already entered by hand)`;
     } else {
       // return — no inventory transaction; ledger note comes from the
       // audit log line below.
@@ -6866,6 +7404,29 @@ async function productStandardRate(sql, jobName) {
   const rows = await sql`SELECT rate FROM finance.product_rates WHERE lower(btrim(product)) = ${key}`;
   return rows.length ? Number(rows[0].rate) : null;
 }
+// The product a job name counts as (Products tab), through its alias if it has one.
+async function productKeyFor(sql, jobName) {
+  const own = String(jobName || '').trim().toLowerCase();
+  if (!own) return '';
+  const al = await sql`SELECT canonical FROM finance.product_aliases WHERE alias = ${own}`;
+  return al.length ? String(al[0].canonical || '').trim().toLowerCase() : own;
+}
+// Same shape and limits as the job card's Special Colors editor: up to 5
+// colours, each with up to 4 mixes, lowercase, empty rows dropped.
+function normalizeSpecialColors(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter(s => s && typeof s === 'object')
+    .map(s => ({
+      name: String(s.name || '').trim().toLowerCase(),
+      mix: (Array.isArray(s.mix) ? s.mix : [])
+        .filter(m => m && typeof m === 'object')
+        .map(m => ({ color: String(m.color || '').trim().toLowerCase(), pct: String(m.pct || '').trim() }))
+        .filter(m => m.color || m.pct)
+        .slice(0, 4),
+    }))
+    .filter(s => s.name || s.mix.length)
+    .slice(0, 5);
+}
 function isRateOverride(rate, standard) {
   return standard !== null && standard !== undefined && rate !== null && rate !== undefined && Math.abs(Number(rate) - Number(standard)) > RATE_EPS;
 }
@@ -6887,7 +7448,67 @@ async function deliveryPricing(sql, job, { hasPricing, rate, taxPct }) {
   const t = hasPricing ? taxPct : jt;
   return { rate: r, taxPct: t, override: isRateOverride(r, standard) };
 }
-function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing }) {
+// ── Carton Shipper per delivery ───────────────────────────────────
+// Each delivery entry carries its OWN cartons_packets (owner, 2026-10-08).
+// It used to be one job-level figure (jobs.cartons_packets) that every new
+// delivery overwrote, so recording a 3rd delivery with 5 showed 5 on the
+// first two as well. A job none of whose entries carry the key yet is a
+// legacy job: before any per-delivery value is written, each of its entries
+// keeps exactly what its card showed until now - the job-level figure (a
+// wrong one can then be corrected on that one card). With no job-level
+// figure, the station's Carton Shipper (a whole-job count) goes onto the
+// latest delivery only, so the total is not counted twice.
+function deliveryHasOwnShipper(d) {
+  return !!d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets');
+}
+// Carton Shipper is written "1600x20" = 20 cartons of 1600 (owner,
+// 2026-10-13); older entries are a plain carton count. Counts cartons.
+function stationShipperTotal(job) {
+  // Total cartons = Carton Shipper + Loose Carton Shipper (2026-10-13).
+  const pp = (job && job.particulars) || {};
+  return stationShipperRowTotal(pp.ready_packets_qty) + stationShipperRowTotal(pp.loose_shipper_qty);
+}
+function stationShipperRowTotal(p) {
+  if (!p) return 0;
+  // One entry may hold several lines: "1600x20+1400x3" = 23 cartons.
+  const one = t => {
+    const m = /^([\d.]+)\s*[x×*]\s*([\d.]+)$/i.exec(t);
+    if (m) return parseFloat(m[2]) || 0;
+    const n = parseFloat(t.replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) ? n : 0;
+  };
+  const num = s => String(s ?? '').split('+').map(x => x.trim()).filter(Boolean).reduce((a, x) => a + one(x), 0);
+  if (Array.isArray(p.entries) && p.entries.length) return p.entries.reduce((a, e) => a + num(e && e.qty), 0);
+  return String(p.quantity || '').split('|').reduce((a, s) => a + num(s), 0);
+}
+function freezeLegacyShippers(list, job) {
+  const arr = Array.isArray(list) ? [...list] : [];
+  if (!arr.length || arr.some(deliveryHasOwnShipper)) return arr;
+  const own = (job.cartons_packets === null || job.cartons_packets === undefined || job.cartons_packets === '') ? null : Number(job.cartons_packets);
+  const station = stationShipperTotal(job);
+  const lastIx = arr.length - 1;
+  return arr.map((d, k) => ({
+    ...(d && typeof d === 'object' ? d : {}),
+    cartons_packets: Number.isFinite(own) ? own : ((k === lastIx && station > 0) ? station : null),
+  }));
+}
+// A typed Carton Shipper: null when blank, NaN when not a valid number.
+function parseShipperInput(raw) {
+  if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  return Number.isFinite(n) && n >= 0 ? n : NaN;
+}
+// The shipped total at which a job counts as fully delivered: its booked
+// qty - except a job sent back from Delivered because Ready cartons were
+// still unshipped (client undoFinalizeDelivery stamps stages[6].reopened),
+// which closes once those Ready cartons are shipped, not at the booked qty
+// it had already passed. Used by delivery create and edit alike.
+function deliveryTargetQty(job, stageIndex, stages, bookedQty) {
+  const reopened = !!(stageIndex === 6 && stages && stages[6] && stages[6].reopened);
+  return reopened
+    ? Math.max(bookedQty, readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty))
+    : bookedQty;
+}
+function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing, cartonsPackets }) {
   const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const priorTotal = sumDeliveryCartons(job.deliveries);
   const nextTotal  = priorTotal + cartonsN;
@@ -6901,9 +7522,11 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
     by: byEmail || 'unknown',
     at: new Date().toISOString(),
     linked_job_id: linkedJobId || null,
+    // This shipment's own Carton Shipper (null = none typed).
+    cartons_packets: (cartonsPackets === null || cartonsPackets === undefined || !Number.isFinite(Number(cartonsPackets))) ? null : Number(cartonsPackets),
   };
   if (pricing) { entry.rate = pricing.rate; entry.tax_pct = pricing.taxPct; entry.rate_override = !!pricing.override; }
-  const deliveries = [...freezeLegacyDeliveryRates(job.deliveries, job), entry];
+  const deliveries = [...freezeLegacyShippers(freezeLegacyDeliveryRates(job.deliveries, job), job), entry];
   // Stage/log timestamps reflect the delivery's OWN date (what the store
   // keeper picked, possibly backdated) rather than the instant this API
   // call happens to run — so Job History, "Day in production", and any
@@ -6919,17 +7542,18 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
   let stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
   let log = Array.isArray(job.log) ? [...job.log] : [];
   log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-    notes: `Delivery recorded: ${cartonsN.toLocaleString()} cartons${notes ? ' — ' + notes : ''}`,
+    notes: `Delivery recorded: ${deliveryFactsText(entry)}`,
     by: `${by} (${STAGES[stage_index] || '?'})`, time });
   // With no booked P.O. Qty (bookedQty falsy — routine for shade cards,
   // which never carry one) there's no target to compare against, so any
   // recorded shipment counts as the whole delivery rather than leaving
   // the job stuck at "Ready to Deliver" forever waiting to clear a
   // booked qty of 0.
-  const deliveryComplete = bookedQty ? nextTotal >= bookedQty : nextTotal > 0;
+  const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+  const deliveryComplete = target ? nextTotal >= target : nextTotal > 0;
   if (deliveryComplete && stage_index < 7) {
     // Mark 6 done, move to 7.
-    stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+    stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
     stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
     stage_index = 7;
     log.push({ stage: STAGES[7], status: 'done', notes: bookedQty ? `All ${bookedQty.toLocaleString()} pcs delivered` : `${nextTotal.toLocaleString()} delivered (no booked qty set)`, by: `${by} (${STAGES[7]})`, time });
@@ -7003,6 +7627,11 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-delivery:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const cartons = String(req.body.cartons ?? '').trim();
     const date    = String(req.body.date    ?? '').trim() || businessDateISO();
     let notes     = String(req.body.notes   ?? '').trim() || null;
@@ -7018,6 +7647,9 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     if (!Number.isFinite(cartonsN) || cartonsN <= 0) {
       return res.status(400).json({ error: 'Delivery cartons must be a positive number.' });
     }
+    // This shipment's Carton Shipper (stored on the delivery itself).
+    let shipper = parseShipperInput(req.body.cartons_packets);
+    if (Number.isNaN(shipper)) return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
     // Rate/tax_pct optionally ride along with the delivery (the client's
     // Rate/Tax fields only render for a delivery_write holder — see
     // showPricingFields in deliveriesSection). Both keys must be present
@@ -7084,8 +7716,10 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // or less than the P.O. asked for (yield, over-run, customer top-up
     // request). Recording reality is the priority; the tile just shows
     // the running total against the booked qty for context.
+    // A Carton Shipper typed into the form's draft (by whoever filled it in).
+    if (shipper === null) { const ds = parseShipperInput(draft.cartons_packets); if (ds !== null && !Number.isNaN(ds)) shipper = ds; }
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
-      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }) });
+      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }), cartonsPackets: job.is_shade_card ? null : shipper });
     // Draft-sourced pricing never CLEARS a job-level value it did not set.
     const nextRate   = hasPricing ? ((pricingFromDraft && rate   === null) ? job.rate    : rate)   : job.rate;
     const nextTaxPct = hasPricing ? ((pricingFromDraft && taxPct === null) ? job.tax_pct : taxPct) : job.tax_pct;
@@ -7106,10 +7740,11 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
       action: 'job.delivery.add',
       entityType: 'job',
       entityId: id,
-      summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
-      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined },
+      summary: `Recorded delivery for Job E-${id}: ${deliveryFactsText(entry)} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})${hasPricing ? `; pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%` : ''}`,
+      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, rate: hasPricing ? rate : undefined, tax_pct: hasPricing ? taxPct : undefined, at: entry.at, entry },
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7166,7 +7801,7 @@ app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission(
       entityType: 'job',
       entityId: id,
       summary: `Recorded delivery of ${cartonsN.toLocaleString()} cartons for Job E-${id} (shade card) from Station by manager ${v.operator.name} (total ${nextTotal.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
-      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty },
+      metadata: { cartons: entry.cartons, date, total: nextTotal, booked: bookedQty, at: entry.at, entry },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7411,18 +8046,20 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     let cpLeft = cpTotal;
     for (let i = 0; i < plan.length; i++) {
       const { job, allocate } = plan[i];
+      // This job's share of the typed Carton Shipper, stored on its NEW
+      // delivery entry (not the job - that overwrote earlier shipments).
+      let cpShare = null;
+      if (cpTotal !== null) {
+        cpShare = i === plan.length - 1 ? cpLeft : Math.round(cpTotal * allocate / fulfilledCartons);
+        cpLeft -= cpShare;
+      }
       const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
         cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, msiNo, byEmail,
         pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }),
+        cartonsPackets: cpShare,
       });
       const nextRate = hasPricing ? rate   : job.rate;
       const nextTax  = hasPricing ? taxPct : job.tax_pct;
-      let nextCp = job.cartons_packets;
-      if (cpTotal !== null) {
-        const share = i === plan.length - 1 ? cpLeft : Math.round(cpTotal * allocate / fulfilledCartons);
-        cpLeft -= share;
-        nextCp = share;
-      }
       await sql`
         UPDATE jobs
            SET deliveries  = ${JSON.stringify(deliveries)},
@@ -7431,8 +8068,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
                stages      = ${JSON.stringify(stages)},
                log         = ${JSON.stringify(log)},
                rate        = ${nextRate},
-               tax_pct     = ${nextTax},
-               cartons_packets = ${nextCp}
+               tax_pct     = ${nextTax}
          WHERE id = ${job.id}`;
       deliveriesMade.push({ job_id: job.id, cartons: allocate });
     }
@@ -7458,6 +8094,9 @@ app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (
   try {
     await dbReady;
     const sql = getDb();
+    const revId = reversesAuditIdOf(req);
+    if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
+    if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const rateRaw = req.body?.rate;
     const taxRaw  = req.body?.tax_pct;
@@ -7482,8 +8121,8 @@ app.patch('/api/jobs/:id/pricing', requirePermission('job_btn_pricing'), async (
       action: 'job.pricing.update',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%`,
-      metadata: { rate, tax_pct: taxPct, prior_rate: rows[0].rate, prior_tax_pct: rows[0].tax_pct },
+      summary: `${revId ? 'Reversed - ' : ''}Job E-${id} pricing set: rate ${rate === null ? '—' : rate}, tax ${taxPct}%`,
+      metadata: { reverses_audit_id: revId || undefined, rate, tax_pct: taxPct, prior_rate: rows[0].rate, prior_tax_pct: rows[0].tax_pct },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7497,6 +8136,9 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
   try {
     await dbReady;
     const sql = getDb();
+    const revId = reversesAuditIdOf(req);
+    if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
+    if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
     const raw = req.body?.cartons_packets;
     const value = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
@@ -7514,8 +8156,8 @@ app.patch('/api/jobs/:id/cartons-packets', requirePermission('job_btn_pricing'),
       action: 'job.cartons_packets.update',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} Carton Shipper set to ${value === null ? '— (station figure)' : value}`,
-      metadata: { cartons_packets: value, prior: rows[0].cartons_packets },
+      summary: `${revId ? 'Reversed - ' : ''}Job E-${id} Carton Shipper set to ${value === null ? '— (station figure)' : value}`,
+      metadata: { reverses_audit_id: revId || undefined, cartons_packets: value, prior: rows[0].cartons_packets },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7646,6 +8288,48 @@ app.delete('/api/product-aliases/:alias', requirePermission('products_btn_rate')
       summary: `Product Alias removed: "${alias}" no longer folds into "${deleted[0].canonical}"`,
     });
     res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Product Special Colors ─────────────────────────────────────────
+// Set on a Products tile and kept with that product only - never applied to
+// any job, new or old (owner, 2026-10-06). Printed from the tile as 4x3
+// stickers.
+app.get('/api/product-specials', requireFinanceView, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT * FROM finance.product_specials ORDER BY product_key ASC`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/product-specials', requirePermission('products_btn_specials'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = await productKeyFor(sql, req.body?.product);
+    if (!key) return res.status(400).json({ error: 'Product name is required.' });
+    if (req.body?.special_colors !== undefined && !Array.isArray(req.body.special_colors)) return res.status(400).json({ error: 'special_colors must be a list.' });
+    const list = normalizeSpecialColors(req.body?.special_colors);
+    const before = await sql`SELECT special_colors FROM finance.product_specials WHERE product_key = ${key}`;
+    const prior = before.length ? normalizeSpecialColors(before[0].special_colors) : [];
+    if (JSON.stringify(prior) === JSON.stringify(list)) return res.json({ ok: true, unchanged: true, product_key: key, special_colors: list });
+    if (list.length) {
+      await sql`
+        INSERT INTO finance.product_specials (product_key, special_colors, updated_by, updated_at)
+        VALUES (${key}, ${JSON.stringify(list)}::jsonb, ${req.user.email}, NOW())
+        ON CONFLICT (product_key) DO UPDATE SET special_colors = EXCLUDED.special_colors, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      `;
+    } else {
+      await sql`DELETE FROM finance.product_specials WHERE product_key = ${key}`;
+    }
+    const txt = l => l.length ? l.map(s => (s.name || '(no name)') + (s.mix.length ? ' [' + s.mix.map(m => [m.color, m.pct && m.pct + '%'].filter(Boolean).join(' ')).join(', ') + ']' : '')).join('; ') : 'none';
+    await logAudit(sql, req, {
+      // audit_log.entity_id is an INTEGER - the product goes in metadata instead.
+      action: 'product_specials.update', entityType: 'product_specials', entityId: null,
+      summary: `Special Colors for product "${key}": ${txt(prior)} -> ${txt(list)}`,
+      metadata: { product: key, before: prior, after: list },
+    });
+    res.json({ ok: true, product_key: key, special_colors: list });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -8377,6 +9061,8 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     const specs         = 'specs' in body && body.specs && typeof body.specs === 'object' ? body.specs : cur.specs;
     let template        = 'template' in body && body.template && typeof body.template === 'object' ? body.template : cur.template;
     const clientVisible = 'client_visible' in body ? !!body.client_visible : cur.client_visible;
+    const shipperNote   = 'shipper_note' in body ? (String(body.shipper_note || '').trim().slice(0, 200) || null) : (cur.shipper_note ?? null);
+    const looseNote     = 'loose_note' in body ? (String(body.loose_note || '').trim().slice(0, 200) || null) : (cur.loose_note ?? null);
     // Sanitize secondary_paper on the template — issued_sheets is a
     // per-sub-job runtime counter, must not live on the group's
     // template (otherwise duplicating from group would leak stale
@@ -8394,6 +9080,8 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
              specs = ${JSON.stringify(specs || {})},
              template = ${JSON.stringify(template || {})},
              client_visible = ${clientVisible},
+             shipper_note = ${shipperNote},
+             loose_note = ${looseNote},
              updated_at = NOW()
        WHERE id = ${id}
        RETURNING *
@@ -8412,9 +9100,16 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     if (clientVisible !== cur.client_visible) {
       await sql`UPDATE jobs SET stock_group_visible = ${clientVisible}, client_visible = (client_visible OR ${clientVisible}) WHERE group_job_id = ${id} AND deleted_at IS NULL`;
     }
+    // Name what changed (Code / MIL Qty edits come from the MIL Products report).
+    const groupChanges = [];
+    if (String(cur.jobcode || '') !== String(jobcode || '')) groupChanges.push(`Code "${cur.jobcode || ''}" -> "${jobcode || ''}"`);
+    if (String(cur.po_qty || '') !== String(poQty || '')) groupChanges.push(`MIL Qty "${cur.po_qty || ''}" -> "${poQty || ''}"`);
+    if (String(cur.shipper_note || '') !== String(shipperNote || '')) groupChanges.push(`Carton Shipper "${cur.shipper_note || ''}" -> "${shipperNote || ''}"`);
+    if (String(cur.loose_note || '') !== String(looseNote || '')) groupChanges.push(`Loose Carton Shipper "${cur.loose_note || ''}" -> "${looseNote || ''}"`);
     await logAudit(sql, req, {
       action: 'group.update', entityType: 'group', entityId: id,
-      summary: `Updated group "${product}"`,
+      summary: `Updated group "${product}"${groupChanges.length ? ': ' + groupChanges.join('; ') : ''}`,
+      metadata: groupChanges.length ? { jobcode: { before: cur.jobcode, after: jobcode }, po_qty: { before: cur.po_qty, after: poQty } } : undefined,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -8535,6 +9230,11 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
     const challanNo = String(req.body?.challan_no ?? '').trim() || null;
     const date = String(req.body?.date ?? '').trim() || businessDateISO();
     const entriesIn = Array.isArray(req.body?.entries) ? req.body.entries : [];
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [id, ...entriesIn.map(e => parseInt(e && e.job_id, 10))].filter(Number.isFinite).map(x => `job-delivery:${x}`));
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     if (entriesIn.length !== 2) {
       return res.status(400).json({ error: 'Linked delivery needs exactly 2 job entries.' });
     }
@@ -8594,6 +9294,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
       metadata: { challan_no: challanNo, date, a: { job_id: id, cartons: cartonsA }, b: { job_id: partnerId, cartons: cartonsB } },
     });
     res.json({ job: rowA, partner: rowB });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -8606,6 +9307,11 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
     const sql = getDb();
     const id  = parseInt(req.params.id, 10);
     const ix  = parseInt(req.params.index, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-delivery:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
@@ -8637,7 +9343,7 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       stage_index = 6;
     }
     log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
-      notes: `Delivery entry removed (was ${(removed && removed.cartons) || '?'} cartons on ${(removed && removed.date) || '?'})`,
+      notes: `Delivery entry removed: ${deliveryFactsText(removed) || '?'}`,
       by: `${by} (${STAGES[stage_index] || '?'})`, time });
     const updated = await sql`
       UPDATE jobs
@@ -8653,10 +9359,11 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
       action: 'job.delivery.remove',
       entityType: 'job',
       entityId: id,
-      summary: `Removed delivery entry #${ix + 1} from Job E-${id}${guardNote(delGuard)}`,
-      metadata: { removed, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
+      summary: `Removed delivery entry #${ix + 1} from Job E-${id}: ${deliveryFactsText(removed)}${guardNote(delGuard)}`,
+      metadata: { removed, index: ix, remaining_total: totalCartons, reason: delGuard.reason, paid_via: delGuard.receipts },
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -8667,11 +9374,143 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
 // (and the DELETE route does on removal), since the entry's own cartons
 // value is what those derive from. Used by both the job card's Deliveries
 // ledger (inline-editable) and the Sale Report table.
+// REVERSE one line of a job's History (owner, 2026-10-12): a removed
+// delivery goes back in its old place, a recorded delivery comes out again,
+// and a job-card edit puts the old values back - only if it moved no paper
+// stock or stage and nothing has changed those fields since. Delivery-entry,
+// pricing and Carton Shipper edits are reversed through their own routes
+// (reverses_audit_id). Each reverse is logged with reverses_audit_id.
+app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10), auditId = parseInt(req.params.auditId, 10);
+    if (!Number.isFinite(id) || !Number.isFinite(auditId)) return res.status(400).json({ error: 'Invalid id' });
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`audit-reverse:${auditId}`, `job-delivery:${id}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
+    const [a] = await sql`SELECT * FROM audit_log WHERE id = ${auditId} AND entity_type = 'job' AND entity_id = ${id}`;
+    if (!a) return res.status(404).json({ error: 'History line not found' });
+    const m = (a.metadata && typeof a.metadata === 'object') ? a.metadata : {};
+    if (m.reverses_audit_id) return res.status(400).json({ error: 'A reverse cannot itself be reversed - make the change again instead.' });
+    if (await alreadyReversed(sql, auditId)) return res.status(409).json({ error: 'That change was already reversed.' });
+    const can = key => userHasRole(req.user, 'super_admin') || roleHasPermission(req.user, key, 'yes');
+    if (!can('job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
+    const [job] = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const by = req.user?.email || 'unknown';
+    const time = businessStamp();
+    const nowIso = new Date().toISOString();
+    const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+    let stage_index = job.stage_index || 0;
+    const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+    const log = Array.isArray(job.log) ? [...job.log] : [];
+    const list = Array.isArray(job.deliveries) ? [...job.deliveries] : [];
+    const saveDeliveries = async (total) => (await sql`
+      UPDATE jobs SET deliveries = ${JSON.stringify(list)}, delqty = ${total ? String(total) : null},
+             stage_index = ${stage_index}, stages = ${JSON.stringify(stages)}, log = ${JSON.stringify(log)}
+       WHERE id = ${id} RETURNING *`)[0];
+
+    if (a.action === 'job.delivery.remove') {
+      if (!can('job_btn_delete_delivery')) return res.status(403).json({ error: 'Not allowed' });
+      const entry = m.removed;
+      if (!entry || typeof entry !== 'object') return res.status(400).json({ error: 'This removal did not keep the delivery, so it cannot be put back.' });
+      const was = m.index !== undefined && m.index !== null ? +m.index : (parseInt((String(a.summary).match(/#(\d+)/) || [])[1], 10) - 1);
+      const ix = Number.isFinite(was) ? Math.max(0, Math.min(list.length, was)) : list.length;
+      list.splice(ix, 0, entry);
+      const total = sumDeliveryCartons(list);
+      const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+      if ((target ? total >= target : total > 0) && stage_index < 7) {
+        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
+        stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
+        stage_index = 7;
+      }
+      log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+        notes: `Delivery entry put back (reverse of its removal): ${deliveryFactsText(entry)}`, by: `${by} (${STAGES[stage_index] || '?'})`, time });
+      const upd = await saveDeliveries(total);
+      await logAudit(sql, req, { action: 'job.delivery.restore', entityType: 'job', entityId: id,
+        summary: `Reversed - put back delivery entry #${ix + 1} on Job E-${id}: ${deliveryFactsText(entry)} (total ${total.toLocaleString()}${bookedQty ? '/' + bookedQty.toLocaleString() : ''})`,
+        metadata: { reverses_audit_id: auditId, index: ix, restored: entry, total } });
+      return res.json(upd);
+    }
+
+    if (a.action === 'job.delivery.add') {
+      if (!can('job_btn_delete_delivery')) return res.status(403).json({ error: 'Not allowed' });
+      let ix = m.at ? list.findIndex(d => d && d.at === m.at) : -1;
+      if (ix < 0 && !m.at) {
+        for (let i = list.length - 1; i >= 0; i--) {
+          const d = list[i];
+          if (d && String(d.cartons) === String(m.cartons) && String(d.date || '') === String(m.date || '')) { ix = i; break; }
+        }
+      }
+      if (ix < 0) return res.status(409).json({ error: 'That delivery is no longer on the job (it was removed or changed since).' });
+      const removed = list.splice(ix, 1)[0];
+      const guard = await paidInvoiceGuard(sql, removed && removed.notes, (req.body && req.body.reason) || req.query.reason);
+      if (guard.error) return res.status(409).json(guard.error);
+      const total = sumDeliveryCartons(list);
+      const shouldRevert = bookedQty ? total < bookedQty : total <= 0;
+      if (stage_index === 7 && shouldRevert) {
+        stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
+        delete stages[7];
+        stage_index = 6;
+      }
+      log.push({ stage: STAGES[stage_index], status: stages[stage_index]?.status || 'active',
+        notes: `Delivery entry removed (reverse of recording it): ${deliveryFactsText(removed)}`, by: `${by} (${STAGES[stage_index] || '?'})`, time });
+      const upd = await saveDeliveries(total);
+      await logAudit(sql, req, { action: 'job.delivery.remove', entityType: 'job', entityId: id,
+        summary: `Reversed - removed delivery entry #${ix + 1} from Job E-${id}: ${deliveryFactsText(removed)}${guardNote(guard)}`,
+        metadata: { reverses_audit_id: auditId, removed, index: ix, remaining_total: total, reason: guard.reason, paid_via: guard.receipts } });
+      return res.json(upd);
+    }
+
+    if (a.action === 'job.update') {
+      if (!can('job_btn_edit')) return res.status(403).json({ error: 'Not allowed' });
+      const rv = m.revert;
+      if (!rv) return res.status(400).json({ error: 'This edit was saved before Reverse existed - change it back on the job card.' });
+      if (!rv.reversible) return res.status(400).json({ error: `This edit cannot be reversed here because ${rv.why || 'it moved stock'} - change it back on the job card.` });
+      const sameVal = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+      const cols = rv.cols || {}, parts = rv.particulars || {};
+      const pNow = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
+      const moved = [...Object.keys(cols).filter(c => !sameVal(job[c], cols[c].after)), ...Object.keys(parts).filter(k => !sameVal(pNow[k], parts[k].after))];
+      if (moved.length) return res.status(409).json({ error: `Changed again since this edit (${moved.join(', ')}) - change it back on the job card instead.` });
+      const v = { ...job };
+      for (const c of Object.keys(cols)) v[c] = cols[c].before;
+      const particulars = { ...pNow };
+      for (const k of Object.keys(parts)) { if (parts[k].before === null || parts[k].before === undefined) delete particulars[k]; else particulars[k] = parts[k].before; }
+      const [upd] = await sql`
+        UPDATE jobs SET name = ${v.name}, client = ${v.client}, jobcode = ${v.jobcode}, ref = ${v.ref},
+               dateissued = ${v.dateissued}, deadline = ${v.deadline}, size = ${v.size}, ups = ${v.ups}, sheets = ${v.sheets},
+               qty = ${v.qty}, paper = ${v.paper}, machine = ${v.machine}, coatings = ${v.coatings || []}, priority = ${v.priority},
+               cartonqty = ${v.cartonqty}, notes = ${v.notes}, bno = ${v.bno}, mfgdate = ${v.mfgdate}, expdate = ${v.expdate},
+               mrp = ${v.mrp}, cut_size = ${v.cut_size}, is_shade_card = ${!!v.is_shade_card}, client_visible = ${!!v.client_visible},
+               particulars = ${JSON.stringify(particulars)}
+         WHERE id = ${id} RETURNING *`;
+      const undone = (Array.isArray(m.changes) ? m.changes : []).map(s => String(s).replace(/^(.*?): ([\s\S]*) -> ([\s\S]*)$/, '$1: $3 -> $2'));
+      await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: id,
+        summary: `Reversed - Job E-${id} edit put back${undone.length ? ': ' + undone.join('; ') : ''}`,
+        metadata: { reverses_audit_id: auditId, changes: undone } });
+      return res.json(upd);
+    }
+    return res.status(400).json({ error: 'This kind of change cannot be reversed from History.' });
+    } finally { await releaseOpLocks(sql, _opHeld); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
+    const revId = reversesAuditIdOf(req);
+    if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
+    if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
     const id = parseInt(req.params.id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`job-delivery:${id}`], { wait: true });
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const ix = parseInt(req.params.index, 10);
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
@@ -8709,8 +9548,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       `;
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}${guardNote(guard)}`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override, reason: guard.reason, paid_via: guard.receipts },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: ${which === 'rate' ? 'rate' : 'sale tax %'} "${prev[which] ?? ''}" -> "${num ?? ''}"${entry.rate_override ? ' (differs from the product rate)' : ''}${guardNote(guard)}`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: which, before: prev[which] ?? null, after: num, rate_override: !!entry.rate_override, reason: guard.reason, paid_via: guard.receipts },
       });
       return res.json(upd[0]);
     }
@@ -8723,18 +9562,38 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       const t = String(req.body.value ?? '').replace(/,/g, '').trim();
       const num = t === '' ? null : Number(t);
       if (num !== null && (!Number.isFinite(num) || num < 0)) {
-        return res.status(400).json({ error: (which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage') + ' must be a non-negative number (or blank for the calculated figure).' });
+        return res.status(400).json({ error: (which === 'uc_qty' ? 'Printed UC Qty' : 'Wastage') + ' must be a non-negative number (or blank for the calculated figure).' });
       }
       const prev = list[ix] || {};
       const entry = { ...prev };
       if (num === null) delete entry[which]; else entry[which] = num;
+      // A new UC makes a hand-typed wastage stale - drop it so the shipment's
+      // wastage is worked out again as UC - delivered (owner, 2026-10-02).
+      const droppedWastage = (which === 'uc_qty' && entry.wastage_qty !== undefined) ? entry.wastage_qty : undefined;
+      if (droppedWastage !== undefined) delete entry.wastage_qty;
       list[ix] = entry;
       const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(list)} WHERE id = ${id} RETURNING *`;
-      const label = which === 'uc_qty' ? 'Unit Carton Qty' : 'Wastage';
+      const label = which === 'uc_qty' ? 'Printed UC Qty' : 'Wastage';
       await logAudit(sql, req, {
         action: 'job.delivery.edit', entityType: 'job', entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"`,
-        metadata: { index: ix, field: which, before: prev[which] ?? null, after: num },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: Sale Report ${label} "${prev[which] ?? 'calculated'}" -> "${num ?? 'calculated'}"${droppedWastage !== undefined ? ` (typed Wastage ${droppedWastage} cleared - recalculated)` : ''}`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: which, before: prev[which] ?? null, after: num, wastage_cleared: droppedWastage ?? null },
+      });
+      return res.json(upd[0]);
+    }
+    // This shipment's own Carton Shipper (blank clears it). The other
+    // shipments are untouched (owner, 2026-10-08).
+    if (req.body?.field === 'cartons_packets') {
+      const v = parseShipperInput(req.body.value);
+      if (Number.isNaN(v)) return res.status(400).json({ error: 'Carton Shipper must be a non-negative number.' });
+      const frozen = freezeLegacyShippers(list, job);
+      const prevV = frozen[ix] && deliveryHasOwnShipper(frozen[ix]) ? frozen[ix].cartons_packets : null;
+      frozen[ix] = { ...frozen[ix], cartons_packets: v };
+      const upd = await sql`UPDATE jobs SET deliveries = ${JSON.stringify(frozen)} WHERE id = ${id} RETURNING *`;
+      await logAudit(sql, req, {
+        action: 'job.delivery.edit', entityType: 'job', entityId: id,
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: Carton Shipper "${prevV ?? ''}" -> "${v ?? ''}"`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: 'cartons_packets', before: prevV, after: v },
       });
       return res.json(upd[0]);
     }
@@ -8772,9 +9631,10 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       // Same forward/back rules as computeDeliveryUpdate (create) and the
       // DELETE route (remove) — an edit can cross the completion threshold
       // in either direction, so both are handled here.
-      const deliveryComplete = bookedQty ? totalCartons >= bookedQty : totalCartons > 0;
+      const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+      const deliveryComplete = target ? totalCartons >= target : totalCartons > 0;
       if (deliveryComplete && stage_index < 7) {
-        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso };
+        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
         stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
         stage_index = 7;
       } else if (!deliveryComplete && stage_index === 7) {
@@ -8800,8 +9660,8 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
         action: 'job.delivery.edit',
         entityType: 'job',
         entityId: id,
-        summary: `Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"${guardNote(cartonsGuard)}`,
-        metadata: { index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN), reason: cartonsGuard.reason, paid_via: cartonsGuard.receipts },
+        summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: cartons "${before.cartons || ''}" → "${cartonsN}"${guardNote(cartonsGuard)}`,
+        metadata: { reverses_audit_id: revId || undefined, index: ix, field: 'cartons', before: before.cartons || null, after: String(cartonsN), reason: cartonsGuard.reason, paid_via: cartonsGuard.receipts },
       });
       return res.json(updated[0]);
     }
@@ -8817,10 +9677,11 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       action: 'job.delivery.edit',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id} delivery #${ix + 1}: ${field} "${before[field] || ''}" → "${value || ''}"`,
-      metadata: { index: ix, field, before: before[field] || null, after: value },
+      summary: `${revId ? 'Reversed - ' : ''}Job E-${id} delivery #${ix + 1}: ${field} "${before[field] || ''}" → "${value || ''}"`,
+      metadata: { reverses_audit_id: revId || undefined, index: ix, field, before: before[field] || null, after: value },
     });
     res.json(updated[0]);
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -9134,6 +9995,18 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
     const opening = parseSheets(opening_balance);
     const label = `${paper_type}${size?' '+size:''}${gsm?' '+gsm+'gsm':''}${brand?' · '+brand:''}`;
 
+    // Same paper as a deleted item: bring that one back (its history and
+    // job links included) instead of starting a second row.
+    const restored = await restoreDeletedItem(sql, { paper_type, size, gsm, brand, isOffcut });
+    if (restored) {
+      if (opening > 0) {
+        await applyInventoryChange(sql, { itemId: restored.id, change: +opening, reason: 'opening-balance', jobId: null, notes: opening_notes || 'Opening balance', user: req.user });
+      }
+      await logAudit(sql, req, { action: 'inventory.restore', entityType: 'inventory', entityId: restored.id,
+        summary: `Restored deleted paper item: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}` });
+      return res.json({ ...(await sql`SELECT * FROM inventory_items WHERE id = ${restored.id}`)[0], restored: true });
+    }
+
     // Hard duplicate check: same (paper_type, size, gsm, brand) — compared
     // case-insensitively and trimmed, so "ningbo" / "Ningbo" / "NINGBO" all
     // count as the same brand. Refuse the add with a 409 instead of merging.
@@ -9353,11 +10226,10 @@ app.post('/api/inventory/dropdown/:field/:value/unhide', requireAdmin, async (re
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// DELETE an inventory item. Admin only. Refused if any pending-issuance
-// jobs still reference this item (their stock hasn't been deducted yet, so
-// losing the link would orphan them). Issued/in-progress/delivered jobs are
-// fine to lose the live link — their deductions already happened. Cascades
-// the full transaction history (intentional — admin saw the warning).
+// DELETE an inventory item = hide it (owner, 2026-10-01). It leaves the
+// Inventory list and pickers; its stock movements, the reports and the jobs
+// that used it all keep it. Refused while a pending job (main or 2nd paper)
+// still waits for stock from it.
 app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req, res) => {
   try {
     await dbReady;
@@ -9370,7 +10242,8 @@ app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req
     // jobs don't block — they're conceptually gone.
     const blockers = await sql`
       SELECT id, jobcode, name FROM jobs
-      WHERE inventory_item_id = ${itemId} AND issuance_status = 'pending'
+      WHERE (inventory_item_id = ${itemId} OR particulars->'secondary_paper'->>'inventory_item_id' = ${String(itemId)})
+        AND issuance_status = 'pending'
         AND deleted_at IS NULL
       ORDER BY id
     `;
@@ -9384,22 +10257,18 @@ app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req
 
     // Snapshot for audit log before delete.
     const existing = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
-    if (!existing[0]) return res.status(404).json({ error: 'Item not found' });
+    if (!existing[0] || existing[0].deleted_at) return res.status(404).json({ error: 'Item not found' });
     const it = existing[0];
     const label = `${it.paper_type}${it.size?' '+it.size:''}${it.gsm?' '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
 
-    // Clear the link on any non-pending jobs that still pointed at this item
-    // (no FK on jobs.inventory_item_id, so we tidy up manually). Their
-    // historical paper data stays in the jobs row, just the live link is gone.
-    await sql`UPDATE jobs SET inventory_item_id = NULL WHERE inventory_item_id = ${itemId}`;
-    // Cascades inventory_transactions; sets inventory_imports.inventory_item_id NULL.
-    await sql`DELETE FROM inventory_items WHERE id = ${itemId}`;
+    // Hidden, not removed: stock movements and job links stay.
+    await sql`UPDATE inventory_items SET deleted_at = NOW(), deleted_by = ${(req.user && req.user.email) || null} WHERE id = ${itemId}`;
 
     await logAudit(sql, req, {
       action: 'inventory.delete',
       entityType: 'inventory',
       entityId: itemId,
-      summary: `Deleted paper item: ${label} (balance was ${it.current_balance||0} sheets)`,
+      summary: `Deleted paper item: ${label} (balance was ${it.current_balance||0} sheets; its stock history and job links are kept)`,
     });
 
     res.json({ ok: true, deleted_id: itemId });
@@ -9423,6 +10292,11 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     const occurredAt = entry.at;
     if (!userHasBtn(req.user, delta > 0 ? 'inv_btn_stock_in' : 'inv_btn_stock_out')) return res.status(403).json({ error: 'Not allowed' });
     const itemId = parseInt(id, 10);
+
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`item-tx:${itemId}`]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     const itemRows = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
     const sourceItem = itemRows[0];
     if (!sourceItem) return res.status(404).json({ error: 'Inventory item not found' });
@@ -9474,6 +10348,39 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     let jobFullyIssued = false;
     let partialRemaining = 0;
 
+    // "Job Card" with a real job: issued through performIssueStock - the
+    // same routine as Pending Stock - so the need (offcut taken at CTP, the
+    // 2nd paper), the paper check, the offcut return, the job's issued list
+    // and the one-at-a-time lock are all the same (owner, 2026-10-13: this
+    // path had its own copy of the rules, which counted old-paper issues
+    // and kept no issued list). The 2nd paper is issued as the 2nd paper.
+    if (isJobIssuance) {
+      const sec = jobRow.particulars && jobRow.particulars.secondary_paper;
+      const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id IN (${itemId}, ${jobRow.inventory_item_id || 0}, ${(sec && sec.inventory_item_id) || 0})`;
+      const byId = new Map(grp.map(x => [x.id, x]));
+      const key = it => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
+      const mine = key(byId.get(itemId));
+      const source = (sec && sec.inventory_item_id && mine === key(byId.get(sec.inventory_item_id)) && mine !== key(byId.get(jobRow.inventory_item_id))) ? 'secondary' : 'primary';
+      const r = await performIssueStock(sql, req, jobRow.id, { splits: [{ item_id: itemId, sheets: Math.abs(delta) }], challan_no: challan_no == null ? null : String(challan_no), entry_date, source });
+      if (r.error) return res.status(r.status || 400).json({ error: r.error });
+      const after = r.job || {};
+      const owed = source === 'secondary'
+        ? Math.max(0, Math.round((+((after.particulars || {}).secondary_paper || {}).packets || 0) * packetSize(sourceItem.paper_type || '')) - (parseInt(((after.particulars || {}).secondary_paper || {}).issued_sheets, 10) || 0))
+        : (parseInt((after.particulars || {}).partial_pending_sheets, 10) || 0);
+      const [itNow] = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
+      return res.json({
+        ...(itNow || {}),
+        job_flipped: jobRow.issuance_status === 'pending' && after.issuance_status === 'issued' && !owed,
+        linked_job_id: jobRow.id,
+        job_partial_remaining: owed,
+        job_fully_issued: !owed,
+        offcut_item_id: null,
+      });
+    }
+
+    if (isJobIssuance && jobRow.particulars && jobRow.particulars.paper_waived) {
+      return res.status(400).json({ error: `Job E-${jobRow.id} was processed without paper by an Admin - no stock can be issued to it. Send it back to Pending Stock first if paper should be issued.` });
+    }
     if (isJobIssuance) {
       // Brand-agnostic: the job specifies a paper GROUP (type + size +
       // gsm + is_offcut). Store keeper is free to issue from any brand
@@ -9598,6 +10505,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       job_fully_issued: isJobIssuance && jobFullyIssued,
       offcut_item_id: offcutItem?.id || null,
     });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -9620,6 +10528,83 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
 //   • The transaction is itself a reversal (no chain reversals)
 //   • The reason isn't one of the reversible kinds (delivery, job-consumed,
 //     job-edit-apply, job-edit-revert, job-offcut, adjustment)
+// EDIT a stock entry's Challan No., Notes or Date after the fact (Stock In /
+// Stock Out reports - owner, 2026-10-05; Date 2026-10-12). Body: { ids:
+// [txId, ...], field: 'challan_no' | 'notes' | 'date', value }. A Date
+// (YYYY-MM-DD, not in the future) moves created_at to that day at the same
+// clock time; recorded_at keeps the real moment it was typed in (the "Late
+// entry" tag), and clears again if the date goes back to that day. Several ids = one split issuance shown as
+// one row; they all get the same value. Needs the Stock In button for a
+// stock-in row and Stock Out for a stock-out row. Quantities never change.
+// Each edit is logged on the paper (entity inventory) so it shows in that
+// paper's History, with the tx ids so the line can open the edited row.
+app.post('/api/inventory/tx-ref', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const field = req.body && req.body.field;
+    if (field !== 'challan_no' && field !== 'notes' && field !== 'date') return res.status(400).json({ error: 'field must be challan_no, notes or date' });
+    const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(x => parseInt(x, 10)).filter(Number.isFinite))];
+    if (!ids.length || ids.length > 20) return res.status(400).json({ error: 'Give the entry id(s) to edit.' });
+    const raw = String(req.body.value ?? '').trim();
+    if (raw.length > 300) return res.status(400).json({ error: 'Too long - keep it under 300 characters.' });
+    if (field === 'date') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(raw) || isNaN(new Date(raw + 'T00:00:00Z'))) return res.status(400).json({ error: 'Pick a valid date.' });
+      if (raw > businessDateISO()) return res.status(400).json({ error: 'The date cannot be in the future.' });
+    }
+    const txs = await sql`
+      SELECT t.id, t.item_id, t.change, t.reason, t.job_id, t.challan_no, t.notes, t.user_notes, t.created_at, t.recorded_at, t.deleted_at,
+             i.paper_type, i.size, i.gsm, i.brand
+        FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.id = ANY(${ids})`;
+    if (txs.length !== ids.length) return res.status(404).json({ error: 'Entry not found' });
+    for (const t of txs) {
+      const need = t.change > 0 ? 'inv_btn_stock_in' : 'inv_btn_stock_out';
+      if (!userHasBtn(req.user, need)) return res.status(403).json({ error: `Not allowed - your role cannot edit ${t.change > 0 ? 'Stock In' : 'Stock Out'} entries.` });
+    }
+    // What the reports showed before (Notes: the typed note, else the
+    // system note - hidden on job-consumed rows).
+    const shownNotes = (t) => t.user_notes !== null && t.user_notes !== undefined ? t.user_notes : (t.reason === 'job-consumed' ? '' : (t.notes || ''));
+    const dmy = iso => iso.split('-').reverse().join('/');
+    const valueOf = (t) => field === 'challan_no' ? (t.challan_no || '') : field === 'date' ? businessDateISO(new Date(t.created_at)) : shownNotes(t);
+    const before = field === 'date' ? dmy(valueOf(txs[0])) : valueOf(txs[0]);
+    const after = field === 'date' ? dmy(raw) : raw;
+    if (txs.every(t => valueOf(t) === raw)) return res.json({ ok: true, unchanged: true });
+    if (field === 'challan_no') await sql`UPDATE inventory_transactions SET challan_no = ${after || null} WHERE id = ANY(${ids})`;
+    else if (field === 'notes') await sql`UPDATE inventory_transactions SET user_notes = ${after} WHERE id = ANY(${ids})`;
+    else {
+      const [y, mo, d] = raw.split('-').map(Number);
+      for (const t of txs) {
+        // Same clock time (business-local) on the new day.
+        const parts = {};
+        for (const p of new Intl.DateTimeFormat('en-US', { timeZone: BUSINESS_TZ, hour12: false, hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(t.created_at))) parts[p.type] = p.value;
+        const hh = parts.hour === '24' ? 0 : +parts.hour;
+        const nextAt = new Date(businessWallClockToMs(y, mo, d, hh, +parts.minute));
+        const realAt = new Date(t.recorded_at || t.created_at);   // when it was really typed in
+        const nextRecorded = businessDateISO(realAt) === raw ? null : realAt.toISOString();
+        await sql`UPDATE inventory_transactions SET created_at = ${nextAt.toISOString()}, recorded_at = ${nextRecorded} WHERE id = ${t.id}`;
+      }
+    }
+    const t0 = txs[0];
+    const direction = t0.change > 0 ? 'in' : 'out';
+    const sheets = txs.reduce((a, t) => a + Math.abs(t.change), 0);
+    const paper = [t0.paper_type, t0.size, t0.gsm ? t0.gsm + 'gsm' : '', t0.brand].filter(Boolean).join(' ');
+    const label = field === 'challan_no' ? 'Challan No.' : field === 'date' ? 'Date' : 'Notes';
+    const day = businessDateISO(new Date(t0.created_at)).split('-').reverse().join('/');
+    for (const itemId of [...new Set(txs.map(t => t.item_id))]) {
+      await logAudit(sql, req, {
+        action: 'inventory.tx.edit',
+        entityType: 'inventory',
+        entityId: itemId,
+        summary: `Edited ${label} on a Stock ${direction === 'in' ? 'In' : 'Out'} entry (${day}, ${sheets.toLocaleString()} sheets of ${paper}${t0.job_id ? ', Job E-' + t0.job_id : ''}): "${before || '—'}" -> "${after || '—'}"`,
+        metadata: { tx_ids: ids, direction, field, before, after, tx_created_at: t0.created_at },
+      });
+    }
+    const rows = await sql`SELECT id, challan_no, notes, user_notes, created_at, recorded_at FROM inventory_transactions WHERE id = ANY(${ids})`;
+    res.json({ ok: true, rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res) => {
   try {
     await dbReady;
@@ -9633,6 +10618,10 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     if (!rows[0]) return res.status(404).json({ error: 'Transaction not found' });
     const tx = rows[0];
 
+    // One at a time - see takeOpLocks (2026-10-13).
+    const _opHeld = await takeOpLocks(sql, [`tx-reverse:${txId}`, tx.job_id ? `job-stock:${tx.job_id}` : null]);
+    if (!_opHeld) return res.status(409).json({ error: OP_BUSY });
+    try {
     // Reasons we never reverse — these are bookkeeping rows that don't
     // represent a real, undo-able event. 'correction' is itself a reversal
     // class; reversing one would create an infinite loop of corrections.
@@ -9725,6 +10714,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     // re-issue. Stage stays where it is; the operator will see the
     // "Pending Stock" badge on the job until the store keeper acts.
     let jobReverted = false;
+    let jobPartial = null;        // set when only ONE of the job's issues was undone
     let offcutRefundedSheets = 0;
     if (tx.reason === 'offcut') {
       for (const paired of pairedOffcutRows) {
@@ -9743,13 +10733,73 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
-      if (job && job.issuance_status === 'issued') {
+      // Is anything else still issued to this job? (The row just reversed is
+      // already netted out by its reversal.) Then this undid ONE issue - a
+      // top-up, one of several, one brand of a split, the 2nd paper - not the
+      // job's whole issuance: the job stays issued and only these sheets are
+      // owed again (owner, E-489, 2026-10-01: reversing a 41.5-packet top-up
+      // sent the job back to "505 needed"). Same for every way an issue is
+      // reversed - one row, a bulk reversal, a split - all come through here.
+      // Only issues of the job's CURRENT paper count (main or 2nd paper, any
+      // brand): after a paper change the old paper's issue stays in the
+      // ledger by design, but it is no longer this job's issuance (owner,
+      // E-989, 2026-10-13: an old 25x30 issue kept the job "Requires More
+      // Stock" after its 16x23 offcut issue was reversed).
+      const curSec = job && job.particulars && job.particulars.secondary_paper && job.particulars.secondary_paper.inventory_item_id;
+      const standingRows = await sql`
+        SELECT COALESCE(SUM(-t.change), 0) AS sheets FROM inventory_transactions t
+          JOIN inventory_items i ON i.id = t.item_id
+        WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-consumed'
+          AND t.reverses_tx_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+          AND EXISTS (SELECT 1 FROM inventory_items c
+                       WHERE c.id IN (${(job && job.inventory_item_id) || 0}, ${curSec || 0})
+                         AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '')
+                         AND COALESCE(c.size, '') = COALESCE(i.size, '')
+                         AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '')
+                         AND COALESCE(c.is_offcut, false) = COALESCE(i.is_offcut, false))`;
+      const standingSheets = parseFloat(standingRows[0] && standingRows[0].sheets) || 0;
+      if (job && (job.issuance_status === 'issued' || (job.issuance_status === 'ctp' && job.issued_at)) && standingSheets > 0) {
+        const sheetsBack = Math.round(Math.abs(parseFloat(tx.change) || 0));
+        const p = { ...(job.particulars || {}) };
+        // Main paper or 2nd paper? By the issued list's own tag when it has
+        // this row, else by which of the two paper groups the item is in.
+        const items = Array.isArray(job.issued_items) ? [...job.issued_items] : [];
+        let k = items.findIndex(x => x && x.tx_id === tx.id);
+        if (k < 0) k = items.findIndex(x => x && x.item_id === tx.item_id && Math.round(+x.sheets || 0) === sheetsBack);
+        let isSecondary = k >= 0 && items[k].source === 'secondary';
+        const sec = p.secondary_paper && typeof p.secondary_paper === 'object' ? p.secondary_paper : null;
+        if (k < 0 && sec && sec.inventory_item_id) {
+          const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id IN (${tx.item_id}, ${job.inventory_item_id || 0}, ${sec.inventory_item_id})`;
+          const byId = new Map(grp.map(x => [x.id, x]));
+          const key = (it) => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
+          const mine = key(byId.get(tx.item_id));
+          isSecondary = mine !== null && mine === key(byId.get(sec.inventory_item_id)) && mine !== key(byId.get(job.inventory_item_id));
+        }
+        if (k >= 0) items.splice(k, 1);
+        if (isSecondary) {
+          // The 2nd paper owes these sheets again; the main paper is untouched.
+          p.secondary_paper = { ...sec, issued_sheets: Math.max(0, (parseInt(sec.issued_sheets, 10) || 0) - sheetsBack) };
+        } else {
+          // The main paper owes these sheets again ("Requires More Stock").
+          const prev = parseInt(p.partial_pending_sheets, 10);
+          p.partial_pending_sheets = (Number.isFinite(prev) && prev > 0 ? prev : 0) + sheetsBack;
+        }
+        await sql`
+          UPDATE jobs
+             SET issued_items = ${JSON.stringify(items)}::jsonb,
+                 particulars  = ${JSON.stringify(p)}
+           WHERE id = ${tx.job_id}
+        `;
+        jobPartial = { sheets: sheetsBack, secondary: isSecondary };
+      } else if (job && job.issuance_status === 'issued') {
         // Same cleanup as /reverse-issuance: drop anything created by
         // the specific issuance we're undoing so the job doesn't keep
         // ghost effects (owner report: reversal left a "+2 top-up" chip
         // on a job whose over-issue had been "Use"-decided).
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.paper_waived;   // needs paper again - drop "processed without paper"
         delete cleanParticulars.over_issue_pending;
         delete cleanParticulars.over_issue_decisions;
         if (Array.isArray(cleanParticulars.packets_topups)) {
@@ -9774,6 +10824,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
         // routes to Pending Stock again instead of Printing.
         const cleanParticulars = { ...(job.particulars || {}) };
         delete cleanParticulars.partial_pending_sheets;
+        delete cleanParticulars.paper_waived;   // needs paper again - drop "processed without paper"
         delete cleanParticulars.over_issue_pending;
         delete cleanParticulars.over_issue_decisions;
         if (Array.isArray(cleanParticulars.packets_topups)) {
@@ -9802,6 +10853,8 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
         WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-offcut'
           AND t.reverses_tx_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+          -- One issue undone: only the offcut written with it (same moment).
+          AND (${!jobPartial} OR ABS(EXTRACT(EPOCH FROM (t.created_at - ${tx.created_at}::timestamptz))) <= 10)
         ORDER BY t.id ASC
       `;
       for (const orow of pairedOffcuts) {
@@ -9822,10 +10875,11 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
       action: 'inventory.reverse',
       entityType: 'inventory',
       entityId: tx.item_id,
-      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${jobPartial ? ` · Job E-${tx.job_id} stays issued - ${jobPartial.sheets.toLocaleString()} sheets of its ${jobPartial.secondary ? '2nd' : 'main'} paper owed again` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
     });
 
-    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, offcut_refunded_sheets: offcutRefundedSheets });
+    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, job_partial: jobPartial, offcut_refunded_sheets: offcutRefundedSheets });
+    } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -9857,6 +10911,9 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
     // Offcut Consumption report only: include automatic E-job deductions
     // from offcut inventory while all other movement reports stay unchanged.
     const includeOffcutAuto = req.query.include_offcut_auto === '1';
+    // Stock Out's "+ offcut" note (with include_offcut_auto=1): only offcut
+    // items' stock-outs that belong to a job.
+    const offcutOnly = req.query.offcut_only === '1';
     // Manual Consumption only: hide rows it has archived. This used to ride
     // on include_offcut_manual, but Stock In/Out started sending that flag
     // too (for the offcut carve-out below), so archiving a row there made it
@@ -9910,6 +10967,10 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
         -- deleted_at is only ever set by Manual Consumption's own delete
         -- (see DELETE /api/inventory/transactions/:id?scope=manual below).
         AND (${raw} OR NOT ${excludeArchived} OR t.deleted_at IS NULL)
+        -- Deleted from Stock In/Out / Offcut Consumption (moved to Archive):
+        -- out of every movement report; the raw ledger keeps it so running
+        -- balances stay right.
+        AND (${raw} OR t.deleted_at IS NULL OR t.deleted_scope IS DISTINCT FROM 'history')
         -- Every exclusion below is bypassed when raw=1, so the Stock
         -- Summary gets the true ledger (corrections + reversals + offcut
         -- included) to compute an accurate running balance.
@@ -9949,6 +11010,7 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
              OR (${dir} = 'in'  AND t.change > 0)
              OR (${dir} = 'out' AND t.change < 0))
         AND (${challanQ} = '' OR t.challan_no ILIKE ${'%' + challanQ + '%'})
+        AND (NOT ${offcutOnly} OR (COALESCE(i.is_offcut, false) = true AND t.job_id IS NOT NULL))
       ORDER BY t.created_at DESC, t.id DESC
     `;
     res.json(txs);
@@ -9995,7 +11057,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
     if (!anchorRows.length) return res.status(404).json({ error: 'Inventory item not found' });
     const anchor = anchorRows[0];
     const members = grouped ? await sql`
-      SELECT id, brand, current_balance
+      SELECT id, brand, current_balance, deleted_at
         FROM inventory_items
        WHERE COALESCE(paper_type, '') = ${anchor.paper_type || ''}
          AND COALESCE(size, '') = ${anchor.size || ''}
@@ -10004,18 +11066,23 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
        ORDER BY id
     ` : [{ id: anchor.id, brand: anchor.brand, current_balance: anchor.current_balance }];
     const memberIds = members.map(x => x.id);
+    // A reversal row carries no job / challan of its own; rev_* name the
+    // entry it undid so History can show them (owner, 2026-10-13).
     const txs = await sql`
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
         i.brand AS item_brand,
-        EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed
+        EXISTS(SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id) AS has_been_reversed,
+        o.job_id AS rev_job_id, o.challan_no AS rev_challan_no, oj.name AS rev_job_name, oj.jobcode AS rev_job_code
       FROM inventory_transactions t
       JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN jobs j ON j.id = t.job_id
+      LEFT JOIN inventory_transactions o ON o.id = t.reverses_tx_id
+      LEFT JOIN jobs oj ON oj.id = o.job_id
       WHERE t.item_id = ANY(${memberIds})
       ORDER BY t.created_at DESC, t.id DESC
     `;
     if (!grouped) return res.json(txs);
-    const currentBalance = members.reduce((sum, x) => sum + (parseFloat(x.current_balance) || 0), 0);
+    const currentBalance = members.reduce((sum, x) => sum + (x.deleted_at ? 0 : (parseFloat(x.current_balance) || 0)), 0);
     res.json({
       transactions: txs,
       current_balance: currentBalance,
@@ -10118,19 +11185,31 @@ app.post('/api/imports/:id/cancel', requirePermission('inv_btn_add_import'), asy
     const rows = await sql`
       UPDATE inventory_imports SET status='cancelled' WHERE id=${id} AND status='pending' AND deleted_at IS NULL RETURNING *
     `;
-    if (!rows.length) return res.status(400).json({ error: 'Only pending imports can be cancelled' });
-    res.json(rows[0]);
+    if (rows.length) return res.json(rows[0]);
+    // Partly received: close it (owner, 2026-10-13) - what arrived stays in
+    // stock, the rest is not coming. Same end state as "Final delivery".
+    const closed = await sql`
+      UPDATE inventory_imports SET status='received' WHERE id=${id} AND status='partial' AND deleted_at IS NULL RETURNING *
+    `;
+    if (!closed.length) return res.status(400).json({ error: 'Only pending or partly received imports can be cancelled' });
+    const im = closed[0];
+    await logAudit(sql, req, {
+      action: 'import.close_short', entityType: 'import', entityId: im.id,
+      summary: `Import closed: ${(+im.received_packets || 0).toLocaleString()} of ${(+im.packets || 0).toLocaleString()} arrived (${[im.paper_type, im.size, im.gsm ? im.gsm + 'gsm' : '', im.brand].filter(Boolean).join(' ')}); the rest is not coming`,
+    });
+    res.json(im);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // ── Trash (soft-deleted jobs + imports) ─────────────────────
-// Items soft-deleted by the bulk "Delete from History" actions live here for
-// 30 days, then auto-purge. Lazy purge model: every GET /api/trash runs a
-// cleanup first so we don't need cron on Vercel.
-const TRASH_RETENTION_DAYS = 30;
+// Items soft-deleted by the bulk "Delete from History" actions live here
+// until an admin deliberately deletes them. Nothing ages out any more.
+const TRASH_RETENTION_DAYS = 30;   // kept only for old audit wording; nothing purges on it
 
-// Run the auto-purge for both tables. Cheap (indexed on deleted_at) and
-// idempotent — safe to call on every list request.
+// NOT CALLED ANY MORE (owner, 2026-10-01). It used to run on every Archive
+// open and erase imports and stock entries archived over 30 days ago - and
+// an archived Manual Consumption entry still counts in Stock In/Out, so a
+// report could change by itself a month later. Kept for reference only.
 async function purgeExpiredTrash(sql) {
   // JOBS ARE NEVER AUTO-PURGED. They used to be, after 30 days, and silently:
   // the row was hard-deleted and nothing was written down, so a job card
@@ -10172,7 +11251,6 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
   try {
     await dbReady;
     const sql = getDb();
-    await purgeExpiredTrash(sql);
     const jobsRows = await sql`
       SELECT id, name, jobcode, client, stage_index, deleted_at, deleted_by, created_at
       FROM jobs WHERE deleted_at IS NOT NULL
@@ -10184,16 +11262,20 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
       ORDER BY deleted_at DESC
     `;
     const transactionsRows = await sql`
-      SELECT t.id, t.change, t.reason, t.notes, t.created_at, t.deleted_at, t.deleted_by,
+      SELECT t.id, t.change, t.reason, t.notes, t.created_at, t.deleted_at, t.deleted_by, t.deleted_scope, t.job_id, t.challan_no,
              i.paper_type, i.size AS item_size, i.gsm AS item_gsm, i.brand AS item_brand
         FROM inventory_transactions t
         LEFT JOIN inventory_items i ON i.id = t.item_id
        WHERE t.deleted_at IS NOT NULL
        ORDER BY t.deleted_at DESC
     `;
-    // jobs_retained: archived jobs are kept indefinitely, so the Archive can
-    // say so instead of counting down days that no longer run out.
-    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true });
+    const papersRows = await sql`
+      SELECT id, paper_type, size, gsm, brand, is_offcut, current_balance, deleted_at, deleted_by
+        FROM inventory_items WHERE deleted_at IS NOT NULL
+       ORDER BY deleted_at DESC
+    `;
+    // Everything in the Archive is kept until restored.
+    res.json({ jobs: jobsRows, imports: importsRows, transactions: transactionsRows, papers: papersRows, retention_days: TRASH_RETENTION_DAYS, jobs_retained: true, all_retained: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -10237,115 +11319,73 @@ app.post('/api/trash/restore', requirePermission('trash_admin'), async (req, res
       return res.json({ ok: true });
     }
     if (type === 'transaction') {
-      const updated = await sql`UPDATE inventory_transactions SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
+      const updated = await sql`UPDATE inventory_transactions SET deleted_at=NULL, deleted_by=NULL, deleted_scope=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
       if (!updated.length) return res.status(404).json({ error: 'Transaction not in archive' });
       await logAudit(sql, req, { action: 'inventory.tx.restore', entityType: 'inventory_item', entityId: rowId, summary: `Restored tx #${rowId} from Archive (${updated[0].change > 0 ? '+' : ''}${updated[0].change} sheets · ${updated[0].reason || 'no reason'})` });
       return res.json({ ok: true });
     }
-    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
+    if (type === 'paper') {
+      const updated = await sql`UPDATE inventory_items SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING *`;
+      if (!updated.length) return res.status(404).json({ error: 'Paper item not in archive' });
+      const p = updated[0];
+      const label = `${p.paper_type}${p.size ? ' ' + p.size : ''}${p.gsm ? ' ' + p.gsm + 'gsm' : ''}${p.brand ? ' · ' + p.brand : ''}`;
+      await logAudit(sql, req, { action: 'inventory.restore', entityType: 'inventory', entityId: rowId, summary: `Restored paper item from Archive: ${label}` });
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'type must be "job", "import", "transaction" or "paper"' });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// PERMANENT delete from trash. Same shape as restore. Hard-deletes the row.
+// Nothing in the Archive is ever deleted permanently (owner, 2026-10-01) -
+// both routes below refuse, so an old open page can't do it either.
+const ARCHIVE_NO_PURGE = "Nothing in the Archive can be deleted permanently - restore it if it was archived by mistake.";
+
+// PERMANENT delete from trash - refused.
 app.delete('/api/trash/:type/:id', requirePermission('trash_admin'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const type = req.params.type;
-    const rowId = parseInt(req.params.id, 10);
-    if (!Number.isFinite(rowId)) return res.status(400).json({ error: 'Invalid id' });
-    if (type === 'job') {
-      const deleted = await sql`DELETE FROM jobs WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, name`;
-      if (!deleted.length) return res.status(404).json({ error: 'Job not in archive' });
-      await logAudit(sql, req, { action: 'job.purge', entityType: 'job', entityId: rowId, summary: `Permanently deleted Job E-${rowId}: ${deleted[0].name}` });
-      return res.json({ ok: true });
-    }
-    if (type === 'import') {
-      const deleted = await sql`DELETE FROM inventory_imports WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, paper_type`;
-      if (!deleted.length) return res.status(404).json({ error: 'Import not in archive' });
-      await logAudit(sql, req, { action: 'import.purge', entityType: 'import', entityId: rowId, summary: `Permanently deleted import #${rowId}: ${deleted[0].paper_type}` });
-      return res.json({ ok: true });
-    }
-    if (type === 'transaction') {
-      const deleted = await sql`DELETE FROM inventory_transactions WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING id, change, reason`;
-      if (!deleted.length) return res.status(404).json({ error: 'Transaction not in archive' });
-      await logAudit(sql, req, { action: 'inventory.tx.purge', entityType: 'inventory_item', entityId: rowId, summary: `Permanently deleted tx #${rowId} (${deleted[0].change > 0 ? '+' : ''}${deleted[0].change} sheets · ${deleted[0].reason || 'no reason'})` });
-      return res.json({ ok: true });
-    }
-    res.status(400).json({ error: 'type must be "job", "import", or "transaction"' });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+  res.status(403).json({ error: ARCHIVE_NO_PURGE });
 });
 
-// EMPTY trash entirely (admin "Empty Trash" button). Hard-deletes the imports
-// and stock transactions currently in the Archive, regardless of age.
-// ARCHIVED JOBS ARE LEFT ALONE - see purgeExpiredTrash for why a job number
-// must not vanish. Destroying a job is still possible, but only one at a
-// time via Delete Permanently, which names the job in the audit log; a bulk
-// button that wipes a hundred job numbers in one click is not something an
-// audit can be reconstructed from.
+// EMPTY Archive - refused (see ARCHIVE_NO_PURGE).
 app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const jobsDel    = [];
-    const importsDel = await sql`DELETE FROM inventory_imports     WHERE deleted_at IS NOT NULL RETURNING id`;
-    const txDel       = await sql`DELETE FROM inventory_transactions WHERE deleted_at IS NOT NULL RETURNING id`;
-    await logAudit(sql, req, {
-      action: 'trash.empty',
-      entityType: 'system',
-      entityId: 0,
-      summary: `Emptied Archive: ${jobsDel.length} job${jobsDel.length===1?'':'s'} + ${importsDel.length} import${importsDel.length===1?'':'s'} + ${txDel.length} transaction${txDel.length===1?'':'s'} permanently deleted`,
-    });
-    res.json({ ok: true, jobs: jobsDel.length, imports: importsDel.length, transactions: txDel.length });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+  res.status(403).json({ error: ARCHIVE_NO_PURGE });
 });
 
-// DELETE an inventory transaction row from history (admin only).
-// ?scope=manual (sent only by Manual Consumption's own Delete button) soft-
-// deletes — moves it to Archive (30-day retention, restorable), and is
-// scoped to Manual Consumption only: the row keeps showing in Stock In/Out
-// and Total In/Out exactly as before, since deleting a manual-consumption
-// entry is not the same thing as saying the stock movement never happened.
-// Every other caller (Stock In/Out's own bulk delete) hard-deletes, same as
-// always — no archive for those. Neither path touches current_balance; the
-// row already happened and its effect is baked into the running balance.
-// To actually undo a row's effect on stock, use the per-row Reverse on the
-// inventory History modal instead (which posts a proper correction entry).
+// DELETE a stock entry = move it to the Archive (admin only; restorable,
+// never erased - owner, 2026-10-01). Neither kind touches current_balance and
+// the paper's History keeps the row, so the ledger still adds up.
+//   ?scope=manual (Manual Consumption's own Delete): leaves Manual
+//     Consumption only - still counts in Stock In/Out.
+//   otherwise (Stock In/Out "Delete from History", Offcut Consumption
+//     Delete): leaves those movement reports too.
+// To undo an entry's effect on stock, use Reverse in the History instead.
 app.delete('/api/inventory/transactions/:id', requirePermission('trash_admin'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    if (req.query.scope === 'manual') {
-      const by = req.user?.email || 'unknown';
-      const updated = await sql`
-        UPDATE inventory_transactions
-           SET deleted_at = NOW(), deleted_by = ${by}
-         WHERE id = ${id} AND deleted_at IS NULL
-         RETURNING id, item_id, change, reason
-      `;
-      if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
-      const tx = updated[0];
-      await logAudit(sql, req, {
-        action: 'inventory.tx.delete',
-        entityType: 'inventory_item',
-        entityId: tx.item_id,
-        summary: `Moved tx #${id} to Archive from Manual Consumption (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — still shows in Stock In/Out, balance unchanged`,
-      });
-      return res.json({ ok: true });
-    }
-    const tx = (await sql`SELECT id, item_id, change, reason FROM inventory_transactions WHERE id=${id}`)[0];
-    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-    // reverses_tx_id has ON DELETE SET NULL so reversal rows pointing at this
-    // one (if any) survive — they just lose their back-link. Acceptable for
-    // archival purposes.
-    await sql`DELETE FROM inventory_transactions WHERE id=${id}`;
+    const scope = req.query.scope === 'manual' ? 'manual' : 'history';
+    const by = req.user?.email || 'unknown';
+    // A Manual-Consumption-archived row deleted again from Stock In/Out moves
+    // up to 'history'; nothing else re-archives an archived row.
+    const updated = scope === 'manual'
+      ? await sql`
+          UPDATE inventory_transactions SET deleted_at = NOW(), deleted_by = ${by}, deleted_scope = 'manual'
+           WHERE id = ${id} AND deleted_at IS NULL
+           RETURNING id, item_id, change, reason`
+      : await sql`
+          UPDATE inventory_transactions SET deleted_at = NOW(), deleted_by = ${by}, deleted_scope = 'history'
+           WHERE id = ${id} AND (deleted_at IS NULL OR deleted_scope IS DISTINCT FROM 'history')
+           RETURNING id, item_id, change, reason`;
+    if (!updated.length) return res.status(404).json({ error: 'Transaction not found' });
+    const tx = updated[0];
     await logAudit(sql, req, {
       action: 'inventory.tx.delete',
       entityType: 'inventory_item',
       entityId: tx.item_id,
-      summary: `Deleted tx #${id} from history (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged`,
+      summary: scope === 'manual'
+        ? `Moved tx #${id} to Archive from Manual Consumption (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — still shows in Stock In/Out, balance unchanged`
+        : `Moved tx #${id} to Archive from Stock In/Out (${tx.change > 0 ? '+' : ''}${tx.change} sheets · ${tx.reason || 'no reason'}) — balance unchanged, restorable`,
     });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
