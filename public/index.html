@@ -4408,7 +4408,18 @@ function jobHasPerDeliveryShipper(j) {
   return list.some(d => d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets'));
 }
 function deliveryShipper(j, i) {
-  if (!jobHasPerDeliveryShipper(j)) return { value: cartonsPacketsFor(j), legacy: true };
+  // A job recorded before per-delivery figures: read it exactly as the
+  // server stores it on its first delivery edit (freezeLegacyShippers) - a
+  // job-level figure belongs to EVERY delivery (that is what each card
+  // showed); with none, the Station's count goes onto the latest delivery
+  // only. Before (owner, 2026-10-15) the cards showed the figure on every
+  // delivery but the MIL / Jobs reports counted it once (2 x 15 -> 15).
+  if (!jobHasPerDeliveryShipper(j)) {
+    const own = jobOwnShipper(j);
+    if (own !== null) return { value: own, legacy: true };
+    const n = Array.isArray(j && j.deliveries) ? j.deliveries.length : 0;
+    return { value: i === n - 1 ? readyPacketsQtyTotal(j) : null, legacy: true };
+  }
   const d = (j.deliveries || [])[i];
   const raw = d && d.cartons_packets;
   const n = (raw === null || raw === undefined || raw === '') ? null : Number(raw);
@@ -4417,8 +4428,13 @@ function deliveryShipper(j, i) {
 // The job's Carton Shipper in total: every delivery's own figure added up,
 // or the old job figure for a job recorded before per-delivery figures.
 function jobShipperTotal(j) {
-  if (!jobHasPerDeliveryShipper(j)) return cartonsPacketsFor(j);
   return (j.deliveries || []).reduce((a, d, i) => a + (deliveryShipper(j, i).value || 0), 0);
+}
+// The job-level Carton Shipper typed before per-delivery figures (null if none).
+function jobOwnShipper(j) {
+  if (!j || j.cartons_packets === null || j.cartons_packets === undefined || j.cartons_packets === '') return null;
+  const n = Number(j.cartons_packets);
+  return Number.isFinite(n) ? n : null;
 }
 function cartonsPacketsFor(j) {
   if (!j) return 0;
@@ -8115,9 +8131,7 @@ function tileDeliveryRecordsHtml(j) {
   const left = booked ? Math.max(0, booked - shipped) : 0;
   // Carton Shipper: each delivery's own (owner, 2026-10-08), added up; a job
   // recorded before that keeps its one job figure (see deliveryShipper).
-  const ownShipper = d => { const n = (d && d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '') ? Number(d.cartons_packets) : NaN; return Number.isFinite(n) ? n : 0; };
-  const perShipper = !shade && list.some(d => d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets'));
-  const shipper = shade ? 0 : (perShipper ? list.reduce((a, d) => a + ownShipper(d), 0) : cartonsPacketsFor(j));
+  const shipper = shade ? 0 : jobShipperTotal(j);
   const f = (label, val) => (val === '' || val === null || val === undefined) ? '' : `<span><span class="tdr-l">${label}</span> ${val}</span>`;
   const sorted = list.map((d, i) => ({ d, i })).sort((a, b) => {
     const ta = a.d && a.d.date ? new Date(a.d.date).getTime() : 0;
@@ -8134,7 +8148,7 @@ function tileDeliveryRecordsHtml(j) {
       ${shade ? '' : f('Batch', esc(d.batch_no || ''))}
       ${shade ? '' : f('E-FBR', esc(d.fbr_no || ''))}
       ${shade ? '' : f('MSI', esc(d.msi_no || ''))}
-      ${perShipper && ownShipper(d) > 0 ? f('Carton Shipper', ownShipper(d).toLocaleString()) : ''}
+      ${!shade && deliveryShipper(j, i).value > 0 ? f('Carton Shipper', deliveryShipper(j, i).value.toLocaleString()) : ''}
       ${f(shade ? 'Challan' : 'Invoice', esc(inv))}
       ${sp && sp.rate !== null ? f('Rate', `<span style="${sp.override ? RATE_OVERRIDE_STYLE : ''}">${fmtRate(sp.rate)}</span>`) : ''}
       ${sp ? f('Tax', esc(String(sp.tax)) + '%') : ''}
@@ -16973,8 +16987,7 @@ function jrMilJobFigures(j, asOf) {
   // the Jobs Report; a job recorded before per-shipment figures counts its one
   // job figure once (owner, 2026-10-13).
   let shipper = 0;
-  if (jobHasPerDeliveryShipper(j)) dels.forEach((d, i) => { if (upTo(d)) shipper += deliveryShipper(j, i).value || 0; });
-  else if (dels.some(upTo)) shipper = cartonsPacketsFor(j) || 0;
+  dels.forEach((d, i) => { if (upTo(d)) shipper += deliveryShipper(j, i).value || 0; });
   const p = j.particulars || {};
   const si = j.stage_index || 0;
   let made = 0;
@@ -19556,13 +19569,12 @@ function buildSaleReportRows(tabOverride) {
     // full registered name — the job card's shorter one is only the lookup key.
     const cs = resolveCompanySettings(j.client);
     const companyName = (cs && cs.company) || j.client || '';
-    // Carton Shipper: each shipment's own (owner, 2026-10-08); a job recorded
-    // before that shows its one job figure, counted once in the total.
-    const cpPerRow = deliveriesList.some(d => d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'cartons_packets'));
-    const cpJob = cpPerRow ? 0 : cartonsPacketsFor(j);
+    // Carton Shipper: each shipment's own (owner, 2026-10-08). An older job
+    // reads the way its delivery cards show it (see deliveryShipper), so the
+    // total is the rows added up (owner, 2026-10-15).
+    const cpPerRow = true;
     deliveriesList.forEach((d, idx) => {
-      const cpOwn = (cpPerRow && d && d.cartons_packets !== null && d.cartons_packets !== undefined && d.cartons_packets !== '') ? Number(d.cartons_packets) : NaN;
-      const cartonsPackets = cpPerRow ? (Number.isFinite(cpOwn) ? cpOwn : 0) : cpJob;
+      const cartonsPackets = deliveryShipper(j, idx).value || 0;
       const poNo    = (d && d.po_no    ? String(d.po_no).trim()    : '') || (j.ref || '');
       const batchNo = (d && d.batch_no ? String(d.batch_no).trim() : '') || (j.bno || '');
       const fbrNo   = (d && d.fbr_no ? String(d.fbr_no).trim() : '');
