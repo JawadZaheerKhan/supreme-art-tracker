@@ -32638,11 +32638,24 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
   // only one brand, pre-populate its Issue field with min(need, avail) so
   // the store keeper can click Issue Stock immediately when they want
   // the exact need — or adjust up for an intentional over-issue.
-  const singleRow = rows.length === 1 ? rows[0] : null;
-  const singleBalSheets = singleRow ? (singleRow.current_balance || 0) : 0;
-  const singlePreSheets = singleRow ? Math.min(needSheets, singleBalSheets) : 0;
-  const singlePrePkts = ps ? singlePreSheets / ps : 0;
-  const singlePre = Number.isInteger(singlePrePkts) ? singlePrePkts : +singlePrePkts.toFixed(2);
+  // Same as Stock Out (Bulk) (owner, 2026-10-16): the job's whole need is
+  // filled in - each brand up to its stock, highest first, and whatever
+  // stock can't cover on the first brand. Short of stock, that row shows
+  // red and Issue Stock stays off (nothing is issued) until stock is in or
+  // the numbers are lowered for a partial issue.
+  const preSheets = new Map();
+  {
+    let left = needSheets;
+    for (const it of rows) {
+      const take = Math.max(0, Math.min(left, it.current_balance || 0));
+      if (take > 0) { preSheets.set(it.id, take); left -= take; }
+    }
+    if (left > 0 && rows.length) preSheets.set(rows[0].id, (preSheets.get(rows[0].id) || 0) + left);
+  }
+  const preOf = (id) => {
+    const p = ps ? (preSheets.get(id) || 0) / ps : 0;
+    return p > 0 ? String(Number.isInteger(p) ? p : +p.toFixed(2)) : '';
+  };
   const rowHtml = rows.map((it) => {
     const balSheets  = it.current_balance || 0;
     // Available packets: show the true fractional value so a partial
@@ -32653,7 +32666,7 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
     const availNote = balSheets > 0
       ? `${balPackets.toLocaleString()} <span style="color:var(--text3);font-size:11px;">(${balSheets.toLocaleString()} sheets)</span>`
       : `<span style="color:var(--text3);">0</span>`;
-    const preFillValue = (singleRow && it.id === singleRow.id && singlePre > 0) ? String(singlePre) : '';
+    const preFillValue = preOf(it.id);
     return `
       <tr class="split-row ${balSheets <= 0 ? 'split-row-out' : ''}">
         <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
@@ -32662,7 +32675,6 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
           <input type="number" class="split-qty" min="0" max="${balPackets}" step="any"
                  data-item-id="${it.id}" data-avail-packets="${balPackets}" data-avail-sheets="${balSheets}"
                  value="${preFillValue}" placeholder="0"
-                 ${balSheets <= 0 ? 'disabled' : ''}
                  oninput="recomputeSplitFooter()">
         </td>
       </tr>`;
