@@ -6424,6 +6424,20 @@ async function performIssueStockUnlocked(sql, req, id, body) {
       return { status: 400, error: `Split item "${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}" is not in this job's paper group.` };
     }
   }
+  // Every brand must hold its share BEFORE anything is deducted: the brands
+  // are deducted one by one, so a refusal on the 2nd one used to leave the
+  // 1st already taken while the job stayed unissued (2026-10-16).
+  {
+    const want = new Map();
+    for (const s of splits) want.set(s.item_id, (want.get(s.item_id) || 0) + s.sheets);
+    for (const [itemId, sheets] of want) {
+      const it = itemsById.get(itemId);
+      const bal = parseFloat(it.current_balance) || 0;
+      if (sheets > bal) {
+        return { status: 400, error: `Not enough stock of ${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}: ${bal.toLocaleString()} sheets on hand, ${sheets.toLocaleString()} asked. Nothing was issued.` };
+      }
+    }
+  }
   const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
   const ps   = packetSize(paperType);
   const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
@@ -7075,6 +7089,19 @@ async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, man
     throw e;
   }
 }
+// Two people saving the same type name at the same moment both pass the
+// name check; the unique index then refuses one - say so plainly (409)
+// instead of a raw database error (2026-10-16 review). null = answered.
+async function cartonNameSafe(res, name, run) {
+  try { return (await run())[0]; }
+  catch (e) {
+    if (/ux_carton_types_name|duplicate key/i.test(String(e && e.message))) {
+      res.status(409).json({ error: `A carton type named "${name}" already exists.` });
+      return null;
+    }
+    throw e;
+  }
+}
 async function cartonTypeOr404(sql, id, res) {
   const t = (await sql`SELECT * FROM carton_types WHERE id = ${parseInt(id, 10) || 0}`)[0];
   if (!t) { res.status(404).json({ error: 'Carton type not found.' }); return null; }
@@ -7114,7 +7141,11 @@ async function syncStationCartons(sql, jobId, particulars, user, issuedTo) {
   const held = await takeOpLocks(sql, [`job-cartons:${jobId}`], { wait: true });
   if (!held) throw new Error('Carton stock is being updated for this job - save again in a moment.');
   try {
-    const want = stationCartonsWanted(particulars);
+    // Work from the job as stored now, inside the lock: two saves landing
+    // together (Pasting and QC) must not leave stock matching the save that
+    // lost the race (2026-10-16 review). `particulars` is the fallback.
+    const fresh = (await sql`SELECT particulars FROM jobs WHERE id = ${jobId}`)[0];
+    const want = stationCartonsWanted((fresh && fresh.particulars) || particulars);
     const rows = await sql`SELECT type_id, -SUM(change)::int AS taken FROM carton_transactions WHERE job_id = ${jobId} AND source = 'station' GROUP BY type_id`;
     const taken = new Map(rows.map(r => [r.type_id, Number(r.taken) || 0]));
     const ids = [...new Set([...want.keys(), ...taken.keys()])];
@@ -7214,10 +7245,11 @@ app.post('/api/cartons/types', requirePermission('carton_btn_types'), async (req
     if (b.error) return res.status(400).json({ error: b.error });
     const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name})`;
     if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
-    const t = (await sql`
+    const t = await cartonNameSafe(res, b.name, () => sql`
       INSERT INTO carton_types (name, size, ply, reorder_level, created_by)
       VALUES (${b.name}, ${b.size}, ${b.ply}, ${b.reorder}, ${req.user.email})
-      RETURNING *`)[0];
+      RETURNING *`);
+    if (!t) return;
     await logAudit(sql, req, { action: 'carton.type_create', entityType: 'carton_type', entityId: t.id, summary: `Carton type added: ${cartonTypeLabel(t)}` });
     res.json(t);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -7233,9 +7265,10 @@ app.put('/api/cartons/types/:id', requirePermission('carton_btn_types'), async (
     const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND id <> ${cur.id}`;
     if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
     const hidden = !!(req.body && req.body.hidden);
-    const t = (await sql`
+    const t = await cartonNameSafe(res, b.name, () => sql`
       UPDATE carton_types SET name = ${b.name}, size = ${b.size}, ply = ${b.ply}, reorder_level = ${b.reorder}, hidden = ${hidden}
-       WHERE id = ${cur.id} RETURNING *`)[0];
+       WHERE id = ${cur.id} RETURNING *`);
+    if (!t) return;
     const what = cur.hidden !== hidden ? (hidden ? 'hidden' : 'shown again') : 'edited';
     await logAudit(sql, req, { action: 'carton.type_edit', entityType: 'carton_type', entityId: t.id, summary: `Carton type ${what}: ${cartonTypeLabel(cur)}${what === 'edited' ? ' -> ' + cartonTypeLabel(t) : ''}` });
     res.json(t);
@@ -10434,7 +10467,16 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
       entityType: 'job', entityId: id,
       summary: `Job E-${id}: removed particulars entry #${idx + 1} by ${actorLabel}${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
     });
-    res.json(updated[0]);
+    // A deleted Carton Shipper / Loose entry gives its cartons back to stock
+    // (2026-10-16 review: they stayed issued). Never fails the delete.
+    let cartonWarning = null, cartonError = null;
+    if (keys.some(k => STATION_CARTON_KEYS.includes(k))) {
+      try {
+        const below = await syncStationCartons(sql, id, particulars, { ...req.user, station_actor: actorLabel }, actorLabel);
+        if (below.length) cartonWarning = below;
+      } catch (e) { console.error('delete-entry carton sync', e); cartonError = e.message || 'Carton stock was not updated.'; }
+    }
+    res.json({ ...updated[0], ...(cartonWarning ? { carton_warning: cartonWarning } : {}), ...(cartonError ? { carton_error: cartonError } : {}) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

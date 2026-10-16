@@ -12398,6 +12398,20 @@ function jobFreshNeedSheets(j) {
 }
 // When jobs multi-select changes, sum their needs into the packets +
 // sheets inputs so the store keeper sees the total and can override.
+// A brand box the app filled: shows packets (2 decimals) and keeps the exact
+// sheets, used on save while the box still shows what was filled.
+function fillExact(el, sheets, ps) {
+  el.value = sheets > 0 ? +(sheets / ps).toFixed(2) : '';
+  el.dataset.fillSheets = sheets > 0 ? String(sheets) : '';
+  el.dataset.fillShown = String(el.value);
+}
+// Sheets for a typed / filled packets box: the exact filled sheets when the
+// box is unchanged, else packets x packet size.
+function boxSheets(el, ps) {
+  const pk = parseFloat(el.value);
+  if (el.dataset.fillSheets && String(el.value) === el.dataset.fillShown) return parseInt(el.dataset.fillSheets, 10) || 0;
+  return Number.isFinite(pk) ? Math.round(pk * ps) : 0;
+}
 function bulkOutJobsChanged(idx) {
   const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
   if (!tr) return;
@@ -12420,19 +12434,21 @@ function bulkOutJobsChanged(idx) {
     const pickedBrand = hiddenItem && hiddenItem.dataset.group !== '1' ? itemId : null;
     const order = [...brandInputs].sort((a, b) => (parseInt(b.dataset.itemId, 10) === pickedBrand) - (parseInt(a.dataset.itemId, 10) === pickedBrand));
     let remaining = totalSheets;
+    const shares = new Map();
     order.forEach(el => {
       const avail = parseInt(el.dataset.availSheets, 10) || 0;
-      const share = Math.min(remaining, avail);
-      el.value = share > 0 ? +(share / ps).toFixed(2) : '';
-      remaining -= Math.max(share, 0);
+      const share = Math.max(0, Math.min(remaining, avail));
+      shares.set(el, share);
+      remaining -= share;
     });
     // Not enough in stock (owner, 2026-10-15): the rest still goes in - on
     // the first brand (the picked one) - so the row shows what the jobs need.
     // Remove All then stops with "not enough stock" and nothing is issued.
-    if (remaining > 0) {
-      const first = order[0];
-      first.value = +(((parseFloat(first.value) || 0) * ps + remaining) / ps).toFixed(2);
-    }
+    if (remaining > 0 && order.length) shares.set(order[0], shares.get(order[0]) + remaining);
+    // The exact sheets ride along (fillExact) so a save doesn't re-round the
+    // 2-decimal packets: 333 sheets of a ream paper show 0.67, and 0.67 x 500
+    // = 335 would ask more than the brand holds (2026-10-16).
+    order.forEach(el => { const sh = shares.get(el) || 0; fillExact(el, sh, ps); });
     bulkOutBrandSplitChanged(idx);
   } else {
     tr.querySelector('.bulkout-qty').value = totalSheets || '';
@@ -12583,9 +12599,10 @@ async function saveBulkStockOutRun() {
       .map(el => ({
         item_id: parseInt(el.dataset.itemId, 10),
         pkts: parseFloat(el.value),
+        sheets: boxSheets(el, psRow),   // exact sheets when the app filled it
       }))
       .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.pkts) && s.pkts > 0)
-      .map(s => ({ item_id: s.item_id, sheets: Math.round(s.pkts * psRow) }));
+      .map(s => ({ item_id: s.item_id, sheets: s.sheets }));
     if (!itemId && !qty && !jobCard && !selectedJobs.length) continue;
     if (!itemId) {
       await alertDialog({ title: `${rowLabel}: paper required`, message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
@@ -27793,7 +27810,7 @@ function jobForm(j={}, opts) {
           return `
         <td colspan="1"><span class="jc-lbl">Sheets Qty</span>
           <div id="f-sheets-wrap" data-mode="${packetsMode}" data-lock-total="${totalSh || 0}" style="display:flex;flex-direction:column;gap:3px;align-items:stretch;">
-            <input type="text" id="f-sheets" value="${esc(String(sheetsPrimVal))}" oninput="jobSheetsPrimaryEdited(); jobCartonQtySync(); jobPacketsSync(); updateStockHint();" style="width:100%;box-sizing:border-box;${hasSecond ? 'text-align:center;' : ''}">
+            <input type="text" id="f-sheets" value="${esc(String(sheetsPrimVal))}" oninput="jobSheetsPrimaryEdited(); jobCartonQtySync(); jobPacketsSync(); jobRelockPacketsTotal(); updateStockHint();" style="width:100%;box-sizing:border-box;${hasSecond ? 'text-align:center;' : ''}">
             <span id="sheets-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:4px;align-items:center;">
               <span style="font-weight:700;color:var(--text2);flex:0 0 auto;">+</span>
               <input type="text" id="f-sheets-2" value="${esc(hasSecond ? String(secSh || '') : '')}" placeholder="0" oninput="jobSecondarySheetsEdited();" style="flex:1 1 0;min-width:0;box-sizing:border-box;text-align:center;">
@@ -31413,6 +31430,16 @@ function jobFormTotalPackets() {
 }
 // Primary packets edited by hand — in pending mode, re-lock the total so a
 // later secondary edit subtracts from the NEW total the user just set.
+// Pending job with a 2nd paper: the packets total the 2nd paper is taken out
+// of follows the main paper's boxes. Typing main Sheets rewrites main Packets
+// (jobPacketsSync) - without this the total stayed at the old value and a
+// later 2nd-paper edit split packets and sheets differently (2026-10-16).
+function jobRelockPacketsTotal() {
+  const wrap = document.getElementById('f-packets-wrap');
+  if (wrap && wrap.dataset.mode === 'pending' && jobSecondPaperActive()) {
+    wrap.dataset.lockTotal = String(jobFormTotalPackets());
+  }
+}
 function jobPrimaryPacketsEdited() {
   // Packets -> Sheets for the main paper too (owner, 2026-10-16: typing
   // packets left Sheets as it was; the 2nd paper's pair was already linked).
@@ -31427,10 +31454,7 @@ function jobPrimaryPacketsEdited() {
     if (Number.isFinite(pk) && pk > 0) shEl.value = String(Math.round(pk * packetSize(it.paper_type) * cutPieces));
     else if (String(pkEl.value).trim() === '') shEl.value = '';
   }
-  const wrap = document.getElementById('f-packets-wrap');
-  if (wrap && wrap.dataset.mode === 'pending' && jobSecondPaperActive()) {
-    wrap.dataset.lockTotal = String(jobFormTotalPackets());
-  }
+  jobRelockPacketsTotal();
   jobSheetsPrimaryEdited();   // keeps the Sheets total in step too
   jobCartonQtySync();
   updateStockHint();
@@ -32702,6 +32726,8 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
       ? `${balPackets.toLocaleString()} <span style="color:var(--text3);font-size:11px;">(${balSheets.toLocaleString()} sheets)</span>`
       : `<span style="color:var(--text3);">0</span>`;
     const preFillValue = preOf(it.id);
+    // Exact sheets of the fill, used on save while the box is unchanged (see boxSheets).
+    const preExact = preSheets.get(it.id) ? ` data-fill-sheets="${preSheets.get(it.id)}" data-fill-shown="${esc(preFillValue)}"` : '';
     return `
       <tr class="split-row ${balSheets <= 0 ? 'split-row-out' : ''}">
         <td style="text-transform:uppercase;letter-spacing:0.02em;font-weight:600;">${brandTxt}</td>
@@ -32709,7 +32735,7 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
         <td>
           <input type="number" class="split-qty" min="0" max="${balPackets}" step="any"
                  data-item-id="${it.id}" data-avail-packets="${balPackets}" data-avail-sheets="${balSheets}"
-                 value="${preFillValue}" placeholder="0"
+                 value="${preFillValue}" placeholder="0"${preExact}
                  oninput="recomputeSplitFooter()">
         </td>
       </tr>`;
@@ -32841,9 +32867,10 @@ async function saveSplitIssue(jobId) {
     .map(inp => ({
       item_id: parseInt(inp.dataset.itemId, 10),
       packets: parseFloat(inp.value),
+      sheets: boxSheets(inp, ps),   // exact sheets when the app filled it
     }))
     .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.packets) && s.packets > 0)
-    .map(s => ({ item_id: s.item_id, sheets: Math.round(s.packets * ps) }));
+    .map(s => ({ item_id: s.item_id, sheets: s.sheets }));
   if (!splits.length) { notify('Enter at least one brand quantity.'); return; }
   const chIn = document.getElementById('split-challan');
   const challanNo = chIn ? ((chIn.value || '').trim() || null) : null;
@@ -35398,7 +35425,7 @@ function stationOpenJob(id) {
   stationJobId = id;
   stationView = 'update';
   // Pasting / QC pick a carton type per Carton Shipper line - fresh list each job.
-  if (stationOperator && (stationOperator.stage_index === 5 || stationOperator.stage_index === 6)) stationCartonTypes = null;
+  if (stationOperator && (stationOperator.stage_index === 5 || stationOperator.stage_index === 6)) { stationCartonTypes = null; stationCartonTypesFailed = false; }
   stationRecBlobs = [];
   stationDraftValues = {};
   stationPrintMult = {};
@@ -35908,13 +35935,21 @@ function stationShipperSync() {
 // Carton Shippers stock follow (server: syncStationCartons).
 let stationCartonTypes = null;       // [{id, name, size, ply, hidden}] - null until loaded
 let stationCartonTypesLoading = false;
+let stationCartonTypesFailed = false; // the list didn't load - no retry loop; retried on the next job opened
 async function stationLoadCartonTypes() {
-  if (stationCartonTypesLoading) return;
+  if (stationCartonTypesLoading || stationCartonTypesFailed) return;
   stationCartonTypesLoading = true;
+  // A failed load stays null (types unknown) - it used to become [] ("no
+  // types"), and a save then wiped the job's saved types and gave its
+  // cartons back to stock (2026-10-16 review).
   try { stationCartonTypes = await api('GET', '/api/station/carton-types'); }
-  catch { stationCartonTypes = []; }
+  catch { stationCartonTypes = null; stationCartonTypesFailed = true; }
   stationCartonTypesLoading = false;
   if (stationView === 'update') { stationSnapshotDraft(); stationRender(); }
+}
+// The carton type boxes can be trusted: the list is loaded and every box is live.
+function stationCartonTypesReady() {
+  return Array.isArray(stationCartonTypes) && !document.querySelector('select.station-shipper-type[disabled]');
 }
 function stationCartonTypeText(t) { return [t.name, t.size, t.ply].filter(Boolean).join(' · '); }
 // firstOfPass: set on the first Carton Shipper line, whose pick the Loose
@@ -35922,7 +35957,7 @@ function stationCartonTypeText(t) { return [t.name, t.size, t.ply].filter(Boolea
 function stationCartonTypeSelectHtml(id, value, follow, firstOfPass) {
   if (stationCartonTypes === null) {
     stationLoadCartonTypes();
-    return `<select class="station-shipper-type" id="${id}" disabled><option value="">Loading carton types…</option></select>`;
+    return `<select class="station-shipper-type" id="${id}" disabled><option value="">${stationCartonTypesFailed ? 'Carton types did not load - the saved type is kept' : 'Loading carton types…'}</option></select>`;
   }
   const list = stationCartonTypes.filter(t => !t.hidden || String(t.id) === String(value));
   if (!list.length) return `<div class="station-shipper-type-none">No carton types yet — add them in Carton Shippers</div>`;
@@ -35962,8 +35997,11 @@ function stationShipperRemoveLine(fieldId, k) {
   stationSnapshotDraft();
   const h = document.getElementById(fieldId);
   const n = (h && parseInt(h.dataset.lines, 10)) || 1;
+  // Types move up with the numbers - only while the type boxes are live (a
+  // loading box reads '' and would hide the saved types).
+  const moveTypes = stationCartonTypesReady();
   for (let i = k; i < n - 1; i++) {
-    for (const s of ['q', 'n', 't']) {
+    for (const s of (moveTypes ? ['q', 'n', 't'] : ['q', 'n'])) {
       const next = document.getElementById(`${fieldId}-${s}${i + 1}`);
       stationDraftValues[`${fieldId}-${s}${i}`] = next ? next.value : '';
     }
@@ -36058,13 +36096,17 @@ async function stationDeleteEntry(jobId, idx, keysJson) {
       const i = jobs.findIndex(j => j.id === updated.id);
       if (i !== -1) jobs[i] = updated;
     }
-    stationSnapshotDraft();
+    // Draw from what is saved: kept values are per pass slot, so after a
+    // pass is removed they would draw the deleted numbers onto the next pass
+    // and the next Save would write them back (2026-10-16 review).
+    stationDraftValues = {};
+    stationShipperOverride = {};
     // Reset the pass counter so the render re-derives from entries[].
     stationPassCount = 1;
     stationJobPassKey = null;
     stationPrintMult = {};
     stationRender();
-    notify('Entry deleted');
+    notify('Entry deleted' + stationCartonNote(updated));
   } catch (e) {
     notify('Error: ' + (e.message || String(e)));
   }
@@ -36498,7 +36540,9 @@ async function stationSubmit(advance, skipTo) {
   // as the lines (owner, 2026-10-14). Every line with cartons needs its type.
   const cartonTypesPatch = {};
   let cartonTypeMissing = false;
-  fields.filter(f => f.type === 'shipper' && f.key in patch).forEach(f => {
+  // Types still loading / not loaded: send none - the server keeps each
+  // line's saved type, so nothing is wrongly given back to stock.
+  if (stationCartonTypesReady()) fields.filter(f => f.type === 'shipper' && f.key in patch).forEach(f => {
     const hs = Array.from(document.querySelectorAll(`input.station-shipper-val[data-key="${CSS.escape(f.key)}"]`))
       .sort((a, b) => Number(a.dataset.pass) - Number(b.dataset.pass));
     const per = hs.map(h => { try { return JSON.parse(h.dataset.types || '[]'); } catch { return []; } });
