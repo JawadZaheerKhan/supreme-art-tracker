@@ -798,6 +798,9 @@
     -webkit-overflow-scrolling: touch;
   }
   .report-scroll-wrap > table { margin: 0; }
+  /* Fit variant: the box hugs a width:auto table - columns as wide as
+     their text, no gaps; long text wraps before a sideways scroll does. */
+  .report-scroll-wrap--fit { width: fit-content; max-width: 100%; }
   .report-scroll-wrap thead th {
     position: sticky;
     z-index: 5;
@@ -1298,6 +1301,8 @@
   .sm-offcut-note { display:inline-flex; align-items:center; gap:4px; margin-top:4px; padding:1px 7px; font-size:11px; font-weight:600; color:#155e75; background:#cffafe; border:1px solid #67e8f9; border-radius:999px; cursor:pointer; white-space:nowrap; }
   .sm-offcut-note:hover { background:#a5f3fc; }
   .sm-ref-input { padding:3px 6px; border:1px solid var(--border); border-radius:5px; font-size:12px; background:var(--bg); box-sizing:border-box; }
+  /* wrapEditHtml: as wide as its text up to max-width, then a 2nd line. */
+  .sm-wrap-input { field-sizing: content; resize: none; display: block; font-family: inherit; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
   .sm-ref-input:focus { border-color:#A32D2D; outline:none; background:#fff; }
   .tdr { background:#fff8ed; border:1px solid #fed7aa; border-radius:8px; padding:5px 9px; margin-bottom:8px; font-size:11px; line-height:1.35; color:var(--text); }
   .tdr-head { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; font-size:10px; text-transform:uppercase; letter-spacing:0.04em; color:#9a3412; font-weight:700; margin-bottom:2px; }
@@ -12799,8 +12804,15 @@ function txNotesShown(t) {
 // column blank ("—") with the reference visible only in Notes, even though
 // the Job column exists for exactly this. Surface it here too, styled
 // distinctly since it's a typed reference, not a clickable job link.
+// A report cell's editable text: grows with its text and wraps onto a
+// 2nd line at maxW instead of widening its column (owner, 2026-10-16).
+// Enter saves, as the one-line inputs did.
+function wrapEditHtml(value, placeholder, onchange, title, minW, maxW, align) {
+  return `<textarea rows="1" class="sm-ref-input sm-wrap-input" placeholder="${esc(placeholder)}" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="event.stopPropagation(); this.value=this.value.replace(/\\s*\\n\\s*/g,' '); ${onchange}"${title ? ` title="${esc(title)}"` : ''} style="min-width:${minW}px;max-width:${maxW}px;${align ? `text-align:${align};` : ''}">${esc(value)}</textarea>`;
+}
+
 function txJobCellHtml(t) {
-  if (t && t.job_id) return `Job E-${t.job_id}`;
+  if (t && t.job_id) return `<span style="white-space:nowrap;">Job E-${t.job_id}</span>`;
   const ref = extractManualJobCardNo(t && t.notes);
   return ref === '(no reference)' ? '<span style="color:var(--text3)">—</span>'
     : `<span style="color:var(--text2);" title="Off-system job card reference — not a linked job">${esc(ref)}</span>`;
@@ -17145,24 +17157,23 @@ function renderJrMil() {
   const mmBg = 'background:#fef3c7;box-shadow:inset 0 0 0 2px #f59e0b;';
   const noteCell = (r, i, field, note, auto) => {
     const warn = r.cartonsMismatch ? ` title="Typed cartons (${fmtN(r.typedCartons)}) don't match the cartons on hand (${fmtN(r.packedCartons)}) - update them"` : '';
-    const style = `padding:7px 10px;white-space:nowrap;${r.cartonsMismatch ? mmBg : ''}`;
+    const style = `padding:7px 10px;${r.cartonsMismatch ? mmBg : ''}`;
     if (canEdit && r.groupId) {
-      // As wide as its text (typed or the "auto:" hint), growing while typing
-      // - a fixed 150px cut off "1440x1 + 1300x1" (owner, 2026-10-16).
+      // As wide as its text (typed or the "auto:" hint), wrapping onto a 2nd
+      // line past 190px instead of widening the table (owner, 2026-10-16).
       const ph = auto ? 'auto: ' + auto : '';
-      const w = Math.max(14, String(note || '').length, ph.length) + 2;
-      return `<td style="${style}"${warn}><input type="text" class="sm-ref-input" value="${esc(note)}" placeholder="${esc(ph)}" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" oninput="this.style.width='calc('+(Math.max(14,this.value.length,this.placeholder.length)+2)+'ch + 20px)'" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" style="width:calc(${w}ch + 20px);"></td>`;
+      return `<td style="${style}"${warn}>${wrapEditHtml(note, ph, `saveMilGroupField(${i}, '${field}', this.value)`, '', 90, 190)}</td>`;
     }
-    return `<td style="${style}"${warn}>${note ? esc(note) : (auto ? `<span style="color:var(--text3);font-style:italic;" title="Worked out from the Station packing and the shipments">${esc(auto)}</span>` : '<span style="color:var(--text3)">—</span>')}</td>`;
+    return `<td style="${style}"${warn}><div style="max-width:190px;">${note ? esc(note) : (auto ? `<span style="color:var(--text3);font-style:italic;" title="Worked out from the Station packing and the shipments">${esc(auto)}</span>` : '<span style="color:var(--text3)">—</span>')}</div></td>`;
   };
   // Code and MIL Qty are the MIL group's own fields: typed here, saved on the
   // group (older name-only groups have no group record to save to).
   const cell = (r, i, field, shown, align) => (canEdit && r.groupId)
-    ? `<input type="text" class="sm-ref-input" value="${esc(shown)}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" title="Edit and press Enter - saved on the MIL group" style="width:${field === 'po_qty' ? '110px' : '100px'};text-align:${align};">`
+    ? `<input type="text" class="sm-ref-input" value="${esc(shown)}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" title="Edit and press Enter - saved on the MIL group" style="width:${field === 'po_qty' ? '90px' : '84px'};text-align:${align};">`
     : (esc(shown) || '<span style="color:var(--text3)">—</span>');
   const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.short ? shortBg + 'box-shadow:inset 4px 0 0 #dc2626;' : ''}" onclick="jrOpenMilGroup(${i})" title="${r.short ? 'Ready + In Process is below the MIL Qty - ' : ''}Open this MIL product's tile in the Jobs tab">
       <td style="padding:7px 10px;">${cell(r, i, 'jobcode', r.code, 'left')}</td>
-      <td style="padding:7px 10px;font-weight:700;">${esc(r.product)}<div style="font-size:11px;color:var(--text2);font-weight:400;">${esc(r.client)} · ${r.jobCount} job${r.jobCount === 1 ? '' : 's'}</div></td>
+      <td style="padding:7px 10px;font-weight:700;"><div style="min-width:130px;max-width:220px;">${esc(r.product)}</div><div style="font-size:11px;color:#7c3aed;font-weight:600;" title="${esc(r.client)}">${r.jobCount} job${r.jobCount === 1 ? '' : 's'}</div></td>
       <td style="padding:7px 10px;text-align:right;">${cell(r, i, 'po_qty', r.milQty ? String(r.milQty) : '', 'right')}</td>
       <td style="padding:7px 10px;text-align:right;font-weight:600;color:${r.short ? '#b91c1c' : '#166534'};">${fmtN(r.ready)}</td>
       <td style="padding:7px 10px;text-align:right;color:#1e40af;">${fmtN(r.inProcess)}</td>
@@ -17178,8 +17189,8 @@ function renderJrMil() {
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready (on the shelf), the cartons on hand (Carton Shipper / Loose / Total, after the shipments) and Shipped (up to the day) as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its tile in the Jobs tab, a Shipped figure for its deliveries.
       <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${shortBg}border:1px solid rgba(220,38,38,0.45);"></span>Red = Ready + In Process below the MIL Qty</span>
       <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${mmBg}"></span>Amber = typed cartons don't match Total Cartons</span></div>
-    <div class="report-scroll-wrap">
-      <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+    <div class="report-scroll-wrap report-scroll-wrap--fit">
+      <table class="ss-table" style="width:auto;border-collapse:collapse;font-size:13px;">
         <thead><tr style="background:var(--bg2);">
           <th ${th}>Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR}>Shipped Qty</th><th ${th} title="Typed: the full cartons on hand, e.g. 1400x5 + 1500x10 (grey = the app's estimate)">Carton Shipper</th><th ${th} title="Typed: the loose cartons on hand, e.g. 200x2 (grey = the app's estimate)">Loose Carton Shipper</th><th ${thR} title="Automatic: cartons packed at the Station less the shipments' cartons">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th>
         </tr></thead>
@@ -23476,13 +23487,13 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;white-space:nowrap;">${balCell}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${weightCell}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(t.reason||'')}</td>
-      <td style="padding:8px 10px;white-space:nowrap;">${job}</td>
+      <td style="padding:8px 10px;"><div style="min-width:80px;max-width:200px;">${job}</div></td>
       <td style="padding:8px 10px;">${canEditRef
-        ? `<input type="text" value="${esc(t.challan_no || '')}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveTxRef('${direction}', [${ids.join(',')}], 'challan_no', this.value)" title="Challan No. — edit and press Enter; the change is logged in this paper's History" class="sm-ref-input" style="width:90px;">`
+        ? wrapEditHtml(t.challan_no || '', '—', `saveTxRef('${direction}', [${ids.join(',')}], 'challan_no', this.value)`, "Challan No. — edit and press Enter; the change is logged in this paper's History", 60, 120)
         : (t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>')}</td>
-      <td style="padding:8px 10px;width:100%;min-width:140px;">${canEditRef
-        ? `<input type="text" value="${esc(txNotesShown(t))}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)" title="Notes — edit and press Enter; the change is logged in this paper's History" class="sm-ref-input" style="width:100%;min-width:140px;">`
-        : esc(txNotesShown(t))}${smOffcutNoteHtml(direction, t)}</td>
+      <td style="padding:8px 10px;">${canEditRef
+        ? wrapEditHtml(txNotesShown(t), '—', `saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)`, "Notes — edit and press Enter; the change is logged in this paper's History", 120, 260)
+        : `<div style="max-width:260px;">${esc(txNotesShown(t))}</div>`}${smOffcutNoteHtml(direction, t)}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${reverseCell}</td>
     </tr>`;
   }).join('');
@@ -23495,8 +23506,8 @@ function renderStockMovement(direction, from, to) {
   const someVisSel = !allVisSel && txs.some(t => stockMovementSel[direction].has(t.id));
   document.getElementById(`sm-${direction}-content`).innerHTML = txs.length
     ? `<div id="sm-${direction}-bulk-bar" class="bulk-actions" style="display:none;"></div>
-       <div class="report-scroll-wrap">
-       <table class="ss-table sm-compact" style="width:100%;border-collapse:collapse;font-size:13px;">
+       <div class="report-scroll-wrap report-scroll-wrap--fit">
+       <table class="ss-table sm-compact" style="width:auto;border-collapse:collapse;font-size:13px;">
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
