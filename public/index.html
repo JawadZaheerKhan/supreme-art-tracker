@@ -31409,10 +31409,25 @@ function jobFormTotalPackets() {
 // Primary packets edited by hand — in pending mode, re-lock the total so a
 // later secondary edit subtracts from the NEW total the user just set.
 function jobPrimaryPacketsEdited() {
+  // Packets -> Sheets for the main paper too (owner, 2026-10-16: typing
+  // packets left Sheets as it was; the 2nd paper's pair was already linked).
+  // Sheets = packets x packet size x cut pieces - the reverse of jobPacketsSync.
+  const pkEl = document.getElementById('f-packets');
+  const shEl = document.getElementById('f-sheets');
+  const itemId = parseInt((document.getElementById('f-inventory-item') || {}).value, 10);
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
+  if (pkEl && shEl && it) {
+    const pk = parseFloat(pkEl.value);
+    const cutPieces = parseInt(String((document.getElementById('f-sheet-cut') || {}).value || '1/1').split('/')[1], 10) || 1;
+    if (Number.isFinite(pk) && pk > 0) shEl.value = String(Math.round(pk * packetSize(it.paper_type) * cutPieces));
+    else if (String(pkEl.value).trim() === '') shEl.value = '';
+  }
   const wrap = document.getElementById('f-packets-wrap');
   if (wrap && wrap.dataset.mode === 'pending' && jobSecondPaperActive()) {
     wrap.dataset.lockTotal = String(jobFormTotalPackets());
   }
+  jobSheetsPrimaryEdited();   // keeps the Sheets total in step too
+  jobCartonQtySync();
   updateStockHint();
 }
 // Primary sheets edited by hand — re-lock the sheets total (pending mode).
@@ -31453,12 +31468,21 @@ function secondaryCutPieces(j) {
 function jobSecondaryCutChanged() {
   jobSecondaryPacketsEdited();
 }
-function jobSecondaryPacketsEdited() {
+// fromSheets: called while the 2nd paper's Sheets box is being typed in -
+// keep what is typed there. Rewriting it from the 2-decimal packets turned
+// "7" into 8 (7 / 200 = 0.04 packets -> 8 sheets), so 700 could never be
+// typed (owner, 2026-10-16).
+function jobSecondaryPacketsEdited(fromSheets) {
   const ps = secondaryPacketSheets() * secondaryCutPieces();
   const secPk = parseFloat((document.getElementById('f-packets-2')||{}).value) || 0;
-  const secSh = secPk > 0 ? Math.round(secPk * ps) : 0;
   const sh2 = document.getElementById('f-sheets-2');
-  if (sh2) sh2.value = secSh > 0 ? String(secSh) : '';
+  let secSh;
+  if (fromSheets) {
+    secSh = Math.round(parseFloat((sh2 || {}).value) || 0);
+  } else {
+    secSh = secPk > 0 ? Math.round(secPk * ps) : 0;
+    if (sh2) sh2.value = secSh > 0 ? String(secSh) : '';
+  }
   const pwrap = document.getElementById('f-packets-wrap');
   const swrap = document.getElementById('f-sheets-wrap');
   if (pwrap && pwrap.dataset.mode === 'pending') {
@@ -31479,7 +31503,7 @@ function jobSecondarySheetsEdited() {
   const secSh = parseFloat((document.getElementById('f-sheets-2')||{}).value) || 0;
   const pk2 = document.getElementById('f-packets-2');
   if (pk2) pk2.value = (secSh > 0 && ps > 0) ? String(+(secSh / ps).toFixed(2)) : '';
-  jobSecondaryPacketsEdited();
+  jobSecondaryPacketsEdited(true);
 }
 function jobCartonQtySync() {
   const upsEl     = document.getElementById('f-ups');
