@@ -11897,7 +11897,7 @@ function bulkComboPick(prefix, idx, itemId, groupPick) {
     label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
   }
   if (search) search.value = label;
-  if (hidden) hidden.value = String(itemId);
+  if (hidden) { hidden.value = String(itemId); hidden.dataset.group = groupPick && members.length > 1 ? '1' : ''; }
   bulkComboClose(prefix, idx);
   // Re-sync packets↔sheets against the picked item's paper type so
   // the numbers match whatever the user has already typed.
@@ -12414,18 +12414,23 @@ function bulkOutJobsChanged(idx) {
     // brand up to its available cap in stock-desc order (that order
     // matches how bulkOutRefreshBrandSplits renders them). User can
     // rebalance manually afterwards.
+    // The brand picked in the search goes first (owner, 2026-10-16: picking
+    // PENDO filled NINGBO); a whole-group pick keeps most-stock first.
+    const hiddenItem = tr.querySelector('.bulkout-item');
+    const pickedBrand = hiddenItem && hiddenItem.dataset.group !== '1' ? itemId : null;
+    const order = [...brandInputs].sort((a, b) => (parseInt(b.dataset.itemId, 10) === pickedBrand) - (parseInt(a.dataset.itemId, 10) === pickedBrand));
     let remaining = totalSheets;
-    brandInputs.forEach(el => {
+    order.forEach(el => {
       const avail = parseInt(el.dataset.availSheets, 10) || 0;
       const share = Math.min(remaining, avail);
       el.value = share > 0 ? +(share / ps).toFixed(2) : '';
       remaining -= Math.max(share, 0);
     });
     // Not enough in stock (owner, 2026-10-15): the rest still goes in - on
-    // the first brand - so the row shows what the jobs need. Remove All then
-    // stops with "not enough stock" and nothing is issued.
+    // the first brand (the picked one) - so the row shows what the jobs need.
+    // Remove All then stops with "not enough stock" and nothing is issued.
     if (remaining > 0) {
-      const first = brandInputs[0];
+      const first = order[0];
       first.value = +(((parseFloat(first.value) || 0) * ps + remaining) / ps).toFixed(2);
     }
     bulkOutBrandSplitChanged(idx);
@@ -32667,18 +32672,20 @@ function openIssueSplitPopup(j, anchor, members, needSheets, unit, source) {
   // the store keeper can click Issue Stock immediately when they want
   // the exact need — or adjust up for an intentional over-issue.
   // Same as Stock Out (Bulk) (owner, 2026-10-16): the job's whole need is
-  // filled in - each brand up to its stock, highest first, and whatever
-  // stock can't cover on the first brand. Short of stock, that row shows
-  // red and Issue Stock stays off (nothing is issued) until stock is in or
-  // the numbers are lowered for a partial issue.
+  // filled in - the job's OWN brand (anchor) first, then the others by
+  // stock, highest first; whatever stock can't cover goes on the job's
+  // brand. Short of stock, that row shows red and Issue Stock stays off
+  // (nothing is issued) until stock is in or the numbers are lowered.
+  // (Filling the most-stocked brand first put a PENDO job's need on NINGBO.)
   const preSheets = new Map();
   {
+    const fillOrder = [...rows.filter(r => r.id === anchor.id), ...rows.filter(r => r.id !== anchor.id)];
     let left = needSheets;
-    for (const it of rows) {
+    for (const it of fillOrder) {
       const take = Math.max(0, Math.min(left, it.current_balance || 0));
       if (take > 0) { preSheets.set(it.id, take); left -= take; }
     }
-    if (left > 0 && rows.length) preSheets.set(rows[0].id, (preSheets.get(rows[0].id) || 0) + left);
+    if (left > 0 && fillOrder.length) preSheets.set(fillOrder[0].id, (preSheets.get(fillOrder[0].id) || 0) + left);
   }
   const preOf = (id) => {
     const p = ps ? (preSheets.get(id) || 0) / ps : 0;
