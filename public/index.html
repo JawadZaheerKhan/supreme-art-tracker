@@ -23487,7 +23487,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;white-space:nowrap;">${balCell}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${weightCell}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(t.reason||'')}</td>
-      <td style="padding:8px 10px;"><div style="min-width:80px;max-width:200px;">${job}</div></td>
+      ${direction === 'out' ? `<td style="padding:8px 10px;"><div style="min-width:80px;max-width:200px;">${job}</div></td>` : ''}
       <td style="padding:8px 10px;">${canEditRef
         ? wrapEditHtml(t.challan_no || '', '—', `saveTxRef('${direction}', [${ids.join(',')}], 'challan_no', this.value)`, "Challan No. — edit and press Enter; the change is logged in this paper's History", 60, 120)
         : (t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>')}</td>
@@ -23511,7 +23511,7 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
@@ -25120,7 +25120,7 @@ function printStockMovement(direction) {
       <td ${tdChg}>${fmt(pkts)} ${unit}<br><span style="font-size:8pt;font-weight:normal;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
       <td ${tdR}>${balCell}</td>
       <td ${tdL}>${esc(t.reason||'')}</td>
-      <td ${tdL}>${job}</td>
+      ${direction === 'out' ? `<td ${tdL}>${job}</td>` : ''}
       <td ${tdL}>${esc(txNotesShown(t))}${smOffcutText(direction, t) ? `<br><i>${esc(smOffcutText(direction, t))}</i>` : ''}</td>
     </tr>`;
   }).join('');
@@ -25147,7 +25147,7 @@ function printStockMovement(direction) {
           <th style="border:1px solid #000;padding:4px;text-align:right;">Change<br><span style="font-weight:normal;font-size:8pt;">(sheets / pkts·reams)</span></th>
           <th style="border:1px solid #000;padding:4px;text-align:right;">Current Balance</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Reason</th>
-          <th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>
+          ${direction === 'out' ? '<th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>' : ''}
           <th style="border:1px solid #000;padding:4px;text-align:left;">Notes</th>
         </tr>
         ${tableRows}
@@ -25185,6 +25185,9 @@ async function exportStockMovement(direction) {
   // Challan No. were missing), worked out the same way as the screen rows.
   const header = ['When', 'Item', 'Change (Packets/Reams)', 'Change (Sheets)', 'Current Balance (Packets/Reams)', 'Current Balance (Sheets)',
     'Weight (kg)', 'Weight on Hand (kg)', 'Reason', 'Job', 'Challan No.', 'Entered by', 'Notes'];
+  // Stock In has no Job column (owner, 2026-10-16).
+  const showJob = direction === 'out';
+  if (!showJob) header.splice(header.indexOf('Job'), 1);
   const aoa = reportExcelAoa(header);
   const r2 = (n) => Math.round(n * 100) / 100;
   for (const t of txs) {
@@ -25197,7 +25200,7 @@ async function exportStockMovement(direction) {
     const inv  = isGroup ? null : inventoryAll.find(i => i.id === t.item_id);
     const bal  = inv ? (inv.current_balance || 0) : null;
     const wPer = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
-    aoa.push([
+    const row = [
       fmtDMYT(t.created_at),
       item,
       r2(Math.abs(pkts)),
@@ -25211,7 +25214,9 @@ async function exportStockMovement(direction) {
       t.challan_no || '',
       txByName(t),
       [txNotesShown(t), smOffcutText(direction, t)].filter(Boolean).join(' | '),
-    ]);
+    ];
+    if (!showJob) row.splice(9, 1);
+    aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const { from, to } = periodToDateRange(state.period, state.from, state.to);
