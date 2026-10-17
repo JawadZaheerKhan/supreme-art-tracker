@@ -6817,6 +6817,7 @@ function refreshCurrent() {
 // log of every in / out with Reverse. Server: /api/cartons*. Each button
 // follows its own Access Register row (Carton Shippers tab).
 let cartonTypes = [];
+let cartonDeletedTypes = [];       // deleted types: gone everywhere except their Stock In / Out rows
 let cartonTx = [];
 let cartonView = 'stock';          // 'stock' | 'in' | 'out' | 'summary'
 let cartonSearch = '';
@@ -6835,7 +6836,9 @@ function enterCartonShippers() {
 async function loadCartons() {
   try {
     const d = await api('GET', '/api/cartons');
-    cartonTypes = Array.isArray(d.types) ? d.types : [];
+    const all = Array.isArray(d.types) ? d.types : [];
+    cartonTypes = all.filter(t => !t.deleted_at);
+    cartonDeletedTypes = all.filter(t => t.deleted_at);
     cartonTx = Array.isArray(d.transactions) ? d.transactions : [];
     cartonLoaded = true;
   } catch (e) { notify('Error loading carton shippers: ' + e.message); }
@@ -6854,13 +6857,16 @@ function canCartonIssue()   { return isSuperAdmin() || hasPerm('carton_btn_issue
 function canReverseCartonTx(t) {
   if (!t || t.kind === 'correction' || t.reverses_tx_id || t.reversed_by) return false;
   if (t.source === 'station') return false;   // the Station's count controls it - change it there
+  if (cartonDeletedTypes.some(d => d.id === t.type_id)) return false;   // a deleted type's entries can only be deleted
   if (isSuperAdmin()) return true;
   const lvl = permLevel('carton_btn_reverse');
   if (lvl === 'yes') return true;
   return lvl === '30-day' && Date.now() - new Date(t.recorded_at || t.created_at).getTime() <= 30 * 86400000;
 }
 const cartonNum = n => (Number(n) || 0).toLocaleString();
-function cartonTypeById(id) { return cartonTypes.find(t => String(t.id) === String(id)); }
+function cartonTypeById(id) { return cartonTypes.find(t => String(t.id) === String(id)) || cartonDeletedTypes.find(t => String(t.id) === String(id)); }
+// Delete (black, Super Admin only - owner 2026-10-17).
+const CARTON_DELETE_STYLE = 'background:#111;color:#fff;border-color:#111;';
 function cartonTypeText(t) { return t ? [t.name, t.size, t.ply].filter(Boolean).join(' · ') : '—'; }
 function cartonIsLow(t) { return !!t && ((Number(t.current_balance) || 0) < 0 || (t.reorder_level != null && (Number(t.current_balance) || 0) <= Number(t.reorder_level))); }
 function cartonIsBelowZero(t) { return !!t && (Number(t.current_balance) || 0) < 0; }
@@ -6945,6 +6951,7 @@ function renderCartonStockList() {
               ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
               ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
               ${canCartonTypes() ? `<button class="btn btn-sm" title="Edit or hide this type" onclick="openCartonTypeModal(${t.id})">Edit</button>` : ''}
+              ${isSuperAdmin() ? `<button class="btn btn-sm" style="${CARTON_DELETE_STYLE}" title="Delete this carton type - its Stock In / Stock Out entries stay" onclick="deleteCartonType(${t.id})">Delete</button>` : ''}
             </td>
           </tr>`;
         }).join('')}</tbody>
@@ -6966,7 +6973,7 @@ function cartonTxTab(t) {
 function cartonTabQty(t, kind) { return kind === 'in' ? t.change : -t.change; }
 function cartonLogViewHtml(kind) {
   const f = cartonLogF[kind];
-  const typeOpts = cartonTypes.map(t => `<option value="${t.id}" ${String(t.id) === f.type ? 'selected' : ''}>${esc(cartonTypeText(t))}${t.hidden ? ' (hidden)' : ''}</option>`).join('');
+  const typeOpts = [...cartonTypes, ...cartonDeletedTypes].map(t => `<option value="${t.id}" ${String(t.id) === f.type ? 'selected' : ''}>${esc(cartonTypeText(t))}${t.deleted_at ? ' (deleted)' : t.hidden ? ' (hidden)' : ''}</option>`).join('');
   const o = (v, l) => `<option value="${v}" ${f.reason === v ? 'selected' : ''}>${l}</option>`;
   return `
     <div class="toolbar" style="flex-wrap:wrap;">
@@ -7029,7 +7036,7 @@ function renderCartonLogList(kind) {
           const q = cartonTabQty(t, kind);
           return `<tr class="${rev ? 'carton-reversed' : ''}${corr ? ' carton-correction' : ''}">
             <td style="white-space:nowrap;">${esc(fmtDMYT(t.created_at))}${lateEntryTagHtml(t)}</td>
-            <td>${esc(cartonTypeText(ty))}</td>
+            <td>${esc(cartonTypeText(ty))}${ty && ty.deleted_at ? ' <span class="carton-tag" title="This carton type was deleted - its entries stay">DELETED TYPE</span>' : ''}</td>
             <td class="num" style="color:${corr ? '#9a3412' : color};font-weight:700;">${q < 0 ? '&minus;' : ''}${cartonNum(Math.abs(q))}</td>
             ${isIn
               ? `<td>${esc(corr ? `Reversal of entry #${t.reverses_tx_id}` : t.supplier || '—')}</td>`
@@ -7037,7 +7044,7 @@ function renderCartonLogList(kind) {
             <td>${esc(t.challan_no || '—')}</td>
             <td style="max-width:220px;">${esc(corr ? '' : t.notes || '')}</td>
             <td style="white-space:nowrap;"><span title="${esc(txByTitle(t))}">${esc(t.actor_name || String(t.user_email || '—').split('@')[0])}</span></td>
-            <td style="white-space:nowrap;">${rev ? `<span class="carton-tag">REVERSED</span>` : canReverseCartonTx(t) ? `<button class="btn btn-sm btn-danger" onclick="reverseCartonTx(${t.id})">&#8634; Reverse</button>` : ''}</td>
+            <td style="white-space:nowrap;">${rev ? `<span class="carton-tag">REVERSED</span>` : canReverseCartonTx(t) ? `<button class="btn btn-sm btn-danger" onclick="reverseCartonTx(${t.id})">&#8634; Reverse</button>` : ''}${isSuperAdmin() ? ` <button class="btn btn-sm" style="${CARTON_DELETE_STYLE}" title="Delete this entry - its quantity comes off the stock" onclick="deleteCartonTx(${t.id})">Delete</button>` : ''}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
@@ -7267,6 +7274,56 @@ async function reverseCartonTx(id) {
     notify('Entry reversed');
     await loadCartons();
   } catch (e) { await alertDialog({ title: 'Could not reverse', message: e.message, kind: 'warn' }); }
+  showSaving(false);
+}
+
+// Delete a carton type (Super Admin). Its Stock In / Stock Out entries stay.
+async function deleteCartonType(id) {
+  const t = cartonTypeById(id);
+  if (!t) return;
+  const n = cartonTx.filter(x => x.type_id === t.id).length;
+  const ok = await confirmDialog({
+    title: `Delete ${cartonTypeText(t)}?`,
+    message: `It leaves the Stock list, the Summary, the Stock In / Issue pickers and the Station's carton types (${cartonNum(t.current_balance)} on hand now).\n\nIts ${n.toLocaleString()} Stock In / Stock Out entr${n === 1 ? 'y stays' : 'ies stay'} in those tabs - delete them there one by one if you want them gone.`,
+    danger: true, confirmText: 'Delete type',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/cartons/types/${id}`);
+    notify('Carton type deleted - its entries are kept');
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Could not delete', message: e.message, kind: 'warn' }); }
+  showSaving(false);
+}
+// Delete one Stock In / Stock Out entry (Super Admin): the row goes and its
+// quantity comes back off the stock. A reversal of it goes with it.
+async function deleteCartonTx(id) {
+  const t = cartonTx.find(x => x.id === id);
+  if (!t) return;
+  const ty = cartonTypeById(t.type_id);
+  const rev = cartonTx.find(x => x.reverses_tx_id === t.id);
+  const undo = t.change + (rev ? rev.change : 0);
+  const now = ty ? Number(ty.current_balance) || 0 : null;
+  const what = t.kind === 'correction' ? 'reversal' : t.kind === 'in' ? 'Stock In' : 'Stock Out';
+  const notes = [
+    rev ? `Its reversal (entry #${rev.id}) is deleted with it.` : '',
+    t.kind === 'correction' ? `Entry #${t.reverses_tx_id}, which this reversal undid, counts again.` : '',
+    t.source === 'station' ? `This was taken by the Station for E-${t.job_id}. If that job's Carton Shipper count is saved at the Station again, the Station takes the cartons again.` : '',
+    now !== null && undo ? `Stock of ${cartonTypeText(ty)}: ${cartonNum(now)} → ${cartonNum(now - undo)}${now - undo < 0 ? ' (below zero)' : ''}.` : '',
+  ].filter(Boolean).join('\n\n');
+  const ok = await confirmDialog({
+    title: `Delete this ${what}?`,
+    message: `#${t.id} · ${t.change > 0 ? '+' : '−'}${cartonNum(Math.abs(t.change))} × ${cartonTypeText(ty)} on ${fmtDMY(t.created_at)}${t.kind === 'out' ? ` to ${t.issued_to || '—'} (${cartonForText(t)})` : t.supplier ? ` from ${t.supplier}` : ''}.\n\nIt is removed from the log for good.${notes ? '\n\n' + notes : ''}`,
+    danger: true, confirmText: 'Delete entry',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/cartons/transactions/${id}`);
+    notify('Entry deleted');
+    await loadCartons();
+  } catch (e) { await alertDialog({ title: 'Could not delete', message: e.message, kind: 'warn' }); }
   showSaving(false);
 }
 

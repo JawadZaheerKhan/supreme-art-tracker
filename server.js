@@ -310,7 +310,8 @@ function getDb() {
 // Bumped again for the Carton Shippers tables, their Access Register rows and
 // the Procurement role in users_role_check (2026-10-14).
 // Bumped again for carton_transactions.source (Station carton issues, 2026-10-14).
-const SCHEMA_VERSION = 'v2026-10-14-station-cartons';
+// Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
+const SCHEMA_VERSION = 'v2026-10-17-carton-delete';
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -1831,10 +1832,16 @@ async function initDb() {
     // carton type per Carton Shipper line); NULL = typed in the Carton Shippers tab.
     await sql`ALTER TABLE carton_transactions ADD COLUMN IF NOT EXISTS source TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS carton_tx_type_idx ON carton_transactions(type_id)`;
+    // Delete a carton type (Super Admin, owner 2026-10-17): the type only gets a
+    // deleted_at - a real DELETE would cascade away its whole In / Out log,
+    // which has to stay. A deleted type's name can be used again.
+    await sql`ALTER TABLE carton_types ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE carton_types ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
     await sql`CREATE INDEX IF NOT EXISTS carton_tx_job_idx ON carton_transactions(job_id)`;
     try {
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_tx_reverses_once ON carton_transactions (reverses_tx_id) WHERE reverses_tx_id IS NOT NULL`;
-      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_types_name ON carton_types (lower(name))`;
+      await sql`DROP INDEX IF EXISTS ux_carton_types_name`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_types_name_live ON carton_types (lower(name)) WHERE deleted_at IS NULL`;
     } catch (e) { console.error('carton unique indexes not created:', e.message); }
 
     // An entry can be reversed only once - even two reverse clicks that
@@ -7103,8 +7110,8 @@ async function cartonNameSafe(res, name, run) {
   }
 }
 async function cartonTypeOr404(sql, id, res) {
-  const t = (await sql`SELECT * FROM carton_types WHERE id = ${parseInt(id, 10) || 0}`)[0];
-  if (!t) { res.status(404).json({ error: 'Carton type not found.' }); return null; }
+  const t = (await sql`SELECT * FROM carton_types WHERE id = ${parseInt(id, 10) || 0} AND deleted_at IS NULL`)[0];
+  if (!t) { res.status(404).json({ error: 'Carton type not found (it may have been deleted).' }); return null; }
   return t;
 }
 
@@ -7178,7 +7185,8 @@ app.get('/api/station/carton-types', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    res.json(await sql`SELECT id, name, size, ply, hidden FROM carton_types ORDER BY lower(name)`);
+    // A deleted type reads as hidden: kept on a line that already has it, not offered for new lines.
+    res.json(await sql`SELECT id, name, size, ply, (hidden OR deleted_at IS NOT NULL) AS hidden FROM carton_types ORDER BY lower(name)`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7210,7 +7218,7 @@ async function readCartonIssueRow(sql, b) {
 // The carton types a bulk form names, by id.
 async function cartonTypesFor(sql, raw) {
   const ids = [...new Set(raw.map(r => parseInt(r && r.type_id, 10)).filter(n => n > 0))];
-  const rows = ids.length ? await sql`SELECT * FROM carton_types WHERE id = ANY(${ids})` : [];
+  const rows = ids.length ? await sql`SELECT * FROM carton_types WHERE id = ANY(${ids}) AND deleted_at IS NULL` : [];
   return new Map(rows.map(t => [t.id, t]));
 }
 
@@ -7243,7 +7251,7 @@ app.post('/api/cartons/types', requirePermission('carton_btn_types'), async (req
     const sql = getDb();
     const b = readCartonTypeBody(req.body || {});
     if (b.error) return res.status(400).json({ error: b.error });
-    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name})`;
+    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND deleted_at IS NULL`;
     if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
     const t = await cartonNameSafe(res, b.name, () => sql`
       INSERT INTO carton_types (name, size, ply, reorder_level, created_by)
@@ -7262,7 +7270,7 @@ app.put('/api/cartons/types/:id', requirePermission('carton_btn_types'), async (
     if (!cur) return;
     const b = readCartonTypeBody(req.body || {});
     if (b.error) return res.status(400).json({ error: b.error });
-    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND id <> ${cur.id}`;
+    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND id <> ${cur.id} AND deleted_at IS NULL`;
     if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
     const hidden = !!(req.body && req.body.hidden);
     const t = await cartonNameSafe(res, b.name, () => sql`
@@ -7272,6 +7280,54 @@ app.put('/api/cartons/types/:id', requirePermission('carton_btn_types'), async (
     const what = cur.hidden !== hidden ? (hidden ? 'hidden' : 'shown again') : 'edited';
     await logAudit(sql, req, { action: 'carton.type_edit', entityType: 'carton_type', entityId: t.id, summary: `Carton type ${what}: ${cartonTypeLabel(cur)}${what === 'edited' ? ' -> ' + cartonTypeLabel(t) : ''}` });
     res.json(t);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Delete a carton type (Super Admin only, owner 2026-10-17). It leaves the
+// Stock list, the pickers, the Summary and the Station's choices; its Stock
+// In / Stock Out entries stay (each can be deleted on its own).
+app.delete('/api/cartons/types/:id', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const cur = await cartonTypeOr404(sql, req.params.id, res);
+    if (!cur) return;
+    const n = Number((await sql`SELECT COUNT(*)::int AS n FROM carton_transactions WHERE type_id = ${cur.id}`)[0].n) || 0;
+    await sql`UPDATE carton_types SET deleted_at = NOW(), deleted_by = ${req.user.email} WHERE id = ${cur.id} AND deleted_at IS NULL`;
+    await logAudit(sql, req, {
+      action: 'carton.type_delete', entityType: 'carton_type', entityId: cur.id,
+      summary: `Carton type deleted: ${cartonTypeLabel(cur)} (${(cur.current_balance || 0).toLocaleString()} on hand; its ${n.toLocaleString()} In / Out entr${n === 1 ? 'y' : 'ies'} kept)`,
+    });
+    res.json({ ok: true, id: cur.id, entries_kept: n });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Delete one Stock In / Stock Out entry outright (Super Admin only, owner
+// 2026-10-17). The row leaves the log and its quantity comes back off the
+// type's stock. A reversal of it goes with it (it only existed to cancel it);
+// deleting a reversal on its own puts the entry it undid back in force.
+app.delete('/api/cartons/transactions/:id', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const tx = (await sql`SELECT * FROM carton_transactions WHERE id = ${parseInt(req.params.id, 10) || 0}`)[0];
+    if (!tx) return res.status(404).json({ error: 'Entry not found (it may already be deleted).' });
+    const held = await takeOpLocks(sql, [`carton-tx:${tx.id}`, `carton-type:${tx.type_id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const rows = await sql`SELECT id, change FROM carton_transactions WHERE id = ${tx.id} OR reverses_tx_id = ${tx.id}`;
+      if (!rows.some(r => r.id === tx.id)) return res.status(404).json({ error: 'Entry not found (it may already be deleted).' });
+      const ids = rows.map(r => r.id);
+      const undo = rows.reduce((a, r) => a + (Number(r.change) || 0), 0);
+      await sql`DELETE FROM carton_transactions WHERE id = ANY(${ids})`;
+      const type = (await sql`UPDATE carton_types SET current_balance = current_balance - ${undo} WHERE id = ${tx.type_id} RETURNING *`)[0];
+      await logAudit(sql, req, {
+        action: 'carton.tx_delete', entityType: 'carton_type', entityId: tx.type_id,
+        summary: `Carton entry #${tx.id} deleted (${tx.kind === 'correction' ? 'reversal' : tx.kind === 'in' ? 'Stock In' : 'Stock Out'} ${tx.change > 0 ? '+' : ''}${tx.change.toLocaleString()} ${type ? cartonTypeLabel(type) : ''}${ids.length > 1 ? ', with its reversal' : ''}); stock now ${type ? (type.current_balance || 0).toLocaleString() : '?'}`,
+        metadata: { tx, deleted_ids: ids },
+      });
+      res.json({ ok: true, deleted: ids, balance: type ? type.current_balance : null });
+    } finally { await releaseOpLocks(sql, held); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
@@ -7455,6 +7511,7 @@ app.post('/api/cartons/transactions/:id/reverse', requireAuth, async (req, res) 
     const tx = (await sql`SELECT * FROM carton_transactions WHERE id = ${txId}`)[0];
     if (!tx) return res.status(404).json({ error: 'Entry not found.' });
     if (tx.kind === 'correction' || tx.reverses_tx_id) return res.status(400).json({ error: 'A reversal cannot itself be reversed.' });
+    if ((await sql`SELECT deleted_at FROM carton_types WHERE id = ${tx.type_id}`)[0]?.deleted_at) return res.status(400).json({ error: 'This carton type was deleted - its entries can be deleted, not reversed.' });
     if (tx.source === 'station') return res.status(400).json({ error: 'This was taken by the Station - change the Carton Shipper count or type at the Station (or the green ▶ on the job card) and the stock follows.' });
     if (tier === '30-day' && Date.now() - new Date(tx.recorded_at || tx.created_at).getTime() > 30 * 86400000) {
       return res.status(403).json({ error: 'Only entries from the last 30 days can be reversed with your access.' });
