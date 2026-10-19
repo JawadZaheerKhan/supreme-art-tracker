@@ -6950,6 +6950,7 @@ function renderCartonStockList() {
             <td class="carton-actions">
               ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
               ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
+              <button class="btn btn-sm" title="Every Stock In / Stock Out of this type, with the balance after each" onclick="openCartonHistory(${t.id})">History</button>
               ${canCartonTypes() ? `<button class="btn btn-sm" title="Edit or hide this type" onclick="openCartonTypeModal(${t.id})">Edit</button>` : ''}
               ${isSuperAdmin() ? `<button class="btn btn-sm" style="${CARTON_DELETE_STYLE}" title="Delete this carton type - its Stock In / Stock Out entries stay" onclick="deleteCartonType(${t.id})">Delete</button>` : ''}
             </td>
@@ -7325,6 +7326,51 @@ async function deleteCartonTx(id) {
     await loadCartons();
   } catch (e) { await alertDialog({ title: 'Could not delete', message: e.message, kind: 'warn' }); }
   showSaving(false);
+}
+
+// History of one carton type (owner, 2026-10-19): every Stock In / Stock Out
+// / reversal of it, newest first, with the balance after each - the running
+// total of the entries in date order (a backdated entry counts on its day).
+function cartonHistoryRows(typeId) {
+  const asc = cartonTx.filter(t => String(t.type_id) === String(typeId))
+    .sort((a, b) => (new Date(a.created_at) - new Date(b.created_at)) || (a.id - b.id));
+  let bal = 0;
+  return asc.map(t => ({ t, after: (bal += Number(t.change) || 0) })).reverse();
+}
+function openCartonHistory(typeId) {
+  const ty = cartonTypeById(typeId);
+  if (!ty) return;
+  const rows = cartonHistoryRows(typeId);
+  // Totals as the Summary counts them: a reversed entry and its reversal are left out.
+  const tIn = rows.filter(r => r.t.kind === 'in' && !r.t.reversed_by).reduce((a, r) => a + r.t.change, 0);
+  const tOut = rows.filter(r => r.t.kind === 'out' && !r.t.reversed_by).reduce((a, r) => a - r.t.change, 0);
+  const label = t => t.kind === 'correction' ? '<span style="color:#9a3412;font-weight:700;">REVERSAL</span>'
+    : t.kind === 'in' ? '<span style="color:#166534;font-weight:700;">IN</span>'
+    : `<span style="color:#B91C1C;font-weight:700;">OUT</span>${t.source === 'station' ? ' <span class="carton-tag">STATION</span>' : ''}`;
+  const body = rows.map(({ t, after }) => `<tr${t.reversed_by ? ' class="carton-reversed"' : ''}>
+      <td style="white-space:nowrap;">${esc(fmtDMY(t.created_at))}<div style="font-size:10px;color:var(--text3);">${esc(fmtTime12(t.created_at))}</div>${lateEntryTagHtml(t)}</td>
+      <td style="white-space:nowrap;">${label(t)}${t.reversed_by ? ' <span class="carton-tag">REVERSED</span>' : ''}</td>
+      <td class="num" style="font-weight:700;color:${t.change > 0 ? '#166534' : '#B91C1C'};">${t.change > 0 ? '+' : '&minus;'}${cartonNum(Math.abs(t.change))}</td>
+      <td class="num"${after < 0 ? ' style="color:#991b1b;"' : ''}><b>${cartonNum(after)}</b></td>
+      <td>${esc(t.kind === 'in' ? (t.supplier || '—') : t.kind === 'out' ? (t.issued_to || '—') : '—')}</td>
+      <td>${esc(t.kind === 'in' ? '' : cartonForText(t) || '—')}</td>
+      <td>${esc(t.challan_no || '—')}</td>
+      <td style="max-width:200px;">${esc(t.kind === 'correction' ? '' : t.notes || '')}</td>
+      <td style="white-space:nowrap;"><span title="${esc(txByTitle(t))}">${esc(t.actor_name || String(t.user_email || '—').split('@')[0])}</span></td>
+    </tr>`).join('');
+  const last = rows.length ? rows[0].after : 0;
+  const off = rows.length && last !== (Number(ty.current_balance) || 0);
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>History · ${esc(cartonTypeText(ty))}${ty.deleted_at ? ' <span class="carton-tag">DELETED TYPE</span>' : ty.hidden ? ' <span class="carton-tag">HIDDEN</span>' : ''}</h2>
+    <div style="font-size:12px;color:var(--text2);margin:-7px 0 12px;">On hand now <b style="color:${(Number(ty.current_balance) || 0) < 0 ? '#991b1b' : 'var(--text)'};">${cartonNum(ty.current_balance)}</b> · ${rows.length.toLocaleString()} entr${rows.length === 1 ? 'y' : 'ies'} · Total In <b style="color:#166534;">${cartonNum(tIn)}</b> · Total Out <b style="color:#B91C1C;">${cartonNum(tOut)}</b>${off ? ` · <span title="The entries add up to ${cartonNum(last)}">entries add up to ${cartonNum(last)}</span>` : ''}</div>
+    ${rows.length ? `<div class="carton-tablewrap" style="max-height:60vh;overflow:auto;">
+      <table class="carton-table">
+        <thead><tr><th>When</th><th>Entry</th><th class="num">Qty</th><th class="num">Balance</th><th>Supplier / Issued To</th><th>For</th><th>Challan</th><th>Notes</th><th>By</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>` : `<div class="empty" style="padding:24px;text-align:center;">No Stock In / Stock Out for this carton type yet.</div>`}
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
 }
 
 // ---- Type modal ----
