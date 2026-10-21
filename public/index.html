@@ -14397,12 +14397,15 @@ function renderInventoryReport() {
   const offcutOnly = invReportState.offcutMode === 'offcut';
   // The Offcut button (offcut in stock): no Items and no Weight columns (owner, 2026-10-21).
   const noIW = !!invReportState.offcutInStock;
-  // ...and each row tinted by its GSM: very light blues, one per GSM (sorted,
-  // so neighbouring GSMs differ), the same GSM always the same tone.
-  const GSM_TINTS = ['#eff6ff', '#e0f2fe', '#e0e7ff', '#ecfeff', '#dbeafe', '#f0f9ff', '#e7eefc', '#dff3fb'];
+  // ...and each row tinted by its GSM: one blue, getting gradually darker as
+  // the GSM goes up - the lowest GSM the lightest, the highest the darkest
+  // (owner, 2026-10-21). The same GSM is always the same tone.
   const gsmTint = new Map();
-  if (noIW) [...new Set(rows.map(r => String(r.gsm || '')))].sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0) || a.localeCompare(b))
-    .forEach((g, k) => gsmTint.set(g, GSM_TINTS[k % GSM_TINTS.length]));
+  if (noIW) {
+    const gsms = [...new Set(rows.map(r => String(r.gsm || '')))].sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0) || a.localeCompare(b));
+    const step = gsms.length > 1 ? 16 / (gsms.length - 1) : 0;   // lightness 97% down to 81%
+    gsms.forEach((g, k) => gsmTint.set(g, `hsl(210, 85%, ${+(97 - k * step).toFixed(1)}%)`));
+  }
   const importHead   = showImport ? `<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Import</th>` : '';
   const brandCell    = (r) => showBrand    ? `<td style="padding:6px 8px;">${esc(r.brand)    || '—'}</td>` : '';
   const supplierCell = (r) => showSupplier ? `<td style="padding:6px 8px;">${esc(r.supplier) || '—'}</td>` : '';
