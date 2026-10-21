@@ -14012,7 +14012,8 @@ function buildSummaryBuckets(from, to, granularity) {
 //   ignore   — collapse to paper/size/gsm/fresh-offcut only, NO brand/supplier columns
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
 // offcutMode: '' = fresh + offcut, 'fresh' = fresh only, 'offcut' = offcut only (owner, 2026-10-13).
-let invReportState = { period: 'all', groupBy: 'ignore', paperType: '', search: '', offcutMode: '', from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
+// offcutInStock: the Offcut button - offcut items with stock only (owner, 2026-10-21).
+let invReportState = { period: 'all', groupBy: 'ignore', paperType: '', search: '', offcutMode: '', offcutInStock: false, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
 // This report gets its own period picker instead of the shared
 // reportPeriodOptions list. A stock position is only ever "now" or "as at a
 // past date": Today / This Week / This Month described a movement window,
@@ -14093,6 +14094,10 @@ function openInventoryReport() {
           <option value="lowAll"${invReportState.stockLevel==='lowAll'?' selected':''}>All + consumption</option>
         </select>
       </div>
+      <div>
+        <div class="dash-flbl">&nbsp;</div>
+        <button type="button" class="btn" id="ir-offcut-btn" onclick="toggleIROffcutInStock()" title="Only offcut paper that has stock - click again for everything" style="${irOffcutBtnStyle()}">&#9986; Offcut</button>
+      </div>
       <div id="ir-low-period-wrap" style="display:${invReportState.stockLevel==='low'||invReportState.stockLevel==='lowAll'?'block':'none'};">
         <div class="dash-flbl">Consumption period</div>
         <select class="filter" id="ir-low-period" onchange="setIRLowPeriod(this.value)">
@@ -14133,10 +14138,35 @@ function setIRSearch(v) {
   _irSearchTimer = setTimeout(renderInventoryReport, 200);
 }
 const IR_OFFCUT_MODES = [['', 'Fresh + Offcut'], ['fresh', 'Fresh only'], ['offcut', 'Offcut only']];
-function irOffcutModeLabel() { return (IR_OFFCUT_MODES.find(([k]) => k === (invReportState.offcutMode || '')) || IR_OFFCUT_MODES[0])[1]; }
-function setIROffcutMode(v)  { invReportState.offcutMode = v || ''; renderInventoryReport(); }
+function irOffcutModeLabel() { return invReportState.offcutInStock ? 'Offcut in stock' : (IR_OFFCUT_MODES.find(([k]) => k === (invReportState.offcutMode || '')) || IR_OFFCUT_MODES[0])[1]; }
+function setIROffcutMode(v)  { invReportState.offcutMode = v || ''; irOffcutInStockOff(); renderInventoryReport(); }
+// The Offcut button: offcut only AND in stock. On: the Fresh / Offcut box
+// reads "Offcut only" and Stock level "All"; off: back to Fresh + Offcut.
+function irOffcutBtnStyle() {
+  return (invReportState.offcutInStock ? OFFCUT_BTN_STYLE : OFFCUT_BTN_LIGHT_STYLE) + 'padding:8px 16px;';
+}
+function toggleIROffcutInStock() {
+  const on = !invReportState.offcutInStock;
+  invReportState.offcutInStock = on;
+  invReportState.offcutMode = on ? 'offcut' : '';
+  if (on && invReportState.stockLevel) {
+    invReportState.stockLevel = '';
+    const sl = document.getElementById('ir-stock-level'); if (sl) sl.value = '';
+    const wrap = document.getElementById('ir-low-period-wrap'); if (wrap) wrap.style.display = 'none';
+  }
+  const om = document.getElementById('ir-offcut-mode'); if (om) om.value = invReportState.offcutMode;
+  const btn = document.getElementById('ir-offcut-btn'); if (btn) btn.style.cssText = irOffcutBtnStyle();
+  renderInventoryReport();
+}
+// Changing Fresh / Offcut or Stock level by hand turns the button off.
+function irOffcutInStockOff() {
+  if (!invReportState.offcutInStock) return;
+  invReportState.offcutInStock = false;
+  const btn = document.getElementById('ir-offcut-btn'); if (btn) btn.style.cssText = irOffcutBtnStyle();
+}
 function setIRStockLevel(v) {
   invReportState.stockLevel = v;
+  irOffcutInStockOff();
   const wrap = document.getElementById('ir-low-period-wrap');
   if (wrap) wrap.style.display = (v === 'low' || v === 'lowAll') ? 'block' : 'none';
   if (v === 'low' || v === 'lowAll') { fetchIRConsumption(); return; }
@@ -14223,6 +14253,8 @@ function buildInventoryReportRows() {
     });
   }
   if (stockLevel === 'out') items = items.filter(i => balanceOf(i) <= 0);
+  // The Offcut button: offcut paper that has stock - nothing at zero or below.
+  if (invReportState.offcutInStock) items = items.filter(i => !!i.is_offcut && balanceOf(i) > 0);
   if (stockLevel === 'low') items = items.filter(i => {
     const consumed = consumption[i.id] || 0;
     return consumed > 0 && balanceOf(i) < consumed;
@@ -14681,7 +14713,7 @@ function printInventoryReport() {
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'CURRENT BALANCE SUMMARY',
         tag: offcutOnly ? 'OFFCUT' : '',
-        scope: `${modeLabel} · Paper: ${paperType || 'All'}${offcutOnly ? '' : ' · ' + irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
+        scope: `${modeLabel} · Paper: ${paperType || 'All'}${offcutOnly && !invReportState.offcutInStock ? '' : ' · ' + irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
         dateText: `Generated: ${fmtDMYT(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
