@@ -149,13 +149,36 @@
     stairs: [FLOORS[1].stairs[0]], lift: FLOORS[1].lift,
     labels: FLOORS[1].labels.filter(l => l[2] <= 822 || l[1] <= 512),
   });
-  // Where each stage's pallets stand: floor + plan rectangle. PROVISIONAL -
-  // the owner will say where each stage and machine really is.
+  // The basement machines, placed by the owner (2026-10-21) on a screenshot:
+  // 7 printing presses (red) and 7 die-cutting + embellishment machines
+  // (green) - 5 small platens along the left, 2 big ones by the back wall.
+  // `at` is the basement plan pixel (nudged off pillars / walls); `pallets`
+  // are the spots beside each machine where its jobs' pallets wait, in metres
+  // from the machine's centre.
+  const MACHINES = [
+    { kind: 'press', stage: 1, at: [764, 223], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
+    { kind: 'press', stage: 1, at: [743, 386], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
+    { kind: 'press', stage: 1, at: [721, 516], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
+    { kind: 'press', stage: 1, at: [671, 848], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
+    { kind: 'press', stage: 1, at: [677, 952], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
+    { kind: 'press', stage: 1, at: [952, 808], pallets: [[-2.4, 2.7], [0.2, 2.7]] },
+    { kind: 'press', stage: 1, at: [952, 989], pallets: [[-2.4, 2.7], [0.2, 2.7]] },
+    { kind: 'diecut-big', stage: 3, at: [485, 160], pallets: [[-1.2, 2.9], [1.4, 2.9]] },
+    { kind: 'diecut-big', stage: 3, at: [314, 183], pallets: [[4.0, 0], [4.0, 2.5]] },
+    { kind: 'diecut', stage: 3, at: [320, 316], pallets: [[2.5, 0]] },
+    { kind: 'diecut', stage: 3, at: [311, 388], pallets: [[2.6, 0]] },
+    { kind: 'diecut', stage: 3, at: [333, 543], pallets: [[2.5, 0]] },
+    { kind: 'diecut', stage: 3, at: [300, 620], pallets: [[0, -2.6]] },
+    { kind: 'diecut', stage: 3, at: [300, 686], pallets: [[3.0, 0]] },
+  ];
+  // Where each stage's pallets stand. Printing and Die Cutting wait beside
+  // their machines; the rest use a plan rectangle - PROVISIONAL until the
+  // owner places those stages too.
   const STAGE_ZONES = [
     { floor: 1, r: [360, 180, 500, 520] },      // CTP            - ground floor, left hall
-    { floor: 0, r: [360, 100, 600, 560] },      // Printing       - basement, Hall-01 left
-    { floor: 0, r: [620, 100, 1000, 560] },     // Coatings       - basement, Hall-01 right
-    { floor: 0, r: [520, 730, 1000, 1060] },    // Die Cutting    - basement, Hall-02
+    { floor: 0, machines: true },               // Printing       - beside the 7 presses
+    { floor: 0, r: [870, 100, 1000, 560] },     // Coatings       - basement, Hall-01 right strip
+    { floor: 0, machines: true },               // Die Cutting    - beside the 7 die cutters
     { floor: 2, r: [530, 365, 860, 520] },      // Sorting        - 1st floor, middle hall
     { floor: 2, r: [890, 365, 1040, 700] },     // Pasting        - 1st floor, right hall
   ];
@@ -175,6 +198,15 @@
     if (place === 'wait') {
       const col = k % 3, row = Math.floor(k / 3) % 3, layer = Math.floor(k / 9);
       return { x: WAIT.x0 + 2 + col * 3.5, z: WAIT.z0 + 2.2 + row * 3.8, lift: layer, y: 0 };
+    }
+    if (STAGE_ZONES[place].machines) {
+      // Spread across the stage's machines first, then their second spot,
+      // then stack a layer up.
+      const ms = MACHINES.filter(m => m.stage === place);
+      const spots = [];
+      for (let s = 0; s < 3; s++) ms.forEach(m => { if (m.pallets[s]) spots.push([m, m.pallets[s]]); });
+      const [m, off] = spots[k % spots.length];
+      return { x: wx(PLAN_B, m.at[0]) + off[0], z: wz(PLAN_B, m.at[1]) + off[1], lift: Math.floor(k / spots.length), y: FLOOR_Y[0], floor: 0 };
     }
     const r = zoneRect(place);
     const cols = Math.max(1, Math.floor((r.x1 - r.x0 - 0.6) / 3.3)), rows = Math.max(1, Math.floor((r.z1 - r.z0 - 0.6) / 3.0));
@@ -505,6 +537,7 @@
     // Stage areas (provisional until the owner places them): a painted
     // outline and the stage's name on its floor.
     STAGE_ZONES.forEach((z, i) => {
+      if (!z.r) return;
       const r = zoneRect(i), g = floorGroups[r.floor], y = SLAB + 0.015;
       const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2, w = r.x1 - r.x0, d = r.z1 - r.z0;
       for (const [bw, bd, x, zz] of [[w, 0.2, cx, r.z0], [w, 0.2, cx, r.z1], [0.2, d, r.x0, cz], [0.2, d, r.x1, cz]]) box(bw, 0.02, bd, 0x2563eb, x, y, zz, g, false);
@@ -512,6 +545,103 @@
       const m = decal(lab, Math.min(w - 0.4, lab.length * 0.95), 1.2, '#1e40af', { size: 0.62 });
       m.rotation.x = -Math.PI / 2; m.position.set(cx, y + 0.01, r.z1 - 0.9); m.renderOrder = 1; g.add(m);
     });
+    // ── Basement machines (owner's placement): presses and die cutters ──
+    // Each machine runs: rollers turn, sheets travel feeder -> delivery, the
+    // delivery pile grows, die-cutter platens press, flywheels spin.
+    const animated = [];
+    const roller = (len, r, color, x, y, z, parent) => {   // a roller along z that can spin
+      const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g);
+      cyl(r, r, len, color, 0, 0, 0, g, 12).rotation.x = Math.PI / 2;
+      box(r * 0.5, r * 0.5, len * 0.98, 0x1e293b, 0, r * 0.85, 0, g, false);   // a stripe, so the turning shows
+      return g;
+    };
+    const sheetGeo = new THREE.BoxGeometry(1, 0.03, 1); geos.add(sheetGeo);
+    const sheetMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+    const travelSheet = (parent, x0, x1, y, w, d, speed, phase) => {
+      const s = new THREE.Mesh(sheetGeo, sheetMat); s.scale.set(w, 1, d); s.position.y = y; parent.add(s);
+      return t => { const u = ((t * speed + phase) % 1 + 1) % 1; s.position.x = x0 + (x1 - x0) * u; s.visible = u > 0.04 && u < 0.96; };
+    };
+    const signal = (parent, x, z) => {   // the green / amber / red light tower
+      cyl(0.05, 0.05, 0.7, 0x334155, x, 2.25, z, parent, 6);
+      const lamp = c => new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.15 });
+      const green = lamp(0x22c55e);
+      [[0xef4444, 2.95], [0xf59e0b, 2.78]].forEach(([c, y]) => { const m = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.16, 10), lamp(c)); geos.add(m.geometry); m.position.set(x, y, z); parent.add(m); });
+      const gm = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.16, 10), green); geos.add(gm.geometry); gm.position.set(x, 2.61, z); parent.add(gm);
+      return t => { green.emissiveIntensity = 0.5 + 0.5 * Math.sin(t * 4); };
+    };
+    const buildPress = (g, n) => {         // sheet-fed offset press, 6.5 m long along x
+      const L = 6.5, W = 2.2;
+      box(L, 0.3, W, 0x334155, 0, 0.15, 0, g);
+      box(1.3, 1.4, W * 0.9, 0xe2e8f0, -L / 2 + 0.65, 1.0, 0, g);                 // feeder
+      box(1.1, 0.5, 1.6, 0xffffff, -L / 2 + 0.6, 1.95, 0, g);                     // paper pile
+      const rollers = [];
+      for (let u = 0; u < 4; u++) {                                              // four printing units
+        const ux = -L / 2 + 1.85 + u * 1.05;
+        box(1.0, 1.9, W, u % 2 ? 0x1d4ed8 : 0x2563eb, ux, 1.25, 0, g);
+        box(0.7, 0.25, W * 0.7, [0x06b6d4, 0xdb2777, 0xfacc15, 0x111827][u], ux, 2.32, 0, g);   // C M Y K ink ducts
+        rollers.push(roller(W * 1.02, 0.17, 0x94a3b8, ux + 0.45, 1.6, 0, g));
+      }
+      box(1.3, 1.1, W, 0xe2e8f0, L / 2 - 0.65, 0.85, 0, g);                      // delivery
+      const pile = box(1.0, 1, 1.5, 0xffffff, L / 2 - 0.65, 1.4, 0, g);
+      box(0.5, 1.1, 0.35, 0x1f2937, L / 2 - 0.4, 0.85, W / 2 + 0.45, g);         // console
+      const scr = box(0.42, 0.3, 0.02, 0x22d3ee, L / 2 - 0.4, 1.25, W / 2 + 0.63, g, false); scr.material = new THREE.MeshBasicMaterial({ color: 0x67e8f9 });
+      const light = signal(g, L / 2 - 1.3, -W / 2 + 0.2);
+      person(L / 2 - 1.3, W / 2 + 0.9, Math.PI, g);
+      const sheets = [0, 0.33, 0.66].map(ph => travelSheet(g, -L / 2 + 0.9, L / 2 - 0.8, 2.52, 0.9, 1.4, 0.45, ph + n * 0.13));
+      animated.push((dt, t) => {
+        for (const r of rollers) r.rotation.z -= dt * 6;
+        for (const s of sheets) s(t);
+        const h = 0.15 + ((t * 0.05 + n * 0.17) % 1) * 0.6; pile.scale.y = h; pile.position.y = 1.4 + h / 2;
+        light(t + n);
+      });
+    };
+    const buildDieCutBig = (g, n) => {     // big automatic die cutter, 5 m along x
+      const L = 5, W = 2.4;
+      box(L, 0.3, W, 0x334155, 0, 0.15, 0, g);
+      box(1.2, 1.5, W * 0.9, 0xe2e8f0, -L / 2 + 0.6, 1.05, 0, g);
+      box(1.0, 0.45, 1.7, 0xffffff, -L / 2 + 0.6, 2.02, 0, g);
+      box(2.2, 2.1, W, 0x1e3a8a, -0.2, 1.35, 0, g);                              // cutting section
+      const platen = box(1.9, 0.25, W * 0.85, 0x94a3b8, -0.2, 2.55, 0, g);
+      box(1.0, 1.6, W, 0x2563eb, 1.4, 1.1, 0, g);                                // stripping
+      box(0.8, 1.0, W, 0xe2e8f0, L / 2 - 0.4, 0.8, 0, g);                        // delivery
+      const pile = box(0.7, 1, 1.6, 0xc9a26b, L / 2 - 0.4, 1.3, 0, g);
+      const light = signal(g, 1.4, -W / 2 + 0.2);
+      person(0.6, W / 2 + 0.9, Math.PI, g);
+      const sheets = [0, 0.5].map(ph => travelSheet(g, -L / 2 + 0.8, L / 2 - 0.5, 2.3, 1.0, 1.6, 0.4, ph + n * 0.2));
+      animated.push((dt, t) => {
+        platen.position.y = 2.55 + Math.max(0, Math.sin(t * 5 + n)) * 0.22;
+        for (const s of sheets) s(t);
+        const h = 0.15 + ((t * 0.04 + n * 0.3) % 1) * 0.55; pile.scale.y = h; pile.position.y = 1.3 + h / 2;
+        light(t + n);
+      });
+    };
+    const buildDieCut = (g, n) => {        // small platen die cutter with its flywheel
+      box(1.8, 0.25, 1.5, 0x334155, 0, 0.12, 0, g);
+      box(1.3, 1.5, 1.3, 0x1e40af, -0.15, 1.0, 0, g);
+      const jaw = new THREE.Group(); jaw.position.set(0.5, 0.6, 0); g.add(jaw);
+      box(0.18, 1.1, 1.1, 0x94a3b8, 0.09, 0.55, 0, jaw);                           // the platen that closes
+      const fly = new THREE.Group(); fly.position.set(-0.15, 1.15, 0.8); g.add(fly);
+      cyl(0.62, 0.62, 0.12, 0x64748b, 0, 0, 0, fly, 18).rotation.x = Math.PI / 2;
+      for (const a of [0, Math.PI / 3, 2 * Math.PI / 3]) { const sp = box(1.15, 0.08, 0.14, 0x1f2937, 0, 0, 0.02, fly, false); sp.rotation.z = a; }
+      person(0.3, -1.25, 0, g);
+      const light = signal(g, -0.6, -0.5);
+      animated.push((dt, t) => {
+        fly.rotation.z -= dt * 4;
+        jaw.rotation.z = -0.45 * (0.5 + 0.5 * Math.sin(t * 2.6 + n * 1.3));
+        light(t + n);
+      });
+    };
+    const STAGE_COLOR = { 1: '#1e40af', 3: '#7c3aed' };
+    MACHINES.forEach((m, i) => {
+      const g = new THREE.Group();
+      g.position.set(wx(PLAN_B, m.at[0]), SLAB, wz(PLAN_B, m.at[1]));
+      floorGroups[0].add(g);
+      if (m.kind === 'press') buildPress(g, i); else if (m.kind === 'diecut-big') buildDieCutBig(g, i); else buildDieCut(g, i);
+      const name = m.stage === 1 ? 'PRINTING' : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
+      const lab = decal(name, name.length * 0.62, 0.8, STAGE_COLOR[m.stage], { size: 0.62 });
+      lab.rotation.x = -Math.PI / 2; lab.position.set(0, 0.02, m.kind === 'diecut' ? 1.6 : -(m.kind === 'press' ? 1.6 : 1.75)); lab.renderOrder = 1; g.add(lab);
+    });
+
     // Which floors show: all (see-through upper slabs) or just one.
     let floorFocus = null;
     const setFloorFocus = f => {
@@ -571,8 +701,9 @@
       return wanderers[wanderers.length - 1];
     };
     const planArea = (pl, a, b, c, d) => ({ x0: wx(pl, a), z0: wz(pl, b), x1: wx(pl, c), z1: wz(pl, d) });
-    { const h1 = planArea(PLAN_B, 380, 120, 980, 560); wander(h1, [h1.x0 + 4, h1.z1 - 2], 0); }
-    { const h2 = planArea(PLAN_B, 540, 760, 980, 1090); wander(h2, [h2.x0 + 3, h2.z0 + 3], 0); }
+    // Aisles kept clear of the machines.
+    { const h1 = planArea(PLAN_B, 420, 270, 610, 560); wander(h1, [h1.x0 + 2, h1.z1 - 2], 0); }
+    { const h2 = planArea(PLAN_B, 760, 740, 830, 1100); wander(h2, [h2.x0 + 1, h2.z0 + 3], 0); }
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: -8, z1: 5 }, [READY.x0 + 14, 5]);
 
     // ── Trucks ──
@@ -944,6 +1075,7 @@
       }
       // Lift, floor names, people.
       liftCar.position.y = 1.4 + (FLOOR_Y[2]) * (0.5 - 0.5 * Math.cos(clock * 0.35));
+      if (floorGroups[0].visible) for (const f of animated) f(dt, clock);
       for (const t of floorTags) scaleTag(t);
       people.forEach((pp, i) => { if (!pp.parent || pp.parent.type !== 'Scene') return; pp.position.y = 0.3 + Math.abs(Math.sin(clock * 2 + i)) * 0.05; });
       // Forklifts wandering about.
