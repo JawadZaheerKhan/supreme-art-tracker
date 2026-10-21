@@ -306,7 +306,24 @@ function getDb() {
 // job_btn_process_without_paper and rpt_mil_products (2026-10-13).
 // Bumped again for stock_groups.shipper_note / loose_note (2026-10-13).
 // Bumped again to seed the Access Register row job_btn_particulars (2026-10-14).
-const SCHEMA_VERSION = 'v2026-10-14-tx-actor-name';
+// Bumped again for inventory_transactions.actor_name (2026-10-14).
+// Bumped again for the Carton Shippers tables, their Access Register rows and
+// the Procurement role in users_role_check (2026-10-14).
+// Bumped again for carton_transactions.source (Station carton issues, 2026-10-14).
+// Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
+const SCHEMA_VERSION = 'v2026-10-17-carton-delete';
+
+// Extra papers on a job card beside the main one: the 2nd paper and the 3rd
+// paper (owner, 2026-10-21). Each lives in particulars[key] =
+// { inventory_item_id, packets, sheet_cut, issued_sheets }, its packets are
+// part of the job's total, and its issued_items rows carry its source tag.
+// Anything that is not one of these sources is the main paper.
+const EXTRA_PAPERS = [
+  { key: 'secondary_paper', source: 'secondary', label: '2nd' },
+  { key: 'third_paper',     source: 'third',     label: '3rd' },
+];
+const EXTRA_SOURCES = new Set(EXTRA_PAPERS.map(e => e.source));
+function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source === source) || null; }
 
 // Editable role-permission groups behind the Access Register's "click to
 // change" cells. Nearly every capability in the register is here — the
@@ -519,6 +536,15 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
+
+  // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
+  // every role until a Super Admin turns it on, except Procurement, whose tab
+  // this is (and who sees nothing else by default).
+  carton_tab_access:   { label: 'Carton Shippers tab — the carton shipper stock list and its In / Out log', levels: { procurement: 'view' } },
+  carton_btn_types:    { label: '+ Carton Type — also covers Edit and Hide on a type', levels: { procurement: 'yes' } },
+  carton_btn_stock_in: { label: 'Stock In — cartons received from a supplier', levels: { procurement: 'yes' } },
+  carton_btn_issue:    { label: 'Issue — cartons given out for an E-Job, a manual job or other', levels: { procurement: 'yes' } },
+  carton_btn_reverse:  { label: 'Reverse — undo a wrong carton entry', levels: { procurement: '30-day' }, extra: ['30-day'] },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -608,6 +634,21 @@ function effectiveLevelFor(user, key) {
     const lvl = group[r] || 'no';
     if (lvl === 'yes') return 'yes';
     if (permLevelAtLeast(lvl, 'view') && best !== 'yes' && !permLevelAtLeast(best, 'view')) best = lvl;
+  }
+  return best;
+}
+// Carton Shippers' Reverse row: same 3 tiers, no automatic Admin bypass
+// (only Super Admin), since the row starts hidden for everyone.
+function cartonReverseTier(user) {
+  if (userHasRole(user, 'client')) return 'no';
+  if (userHasRole(user, 'super_admin')) return 'yes';
+  const group = ROLE_PERMS.carton_btn_reverse || ROLE_PERMISSION_DEFAULTS.carton_btn_reverse.levels;
+  const roles = normalizeUserRoles(Array.isArray(user && user.roles) && user.roles.length ? user.roles : (user && user.role));
+  let best = 'no';
+  for (const r of roles) {
+    const lvl = group[r] || 'no';
+    if (lvl === 'yes') return 'yes';
+    if (lvl === '30-day') best = '30-day';
   }
   return best;
 }
@@ -893,6 +934,9 @@ async function initDb() {
           secondary_paper: seedParts.secondary_paper
             ? (({ issued_sheets, ...rest }) => rest)(seedParts.secondary_paper)
             : null,
+          third_paper: seedParts.third_paper
+            ? (({ issued_sheets, ...rest }) => rest)(seedParts.third_paper)
+            : null,
         },
       };
     };
@@ -1152,11 +1196,11 @@ async function initDb() {
     // each cold start. Own try/catch so a stale list can never do that again.
     try {
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin','procurement'))`;
       await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
       await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin','procurement'))`;
     } catch (roleErr) {
       // Log loudly but keep going — the migrations below must still run.
       console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
@@ -1762,6 +1806,59 @@ async function initDb() {
         at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    // Carton Shippers (owner, 2026-10-14): carton shipper types (own name,
+    // size, ply) and every in / out, kept apart from paper. Whole cartons.
+    await sql`
+      CREATE TABLE IF NOT EXISTS carton_types (
+        id              SERIAL PRIMARY KEY,
+        name            TEXT NOT NULL,
+        size            TEXT,
+        ply             TEXT,
+        reorder_level   INTEGER,
+        current_balance INTEGER NOT NULL DEFAULT 0,
+        hidden          BOOLEAN NOT NULL DEFAULT false,
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        created_by      TEXT
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS carton_transactions (
+        id             SERIAL PRIMARY KEY,
+        type_id        INTEGER NOT NULL REFERENCES carton_types(id) ON DELETE CASCADE,
+        change         INTEGER NOT NULL,
+        kind           TEXT NOT NULL,
+        reason         TEXT,
+        job_id         INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+        manual_job     TEXT,
+        other_reason   TEXT,
+        issued_to      TEXT,
+        supplier       TEXT,
+        challan_no     TEXT,
+        notes          TEXT,
+        user_id        INTEGER,
+        user_email     TEXT,
+        actor_name     TEXT,
+        reverses_tx_id INTEGER REFERENCES carton_transactions(id) ON DELETE SET NULL,
+        created_at     TIMESTAMPTZ DEFAULT NOW(),
+        recorded_at    TIMESTAMPTZ
+      )
+    `;
+    // 'station' = issued / returned by the Station's carton sync (Pasting / QC
+    // carton type per Carton Shipper line); NULL = typed in the Carton Shippers tab.
+    await sql`ALTER TABLE carton_transactions ADD COLUMN IF NOT EXISTS source TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS carton_tx_type_idx ON carton_transactions(type_id)`;
+    // Delete a carton type (Super Admin, owner 2026-10-17): the type only gets a
+    // deleted_at - a real DELETE would cascade away its whole In / Out log,
+    // which has to stay. A deleted type's name can be used again.
+    await sql`ALTER TABLE carton_types ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE carton_types ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    await sql`CREATE INDEX IF NOT EXISTS carton_tx_job_idx ON carton_transactions(job_id)`;
+    try {
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_tx_reverses_once ON carton_transactions (reverses_tx_id) WHERE reverses_tx_id IS NOT NULL`;
+      await sql`DROP INDEX IF EXISTS ux_carton_types_name`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS ux_carton_types_name_live ON carton_types (lower(name)) WHERE deleted_at IS NULL`;
+    } catch (e) { console.error('carton unique indexes not created:', e.message); }
+
     // An entry can be reversed only once - even two reverse clicks that
     // reach the server together. Skipped (logged) if old data already has a
     // doubled reversal, so start-up never fails on it.
@@ -2385,7 +2482,9 @@ function publicUser(u) {
 // cleaned roles array plus the single highest-priority role kept in the
 // legacy `role` column (admin outranks manager roles outranks ceo/operator;
 // client is a mutually-exclusive external role, ranked last).
-const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'operator', 'client'];
+// 'procurement' (owner, 2026-10-14): the carton shipper buyer - by default
+// sees only the Carton Shippers tab.
+const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'procurement', 'operator', 'client'];
 // actingUser: only a Super Admin can grant or keep the super_admin role on
 // anyone (including themselves) — a plain Admin submitting 'super_admin' in
 // the payload (by tampering with the request, since the checkbox is hidden
@@ -2674,7 +2773,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 // hard client-role block above; letting it appear in the editor would
 // invite a mistaken edit into something that actually can't take effect
 // safely, which is worse than just not offering it.
-const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator'];
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement'];
 
 // Every signed-in user needs to know their OWN effective permissions
 // (client-side canWriteJobs() etc. read this at boot) — this is not
@@ -2686,7 +2785,9 @@ app.get('/api/role-permissions/effective', requireAuth, async (req, res) => {
     for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) {
       // inventory_reverse has its own tier logic (30-day) the generic
       // level-lookup doesn't know about.
-      effective[key] = (key === 'inventory_reverse' || key === 'inv_btn_reverse') ? reverseTierFor(req.user) : effectiveLevelFor(req.user, key);
+      effective[key] = (key === 'inventory_reverse' || key === 'inv_btn_reverse') ? reverseTierFor(req.user)
+        : key === 'carton_btn_reverse' ? cartonReverseTier(req.user)
+        : effectiveLevelFor(req.user, key);
     }
     res.json(effective);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -4846,10 +4947,12 @@ async function jobMainPaperOverIssue(sql, job) {
   const sameGroup = (a, b) => (a.paper_type || '') === (b.paper_type || '') && (a.size || '') === (b.size || '')
     && String(a.gsm || '') === String(b.gsm || '') && !!a.is_offcut === !!b.is_offcut;
   let secSheets = 0;
-  const sec = p.secondary_paper;
-  if (sec && sec.inventory_item_id && parseFloat(sec.packets) > 0) {
-    const secItem = (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0];
-    if (secItem && !sameGroup(secItem, anchor)) secSheets = Math.round(parseFloat(sec.packets) * packetSize(secItem.paper_type || ''));
+  for (const e of EXTRA_PAPERS) {
+    const sec = p[e.key];
+    if (sec && sec.inventory_item_id && parseFloat(sec.packets) > 0) {
+      const secItem = (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0];
+      if (secItem && !sameGroup(secItem, anchor)) secSheets += Math.round(parseFloat(sec.packets) * packetSize(secItem.paper_type || ''));
+    }
   }
   const topupSheets = (Array.isArray(p.packets_topups) ? p.packets_topups : [])
     .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile')
@@ -5370,7 +5473,7 @@ app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forw
     // (issued_items carries primary rows). Then Pending Stock is already
     // behind us — go straight to Printing as an issued job.
     const stockDone = Array.isArray(job.issued_items)
-      && job.issued_items.some(x => x && x.source !== 'secondary');
+      && job.issued_items.some(x => x && !EXTRA_SOURCES.has(x.source));
     stages[0] = { ...(stages[0] || {}), status: 'done', by, time, at: nowIso, notes: 'CTP plates finished (marked by manager)' };
     stages[1] = { ...(stages[1] || {}), status: 'active', by, time, at: nowIso };
     log.push({ stage: STAGES[0], status: 'done', notes: `CTP done by ${by} — moved to ${stockDone ? 'Printing (stock already issued)' : 'Pending Stock'}`, by, time });
@@ -5717,13 +5820,15 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     // Clear the stamp only; never touch inventory here — if sheets need
     // refunding back to the offcut item, that's a manual correction the
     // admin makes themselves (as already happened for this case).
-    const priorSecondaryPaper = priorParticulars.secondary_paper && typeof priorParticulars.secondary_paper === 'object'
-      ? priorParticulars.secondary_paper : null;
-    const newSecondaryPaper = cleanParticulars.secondary_paper && typeof cleanParticulars.secondary_paper === 'object'
-      ? cleanParticulars.secondary_paper : null;
-    if (priorSecondaryPaper && priorSecondaryPaper.inventory_item_id && !newSecondaryPaper && cleanParticulars.offcut_pre_consumed) {
-      if (cleanParticulars === newParticulars) cleanParticulars = { ...newParticulars };
-      delete cleanParticulars.offcut_pre_consumed;
+    for (const e of EXTRA_PAPERS) {
+      const priorSecondaryPaper = priorParticulars[e.key] && typeof priorParticulars[e.key] === 'object'
+        ? priorParticulars[e.key] : null;
+      const newSecondaryPaper = cleanParticulars[e.key] && typeof cleanParticulars[e.key] === 'object'
+        ? cleanParticulars[e.key] : null;
+      if (priorSecondaryPaper && priorSecondaryPaper.inventory_item_id && !newSecondaryPaper && cleanParticulars.offcut_pre_consumed) {
+        if (cleanParticulars === newParticulars) cleanParticulars = { ...newParticulars };
+        delete cleanParticulars.offcut_pre_consumed;
+      }
     }
     // Same reasoning, PRIMARY item this time: if the paper is being
     // changed to a different item, any offcut_pre_consumed stamp names
@@ -5945,7 +6050,7 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     // raise the over-issue decision for the extra (see jobMainPaperOverIssue).
     try {
       const pq = (o) => String((o && o.quantity_of_packets) ?? '').trim();
-      const sp = (o) => String((o && o.secondary_paper && o.secondary_paper.packets) ?? '').trim();
+      const sp = (o) => EXTRA_PAPERS.map(e => String((o && o[e.key] && o[e.key].packets) ?? '').trim()).join('|');
       const jp = job.particulars || {};
       const needChanged = pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp);
       if (needChanged && oldItemId === newItemId && !jp.over_issue_pending
@@ -6044,7 +6149,10 @@ app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) =>
     const sec = p0.secondary_paper;
     const secItem = (sec && sec.inventory_item_id) ? (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0] : null;
     const secondOwed = secondaryOwedSheets(job, secItem);
-    if (status === 'issued' && mainOwed <= 0 && secondOwed <= 0) {
+    const third = p0.third_paper;
+    const thirdItem = (third && third.inventory_item_id) ? (await sql`SELECT * FROM inventory_items WHERE id = ${third.inventory_item_id}`)[0] : null;
+    const thirdOwed = secondaryOwedSheets(job, thirdItem, 'third_paper');
+    if (status === 'issued' && mainOwed <= 0 && secondOwed <= 0 && thirdOwed <= 0) {
       return res.status(400).json({ error: `Job E-${id} already has all its paper - nothing to process without.` });
     }
     const nowIso = new Date().toISOString();
@@ -6052,9 +6160,9 @@ app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) =>
     const who = (req.user && (req.user.name || req.user.email)) || 'Admin';
     const p = { ...p0 };
     delete p.partial_pending_sheets;
-    p.paper_waived = { at: nowIso, by: (req.user && req.user.email) || null, by_name: who, from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed };
+    p.paper_waived = { at: nowIso, by: (req.user && req.user.email) || null, by_name: who, from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed, third_owed_sheets: thirdOwed };
     const log = Array.isArray(job.log) ? [...job.log] : [];
-    const owedTxt = [mainOwed > 0 ? `${mainOwed.toLocaleString()} sheets main paper` : '', secondOwed > 0 ? `${secondOwed.toLocaleString()} sheets 2nd paper` : ''].filter(Boolean).join(' + ');
+    const owedTxt = [mainOwed > 0 ? `${mainOwed.toLocaleString()} sheets main paper` : '', secondOwed > 0 ? `${secondOwed.toLocaleString()} sheets 2nd paper` : '', thirdOwed > 0 ? `${thirdOwed.toLocaleString()} sheets 3rd paper` : ''].filter(Boolean).join(' + ');
     log.push({ stage: 'Printing', status: 'active', notes: `Processed without paper by ${who} (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}`, by: `${who} (Admin)`, time });
     const bumpedStage = Math.max(job.stage_index || 0, 1);
     const updated = await sql`
@@ -6073,7 +6181,7 @@ app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) =>
       entityType: 'job',
       entityId: id,
       summary: `Processed Job E-${id}: ${job.name} without paper (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}. Was ${status === 'pending' ? 'in Pending Stock' : 'part-issued'}.`,
-      metadata: { from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed },
+      metadata: { from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed, third_owed_sheets: thirdOwed },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -6179,17 +6287,19 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   // The store keeper sees the secondary as its own tile in Pending
   // Stock and issues it independently of the primary.
   const source = String((body && body.source) || 'primary').toLowerCase();
-  const isSecondary = source === 'secondary';
+  // isSecondary: one of the extra papers (2nd or 3rd) - extra says which.
+  const extra = extraPaperBySource(source);
+  const isSecondary = !!extra;
   if (job.particulars && job.particulars.paper_waived) {
     return { status: 400, error: `Job E-${id} was processed without paper by an Admin - nothing to issue. Send it back to Pending Stock first if paper should be issued.` };
   }
-  const secondaryRef = (job.particulars && job.particulars.secondary_paper) || null;
+  const secondaryRef = (extra && job.particulars && job.particulars[extra.key]) || null;
   if (isSecondary) {
     if (!secondaryRef || !secondaryRef.inventory_item_id) {
-      return { status: 400, error: 'Job has no 2nd paper set — nothing secondary to issue.' };
+      return { status: 400, error: `Job has no ${extra.label} paper set — nothing to issue for it.` };
     }
     if (!Number.isFinite(+secondaryRef.packets) || +secondaryRef.packets <= 0) {
-      return { status: 400, error: '2nd paper has no packets set on the job.' };
+      return { status: 400, error: `${extra.label} paper has no packets set on the job.` };
     }
   }
   // Allow further issuance on a partial-issued job (status is 'issued'
@@ -6263,26 +6373,27 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   // (owner rule: total = 10 = 5 primary + 5 secondary, not 15).
   // Offcut secondary is already in preConsumedSheets, so exclude it
   // here to avoid double-subtracting.
-  const secondaryForPrimary = (() => {
-    const sec = (job.particulars || {}).secondary_paper;
-    if (!sec || !sec.inventory_item_id) return 0;
+  // The 3rd paper's packets come off the main paper's need the same way.
+  const secondaryForPrimary = EXTRA_PAPERS.reduce((sum, e) => {
+    const sec = (job.particulars || {})[e.key];
+    if (!sec || !sec.inventory_item_id) return sum;
     const packets = parseFloat(sec.packets);
-    if (!Number.isFinite(packets) || packets <= 0) return 0;
+    if (!Number.isFinite(packets) || packets <= 0) return sum;
     // If secondary is already accounted for in offcut_pre_consumed,
     // don't subtract again.
     const inPreConsumed = preConsumed && Array.isArray(preConsumed.items)
       && preConsumed.items.some(it => it && it.item_id === sec.inventory_item_id);
-    if (inPreConsumed) return 0;
+    if (inPreConsumed) return sum;
     // Use psForNeed (declared above), NOT ps — ps is declared further
     // down, so referencing it here throws "Cannot access 'ps' before
     // initialization" (temporal dead zone). Both equal packetSize(paperType).
-    return Math.round(packets * psForNeed);
-  })();
+    return sum + Math.round(packets * psForNeed);
+  }, 0);
   const freshNeed = Math.max(0, totalNeedSheets - preConsumedSheets - secondaryForPrimary);
   // Same ceiling rule as primaryOwedSheets: the marker caps it, but what is
   // really owed is the current requirement less what has already been issued.
   const issuedPrimary = (Array.isArray(job.issued_items) ? job.issued_items : [])
-    .reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    .reduce((a, x) => a + ((x && !EXTRA_SOURCES.has(x.source)) ? (parseFloat(x.sheets) || 0) : 0), 0);
   const issuedRows = Array.isArray(job.issued_items) ? job.issued_items : [];
   const needSheets = isSecondary
     ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
@@ -6343,6 +6454,20 @@ async function performIssueStockUnlocked(sql, req, id, body) {
       !!it.is_offcut === !!anchor.is_offcut;
     if (!sameGroup) {
       return { status: 400, error: `Split item "${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}" is not in this job's paper group.` };
+    }
+  }
+  // Every brand must hold its share BEFORE anything is deducted: the brands
+  // are deducted one by one, so a refusal on the 2nd one used to leave the
+  // 1st already taken while the job stayed unissued (2026-10-16).
+  {
+    const want = new Map();
+    for (const s of splits) want.set(s.item_id, (want.get(s.item_id) || 0) + s.sheets);
+    for (const [itemId, sheets] of want) {
+      const it = itemsById.get(itemId);
+      const bal = parseFloat(it.current_balance) || 0;
+      if (sheets > bal) {
+        return { status: 400, error: `Not enough stock of ${it.paper_type} · ${it.size || ''} · ${it.gsm || ''}gsm · ${it.brand || 'no brand'}: ${bal.toLocaleString()} sheets on hand, ${sheets.toLocaleString()} asked. Nothing was issued.` };
+      }
     }
   }
   const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
@@ -6461,9 +6586,9 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   const remaining = Math.max(0, needSheets - totalIssued);
   const nextParticulars = { ...(job.particulars || {}) };
   if (isSecondary) {
-    const sec = { ...(nextParticulars.secondary_paper || {}) };
+    const sec = { ...(nextParticulars[extra.key] || {}) };
     sec.issued_sheets = (parseInt(sec.issued_sheets, 10) || 0) + totalIssued;
-    nextParticulars.secondary_paper = sec;
+    nextParticulars[extra.key] = sec;
   } else {
     if (fullyIssued) delete nextParticulars.partial_pending_sheets;
     else             nextParticulars.partial_pending_sheets = remaining;
@@ -6501,7 +6626,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   const nextInvItemId = isSecondary ? job.inventory_item_id : primary.item_id;
   // Also tag issued_items rows with source so the ledger + reports can
   // tell primary and secondary apart later.
-  const issuedItemsTagged = issuedItems.map(x => ({ ...x, source: isSecondary ? 'secondary' : 'primary' }));
+  const issuedItemsTagged = issuedItems.map(x => ({ ...x, source: isSecondary ? extra.source : 'primary' }));
   // Issuing only the 2nd paper must not mark the whole job issued while the
   // main paper is still owed (or not yet requested) — otherwise the main
   // paper silently drops out of Pending Stock. The two sides can now be
@@ -6556,7 +6681,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
     entityType: 'job',
     entityId: id,
     // tx_ids: the stock-out rows this issuance wrote, for the History click.
-    metadata: { tx_ids: issuedItems.map(x => x.tx_id).filter(Boolean), items: issuedItems, secondary: isSecondary },
+    metadata: { tx_ids: issuedItems.map(x => x.tx_id).filter(Boolean), items: issuedItems, secondary: isSecondary, source: isSecondary ? extra.source : 'primary' },
     // Issued amount in packets first; what is still NEEDED stays in sheets as
     // well, since that is the figure the rest of the app quotes back.
     summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} of ${paperList} for Job E-${id}: ${job.name}${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
@@ -6633,7 +6758,7 @@ async function primaryOwedSheets(sql, job, itemsById) {
   // says otherwise. A fresh CTP job owes its full need, like 'pending'.
   if (job.issuance_status === 'ctp' && !partial) {
     const rowsCtp = Array.isArray(job.issued_items) ? job.issued_items : [];
-    const issuedCtp = rowsCtp.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    const issuedCtp = rowsCtp.reduce((a, x) => a + ((x && !EXTRA_SOURCES.has(x.source)) ? (parseFloat(x.sheets) || 0) : 0), 0);
     if (issuedCtp > 0) return 0;
   }
   const item = itemsById
@@ -6646,11 +6771,13 @@ async function primaryOwedSheets(sql, job, itemsById) {
   const pre = p.offcut_pre_consumed;
   const preSheets = pre && Number.isFinite(+pre.total_sheets) ? Math.max(0, Math.round(+pre.total_sheets)) : 0;
   let secSheets = 0;
-  const sec = p.secondary_paper;
-  if (sec && sec.inventory_item_id) {
-    const packets = parseFloat(sec.packets);
-    const inPre = pre && Array.isArray(pre.items) && pre.items.some(it => it && it.item_id === sec.inventory_item_id);
-    if (Number.isFinite(packets) && packets > 0 && !inPre) secSheets = Math.round(packets * ps);
+  for (const e of EXTRA_PAPERS) {
+    const sec = p[e.key];
+    if (sec && sec.inventory_item_id) {
+      const packets = parseFloat(sec.packets);
+      const inPre = pre && Array.isArray(pre.items) && pre.items.some(it => it && it.item_id === sec.inventory_item_id);
+      if (Number.isFinite(packets) && packets > 0 && !inPre) secSheets += Math.round(packets * ps);
+    }
   }
   const need = Math.max(0, total - preSheets - secSheets);
   // The partial marker is a snapshot from the last issuance and goes stale as
@@ -6662,7 +6789,7 @@ async function primaryOwedSheets(sql, job, itemsById) {
   if (partial > 0) {
     const rows = Array.isArray(job.issued_items) ? job.issued_items : [];
     if (!rows.length) return partial;
-    const issued = rows.reduce((a, x) => a + ((x && x.source !== 'secondary') ? (parseFloat(x.sheets) || 0) : 0), 0);
+    const issued = rows.reduce((a, x) => a + ((x && !EXTRA_SOURCES.has(x.source)) ? (parseFloat(x.sheets) || 0) : 0), 0);
     return Math.max(0, need - issued);
   }
   return need;
@@ -6670,9 +6797,9 @@ async function primaryOwedSheets(sql, job, itemsById) {
 
 // Sheets still owed on a job's 2nd paper. Legacy jobs whose 2nd paper was
 // silently auto-consumed on CTP forward (offcut_pre_consumed) owe nothing.
-function secondaryOwedSheets(job, secItem) {
+function secondaryOwedSheets(job, secItem, key = 'secondary_paper') {
   const p = job.particulars || {};
-  const sec = p.secondary_paper;
+  const sec = p[key];
   if (!sec || !sec.inventory_item_id || !secItem) return 0;
   if (p.paper_waived) return 0;          // processed without paper by an Admin
   if (job.issuance_status !== 'pending' && job.issuance_status !== 'issued') return 0;
@@ -6735,11 +6862,13 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
         // via partial_pending_sheets — i.e. some was already issued.
         if (owed > 0) push(job, 'primary', primaryItem, owed, job.issuance_status === 'issued');
       }
-      const sec = (job.particulars || {}).secondary_paper;
-      const secItem = sec && itemsById.get(sec.inventory_item_id);
-      if (secItem) {
-        const owed = secondaryOwedSheets(job, secItem);
-        if (owed > 0) push(job, 'secondary', secItem, owed, (parseInt(sec.issued_sheets, 10) || 0) > 0);
+      for (const e of EXTRA_PAPERS) {
+        const sec = (job.particulars || {})[e.key];
+        const secItem = sec && itemsById.get(sec.inventory_item_id);
+        if (secItem) {
+          const owed = secondaryOwedSheets(job, secItem, e.key);
+          if (owed > 0) push(job, e.source, secItem, owed, (parseInt(sec.issued_sheets, 10) || 0) > 0);
+        }
       }
     }
     res.json(out);
@@ -6763,20 +6892,21 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
     if (v.error) return res.status(v.status).json({ error: v.error });
     const op = v.operator;
     await withStationActor(sql, req, op);
-    const source = req.body.source === 'secondary' ? 'secondary' : 'primary';
+    const extra = extraPaperBySource(req.body.source);
+    const source = extra ? extra.source : 'primary';
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    const anchorId = source === 'secondary'
-      ? ((job.particulars || {}).secondary_paper || {}).inventory_item_id
+    const anchorId = extra
+      ? ((job.particulars || {})[extra.key] || {}).inventory_item_id
       : job.inventory_item_id;
     if (!anchorId) return res.status(400).json({ error: 'Job has no paper set for this side.' });
     const anchor = (await sql`SELECT * FROM inventory_items WHERE id = ${anchorId}`)[0];
     if (!anchor || !anchor.is_offcut) {
       return res.status(400).json({ error: 'This paper is not an offcut — fresh stock is issued by the store keeper.' });
     }
-    const owed = source === 'secondary'
-      ? secondaryOwedSheets(job, anchor)
+    const owed = extra
+      ? secondaryOwedSheets(job, anchor, extra.key)
       : await primaryOwedSheets(sql, job);
     if (owed <= 0) return res.status(400).json({ error: 'Nothing pending to issue for this job.' });
     const group = (await sql`
@@ -6804,7 +6934,7 @@ app.post('/api/jobs/:id/papercut-issue-stock', requireStationUser, async (req, r
       action: 'job.papercut_issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id}: ${packetsWithSheets(owed, packetSize(anchor.paper_type || ''), packetUnitLabelSrv(anchor.paper_type || ''))} of offcut${source === 'secondary' ? ' (2nd paper)' : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
+      summary: `Job E-${id}: ${packetsWithSheets(owed, packetSize(anchor.paper_type || ''), packetUnitLabelSrv(anchor.paper_type || ''))} of offcut${extra ? ` (${extra.label} paper)` : ''} issued from Station by Paper Cutting ${op.name}${personName ? ' · ' + personName : ''}`,
     });
     res.json(result.job);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -6944,6 +7074,502 @@ app.post('/api/station/offcut-items/:id/stock-in', requireStationUser, async (re
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// ── Carton Shippers (owner, 2026-10-14) ───────────────────────
+// Carton shipper stock: types (own name, size L x W x H, ply) and every
+// Stock In / Issue / reversal. Issued from the Carton Shippers tab now (to an
+// E-Job, a manual job, or other); the Pasting Station comes later.
+const CARTON_REASONS = { 'e-job': 'E-Job', 'manual-job': 'Manual Job', other: 'Other' };
+function cartonQty(v) {
+  const n = Number(String(v == null ? '' : v).replace(/,/g, '').trim());
+  return Number.isInteger(n) && n > 0 && n <= 10000000 ? n : null;
+}
+function cartonText(v, max = 200) {
+  const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  return s ? s.slice(0, max) : null;
+}
+// "18 X 12 x 10" -> "18x12x10" (same spelling everywhere, so search matches).
+function cartonSize(v) {
+  const s = cartonText(v, 60);
+  return s ? s.toLowerCase().replace(/\s*[x×*]\s*/g, 'x') : null;
+}
+function cartonTypeLabel(t) {
+  return [t.name, t.size, t.ply].filter(Boolean).join(' · ');
+}
+// One carton row + its balance. The balance moves first, in one statement
+// that refuses to go below zero, so two issues at once can never overdraw.
+async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, manualJob, otherReason, issuedTo, supplier, challanNo, notes, user, occurredAt, reversesTxId, source, allowNegative }) {
+  // allowNegative: the Station never stops on short stock (owner, 2026-10-14)
+  // - the count goes below zero and the Carton Shippers tab flags it.
+  const moved = change < 0 && !allowNegative
+    ? await sql`UPDATE carton_types SET current_balance = current_balance + ${change} WHERE id = ${typeId} AND current_balance + ${change} >= 0 RETURNING current_balance`
+    : await sql`UPDATE carton_types SET current_balance = current_balance + ${change} WHERE id = ${typeId} RETURNING current_balance`;
+  if (!moved.length) {
+    const t = (await sql`SELECT current_balance FROM carton_types WHERE id = ${typeId}`)[0];
+    if (!t) return { status: 404, error: 'Carton type not found.' };
+    return { status: 400, error: `Only ${(t.current_balance || 0).toLocaleString()} on hand - cannot take out ${Math.abs(change).toLocaleString()}.` };
+  }
+  const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
+  try {
+    const row = (await sql`
+      INSERT INTO carton_transactions (type_id, change, kind, reason, job_id, manual_job, other_reason, issued_to, supplier, challan_no, notes,
+                                       user_id, user_email, actor_name, reverses_tx_id, source, created_at, recorded_at)
+      VALUES (${typeId}, ${change}, ${kind}, ${reason || null}, ${jobId || null}, ${manualJob || null}, ${otherReason || null}, ${issuedTo || null},
+              ${supplier || null}, ${challanNo || null}, ${notes || null},
+              ${(user && user.id) || null}, ${(user && user.email) || null}, ${(user && user.station_actor) || null}, ${reversesTxId || null}, ${source || null},
+              COALESCE(${occurredIso}::timestamptz, NOW()),
+              CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
+      RETURNING id`)[0];
+    return { id: row.id, balance: moved[0].current_balance };
+  } catch (e) {
+    await sql`UPDATE carton_types SET current_balance = current_balance - ${change} WHERE id = ${typeId}`;
+    if (/ux_carton_tx_reverses_once/.test(e.message || '')) return { status: 409, error: 'This entry was already reversed.' };
+    throw e;
+  }
+}
+// Two people saving the same type name at the same moment both pass the
+// name check; the unique index then refuses one - say so plainly (409)
+// instead of a raw database error (2026-10-16 review). null = answered.
+async function cartonNameSafe(res, name, run) {
+  try { return (await run())[0]; }
+  catch (e) {
+    if (/ux_carton_types_name|duplicate key/i.test(String(e && e.message))) {
+      res.status(409).json({ error: `A carton type named "${name}" already exists.` });
+      return null;
+    }
+    throw e;
+  }
+}
+async function cartonTypeOr404(sql, id, res) {
+  const t = (await sql`SELECT * FROM carton_types WHERE id = ${parseInt(id, 10) || 0} AND deleted_at IS NULL`)[0];
+  if (!t) { res.status(404).json({ error: 'Carton type not found (it may have been deleted).' }); return null; }
+  return t;
+}
+
+// ── Station carton types (owner, 2026-10-14) ──────────────────
+// Each Carton Shipper / Loose Carton Shipper line at Pasting and QC names
+// its carton type (particulars.<key>.entries[i].carton_types, one id per
+// "qty x cartons" line). After every Station save the job's cartons per type
+// are compared with what the Station has already taken for that job, and
+// the difference is issued (or returned) - so Pasting and QC editing the
+// same rows never count twice, and a lowered count goes back to stock.
+const STATION_CARTON_KEYS = ['ready_packets_qty', 'loose_shipper_qty'];
+// Cartons per type the job's Carton Shipper rows hold: Map(typeId -> count).
+function stationCartonsWanted(particulars) {
+  const want = new Map();
+  for (const key of STATION_CARTON_KEYS) {
+    const p = particulars && particulars[key];
+    const entries = p && Array.isArray(p.entries) ? p.entries : [];
+    for (const e of entries) {
+      const types = e && Array.isArray(e.carton_types) ? e.carton_types : [];
+      String((e && e.qty) || '').split('+').map(s => s.trim()).filter(Boolean).forEach((line, k) => {
+        const t = parseInt(types[k], 10);
+        if (!(t > 0)) return;
+        const m = /^([\d.]+)\s*[x×*]\s*([\d.]+)$/i.exec(line);
+        const n = Math.round(m ? parseFloat(m[2]) : parseFloat(line.replace(/[^0-9.]/g, '')));
+        if (n > 0) want.set(t, (want.get(t) || 0) + n);
+      });
+    }
+  }
+  return want;
+}
+// Bring the job's Station carton issues in line with its rows. Returns the
+// carton types now below zero (for the operator's message).
+async function syncStationCartons(sql, jobId, particulars, user, issuedTo) {
+  const held = await takeOpLocks(sql, [`job-cartons:${jobId}`], { wait: true });
+  if (!held) throw new Error('Carton stock is being updated for this job - save again in a moment.');
+  try {
+    // Work from the job as stored now, inside the lock: two saves landing
+    // together (Pasting and QC) must not leave stock matching the save that
+    // lost the race (2026-10-16 review). `particulars` is the fallback.
+    const fresh = (await sql`SELECT particulars FROM jobs WHERE id = ${jobId}`)[0];
+    const want = stationCartonsWanted((fresh && fresh.particulars) || particulars);
+    const rows = await sql`SELECT type_id, -SUM(change)::int AS taken FROM carton_transactions WHERE job_id = ${jobId} AND source = 'station' GROUP BY type_id`;
+    const taken = new Map(rows.map(r => [r.type_id, Number(r.taken) || 0]));
+    const ids = [...new Set([...want.keys(), ...taken.keys()])];
+    if (!ids.length) return [];
+    const types = new Map((await sql`SELECT * FROM carton_types WHERE id = ANY(${ids})`).map(t => [t.id, t]));
+    const moved = [];
+    for (const id of ids) {
+      const t = types.get(id);
+      if (!t) continue;
+      const diff = (want.get(id) || 0) - (taken.get(id) || 0);
+      if (!diff) continue;
+      const r = await applyCartonChange(sql, {
+        typeId: id, change: -diff, kind: 'out', reason: 'e-job', jobId, issuedTo, user, source: 'station', allowNegative: true,
+        notes: diff > 0 ? null : `Station count lowered - ${(-diff).toLocaleString()} back to stock`,
+      });
+      if (r.error) throw new Error(r.error);
+      moved.push({ type: t, diff, balance: r.balance });
+    }
+    if (moved.length) {
+      await logAudit(sql, { user }, {
+        action: 'carton.station', entityType: 'job', entityId: jobId,
+        summary: `Job E-${jobId}: Station cartons ${moved.map(m => `${m.diff > 0 ? '-' : '+'}${Math.abs(m.diff).toLocaleString()} ${cartonTypeLabel(m.type)}`).join(', ')}`,
+      });
+    }
+    return moved.filter(m => m.balance < 0).map(m => ({ id: m.type.id, name: cartonTypeLabel(m.type), balance: m.balance }));
+  } finally { await releaseOpLocks(sql, held); }
+}
+// The Station's carton type list (operators can't read /api/cartons).
+app.get('/api/station/carton-types', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    // A deleted type reads as hidden: kept on a line that already has it, not offered for new lines.
+    res.json(await sql`SELECT id, name, size, ply, (hidden OR deleted_at IS NOT NULL) AS hidden FROM carton_types ORDER BY lower(name)`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// One Issue line (single or bulk): quantity, who took them, and what for -
+// an E-Job (must exist), a manual job, or other.
+async function readCartonIssueRow(sql, b) {
+  const qty = cartonQty(b.qty);
+  if (!qty) return { error: 'Quantity must be a whole number of cartons above zero.' };
+  const issuedTo = cartonText(b.issued_to, 120);
+  if (!issuedTo) return { error: 'Enter who the cartons are issued to.' };
+  const reason = String(b.reason || '');
+  if (!CARTON_REASONS[reason]) return { error: 'Pick a reason: E-Job, Manual Job or Other.' };
+  let jobId = null, manualJob = null, otherReason = null, jobLabel = '';
+  if (reason === 'e-job') {
+    const job = (await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(b.job_id, 10) || 0} AND deleted_at IS NULL`)[0];
+    if (!job) return { error: 'Pick the job (E-number) these cartons are for.' };
+    jobId = job.id; jobLabel = `E-${job.id} ${job.name || ''}`.trim();
+  } else if (reason === 'manual-job') {
+    manualJob = cartonText(b.manual_job, 120);
+    if (!manualJob) return { error: 'Enter the manual job number / name.' };
+    jobLabel = 'manual job ' + manualJob;
+  } else {
+    otherReason = cartonText(b.other_reason, 200);
+    if (!otherReason) return { error: 'Write what the cartons are for.' };
+    jobLabel = otherReason;
+  }
+  return { qty, issuedTo, reason, jobId, manualJob, otherReason, jobLabel };
+}
+// The carton types a bulk form names, by id.
+async function cartonTypesFor(sql, raw) {
+  const ids = [...new Set(raw.map(r => parseInt(r && r.type_id, 10)).filter(n => n > 0))];
+  const rows = ids.length ? await sql`SELECT * FROM carton_types WHERE id = ANY(${ids}) AND deleted_at IS NULL` : [];
+  return new Map(rows.map(t => [t.id, t]));
+}
+
+app.get('/api/cartons', requirePermission('carton_tab_access', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const types = await sql`SELECT * FROM carton_types ORDER BY lower(name)`;
+    const transactions = await sql`
+      SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
+             (SELECT r.id FROM carton_transactions r WHERE r.reverses_tx_id = t.id LIMIT 1) AS reversed_by
+        FROM carton_transactions t
+        LEFT JOIN jobs j ON j.id = t.job_id
+       ORDER BY t.created_at DESC, t.id DESC`;
+    res.json({ types, transactions });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+function readCartonTypeBody(body) {
+  const name = cartonText(body && body.name, 80);
+  if (!name) return { error: 'Give the carton type a name.' };
+  const rl = String((body && body.reorder_level) == null ? '' : body.reorder_level).trim();
+  const reorder = rl === '' ? null : cartonQty(rl);
+  if (rl !== '' && reorder === null) return { error: 'Reorder level must be a whole number above zero (or left blank).' };
+  return { name, size: cartonSize(body.size), ply: cartonText(body.ply, 30), reorder };
+}
+app.post('/api/cartons/types', requirePermission('carton_btn_types'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = readCartonTypeBody(req.body || {});
+    if (b.error) return res.status(400).json({ error: b.error });
+    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND deleted_at IS NULL`;
+    if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
+    const t = await cartonNameSafe(res, b.name, () => sql`
+      INSERT INTO carton_types (name, size, ply, reorder_level, created_by)
+      VALUES (${b.name}, ${b.size}, ${b.ply}, ${b.reorder}, ${req.user.email})
+      RETURNING *`);
+    if (!t) return;
+    await logAudit(sql, req, { action: 'carton.type_create', entityType: 'carton_type', entityId: t.id, summary: `Carton type added: ${cartonTypeLabel(t)}` });
+    res.json(t);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/cartons/types/:id', requirePermission('carton_btn_types'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const cur = await cartonTypeOr404(sql, req.params.id, res);
+    if (!cur) return;
+    const b = readCartonTypeBody(req.body || {});
+    if (b.error) return res.status(400).json({ error: b.error });
+    const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND id <> ${cur.id} AND deleted_at IS NULL`;
+    if (dup.length) return res.status(409).json({ error: `A carton type named "${b.name}" already exists.` });
+    const hidden = !!(req.body && req.body.hidden);
+    const t = await cartonNameSafe(res, b.name, () => sql`
+      UPDATE carton_types SET name = ${b.name}, size = ${b.size}, ply = ${b.ply}, reorder_level = ${b.reorder}, hidden = ${hidden}
+       WHERE id = ${cur.id} RETURNING *`);
+    if (!t) return;
+    const what = cur.hidden !== hidden ? (hidden ? 'hidden' : 'shown again') : 'edited';
+    await logAudit(sql, req, { action: 'carton.type_edit', entityType: 'carton_type', entityId: t.id, summary: `Carton type ${what}: ${cartonTypeLabel(cur)}${what === 'edited' ? ' -> ' + cartonTypeLabel(t) : ''}` });
+    res.json(t);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Delete a carton type (Super Admin only, owner 2026-10-17). It leaves the
+// Stock list, the pickers, the Summary and the Station's choices; its Stock
+// In / Stock Out entries stay (each can be deleted on its own).
+app.delete('/api/cartons/types/:id', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const cur = await cartonTypeOr404(sql, req.params.id, res);
+    if (!cur) return;
+    const n = Number((await sql`SELECT COUNT(*)::int AS n FROM carton_transactions WHERE type_id = ${cur.id}`)[0].n) || 0;
+    await sql`UPDATE carton_types SET deleted_at = NOW(), deleted_by = ${req.user.email} WHERE id = ${cur.id} AND deleted_at IS NULL`;
+    await logAudit(sql, req, {
+      action: 'carton.type_delete', entityType: 'carton_type', entityId: cur.id,
+      summary: `Carton type deleted: ${cartonTypeLabel(cur)} (${(cur.current_balance || 0).toLocaleString()} on hand; its ${n.toLocaleString()} In / Out entr${n === 1 ? 'y' : 'ies'} kept)`,
+    });
+    res.json({ ok: true, id: cur.id, entries_kept: n });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Delete one Stock In / Stock Out entry outright (Super Admin only, owner
+// 2026-10-17). The row leaves the log and its quantity comes back off the
+// type's stock. A reversal of it goes with it (it only existed to cancel it);
+// deleting a reversal on its own puts the entry it undid back in force.
+app.delete('/api/cartons/transactions/:id', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const tx = (await sql`SELECT * FROM carton_transactions WHERE id = ${parseInt(req.params.id, 10) || 0}`)[0];
+    if (!tx) return res.status(404).json({ error: 'Entry not found (it may already be deleted).' });
+    const held = await takeOpLocks(sql, [`carton-tx:${tx.id}`, `carton-type:${tx.type_id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const rows = await sql`SELECT id, change FROM carton_transactions WHERE id = ${tx.id} OR reverses_tx_id = ${tx.id}`;
+      if (!rows.some(r => r.id === tx.id)) return res.status(404).json({ error: 'Entry not found (it may already be deleted).' });
+      const ids = rows.map(r => r.id);
+      const undo = rows.reduce((a, r) => a + (Number(r.change) || 0), 0);
+      await sql`DELETE FROM carton_transactions WHERE id = ANY(${ids})`;
+      const type = (await sql`UPDATE carton_types SET current_balance = current_balance - ${undo} WHERE id = ${tx.type_id} RETURNING *`)[0];
+      await logAudit(sql, req, {
+        action: 'carton.tx_delete', entityType: 'carton_type', entityId: tx.type_id,
+        summary: `Carton entry #${tx.id} deleted (${tx.kind === 'correction' ? 'reversal' : tx.kind === 'in' ? 'Stock In' : 'Stock Out'} ${tx.change > 0 ? '+' : ''}${tx.change.toLocaleString()} ${type ? cartonTypeLabel(type) : ''}${ids.length > 1 ? ', with its reversal' : ''}); stock now ${type ? (type.current_balance || 0).toLocaleString() : '?'}`,
+        metadata: { tx, deleted_ids: ids },
+      });
+      res.json({ ok: true, deleted: ids, balance: type ? type.current_balance : null });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/cartons/stock-in', requirePermission('carton_btn_stock_in'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const type = await cartonTypeOr404(sql, b.type_id, res);
+    if (!type) return;
+    const qty = cartonQty(b.qty);
+    if (!qty) return res.status(400).json({ error: 'Quantity must be a whole number of cartons above zero.' });
+    const supplier = cartonText(b.supplier, 120);
+    if (!supplier) return res.status(400).json({ error: 'Enter the supplier.' });
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const held = await takeOpLocks(sql, [`carton-type:${type.id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const r = await applyCartonChange(sql, {
+        typeId: type.id, change: +qty, kind: 'in', supplier, challanNo: cartonText(b.challan_no, 60),
+        notes: cartonText(b.notes, 300), user: req.user, occurredAt: entry.at,
+      });
+      if (r.error) return res.status(r.status || 400).json({ error: r.error });
+      await logAudit(sql, req, {
+        action: 'carton.stock_in', entityType: 'carton_type', entityId: type.id,
+        summary: `+${qty.toLocaleString()} cartons in: ${cartonTypeLabel(type)} from ${supplier}${b.challan_no ? ' · challan ' + cartonText(b.challan_no, 60) : ''}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+      });
+      res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/cartons/issue', requirePermission('carton_btn_issue'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const type = await cartonTypeOr404(sql, b.type_id, res);
+    if (!type) return;
+    const row = await readCartonIssueRow(sql, b);
+    if (row.error) return res.status(400).json({ error: row.error });
+    const { qty, issuedTo, reason, jobId, manualJob, otherReason, jobLabel } = row;
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const held = await takeOpLocks(sql, [`carton-type:${type.id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const r = await applyCartonChange(sql, {
+        typeId: type.id, change: -qty, kind: 'out', reason, jobId, manualJob, otherReason, issuedTo,
+        notes: cartonText(b.notes, 300), user: req.user, occurredAt: entry.at,
+      });
+      if (r.error) return res.status(r.status || 400).json({ error: r.error });
+      await logAudit(sql, req, {
+        action: 'carton.issue', entityType: 'carton_type', entityId: type.id,
+        summary: `-${qty.toLocaleString()} cartons issued: ${cartonTypeLabel(type)} to ${issuedTo} for ${jobLabel}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+        metadata: { tx_id: r.id, job_id: jobId },
+      });
+      res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Stock In (Bulk): several carton types from one delivery - one supplier,
+// challan, entry date and note for every row. Every row is checked before
+// anything is saved.
+app.post('/api/cartons/bulk-in', requirePermission('carton_btn_stock_in'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const raw = Array.isArray(b.rows) ? b.rows : [];
+    if (!raw.length) return res.status(400).json({ error: 'Add at least one row.' });
+    if (raw.length > 100) return res.status(400).json({ error: 'At most 100 rows at a time.' });
+    const supplier = cartonText(b.supplier, 120);
+    if (!supplier) return res.status(400).json({ error: 'Enter the supplier.' });
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const types = await cartonTypesFor(sql, raw);
+    const rows = [];
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i] || {};
+      const t = types.get(parseInt(r.type_id, 10));
+      if (!t) return res.status(400).json({ error: `Row ${i + 1}: pick a carton type.` });
+      if (t.hidden) return res.status(400).json({ error: `Row ${i + 1}: ${t.name} is hidden - show it again first.` });
+      const qty = cartonQty(r.qty);
+      if (!qty) return res.status(400).json({ error: `Row ${i + 1}: quantity must be a whole number of cartons above zero.` });
+      rows.push({ type: t, qty });
+    }
+    const held = await takeOpLocks(sql, [...new Set(rows.map(r => `carton-type:${r.type.id}`))]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const challanNo = cartonText(b.challan_no, 60);
+      const notes = cartonText(b.notes, 300);
+      const ids = [];
+      for (const r of rows) {
+        const x = await applyCartonChange(sql, { typeId: r.type.id, change: +r.qty, kind: 'in', supplier, challanNo, notes, user: req.user, occurredAt: entry.at });
+        if (x.error) return res.status(x.status || 400).json({ error: x.error + (ids.length ? ` (${ids.length} earlier row(s) were saved - check the log)` : '') });
+        ids.push(x.id);
+      }
+      const total = rows.reduce((a, r) => a + r.qty, 0);
+      await logAudit(sql, req, {
+        action: 'carton.stock_in', entityType: 'carton_type', entityId: null,
+        summary: `+${total.toLocaleString()} cartons in (bulk) from ${supplier}${challanNo ? ' · challan ' + challanNo : ''}: ${rows.map(r => r.qty.toLocaleString() + ' ' + cartonTypeLabel(r.type)).join(', ')}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+        metadata: { tx_ids: ids },
+      });
+      res.json({ ok: true, ids, total });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Stock Out (Bulk): several lines, each with its own type, quantity, issued
+// to and what for; one challan, entry date and note for all. Nothing is
+// saved unless every row is valid and every type has enough on hand for the
+// rows that take from it.
+app.post('/api/cartons/bulk-out', requirePermission('carton_btn_issue'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const raw = Array.isArray(b.rows) ? b.rows : [];
+    if (!raw.length) return res.status(400).json({ error: 'Add at least one row.' });
+    if (raw.length > 100) return res.status(400).json({ error: 'At most 100 rows at a time.' });
+    const entry = stockEntryInstant(b.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const types = await cartonTypesFor(sql, raw);
+    const rows = [];
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i] || {};
+      const t = types.get(parseInt(r.type_id, 10));
+      if (!t) return res.status(400).json({ error: `Row ${i + 1}: pick a carton type.` });
+      if (t.hidden) return res.status(400).json({ error: `Row ${i + 1}: ${t.name} is hidden - show it again first.` });
+      const line = await readCartonIssueRow(sql, r);
+      if (line.error) return res.status(400).json({ error: `Row ${i + 1}: ${line.error}` });
+      rows.push({ type: t, ...line });
+    }
+    const typeIds = [...new Set(rows.map(r => r.type.id))];
+    const held = await takeOpLocks(sql, typeIds.map(id => `carton-type:${id}`));
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const fresh = await sql`SELECT id, current_balance FROM carton_types WHERE id = ANY(${typeIds})`;
+      const need = new Map();
+      for (const r of rows) need.set(r.type.id, (need.get(r.type.id) || 0) + r.qty);
+      for (const f of fresh) {
+        const n = need.get(f.id) || 0;
+        if (n > (Number(f.current_balance) || 0)) {
+          return res.status(400).json({ error: `Only ${(Number(f.current_balance) || 0).toLocaleString()} × ${cartonTypeLabel(types.get(f.id))} on hand - these rows need ${n.toLocaleString()}. Nothing was saved.` });
+        }
+      }
+      const challanNo = cartonText(b.challan_no, 60);
+      const notes = cartonText(b.notes, 300);
+      const ids = [];
+      for (const r of rows) {
+        const x = await applyCartonChange(sql, {
+          typeId: r.type.id, change: -r.qty, kind: 'out', reason: r.reason, jobId: r.jobId, manualJob: r.manualJob, otherReason: r.otherReason,
+          issuedTo: r.issuedTo, challanNo, notes, user: req.user, occurredAt: entry.at,
+        });
+        if (x.error) return res.status(x.status || 400).json({ error: x.error + (ids.length ? ` (${ids.length} earlier row(s) were saved - check the log)` : '') });
+        ids.push(x.id);
+      }
+      const total = rows.reduce((a, r) => a + r.qty, 0);
+      await logAudit(sql, req, {
+        action: 'carton.issue', entityType: 'carton_type', entityId: null,
+        summary: `-${total.toLocaleString()} cartons issued (bulk)${challanNo ? ' · challan ' + challanNo : ''}: ${rows.map(r => `${r.qty.toLocaleString()} ${cartonTypeLabel(r.type)} to ${r.issuedTo} for ${r.jobLabel}`).join('; ')}${entry.date ? ' (entry date ' + entry.date + ')' : ''}`,
+        metadata: { tx_ids: ids, job_ids: [...new Set(rows.map(r => r.jobId).filter(Boolean))] },
+      });
+      res.json({ ok: true, ids, total });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Undo a wrong entry with an opposite "correction" row (both stay in the
+// log). 'yes' = any entry, any age; '30-day' = entries from the last 30 days.
+app.post('/api/cartons/transactions/:id/reverse', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const tier = cartonReverseTier(req.user);
+    if (tier === 'no') return res.status(403).json({ error: 'Not allowed' });
+    const txId = parseInt(req.params.id, 10);
+    const tx = (await sql`SELECT * FROM carton_transactions WHERE id = ${txId}`)[0];
+    if (!tx) return res.status(404).json({ error: 'Entry not found.' });
+    if (tx.kind === 'correction' || tx.reverses_tx_id) return res.status(400).json({ error: 'A reversal cannot itself be reversed.' });
+    if ((await sql`SELECT deleted_at FROM carton_types WHERE id = ${tx.type_id}`)[0]?.deleted_at) return res.status(400).json({ error: 'This carton type was deleted - its entries can be deleted, not reversed.' });
+    if (tx.source === 'station') return res.status(400).json({ error: 'This was taken by the Station - change the Carton Shipper count or type at the Station (or the green ▶ on the job card) and the stock follows.' });
+    if (tier === '30-day' && Date.now() - new Date(tx.recorded_at || tx.created_at).getTime() > 30 * 86400000) {
+      return res.status(403).json({ error: 'Only entries from the last 30 days can be reversed with your access.' });
+    }
+    const held = await takeOpLocks(sql, [`carton-tx:${tx.id}`, `carton-type:${tx.type_id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const already = await sql`SELECT id FROM carton_transactions WHERE reverses_tx_id = ${tx.id}`;
+      if (already.length) return res.status(409).json({ error: 'This entry was already reversed.' });
+      const type = (await sql`SELECT * FROM carton_types WHERE id = ${tx.type_id}`)[0];
+      const r = await applyCartonChange(sql, {
+        typeId: tx.type_id, change: -tx.change, kind: 'correction', reversesTxId: tx.id, user: req.user,
+        notes: `Reversal of entry #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change})`,
+      });
+      if (r.error) {
+        const msg = tx.change > 0 ? r.error.replace(/\.$/, '') + ' - some of these cartons were already issued.' : r.error;
+        return res.status(r.status || 400).json({ error: msg });
+      }
+      await logAudit(sql, req, {
+        action: 'carton.reverse', entityType: 'carton_type', entityId: tx.type_id,
+        summary: `Carton entry #${tx.id} reversed (${tx.change > 0 ? '+' : ''}${tx.change.toLocaleString()} ${type ? cartonTypeLabel(type) : ''})`,
+        metadata: { tx_id: tx.id, reversal_tx_id: r.id },
+      });
+      res.json({ ok: true, id: r.id, balance: r.balance });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Reverse a previously-issued stock issuance: refunds the consumed sheets
 // back to inventory, undoes the offcut return if there was one, and flips
 // the job back to issuance_status='pending'. Guarded to stage 0 because
@@ -6983,10 +7609,11 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
     // design and is not this job's issuance any more (owner, E-989 class,
     // 2026-10-13).
     const curSecRI = job.particulars && job.particulars.secondary_paper && job.particulars.secondary_paper.inventory_item_id;
+    const curThirdRI = job.particulars && job.particulars.third_paper && job.particulars.third_paper.inventory_item_id;
     const consumedAll = await sql`
       SELECT t.id, t.item_id, t.change, t.created_at,
              EXISTS (SELECT 1 FROM inventory_items c
-                      WHERE c.id IN (${job.inventory_item_id || 0}, ${curSecRI || 0})
+                      WHERE c.id IN (${job.inventory_item_id || 0}, ${curSecRI || 0}, ${curThirdRI || 0})
                         AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '')
                         AND COALESCE(c.size, '') = COALESCE(i.size, '')
                         AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '')
@@ -9044,6 +9671,7 @@ app.post('/api/stock-groups', requirePermission('job_btn_create_mil'), async (re
           no_of_colors: seedParts.no_of_colors || {},
           special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
           secondary_paper: seedParts.secondary_paper || null,
+          third_paper: seedParts.third_paper || null,
         },
       };
       const created = await sql`
@@ -9106,9 +9734,11 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     // per-sub-job runtime counter, must not live on the group's
     // template (otherwise duplicating from group would leak stale
     // "already issued" numbers into fresh sub jobs).
-    if (template && template.particulars && template.particulars.secondary_paper) {
-      const { issued_sheets, ...restSec } = template.particulars.secondary_paper;
-      template = { ...template, particulars: { ...template.particulars, secondary_paper: restSec } };
+    for (const e of EXTRA_PAPERS) {
+      if (template && template.particulars && template.particulars[e.key]) {
+        const { issued_sheets, ...restSec } = template.particulars[e.key];
+        template = { ...template, particulars: { ...template.particulars, [e.key]: restSec } };
+      }
     }
     const updated = await sql`
       UPDATE stock_groups
@@ -9928,7 +10558,16 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
       entityType: 'job', entityId: id,
       summary: `Job E-${id}: removed particulars entry #${idx + 1} by ${actorLabel}${removedSummary.length ? ' (' + removedSummary.join(', ') + ')' : ''}`,
     });
-    res.json(updated[0]);
+    // A deleted Carton Shipper / Loose entry gives its cartons back to stock
+    // (2026-10-16 review: they stayed issued). Never fails the delete.
+    let cartonWarning = null, cartonError = null;
+    if (keys.some(k => STATION_CARTON_KEYS.includes(k))) {
+      try {
+        const below = await syncStationCartons(sql, id, particulars, { ...req.user, station_actor: actorLabel }, actorLabel);
+        if (below.length) cartonWarning = below;
+      } catch (e) { console.error('delete-entry carton sync', e); cartonError = e.message || 'Carton stock was not updated.'; }
+    }
+    res.json({ ...updated[0], ...(cartonWarning ? { carton_warning: cartonWarning } : {}), ...(cartonError ? { carton_error: cartonError } : {}) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -10281,7 +10920,8 @@ app.delete('/api/inventory/:id', requirePermission('inv_btn_delete'), async (req
     // jobs don't block — they're conceptually gone.
     const blockers = await sql`
       SELECT id, jobcode, name FROM jobs
-      WHERE (inventory_item_id = ${itemId} OR particulars->'secondary_paper'->>'inventory_item_id' = ${String(itemId)})
+      WHERE (inventory_item_id = ${itemId} OR particulars->'secondary_paper'->>'inventory_item_id' = ${String(itemId)}
+             OR particulars->'third_paper'->>'inventory_item_id' = ${String(itemId)})
         AND issuance_status = 'pending'
         AND deleted_at IS NULL
       ORDER BY id
@@ -10394,17 +11034,20 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     // path had its own copy of the rules, which counted old-paper issues
     // and kept no issued list). The 2nd paper is issued as the 2nd paper.
     if (isJobIssuance) {
-      const sec = jobRow.particulars && jobRow.particulars.secondary_paper;
-      const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id IN (${itemId}, ${jobRow.inventory_item_id || 0}, ${(sec && sec.inventory_item_id) || 0})`;
+      const jp = jobRow.particulars || {};
+      const extrasSet = EXTRA_PAPERS.filter(e => jp[e.key] && jp[e.key].inventory_item_id);
+      const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id = ANY(${[itemId, jobRow.inventory_item_id || 0, ...extrasSet.map(e => jp[e.key].inventory_item_id)]})`;
       const byId = new Map(grp.map(x => [x.id, x]));
       const key = it => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
       const mine = key(byId.get(itemId));
-      const source = (sec && sec.inventory_item_id && mine === key(byId.get(sec.inventory_item_id)) && mine !== key(byId.get(jobRow.inventory_item_id))) ? 'secondary' : 'primary';
+      const extraHit = mine !== key(byId.get(jobRow.inventory_item_id))
+        ? extrasSet.find(e => mine === key(byId.get(jp[e.key].inventory_item_id))) : null;
+      const source = extraHit ? extraHit.source : 'primary';
       const r = await performIssueStock(sql, req, jobRow.id, { splits: [{ item_id: itemId, sheets: Math.abs(delta) }], challan_no: challan_no == null ? null : String(challan_no), entry_date, source });
       if (r.error) return res.status(r.status || 400).json({ error: r.error });
       const after = r.job || {};
-      const owed = source === 'secondary'
-        ? Math.max(0, Math.round((+((after.particulars || {}).secondary_paper || {}).packets || 0) * packetSize(sourceItem.paper_type || '')) - (parseInt(((after.particulars || {}).secondary_paper || {}).issued_sheets, 10) || 0))
+      const owed = extraHit
+        ? Math.max(0, Math.round((+((after.particulars || {})[extraHit.key] || {}).packets || 0) * packetSize(sourceItem.paper_type || '')) - (parseInt(((after.particulars || {})[extraHit.key] || {}).issued_sheets, 10) || 0))
         : (parseInt((after.particulars || {}).partial_pending_sheets, 10) || 0);
       const [itNow] = await sql`SELECT * FROM inventory_items WHERE id = ${itemId}`;
       return res.json({
@@ -10785,6 +11428,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
       // E-989, 2026-10-13: an old 25x30 issue kept the job "Requires More
       // Stock" after its 16x23 offcut issue was reversed).
       const curSec = job && job.particulars && job.particulars.secondary_paper && job.particulars.secondary_paper.inventory_item_id;
+      const curThird = job && job.particulars && job.particulars.third_paper && job.particulars.third_paper.inventory_item_id;
       const standingRows = await sql`
         SELECT COALESCE(SUM(-t.change), 0) AS sheets FROM inventory_transactions t
           JOIN inventory_items i ON i.id = t.item_id
@@ -10792,7 +11436,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
           AND t.reverses_tx_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
           AND EXISTS (SELECT 1 FROM inventory_items c
-                       WHERE c.id IN (${(job && job.inventory_item_id) || 0}, ${curSec || 0})
+                       WHERE c.id IN (${(job && job.inventory_item_id) || 0}, ${curSec || 0}, ${curThird || 0})
                          AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '')
                          AND COALESCE(c.size, '') = COALESCE(i.size, '')
                          AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '')
@@ -10806,19 +11450,26 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
         const items = Array.isArray(job.issued_items) ? [...job.issued_items] : [];
         let k = items.findIndex(x => x && x.tx_id === tx.id);
         if (k < 0) k = items.findIndex(x => x && x.item_id === tx.item_id && Math.round(+x.sheets || 0) === sheetsBack);
-        let isSecondary = k >= 0 && items[k].source === 'secondary';
-        const sec = p.secondary_paper && typeof p.secondary_paper === 'object' ? p.secondary_paper : null;
-        if (k < 0 && sec && sec.inventory_item_id) {
-          const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id IN (${tx.item_id}, ${job.inventory_item_id || 0}, ${sec.inventory_item_id})`;
-          const byId = new Map(grp.map(x => [x.id, x]));
-          const key = (it) => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
-          const mine = key(byId.get(tx.item_id));
-          isSecondary = mine !== null && mine === key(byId.get(sec.inventory_item_id)) && mine !== key(byId.get(job.inventory_item_id));
+        // (2nd or 3rd paper: extraRev says which.)
+        let extraRev = k >= 0 ? extraPaperBySource(items[k].source) : null;
+        if (k < 0) {
+          const extrasSet = EXTRA_PAPERS.filter(e => p[e.key] && typeof p[e.key] === 'object' && p[e.key].inventory_item_id);
+          if (extrasSet.length) {
+            const grp = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id = ANY(${[tx.item_id, job.inventory_item_id || 0, ...extrasSet.map(e => p[e.key].inventory_item_id)]})`;
+            const byId = new Map(grp.map(x => [x.id, x]));
+            const key = (it) => it ? [it.paper_type || '', it.size || '', String(it.gsm || ''), !!it.is_offcut].join('|') : null;
+            const mine = key(byId.get(tx.item_id));
+            if (mine !== null && mine !== key(byId.get(job.inventory_item_id))) {
+              extraRev = extrasSet.find(e => mine === key(byId.get(p[e.key].inventory_item_id))) || null;
+            }
+          }
         }
+        const sec = extraRev && p[extraRev.key] && typeof p[extraRev.key] === 'object' ? p[extraRev.key] : null;
+        const isSecondary = !!(extraRev && sec);
         if (k >= 0) items.splice(k, 1);
         if (isSecondary) {
-          // The 2nd paper owes these sheets again; the main paper is untouched.
-          p.secondary_paper = { ...sec, issued_sheets: Math.max(0, (parseInt(sec.issued_sheets, 10) || 0) - sheetsBack) };
+          // That extra paper owes these sheets again; the main paper is untouched.
+          p[extraRev.key] = { ...sec, issued_sheets: Math.max(0, (parseInt(sec.issued_sheets, 10) || 0) - sheetsBack) };
         } else {
           // The main paper owes these sheets again ("Requires More Stock").
           const prev = parseInt(p.partial_pending_sheets, 10);
@@ -10830,7 +11481,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
                  particulars  = ${JSON.stringify(p)}
            WHERE id = ${tx.job_id}
         `;
-        jobPartial = { sheets: sheetsBack, secondary: isSecondary };
+        jobPartial = { sheets: sheetsBack, secondary: isSecondary, paper: isSecondary ? extraRev.label : 'main' };
       } else if (job && job.issuance_status === 'issued') {
         // Same cleanup as /reverse-issuance: drop anything created by
         // the specific issuance we're undoing so the job doesn't keep
@@ -10914,7 +11565,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
       action: 'inventory.reverse',
       entityType: 'inventory',
       entityId: tx.item_id,
-      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${jobPartial ? ` · Job E-${tx.job_id} stays issued - ${jobPartial.sheets.toLocaleString()} sheets of its ${jobPartial.secondary ? '2nd' : 'main'} paper owed again` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
+      summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${jobPartial ? ` · Job E-${tx.job_id} stays issued - ${jobPartial.sheets.toLocaleString()} sheets of its ${jobPartial.paper || (jobPartial.secondary ? '2nd' : 'main')} paper owed again` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
     });
 
     res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, job_partial: jobPartial, offcut_refunded_sheets: offcutRefundedSheets });
@@ -11790,6 +12441,8 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
               date:     old.date     || null,
               operator: old.operator || operator.name,
               machine:  old.machine  || operator.machine || null,
+              // Carton type per line (Carton Shipper rows) rides along.
+              ...(Array.isArray(old.carton_types) ? { carton_types: old.carton_types } : {}),
             };
           }
           return { qty, date: todayISO, operator: operator.name, machine: operator.machine || null };
@@ -11832,6 +12485,22 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         };
       }
     }
+
+    // Carton type per Carton Shipper line (owner, 2026-10-14): one id list
+    // per pass, one id per "qty x cartons" line. A pass the client didn't
+    // send keeps what it had.
+    const cartonTypesPatch = req.body.carton_types_patch && typeof req.body.carton_types_patch === 'object' ? req.body.carton_types_patch : {};
+    for (const key of STATION_CARTON_KEYS) {
+      if (!(key in particularsPatch) || !Array.isArray(cartonTypesPatch[key])) continue;
+      const p = particulars[key];
+      if (!p || !Array.isArray(p.entries)) continue;
+      p.entries = p.entries.map((e, i) => {
+        const want = cartonTypesPatch[key][i];
+        if (!Array.isArray(want)) return e;
+        return { ...e, carton_types: want.slice(0, 50).map(x => parseInt(x, 10) > 0 ? parseInt(x, 10) : null) };
+      });
+    }
+    const touchesCartons = STATION_CARTON_KEYS.some(k => k in particularsPatch);
 
     // Byline used by every log entry below. The stage in parentheses must
     // reflect the stage the WORK is being done at (curStage), NOT the
@@ -12029,7 +12698,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // Early-issued jobs (stock issued while still at CTP) skip Pending
     // Stock entirely — plates done + paper in hand = straight to Printing.
     const ctpStockDone = ctpForward && Array.isArray(job.issued_items)
-      && job.issued_items.some(x => x && x.source !== 'secondary');
+      && job.issued_items.some(x => x && !EXTRA_SOURCES.has(x.source));
     const nextStatus = ctpForward ? (ctpStockDone ? 'issued' : 'pending') : job.issuance_status;
     const updated = await sql`
       UPDATE jobs
@@ -12052,7 +12721,20 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         : `Job E-${id} numbers recorded by ${operator.name} at ${STAGES[curStage]}`,
       metadata: { operator_id: operator.id, operator_name: operator.name, stage_index: curStage, advance, target_stage: stage_index, skipped: skippedCount },
     });
-    res.json(updated[0]);
+    // Carton stock follows the job's Carton Shipper rows. The numbers are
+    // already saved, so a problem here is reported, never a failed save.
+    let cartonWarning = null, cartonError = null;
+    if (touchesCartons) {
+      try {
+        const stationUser = { ...req.user, station_actor: person.name || operator.name };
+        const below = await syncStationCartons(sql, id, particulars, stationUser, person.name || operator.name);
+        if (below.length) cartonWarning = below;
+      } catch (e) {
+        console.error('station carton sync', e);
+        cartonError = e.message || 'Carton stock was not updated.';
+      }
+    }
+    res.json({ ...updated[0], ...(cartonWarning ? { carton_warning: cartonWarning } : {}), ...(cartonError ? { carton_error: cartonError } : {}) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
