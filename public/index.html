@@ -3931,10 +3931,18 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     </select>
     <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
   </div>
-  <div id="client-view-summary" style="margin:0 0 16px;"></div>
-  <div id="client-view-list">
-    <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
+  <!-- Project Animation (owner, 2026-10-21): Jobs | Animation sub-tabs. -->
+  <div class="tabs" id="client-view-subtabs" style="margin:0 0 12px;">
+    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-view','jobs')">Jobs</button>
+    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-view','animation')">&#127981; Animation</button>
   </div>
+  <div id="client-view-jobs-pane">
+    <div id="client-view-summary" style="margin:0 0 16px;"></div>
+    <div id="client-view-list">
+      <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
+    </div>
+  </div>
+  <div id="client-view-anim" style="display:none;"></div>
 </div>
 
 <!-- Client portal — external stakeholders. Only shown to users whose
@@ -3943,10 +3951,17 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      /api/client/jobs — this shell is UX only. -->
 <div class="main" id="client-mode" style="display:none;">
   <div id="client-portal-hero" class="hero-card"></div>
-  <div id="client-portal-summary" style="margin-top:16px;"></div>
-  <div id="client-portal-list" style="margin-top:16px;">
-    <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
+  <div class="tabs" id="client-portal-subtabs" style="margin:16px 0 0;">
+    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-portal','jobs')">Jobs</button>
+    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-portal','animation')">&#127981; Animation</button>
   </div>
+  <div id="client-portal-jobs-pane">
+    <div id="client-portal-summary" style="margin-top:16px;"></div>
+    <div id="client-portal-list" style="margin-top:16px;">
+      <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
+    </div>
+  </div>
+  <div id="client-portal-anim" style="display:none;margin-top:16px;"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -6721,6 +6736,9 @@ function setMode(m) {
   document.getElementById('station-mode').style.display   = m === 'station' ? 'block' : 'none';
   const clientViewEl = document.getElementById('client-view-mode');
   if (clientViewEl) clientViewEl.style.display = m === 'client-view' ? 'block' : 'none';
+  // Project Animation: stop drawing the 3D view while its tab is off screen.
+  if (m !== 'client-view' && typeof clientAnim !== 'undefined' && clientAnim['client-view']) clientAnim['client-view'].setActive(false);
+  if (typeof syncClientAnimTimer === 'function') syncClientAnimTimer();
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('app-date-refresh');
@@ -38106,6 +38124,7 @@ async function loadClientJobs(showToast) {
     ]);
     clientJobs = clientRes;
     renderClientJobs();
+    refreshClientAnim('client-portal');
     if (showToast) notify('Refreshed');
   } catch (e) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load your jobs: ${esc(e.message || String(e))}</div>`;
@@ -38707,6 +38726,7 @@ async function loadClientViewJobs(showToast) {
   renderClientViewHero(); // greeting reflects the picked company
   if (!company) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>`;
+    refreshClientAnim('client-view');
     return;
   }
   listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
@@ -38721,9 +38741,99 @@ async function loadClientViewJobs(showToast) {
     ]);
     clientViewJobs = clientRes;
     renderClientViewList();
+    refreshClientAnim('client-view');
     if (showToast) notify('Refreshed');
   } catch (e) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load client view: ${esc(e.message || String(e))}</div>`;
+  }
+}
+
+// ── Project Animation (owner, 2026-10-21) ─────────────────────────
+// The Clients tab's "Animation" sub-tab (Client View preview and the real
+// client portal): a 3D view of the shop - Production building, Ready Stock
+// building, 3 trucks - drawn by public/animation.js from the same
+// client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
+const CLIENT_ANIM_SRC = '/animation.js?v=1';
+const CLIENT_ANIM_SHELLS = {
+  'client-view': {
+    bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
+    // The admin preview lists hidden jobs too (to tick them); the client
+    // only ever sees the ones shown to them, so the animation does too.
+    rows: () => clientViewCompany ? clientViewJobs.filter(j => j.stock_group_name ? j.stock_group_visible : j.client_visible) : null,
+    company: () => clientViewCompany,
+    reload: () => loadClientViewJobs(),
+  },
+  'client-portal': {
+    bar: 'client-portal-subtabs', jobs: 'client-portal-jobs-pane', anim: 'client-portal-anim',
+    rows: () => clientJobs,
+    company: () => (currentUser && currentUser.client_company) || '',
+    reload: () => loadClientJobs(),
+  },
+};
+const clientSubTab = { 'client-view': 'jobs', 'client-portal': 'jobs' };
+const clientAnim = {};
+let clientAnimScript = null;
+let clientAnimTimer = null;
+function loadClientAnimScript() {
+  if (window.SAAnimation) return Promise.resolve();
+  return clientAnimScript || (clientAnimScript = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = CLIENT_ANIM_SRC;
+    s.onload = resolve;
+    s.onerror = () => { clientAnimScript = null; s.remove(); reject(new Error('Could not load the animation.')); };
+    document.head.appendChild(s);
+  }));
+}
+function setClientSubTab(shell, tab) {
+  const cfg = CLIENT_ANIM_SHELLS[shell];
+  if (!cfg) return;
+  clientSubTab[shell] = tab;
+  document.querySelectorAll(`#${cfg.bar} .tab`).forEach(b => b.classList.toggle('active', b.dataset.sub === tab));
+  const jobsEl = document.getElementById(cfg.jobs), animEl = document.getElementById(cfg.anim);
+  if (jobsEl) jobsEl.style.display = tab === 'animation' ? 'none' : '';
+  if (animEl) animEl.style.display = tab === 'animation' ? '' : 'none';
+  if (tab === 'animation') refreshClientAnim(shell);
+  else if (clientAnim[shell]) clientAnim[shell].setActive(false);
+  syncClientAnimTimer();
+}
+async function refreshClientAnim(shell) {
+  const cfg = CLIENT_ANIM_SHELLS[shell];
+  if (!cfg || clientSubTab[shell] !== 'animation') return;
+  const host = document.getElementById(cfg.anim);
+  if (!host) return;
+  const rows = cfg.rows();
+  if (!rows) {
+    if (clientAnim[shell]) { clientAnim[shell].destroy(); delete clientAnim[shell]; }
+    host.className = '';
+    host.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to see their animation.</div>`;
+    return;
+  }
+  try { await loadClientAnimScript(); } catch (e) {
+    host.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">${esc(e.message)} Check the internet connection, then press Refresh.</div>`;
+    return;
+  }
+  if (clientSubTab[shell] !== 'animation') return;
+  const company = cfg.company();
+  let ctl = clientAnim[shell];
+  if (ctl && ctl.company !== company) { ctl.destroy(); ctl = null; delete clientAnim[shell]; }
+  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company });
+  else ctl.update(rows);
+  ctl.setActive(true);
+}
+// While an Animation sub-tab is on screen, re-read the jobs every minute so
+// pallets move and trucks leave without anyone pressing Refresh.
+function syncClientAnimTimer() {
+  const on = (clientSubTab['client-view'] === 'animation' && mode === 'client-view') ||
+             (clientSubTab['client-portal'] === 'animation' && isClient());
+  if (on && !clientAnimTimer) {
+    clientAnimTimer = setInterval(() => {
+      if (document.hidden) return;
+      if (isClient()) { if (clientSubTab['client-portal'] === 'animation') CLIENT_ANIM_SHELLS['client-portal'].reload(); }
+      else if (mode === 'client-view' && clientSubTab['client-view'] === 'animation' && clientViewCompany) CLIENT_ANIM_SHELLS['client-view'].reload();
+    }, 60000);
+  } else if (!on && clientAnimTimer) {
+    clearInterval(clientAnimTimer);
+    clientAnimTimer = null;
   }
 }
 
