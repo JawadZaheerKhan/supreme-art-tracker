@@ -173,7 +173,8 @@
         // Entrance Lobby's staircase goes DOWN to the basement, |_____ shaped,
         // through an opening in the floor.
         stairs: [[140, 8, 195, 48, 1, RAISE, 'z']],
-        holes: [[...TOWER_LOBBY, 'TRB']],
+        // Railed all round except where the stairs start (back-left corner).
+        holes: [[...TOWER_LOBBY, 'LRB', [[57, 392, 172, 392]]]],
         labels: [['PRODUCTION OFFICE', 95, 175, 0.75], ['LOBBY', 300, 110, 1.0], ['PLATE MAKING', 485, 65, 0.85], ['SCANNING ROOM', 495, 185, 0.75],
           ['STORE ROOM', 100, 315, 0.85], ['ENTRANCE LOBBY', 297, 340, 0.85], ['ACCOUNT OFFICE', 475, 310, 0.7], ['DIRECTOR', 470, 445, 0.75], ['BATH', 572, 478, 0.6]] },
     ] },
@@ -186,15 +187,17 @@
   ];
   // The stair towers: plan rect, the floor heights they join, the axis the
   // flights run along, and which lane the first (lowest) flight climbs.
+  // Two flights per tower with one landing between them (owner, 2026-10-22).
   // Both core flights start from the back (owner's drawing): the basement
   // one (blue) arrives at the ground floor's back-left; the 1st-floor one
   // (yellow) leaves from the back-right - right side forward, across the
   // front, back up the left. The lobby one arrives at the lobby's left end.
   const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
   const TOWERS = [
-    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, axis: 'z', flights: 4, startLane: 'right' },
-    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 4, startLane: 'right' },
-    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, axis: 'x', flights: 4, startLane: 'right' },
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right' },
+    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right' },
+    // The lobby's: |_____ - a short flight, a corner landing, one long flight.
+    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L' },
   ];
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
   // 7 printing presses (red) and 7 die-cutting + embellishment machines
@@ -275,6 +278,8 @@
   .saa-host { position: relative; width: 100%; height: max(420px, calc(100vh - 160px)); height: max(420px, calc(100dvh - 160px)); border-radius: 14px; overflow: hidden; background: linear-gradient(#f5f8fc, #e6edf5); border: 1px solid var(--border, #e2e8f0); user-select: none; -webkit-user-select: none; }
   .saa-host canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
   .saa-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--text2, #64748b); font-size: 14px; }
+  /* "No orders" note: a small pill under the cards, not over the 3D view. */
+  .saa-empty { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,.92); border: 1px solid #e2e8f0; border-radius: 999px; padding: 6px 14px; font-size: 12px; color: #64748b; white-space: nowrap; }
   .saa-top { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; pointer-events: none; }
   .saa-stats { display: flex; gap: 8px; flex-wrap: wrap; }
   .saa-card { background: rgba(255,255,255,.92); border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px 10px; min-width: 86px; box-shadow: 0 2px 8px rgba(15,23,42,.06); }
@@ -309,6 +314,7 @@
   @media (max-width: 640px) {
     .saa-host { height: max(400px, calc(100vh - 150px)); height: max(400px, calc(100dvh - 150px)); border-radius: 10px; }
     .saa-top { top: 8px; left: 8px; right: 8px; flex-direction: column; gap: 6px; }
+    .saa-empty { top: 112px; }
     .saa-stats { gap: 5px; flex-wrap: nowrap; width: 100%; }
     .saa-card { flex: 1 1 0; min-width: 0; padding: 4px 6px; border-radius: 8px; }
     .saa-card b { font-size: 14px; } .saa-card span { font-size: 9.5px; white-space: normal; display: block; line-height: 1.15; }
@@ -450,10 +456,14 @@
     const holePath = () => new THREE.Path(pitPts.map(([x, z]) => new THREE.Vector2(x, -z)));
     const flatShape = (x0, z0, x1, z1) => { const sh = new THREE.Shape([new THREE.Vector2(x0, -z0), new THREE.Vector2(x1, -z0), new THREE.Vector2(x1, -z1), new THREE.Vector2(x0, -z1)]); sh.holes.push(holePath()); return sh; };
     const groundGeo = new THREE.ShapeGeometry(flatShape(-450, -450, 450, 450)); geos.add(groundGeo);
-    const ground = new THREE.Mesh(groundGeo, mat(0xe9eef4));
+    // Own materials: in the Basement view the street goes see-through so the
+    // whole basement shows, right up to its front wall.
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0xe9eef4, roughness: 0.82, transparent: true });
+    const yardMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.82, transparent: true });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
     const yardGeo = new THREE.ExtrudeGeometry(flatShape(-60, -38, 52, 34), { depth: 0.12, bevelEnabled: false }); geos.add(yardGeo);
-    const yard = new THREE.Mesh(yardGeo, mat(0xf8fafc)); yard.rotation.x = -Math.PI / 2; yard.receiveShadow = true; scene.add(yard);
+    const yard = new THREE.Mesh(yardGeo, yardMat); yard.rotation.x = -Math.PI / 2; yard.receiveShadow = true; scene.add(yard);
     const earthMat = new THREE.MeshStandardMaterial({ color: 0x8d6e4c, roughness: 1, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide });
     pitPts.forEach(([x1, z1], k) => {
       const [x2, z2] = pitPts[(k + 1) % pitPts.length], len = Math.hypot(x2 - x1, z2 - z1);
@@ -569,13 +579,14 @@
         // Slab in the part's own shape; a raised part is a solid step up.
         const shape = new THREE.Shape(P.outline.map(([px, py]) => new THREE.Vector2(X(px), -Z(py))));
         // Stair openings, with railings on the given sides (Top/back, Bottom/front, Left, Right).
-        for (const [a, b, c, d, rails] of P.holes || []) {
+        for (const [a, b, c, d, rails, extra] of P.holes || []) {
           shape.holes.push(new THREE.Path([new THREE.Vector2(X(a), -Z(b)), new THREE.Vector2(X(c), -Z(b)), new THREE.Vector2(X(c), -Z(d)), new THREE.Vector2(X(a), -Z(d))]));
           const sides = { T: [X(a), Z(b), X(c), Z(b)], B: [X(a), Z(d), X(c), Z(d)], L: [X(a), Z(b), X(a), Z(d)], R: [X(c), Z(b), X(c), Z(d)] };
           for (const k of rails || '') {
             const [p, q, u, v] = sides[k];
             railing(p, q, u, v, SLAB, pg);
           }
+          for (const [e, f, g2, h] of extra || []) railing(X(e), Z(f), X(g2), Z(h), SLAB, pg);
         }
         const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB + raise, bevelEnabled: false }); geos.add(sg);
         const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.position.y = -raise; slab.receiveShadow = true; pg.add(slab);
@@ -661,40 +672,59 @@
     // treads with a nosing, stringers and handrails on both sides. A tower
     // shows in the overview and in the views of the two floors it joins.
     const towerGroups = [];
+    // One straight flight from l0 to l1 along x (axisX) or z, centred on
+    // `wc` across, `wdt` wide, climbing `rise` from `base`: treads with a
+    // nosing, stringers and handrails on both sides, posts at both ends.
+    const flight = (tg, axisX, l0, l1, wc, wdt, base, rise) => {
+      const run = Math.abs(l1 - l0), dir = Math.sign(l1 - l0) || 1, m = Math.max(5, Math.round(rise / 0.27)), tread = run / m, sr = rise / m;
+      const put = (dl, dw, h, l, w, y, color, tilt) => {
+        const b = axisX ? box(dl, h, dw, color, l, y, w, tg) : box(dw, h, dl, color, w, y, l, tg);
+        if (tilt) { if (axisX) b.rotation.z = tilt; else b.rotation.x = -tilt; }
+        return b;
+      };
+      for (let s = 0; s < m; s++) {
+        const top = base + (s + 1) * sr, l = l0 + dir * (s + 0.5) * tread;
+        put(tread + 0.03, wdt, 0.14, l, wc, top - 0.07, 0xe5e7eb);                                  // tread
+        put(0.05, wdt, 0.05, l + dir * tread / 2, wc, top - 0.025, 0x9ca3af);                       // nosing
+      }
+      const ang = Math.atan2(rise, run) * dir, slope = Math.hypot(run, rise), midL = (l0 + l1) / 2;
+      for (const w of [wc - wdt / 2 + 0.04, wc + wdt / 2 - 0.04]) {
+        put(slope, 0.08, 0.32, midL, w, base + rise / 2 - 0.2, BRAND_DARK, ang);                   // stringer
+        put(slope, 0.06, 0.06, midL, w, base + rise / 2 + 0.92, 0x111827, ang);                    // handrail
+        put(0.06, 0.06, 0.95, l0, w, base + 0.47, 0x374151);                                       // posts
+        put(0.06, 0.06, 0.95, l1, w, base + rise + 0.47, 0x374151);
+      }
+    };
+    const landing = (tg, x0, x1, z0, z1, y) => box(x1 - x0, 0.2, z1 - z0, 0xd1d5db, (x0 + x1) / 2, y - 0.1, (z0 + z1) / 2, tg);
     for (const T of TOWERS) {
       const tg = new THREE.Group(); scene.add(tg); towerGroups.push({ g: tg, floors: T.name === 'ground-first' ? [1, 2] : [0, 1] });
       const pl = T.plan, x0 = wx(pl, T.r[0]), x1 = wx(pl, T.r[2]), z0 = wz(pl, T.r[1]), z1 = wz(pl, T.r[3]);
+      if (T.shape === 'L') {
+        // |_____ : from the top at the back-left, a short flight forward down
+        // the left side, a corner landing, then one long flight along the
+        // front down to the floor below (owner's drawing). Built bottom-up.
+        const fw = Math.min(1.6, (z1 - z0) * 0.45), runLong = x1 - x0 - fw, runShort = z1 - fw - z0;
+        const total = T.to - T.from, hLong = total * runLong / (runLong + runShort), hShort = total - hLong;
+        flight(tg, true, x1, x0 + fw, z1 - fw / 2, fw, T.from, hLong);
+        landing(tg, x0, x0 + fw, z1 - fw, z1, T.from + hLong);
+        flight(tg, false, z1 - fw, z0, x0 + fw / 2, fw, T.from + hLong, hShort);
+        continue;
+      }
+      // Dog-leg / switchback: flights alternate lanes with a landing at each turn.
       const alongX = T.axis === 'x';
       const L0 = alongX ? x0 : z0, L1 = alongX ? x1 : z1, W0 = alongX ? z0 : x0, W1 = alongX ? z1 : x1;
-      const len = L1 - L0, wid = W1 - W0, lane = (wid - 0.12) / 2, land = Math.min(1.3, len * 0.22), run = len - 2 * land;
-      const rise = (T.to - T.from) / T.flights, m = Math.max(5, Math.round(rise / 0.27)), tread = run / m, sr = rise / m;
-      // (length along the flight, width across, height, along, across, y) -> a box in the tower
-      const put = (dl, dw, h, l, w, y, color, tilt) => {
-        const b = alongX ? box(dl, h, dw, color, l, y, w, tg) : box(dw, h, dl, color, w, y, l, tg);
-        if (tilt) { if (alongX) b.rotation.z = tilt; else b.rotation.x = -tilt; }
-        return b;
-      };
+      const len = L1 - L0, wid = W1 - W0, lane = (wid - 0.12) / 2, land = Math.min(1.3, len * 0.22);
+      const rise = (T.to - T.from) / T.flights;
+      const rect = (la, lb, wa, wb, y) => alongX ? landing(tg, Math.min(la, lb), Math.max(la, lb), wa, wb, y) : landing(tg, wa, wb, Math.min(la, lb), Math.max(la, lb), y);
       for (let k = 0; k < T.flights; k++) {
         const fwd = k % 2 === 0;                                   // even flights run from L0 to L1
         const low = (k % 2 === 0) === (T.startLane === 'left');    // on the low-side (left / back) lane?
-        const laneW = low ? W0 + lane / 2 : W1 - lane / 2;
-        const sideW = [low ? W0 + 0.04 : W1 - 0.04, low ? W0 + lane : W1 - lane];
-        const base = T.from + k * rise;
-        for (let s = 0; s < m; s++) {
-          const top = base + (s + 1) * sr, l = fwd ? L0 + land + (s + 0.5) * tread : L1 - land - (s + 0.5) * tread;
-          put(tread + 0.03, lane, 0.14, l, laneW, top - 0.07, 0xe5e7eb);                                  // tread
-          put(0.05, lane, 0.05, l + (fwd ? tread / 2 : -tread / 2), laneW, top - 0.025, 0x9ca3af);         // nosing
-        }
-        const ang = Math.atan2(rise, run) * (fwd ? 1 : -1), slope = Math.hypot(run, rise), midL = (L0 + L1) / 2;
-        for (const w of sideW) {
-          put(slope, 0.08, 0.32, midL, w, base + rise / 2 - 0.2, BRAND_DARK, ang);                         // stringer
-          put(slope, 0.06, 0.06, midL, w, base + rise / 2 + 0.92, 0x111827, ang);                          // handrail
-          put(0.06, 0.06, 0.95, fwd ? L0 + land : L1 - land, w, base + 0.47, 0x374151);                    // posts at both ends
-          put(0.06, 0.06, 0.95, fwd ? L1 - land : L0 + land, w, base + rise + 0.47, 0x374151);
-        }
-        // Landing at the flight's top end (full width between flights; the last one is the floor's own edge).
-        const endL = fwd ? L1 - land / 2 : L0 + land / 2, topY = base + rise;
-        put(land, k < T.flights - 1 ? wid : lane, 0.2, endL, k < T.flights - 1 ? (W0 + W1) / 2 : laneW, topY - 0.1, 0xd1d5db);
+        const laneW = low ? W0 + lane / 2 : W1 - lane / 2, base = T.from + k * rise;
+        flight(tg, alongX, fwd ? L0 + land : L1 - land, fwd ? L1 - land : L0 + land, laneW, lane, base, rise);
+        // Landing at the flight's top end: full width between flights; the last one meets the floor.
+        const e0 = fwd ? L1 - land : L0, e1 = fwd ? L1 : L0 + land;
+        if (k < T.flights - 1) rect(e0, e1, W0, W1, base + rise);
+        else rect(e0, e1, laneW - lane / 2, laneW + lane / 2, base + rise);
       }
     }
     // The building's frame: corner posts through all three floors, the lift
@@ -831,6 +861,7 @@
       floorGroups.forEach((g, i) => { g.visible = f == null || i === f; });
       towerGroups.forEach(t => { t.g.visible = f == null || t.floors.includes(f); });
       frame.visible = f == null;
+      for (const m of [groundMat, yardMat]) { m.opacity = f === 0 ? 0.15 : 1; m.depthWrite = f !== 0; }
       slabMats.forEach((m, i) => { m.opacity = (f != null || i === 0) ? 1 : 0.62; });
       for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
@@ -1115,7 +1146,7 @@
     ui.top.append(ui.stats, ui.views);
     ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="ready">Ready Stock</button>';
     ui.bar = document.createElement('div'); ui.bar.className = 'saa-bar';
-    ui.msg = document.createElement('div'); ui.msg.className = 'saa-msg'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
+    ui.msg = document.createElement('div'); ui.msg.className = 'saa-empty'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
     host.append(ui.top, ui.bar, ui.msg);
     ui.views.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; select(null); setView(b.dataset.v); lastInput = clock; });
 
@@ -1388,7 +1419,7 @@
       for (const p of pallets.values()) if (p.pendingFill && !p.move) { fillPallet(p); p.pendingFill = false; }
       for (const p of pallets.values()) placeTag(p);
       if (selectedId != null && !byId.has(selectedId)) selectedId = null;
-      ui.msg.style.display = next.length ? 'none' : 'flex';
+      ui.msg.style.display = next.length ? 'none' : 'block';
       ui.msg.textContent = 'No orders to show for this company yet.';
       renderStats(); renderBar();
     };
