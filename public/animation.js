@@ -14,6 +14,8 @@
   const loadThree = () => threePromise || (threePromise = import(THREE_URL).catch(e => { threePromise = null; throw e; }));
 
   // ── Pure helpers (no Three.js; covered by the offline tests) ──────
+  // The app's red (index.html --brand, --brand-dark, --brand-light, --brand-deep).
+  const BRAND = 0xA32D2D, BRAND_DARK = 0x7C1F1F, BRAND_LIGHT = 0xC04545, BRAND_DEEP = 0x5C1414, BRAND_PALE = 0xe8a3a3;
   const STAGES = ['CTP Plate Making', 'Printing', 'Coatings', 'Die Cutting', 'Sorting', 'Pasting', 'Ready to Deliver', 'Delivered'];
   const BAY_NAMES = ['CTP', 'Printing', 'Coatings', 'Die Cutting', 'Sorting', 'Pasting'];
 
@@ -159,7 +161,7 @@
   // metres from the machine's centre. Numbered from the top, as the owner
   // counts them (2026-10-21): presses 1-3 five-unit, 4 two-unit, 5-7 one-
   // unit; presses 1-5 deliver to the left, 6-7 to the right. Die cutters 1-2
-  // big, front down; 3-5 front right; 6-7 front down.
+  // big, front down; 3-5 front right; 6-7 front down; 5-7 in the Machine Area.
   const MACHINES = [
     { kind: 'press', stage: 1, units: 5, face: 'left', at: [764, 223], pallets: [[-1.6, 2.7], [1.0, 2.7]] },
     { kind: 'press', stage: 1, units: 5, face: 'left', at: [743, 386], pallets: [[-1.6, 2.7], [1.0, 2.7]] },
@@ -172,9 +174,11 @@
     { kind: 'diecut-big', stage: 3, face: 'down', at: [314, 183], pallets: [[-2.6, 1.5], [-2.6, -1.2]] },
     { kind: 'diecut', stage: 3, face: 'right', at: [320, 316], pallets: [[3.2, 0]] },
     { kind: 'diecut', stage: 3, face: 'right', at: [311, 388], pallets: [[3.2, 0]] },
-    { kind: 'diecut', stage: 3, face: 'right', at: [333, 543], pallets: [[3.2, 0]] },
-    { kind: 'diecut', stage: 3, face: 'down', at: [300, 620], pallets: [[0, -2.6]] },
+    // 5-7 stand together in the Machine Area (owner, 2026-10-21), between
+    // the stairs and the Work Shop wall.
+    { kind: 'diecut', stage: 3, face: 'right', at: [290, 620], pallets: [[0, -2.6]] },
     { kind: 'diecut', stage: 3, face: 'down', at: [300, 686], pallets: [[3.0, 0]] },
+    { kind: 'diecut', stage: 3, face: 'down', at: [300, 752], pallets: [[3.0, 0]] },
   ];
   // A machine's front is its local +x; this turns it to face that side.
   const FACE_ROT = { right: 0, up: Math.PI / 2, left: Math.PI, down: -Math.PI / 2 };
@@ -236,7 +240,7 @@
   .saa-card.green b { color: #166534; }
   .saa-views { display: flex; gap: 6px; flex-shrink: 0; pointer-events: auto; }
   .saa-views button { font: 600 12px/1 inherit; font-family: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid #cbd5e1; background: rgba(255,255,255,.92); color: #1e293b; cursor: pointer; }
-  .saa-views button.on { background: #1e40af; border-color: #1e40af; color: #fff; }
+  .saa-views button.on { background: #A32D2D; border-color: #A32D2D; color: #fff; }
   .saa-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; background: rgba(255,255,255,.95); border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; box-shadow: 0 4px 14px rgba(15,23,42,.08); font-size: 12px; color: #334155; }
   .saa-bar .saa-hint { color: #64748b; }
   .saa-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -364,7 +368,7 @@
     };
     // Rounded tag that always faces the camera.
     const tag = (title, sub, tone, base) => {
-      const bg = tone === 'red' ? '#dc2626' : tone === 'blue' ? '#1e40af' : tone === 'amber' ? '#b45309' : '#ffffff';
+      const bg = tone === 'red' ? '#dc2626' : tone === 'blue' ? '#1e40af' : tone === 'brand' ? '#A32D2D' : tone === 'amber' ? '#b45309' : '#ffffff';
       const fg = tone ? '#ffffff' : '#0f172a';
       const fg2 = tone ? 'rgba(255,255,255,.85)' : '#64748b';
       const tex = canvasTex(512, sub ? 176 : 120, (g, w, h) => {
@@ -404,8 +408,8 @@
     box(GATE.x1 - GATE.x0, 0.13, 8, 0xc4ced9, (GATE.x0 + GATE.x1) / 2, 0.08, GATE.z + 2.5, scene, false);
     // Painted lanes from the docks to the gate.
     for (const dx of DOCKS) {
-      box(0.18, 0.02, 9, 0x93c5fd, dx - 1.9, 0.14, DOCK_Z + 1, scene, false);
-      box(0.18, 0.02, 9, 0x93c5fd, dx + 1.9, 0.14, DOCK_Z + 1, scene, false);
+      box(0.18, 0.02, 9, BRAND_PALE, dx - 1.9, 0.14, DOCK_Z + 1, scene, false);
+      box(0.18, 0.02, 9, BRAND_PALE, dx + 1.9, 0.14, DOCK_Z + 1, scene, false);
     }
     // Fence with a gate gap.
     const fence = new THREE.Group(); scene.add(fence);
@@ -420,7 +424,7 @@
     fenceRun(-60, -38, 52, -38); fenceRun(-60, -38, -60, GATE.z); fenceRun(52, -38, 52, GATE.z);
     // Gate: a booth and a boom that lifts for trucks.
     box(2.2, 2.6, 2.2, 0xffffff, GATE.x1 + 1.6, 1.3, GATE.z - 1.6, scene);
-    box(2.6, 0.25, 2.6, 0x1e40af, GATE.x1 + 1.6, 2.72, GATE.z - 1.6, scene);
+    box(2.6, 0.25, 2.6, BRAND, GATE.x1 + 1.6, 2.72, GATE.z - 1.6, scene);
     box(0.06, 0.8, 1.6, 0x60a5fa, GATE.x1 + 0.48, 1.7, GATE.z - 1.6, scene, false);
     const boomPivot = new THREE.Group(); boomPivot.position.set(GATE.x1 - 0.3, 1.25, GATE.z); scene.add(boomPivot);
     box(0.5, 1.2, 0.5, 0x334155, GATE.x1 - 0.3, 0.6, GATE.z, scene);
@@ -445,19 +449,19 @@
       const g = new THREE.Group(); scene.add(g);
       const w = b.x1 - b.x0, d = b.z1 - b.z0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
       const fl = box(w, 0.3, d, 0xf1f5f9, cx, 0.15, cz, g); fl.castShadow = false;
-      box(w, 7, 0.5, 0x3b82f6, cx, 3.8, b.z0, g);
-      box(w + 0.3, 0.45, 0.8, 0x1e40af, cx, 7.5, b.z0, g);
-      for (let x = b.x0 + 2.5; x < b.x1 - 1; x += 2.5) box(0.12, 6.4, 0.06, 0x2f6fe0, x, 3.7, b.z0 + 0.28, g, false);
-      box(0.5, 7, d, 0x3b82f6, b.x0, 3.8, cz, g);
-      box(0.8, 0.45, d + 0.3, 0x1e40af, b.x0, 7.5, cz, g);
-      box(0.5, 1.3, d, 0x60a5fa, b.x1, 0.95, cz, g);
+      box(w, 7, 0.5, BRAND, cx, 3.8, b.z0, g);
+      box(w + 0.3, 0.45, 0.8, BRAND_DARK, cx, 7.5, b.z0, g);
+      for (let x = b.x0 + 2.5; x < b.x1 - 1; x += 2.5) box(0.12, 6.4, 0.06, 0x8f2626, x, 3.7, b.z0 + 0.28, g, false);
+      box(0.5, 7, d, BRAND, b.x0, 3.8, cz, g);
+      box(0.8, 0.45, d + 0.3, BRAND_DARK, b.x0, 7.5, cz, g);
+      box(0.5, 1.3, d, BRAND_LIGHT, b.x1, 0.95, cz, g);
       // Roof beams, so it reads as a building rather than a yard.
-      for (let x = b.x0 + 5; x < b.x1 - 2; x += 7.5) box(0.35, 0.35, d * 0.55, 0x1e3a8a, x, 7.4, b.z0 + d * 0.27, g);
+      for (let x = b.x0 + 5; x < b.x1 - 2; x += 7.5) box(0.35, 0.35, d * 0.55, BRAND_DEEP, x, 7.4, b.z0 + d * 0.27, g);
       // Front: low wall, with gaps for the docks when asked.
       const gaps = (opts2 && opts2.gaps) || [];
       let x = b.x0;
       const cuts = gaps.map(gx => [gx - 2.1, gx + 2.1]).concat([[b.x1, b.x1]]);
-      for (const [a, c] of cuts) { if (a - x > 0.2) box(a - x, 1.3, 0.5, 0x60a5fa, (x + a) / 2, 0.95, b.z1, g); x = c; }
+      for (const [a, c] of cuts) { if (a - x > 0.2) box(a - x, 1.3, 0.5, BRAND_LIGHT, (x + a) / 2, 0.95, b.z1, g); x = c; }
       const sign = decal(name, Math.min(w * 0.6, 22), 2.6, '#ffffff', { size: 0.66, spacing: 6 });
       sign.position.set(cx, 5.2, b.z0 + 0.3); g.add(sign);
       return g;
@@ -468,7 +472,7 @@
     const people = [];
     const person = (x, z, face, parent) => {
       const g = new THREE.Group(); g.position.set(x, 0.3, z); g.rotation.y = face || 0;
-      cyl(0.32, 0.36, 1.1, 0x1e40af, 0, 0.85, 0, g, 10);
+      cyl(0.32, 0.36, 1.1, BRAND, 0, 0.85, 0, g, 10);
       const hg = new THREE.SphereGeometry(0.3, 12, 10); geos.add(hg);
       const head = new THREE.Mesh(hg, mat(0xe8b98f)); head.position.y = 1.65; head.castShadow = true; g.add(head);
       box(0.66, 0.16, 0.62, 0xfacc15, 0, 1.92, 0, g);
@@ -486,7 +490,7 @@
       m.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
       return m;
     };
-    const edgeMat = new THREE.LineBasicMaterial({ color: 0x1e40af });
+    const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       const pl = F.plan, X = px => wx(pl, px), Z = py => wz(pl, py);
@@ -499,8 +503,8 @@
       const eg = new THREE.EdgesGeometry(sg); geos.add(eg);
       const edges = new THREE.LineSegments(eg, edgeMat); edges.rotation.x = -Math.PI / 2; g.add(edges);
       // Outer walls (blue) and room walls (light blue), low so you see in.
-      F.outline.forEach(([px, py], k) => { const [qx, qy] = F.outline[(k + 1) % F.outline.length]; wallSeg(X(px), Z(py), X(qx), Z(qy), 2.4, 0x3b82f6, 0.35, g); });
-      for (const [a, b, c, d] of F.walls) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, 0x93c5fd, 0.2, g);
+      F.outline.forEach(([px, py], k) => { const [qx, qy] = F.outline[(k + 1) % F.outline.length]; wallSeg(X(px), Z(py), X(qx), Z(qy), 2.4, BRAND, 0.35, g); });
+      for (const [a, b, c, d] of F.walls) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, g);
       for (const [a, b, c, d] of F.dashed || []) {
         const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
         for (let k = 0; k < n; k += 2) { const t0 = k / n, t1 = (k + 1) / n; box(Math.abs(X(c) - X(a)) * (t1 - t0) + 0.15, 0.02, Math.abs(Z(d) - Z(b)) * (t1 - t0) + 0.15, 0x94a3b8, X(a) + (X(c) - X(a)) * (t0 + t1) / 2, SLAB + 0.01, Z(b) + (Z(d) - Z(b)) * (t0 + t1) / 2, g, false); }
@@ -518,13 +522,13 @@
       if (F.terrace) {
         const [a, b, c, d] = F.terrace;
         box(X(c) - X(a), 0.2, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, 0.1, (Z(b) + Z(d)) / 2, g);
-        wallSeg(X(a), Z(d), X(c), Z(d), 0.9, 0x60a5fa, 0.15, g); wallSeg(X(a), Z(b), X(a), Z(d), 0.9, 0x60a5fa, 0.15, g); wallSeg(X(c), Z(b), X(c), Z(d), 0.9, 0x60a5fa, 0.15, g);
+        wallSeg(X(a), Z(d), X(c), Z(d), 0.9, BRAND_LIGHT, 0.15, g); wallSeg(X(a), Z(b), X(a), Z(d), 0.9, BRAND_LIGHT, 0.15, g); wallSeg(X(c), Z(b), X(c), Z(d), 0.9, BRAND_LIGHT, 0.15, g);
       }
       for (const [text, px, py, s] of F.labels || []) {
         const m = decal(text, Math.max(3, text.length * s * 0.78), s * 1.3, '#64748b', { size: 0.6, weight: 700 });
         m.rotation.x = -Math.PI / 2; m.position.set(X(px), SLAB + 0.02, Z(py)); m.renderOrder = 1; g.add(m);
       }
-      const ft = tag(FLOOR_NAMES[fi], '', 'blue', 3.4);
+      const ft = tag(FLOOR_NAMES[fi], '', 'brand', 3.4);
       ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 18); g.add(ft); floorTags.push(ft);
     });
     // The building's frame: corner posts through all three floors, the lift
@@ -532,13 +536,13 @@
     const frame = new THREE.Group(); scene.add(frame);
     {
       const pl = PLAN_G, top = FLOOR_Y[2] + 2.8;
-      for (const [px, py] of FLOORS[1].outline) cyl(0.14, 0.14, top, 0x1e40af, wx(pl, px), top / 2, wz(pl, py), frame, 8);
+      for (const [px, py] of FLOORS[1].outline) cyl(0.14, 0.14, top, BRAND_DARK, wx(pl, px), top / 2, wz(pl, py), frame, 8);
       const [a, b, c, d] = FLOORS[1].lift, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
       const shaftGeo = new THREE.BoxGeometry(lw, top, ld); geos.add(shaftGeo);
-      const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.18, depthWrite: false }));
+      const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: BRAND_LIGHT, transparent: true, opacity: 0.18, depthWrite: false }));
       shaft.position.set(lx, top / 2, lz); frame.add(shaft);
-      var liftCar = box(lw * 0.8, 2.0, ld * 0.8, 0x1d4ed8, lx, 1.4, lz, frame);
-      const sign = tag('PRODUCTION', '', 'blue', 5.5);
+      var liftCar = box(lw * 0.8, 2.0, ld * 0.8, BRAND_DARK, lx, 1.4, lz, frame);
+      const sign = tag('PRODUCTION', '', 'brand', 5.5);
       sign.position.set(BLD.x0 + BLD.w / 2, top + 1.8, BLD.z0 + 2); frame.add(sign); floorTags.push(sign);
     }
     // Stage areas (provisional until the owner places them): a painted
@@ -547,9 +551,9 @@
       if (!z.r) return;
       const r = zoneRect(i), g = floorGroups[r.floor], y = SLAB + 0.015;
       const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2, w = r.x1 - r.x0, d = r.z1 - r.z0;
-      for (const [bw, bd, x, zz] of [[w, 0.2, cx, r.z0], [w, 0.2, cx, r.z1], [0.2, d, r.x0, cz], [0.2, d, r.x1, cz]]) box(bw, 0.02, bd, 0x2563eb, x, y, zz, g, false);
+      for (const [bw, bd, x, zz] of [[w, 0.2, cx, r.z0], [w, 0.2, cx, r.z1], [0.2, d, r.x0, cz], [0.2, d, r.x1, cz]]) box(bw, 0.02, bd, BRAND, x, y, zz, g, false);
       const lab = `${i + 1}  ${BAY_NAMES[i].toUpperCase()}`;
-      const m = decal(lab, Math.min(w - 0.4, lab.length * 0.95), 1.2, '#1e40af', { size: 0.62 });
+      const m = decal(lab, Math.min(w - 0.4, lab.length * 0.95), 1.2, '#7C1F1F', { size: 0.62 });
       m.rotation.x = -Math.PI / 2; m.position.set(cx, y + 0.01, r.z1 - 0.9); m.renderOrder = 1; g.add(m);
     });
     // ── Basement machines (owner's placement): presses and die cutters ──
@@ -578,17 +582,17 @@
     };
     const buildPress = (g, n, units) => {  // sheet-fed offset press: feeder -> units -> delivery along +x
       const UW = 0.95, W = 2.2, L = 1.3 + units * UW + 1.3 + 0.2;
-      box(L, 0.3, W, 0x334155, 0, 0.15, 0, g);
-      box(1.3, 1.4, W * 0.9, 0xe2e8f0, -L / 2 + 0.65, 1.0, 0, g);                 // feeder
+      box(L, 0.3, W, 0x111827, 0, 0.15, 0, g);
+      box(1.3, 1.4, W * 0.9, 0xcbd5e1, -L / 2 + 0.65, 1.0, 0, g);                 // feeder
       box(1.1, 0.5, 1.6, 0xffffff, -L / 2 + 0.6, 1.95, 0, g);                     // paper pile
       const rollers = [];
       for (let u = 0; u < units; u++) {                                          // the printing units
         const ux = -L / 2 + 1.3 + 0.1 + UW * (u + 0.5);
-        box(UW - 0.05, 1.9, W, u % 2 ? 0x1d4ed8 : 0x2563eb, ux, 1.25, 0, g);
+        box(UW - 0.05, 1.9, W, u % 2 ? 0x1f2937 : 0x111827, ux, 1.25, 0, g);
         box(0.65, 0.25, W * 0.7, [0x06b6d4, 0xdb2777, 0xfacc15, 0x111827, 0xf97316][u % 5], ux, 2.32, 0, g);   // ink ducts: C M Y K + a fifth colour
         rollers.push(roller(W * 1.02, 0.17, 0x94a3b8, ux + 0.42, 1.6, 0, g));
       }
-      box(1.3, 1.1, W, 0xe2e8f0, L / 2 - 0.65, 0.85, 0, g);                      // delivery
+      box(1.3, 1.1, W, 0xcbd5e1, L / 2 - 0.65, 0.85, 0, g);                      // delivery
       const pile = box(1.0, 1, 1.5, 0xffffff, L / 2 - 0.65, 1.4, 0, g);
       box(0.5, 1.1, 0.35, 0x1f2937, L / 2 - 0.4, 0.85, W / 2 + 0.45, g);         // console
       const scr = box(0.42, 0.3, 0.02, 0x22d3ee, L / 2 - 0.4, 1.25, W / 2 + 0.63, g, false); scr.material = new THREE.MeshBasicMaterial({ color: 0x67e8f9 });
@@ -604,13 +608,13 @@
     };
     const buildDieCutBig = (g, n) => {     // big automatic die cutter, 5 m along x
       const L = 5, W = 2.4;
-      box(L, 0.3, W, 0x334155, 0, 0.15, 0, g);
-      box(1.2, 1.5, W * 0.9, 0xe2e8f0, -L / 2 + 0.6, 1.05, 0, g);
+      box(L, 0.3, W, 0x111827, 0, 0.15, 0, g);
+      box(1.2, 1.5, W * 0.9, 0xcbd5e1, -L / 2 + 0.6, 1.05, 0, g);
       box(1.0, 0.45, 1.7, 0xffffff, -L / 2 + 0.6, 2.02, 0, g);
-      box(2.2, 2.1, W, 0x1e3a8a, -0.2, 1.35, 0, g);                              // cutting section
+      box(2.2, 2.1, W, 0x111827, -0.2, 1.35, 0, g);                              // cutting section
       const platen = box(1.9, 0.25, W * 0.85, 0x94a3b8, -0.2, 2.55, 0, g);
-      box(1.0, 1.6, W, 0x2563eb, 1.4, 1.1, 0, g);                                // stripping
-      box(0.8, 1.0, W, 0xe2e8f0, L / 2 - 0.4, 0.8, 0, g);                        // delivery
+      box(1.0, 1.6, W, 0x9ca3af, 1.4, 1.1, 0, g);                                // stripping
+      box(0.8, 1.0, W, 0xcbd5e1, L / 2 - 0.4, 0.8, 0, g);                        // delivery
       const pile = box(0.7, 1, 1.6, 0xc9a26b, L / 2 - 0.4, 1.3, 0, g);
       const light = signal(g, 1.4, -W / 2 + 0.2);
       person(0.6, W / 2 + 0.9, Math.PI, g);
@@ -623,12 +627,12 @@
       });
     };
     const buildDieCut = (g, n) => {        // small platen die cutter with its flywheel
-      box(1.8, 0.25, 1.5, 0x334155, 0, 0.12, 0, g);
-      box(1.3, 1.5, 1.3, 0x1e40af, -0.15, 1.0, 0, g);
+      box(1.8, 0.25, 1.5, 0x111827, 0, 0.12, 0, g);
+      box(1.3, 1.5, 1.3, 0x1f2937, -0.15, 1.0, 0, g);
       const jaw = new THREE.Group(); jaw.position.set(0.5, 0.6, 0); g.add(jaw);    // front (+x): the platen that opens and closes
       box(0.18, 1.1, 1.1, 0x94a3b8, 0.09, 0.55, 0, jaw);
       const fly = new THREE.Group(); fly.position.set(-0.15, 1.15, 0.8); g.add(fly);
-      cyl(0.62, 0.62, 0.12, 0x64748b, 0, 0, 0, fly, 18).rotation.x = Math.PI / 2;
+      cyl(0.62, 0.62, 0.12, 0xcbd5e1, 0, 0, 0, fly, 18).rotation.x = Math.PI / 2;
       for (const a of [0, Math.PI / 3, 2 * Math.PI / 3]) { const sp = box(1.15, 0.08, 0.14, 0x1f2937, 0, 0, 0.02, fly, false); sp.rotation.z = a; }
       person(1.35, -0.2, 0, g);                                                    // operator feeding at the front
       const light = signal(g, -0.6, -0.5);
@@ -638,7 +642,7 @@
         light(t + n);
       });
     };
-    const STAGE_COLOR = { 1: '#1e40af', 3: '#7c3aed' };
+    const STAGE_COLOR = { 1: '#374151', 3: '#374151' };
     MACHINES.forEach((m, i) => {
       const g = new THREE.Group(), x = wx(PLAN_B, m.at[0]), z = wz(PLAN_B, m.at[1]);
       g.position.set(x, SLAB, z);
@@ -667,7 +671,7 @@
     // Ready Stock: racks along the back wall, filled with cartons.
     for (let r = 0; r < 3; r++) {
       const rx = READY.x0 + 5 + r * 9;
-      for (const ux of [-3.8, 3.8]) for (const uz of [-0.7, 0.7]) box(0.16, 5.2, 0.16, 0x1e40af, rx + ux, 2.9, READY.z0 + 1.8 + uz, scene);
+      for (const ux of [-3.8, 3.8]) for (const uz of [-0.7, 0.7]) box(0.16, 5.2, 0.16, 0x374151, rx + ux, 2.9, READY.z0 + 1.8 + uz, scene);
       for (let lv = 0; lv < 3; lv++) {
         box(7.8, 0.14, 0.14, 0xf97316, rx, 0.9 + lv * 1.75, READY.z0 + 1.1, scene, false);
         box(7.8, 0.14, 0.14, 0xf97316, rx, 0.9 + lv * 1.75, READY.z0 + 2.5, scene, false);
@@ -706,16 +710,39 @@
     };
     // A forklift that potters about inside an area between jobs.
     const wanderers = [];
-    const wander = (area, start, floor) => {
-      const f = forklift();
+    const wander = (area, start, floor, model) => {
+      const f = model || forklift();
       f.position.set(start[0], floor == null ? 0.3 : FLOOR_Y[floor] + SLAB, start[1]);
       wanderers.push({ f, area, floor, target: null, wait: Math.random() * 2, busy: false });
       return wanderers[wanderers.length - 1];
     };
     const planArea = (pl, a, b, c, d) => ({ x0: wx(pl, a), z0: wz(pl, b), x1: wx(pl, c), z1: wz(pl, d) });
-    // Aisles kept clear of the machines.
-    { const h1 = planArea(PLAN_B, 420, 270, 610, 560); wander(h1, [h1.x0 + 2, h1.z1 - 2], 0); }
-    { const h2 = planArea(PLAN_B, 760, 740, 830, 1100); wander(h2, [h2.x0 + 1, h2.z0 + 3], 0); }
+    // Production floors: three yellow hand lifters (hand pallet trucks) on
+    // each floor, each with its operator, moving along the clear aisles.
+    const handLifter = (load) => {
+      const g = new THREE.Group();                        // forks point forward (+z)
+      for (const x of [-0.33, 0.33]) box(0.3, 0.1, 1.5, 0xfacc15, x, 0.1, 0.55, g);
+      box(0.95, 0.4, 0.4, 0xfacc15, 0, 0.3, -0.35, g);
+      cyl(0.1, 0.1, 0.5, 0xeab308, 0, 0.7, -0.38, g, 8);
+      const handle = box(0.07, 1.1, 0.07, 0x111827, 0, 1.15, -0.62, g); handle.rotation.x = -0.35;
+      box(0.45, 0.07, 0.07, 0x111827, 0, 1.66, -0.82, g);
+      for (const x of [-0.3, 0.3]) { const w = cyl(0.12, 0.12, 0.1, 0x111827, x, 0.12, -0.35, g, 10); w.rotation.z = Math.PI / 2; }
+      if (load) for (const x of [-0.3, 0.3]) box(0.55, 0.5, 1.2, 0xc9a26b, x, 0.42, 0.6, g);
+      person(0, -1.25, 0, g);
+      g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+      scene.add(g);
+      return g;
+    };
+    const LIFTER_AISLES = [
+      [PLAN_B, 0, [[420, 270, 610, 560], [520, 600, 1000, 690], [740, 740, 830, 1100]]],
+      [PLAN_G, 1, [[360, 180, 500, 700], [530, 370, 860, 520], [540, 730, 1040, 810]]],
+      [PLAN_G, 2, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
+    ];
+    LIFTER_AISLES.forEach(([pl, floor, areas]) => areas.forEach((r, k) => {
+      const a = planArea(pl, r[0], r[1], r[2], r[3]);
+      const w = wander(a, [(a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2], floor, handLifter((k + floor) % 2 === 0));
+      w.speed = 1.7;
+    }));
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: -8, z1: 5 }, [READY.x0 + 14, 5]);
 
     // ── Trucks ──
@@ -1095,8 +1122,8 @@
         if (w.busy) continue;
         if (w.wait > 0) { w.wait -= dt; continue; }
         if (!w.target) w.target = [w.area.x0 + Math.random() * (w.area.x1 - w.area.x0), w.area.z0 + Math.random() * (w.area.z1 - w.area.z0)];
-        if (driveTo(w.f, w.target[0], w.target[1], dt, 3.2)) { w.target = null; w.wait = 1 + Math.random() * 2.5; }
-        const forks = w.f.userData.forks; forks.position.y = Math.max(0, Math.sin(clock * 0.9 + w.area.x0) * 0.5);
+        if (driveTo(w.f, w.target[0], w.target[1], dt, w.speed || 3.2)) { w.target = null; w.wait = 1 + Math.random() * 2.5; }
+        const forks = w.f.userData.forks; if (forks) forks.position.y = Math.max(0, Math.sin(clock * 0.9 + w.area.x0) * 0.5);
       }
       // Loader: stack -> dock -> back.
       if (loaderJob) {
