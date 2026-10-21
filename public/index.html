@@ -31473,8 +31473,12 @@ function toggleSecondPaper() {
   } else {
     // Collapse back to a single total box: fold the secondary back into
     // the primary so nothing is lost, then clear the 2nd-paper inputs.
-    if (primPkEl) primPkEl.value = String(jobFormTotalPackets() || '');
-    if (primShEl) primShEl.value = String(jobFormTotalSheets() || '');
+    // Main gets every sheet back; its packets follow from them at its own
+    // packet size and cut (the others' packets may be a different cut).
+    const allSheets = jobFormTotalSheets();
+    const mainPkBack = jobMainPacketsForSheets(allSheets);
+    if (primPkEl) primPkEl.value = String((mainPkBack !== null ? mainPkBack : jobFormTotalPackets()) || '');
+    if (primShEl) primShEl.value = String(allSheets || '');
     if (pktPlus) pktPlus.style.display = 'none';
     if (shtPlus) shtPlus.style.display = 'none';
     if (cutPlus) cutPlus.style.display = 'none';
@@ -31568,8 +31572,10 @@ function toggleThirdPaper() {
     const sh3 = parseFloat((document.getElementById('f-sheets-3')||{}).value) || 0;
     const primPkEl = document.getElementById('f-packets');
     const primShEl = document.getElementById('f-sheets');
-    if (primPkEl && pk3) primPkEl.value = String(+((parseFloat(primPkEl.value) || 0) + pk3).toFixed(2));
-    if (primShEl && sh3) primShEl.value = String((parseFloat(primShEl.value) || 0) + sh3);
+    const mainShBack = (parseFloat((primShEl || {}).value) || 0) + sh3;
+    const mainPkBack = jobMainPacketsForSheets(mainShBack);
+    if (primPkEl && (pk3 || sh3)) primPkEl.value = String(mainPkBack !== null ? mainPkBack : +((parseFloat(primPkEl.value) || 0) + pk3).toFixed(2));
+    if (primShEl && sh3) primShEl.value = String(mainShBack);
     jobClearThirdPaper();
   }
   if (typeof updateStockHint === 'function') updateStockHint();
@@ -31923,6 +31929,13 @@ function jobFormPs() {
   const cutPieces = parseInt(cutStr.split('/')[1], 10) || 1;
   return ps * cutPieces;
 }
+// The main paper's packets for N of its sheets - its own packet size and cut.
+// null when no main paper is picked or there are no sheets to go by.
+function jobMainPacketsForSheets(sheets) {
+  const it = inventoryAll.find(x => x.id === parseInt((document.getElementById('f-inventory-item')||{}).value, 10));
+  const per = it ? packetSize(it.paper_type) * (parseInt(String((document.getElementById('f-sheet-cut')||{}).value || '1/1').split('/')[1], 10) || 1) : 0;
+  return (per > 0 && sheets > 0) ? +(sheets / per).toFixed(2) : null;
+}
 // 3rd paper on (owner, 2026-10-21): only ever beside a 2nd paper.
 function jobThirdPaperActive() {
   const span = document.getElementById('packets-plus-third');
@@ -32034,10 +32047,23 @@ function jobSecondaryPacketsEdited(fromSheets) {
     const thirdSh = t3on ? Math.round(parseFloat((document.getElementById('f-sheets-3')||{}).value) || 0) : 0;
     const lockPk = parseFloat(pwrap.dataset.lockTotal);
     const primPkEl = document.getElementById('f-packets');
-    if (primPkEl && Number.isFinite(lockPk)) primPkEl.value = String(Math.max(0, +(lockPk - secPk - thirdPk).toFixed(2)));
     const lockSh = swrap ? parseFloat(swrap.dataset.lockTotal) : NaN;
     const primShEl = document.getElementById('f-sheets');
-    if (primShEl && Number.isFinite(lockSh)) primShEl.value = String(Math.max(0, lockSh - secSh - thirdSh));
+    // The sheets are what the job needs: they stay fixed, the main paper's
+    // sheets are the rest, and its packets follow from them at ITS packet
+    // size and cut (owner, 2026-10-21 - E-1084: 7,000 sheets at 1/2 with a
+    // 1/1 offcut 2nd paper of 43 packets went to 35 - 43 = 0 main packets;
+    // it is 2,700 sheets = 13.5 packets). No sheets to go by -> packets as before.
+    const mainIt = inventoryAll.find(x => x.id === parseInt((document.getElementById('f-inventory-item')||{}).value, 10));
+    const mainPer = mainIt ? packetSize(mainIt.paper_type) * (parseInt(String((document.getElementById('f-sheet-cut')||{}).value || '1/1').split('/')[1], 10) || 1) : 0;
+    if (primShEl && Number.isFinite(lockSh) && lockSh > 0) {
+      const mainSh = Math.max(0, lockSh - secSh - thirdSh);
+      primShEl.value = String(mainSh);
+      if (primPkEl && mainPer > 0) primPkEl.value = String(+(mainSh / mainPer).toFixed(2));
+      else if (primPkEl && Number.isFinite(lockPk)) primPkEl.value = String(Math.max(0, +(lockPk - secPk - thirdPk).toFixed(2)));
+    } else if (primPkEl && Number.isFinite(lockPk)) {
+      primPkEl.value = String(Math.max(0, +(lockPk - secPk - thirdPk).toFixed(2)));
+    }
   }
   jobCartonQtySync();
   updateStockHint();
@@ -32092,10 +32118,23 @@ function jobThirdPacketsEdited(fromSheets) {
     const secSh = Math.round(parseFloat((document.getElementById('f-sheets-2')||{}).value) || 0);
     const lockPk = parseFloat(pwrap.dataset.lockTotal);
     const primPkEl = document.getElementById('f-packets');
-    if (primPkEl && Number.isFinite(lockPk)) primPkEl.value = String(Math.max(0, +(lockPk - secPk - thirdPk).toFixed(2)));
     const lockSh = swrap ? parseFloat(swrap.dataset.lockTotal) : NaN;
     const primShEl = document.getElementById('f-sheets');
-    if (primShEl && Number.isFinite(lockSh)) primShEl.value = String(Math.max(0, lockSh - secSh - thirdSh));
+    // The sheets are what the job needs: they stay fixed, the main paper's
+    // sheets are the rest, and its packets follow from them at ITS packet
+    // size and cut (owner, 2026-10-21 - E-1084: 7,000 sheets at 1/2 with a
+    // 1/1 offcut 2nd paper of 43 packets went to 35 - 43 = 0 main packets;
+    // it is 2,700 sheets = 13.5 packets). No sheets to go by -> packets as before.
+    const mainIt = inventoryAll.find(x => x.id === parseInt((document.getElementById('f-inventory-item')||{}).value, 10));
+    const mainPer = mainIt ? packetSize(mainIt.paper_type) * (parseInt(String((document.getElementById('f-sheet-cut')||{}).value || '1/1').split('/')[1], 10) || 1) : 0;
+    if (primShEl && Number.isFinite(lockSh) && lockSh > 0) {
+      const mainSh = Math.max(0, lockSh - secSh - thirdSh);
+      primShEl.value = String(mainSh);
+      if (primPkEl && mainPer > 0) primPkEl.value = String(+(mainSh / mainPer).toFixed(2));
+      else if (primPkEl && Number.isFinite(lockPk)) primPkEl.value = String(Math.max(0, +(lockPk - secPk - thirdPk).toFixed(2)));
+    } else if (primPkEl && Number.isFinite(lockPk)) {
+      primPkEl.value = String(Math.max(0, +(lockPk - secPk - thirdPk).toFixed(2)));
+    }
   }
   jobCartonQtySync();
   updateStockHint();
