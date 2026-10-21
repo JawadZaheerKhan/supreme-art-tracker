@@ -283,11 +283,37 @@
     #client-view-list   .rib-dot { height: 10px; }
     #client-portal-list .tile-facts,
     #client-view-list   .tile-facts { font-size: 12px; gap: 4px 10px; }
-    /* Admin Client View controls stack vertically on mobile. */
-    #client-view-mode > div[style*="justify-content:flex-end"] {
-      flex-direction: column; align-items: stretch !important;
-    }
-    #client-view-company { width: 100%; }
+    #client-view-company { width: 100%; min-width: 0 !important; }
+  }
+  /* Slim client hero (owner, 2026-10-21): one thin maroon row - greeting,
+     search, the Jobs | Animation buttons and (Client View) the company
+     picker - no logo, so the Animation gets nearly the whole screen. */
+  .hero-card.hero-card--slim { padding: 8px 14px; margin-bottom: 10px; }
+  .hero-card--slim .hero-text { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; }
+  .hero-card--slim .hero-greet { margin: 0; white-space: nowrap; }
+  .hero-card--slim .hero-cta { width: auto !important; flex: 1 1 220px; max-width: 420px; }
+  .hero-card--slim .hero-cta input { padding: 7px 12px !important; font-size: 13px !important; min-width: 0 !important; }
+  .hero-card--slim.hero-anim .hero-cta { display: none; }
+  .hero-card--slim .hero-tools { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin-left: auto; }
+  .hero-card--slim .hero-tools > * { margin: 0 !important; }
+  .hero-card--slim .tabs .tab { color: #fff; background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.4); box-shadow: none; padding: 5px 14px; }
+  .hero-card--slim .tabs .tab.active { background: #fff; color: var(--brand); border-color: #fff; }
+  .hero-card--slim #client-view-controls label { color: rgba(255,255,255,0.9) !important; }
+  .hero-card--slim #client-view-controls select { padding: 5px 8px !important; min-width: 160px !important; border: 0 !important; }
+  .hero-card--slim #client-view-controls .btn { background: rgba(255,255,255,0.15); color: #fff; border-color: rgba(255,255,255,0.4); }
+  @media (max-width: 640px) {
+    /* Phone: greeting + Jobs | Animation on one line, company + Refresh on the next. */
+    .hero-card.hero-card--slim { padding: 8px 10px; }
+    .hero-card--slim .hero-text { gap: 6px 8px; }
+    .hero-card--slim .hero-greet { font-size: 11px !important; margin: 0 !important; letter-spacing: 0.06em; }
+    .hero-card--slim .hero-cta { flex-basis: 100%; max-width: none; order: 3; }
+    .hero-card--slim .hero-tools { display: contents; }
+    .hero-card--slim #client-view-subtabs, .hero-card--slim #client-portal-subtabs { margin-left: auto !important; }
+    .hero-card--slim .tabs .tab { padding: 4px 10px; font-size: 12px; }
+    .hero-card--slim #client-view-controls { flex: 1 1 100%; flex-wrap: nowrap !important; order: 4; }
+    .hero-card--slim #client-view-controls label { display: none; }
+    .hero-card--slim #client-view-company { flex: 1 1 auto; width: auto !important; min-width: 0 !important; }
+    .hero-card--slim #client-view-controls .btn { white-space: nowrap; }
   }
   /* Client-preview tiles: make the stage badge in the tile head much
      more prominent than the internal Track view — client needs the
@@ -3924,7 +3950,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      preview and real client can never drift apart. -->
 <div class="main" id="client-view-mode" style="display:none;">
   <div id="client-view-hero" class="hero-card"></div>
-  <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:12px 0 16px;flex-wrap:wrap;">
+  <!-- Moved into the slim hero by renderClientHero (owner, 2026-10-21). -->
+  <div id="client-view-controls" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:12px 0 16px;flex-wrap:wrap;">
     <label style="font-size:12px;color:var(--text2);font-weight:600;">Preview company:</label>
     <select id="client-view-company" onchange="loadClientViewJobs()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;min-width:200px;">
       <option value="">— Pick company —</option>
@@ -5580,6 +5607,7 @@ function showClientPortal() {
   if (cm) cm.style.display = 'block';
   document.body.classList.add('role-client');
   renderClientHero('client-portal-hero', {
+    tools: ['client-portal-subtabs'],
     filterId: 'client-portal-filter',
     filterValue: clientPortalFilter,
     onInputHandler: 'onClientPortalSearch',
@@ -38069,6 +38097,25 @@ function renderClientHero(elId, opts) {
   const filterId = opts.filterId || 'client-hero-filter';
   const currentVal = esc(opts.filterValue || '');
   const onInput = esc(opts.onInputHandler || '');
+  // Slim hero (owner, 2026-10-21): the given controls (sub-tabs, company
+  // picker) move into the banner and the logo goes. Hold the nodes before
+  // innerHTML replaces the banner, then put them back in.
+  if (opts.tools) {
+    const tools = opts.tools.map(id => document.getElementById(id)).filter(Boolean);
+    el.classList.add('hero-card--slim');
+    el.innerHTML = `
+    <div class="hero-text">
+      <div class="hero-greet">Hello, ${esc(name)} <span class="hero-wave">&#128075;</span></div>
+      <div class="hero-cta" style="align-items:center;">
+        <input type="text" id="${esc(filterId)}" value="${currentVal}" oninput="${onInput}(this.value)"
+               placeholder="Search job name, PO No., Batch No., Date..."
+               style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.35);background:rgba(255,255,255,0.95);color:var(--text);font-size:14px;">
+      </div>
+      <div class="hero-tools"></div>
+    </div>`;
+    el.querySelector('.hero-tools').append(...tools);
+    return;
+  }
   el.innerHTML = `
     <div class="hero-text">
       <div class="hero-greet">Hello, ${esc(name)} <span class="hero-wave">&#128075;</span></div>
@@ -38694,6 +38741,7 @@ async function toggleGroupClientVisible(groupName, value) {
 
 function renderClientViewHero() {
   renderClientHero('client-view-hero', {
+    tools: ['client-view-subtabs', 'client-view-controls'],
     greetingName: clientViewCompany || 'preview',
     filterId: 'client-view-filter',
     filterValue: clientViewFilter,
@@ -38753,7 +38801,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=6';
+const CLIENT_ANIM_SRC = '/animation.js?v=7';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -38789,6 +38837,9 @@ function setClientSubTab(shell, tab) {
   if (!cfg) return;
   clientSubTab[shell] = tab;
   document.querySelectorAll(`#${cfg.bar} .tab`).forEach(b => b.classList.toggle('active', b.dataset.sub === tab));
+  // The job search means nothing to the 3D view, so the slim banner hides it there.
+  const heroEl = document.getElementById(shell === 'client-view' ? 'client-view-hero' : 'client-portal-hero');
+  if (heroEl) heroEl.classList.toggle('hero-anim', tab === 'animation');
   const jobsEl = document.getElementById(cfg.jobs), animEl = document.getElementById(cfg.anim);
   if (jobsEl) jobsEl.style.display = tab === 'animation' ? 'none' : '';
   if (animEl) animEl.style.display = tab === 'animation' ? '' : 'none';

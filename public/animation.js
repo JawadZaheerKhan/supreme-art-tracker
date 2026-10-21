@@ -232,7 +232,7 @@
 
   // ── Styles for the overlay (scoped to .saa-*) ──────────────────────
   const CSS = `
-  .saa-host { position: relative; width: 100%; height: clamp(460px, calc(100vh - 230px), 900px); border-radius: 14px; overflow: hidden; background: linear-gradient(#f5f8fc, #e6edf5); border: 1px solid var(--border, #e2e8f0); user-select: none; -webkit-user-select: none; }
+  .saa-host { position: relative; width: 100%; height: max(420px, calc(100vh - 160px)); height: max(420px, calc(100dvh - 160px)); border-radius: 14px; overflow: hidden; background: linear-gradient(#f5f8fc, #e6edf5); border: 1px solid var(--border, #e2e8f0); user-select: none; -webkit-user-select: none; }
   .saa-host canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
   .saa-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--text2, #64748b); font-size: 14px; }
   .saa-top { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; pointer-events: none; }
@@ -267,7 +267,7 @@
   .saa-note { margin-top: 8px; color: #b91c1c; background: #fef2f2; border-radius: 8px; padding: 6px 8px; }
   @keyframes saa-pulse { 50% { box-shadow: 0 0 0 7px rgba(37,99,235,.06); } }
   @media (max-width: 640px) {
-    .saa-host { height: clamp(420px, calc(100vh - 200px), 760px); border-radius: 10px; }
+    .saa-host { height: max(400px, calc(100vh - 150px)); height: max(400px, calc(100dvh - 150px)); border-radius: 10px; }
     .saa-top { top: 8px; left: 8px; right: 8px; flex-direction: column; gap: 6px; }
     .saa-stats { gap: 5px; flex-wrap: nowrap; width: 100%; }
     .saa-card { flex: 1 1 0; min-width: 0; padding: 4px 6px; border-radius: 8px; }
