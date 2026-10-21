@@ -121,7 +121,11 @@
   const wz = (pl, py) => BLD.z0 + (py - pl.py0) / pl.sz;
   const OUTLINE_G = [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 940], [212, 940], [212, 718], [158, 718]];
   const LIFT_G = [343, 718, 410, 780];
-  const STAIRS_G = [215, 775, 340, 905];                // stairs core: basement - ground - 1st floor
+  // Stair towers (owner, 2026-10-22): switchback stairs that really climb
+  // the gap between floors. The core's goes basement -> ground -> 1st floor
+  // from the back of the core; the Entrance Lobby's goes down to Hall-02.
+  const TOWER_CORE = [218, 775, 276, 905];              // evacuation-plan pixels
+  const TOWER_LOBBY = [22, 392, 172, 495];              // ground-floor-plan pixels
   // Rooms, halls, Breaking Area and the hall with the ablution row.
   const UPPER_WALLS = [
     [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533], [262, 540, 262, 690],
@@ -141,9 +145,8 @@
       dashed: [[500, 703, 1022, 703]],
       columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600], [677, 707], [849, 707], [677, 815], [849, 815], [677, 922], [849, 922], [677, 1030], [849, 1030]],
       // [plan rect, reversed?] - Hall-02's front stairs climb toward the left.
-      stairs: [[530, 1085, 670, 1135, 1], [1025, 258, 1055, 410]],
-      // The core stairs up to the ground floor: start at the back, forward along the left, turn along the front.
-      pstairs: [[215, 620, 270, 810, 'LF', 'up']],
+      // Outside steps; the stairs to the ground floor are the stair towers below.
+      stairs: [[1025, 258, 1055, 410]],
       lift: [333, 597, 397, 665],
       labels: [['HALL-01', 585, 320, 1.4], ['HALL-02', 755, 870, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] }] },
     { parts: [
@@ -156,7 +159,7 @@
       // steps outside the gate lead down to the street.
       { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
         walls: [[412, 780, 412, 940], [212, 940, 420, 940], [505, 940, 512, 940]],
-        pstairs: [[...STAIRS_G, 'LFR', 'up']], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
+        holes: [[...TOWER_CORE, 'LRB']], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
       { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
@@ -170,7 +173,7 @@
         // Entrance Lobby's staircase goes DOWN to the basement, |_____ shaped,
         // through an opening in the floor.
         stairs: [[140, 8, 195, 48, 1, RAISE, 'z']],
-        pstairs: [[22, 392, 172, 495, 'LF', 'down']], holes: [[22, 392, 172, 495]],
+        holes: [[...TOWER_LOBBY, 'TRB']],
         labels: [['PRODUCTION OFFICE', 95, 175, 0.75], ['LOBBY', 300, 110, 1.0], ['PLATE MAKING', 485, 65, 0.85], ['SCANNING ROOM', 495, 185, 0.75],
           ['STORE ROOM', 100, 315, 0.85], ['ENTRANCE LOBBY', 297, 340, 0.85], ['ACCOUNT OFFICE', 475, 310, 0.7], ['DIRECTOR', 470, 445, 0.75], ['BATH', 572, 478, 0.6]] },
     ] },
@@ -179,7 +182,19 @@
     // the loading area below is open (no floor over it).
     { parts: [{ plan: PLAN_G,
       outline: [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
-      walls: UPPER_WALLS, pstairs: [[...STAIRS_G, 'LFR', 'up']], lift: LIFT_G, labels: UPPER_LABELS }] },
+      walls: UPPER_WALLS, holes: [[...TOWER_CORE, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS }] },
+  ];
+  // The stair towers: plan rect, the floor heights they join, the axis the
+  // flights run along, and which lane the first (lowest) flight climbs.
+  // Both core flights start from the back (owner's drawing): the basement
+  // one (blue) arrives at the ground floor's back-left; the 1st-floor one
+  // (yellow) leaves from the back-right - right side forward, across the
+  // front, back up the left. The lobby one arrives at the lobby's left end.
+  const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
+  const TOWERS = [
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, axis: 'z', flights: 4, startLane: 'right' },
+    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 4, startLane: 'right' },
+    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, axis: 'x', flights: 4, startLane: 'right' },
   ];
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
   // 7 printing presses (red) and 7 die-cutting + embellishment machines
@@ -535,6 +550,14 @@
       return m;
     };
     const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
+    // A guard rail: posts every ~1.2 m with a black top rail and a red kick plate.
+    const railing = (x1, z1, x2, z2, y, parent) => {
+      const len = Math.hypot(x2 - x1, z2 - z1), n = Math.max(1, Math.round(len / 1.2)), rot = -Math.atan2(z2 - z1, x2 - x1);
+      for (let i = 0; i <= n; i++) box(0.07, 0.95, 0.07, 0x374151, x1 + (x2 - x1) * i / n, y + 0.475, z1 + (z2 - z1) * i / n, parent);
+      box(len + 0.07, 0.07, 0.09, 0x111827, (x1 + x2) / 2, y + 0.96, (z1 + z2) / 2, parent).rotation.y = rot;
+      box(len, 0.03, 0.05, 0x6b7280, (x1 + x2) / 2, y + 0.5, (z1 + z2) / 2, parent, false).rotation.y = rot;
+      box(len, 0.12, 0.06, BRAND_LIGHT, (x1 + x2) / 2, y + 0.06, (z1 + z2) / 2, parent).rotation.y = rot;
+    };
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       // One slab material per floor (upper floors see-through in the overview).
@@ -545,7 +568,15 @@
         const pl = P.plan, X = px => wx(pl, px), Z = py => wz(pl, py);
         // Slab in the part's own shape; a raised part is a solid step up.
         const shape = new THREE.Shape(P.outline.map(([px, py]) => new THREE.Vector2(X(px), -Z(py))));
-        for (const [a, b, c, d] of P.holes || []) shape.holes.push(new THREE.Path([new THREE.Vector2(X(a), -Z(b)), new THREE.Vector2(X(c), -Z(b)), new THREE.Vector2(X(c), -Z(d)), new THREE.Vector2(X(a), -Z(d))]));
+        // Stair openings, with railings on the given sides (Top/back, Bottom/front, Left, Right).
+        for (const [a, b, c, d, rails] of P.holes || []) {
+          shape.holes.push(new THREE.Path([new THREE.Vector2(X(a), -Z(b)), new THREE.Vector2(X(c), -Z(b)), new THREE.Vector2(X(c), -Z(d)), new THREE.Vector2(X(a), -Z(d))]));
+          const sides = { T: [X(a), Z(b), X(c), Z(b)], B: [X(a), Z(d), X(c), Z(d)], L: [X(a), Z(b), X(a), Z(d)], R: [X(c), Z(b), X(c), Z(d)] };
+          for (const k of rails || '') {
+            const [p, q, u, v] = sides[k];
+            railing(p, q, u, v, SLAB, pg);
+          }
+        }
         const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB + raise, bevelEnabled: false }); geos.add(sg);
         const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.position.y = -raise; slab.receiveShadow = true; pg.add(slab);
         const eg = new THREE.EdgesGeometry(sg); geos.add(eg);
@@ -571,37 +602,6 @@
             const h = (top || 2.25) * ((rev ? n - k - 1 : k) + 1) / n;
             if (alongX) box((x1 - x0) / n, h, z1 - z0, 0xcbd5e1, x0 + (x1 - x0) * (k + 0.5) / n, y0 + h / 2, (z0 + z1) / 2, pg);
             else box(x1 - x0, h, (z1 - z0) / n, 0xcbd5e1, (x0 + x1) / 2, y0 + h / 2, z0 + (z1 - z0) * (k + 0.5) / n, pg);
-          }
-        }
-        // Turning stairs [rect, path, 'up' | 'down'] as the owner drew them:
-        // every flight starts at the back-left, runs forward along the Left
-        // side, turns along the Front, and (U-shaped 'LFR') back along the
-        // Right side. 'up' climbs toward the floor above; 'down' sinks
-        // through an opening in the floor toward the one below.
-        for (const [a, b, c, d, path, dir] of P.pstairs || []) {
-          const x0 = X(a), x1 = X(c), z0 = Z(b), z1 = Z(d), down = dir === 'down', T = 2.4, tread = 0.42;
-          const fw = Math.min(1.5, (x1 - x0) * 0.45, (z1 - z0) * 0.45), right = path.includes('R');
-          const cells = [];                                                       // [cx, cz, w, d] in walking order
-          const run = (n, f) => { for (let k = 0; k < n; k++) cells.push(f(k, n)); };
-          const sideLen = z1 - fw - z0;
-          run(Math.max(2, Math.round(sideLen / tread)), (k, n) => [x0 + fw / 2, z0 + sideLen * (k + 0.5) / n, fw, sideLen / n]);
-          cells.push([x0 + fw / 2, z1 - fw / 2, fw, fw]);                           // landing, front-left
-          const fEnd = right ? x1 - fw : x1, fLen = fEnd - (x0 + fw);
-          if (fLen > 0.3) run(Math.max(1, Math.round(fLen / tread)), (k, n) => [x0 + fw + fLen * (k + 0.5) / n, z1 - fw / 2, fLen / n, fw]);
-          if (right) {
-            cells.push([x1 - fw / 2, z1 - fw / 2, fw, fw]);                         // landing, front-right
-            run(Math.max(2, Math.round(sideLen / tread)), (k, n) => [x1 - fw / 2, z1 - fw - sideLen * (k + 0.5) / n, fw, sideLen / n]);
-          }
-          const r = T / cells.length;
-          cells.forEach(([cx, cz, w, dd], i) => {
-            const t = r * (i + 1);
-            if (down) box(w, T - t + 0.1, dd, 0xcbd5e1, cx, SLAB - t - (T - t + 0.1) / 2, cz, pg);   // tread t below the floor
-            else box(w, t, dd, 0xcbd5e1, cx, SLAB + t / 2, cz, pg);
-          });
-          if (down) {
-            box(x1 - x0, 0.05, z1 - z0, 0x475569, (x0 + x1) / 2, SLAB - T - 0.12, (z0 + z1) / 2, pg, false);   // the floor below
-            wallSeg(x0 + fw, z0, x1, z0, 0.9, BRAND_LIGHT, 0.08, pg);                                   // railings round the opening
-            wallSeg(x1, z0, x1, z1, 0.9, BRAND_LIGHT, 0.08, pg);
           }
         }
         // Hand-lifter ramp: a wedge climbing toward the front, yellow edges.
@@ -656,6 +656,47 @@
       const ft = tag(FLOOR_NAMES[fi], '', 'brand', 3.4);
       ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 18); g.add(ft); floorTags.push(ft);
     });
+    // ── Stair towers: switchback stairs that really climb between floors ──
+    // Flights alternate lanes with a landing at each end; every flight has
+    // treads with a nosing, stringers and handrails on both sides. A tower
+    // shows in the overview and in the views of the two floors it joins.
+    const towerGroups = [];
+    for (const T of TOWERS) {
+      const tg = new THREE.Group(); scene.add(tg); towerGroups.push({ g: tg, floors: T.name === 'ground-first' ? [1, 2] : [0, 1] });
+      const pl = T.plan, x0 = wx(pl, T.r[0]), x1 = wx(pl, T.r[2]), z0 = wz(pl, T.r[1]), z1 = wz(pl, T.r[3]);
+      const alongX = T.axis === 'x';
+      const L0 = alongX ? x0 : z0, L1 = alongX ? x1 : z1, W0 = alongX ? z0 : x0, W1 = alongX ? z1 : x1;
+      const len = L1 - L0, wid = W1 - W0, lane = (wid - 0.12) / 2, land = Math.min(1.3, len * 0.22), run = len - 2 * land;
+      const rise = (T.to - T.from) / T.flights, m = Math.max(5, Math.round(rise / 0.27)), tread = run / m, sr = rise / m;
+      // (length along the flight, width across, height, along, across, y) -> a box in the tower
+      const put = (dl, dw, h, l, w, y, color, tilt) => {
+        const b = alongX ? box(dl, h, dw, color, l, y, w, tg) : box(dw, h, dl, color, w, y, l, tg);
+        if (tilt) { if (alongX) b.rotation.z = tilt; else b.rotation.x = -tilt; }
+        return b;
+      };
+      for (let k = 0; k < T.flights; k++) {
+        const fwd = k % 2 === 0;                                   // even flights run from L0 to L1
+        const low = (k % 2 === 0) === (T.startLane === 'left');    // on the low-side (left / back) lane?
+        const laneW = low ? W0 + lane / 2 : W1 - lane / 2;
+        const sideW = [low ? W0 + 0.04 : W1 - 0.04, low ? W0 + lane : W1 - lane];
+        const base = T.from + k * rise;
+        for (let s = 0; s < m; s++) {
+          const top = base + (s + 1) * sr, l = fwd ? L0 + land + (s + 0.5) * tread : L1 - land - (s + 0.5) * tread;
+          put(tread + 0.03, lane, 0.14, l, laneW, top - 0.07, 0xe5e7eb);                                  // tread
+          put(0.05, lane, 0.05, l + (fwd ? tread / 2 : -tread / 2), laneW, top - 0.025, 0x9ca3af);         // nosing
+        }
+        const ang = Math.atan2(rise, run) * (fwd ? 1 : -1), slope = Math.hypot(run, rise), midL = (L0 + L1) / 2;
+        for (const w of sideW) {
+          put(slope, 0.08, 0.32, midL, w, base + rise / 2 - 0.2, BRAND_DARK, ang);                         // stringer
+          put(slope, 0.06, 0.06, midL, w, base + rise / 2 + 0.92, 0x111827, ang);                          // handrail
+          put(0.06, 0.06, 0.95, fwd ? L0 + land : L1 - land, w, base + 0.47, 0x374151);                    // posts at both ends
+          put(0.06, 0.06, 0.95, fwd ? L1 - land : L0 + land, w, base + rise + 0.47, 0x374151);
+        }
+        // Landing at the flight's top end (full width between flights; the last one is the floor's own edge).
+        const endL = fwd ? L1 - land / 2 : L0 + land / 2, topY = base + rise;
+        put(land, k < T.flights - 1 ? wid : lane, 0.2, endL, k < T.flights - 1 ? (W0 + W1) / 2 : laneW, topY - 0.1, 0xd1d5db);
+      }
+    }
     // The building's frame: corner posts through all three floors, the lift
     // shaft with its car going up and down, and the name on top.
     const frame = new THREE.Group(); scene.add(frame);
@@ -788,6 +829,7 @@
     const setFloorFocus = f => {
       floorFocus = f;
       floorGroups.forEach((g, i) => { g.visible = f == null || i === f; });
+      towerGroups.forEach(t => { t.g.visible = f == null || t.floors.includes(f); });
       frame.visible = f == null;
       slabMats.forEach((m, i) => { m.opacity = (f != null || i === 0) ? 1 : 0.62; });
       for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
@@ -1404,5 +1446,5 @@
     return ctl;
   }
 
-  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P } };
+  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P, TOWERS } };
 })();
