@@ -99,28 +99,87 @@
   }
 
   // ── Layout (world units ~ metres; +x right, +z toward the camera) ──
-  const PROD = { x0: -46, x1: -2, z0: -14, z1: 10 };
+  // The Production building is the owner's real floor plans (2026-10-21),
+  // drawn as three floors stacked with a gap so each one can be seen:
+  // Basement (the basement plan), Ground (the "first floor" evacuation
+  // plan) and 1st floor (the top part of that same plan - rooms, halls and
+  // the ablution row - with the rest left as empty floor). Plan coordinates
+  // are the drawings' pixels; both drawings are fitted to one footprint.
+  const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
+  const FLOOR_Y = [0, 11, 22];                  // basement, ground, 1st floor
+  const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR'];
+  const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // ground / 1st floor drawing
+  const PLAN_B = { px0: 157, py0: 60, sx: 20 * 865 / 900, sz: 20 * 1078 / 1115 };     // basement drawing
+  const wx = (pl, px) => BLD.x0 + (px - pl.px0) / pl.sx;
+  const wz = (pl, py) => BLD.z0 + (py - pl.py0) / pl.sz;
+  const FLOORS = [
+    { plan: PLAN_B,
+      outline: [[157, 60], [1022, 60], [1022, 1138], [500, 1138], [500, 815], [207, 815], [207, 600], [157, 600]],
+      walls: [[207, 600, 330, 600], [330, 597, 330, 815], [330, 597, 400, 597], [400, 597, 400, 710], [400, 710, 500, 710], [500, 710, 500, 815], [330, 668, 400, 668]],
+      dashed: [[500, 703, 1022, 703]],
+      columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600], [677, 707], [849, 707], [677, 815], [849, 815], [677, 922], [849, 922], [677, 1030], [849, 1030]],
+      stairs: [[215, 620, 270, 810], [530, 1085, 670, 1135], [1025, 258, 1055, 410]],
+      lift: [333, 597, 397, 665],
+      labels: [['HALL-01', 585, 320, 1.4], ['HALL-02', 755, 870, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] },
+    { plan: PLAN_G,
+      outline: [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 940], [212, 940], [212, 718], [158, 718]],
+      walls: [
+        [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533], [262, 540, 262, 690],
+        [512, 158, 512, 718], [697, 158, 697, 348], [875, 158, 875, 348], [512, 348, 1058, 348], [512, 530, 875, 530], [875, 348, 875, 718],
+        [512, 630, 600, 718], [600, 718, 1058, 718], [975, 718, 975, 760], [1013, 718, 1013, 760], [512, 822, 1058, 822],
+        [212, 718, 512, 718], [343, 718, 343, 780], [410, 718, 410, 780], [343, 780, 410, 780], [412, 780, 412, 940], [512, 718, 512, 940],
+        [560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
+        [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
+      stairs: [[215, 775, 340, 905], [517, 1165, 640, 1265]],
+      lift: [343, 718, 410, 780],
+      terrace: [668, 1272, 902, 1345],
+      labels: [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
+        ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
+        ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['ABLUTION AREA', 945, 790, 0.7],
+        ['DINING ROOM', 750, 880, 0.9], ['DIRECTOR OFFICE', 605, 995, 0.7], ['FINANCE SECTION', 785, 1010, 0.7], ['WASHROOMS', 985, 995, 0.7],
+        ['LOBBY', 605, 1120, 0.9], ['CORRIDOR', 785, 1125, 0.7], ['DIRECTOR OFFICE', 785, 1215, 0.7], ['DESIGN SECTION', 985, 1160, 0.7], ['TERRACE', 785, 1308, 0.7]] },
+  ];
+  // 1st floor: the same drawing, keeping only the rooms / halls / ablution
+  // row (everything above y=822) and the stairs + lift corner; the dining,
+  // finance, offices etc. part stays as empty floor inside the outer walls.
+  const keepUpper = (x1, y1, x2, y2) => Math.max(y1, y2) <= 822 || Math.max(x1, x2) <= 512;
+  FLOORS.push({
+    plan: PLAN_G, outline: FLOORS[1].outline,
+    walls: FLOORS[1].walls.filter(w => keepUpper(w[0], w[1], w[2], w[3])),
+    stairs: [FLOORS[1].stairs[0]], lift: FLOORS[1].lift,
+    labels: FLOORS[1].labels.filter(l => l[2] <= 822 || l[1] <= 512),
+  });
+  // Where each stage's pallets stand: floor + plan rectangle. PROVISIONAL -
+  // the owner will say where each stage and machine really is.
+  const STAGE_ZONES = [
+    { floor: 1, r: [360, 180, 500, 520] },      // CTP            - ground floor, left hall
+    { floor: 0, r: [360, 100, 600, 560] },      // Printing       - basement, Hall-01 left
+    { floor: 0, r: [620, 100, 1000, 560] },     // Coatings       - basement, Hall-01 right
+    { floor: 0, r: [520, 730, 1000, 1060] },    // Die Cutting    - basement, Hall-02
+    { floor: 2, r: [530, 365, 860, 520] },      // Sorting        - 1st floor, middle hall
+    { floor: 2, r: [890, 365, 1040, 700] },     // Pasting        - 1st floor, right hall
+  ];
+  const zoneRect = i => { const z = STAGE_ZONES[i], pl = FLOORS[z.floor].plan; return { floor: z.floor, x0: wx(pl, z.r[0]), z0: wz(pl, z.r[1]), x1: wx(pl, z.r[2]), z1: wz(pl, z.r[3]) }; };
   const READY = { x0: 8, x1: 36, z0: -14, z1: 8 };
-  const BAY_W = (PROD.x1 - PROD.x0 - 1) / 6;
-  const bayCenter = i => PROD.x0 + 0.5 + BAY_W * (i + 0.5);
   const DOCKS = [14, 22, 30];
   const DOCK_Z = READY.z1 + 4.85;          // truck centre when backed onto the dock
   const GATE = { x0: 39, x1: 48, z: 34 };
   const ROAD_Z = 42;
-  const WAIT = { x0: -44, x1: -26, z0: 13, z1: 21 };
+  const WAIT = { x0: -7, x1: 4, z0: 12, z1: 24 };
 
   function slotFor(place, k) {
     if (place === 'ready') {
       const col = k % 6, row = Math.floor(k / 6) % 4, layer = Math.floor(k / 24);
-      return { x: READY.x0 + 3.6 + col * 3.9, z: READY.z0 + 7.5 + row * 3.4, lift: layer };
+      return { x: READY.x0 + 3.6 + col * 3.9, z: READY.z0 + 7.5 + row * 3.4, lift: layer, y: 0 };
     }
     if (place === 'wait') {
-      const col = k % 5, row = Math.floor(k / 5) % 2, layer = Math.floor(k / 10);
-      return { x: WAIT.x0 + 2.2 + col * 3.4, z: WAIT.z0 + 2.2 + row * 3.6, lift: layer };
+      const col = k % 3, row = Math.floor(k / 3) % 3, layer = Math.floor(k / 9);
+      return { x: WAIT.x0 + 2 + col * 3.5, z: WAIT.z0 + 2.2 + row * 3.8, lift: layer, y: 0 };
     }
-    const c = bayCenter(place);
-    const col = k % 2, row = Math.floor(k / 2) % 5, layer = Math.floor(k / 10);
-    return { x: c + (col ? 1.65 : -1.65), z: -5.2 + row * 2.75, lift: layer };
+    const r = zoneRect(place);
+    const cols = Math.max(1, Math.floor((r.x1 - r.x0 - 0.6) / 3.3)), rows = Math.max(1, Math.floor((r.z1 - r.z0 - 0.6) / 3.0));
+    const per = cols * rows, i = k % per;
+    return { x: r.x0 + 1.9 + (i % cols) * 3.3, z: r.z0 + 1.8 + Math.floor(i / cols) * 3.0, lift: Math.floor(k / per), y: FLOOR_Y[r.floor], floor: r.floor };
   }
 
   // ── Styles for the overlay (scoped to .saa-*) ──────────────────────
@@ -165,7 +224,8 @@
     .saa-stats { gap: 5px; flex-wrap: nowrap; width: 100%; }
     .saa-card { flex: 1 1 0; min-width: 0; padding: 4px 6px; border-radius: 8px; }
     .saa-card b { font-size: 14px; } .saa-card span { font-size: 9.5px; white-space: normal; display: block; line-height: 1.15; }
-    .saa-views button { padding: 6px 9px; font-size: 11px; }
+    .saa-views { width: 100%; gap: 4px; }
+    .saa-views button { flex: 1 1 auto; padding: 6px 4px; font-size: 10.5px; white-space: nowrap; }
     .saa-bar { left: 8px; right: 8px; bottom: 8px; padding: 8px 10px; }
     .saa-step { font-size: 8.5px; }
   }
@@ -195,13 +255,14 @@
     scene.background = new THREE.Color(0xeef3f8);
     scene.fog = new THREE.Fog(0xeef3f8, 190, 360);
     const camera = new THREE.PerspectiveCamera(32, 1, 1, 800);
+    const cam = { target: new THREE.Vector3(-10, 8, 0), az: 0.32, el: 0.62, dist: 150 };
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
     const sun = new THREE.DirectionalLight(0xffffff, 2.3);
-    sun.position.set(-40, 80, 50);
+    sun.position.set(-40, 95, 55);
     sun.castShadow = true;
     sun.shadow.mapSize.set(small ? 1024 : 2048, small ? 1024 : 2048);
-    Object.assign(sun.shadow.camera, { left: -80, right: 80, top: 70, bottom: -70, near: 10, far: 220 });
+    Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 85, bottom: -85, near: 10, far: 260 });
     sun.shadow.bias = -0.0005;
     sun.shadow.normalBias = 0.04;
     scene.add(sun);
@@ -297,7 +358,7 @@
     const groundGeo = new THREE.PlaneGeometry(900, 900); geos.add(groundGeo);
     const ground = new THREE.Mesh(groundGeo, mat(0xe9eef4));
     ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
-    const yard = box(104, 0.12, 60, 0xf8fafc, -5, 0.06, 4, scene, false); yard.castShadow = false;
+    const yard = box(112, 0.12, 72, 0xf8fafc, -4, 0.06, -2, scene, false); yard.castShadow = false;
     box(320, 0.14, 11, 0xb6c2d1, 40, 0.07, ROAD_Z, scene, false);
     for (let x = -110; x <= 190; x += 7) box(3.2, 0.02, 0.28, 0xffffff, x, 0.15, ROAD_Z, scene, false);
     box(320, 0.18, 1.4, 0xdfe5ec, 40, 0.09, ROAD_Z - 6.2, scene, false);
@@ -316,8 +377,8 @@
       rail.rotation.y = -Math.atan2(z1 - z0, x1 - x0);
       const rail2 = rail.clone(); rail2.position.y = 0.75; fence.add(rail2);
     };
-    fenceRun(-56, GATE.z, GATE.x0, GATE.z); fenceRun(GATE.x1, GATE.z, 46 + 4, GATE.z);
-    fenceRun(-56, -24, 50, -24); fenceRun(-56, -24, -56, GATE.z); fenceRun(50, -24, 50, GATE.z);
+    fenceRun(-60, GATE.z, GATE.x0, GATE.z); fenceRun(GATE.x1, GATE.z, 52, GATE.z);
+    fenceRun(-60, -38, 52, -38); fenceRun(-60, -38, -60, GATE.z); fenceRun(52, -38, 52, GATE.z);
     // Gate: a booth and a boom that lifts for trucks.
     box(2.2, 2.6, 2.2, 0xffffff, GATE.x1 + 1.6, 1.3, GATE.z - 1.6, scene);
     box(2.6, 0.25, 2.6, 0x1e40af, GATE.x1 + 1.6, 2.72, GATE.z - 1.6, scene);
@@ -336,8 +397,8 @@
       const g2 = new THREE.IcosahedronGeometry(0.85 * s, 0); geos.add(g2);
       const f2 = new THREE.Mesh(g2, mat(0x5fbf7f, { flatShading: true })); f2.position.set(x + 0.2 * s, 3.25 * s, z - 0.1 * s); f2.castShadow = true; trees.add(f2);
     };
-    [[-62, -10], [-62, 6], [-62, 22], [-30, -30], [-12, -30], [6, -30], [24, -30], [44, -30], [57, -12], [57, 6], [57, 22],
-     [-50, 29], [-38, 29], [-22, 29], [-6, 29], [8, 29], [24, 29], [-70, 48], [-48, 49], [-20, 48], [10, 49], [34, 48], [62, 49], [86, 48]]
+    [[-66, -30], [-66, -12], [-66, 6], [-66, 22], [-44, -44], [-24, -44], [-4, -44], [16, -44], [36, -44], [58, -20], [58, 0], [58, 20],
+     [-56, 31], [-44, 31], [8, 30], [24, 30], [-70, 48], [-48, 49], [-20, 48], [10, 49], [34, 48], [62, 49], [86, 48]]
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
     // ── Buildings (cut-away: tall back wall, low front so you see in) ──
@@ -362,10 +423,9 @@
       sign.position.set(cx, 5.2, b.z0 + 0.3); g.add(sign);
       return g;
     };
-    building(PROD, 'PRODUCTION');
     building(READY, 'READY STOCK', { gaps: DOCKS });
 
-    // Bays: floor lines, names, a machine and an operator in each.
+    // People (forklift drivers).
     const people = [];
     const person = (x, z, face, parent) => {
       const g = new THREE.Group(); g.position.set(x, 0.3, z); g.rotation.y = face || 0;
@@ -376,36 +436,92 @@
       (parent || scene).add(g); people.push(g);
       return g;
     };
-    const machine = (i, cx) => {
-      const g = new THREE.Group(); g.position.set(cx, 0.3, -10.4); scene.add(g);
-      if (i === 0) {           // CTP plate setter
-        box(3.4, 1.5, 2.2, 0xe2e8f0, 0, 0.75, 0, g); box(3.0, 0.2, 1.6, 0x2563eb, 0, 1.6, 0, g);
-        box(1.4, 0.5, 1.2, 0xcbd5e1, 2.6, 0.25, 0.4, g); box(1.2, 0.08, 1.0, 0x94a3b8, 2.6, 0.55, 0.4, g);
-      } else if (i === 1) {    // printing press: five units in a row
-        for (let u = 0; u < 5; u++) { box(1.05, 2.1, 2.3, u % 2 ? 0x1d4ed8 : 0x2563eb, -2.4 + u * 1.15, 1.05, 0, g); cyl(0.22, 0.22, 2.0, 0x334155, -2.4 + u * 1.15, 2.2, 0, g).rotation.x = Math.PI / 2; }
-        box(1.2, 0.9, 2.0, 0xe2e8f0, 3.3, 0.45, 0, g);
-      } else if (i === 2) {    // coater with the UV lamp
-        box(5.4, 1.4, 2.0, 0xe2e8f0, 0, 0.7, 0, g); box(1.4, 0.7, 2.2, 0x0e7490, -0.6, 1.75, 0, g);
-        const lamp = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.12, 1.8), new THREE.MeshBasicMaterial({ color: 0xa78bfa })); geos.add(lamp.geometry); lamp.position.set(-0.6, 1.4, 0); g.add(lamp);
-      } else if (i === 3) {    // die cutter with its flywheel
-        box(3.6, 2.2, 2.4, 0x334155, 0, 1.1, 0, g); box(3.8, 0.3, 2.6, 0x1e40af, 0, 2.35, 0, g);
-        const fw = cyl(1.0, 1.0, 0.3, 0x64748b, 2.05, 1.3, 0, g, 18); fw.rotation.z = Math.PI / 2; g.userData.flywheel = fw;
-      } else if (i === 4) {    // sorting tables
-        for (const tx of [-1.7, 1.7]) { box(2.8, 0.12, 1.6, 0xe7d3b0, tx, 1.0, 0, g); for (const lx of [-1.2, 1.2]) for (const lz of [-0.6, 0.6]) box(0.1, 1.0, 0.1, 0x94a3b8, tx + lx, 0.5, lz, g, false); box(0.8, 0.1, 0.6, 0xffffff, tx, 1.11, 0, g, false); }
-      } else {                 // folder-gluer conveyor
-        box(6.0, 0.9, 1.4, 0xe2e8f0, 0, 0.45, 0, g); for (let r = 0; r < 9; r++) { const rl = cyl(0.12, 0.12, 1.3, 0x94a3b8, -2.7 + r * 0.68, 0.98, 0, g, 8); rl.rotation.x = Math.PI / 2; }
-        box(1.3, 1.4, 1.6, 0x2563eb, -3.2, 0.7, 0, g);
-      }
-      return g;
+
+    // ── Production: the three floors from the owner's plans, stacked apart ──
+    const SLAB = 0.35;
+    const floorGroups = [], floorTags = [], slabMats = [];
+    const wallSeg = (x1, z1, x2, z2, h, color, t, parent) => {
+      const len = Math.hypot(x2 - x1, z2 - z1);
+      if (len < 0.05) return null;
+      const m = box(len + t, h, t, color, (x1 + x2) / 2, SLAB + h / 2, (z1 + z2) / 2, parent);
+      m.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+      return m;
     };
-    const machines = [];
-    for (let i = 0; i < 6; i++) {
-      const cx = bayCenter(i);
-      machines.push(machine(i, cx));
-      person(cx + (i === 1 ? 0 : -1.2), -8.0, Math.PI, null);
-      if (i > 0) box(0.12, 0.02, PROD.z1 - PROD.z0 - 1, 0x93c5fd, PROD.x0 + 0.5 + BAY_W * i, 0.31, (PROD.z0 + PROD.z1) / 2, scene, false);
-      floorDecal(`${i + 1}  ${BAY_NAMES[i].toUpperCase()}`, BAY_W - 0.6, 1.25, '#1e40af', cx, PROD.z1 - 1.2, { size: 0.58 });
+    const edgeMat = new THREE.LineBasicMaterial({ color: 0x1e40af });
+    FLOORS.forEach((F, fi) => {
+      const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
+      const pl = F.plan, X = px => wx(pl, px), Z = py => wz(pl, py);
+      // Floor slab in the building's own shape (upper slabs see-through in the overview).
+      const shape = new THREE.Shape(F.outline.map(([px, py]) => new THREE.Vector2(X(px), -Z(py))));
+      const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB, bevelEnabled: false }); geos.add(sg);
+      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe2e8f0 : 0xf1f5f9, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });
+      slabMats.push(sm);
+      const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.receiveShadow = true; g.add(slab);
+      const eg = new THREE.EdgesGeometry(sg); geos.add(eg);
+      const edges = new THREE.LineSegments(eg, edgeMat); edges.rotation.x = -Math.PI / 2; g.add(edges);
+      // Outer walls (blue) and room walls (light blue), low so you see in.
+      F.outline.forEach(([px, py], k) => { const [qx, qy] = F.outline[(k + 1) % F.outline.length]; wallSeg(X(px), Z(py), X(qx), Z(qy), 2.4, 0x3b82f6, 0.35, g); });
+      for (const [a, b, c, d] of F.walls) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, 0x93c5fd, 0.2, g);
+      for (const [a, b, c, d] of F.dashed || []) {
+        const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
+        for (let k = 0; k < n; k += 2) { const t0 = k / n, t1 = (k + 1) / n; box(Math.abs(X(c) - X(a)) * (t1 - t0) + 0.15, 0.02, Math.abs(Z(d) - Z(b)) * (t1 - t0) + 0.15, 0x94a3b8, X(a) + (X(c) - X(a)) * (t0 + t1) / 2, SLAB + 0.01, Z(b) + (Z(d) - Z(b)) * (t0 + t1) / 2, g, false); }
+      }
+      for (const [px, py] of F.columns || []) box(0.6, 2.4, 0.6, 0x64748b, X(px), SLAB + 1.2, Z(py), g);
+      // Stairs: steps rising along the long side.
+      for (const [a, b, c, d] of F.stairs || []) {
+        const x0 = X(a), x1 = X(c), z0 = Z(b), z1 = Z(d), alongX = (x1 - x0) > (z1 - z0), n = 9;
+        for (let k = 0; k < n; k++) {
+          const h = 0.25 * (k + 1);
+          if (alongX) box((x1 - x0) / n, h, z1 - z0, 0xcbd5e1, x0 + (x1 - x0) * (k + 0.5) / n, SLAB + h / 2, (z0 + z1) / 2, g);
+          else box(x1 - x0, h, (z1 - z0) / n, 0xcbd5e1, (x0 + x1) / 2, SLAB + h / 2, z0 + (z1 - z0) * (k + 0.5) / n, g);
+        }
+      }
+      if (F.terrace) {
+        const [a, b, c, d] = F.terrace;
+        box(X(c) - X(a), 0.2, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, 0.1, (Z(b) + Z(d)) / 2, g);
+        wallSeg(X(a), Z(d), X(c), Z(d), 0.9, 0x60a5fa, 0.15, g); wallSeg(X(a), Z(b), X(a), Z(d), 0.9, 0x60a5fa, 0.15, g); wallSeg(X(c), Z(b), X(c), Z(d), 0.9, 0x60a5fa, 0.15, g);
+      }
+      for (const [text, px, py, s] of F.labels || []) {
+        const m = decal(text, Math.max(3, text.length * s * 0.78), s * 1.3, '#64748b', { size: 0.6, weight: 700 });
+        m.rotation.x = -Math.PI / 2; m.position.set(X(px), SLAB + 0.02, Z(py)); m.renderOrder = 1; g.add(m);
+      }
+      const ft = tag(FLOOR_NAMES[fi], '', 'blue', 3.4);
+      ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 18); g.add(ft); floorTags.push(ft);
+    });
+    // The building's frame: corner posts through all three floors, the lift
+    // shaft with its car going up and down, and the name on top.
+    const frame = new THREE.Group(); scene.add(frame);
+    {
+      const pl = PLAN_G, top = FLOOR_Y[2] + 2.8;
+      for (const [px, py] of FLOORS[1].outline) cyl(0.14, 0.14, top, 0x1e40af, wx(pl, px), top / 2, wz(pl, py), frame, 8);
+      const [a, b, c, d] = FLOORS[1].lift, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
+      const shaftGeo = new THREE.BoxGeometry(lw, top, ld); geos.add(shaftGeo);
+      const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.18, depthWrite: false }));
+      shaft.position.set(lx, top / 2, lz); frame.add(shaft);
+      var liftCar = box(lw * 0.8, 2.0, ld * 0.8, 0x1d4ed8, lx, 1.4, lz, frame);
+      const sign = tag('PRODUCTION', '', 'blue', 5.5);
+      sign.position.set(BLD.x0 + BLD.w / 2, top + 1.8, BLD.z0 + 2); frame.add(sign); floorTags.push(sign);
     }
+    // Stage areas (provisional until the owner places them): a painted
+    // outline and the stage's name on its floor.
+    STAGE_ZONES.forEach((z, i) => {
+      const r = zoneRect(i), g = floorGroups[r.floor], y = SLAB + 0.015;
+      const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2, w = r.x1 - r.x0, d = r.z1 - r.z0;
+      for (const [bw, bd, x, zz] of [[w, 0.2, cx, r.z0], [w, 0.2, cx, r.z1], [0.2, d, r.x0, cz], [0.2, d, r.x1, cz]]) box(bw, 0.02, bd, 0x2563eb, x, y, zz, g, false);
+      const lab = `${i + 1}  ${BAY_NAMES[i].toUpperCase()}`;
+      const m = decal(lab, Math.min(w - 0.4, lab.length * 0.95), 1.2, '#1e40af', { size: 0.62 });
+      m.rotation.x = -Math.PI / 2; m.position.set(cx, y + 0.01, r.z1 - 0.9); m.renderOrder = 1; g.add(m);
+    });
+    // Which floors show: all (see-through upper slabs) or just one.
+    let floorFocus = null;
+    const setFloorFocus = f => {
+      floorFocus = f;
+      floorGroups.forEach((g, i) => { g.visible = f == null || i === f; });
+      frame.visible = f == null;
+      slabMats.forEach((m, i) => { m.opacity = (f != null || i === 0) ? 1 : 0.62; });
+      for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
+      for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
+    };
     // Ready Stock: racks along the back wall, filled with cartons.
     for (let r = 0; r < 3; r++) {
       const rx = READY.x0 + 5 + r * 9;
@@ -448,14 +564,15 @@
     };
     // A forklift that potters about inside an area between jobs.
     const wanderers = [];
-    const wander = (area, start) => {
+    const wander = (area, start, floor) => {
       const f = forklift();
-      f.position.set(start[0], 0.3, start[1]);
-      wanderers.push({ f, area, target: null, wait: Math.random() * 2, busy: false });
+      f.position.set(start[0], floor == null ? 0.3 : FLOOR_Y[floor] + SLAB, start[1]);
+      wanderers.push({ f, area, floor, target: null, wait: Math.random() * 2, busy: false });
       return wanderers[wanderers.length - 1];
     };
-    wander({ x0: PROD.x0 + 3, x1: PROD.x0 + 22, z0: -6.5, z1: 6.5 }, [PROD.x0 + 10, 7.5]);
-    wander({ x0: PROD.x0 + 24, x1: PROD.x1 - 3, z0: -6.5, z1: 6.5 }, [PROD.x1 - 8, 7.5]);
+    const planArea = (pl, a, b, c, d) => ({ x0: wx(pl, a), z0: wz(pl, b), x1: wx(pl, c), z1: wz(pl, d) });
+    { const h1 = planArea(PLAN_B, 380, 120, 980, 560); wander(h1, [h1.x0 + 4, h1.z1 - 2], 0); }
+    { const h2 = planArea(PLAN_B, 540, 760, 980, 1090); wander(h2, [h2.x0 + 3, h2.z0 + 3], 0); }
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: -8, z1: 5 }, [READY.x0 + 14, 5]);
 
     // ── Trucks ──
@@ -572,11 +689,13 @@
         list.forEach((p, i) => {
           const s = slotFor(place, i);
           p.stag = i % 2;
-          const to = new THREE.Vector3(s.x, 0.3 + s.lift * 1.6, s.z);
+          const to = new THREE.Vector3(s.x, (s.y || 0) + (s.floor == null ? 0.3 : SLAB) + s.lift * 1.6, s.z);
+          p.floor = s.floor;
+          p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
           if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; return; }
           if (p.g.position.distanceTo(to) < 0.01) return;
           const from = p.g.position.clone(), dist = from.distanceTo(to);
-          const arc = (from.x < 4) !== (to.x < 4) || Math.abs(from.z - to.z) > 9 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
+          const arc = (from.x < 4) !== (to.x < 4) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
           p.move = { from, to, t: 0, dur: Math.max(0.9, Math.min(4, dist / 9)), arc, refill: p.pendingFill };
         });
       }
@@ -612,18 +731,23 @@
     };
 
     // ── Camera: drag to turn, wheel / pinch to zoom, right-drag to pan ──
+    // A floor view shows only that floor (floor: index).
+    const BX = BLD.x0 + BLD.w / 2, BZ = BLD.z0 + BLD.d / 2;
     const VIEWS = {
-      overview: { target: [-4, 0, 6], az: 0.3, el: 0.74, dist: 112 },
-      process: { target: [(PROD.x0 + PROD.x1) / 2, 0, -1], az: 0.18, el: 0.78, dist: 68 },
+      overview: { target: [-10, 8, 0], az: 0.32, el: 0.62, dist: 150 },
+      basement: { target: [BX, FLOOR_Y[0], BZ], az: 0.22, el: 1.0, dist: 112, floor: 0 },
+      ground: { target: [BX, FLOOR_Y[1], BZ], az: 0.22, el: 1.0, dist: 112, floor: 1 },
+      first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
       ready: { target: [24, 0, 4], az: 0.42, el: 0.72, dist: 60 },
     };
-    const cam = { target: new THREE.Vector3(-4, 0, 6), az: 0.3, el: 0.74, dist: 112 };
     const want = { target: cam.target.clone(), az: cam.az, el: cam.el, dist: cam.dist };
     // Phones held upright: turn the yard side-on so the row of buildings runs
     // up the screen instead of off both edges.
     const TALL_VIEWS = {
-      overview: { target: [-3, 0, 1], az: 1.25, el: 0.98, dist: 200 },
-      process: { target: [(PROD.x0 + PROD.x1) / 2, 0, -1], az: 1.15, el: 0.9, dist: 100 },
+      overview: { target: [-8, 8, -2], az: 1.25, el: 0.9, dist: 235 },
+      basement: { target: [BX, FLOOR_Y[0], BZ], az: 1.2, el: 1.0, dist: 125, floor: 0 },
+      ground: { target: [BX, FLOOR_Y[1], BZ], az: 1.2, el: 1.0, dist: 125, floor: 1 },
+      first: { target: [BX, FLOOR_Y[2], BZ], az: 1.2, el: 1.0, dist: 125, floor: 2 },
       ready: { target: [23, 0, 6], az: 1.05, el: 0.86, dist: 82 },
     };
     let viewName = 'overview', baseAz = cam.az, lastInput = -1e9, clock = 0;
@@ -636,6 +760,7 @@
       const v = (aspectNow() < 0.9 ? TALL_VIEWS : VIEWS)[name]; viewName = name;
       want.target.set(v.target[0], v.target[1], v.target[2]); want.az = v.az; want.el = v.el; want.dist = fitDist(v.dist); baseAz = v.az;
       if (instant) { cam.target.copy(want.target); cam.az = want.az; cam.el = want.el; cam.dist = want.dist; }
+      setFloorFocus(v.floor == null ? null : v.floor);
       ui.views.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === name));
     };
     const applyCamera = () => {
@@ -650,7 +775,7 @@
     ui.stats = document.createElement('div'); ui.stats.className = 'saa-stats';
     ui.views = document.createElement('div'); ui.views.className = 'saa-views';
     ui.top.append(ui.stats, ui.views);
-    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="process">Production</button><button data-v="ready">Ready Stock</button>';
+    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="ready">Ready Stock</button>';
     ui.bar = document.createElement('div'); ui.bar.className = 'saa-bar';
     ui.msg = document.createElement('div'); ui.msg.className = 'saa-msg'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
     host.append(ui.top, ui.bar, ui.msg);
@@ -699,7 +824,12 @@
       for (const k of [prev, id]) { const p = k != null && pallets.get(k); if (p) setTag(p), placeTag(p); }
       if (id != null) {
         const p = pallets.get(id);
-        if (p) { want.target.copy(p.g.position).setY(0); want.dist = fitDist(34); want.el = 0.8; viewName = 'focus'; ui.views.querySelectorAll('button').forEach(b => b.classList.remove('on')); }
+        // Zoom to the pallet; on a production floor show just that floor.
+        if (p) {
+          want.target.set(p.g.position.x, p.floor == null ? 0 : FLOOR_Y[p.floor], p.g.position.z); want.dist = fitDist(34); want.el = 0.8; viewName = 'focus';
+          setFloorFocus(p.floor == null ? null : p.floor);
+          ui.views.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+        }
       }
       renderBar();
     };
@@ -713,7 +843,8 @@
       const r = el.getBoundingClientRect();
       ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
       ray.setFromCamera(ndc, camera);
-      const hit = ray.intersectObjects(palletRoot.children, true).find(h => h.object.userData.jobId != null || h.object.isSprite);
+      const shown = o => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+      const hit = ray.intersectObjects(palletRoot.children, true).find(h => (h.object.userData.jobId != null || h.object.isSprite) && shown(h.object));
       if (!hit) return null;
       let o = hit.object;
       while (o && o.userData.jobId == null && o.parent && o.parent !== palletRoot) o = o.parent;
@@ -811,8 +942,9 @@
           scaleTag(t); t.position.y = p.top + 0.5 + t.scale.y * (0.5 + (far ? (p.stag || 0) * 1.1 : 0));
         }
       }
-      // Machines and people.
-      for (const m of machines) if (m.userData.flywheel) m.userData.flywheel.rotation.x += dt * 3;
+      // Lift, floor names, people.
+      liftCar.position.y = 1.4 + (FLOOR_Y[2]) * (0.5 - 0.5 * Math.cos(clock * 0.35));
+      for (const t of floorTags) scaleTag(t);
       people.forEach((pp, i) => { if (!pp.parent || pp.parent.type !== 'Scene') return; pp.position.y = 0.3 + Math.abs(Math.sin(clock * 2 + i)) * 0.05; });
       // Forklifts wandering about.
       for (const w of wanderers) {
