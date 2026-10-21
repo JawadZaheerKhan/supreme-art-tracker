@@ -28185,7 +28185,7 @@ function jobForm(j={}, opts) {
         <td colspan="7" style="border-top:2px dashed #16a34a;padding-top:10px;">
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#166534;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">
-              <span style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;font-size:10px;padding:2px 8px;border-radius:8px;">2ND PAPER</span>
+              <span onclick="jobExtraPaperHelp()" title="What is this? - click" style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;font-size:10px;padding:2px 8px;border-radius:8px;cursor:pointer;">2ND PAPER &#9432;</span>
               <span>goes to Pending Stock on CTP forward · offcut can also be issued by Paper Cutting</span>
             </div>
           </div>
@@ -28212,7 +28212,7 @@ function jobForm(j={}, opts) {
               </label>
             </div>
             <div id="third-paper-block" style="flex:1 1 220px;min-width:200px;display:${thirdId ? '' : 'none'};">
-              <span class="jc-lbl" style="color:#166534;"><span style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;font-size:9px;padding:1px 6px;border-radius:8px;margin-right:4px;">3RD PAPER</span>3rd Paper</span>
+              <span class="jc-lbl" style="color:#166534;"><span onclick="jobExtraPaperHelp()" title="What is this? - click" style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;font-size:9px;padding:1px 6px;border-radius:8px;margin-right:4px;cursor:pointer;">3RD PAPER &#9432;</span>3rd Paper</span>
               <div class="combo" id="paper-combo-3" style="position:relative;">
                 <input type="text" id="paper-search-3"
                   placeholder="Search offcut or fresh paper…"
@@ -28227,7 +28227,7 @@ function jobForm(j={}, opts) {
               <div id="stock-hint-3" style="font-size:11px;color:#166534;margin-top:2px;min-height:14px;"></div>
               <div id="third-paper-warning" style="font-size:11px;color:#7f1d1d;margin-top:3px;font-weight:700;min-height:14px;"></div>
             </div>
-            <div style="width:180px;font-size:11px;color:#166534;padding-top:18px;">
+            <div id="extra-paper-help" style="display:none;flex:1 1 100%;font-size:11px;color:#166534;background:rgba(22,163,74,0.10);border:1px dashed rgba(22,163,74,0.55);border-radius:6px;padding:6px 10px;">
               Enter the 2nd / 3rd paper's packets in the <b>Quantity of Packets</b> boxes above (the <b>+</b> fields). Pending job → part of the total; already-issued job → added on top.
             </div>
           </div>
@@ -31552,6 +31552,11 @@ function updateStockHint2() {
   const pStr = Number.isInteger(balPackets) ? String(balPackets) : (+balPackets.toFixed(2)).toString();
   hint.innerHTML = `Available: <b>${pStr} ${unit}</b> <span style="color:#1e40af;">(${balSheets.toLocaleString()} sheets)</span>`;
 }
+// The 2nd / 3rd paper help line - shown on a click of either badge (owner, 2026-10-21).
+function jobExtraPaperHelp() {
+  const el = document.getElementById('extra-paper-help');
+  if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+}
 // ── 3rd paper: toggle, warning, stock hint ──
 function toggleThirdPaper() {
   const cb = document.getElementById('f-use-third-paper');
@@ -33722,6 +33727,14 @@ function buildPrintCard(j) {
   // floor (owner, 2026-10-13). Boxed in black so it prints in mono too.
   const offcutTagPrint = '<span style="display:inline-block;border:1.5px solid #000;border-radius:3px;padding:0 4px;margin-right:4px;font-weight:800;color:#000;letter-spacing:.04em;text-decoration:none;">OFFCUT</span>';
   const offcutPaperPrint = (label) => `${offcutTagPrint}<span style="${offcutStylePrint}">${v(String(label || '').replace(/^OFFCUT\s*·\s*/i, ''))}</span>`;
+  // The 2nd and 3rd paper print in the job card's green (owner, 2026-10-21):
+  // their cells, their text and their packets in the Packets cell.
+  const EXTRA_GREEN = '#166534';
+  const extraCellStyle = 'background:#dcfce7;-webkit-print-color-adjust:exact;print-color-adjust:exact;';
+  const extraPaperPrint = (label, isOff) => isOff
+    ? `${offcutTagPrint}<span style="${offcutStylePrint}color:${EXTRA_GREEN};text-decoration-color:${EXTRA_GREEN};">${v(String(label || '').replace(/^OFFCUT\s*·\s*/i, ''))}</span>`
+    : `<span style="color:${EXTRA_GREEN};">${v(label)}</span>`;
+  const extraPkts = (n, isOff) => `<span style="color:${EXTRA_GREEN};font-weight:800;${isOff ? `text-decoration:underline;text-decoration-color:${EXTRA_GREEN};text-decoration-thickness:2px;text-underline-offset:2px;` : ''}">${n}</span>`;
   const paperCellHtml = (() => {
     const primaryHtml = primaryIsOffcutP ? offcutPaperPrint(paperBrandCombined) : v(paperBrandCombined);
     if (!secondaryPaperLabel) return primaryHtml;
@@ -33753,9 +33766,10 @@ function buildPrintCard(j) {
         : secondaryPaperLabel && !sameCut
           ? ` &middot; ${cutTag(cutMain)} + ${cutTag(cutSec)}${thirdPaperLabel ? ' + ' + cutTag(cutThird) : ''}`
           : ` &middot; ${cutTag(cutMain)}`;
+      const shown = String(topOverlay.packetsDisplay).split(' + ').map((x, i) => i ? extraPkts(x, false) : x).join(' + ');
       return thirdPaperLabel
-        ? `<span style="font-size:0.82em;">${topOverlay.packetsDisplay + tail}</span>`
-        : topOverlay.packetsDisplay + tail;
+        ? `<span style="font-size:0.82em;">${shown + tail}</span>`
+        : shown + tail;
     }
     const totalPkts = parseFloat(p.quantity_of_packets);
     const secPkts   = secRefPrint ? (parseFloat(secRefPrint.packets) || 0) : 0;
@@ -33768,12 +33782,10 @@ function buildPrintCard(j) {
     const primaryPart = primaryIsOffcutP
       ? `<span style="${offcutStylePrint}">${primaryPkts}</span>`
       : String(primaryPkts);
-    const secondaryPart = secondaryIsOffcutP
-      ? `<span style="${offcutStylePrint}">${secPkts}</span>`
-      : String(secPkts);
+    const secondaryPart = extraPkts(secPkts, secondaryIsOffcutP);
     if (thirdPkts > 0) {
       // Three papers: the same layout, a size smaller so all three fit.
-      const thirdPart = thirdIsOffcutP ? `<span style="${offcutStylePrint}">${thirdPkts}</span>` : String(thirdPkts);
+      const thirdPart = extraPkts(thirdPkts, thirdIsOffcutP);
       const three = !p.sheet_cut ? `${primaryPart} + ${secondaryPart} + ${thirdPart}`
         : sameCut
           ? `${primaryPart} + ${secondaryPart} + ${thirdPart} &middot; ${cutTag(cutMain)}`
@@ -34158,18 +34170,19 @@ function buildPrintCard(j) {
           if (!secondaryPaperLabel) {
             return `<td colspan="4"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${primaryOnlyHtml}</div></td>`;
           }
-          const secondaryHtml = secondaryIsOffcutP ? offcutPaperPrint(secondaryPaperLabel) : v(secondaryPaperLabel);
+          const secondaryHtml = extraPaperPrint(secondaryPaperLabel, secondaryIsOffcutP);
+          const extraLabel = (t) => `<div class="pc-label" style="color:${EXTRA_GREEN};font-weight:700;">${t}</div>`;
           if (!thirdPaperLabel) {
             return `
             <td colspan="3"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${primaryOnlyHtml}</div></td>
-            <td colspan="1"><div class="pc-label">2nd Paper</div><div class="pc-value pc-brand">${secondaryHtml}</div></td>
+            <td colspan="1" style="${extraCellStyle}">${extraLabel('2nd Paper')}<div class="pc-value pc-brand">${secondaryHtml}</div></td>
           `;
           }
-          const thirdHtml = thirdIsOffcutP ? offcutPaperPrint(thirdPaperLabel) : v(thirdPaperLabel);
+          const thirdHtml = extraPaperPrint(thirdPaperLabel, thirdIsOffcutP);
           return `
             <td colspan="2"><div class="pc-label">Paper &mdash; Brand</div><div class="pc-value pc-brand">${primaryOnlyHtml}</div></td>
-            <td colspan="1"><div class="pc-label">2nd Paper</div><div class="pc-value pc-brand">${secondaryHtml}</div></td>
-            <td colspan="1"><div class="pc-label">3rd Paper</div><div class="pc-value pc-brand">${thirdHtml}</div></td>
+            <td colspan="1" style="${extraCellStyle}">${extraLabel('2nd Paper')}<div class="pc-value pc-brand">${secondaryHtml}</div></td>
+            <td colspan="1" style="${extraCellStyle}">${extraLabel('3rd Paper')}<div class="pc-value pc-brand">${thirdHtml}</div></td>
           `;
         })()}
       </tr>
