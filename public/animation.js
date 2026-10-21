@@ -101,61 +101,79 @@
   }
 
   // ── Layout (world units ~ metres; +x right, +z toward the camera) ──
-  // The Production building is the owner's real floor plans (2026-10-21),
-  // drawn as three floors stacked with a gap so each one can be seen:
-  // Basement (the basement plan), Ground (the "first floor" evacuation
-  // plan) and 1st floor (the top part of that same plan - rooms, halls and
-  // the ablution row - with the rest left as empty floor). Plan coordinates
-  // are the drawings' pixels; both drawings are fitted to one footprint.
+  // The Production building is the owner's real floor plans (2026-10-21):
+  // the Basement under the ground (in a pit, seen through the cut-away), the
+  // Ground floor at street level - its front part (Production Office, Plate
+  // Making, offices) on the street and its back part (rooms, halls, Breaking
+  // Area) a few steps up - and the 1st floor above. Floors are stacked with a
+  // gap so each can be seen. A floor is one or more parts, each drawn from a
+  // plan in that plan's own pixels; all plans are fitted to one footprint.
   const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
-  const FLOOR_Y = [0, 11, 22];                  // basement, ground, 1st floor
+  const FLOOR_Y = [-11, 0, 11];                 // basement (underground), ground (street), 1st floor
+  const RAISE = 1.2;                            // the ground floor's back part, a few steps up
   const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR'];
-  const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // ground / 1st floor drawing
+  const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // evacuation plan (upper floors)
   const PLAN_B = { px0: 157, py0: 60, sx: 20 * 865 / 900, sz: 20 * 1078 / 1115 };     // basement drawing
+  // The ground floor's real front part (the owner's ground-floor plan),
+  // fitted into the evacuation plan's lower block (x 512-1058, y 822-1272).
+  const PLAN_P = { px0: -391.2, py0: -725.5, sx: 22.1, sz: 22.0 };
   const wx = (pl, px) => BLD.x0 + (px - pl.px0) / pl.sx;
   const wz = (pl, py) => BLD.z0 + (py - pl.py0) / pl.sz;
+  const OUTLINE_G = [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 940], [212, 940], [212, 718], [158, 718]];
+  const LIFT_G = [343, 718, 410, 780];
+  const STAIRS_G = [215, 775, 340, 905];                // stairs core: basement - ground - 1st floor
+  // Rooms, halls, Breaking Area and the hall with the ablution row.
+  const UPPER_WALLS = [
+    [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533], [262, 540, 262, 690],
+    [512, 158, 512, 718], [697, 158, 697, 348], [875, 158, 875, 348], [512, 348, 1058, 348], [512, 530, 875, 530], [875, 348, 875, 718],
+    [512, 630, 600, 718], [600, 718, 1058, 718], [975, 718, 975, 760], [1013, 718, 1013, 760], [512, 822, 1058, 822], [512, 718, 512, 822],
+    [158, 718, 343, 718], [410, 718, 512, 718]];
+  const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
+    ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
+    ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
   const FLOORS = [
-    { plan: PLAN_B,
+    { parts: [{ plan: PLAN_B,
       outline: [[157, 60], [1022, 60], [1022, 1138], [500, 1138], [500, 815], [207, 815], [207, 600], [157, 600]],
       // The Machine Area is open to Hall-01 (no wall along its top) and the
       // lift's hall side is its doors (owner, 2026-10-21).
       walls: [[330, 597, 330, 815], [400, 597, 400, 710], [400, 710, 500, 710], [500, 710, 500, 815], [330, 668, 400, 668]],
-      ramp: [403, 600, 497, 708],                // hand-lifter ramp up to the ground floor's open-below
-      liftDoor: 'up',
+      ramp: [403, 600, 497, 708],                // hand-lifter ramp up to the ground floor's loading area
       dashed: [[500, 703, 1022, 703]],
       columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600], [677, 707], [849, 707], [677, 815], [849, 815], [677, 922], [849, 922], [677, 1030], [849, 1030]],
       // [plan rect, reversed?] - Hall-02's front stairs climb toward the left.
       stairs: [[215, 620, 270, 810], [530, 1085, 670, 1135, 1], [1025, 258, 1055, 410]],
       lift: [333, 597, 397, 665],
-      labels: [['HALL-01', 585, 320, 1.4], ['HALL-02', 755, 870, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] },
-    { plan: PLAN_G,
-      outline: [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 940], [212, 940], [212, 718], [158, 718]],
-      walls: [
-        [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533], [262, 540, 262, 690],
-        [512, 158, 512, 718], [697, 158, 697, 348], [875, 158, 875, 348], [512, 348, 1058, 348], [512, 530, 875, 530], [875, 348, 875, 718],
-        [512, 630, 600, 718], [600, 718, 1058, 718], [975, 718, 975, 760], [1013, 718, 1013, 760], [512, 822, 1058, 822],
-        [212, 718, 343, 718], [410, 718, 512, 718], [412, 780, 412, 940], [512, 718, 512, 940],
-        [560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
-        [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
-      stairs: [[215, 775, 340, 905], [517, 1165, 640, 1265]],
-      lift: [343, 718, 410, 780],
-      terrace: [668, 1272, 902, 1345],
-      labels: [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
-        ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
-        ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['ABLUTION AREA', 945, 790, 0.7],
-        ['DINING ROOM', 750, 880, 0.9], ['DIRECTOR OFFICE', 605, 995, 0.7], ['FINANCE SECTION', 785, 1010, 0.7], ['WASHROOMS', 985, 995, 0.7],
-        ['LOBBY', 605, 1120, 0.9], ['CORRIDOR', 785, 1125, 0.7], ['DIRECTOR OFFICE', 785, 1215, 0.7], ['DESIGN SECTION', 985, 1160, 0.7], ['TERRACE', 785, 1308, 0.7]] },
+      labels: [['HALL-01', 585, 320, 1.4], ['HALL-02', 755, 870, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] }] },
+    { parts: [
+      // Back part, a few steps up: rooms, halls, Breaking Area, ablution hall.
+      { plan: PLAN_G, raise: RAISE, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
+        walls: UPPER_WALLS, labels: UPPER_LABELS },
+      // Stairs + lift core; the open area behind the lift is the loading
+      // area, with its roller-shutter gate on the outside wall.
+      { plan: PLAN_G, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
+        walls: [[412, 780, 412, 940], [212, 940, 420, 940], [505, 940, 512, 940]],
+        stairs: [STAIRS_G], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940] },
+      // Front part on the street (the owner's ground-floor plan).
+      { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
+        walls: [
+          [135, 5, 135, 125], [135, 125, 150, 125], [185, 125, 205, 125], [205, 125, 205, 250], [5, 250, 205, 250],
+          [200, 250, 200, 378], [5, 378, 200, 378],
+          [205, 245, 270, 245], [330, 245, 392, 245],
+          [392, 125, 603, 125], [392, 125, 392, 500], [392, 248, 603, 248], [392, 375, 550, 375], [545, 400, 545, 500],
+          [0, 500, 270, 500], [330, 500, 603, 500]],
+        // A few steps up to the back part beside the Production Office; the
+        // main staircase off the Entrance Lobby.
+        stairs: [[140, 8, 195, 48, 1, RAISE, 'z'], [25, 435, 170, 495]],
+        labels: [['PRODUCTION OFFICE', 95, 175, 0.75], ['LOBBY', 300, 110, 1.0], ['PLATE MAKING', 485, 65, 0.85], ['SCANNING ROOM', 495, 185, 0.75],
+          ['STORE ROOM', 100, 315, 0.85], ['ENTRANCE LOBBY', 297, 340, 0.85], ['ACCOUNT OFFICE', 475, 310, 0.7], ['DIRECTOR', 470, 445, 0.75], ['BATH', 572, 478, 0.6]] },
+    ] },
+    // 1st floor: the rooms / halls / ablution row and the stairs + lift core;
+    // the area over the ground floor's front part stays as empty floor, and
+    // the loading area below is open (no floor over it).
+    { parts: [{ plan: PLAN_G,
+      outline: [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
+      walls: UPPER_WALLS, stairs: [STAIRS_G], lift: LIFT_G, labels: UPPER_LABELS }] },
   ];
-  // 1st floor: the same drawing, keeping only the rooms / halls / ablution
-  // row (everything above y=822) and the stairs + lift corner; the dining,
-  // finance, offices etc. part stays as empty floor inside the outer walls.
-  const keepUpper = (x1, y1, x2, y2) => Math.max(y1, y2) <= 822 || Math.max(x1, x2) <= 512;
-  FLOORS.push({
-    plan: PLAN_G, outline: FLOORS[1].outline,
-    walls: FLOORS[1].walls.filter(w => keepUpper(w[0], w[1], w[2], w[3])),
-    stairs: [FLOORS[1].stairs[0]], lift: FLOORS[1].lift,
-    labels: FLOORS[1].labels.filter(l => l[2] <= 822 || l[1] <= 512),
-  });
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
   // 7 printing presses (red) and 7 die-cutting + embellishment machines
   // (green) - 5 small platens along the left, 2 big ones by the back wall.
@@ -191,14 +209,14 @@
   // their machines; the rest use a plan rectangle - PROVISIONAL until the
   // owner places those stages too.
   const STAGE_ZONES = [
-    { floor: 1, r: [360, 180, 500, 520] },      // CTP            - ground floor, left hall
-    { floor: 0, machines: true },               // Printing       - beside the 7 presses
-    { floor: 0, r: [870, 100, 1000, 560] },     // Coatings       - basement, Hall-01 right strip
-    { floor: 0, machines: true },               // Die Cutting    - beside the 7 die cutters
-    { floor: 2, r: [530, 365, 860, 520] },      // Sorting        - 1st floor, middle hall
-    { floor: 2, r: [890, 365, 1040, 700] },     // Pasting        - 1st floor, right hall
+    { floor: 1, plan: PLAN_P, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
+    { floor: 0, machines: true },                          // Printing    - beside the 7 presses
+    { floor: 0, plan: PLAN_B, r: [870, 100, 1000, 560] },  // Coatings    - basement, Hall-01 right strip
+    { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
+    { floor: 2, plan: PLAN_G, r: [530, 365, 860, 520] },   // Sorting     - 1st floor, middle hall
+    { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
   ];
-  const zoneRect = i => { const z = STAGE_ZONES[i], pl = FLOORS[z.floor].plan; return { floor: z.floor, x0: wx(pl, z.r[0]), z0: wz(pl, z.r[1]), x1: wx(pl, z.r[2]), z1: wz(pl, z.r[3]) }; };
+  const zoneRect = i => { const z = STAGE_ZONES[i], pl = z.plan; return { floor: z.floor, raise: z.raise || 0, x0: wx(pl, z.r[0]), z0: wz(pl, z.r[1]), x1: wx(pl, z.r[2]), z1: wz(pl, z.r[3]) }; };
   const READY = { x0: 8, x1: 36, z0: -14, z1: 8 };
   const DOCKS = [14, 22, 30];
   const DOCK_Z = READY.z1 + 4.85;          // truck centre when backed onto the dock
@@ -227,7 +245,7 @@
     const r = zoneRect(place);
     const cols = Math.max(1, Math.floor((r.x1 - r.x0 - 0.6) / 3.3)), rows = Math.max(1, Math.floor((r.z1 - r.z0 - 0.6) / 3.0));
     const per = cols * rows, i = k % per;
-    return { x: r.x0 + 1.9 + (i % cols) * 3.3, z: r.z0 + 1.8 + Math.floor(i / cols) * 3.0, lift: Math.floor(k / per), y: FLOOR_Y[r.floor], floor: r.floor };
+    return { x: r.x0 + 1.9 + (i % cols) * 3.3, z: r.z0 + 1.8 + Math.floor(i / cols) * 3.0, lift: Math.floor(k / per), y: FLOOR_Y[r.floor] + r.raise, floor: r.floor };
   }
 
   // ── Styles for the overlay (scoped to .saa-*) ──────────────────────
@@ -303,7 +321,7 @@
     scene.background = new THREE.Color(0xeef3f8);
     scene.fog = new THREE.Fog(0xeef3f8, 190, 360);
     const camera = new THREE.PerspectiveCamera(32, 1, 1, 800);
-    const cam = { target: new THREE.Vector3(-10, 8, 0), az: 0.32, el: 0.62, dist: 150 };
+    const cam = { target: new THREE.Vector3(-10, 1, 0), az: 0.32, el: 0.62, dist: 150 };
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
     const sun = new THREE.DirectionalLight(0xffffff, 2.3);
@@ -403,10 +421,24 @@
     const disposeSprite = s => { if (!s) return; if (s.material.map) { s.material.map.dispose(); const i = textures.indexOf(s.material.map); if (i >= 0) textures.splice(i, 1); } s.material.dispose(); s.parent && s.parent.remove(s); };
 
     // ── Ground, yard, road, fence, trees ──
-    const groundGeo = new THREE.PlaneGeometry(900, 900); geos.add(groundGeo);
+    // Street level, with a pit in the basement's shape: the ground and the
+    // yard have that hole, and see-through earth walls line it, so the
+    // basement reads as underground but stays visible.
+    const pitPts = FLOORS[0].parts[0].outline.map(([px, py]) => [wx(PLAN_B, px), wz(PLAN_B, py)]);
+    const holePath = () => new THREE.Path(pitPts.map(([x, z]) => new THREE.Vector2(x, -z)));
+    const flatShape = (x0, z0, x1, z1) => { const sh = new THREE.Shape([new THREE.Vector2(x0, -z0), new THREE.Vector2(x1, -z0), new THREE.Vector2(x1, -z1), new THREE.Vector2(x0, -z1)]); sh.holes.push(holePath()); return sh; };
+    const groundGeo = new THREE.ShapeGeometry(flatShape(-450, -450, 450, 450)); geos.add(groundGeo);
     const ground = new THREE.Mesh(groundGeo, mat(0xe9eef4));
     ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
-    const yard = box(112, 0.12, 72, 0xf8fafc, -4, 0.06, -2, scene, false); yard.castShadow = false;
+    const yardGeo = new THREE.ExtrudeGeometry(flatShape(-60, -38, 52, 34), { depth: 0.12, bevelEnabled: false }); geos.add(yardGeo);
+    const yard = new THREE.Mesh(yardGeo, mat(0xf8fafc)); yard.rotation.x = -Math.PI / 2; yard.receiveShadow = true; scene.add(yard);
+    const earthMat = new THREE.MeshStandardMaterial({ color: 0x8d6e4c, roughness: 1, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide });
+    pitPts.forEach(([x1, z1], k) => {
+      const [x2, z2] = pitPts[(k + 1) % pitPts.length], len = Math.hypot(x2 - x1, z2 - z1);
+      const eg2 = new THREE.BoxGeometry(len, -FLOOR_Y[0], 0.3); geos.add(eg2);
+      const wall = new THREE.Mesh(eg2, earthMat); wall.position.set((x1 + x2) / 2, FLOOR_Y[0] / 2, (z1 + z2) / 2); wall.rotation.y = -Math.atan2(z2 - z1, x2 - x1); scene.add(wall);
+      box(len, 0.25, 0.5, 0x6b5b4a, (x1 + x2) / 2, 0.06, (z1 + z2) / 2, scene, false).rotation.y = -Math.atan2(z2 - z1, x2 - x1);   // the pit's rim
+    });
     box(320, 0.14, 11, 0xb6c2d1, 40, 0.07, ROAD_Z, scene, false);
     for (let x = -110; x <= 190; x += 7) box(3.2, 0.02, 0.28, 0xffffff, x, 0.15, ROAD_Z, scene, false);
     box(320, 0.18, 1.4, 0xdfe5ec, 40, 0.09, ROAD_Z - 6.2, scene, false);
@@ -498,68 +530,88 @@
     const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
-      const pl = F.plan, X = px => wx(pl, px), Z = py => wz(pl, py);
-      // Floor slab in the building's own shape (upper slabs see-through in the overview).
-      const shape = new THREE.Shape(F.outline.map(([px, py]) => new THREE.Vector2(X(px), -Z(py))));
-      const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB, bevelEnabled: false }); geos.add(sg);
+      // One slab material per floor (upper floors see-through in the overview).
       const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe2e8f0 : 0xf1f5f9, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });
       slabMats.push(sm);
-      const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.receiveShadow = true; g.add(slab);
-      const eg = new THREE.EdgesGeometry(sg); geos.add(eg);
-      const edges = new THREE.LineSegments(eg, edgeMat); edges.rotation.x = -Math.PI / 2; g.add(edges);
-      // Outer walls (blue) and room walls (light blue), low so you see in.
-      F.outline.forEach(([px, py], k) => { const [qx, qy] = F.outline[(k + 1) % F.outline.length]; wallSeg(X(px), Z(py), X(qx), Z(qy), 2.4, BRAND, 0.35, g); });
-      for (const [a, b, c, d] of F.walls) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, g);
-      for (const [a, b, c, d] of F.dashed || []) {
-        const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
-        for (let k = 0; k < n; k += 2) { const t0 = k / n, t1 = (k + 1) / n; box(Math.abs(X(c) - X(a)) * (t1 - t0) + 0.15, 0.02, Math.abs(Z(d) - Z(b)) * (t1 - t0) + 0.15, 0x94a3b8, X(a) + (X(c) - X(a)) * (t0 + t1) / 2, SLAB + 0.01, Z(b) + (Z(d) - Z(b)) * (t0 + t1) / 2, g, false); }
-      }
-      for (const [px, py] of F.columns || []) box(0.6, 2.4, 0.6, 0x64748b, X(px), SLAB + 1.2, Z(py), g);
-      // Stairs: steps rising along the long side (reversed ones the other way).
-      for (const [a, b, c, d, rev] of F.stairs || []) {
-        const x0 = X(a), x1 = X(c), z0 = Z(b), z1 = Z(d), alongX = (x1 - x0) > (z1 - z0), n = 9;
-        for (let k = 0; k < n; k++) {
-          const h = 0.25 * ((rev ? n - k - 1 : k) + 1);
-          if (alongX) box((x1 - x0) / n, h, z1 - z0, 0xcbd5e1, x0 + (x1 - x0) * (k + 0.5) / n, SLAB + h / 2, (z0 + z1) / 2, g);
-          else box(x1 - x0, h, (z1 - z0) / n, 0xcbd5e1, (x0 + x1) / 2, SLAB + h / 2, z0 + (z1 - z0) * (k + 0.5) / n, g);
-        }
-      }
-      // Hand-lifter ramp: a wedge climbing toward the front, yellow edges.
-      if (F.ramp) {
-        const [a, b, c, d] = F.ramp, D = Z(d) - Z(b), W = X(c) - X(a), H = 2.2;
-        const shape = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(D, H)]);
-        const rg = new THREE.ExtrudeGeometry(shape, { depth: W, bevelEnabled: false }); geos.add(rg);
-        const ramp = new THREE.Mesh(rg, mat(0x9ca3af)); ramp.rotation.y = -Math.PI / 2; ramp.position.set(X(c), SLAB, Z(b));
-        ramp.castShadow = true; ramp.receiveShadow = true; g.add(ramp);
-        const len = Math.hypot(D, H), tilt = Math.atan2(H, D);
-        for (const ex of [X(a) + 0.12, X(c) - 0.12]) {
-          const edge = box(0.2, 0.06, len, 0xfacc15, ex, SLAB + H / 2 + 0.04, Z(b) + D / 2, g, false); edge.rotation.x = -tilt;
-        }
-        const lab = decal('RAMP  ↑', 4, 1.0, '#b45309', { size: 0.6 });
-        lab.rotation.x = -Math.PI / 2; lab.position.set((X(a) + X(c)) / 2, SLAB + 0.02, Z(b) - 0.9); lab.renderOrder = 1; g.add(lab);
-      }
-      // Lift on every floor: silver car with doors that slide open and shut.
-      if (F.lift) {
-        const [a, b, c, d] = F.lift, lx0 = X(a), lx1 = X(c), lz0 = Z(b), lz1 = Z(d), lw = lx1 - lx0, ld = lz1 - lz0, H = 2.5, cx = (lx0 + lx1) / 2;
-        wallSeg(lx0, lz0, lx0, lz1, H, 0xcbd5e1, 0.15, g); wallSeg(lx1, lz0, lx1, lz1, H, 0xcbd5e1, 0.15, g); wallSeg(lx0, lz1, lx1, lz1, H, 0xcbd5e1, 0.15, g);
-        box(lw + 0.15, 0.15, ld + 0.15, 0x9ca3af, cx, SLAB + H + 0.07, (lz0 + lz1) / 2, g);
-        box(lw, 0.3, 0.18, 0x6b7280, cx, SLAB + H - 0.15, lz0, g);                   // door head with the floor display
-        const disp = box(0.5, 0.18, 0.04, 0x111827, cx, SLAB + H - 0.15, lz0 - 0.1, g, false); disp.material = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-        const doors = [-1, 1].map(s => box(lw / 2 - 0.05, H - 0.35, 0.08, 0x9ca3af, cx + s * lw / 4, SLAB + (H - 0.3) / 2, lz0, g));
-        const fi0 = fi;
-        liftAnims.push(t => {                                                      // open ~3 s of every 9, a floor apart
-          const u = ((t + fi0 * 3) % 9) / 9, open = u < 0.1 ? u / 0.1 : u < 0.4 ? 1 : u < 0.5 ? 1 - (u - 0.4) / 0.1 : 0;
-          doors.forEach((dr, k) => { dr.position.x = cx + (k ? 1 : -1) * (lw / 4 + open * lw * 0.22); });
+      for (const P of F.parts) {
+        const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise; g.add(pg);
+        const pl = P.plan, X = px => wx(pl, px), Z = py => wz(pl, py);
+        // Slab in the part's own shape; a raised part is a solid step up.
+        const shape = new THREE.Shape(P.outline.map(([px, py]) => new THREE.Vector2(X(px), -Z(py))));
+        const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB + raise, bevelEnabled: false }); geos.add(sg);
+        const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.position.y = -raise; slab.receiveShadow = true; pg.add(slab);
+        const eg = new THREE.EdgesGeometry(sg); geos.add(eg);
+        const edges = new THREE.LineSegments(eg, edgeMat); edges.rotation.x = -Math.PI / 2; edges.position.y = -raise; pg.add(edges);
+        // Outer walls (on the part's outside edges) and room walls, low so you see in.
+        P.outline.forEach(([px, py], k) => {
+          if (P.ext && !P.ext.includes(k)) return;
+          const [qx, qy] = P.outline[(k + 1) % P.outline.length];
+          wallSeg(X(px), Z(py), X(qx), Z(qy), 2.4, BRAND, 0.35, pg);
         });
-      }
-      if (F.terrace) {
-        const [a, b, c, d] = F.terrace;
-        box(X(c) - X(a), 0.2, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, 0.1, (Z(b) + Z(d)) / 2, g);
-        wallSeg(X(a), Z(d), X(c), Z(d), 0.9, BRAND_LIGHT, 0.15, g); wallSeg(X(a), Z(b), X(a), Z(d), 0.9, BRAND_LIGHT, 0.15, g); wallSeg(X(c), Z(b), X(c), Z(d), 0.9, BRAND_LIGHT, 0.15, g);
-      }
-      for (const [text, px, py, s] of F.labels || []) {
-        const m = decal(text, Math.max(3, text.length * s * 0.78), s * 1.3, '#64748b', { size: 0.6, weight: 700 });
-        m.rotation.x = -Math.PI / 2; m.position.set(X(px), SLAB + 0.02, Z(py)); m.renderOrder = 1; g.add(m);
+        for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, pg);
+        for (const [a, b, c, d] of P.dashed || []) {
+          const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
+          for (let k = 0; k < n; k += 2) { const t0 = k / n, t1 = (k + 1) / n; box(Math.abs(X(c) - X(a)) * (t1 - t0) + 0.15, 0.02, Math.abs(Z(d) - Z(b)) * (t1 - t0) + 0.15, 0x94a3b8, X(a) + (X(c) - X(a)) * (t0 + t1) / 2, SLAB + 0.01, Z(b) + (Z(d) - Z(b)) * (t0 + t1) / 2, pg, false); }
+        }
+        for (const [px, py] of P.columns || []) box(0.6, 2.4, 0.6, 0x64748b, X(px), SLAB + 1.2, Z(py), pg);
+        // Stairs [rect, reversed?, top height, 'x' | 'z']: steps rising along
+        // the long side (or the given axis), reversed ones the other way.
+        for (const [a, b, c, d, rev, top, axis] of P.stairs || []) {
+          const x0 = X(a), x1 = X(c), z0 = Z(b), z1 = Z(d), alongX = axis ? axis === 'x' : (x1 - x0) > (z1 - z0), n = 9;
+          for (let k = 0; k < n; k++) {
+            const h = (top || 2.25) * ((rev ? n - k - 1 : k) + 1) / n;
+            if (alongX) box((x1 - x0) / n, h, z1 - z0, 0xcbd5e1, x0 + (x1 - x0) * (k + 0.5) / n, SLAB + h / 2, (z0 + z1) / 2, pg);
+            else box(x1 - x0, h, (z1 - z0) / n, 0xcbd5e1, (x0 + x1) / 2, SLAB + h / 2, z0 + (z1 - z0) * (k + 0.5) / n, pg);
+          }
+        }
+        // Hand-lifter ramp: a wedge climbing toward the front, yellow edges.
+        if (P.ramp) {
+          const [a, b, c, d] = P.ramp, D = Z(d) - Z(b), W = X(c) - X(a), H = 2.2;
+          const rshape = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(D, H)]);
+          const rg = new THREE.ExtrudeGeometry(rshape, { depth: W, bevelEnabled: false }); geos.add(rg);
+          const ramp = new THREE.Mesh(rg, mat(0x9ca3af)); ramp.rotation.y = -Math.PI / 2; ramp.position.set(X(c), SLAB, Z(b));
+          ramp.castShadow = true; ramp.receiveShadow = true; pg.add(ramp);
+          const len = Math.hypot(D, H), tilt = Math.atan2(H, D);
+          for (const ex of [X(a) + 0.12, X(c) - 0.12]) {
+            const edge = box(0.2, 0.06, len, 0xfacc15, ex, SLAB + H / 2 + 0.04, Z(b) + D / 2, pg, false); edge.rotation.x = -tilt;
+          }
+          const lab = decal('RAMP  ↑', 4, 1.0, '#b45309', { size: 0.6 });
+          lab.rotation.x = -Math.PI / 2; lab.position.set((X(a) + X(c)) / 2, SLAB + 0.02, Z(b) - 0.9); lab.renderOrder = 1; pg.add(lab);
+        }
+        // Loading area (yellow-striped bay) and its roller-shutter gate.
+        if (P.loading) {
+          const [a, b, c, d] = P.loading, x0 = X(a), x1 = X(c), z0 = Z(b), z1 = Z(d), cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+          for (const [w, dd, x, z] of [[x1 - x0, 0.18, cx, z0], [x1 - x0, 0.18, cx, z1], [0.18, z1 - z0, x0, cz], [0.18, z1 - z0, x1, cz]]) box(w, 0.02, dd, 0xfacc15, x, SLAB + 0.01, z, pg, false);
+          for (let k = 1; k < 6; k++) { const s = box(0.14, 0.02, (x1 - x0) * 0.9, 0xfacc15, cx, SLAB + 0.012, z0 + (z1 - z0) * k / 6, pg, false); s.rotation.y = Math.PI / 4; s.scale.z = 0.5; }
+          const lab = decal('LOADING AREA', 4.4, 0.9, '#b45309', { size: 0.6 });
+          lab.rotation.x = -Math.PI / 2; lab.rotation.z = Math.PI / 2; lab.position.set(cx, SLAB + 0.03, cz); lab.renderOrder = 1; pg.add(lab);
+        }
+        if (P.gate) {
+          const [a, c, y] = P.gate, x0 = X(a), x1 = X(c), z = Z(y);
+          box(0.3, 2.4, 0.4, 0x6b7280, x0, SLAB + 1.2, z, pg); box(0.3, 2.4, 0.4, 0x6b7280, x1, SLAB + 1.2, z, pg);
+          box(x1 - x0 + 0.3, 0.45, 0.45, 0x4b5563, (x0 + x1) / 2, SLAB + 2.3, z, pg);          // shutter box
+          const sh = box(x1 - x0, 0.9, 0.08, 0x9ca3af, (x0 + x1) / 2, SLAB + 1.65, z, pg);       // half-open roller shutter
+          for (let k = 0; k < 5; k++) box(x1 - x0, 0.03, 0.1, 0x6b7280, (x0 + x1) / 2, SLAB + 1.25 + k * 0.18, z, pg, false);
+          sh.castShadow = true;
+        }
+        // Lift: silver car with doors that slide open and shut.
+        if (P.lift) {
+          const [a, b, c, d] = P.lift, lx0 = X(a), lx1 = X(c), lz0 = Z(b), lz1 = Z(d), lw = lx1 - lx0, ld = lz1 - lz0, H = 2.5, cx = (lx0 + lx1) / 2;
+          wallSeg(lx0, lz0, lx0, lz1, H, 0xcbd5e1, 0.15, pg); wallSeg(lx1, lz0, lx1, lz1, H, 0xcbd5e1, 0.15, pg); wallSeg(lx0, lz1, lx1, lz1, H, 0xcbd5e1, 0.15, pg);
+          box(lw + 0.15, 0.15, ld + 0.15, 0x9ca3af, cx, SLAB + H + 0.07, (lz0 + lz1) / 2, pg);
+          box(lw, 0.3, 0.18, 0x6b7280, cx, SLAB + H - 0.15, lz0, pg);                   // door head with the floor display
+          const disp = box(0.5, 0.18, 0.04, 0x111827, cx, SLAB + H - 0.15, lz0 - 0.1, pg, false); disp.material = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+          const doors = [-1, 1].map(s => box(lw / 2 - 0.05, H - 0.35, 0.08, 0x9ca3af, cx + s * lw / 4, SLAB + (H - 0.3) / 2, lz0, pg));
+          const fi0 = fi;
+          liftAnims.push(t => {                                                      // open ~3 s of every 9, a floor apart
+            const u = ((t + fi0 * 3) % 9) / 9, open = u < 0.1 ? u / 0.1 : u < 0.4 ? 1 : u < 0.5 ? 1 - (u - 0.4) / 0.1 : 0;
+            doors.forEach((dr, k) => { dr.position.x = cx + (k ? 1 : -1) * (lw / 4 + open * lw * 0.22); });
+          });
+        }
+        for (const [text, px, py, s] of P.labels || []) {
+          const m = decal(text, Math.max(3, text.length * s * 0.78), s * 1.3, '#64748b', { size: 0.6, weight: 700 });
+          m.rotation.x = -Math.PI / 2; m.position.set(X(px), SLAB + 0.02, Z(py)); m.renderOrder = 1; pg.add(m);
+        }
       }
       const ft = tag(FLOOR_NAMES[fi], '', 'brand', 3.4);
       ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 18); g.add(ft); floorTags.push(ft);
@@ -568,13 +620,13 @@
     // shaft with its car going up and down, and the name on top.
     const frame = new THREE.Group(); scene.add(frame);
     {
-      const pl = PLAN_G, top = FLOOR_Y[2] + 2.8;
-      for (const [px, py] of FLOORS[1].outline) cyl(0.14, 0.14, top, BRAND_DARK, wx(pl, px), top / 2, wz(pl, py), frame, 8);
-      const [a, b, c, d] = FLOORS[1].lift, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
-      const shaftGeo = new THREE.BoxGeometry(lw, top, ld); geos.add(shaftGeo);
+      const pl = PLAN_G, bot = FLOOR_Y[0], top = FLOOR_Y[2] + 2.8, hgt = top - bot;
+      for (const [px, py] of OUTLINE_G) cyl(0.14, 0.14, hgt, BRAND_DARK, wx(pl, px), bot + hgt / 2, wz(pl, py), frame, 8);
+      const [a, b, c, d] = LIFT_G, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
+      const shaftGeo = new THREE.BoxGeometry(lw, hgt, ld); geos.add(shaftGeo);
       const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: BRAND_LIGHT, transparent: true, opacity: 0.18, depthWrite: false }));
-      shaft.position.set(lx, top / 2, lz); frame.add(shaft);
-      var liftCar = box(lw * 0.8, 2.0, ld * 0.8, BRAND_DARK, lx, 1.4, lz, frame);
+      shaft.position.set(lx, bot + hgt / 2, lz); frame.add(shaft);
+      var liftCar = box(lw * 0.8, 2.0, ld * 0.8, BRAND_DARK, lx, bot + 1.4, lz, frame);
       const sign = tag('PRODUCTION', '', 'brand', 5.5);
       sign.position.set(BLD.x0 + BLD.w / 2, top + 1.8, BLD.z0 + 2); frame.add(sign); floorTags.push(sign);
     }
@@ -582,7 +634,7 @@
     // outline and the stage's name on its floor.
     STAGE_ZONES.forEach((z, i) => {
       if (!z.r) return;
-      const r = zoneRect(i), g = floorGroups[r.floor], y = SLAB + 0.015;
+      const r = zoneRect(i), g = floorGroups[r.floor], y = SLAB + r.raise + 0.015;
       const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2, w = r.x1 - r.x0, d = r.z1 - r.z0;
       for (const [bw, bd, x, zz] of [[w, 0.2, cx, r.z0], [w, 0.2, cx, r.z1], [0.2, d, r.x0, cz], [0.2, d, r.x1, cz]]) box(bw, 0.02, bd, BRAND, x, y, zz, g, false);
       const lab = `${i + 1}  ${BAY_NAMES[i].toUpperCase()}`;
@@ -743,9 +795,9 @@
     };
     // A forklift that potters about inside an area between jobs.
     const wanderers = [];
-    const wander = (area, start, floor, model) => {
+    const wander = (area, start, floor, model, raise) => {
       const f = model || forklift();
-      f.position.set(start[0], floor == null ? 0.3 : FLOOR_Y[floor] + SLAB, start[1]);
+      f.position.set(start[0], floor == null ? 0.3 : FLOOR_Y[floor] + SLAB + (raise || 0), start[1]);
       wanderers.push({ f, area, floor, target: null, wait: Math.random() * 2, busy: false });
       return wanderers[wanderers.length - 1];
     };
@@ -766,14 +818,15 @@
       scene.add(g);
       return g;
     };
-    const LIFTER_AISLES = [
-      [PLAN_B, 0, [[420, 270, 610, 560], [520, 600, 1000, 690], [740, 740, 830, 1100]]],
-      [PLAN_G, 1, [[360, 180, 500, 700], [530, 370, 860, 520], [540, 730, 1040, 810]]],
-      [PLAN_G, 2, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
+    const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
+      [PLAN_B, 0, 0, [[420, 270, 610, 560], [520, 600, 1000, 690], [740, 740, 830, 1100]]],
+      [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 520]]],
+      [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
+      [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
     ];
-    LIFTER_AISLES.forEach(([pl, floor, areas]) => areas.forEach((r, k) => {
+    LIFTER_AISLES.forEach(([pl, floor, raise, areas]) => areas.forEach((r, k) => {
       const a = planArea(pl, r[0], r[1], r[2], r[3]);
-      const w = wander(a, [(a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2], floor, handLifter((k + floor) % 2 === 0));
+      const w = wander(a, [(a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2], floor, handLifter((k + floor) % 2 === 0), raise);
       w.speed = 1.7;
     }));
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: -8, z1: 5 }, [READY.x0 + 14, 5]);
@@ -937,7 +990,7 @@
     // A floor view shows only that floor (floor: index).
     const BX = BLD.x0 + BLD.w / 2, BZ = BLD.z0 + BLD.d / 2;
     const VIEWS = {
-      overview: { target: [-10, 8, 0], az: 0.32, el: 0.62, dist: 150 },
+      overview: { target: [-10, 1, 0], az: 0.32, el: 0.62, dist: 150 },
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 0.22, el: 1.0, dist: 112, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 0.22, el: 1.0, dist: 112, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
@@ -947,7 +1000,7 @@
     // Phones held upright: turn the yard side-on so the row of buildings runs
     // up the screen instead of off both edges.
     const TALL_VIEWS = {
-      overview: { target: [-8, 8, -2], az: 1.25, el: 0.9, dist: 235 },
+      overview: { target: [-8, 1, -2], az: 1.25, el: 0.9, dist: 235 },
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 1.2, el: 1.0, dist: 125, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 1.2, el: 1.0, dist: 125, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 1.2, el: 1.0, dist: 125, floor: 2 },
@@ -1146,7 +1199,7 @@
         }
       }
       // Lift, floor names, people.
-      liftCar.position.y = 1.4 + (FLOOR_Y[2]) * (0.5 - 0.5 * Math.cos(clock * 0.35));
+      liftCar.position.y = FLOOR_Y[0] + 1.4 + (FLOOR_Y[2] - FLOOR_Y[0]) * (0.5 - 0.5 * Math.cos(clock * 0.3));
       if (floorGroups[0].visible) for (const f of animated) f(dt, clock);
       for (const f of liftAnims) f(clock);
       for (const t of floorTags) scaleTag(t);
@@ -1311,5 +1364,5 @@
     return ctl;
   }
 
-  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked } };
+  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P } };
 })();
