@@ -175,7 +175,7 @@
         holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
-      { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
+      { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3], glass: [2], entrance: [2, 270, 330],
         walls: [
           [135, 5, 135, 125], [135, 125, 150, 125], [185, 125, 205, 125], [205, 125, 205, 250], [5, 250, 205, 250],
           [200, 250, 200, 378], [5, 378, 200, 378],
@@ -304,11 +304,17 @@
     { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
   ];
   const zoneRect = i => { const z = STAGE_ZONES[i], pl = z.plan; return { floor: z.floor, raise: z.raise || 0, x0: wx(pl, z.r[0]), z0: wz(pl, z.r[1]), x1: wx(pl, z.r[2]), z1: wz(pl, z.r[3]) }; };
-  const READY = { x0: 8, x1: 36, z0: -14, z1: 8 };
-  const DOCKS = [14, 22, 30];
+  // Site (owner, 2026-10-22): the Ready Stock warehouse stands left of the
+  // building; the yard runs out in front to the road - an L, left empty but
+  // for the car park under a red tent - with the gate at its left end.
+  const SITE = { x0: -94, x1: 14, z0: -40, z1: 60 };
+  const READY = { x0: -88, x1: -60, z0: -34, z1: -12 };
+  const DOCKS = [-82, -74, -66];
   const DOCK_Z = READY.z1 + 4.85;          // truck centre when backed onto the dock
-  const GATE = { x0: 39, x1: 48, z: 34 };
-  const ROAD_Z = 42;
+  const GATE = { x0: -50, x1: -40, z: SITE.z1 };
+  const ROAD_Z = 70;
+  const CAR_PARK = { x0: -6, x1: 11, z0: 36, z1: 56 };
+  const inReady = v => v.x > READY.x0 - 2 && v.x < READY.x1 + 2 && v.z > READY.z0 - 2 && v.z < READY.z1 + 2;
   const WAIT = { x0: -7, x1: 4, z0: 12, z1: 24 };
 
   function slotFor(place, k) {
@@ -409,13 +415,13 @@
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xeef3f8);
-    scene.fog = new THREE.Fog(0xeef3f8, 190, 360);
+    scene.fog = new THREE.Fog(0xeef3f8, 240, 420);
     const camera = new THREE.PerspectiveCamera(32, 1, 1, 800);
-    const cam = { target: new THREE.Vector3(-10, 1, 0), az: 0.32, el: 0.62, dist: 150 };
+    const cam = { target: new THREE.Vector3(-38, 1, 16), az: 0.32, el: 0.62, dist: 190 };
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
     const sun = new THREE.DirectionalLight(0xffffff, 2.3);
-    sun.position.set(-40, 95, 55);
+    sun.position.set(-80, 95, 65); sun.target.position.set(-40, 0, 10); scene.add(sun.target);
     sun.castShadow = true;
     sun.shadow.mapSize.set(small ? 1024 : 2048, small ? 1024 : 2048);
     Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 85, bottom: -85, near: 10, far: 260 });
@@ -524,7 +530,7 @@
     const yardMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.82, transparent: true });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
-    const yardGeo = new THREE.ExtrudeGeometry(flatShape(-60, -38, 52, 34), { depth: 0.12, bevelEnabled: false }); geos.add(yardGeo);
+    const yardGeo = new THREE.ExtrudeGeometry(flatShape(SITE.x0, SITE.z0, SITE.x1, SITE.z1), { depth: 0.12, bevelEnabled: false }); geos.add(yardGeo);
     const yard = new THREE.Mesh(yardGeo, yardMat); yard.rotation.x = -Math.PI / 2; yard.receiveShadow = true; scene.add(yard);
     const earthMat = new THREE.MeshStandardMaterial({ color: 0x8d6e4c, roughness: 1, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide });
     pitPts.forEach(([x1, z1], k) => {
@@ -533,10 +539,10 @@
       const wall = new THREE.Mesh(eg2, earthMat); wall.position.set((x1 + x2) / 2, FLOOR_Y[0] / 2, (z1 + z2) / 2); wall.rotation.y = -Math.atan2(z2 - z1, x2 - x1); scene.add(wall);
       box(len, 0.25, 0.5, 0x6b5b4a, (x1 + x2) / 2, 0.06, (z1 + z2) / 2, scene, false).rotation.y = -Math.atan2(z2 - z1, x2 - x1);   // the pit's rim
     });
-    box(320, 0.14, 11, 0xb6c2d1, 40, 0.07, ROAD_Z, scene, false);
-    for (let x = -110; x <= 190; x += 7) box(3.2, 0.02, 0.28, 0xffffff, x, 0.15, ROAD_Z, scene, false);
-    box(320, 0.18, 1.4, 0xdfe5ec, 40, 0.09, ROAD_Z - 6.2, scene, false);
-    box(GATE.x1 - GATE.x0, 0.13, 8, 0xc4ced9, (GATE.x0 + GATE.x1) / 2, 0.08, GATE.z + 2.5, scene, false);
+    box(360, 0.14, 11, 0xb6c2d1, -20, 0.07, ROAD_Z, scene, false);
+    for (let x = -195; x <= 155; x += 7) box(3.2, 0.02, 0.28, 0xffffff, x, 0.15, ROAD_Z, scene, false);
+    box(360, 0.18, 1.4, 0xdfe5ec, -20, 0.09, ROAD_Z - 6.2, scene, false);
+    box(GATE.x1 - GATE.x0, 0.13, ROAD_Z - 4.5 - GATE.z, 0xc4ced9, (GATE.x0 + GATE.x1) / 2, 0.08, (GATE.z + ROAD_Z - 4.5) / 2, scene, false);
     // Painted lanes from the docks to the gate.
     for (const dx of DOCKS) {
       box(0.18, 0.02, 9, BRAND_PALE, dx - 1.9, 0.14, DOCK_Z + 1, scene, false);
@@ -551,8 +557,8 @@
       rail.rotation.y = -Math.atan2(z1 - z0, x1 - x0);
       const rail2 = rail.clone(); rail2.position.y = 0.75; fence.add(rail2);
     };
-    fenceRun(-60, GATE.z, GATE.x0, GATE.z); fenceRun(GATE.x1, GATE.z, 52, GATE.z);
-    fenceRun(-60, -38, 52, -38); fenceRun(-60, -38, -60, GATE.z); fenceRun(52, -38, 52, GATE.z);
+    fenceRun(SITE.x0, GATE.z, GATE.x0, GATE.z); fenceRun(GATE.x1, GATE.z, SITE.x1, GATE.z);
+    fenceRun(SITE.x0, SITE.z0, SITE.x1, SITE.z0); fenceRun(SITE.x0, SITE.z0, SITE.x0, SITE.z1); fenceRun(SITE.x1, SITE.z0, SITE.x1, SITE.z1);
     // Gate: a booth and a boom that lifts for trucks.
     box(2.2, 2.6, 2.2, 0xffffff, GATE.x1 + 1.6, 1.3, GATE.z - 1.6, scene);
     box(2.6, 0.25, 2.6, BRAND, GATE.x1 + 1.6, 2.72, GATE.z - 1.6, scene);
@@ -571,8 +577,8 @@
       const g2 = new THREE.IcosahedronGeometry(0.85 * s, 0); geos.add(g2);
       const f2 = new THREE.Mesh(g2, mat(0x5fbf7f, { flatShading: true })); f2.position.set(x + 0.2 * s, 3.25 * s, z - 0.1 * s); f2.castShadow = true; trees.add(f2);
     };
-    [[-66, -30], [-66, -12], [-66, 6], [-66, 22], [-44, -44], [-24, -44], [-4, -44], [16, -44], [36, -44], [58, -20], [58, 0], [58, 20],
-     [-56, 31], [-44, 31], [8, 30], [24, 30], [-70, 48], [-48, 49], [-20, 48], [10, 49], [34, 48], [62, 49], [86, 48]]
+    [[-100, -30], [-100, -10], [-100, 10], [-100, 30], [-100, 50], [-84, -46], [-64, -46], [-44, -46], [-24, -46], [-4, -46], [20, -30], [20, -10], [20, 10], [20, 30], [20, 50],
+     [-110, 78], [-80, 77], [-50, 78], [-20, 77], [10, 78], [40, 77], [70, 78]]
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
     // ── Buildings (cut-away: tall back wall, low front so you see in) ──
@@ -598,6 +604,30 @@
       return g;
     };
     building(READY, 'READY STOCK', { gaps: DOCKS });
+    // Car park under a red tent in the front yard (owner, 2026-10-22).
+    {
+      const C = CAR_PARK, cx = (C.x0 + C.x1) / 2, cz = (C.z0 + C.z1) / 2, W = C.x1 - C.x0, half = (C.z1 - C.z0) / 2, eave = 3.2, ridge = 4.6;
+      for (const x of [C.x0, cx, C.x1]) for (const z of [C.z0, cz, C.z1]) if (z !== cz || x !== cx) cyl(0.12, 0.12, z === cz ? ridge : eave, 0x9ca3af, x, (z === cz ? ridge : eave) / 2, z, scene, 8);
+      const tilt = Math.atan2(ridge - eave, half), slope = Math.hypot(half, ridge - eave);
+      const cloth = new THREE.MeshStandardMaterial({ color: 0xc81e1e, roughness: 0.7, transparent: true, opacity: 0.72, depthWrite: false, side: THREE.DoubleSide });   // tent fabric, the cars show through
+      for (const sd of [-1, 1]) {
+        const roof = box(W + 1.2, 0.08, slope + 0.6, 0xc81e1e, cx, (eave + ridge) / 2, cz + sd * half / 2, scene);
+        roof.rotation.x = sd * tilt; roof.material = cloth; roof.renderOrder = 2;
+        box(W + 1.2, 0.45, 0.05, 0xffffff, cx, eave - 0.2, cz + sd * (half + 0.3), scene, false);   // white valance
+      }
+      const rows = [[C.z0 + 4.5, 0], [C.z1 - 4.5, Math.PI]], CARS = [0xffffff, 0x9ca3af, 0x111827, 0x1d4ed8, 0xb91c1c, 0x6b7280, 0xe5e7eb, 0x0f766e];
+      let n = 0;
+      for (const [z, rot] of rows) for (let x = C.x0 + 1.7; x < C.x1 - 1; x += 2.9) {
+        for (const lx of [x - 1.45, x + 1.45]) box(0.1, 0.02, 5, 0xffffff, lx, 0.14, z, scene, false);           // bay lines
+        if (++n % 4 === 0) continue;                                                                         // a free bay now and then
+        const car = new THREE.Group(); car.position.set(x, 0, z); car.rotation.y = rot; scene.add(car);
+        const col = CARS[n % CARS.length];
+        box(1.8, 0.6, 4.0, col, 0, 0.62, 0, car); box(1.6, 0.55, 2.1, col, 0, 1.18, -0.25, car);
+        box(1.64, 0.34, 1.9, 0x1e293b, 0, 1.2, -0.25, car, false);                                              // windows
+        for (const wz2 of [-1.3, 1.3]) for (const sx of [-0.85, 0.85]) { const w = cyl(0.34, 0.34, 0.25, 0x111827, sx, 0.34, wz2, car, 10); w.rotation.z = Math.PI / 2; }
+      }
+      floorDecal('CAR PARKING', 8, 1.2, '#991b1b', cx, C.z0 - 1.6, { size: 0.6 });
+    }
 
     // People (forklift drivers).
     const people = [];
@@ -622,6 +652,32 @@
       return m;
     };
     const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
+    // Façade like the owner's photo: over the low outer walls, red-tint wall
+    // panels up to the next floor with tall black-tint windows on a mullion
+    // grid; a glass front with the entrance canopy on the street. Overview
+    // only - the floor views keep the low cut-away walls so you see in.
+    const facade = new THREE.Group(); scene.add(facade);
+    const facadeBits = { wall: [], glass: [], mullion: [] };
+    const curtain = (x1, z1, x2, z2, y0, y1, out, gap) => {
+      const len = Math.hypot(x2 - x1, z2 - z1), ux = (x2 - x1) / len, uz = (z2 - z1) / len, rot = -Math.atan2(z2 - z1, x2 - x1);
+      const at = (t, o) => [x1 + ux * t + out[0] * o, z1 + uz * t + out[1] * o];
+      const spans = gap ? [[0, gap[0]], [gap[1], len]] : [[0, len]];
+      for (const [a, b] of spans) {
+        if (b - a < 0.3) continue;
+        const [mx, mz] = at((a + b) / 2, 0);
+        facadeBits.wall.push([mx, (y0 + y1) / 2, mz, b - a, y1 - y0, 0.12, rot]);
+        const n = Math.floor((b - a - 0.8) / 3.4), pad = (b - a - n * 3.4) / 2, gy0 = y0 + 0.5, gy1 = y1 - 0.9, gh = gy1 - gy0;
+        if (gh < 1) continue;
+        for (let i = 0; i < n; i++) {
+          const [gxp, gzp] = at(a + pad + 3.4 * (i + 0.5), 0.1);
+          facadeBits.glass.push([gxp, (gy0 + gy1) / 2, gzp, 2.4, gh, 0.06, rot]);
+          const [mxp, mzp] = at(a + pad + 3.4 * (i + 0.5), 0.15);
+          facadeBits.mullion.push([mxp, (gy0 + gy1) / 2, mzp, 0.09, gh, 0.08, rot]);
+          for (const f of [1 / 3, 2 / 3]) facadeBits.mullion.push([mxp, gy0 + gh * f, mzp, 2.4, 0.09, 0.08, rot]);
+          for (const sd of [-1.2, 1.2]) { const [fx, fz] = at(a + pad + 3.4 * (i + 0.5) + sd, 0.15); facadeBits.mullion.push([fx, (gy0 + gy1) / 2, fz, 0.1, gh, 0.08, rot]); }
+        }
+      }
+    };
     // Solar canopy: steel posts on a grid, beams along the rows, and tilted
     // panels (one instanced mesh, so hundreds of panels stay cheap).
     const solarCanopy = (parent, x0, x1, z0, z1, y) => {
@@ -652,7 +708,7 @@
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       // One slab material per floor (upper floors see-through in the overview).
-      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe2e8f0 : 0xf1f5f9, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });
+      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xecc8c8 : 0xf6d6d6, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // red-tint floors (owner)
       slabMats.push(sm);
       for (const P of F.parts) {
         const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise; g.add(pg);
@@ -679,6 +735,28 @@
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
           wallSeg(X(px), Z(py), X(qx), Z(qy), P.parapet ? 1.1 : 2.4, BRAND, 0.35, pg);
         });
+        // Façade panels on the glazed edges (ground and 1st floor; not the
+        // basement, which is underground, nor the roof's parapets).
+        if (fi === 1 || fi === 2) {
+          const cxo = P.outline.reduce((t, [px]) => t + X(px), 0) / P.outline.length, czo = P.outline.reduce((t, [, py]) => t + Z(py), 0) / P.outline.length;
+          const top = FLOOR_Y[fi + 1] - FLOOR_Y[fi];
+          P.outline.forEach(([px, py], k) => {
+            const ext = !P.ext || P.ext.includes(k);
+            if (!ext && !(P.glass || []).includes(k)) return;
+            const [qx, qy] = P.outline[(k + 1) % P.outline.length];
+            const x1 = X(px), z1 = Z(py), x2 = X(qx), z2 = Z(qy), len = Math.hypot(x2 - x1, z2 - z1);
+            let ox = (z2 - z1) / len, oz = -(x2 - x1) / len;
+            if (ox * ((x1 + x2) / 2 - cxo) + oz * ((z1 + z2) / 2 - czo) < 0) { ox = -ox; oz = -oz; }
+            const base = FLOOR_Y[fi] + raise + SLAB, door = P.entrance && P.entrance[0] === k ? P.entrance : null;
+            const gap = door && [door[1], door[2]].map(d => Math.abs(X(d) - x1)).sort((a, b) => a - b);   // the door runs along x
+            curtain(x1, z1, x2, z2, base + (ext ? 2.4 : 0), FLOOR_Y[fi] + top, [ox, oz], gap);
+            if (door) {   // entrance canopy and the dark step platform (the photo's front door)
+              const ex = X((door[1] + door[2]) / 2), ew = Math.abs(X(door[2]) - X(door[1]));
+              const c1 = box(ew + 4, 0.4, 2.6, 0xe7e5e4, ex + ox * 1.3, base + 3.6, z1 + oz * 1.3, facade); c1.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+              const c2 = box(ew + 5, 0.22, 1.8, 0x1f2937, ex + ox * 0.9, FLOOR_Y[fi] + 0.11, z1 + oz * 0.9, facade); c2.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+            }
+          });
+        }
         // Solar panels on a steel frame over the given area (roof, open area).
         if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
         for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, pg);
@@ -754,8 +832,22 @@
         }
       }
       const ft = tag(FLOOR_NAMES[fi], '', 'brand', 3.4);
-      ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 18); g.add(ft); floorTags.push(ft);
+      ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 34); g.add(ft); floorTags.push(ft);   // past the warehouse, beside the core
     });
+    {
+      const unit = new THREE.BoxGeometry(1, 1, 1); geos.add(unit);
+      const kinds = [
+        ['wall', new THREE.MeshStandardMaterial({ color: BRAND, transparent: true, opacity: 0.3, roughness: 0.6, depthWrite: false, side: THREE.DoubleSide }), 1],
+        ['glass', new THREE.MeshStandardMaterial({ color: 0x0b0f17, transparent: true, opacity: 0.66, roughness: 0.12, metalness: 0.6, depthWrite: false }), 2],
+        ['mullion', new THREE.MeshStandardMaterial({ color: 0x374151, roughness: 0.5, metalness: 0.5 }), 0],
+      ];
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), pos = new THREE.Vector3(), sc = new THREE.Vector3();
+      for (const [k, m, order] of kinds) {
+        const list = facadeBits[k], inst = new THREE.InstancedMesh(unit, m, list.length);
+        list.forEach(([x, y, z, w, h, d, rot], i) => inst.setMatrixAt(i, m4.compose(pos.set(x, y, z), q.setFromEuler(e.set(0, rot, 0)), sc.set(w, h, d))));
+        inst.renderOrder = order; facade.add(inst);
+      }
+    }
     // ── Stair towers: switchback stairs that really climb between floors ──
     // Flights alternate lanes with a landing at each end; every flight has
     // treads with a nosing, stringers and handrails on both sides. A tower
@@ -1027,7 +1119,7 @@
       floorFocus = f;
       floorGroups.forEach((g, i) => { g.visible = f == null || i === f; });
       towerGroups.forEach(t => { t.g.visible = f == null || t.floors.includes(f); });
-      frame.visible = f == null;
+      frame.visible = f == null; facade.visible = f == null;
       for (const m of [groundMat, yardMat]) { m.opacity = f === 0 ? 0.15 : 1; m.depthWrite = f !== 0; }
       slabMats.forEach((m, i) => { m.opacity = (f != null || i === 0) ? 1 : 0.62; });
       for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
@@ -1110,7 +1202,7 @@
       const w = wander(a, [(a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2], floor, handLifter((k + floor) % 2 === 0), raise);
       w.speed = 1.7;
     }));
-    const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: -8, z1: 5 }, [READY.x0 + 14, 5]);
+    const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: READY.z0 + 6, z1: READY.z1 - 3 }, [READY.x0 + 14, READY.z1 - 3]);
 
     // ── Trucks ──
     const trucks = [];
@@ -1146,8 +1238,8 @@
     const P = (x, z) => new THREE.Vector3(x, 0, z);
     const curve = pts => new THREE.CatmullRomCurve3(pts, false, 'centripetal');
     const gx = (GATE.x0 + GATE.x1) / 2;
-    const departCurve = dx => curve([P(dx, DOCK_Z), P(dx, DOCK_Z + 6), P((dx + gx) / 2 + 2, GATE.z - 6), P(gx - 1, GATE.z - 2), P(gx, GATE.z + 2), P(gx + 4, ROAD_Z + 2.3), P(gx + 20, ROAD_Z + 2.4), P(150, ROAD_Z + 2.4)]);
-    const returnCurve = dx => curve([P(130, ROAD_Z - 2.4), P(gx + 16, ROAD_Z - 2.4), P(gx + 3, ROAD_Z - 2), P(gx + 1, GATE.z + 1), P(gx - 2, GATE.z - 5), P(dx + 10, DOCK_Z + 13), P(dx - 3, DOCK_Z + 12), P(dx - 7, DOCK_Z + 8), P(dx - 4, DOCK_Z + 6.2), P(dx + 7, DOCK_Z + 7.6)]);
+    const departCurve = dx => curve([P(dx, DOCK_Z), P(dx, DOCK_Z + 6), P((dx + gx) / 2 + 2, GATE.z - 6), P(gx - 1, GATE.z - 2), P(gx, GATE.z + 2), P(gx + 4, ROAD_Z + 2.3), P(gx + 20, ROAD_Z + 2.4), P(gx + 150, ROAD_Z + 2.4)]);
+    const returnCurve = dx => curve([P(gx + 130, ROAD_Z - 2.4), P(gx + 16, ROAD_Z - 2.4), P(gx + 3, ROAD_Z - 2), P(gx + 1, GATE.z + 1), P(gx - 2, GATE.z - 5), P(dx + 10, DOCK_Z + 13), P(dx - 3, DOCK_Z + 12), P(dx - 7, DOCK_Z + 8), P(dx - 4, DOCK_Z + 6.2), P(dx + 7, DOCK_Z + 7.6)]);
     const reverseCurve = dx => curve([P(dx + 7, DOCK_Z + 7.6), P(dx + 2.5, DOCK_Z + 6.4), P(dx, DOCK_Z + 3), P(dx, DOCK_Z)]);
     const startTrip = (tr, legs, onDone) => { tr.legs = legs; tr.leg = 0; tr.t = 0; tr.v = 0; tr.onDone = onDone; };
 
@@ -1232,7 +1324,7 @@
           if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; return; }
           if (p.g.position.distanceTo(to) < 0.01) return;
           const from = p.g.position.clone(), dist = from.distanceTo(to);
-          const arc = (from.x < 4) !== (to.x < 4) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
+          const arc = inReady(from) !== inReady(to) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
           p.move = { from, to, t: 0, dur: Math.max(0.9, Math.min(4, dist / 9)), arc, refill: p.pendingFill };
         });
       }
@@ -1253,7 +1345,7 @@
       for (const x of [-0.55, 0.55]) for (const z of [-0.45, 0.45]) box(1.04, 0.72, 0.86, 0xc9a26b, x, 0.5, z, crate);
       box(2.4, 0.16, 2.0, 0xc08a57, 0, 0.08, 0, crate);
       crate.scale.setScalar(0.62);
-      loaderJob = { q, tr, crate, phase: 'toStack', from: q.fromPos || new THREE.Vector3(READY.x0 + 10, 0.3, -2) };
+      loaderJob = { q, tr, crate, phase: 'toStack', from: q.fromPos || new THREE.Vector3(READY.x0 + 10, 0.3, READY.z0 + 12) };
       loader.busy = true; loader.target = null;
     };
     const departTruck = (tr, q) => {
@@ -1271,23 +1363,23 @@
     // A floor view shows only that floor (floor: index).
     const BX = BLD.x0 + BLD.w / 2, BZ = BLD.z0 + BLD.d / 2;
     const VIEWS = {
-      overview: { target: [-10, 1, 0], az: 0.32, el: 0.62, dist: 150 },
+      overview: { target: [-38, 1, 16], az: 0.32, el: 0.62, dist: 190 },
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 0.22, el: 1.0, dist: 112, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 0.22, el: 1.0, dist: 112, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 0.3, el: 0.8, dist: 100, floor: 3 },
-      ready: { target: [24, 0, 4], az: 0.42, el: 0.72, dist: 60 },
+      ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 2], az: 0.42, el: 0.72, dist: 60 },
     };
     const want = { target: cam.target.clone(), az: cam.az, el: cam.el, dist: cam.dist };
     // Phones held upright: turn the yard side-on so the row of buildings runs
     // up the screen instead of off both edges.
     const TALL_VIEWS = {
-      overview: { target: [-8, 1, -2], az: 1.25, el: 0.9, dist: 235 },
+      overview: { target: [-38, 1, 12], az: 0.5, el: 1.0, dist: 270 },
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 1.2, el: 1.0, dist: 125, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 1.2, el: 1.0, dist: 125, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 1.2, el: 1.0, dist: 125, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 1.2, el: 0.9, dist: 125, floor: 3 },
-      ready: { target: [23, 0, 6], az: 1.05, el: 0.86, dist: 82 },
+      ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 4], az: 1.05, el: 0.86, dist: 82 },
     };
     let viewName = 'overview', baseAz = cam.az, lastInput = -1e9, clock = 0;
     const aspectNow = () => host.clientWidth / Math.max(1, host.clientHeight);
