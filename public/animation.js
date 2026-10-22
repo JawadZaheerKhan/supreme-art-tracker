@@ -112,6 +112,9 @@
   const FLOOR_Y = [-5, 0, 11, 22];              // basement (one storey down, owner), ground (street), 1st floor, roof
   const RAISE = 1.2;                            // the ground floor's back part, a few steps up
   const OPEN_RAISE = 0.8;                       // the 1st floor's open area, a little above the floor
+  const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
+  // Is this basement plan point in the raised back part (Hall-01 side)?
+  const basementRaise = (px, py) => (py < 703 || px < 500) ? BASE_RAISE : 0;
   const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR', 'ROOF'];
   const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // evacuation plan (upper floors)
   const PLAN_B = { px0: 157, py0: 60, sx: 20 * 865 / 900, sz: 20 * 1078 / 1115 };     // basement drawing
@@ -139,19 +142,24 @@
     ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
     ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
   const FLOORS = [
-    { parts: [{ plan: PLAN_B,
-      outline: [[157, 60], [1022, 60], [1022, 1138], [500, 1138], [500, 815], [207, 815], [207, 600], [157, 600]],
-      // The Machine Area is open to Hall-01 (no wall along its top) and the
-      // lift's hall side is its doors (owner, 2026-10-21).
-      walls: [[330, 597, 330, 815], [400, 597, 400, 710], [400, 710, 500, 710], [500, 710, 500, 815], [330, 668, 400, 668]],
-      ramp: [515, 692, 617, 763, 'back'],        // hand-lifter ramp (owner's mark): Hall-02's top-left corner, high end at the back
-      dashed: [[500, 703, 1022, 703]],
-      columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600], [677, 707], [849, 707], [677, 815], [849, 815], [677, 922], [849, 922], [677, 1030], [849, 1030]],
-      // [plan rect, reversed?] - Hall-02's front stairs climb toward the left.
-      // Outside steps; the stairs to the ground floor are the stair towers below.
-      stairs: [[1025, 258, 1055, 410]],
-      lift: [333, 597, 397, 665],
-      labels: [['HALL-01', 585, 320, 1.4], ['HALL-02', 755, 870, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] }] },
+    // Basement, split-level (owner, 2026-10-22): Hall-01 with the Machine
+    // Area and Work Shop is a step up (BASE_RAISE); Hall-02 at the front is
+    // the low part, and the ramp in its top-left corner climbs to Hall-01.
+    { parts: [
+      { plan: PLAN_B, raise: BASE_RAISE,
+        outline: [[157, 60], [1022, 60], [1022, 703], [500, 703], [500, 815], [207, 815], [207, 600], [157, 600]], ext: [0, 1, 4, 5, 6, 7],
+        // The Machine Area is open to Hall-01 (no wall along its top) and the
+        // lift's hall side is its doors (owner, 2026-10-21).
+        walls: [[330, 597, 330, 815], [400, 597, 400, 710], [400, 710, 500, 710], [330, 668, 400, 668]],
+        rails: [[617, 703, 1022, 703]],          // guard rail along the step down to Hall-02 (the ramp end stays open)
+        columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600]],
+        stairs: [[1025, 258, 1055, 410]],        // outside steps; the stairs to the ground floor are the stair towers
+        lift: [333, 597, 397, 665],
+        labels: [['HALL-01', 585, 320, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] },
+      { plan: PLAN_B, outline: [[500, 703], [1022, 703], [1022, 1138], [500, 1138]], ext: [1, 2, 3],
+        ramp: [515, 703, 617, 775, 'back', BASE_RAISE],   // hand-lifter ramp (owner's mark) up to Hall-01
+        columns: [[677, 707], [849, 707], [677, 815], [849, 815], [677, 922], [849, 922], [677, 1030], [849, 1030]],
+        labels: [['HALL-02', 755, 870, 1.4]] }] },
     { parts: [
       // Back part, a few steps up: rooms, halls, Breaking Area, ablution hall.
       { plan: PLAN_G, raise: RAISE, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
@@ -210,7 +218,7 @@
   // The lobby one: |_____ from its back-left.
   const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
   const TOWERS = [
-    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'hi' },
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + BASE_RAISE + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'hi' },
     { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right', startEnd: 'hi' },
     { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L', longAxis: 'x', lane: 'hi', bottom: 'hi' },
   ];
@@ -249,11 +257,12 @@
     { kind: 'diecut', stage: 3, face: 'down', at: [300, 686], pallets: [[3.0, 0]] },
     { kind: 'diecut', stage: 3, face: 'down', at: [300, 752], pallets: [[3.0, 0]] },
     // Paper cutting machines (guillotines) along the line between Hall-01
-    // and Hall-02 - two big, one small in the middle (owner's lines). Not a
+    // and Hall-02 - two big, one small in the middle (owner's lines), their
+    // front (table, operator) toward Hall-01 (owner). Not a
     // job stage in the app, so no pallets wait at them.
-    { kind: 'cutter', stage: null, len: 3.9, dep: 2.4, face: 'down', at: [785, 685], pallets: [] },
-    { kind: 'cutter', stage: null, len: 2.8, dep: 2.0, face: 'down', at: [871, 680], pallets: [] },
-    { kind: 'cutter', stage: null, len: 3.5, dep: 2.4, face: 'down', at: [964, 685], pallets: [] },
+    { kind: 'cutter', stage: null, len: 3.9, dep: 2.4, face: 'up', at: [785, 685], pallets: [] },
+    { kind: 'cutter', stage: null, len: 2.8, dep: 2.0, face: 'up', at: [871, 680], pallets: [] },
+    { kind: 'cutter', stage: null, len: 3.5, dep: 2.4, face: 'up', at: [964, 685], pallets: [] },
   ];
   // A machine's front is its local +x; this turns it to face that side.
   const FACE_ROT = { right: 0, up: Math.PI / 2, left: Math.PI, down: -Math.PI / 2 };
@@ -263,7 +272,7 @@
   const STAGE_ZONES = [
     { floor: 1, plan: PLAN_P, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
-    { floor: 0, plan: PLAN_B, r: [700, 492, 1000, 588] },  // Coatings    - basement, Hall-01 front strip
+    { floor: 0, plan: PLAN_B, r: [700, 492, 1000, 588], raise: BASE_RAISE },  // Coatings - basement, Hall-01 front strip
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
     { floor: 2, plan: PLAN_G, r: [530, 365, 860, 520] },   // Sorting     - 1st floor, middle hall
     { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
@@ -292,7 +301,7 @@
       const spots = [];
       for (let s = 0; s < 3; s++) ms.forEach(m => { if (m.pallets[s]) spots.push([m, m.pallets[s]]); });
       const [m, off] = spots[k % spots.length];
-      return { x: wx(PLAN_B, m.at[0]) + off[0], z: wz(PLAN_B, m.at[1]) + off[1], lift: Math.floor(k / spots.length), y: FLOOR_Y[0], floor: 0 };
+      return { x: wx(PLAN_B, m.at[0]) + off[0], z: wz(PLAN_B, m.at[1]) + off[1], lift: Math.floor(k / spots.length), y: FLOOR_Y[0] + basementRaise(m.at[0], m.at[1]), floor: 0 };
     }
     const r = zoneRect(place);
     const cols = Math.max(1, Math.floor((r.x1 - r.x0 - 0.6) / 3.3)), rows = Math.max(1, Math.floor((r.z1 - r.z0 - 0.6) / 3.0));
@@ -479,7 +488,7 @@
     // Street level, with a pit in the basement's shape: the ground and the
     // yard have that hole, and see-through earth walls line it, so the
     // basement reads as underground but stays visible.
-    const pitPts = FLOORS[0].parts[0].outline.map(([px, py]) => [wx(PLAN_B, px), wz(PLAN_B, py)]);
+    const pitPts = [[157, 60], [1022, 60], [1022, 1138], [500, 1138], [500, 815], [207, 815], [207, 600], [157, 600]].map(([px, py]) => [wx(PLAN_B, px), wz(PLAN_B, py)]);
     const holePath = () => new THREE.Path(pitPts.map(([x, z]) => new THREE.Vector2(x, -z)));
     const flatShape = (x0, z0, x1, z1) => { const sh = new THREE.Shape([new THREE.Vector2(x0, -z0), new THREE.Vector2(x1, -z0), new THREE.Vector2(x1, -z1), new THREE.Vector2(x0, -z1)]); sh.holes.push(holePath()); return sh; };
     const groundGeo = new THREE.ShapeGeometry(flatShape(-450, -450, 450, 450)); geos.add(groundGeo);
@@ -647,6 +656,7 @@
         // Solar panels on a steel frame over the given area (roof, open area).
         if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
         for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, pg);
+        for (const [a, b, c, d] of P.rails || []) railing(X(a), Z(b), X(c), Z(d), SLAB, pg);
         for (const [a, b, c, d] of P.dashed || []) {
           const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
           for (let k = 0; k < n; k += 2) { const t0 = k / n, t1 = (k + 1) / n; box(Math.abs(X(c) - X(a)) * (t1 - t0) + 0.15, 0.02, Math.abs(Z(d) - Z(b)) * (t1 - t0) + 0.15, 0x94a3b8, X(a) + (X(c) - X(a)) * (t0 + t1) / 2, SLAB + 0.01, Z(b) + (Z(d) - Z(b)) * (t0 + t1) / 2, pg, false); }
@@ -922,7 +932,8 @@
     const STAGE_COLOR = { 1: '#374151', 3: '#374151' };
     MACHINES.forEach((m, i) => {
       const g = new THREE.Group(), x = wx(PLAN_B, m.at[0]), z = wz(PLAN_B, m.at[1]);
-      g.position.set(x, SLAB, z);
+      const lift0 = basementRaise(m.at[0], m.at[1]);
+      g.position.set(x, SLAB + lift0, z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[0].add(g);
       if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else if (m.kind === 'cutter') buildCutter(g, i, m.len, m.dep); else buildDieCut(g, i);
@@ -932,7 +943,7 @@
       const depth = m.kind === 'cutter' ? (sideways ? m.dep : m.len) : m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
       const name = m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
       const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
-      lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + 0.02, z - depth / 2 - (m.kind === 'diecut' ? 1.0 : 1.5)); lab.renderOrder = 1; floorGroups[0].add(lab);
+      lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + lift0 + 0.02, z + (m.face === 'up' ? 1 : -1) * (depth / 2 + (m.kind === 'diecut' ? 1.0 : 1.5))); lab.renderOrder = 1; floorGroups[0].add(lab);
     });
 
     // Which floors show: all (see-through upper slabs) or just one.
@@ -1013,7 +1024,8 @@
       return g;
     };
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
-      [PLAN_B, 0, 0, [[470, 300, 640, 560], [640, 722, 1000, 770], [690, 740, 830, 1100]]],
+      [PLAN_B, 0, BASE_RAISE, [[470, 300, 640, 560]]],
+      [PLAN_B, 0, 0, [[640, 722, 1000, 770], [690, 740, 830, 1100]]],
       [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 520]]],
       [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
       [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
