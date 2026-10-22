@@ -115,7 +115,7 @@
   const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
   // Is this basement plan point in the raised back part (Hall-01 side)?
   const basementRaise = (px, py) => (py < 703 || px < 500) ? BASE_RAISE : 0;
-  const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR', 'ROOF'];
+  const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR', '2ND FLOOR'];
   const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // evacuation plan (upper floors)
   const PLAN_B = { px0: 157, py0: 60, sx: 20 * 865 / 900, sz: 20 * 1078 / 1115 };     // basement drawing
   // The ground floor's real front part (the owner's ground-floor plan),
@@ -191,24 +191,33 @@
           ['STORE ROOM', 100, 315, 0.85], ['ENTRANCE LOBBY', 297, 340, 0.85], ['ACCOUNT OFFICE', 475, 310, 0.7], ['DIRECTOR', 470, 445, 0.75], ['BATH', 572, 478, 0.6]] },
     ] },
     // 1st floor: the rooms / halls / ablution row and the stairs + lift core
-    // (the loading area below is open - no floor over it). Beside the hall,
-    // over the ground floor's front part, an OPEN AREA a little higher, with
-    // a ramp up from the hall on its left and solar panels over it (owner).
+    // (the loading area below is open - no floor over it), and over the
+    // ground floor's front part the OFFICES - the evacuation plan's lower
+    // block: Dining Room, Kitchen, Director Offices, Finance, Washrooms,
+    // Lobby, Corridor, Design Section and the Terrace (owner, 2026-10-22).
     { parts: [
       { plan: PLAN_G,
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
-        walls: UPPER_WALLS.filter(w => !(w[1] === 822 && w[3] === 822)).concat([[600, 822, 1058, 822]]),
-        holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS,
-        ramp: [516, 768, 598, 822, 'front', OPEN_RAISE] },
+        ext: [0, 1, 3, 4, 5, 6, 7, 8, 9],   // the hall / offices line is the inner wall below
+        walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS },
+      { plan: PLAN_G, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
+        walls: [[560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
+          [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
+        stairs: [[517, 1165, 640, 1265]], terrace: [668, 1272, 902, 1345],
+        labels: [['DINING ROOM', 750, 880, 0.9], ['KITCHEN', 975, 885, 0.7], ['BATH', 537, 880, 0.55], ['DIRECTOR OFFICE', 605, 995, 0.7], ['FINANCE SECTION', 785, 1010, 0.7],
+          ['WASHROOMS', 985, 995, 0.7], ['LOBBY', 605, 1120, 0.9], ['CORRIDOR', 785, 1125, 0.7], ['DIRECTOR OFFICE', 785, 1215, 0.7], ['DESIGN SECTION', 985, 1160, 0.7], ['TERRACE', 785, 1308, 0.7]] },
+    ] },
+    // 2nd floor: the roof over the back block (open, solar panels on a steel
+    // frame; the stairs come up here) and, over the offices, the OPEN AREA -
+    // a little higher, with solar panels over it (owner, 2026-10-22).
+    { parts: [
+      { plan: PLAN_G, parapet: true,
+        outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
+        holes: [[218, 801, 276, 905, 'LRB']],
+        solar: [170, 170, 1046, 760], labels: [['SOLAR PANELS', 610, 440, 1.4]] },
       { plan: PLAN_G, raise: OPEN_RAISE, parapet: true, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
         solar: [522, 832, 1048, 1262], labels: [['OPEN AREA', 785, 1050, 1.3]] },
     ] },
-    // Roof (2nd floor): open, with rows of solar panels on a steel frame,
-    // over the main block and the stairs core (the stairs come up here).
-    { parts: [{ plan: PLAN_G, parapet: true,
-      outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
-      holes: [[218, 801, 276, 905, 'LRB']],
-      solar: [170, 170, 1046, 760], labels: [['SOLAR PANELS', 610, 440, 1.4]] }] },
   ];
   // The stair towers: plan rect, the floor heights they join, the axis the
   // flights run along, and which lane the first (lowest) flight climbs.
@@ -721,6 +730,11 @@
             const u = ((t + fi0 * 3) % 9) / 9, open = u < 0.1 ? u / 0.1 : u < 0.4 ? 1 : u < 0.5 ? 1 - (u - 0.4) / 0.1 : 0;
             doors.forEach((dr, k) => { dr.position.x = cx + (k ? 1 : -1) * (lw / 4 + open * lw * 0.22); });
           });
+        }
+        if (P.terrace) {
+          const [a, b, c, d] = P.terrace;
+          box(X(c) - X(a), 0.2, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, SLAB - 0.1, (Z(b) + Z(d)) / 2, pg);
+          railing(X(a), Z(d), X(c), Z(d), SLAB, pg); railing(X(a), Z(b), X(a), Z(d), SLAB, pg); railing(X(c), Z(b), X(c), Z(d), SLAB, pg);
         }
         for (const [text, px, py, s] of P.labels || []) {
           const m = decal(text, Math.max(3, text.length * s * 0.78), s * 1.3, '#64748b', { size: 0.6, weight: 700 });
@@ -1244,7 +1258,7 @@
     ui.stats = document.createElement('div'); ui.stats.className = 'saa-stats';
     ui.views = document.createElement('div'); ui.views.className = 'saa-views';
     ui.top.append(ui.stats, ui.views);
-    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="roof">Roof</button><button data-v="ready">Ready Stock</button>';
+    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="roof">2nd Floor</button><button data-v="ready">Ready Stock</button>';
     ui.bar = document.createElement('div'); ui.bar.className = 'saa-bar';
     ui.msg = document.createElement('div'); ui.msg.className = 'saa-empty'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
     host.append(ui.top, ui.bar, ui.msg);
