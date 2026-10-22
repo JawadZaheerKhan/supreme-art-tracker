@@ -109,7 +109,7 @@
   // gap so each can be seen. A floor is one or more parts, each drawn from a
   // plan in that plan's own pixels; all plans are fitted to one footprint.
   const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
-  const FLOOR_Y = [-11, 0, 11];                 // basement (underground), ground (street), 1st floor
+  const FLOOR_Y = [-5, 0, 11];                  // basement (one storey down, owner), ground (street), 1st floor
   const RAISE = 1.2;                            // the ground floor's back part, a few steps up
   const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR'];
   const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // evacuation plan (upper floors)
@@ -125,6 +125,7 @@
   // the gap between floors. The core's goes basement -> ground -> 1st floor
   // from the back of the core; the Entrance Lobby's goes down to Hall-02.
   const TOWER_CORE = [218, 775, 276, 905];              // evacuation-plan pixels
+  // The floor openings over it leave the back strip (the stairs' top landing) as floor.
   const TOWER_LOBBY = [22, 392, 172, 495];              // ground-floor-plan pixels
   // Rooms, halls, Breaking Area and the hall with the ablution row.
   const UPPER_WALLS = [
@@ -159,7 +160,7 @@
       // steps outside the gate lead down to the street.
       { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
         walls: [[412, 780, 412, 940], [212, 940, 420, 940], [505, 940, 512, 940]],
-        holes: [[...TOWER_CORE, 'LRB']], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
+        holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
       { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
@@ -183,21 +184,21 @@
     // the loading area below is open (no floor over it).
     { parts: [{ plan: PLAN_G,
       outline: [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
-      walls: UPPER_WALLS, holes: [[...TOWER_CORE, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS }] },
+      walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS }] },
   ];
   // The stair towers: plan rect, the floor heights they join, the axis the
   // flights run along, and which lane the first (lowest) flight climbs.
   // Two flights per tower with one landing between them (owner, 2026-10-22).
-  // Both core flights start from the back (owner's drawing): the basement
-  // one (blue) arrives at the ground floor's back-left; the 1st-floor one
-  // (yellow) leaves from the back-right - right side forward, across the
-  // front, back up the left. The lobby one arrives at the lobby's left end.
+  // The basement one (owner's blue line) runs against the outer wall: from
+  // the back of the basement forward along the left side, a corner landing,
+  // then a short flight across the front up to the ground floor. The 1st-
+  // floor one (yellow) leaves from the back-right: right side forward,
+  // landing, back up the left. The lobby one: |_____ from its back-left.
   const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
   const TOWERS = [
-    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right' },
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'lo' },
     { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right' },
-    // The lobby's: |_____ - a short flight, a corner landing, one long flight.
-    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L' },
+    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L', longAxis: 'x', lane: 'hi', bottom: 'hi' },
   ];
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
   // 7 printing presses (red) and 7 die-cutting + embellishment machines
@@ -700,14 +701,21 @@
       const tg = new THREE.Group(); scene.add(tg); towerGroups.push({ g: tg, floors: T.name === 'ground-first' ? [1, 2] : [0, 1] });
       const pl = T.plan, x0 = wx(pl, T.r[0]), x1 = wx(pl, T.r[2]), z0 = wz(pl, T.r[1]), z1 = wz(pl, T.r[3]);
       if (T.shape === 'L') {
-        // |_____ : from the top at the back-left, a short flight forward down
-        // the left side, a corner landing, then one long flight along the
-        // front down to the floor below (owner's drawing). Built bottom-up.
-        const fw = Math.min(1.6, (z1 - z0) * 0.45), runLong = x1 - x0 - fw, runShort = z1 - fw - z0;
+        // L stairs, built bottom-up: one long flight along `longAxis` in the
+        // `lane` strip ('lo' = left / back side, 'hi' = right / front side)
+        // starting from the `bottom` end, a corner landing, then a short
+        // flight along the other axis to the top. Same slope for both.
+        const lx = T.longAxis === 'x', A0 = lx ? x0 : z0, A1 = lx ? x1 : z1, B0 = lx ? z0 : x0, B1 = lx ? z1 : x1;
+        const fw = Math.min(1.6, (B1 - B0) * 0.45), hiLane = T.lane === 'hi', hiBottom = T.bottom === 'hi';
+        const laneC = hiLane ? B1 - fw / 2 : B0 + fw / 2;
+        const aStart = hiBottom ? A1 : A0, aEnd = hiBottom ? A0 + fw : A1 - fw;
+        const cA = hiBottom ? [A0, A0 + fw] : [A1 - fw, A1], cB = hiLane ? [B1 - fw, B1] : [B0, B0 + fw];
+        const bStart = hiLane ? B1 - fw : B0 + fw, bEnd = hiLane ? B0 : B1;
+        const runLong = Math.abs(aEnd - aStart), runShort = Math.abs(bEnd - bStart);
         const total = T.to - T.from, hLong = total * runLong / (runLong + runShort), hShort = total - hLong;
-        flight(tg, true, x1, x0 + fw, z1 - fw / 2, fw, T.from, hLong);
-        landing(tg, x0, x0 + fw, z1 - fw, z1, T.from + hLong);
-        flight(tg, false, z1 - fw, z0, x0 + fw / 2, fw, T.from + hLong, hShort);
+        flight(tg, lx, aStart, aEnd, laneC, fw, T.from, hLong);
+        if (lx) landing(tg, cA[0], cA[1], cB[0], cB[1], T.from + hLong); else landing(tg, cB[0], cB[1], cA[0], cA[1], T.from + hLong);
+        flight(tg, !lx, bStart, bEnd, (cA[0] + cA[1]) / 2, fw, T.from + hLong, hShort);
         continue;
       }
       // Dog-leg / switchback: flights alternate lanes with a landing at each turn.
