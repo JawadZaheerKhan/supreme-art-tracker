@@ -126,7 +126,8 @@
   // the gap between floors. The core's goes basement -> ground -> 1st floor
   // from the back of the core; the Entrance Lobby's goes down to Hall-02.
   const TOWER_CORE = [218, 775, 276, 905];              // evacuation-plan pixels
-  // The floor openings over it leave the back strip (the stairs' top landing) as floor.
+  // The floor openings over it leave the front strip (where the 1st-floor
+  // stairs start / arrive) as floor.
   const TOWER_LOBBY = [22, 392, 172, 495];              // ground-floor-plan pixels
   // Rooms, halls, Breaking Area and the hall with the ablution row.
   const UPPER_WALLS = [
@@ -161,7 +162,7 @@
       // steps outside the gate lead down to the street.
       { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
         walls: [[412, 780, 412, 940], [212, 940, 420, 940], [505, 940, 512, 940]],
-        holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
+        holes: [[218, 775, 276, 879, 'LT', [[276, 801, 276, 879]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
       { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
@@ -188,7 +189,7 @@
       { plan: PLAN_G,
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
         walls: UPPER_WALLS.filter(w => !(w[1] === 822 && w[3] === 822)).concat([[600, 822, 1058, 822]]),
-        holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS,
+        holes: [[218, 775, 276, 879, 'LRT']], lift: LIFT_G, labels: UPPER_LABELS,
         ramp: [516, 768, 598, 822, 'front', OPEN_RAISE] },
       { plan: PLAN_G, raise: OPEN_RAISE, parapet: true, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
         solar: [522, 832, 1048, 1262], labels: [['OPEN AREA', 785, 1050, 1.3]] },
@@ -201,15 +202,16 @@
   // The stair towers: plan rect, the floor heights they join, the axis the
   // flights run along, and which lane the first (lowest) flight climbs.
   // Two flights per tower with one landing between them (owner, 2026-10-22).
-  // The basement one (owner's blue line) runs against the outer wall: from
-  // the back of the basement forward along the left side, a corner landing,
-  // then a short flight across the front up to the ground floor. The 1st-
-  // floor one (yellow) leaves from the back-right: right side forward,
-  // landing, back up the left. The lobby one: |_____ from its back-left.
+  // Core (owner, 2026-10-22): the basement one (blue) comes up at the BACK,
+  // by the hall wall - from the front of the basement back along the outer
+  // wall, a corner landing, a short flight across the back. The 1st-floor
+  // one (yellow) starts at the FRONT: back along one side, landing, forward
+  // along the other to the 1st floor's front. No stairs go on to the roof.
+  // The lobby one: |_____ from its back-left.
   const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
   const TOWERS = [
-    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'lo' },
-    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right' },
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'hi' },
+    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right', startEnd: 'hi' },
     { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L', longAxis: 'x', lane: 'hi', bottom: 'hi' },
   ];
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
@@ -770,7 +772,7 @@
       const rise = (T.to - T.from) / T.flights;
       const rect = (la, lb, wa, wb, y) => alongX ? landing(tg, Math.min(la, lb), Math.max(la, lb), wa, wb, y) : landing(tg, wa, wb, Math.min(la, lb), Math.max(la, lb), y);
       for (let k = 0; k < T.flights; k++) {
-        const fwd = k % 2 === 0;                                   // even flights run from L0 to L1
+        const fwd = (k % 2 === 0) !== (T.startEnd === 'hi');       // even flights run from the start end
         const low = (k % 2 === 0) === (T.startLane === 'left');    // on the low-side (left / back) lane?
         const laneW = low ? W0 + lane / 2 : W1 - lane / 2, base = T.from + k * rise;
         flight(tg, alongX, fwd ? L0 + land : L1 - land, fwd ? L1 - land : L0 + land, laneW, lane, base, rise);
@@ -787,9 +789,11 @@
       const pl = PLAN_G, bot = FLOOR_Y[0], top = FLOOR_Y[3] + 1.4, hgt = top - bot;
       for (const [px, py] of OUTLINE_G) cyl(0.14, 0.14, hgt, BRAND_DARK, wx(pl, px), bot + hgt / 2, wz(pl, py), frame, 8);
       const [a, b, c, d] = LIFT_G, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
-      const shaftGeo = new THREE.BoxGeometry(lw, hgt, ld); geos.add(shaftGeo);
+      // The lift runs basement -> 1st floor only; nothing goes on up to the roof.
+      const shaftH = FLOOR_Y[2] + 2.8 - bot;
+      const shaftGeo = new THREE.BoxGeometry(lw, shaftH, ld); geos.add(shaftGeo);
       const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: BRAND_LIGHT, transparent: true, opacity: 0.18, depthWrite: false }));
-      shaft.position.set(lx, bot + hgt / 2, lz); frame.add(shaft);
+      shaft.position.set(lx, bot + shaftH / 2, lz); frame.add(shaft);
       var liftCar = box(lw * 0.8, 2.0, ld * 0.8, BRAND_DARK, lx, bot + 1.4, lz, frame);
       const sign = tag('PRODUCTION', '', 'brand', 5.5);
       sign.position.set(BLD.x0 + BLD.w / 2, top + 4.2, BLD.z0 + 2); frame.add(sign); floorTags.push(sign);
