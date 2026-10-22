@@ -148,10 +148,13 @@
   // marks, 2026-10-22): the rooms column is open to the hall but for its top
   // room's and the kitchen's walls, and the top rooms, the Breaking Area and
   // the hall round it are one open floor.
+  // Second pass (owner, 2026-10-22): the top room's wall, the stub at the
+  // top of the hall, the wall left of the lift and the ablution walls went
+  // too, and a wall from the lift's corner down to the kitchen's line closes
+  // the kitchen side off from the hall.
   const GROUND_WALLS = [
-    [158, 253, 345, 253], [158, 533, 345, 533], [262, 540, 262, 690],
-    [512, 158, 512, 348], [512, 630, 512, 718], [875, 718, 1058, 718], [975, 718, 975, 760], [1013, 718, 1013, 760],
-    [512, 822, 1058, 822], [512, 718, 512, 822], [158, 718, 343, 718], [410, 718, 512, 718]];
+    [158, 533, 345, 533], [262, 540, 262, 690], [343, 533, 343, 718],
+    [512, 630, 512, 718], [512, 822, 1058, 822], [512, 718, 512, 822], [158, 718, 343, 718]];
   const GROUND_LABELS = [['KITCHEN', 222, 625, 0.7], ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['HALL', 695, 440, 1.1],
     ['HALL', 735, 790, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
   const FLOORS = [
