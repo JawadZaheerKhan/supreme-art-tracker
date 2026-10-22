@@ -109,9 +109,10 @@
   // gap so each can be seen. A floor is one or more parts, each drawn from a
   // plan in that plan's own pixels; all plans are fitted to one footprint.
   const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
-  const FLOOR_Y = [-5, 0, 11];                  // basement (one storey down, owner), ground (street), 1st floor
+  const FLOOR_Y = [-5, 0, 11, 22];              // basement (one storey down, owner), ground (street), 1st floor, roof
   const RAISE = 1.2;                            // the ground floor's back part, a few steps up
-  const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR'];
+  const OPEN_RAISE = 0.8;                       // the 1st floor's open area, a little above the floor
+  const FLOOR_NAMES = ['BASEMENT', 'GROUND FLOOR', '1ST FLOOR', 'ROOF'];
   const PLAN_G = { px0: 158, py0: 158, sx: 20, sz: 20 };                             // evacuation plan (upper floors)
   const PLAN_B = { px0: 157, py0: 60, sx: 20 * 865 / 900, sz: 20 * 1078 / 1115 };     // basement drawing
   // The ground floor's real front part (the owner's ground-floor plan),
@@ -179,12 +180,23 @@
         labels: [['PRODUCTION OFFICE', 95, 175, 0.75], ['LOBBY', 300, 110, 1.0], ['PLATE MAKING', 485, 65, 0.85], ['SCANNING ROOM', 495, 185, 0.75],
           ['STORE ROOM', 100, 315, 0.85], ['ENTRANCE LOBBY', 297, 340, 0.85], ['ACCOUNT OFFICE', 475, 310, 0.7], ['DIRECTOR', 470, 445, 0.75], ['BATH', 572, 478, 0.6]] },
     ] },
-    // 1st floor: the rooms / halls / ablution row and the stairs + lift core;
-    // the area over the ground floor's front part stays as empty floor, and
-    // the loading area below is open (no floor over it).
-    { parts: [{ plan: PLAN_G,
-      outline: [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
-      walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS }] },
+    // 1st floor: the rooms / halls / ablution row and the stairs + lift core
+    // (the loading area below is open - no floor over it). Beside the hall,
+    // over the ground floor's front part, an OPEN AREA a little higher, with
+    // a ramp up from the hall on its left and solar panels over it (owner).
+    { parts: [
+      { plan: PLAN_G,
+        outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
+        walls: UPPER_WALLS.filter(w => !(w[1] === 822 && w[3] === 822)).concat([[600, 822, 1058, 822]]),
+        holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS,
+        ramp: [516, 768, 598, 822, 'front', OPEN_RAISE] },
+      { plan: PLAN_G, raise: OPEN_RAISE, parapet: true, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
+        solar: [522, 832, 1048, 1262], labels: [['OPEN AREA', 785, 1050, 1.3]] },
+    ] },
+    // Roof (2nd floor): open, with rows of solar panels on a steel frame.
+    { parts: [{ plan: PLAN_G, parapet: true,
+      outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]],
+      solar: [170, 170, 1046, 810], labels: [['SOLAR PANELS', 610, 440, 1.4]] }] },
   ];
   // The stair towers: plan rect, the floor heights they join, the axis the
   // flights run along, and which lane the first (lowest) flight climbs.
@@ -566,6 +578,25 @@
       return m;
     };
     const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
+    // Solar canopy: steel posts on a grid, beams along the rows, and tilted
+    // panels (one instanced mesh, so hundreds of panels stay cheap).
+    const solarCanopy = (parent, x0, x1, z0, z1, y) => {
+      const nx = Math.max(1, Math.round((x1 - x0) / 7)), nz = Math.max(1, Math.round((z1 - z0) / 7));
+      for (let i = 0; i <= nx; i++) for (let k = 0; k <= nz; k++) box(0.22, y, 0.22, 0x6b7280, x0 + (x1 - x0) * i / nx, y / 2, z0 + (z1 - z0) * k / nz, parent);
+      for (let k = 0; k <= nz; k++) box(x1 - x0, 0.2, 0.2, 0x4b5563, (x0 + x1) / 2, y, z0 + (z1 - z0) * k / nz, parent, false);
+      for (let i = 0; i <= nx; i++) box(0.2, 0.2, z1 - z0, 0x4b5563, x0 + (x1 - x0) * i / nx, y, (z0 + z1) / 2, parent, false);
+      const pw = 1.6, pd = 1.0, cols = Math.floor((x1 - x0) / (pw + 0.12)), rows = Math.floor((z1 - z0) / 1.9);
+      const pg2 = new THREE.BoxGeometry(pw, 0.06, pd); geos.add(pg2);
+      const pm = new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.35, metalness: 0.4 });
+      const inst = new THREE.InstancedMesh(pg2, pm, cols * rows);
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.26, 0, 0)), sc = new THREE.Vector3(1, 1, 1), pos = new THREE.Vector3();
+      let n = 0;
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        pos.set(x0 + (pw + 0.12) * (c + 0.5) + ((x1 - x0) - cols * (pw + 0.12)) / 2, y + 0.35, z0 + 1.9 * (r + 0.5) + ((z1 - z0) - rows * 1.9) / 2);
+        inst.setMatrixAt(n++, m4.compose(pos, q, sc));
+      }
+      inst.castShadow = true; inst.receiveShadow = true; parent.add(inst);
+    };
     // A guard rail: posts every ~1.2 m with a black top rail and a red kick plate.
     const railing = (x1, z1, x2, z2, y, parent) => {
       const len = Math.hypot(x2 - x1, z2 - z1), n = Math.max(1, Math.round(len / 1.2)), rot = -Math.atan2(z2 - z1, x2 - x1);
@@ -602,8 +633,10 @@
         P.outline.forEach(([px, py], k) => {
           if (P.ext && !P.ext.includes(k)) return;
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
-          wallSeg(X(px), Z(py), X(qx), Z(qy), 2.4, BRAND, 0.35, pg);
+          wallSeg(X(px), Z(py), X(qx), Z(qy), P.parapet ? 1.1 : 2.4, BRAND, 0.35, pg);
         });
+        // Solar panels on a steel frame over the given area (roof, open area).
+        if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
         for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, pg);
         for (const [a, b, c, d] of P.dashed || []) {
           const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
@@ -623,7 +656,7 @@
         }
         // Hand-lifter ramp: a wedge climbing toward the front (or the back), yellow edges.
         if (P.ramp) {
-          const [a, b, c, d, up] = P.ramp, D = Z(d) - Z(b), W = X(c) - X(a), H = 2.2, back = up === 'back';
+          const [a, b, c, d, up, rise] = P.ramp, D = Z(d) - Z(b), W = X(c) - X(a), H = rise || 2.2, back = up === 'back';
           const rshape = new THREE.Shape(back ? [new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(0, H)] : [new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(D, H)]);
           const rg = new THREE.ExtrudeGeometry(rshape, { depth: W, bevelEnabled: false }); geos.add(rg);
           const ramp = new THREE.Mesh(rg, mat(0x9ca3af)); ramp.rotation.y = -Math.PI / 2; ramp.position.set(X(c), SLAB, Z(b));
@@ -744,7 +777,7 @@
     // shaft with its car going up and down, and the name on top.
     const frame = new THREE.Group(); scene.add(frame);
     {
-      const pl = PLAN_G, bot = FLOOR_Y[0], top = FLOOR_Y[2] + 2.8, hgt = top - bot;
+      const pl = PLAN_G, bot = FLOOR_Y[0], top = FLOOR_Y[3] + 1.4, hgt = top - bot;
       for (const [px, py] of OUTLINE_G) cyl(0.14, 0.14, hgt, BRAND_DARK, wx(pl, px), bot + hgt / 2, wz(pl, py), frame, 8);
       const [a, b, c, d] = LIFT_G, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
       const shaftGeo = new THREE.BoxGeometry(lw, hgt, ld); geos.add(shaftGeo);
@@ -752,7 +785,7 @@
       shaft.position.set(lx, bot + hgt / 2, lz); frame.add(shaft);
       var liftCar = box(lw * 0.8, 2.0, ld * 0.8, BRAND_DARK, lx, bot + 1.4, lz, frame);
       const sign = tag('PRODUCTION', '', 'brand', 5.5);
-      sign.position.set(BLD.x0 + BLD.w / 2, top + 1.8, BLD.z0 + 2); frame.add(sign); floorTags.push(sign);
+      sign.position.set(BLD.x0 + BLD.w / 2, top + 4.2, BLD.z0 + 2); frame.add(sign); floorTags.push(sign);
     }
     // Stage areas (provisional until the owner places them): a painted
     // outline and the stage's name on its floor.
@@ -1121,6 +1154,7 @@
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 0.22, el: 1.0, dist: 112, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 0.22, el: 1.0, dist: 112, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
+      roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 0.3, el: 0.8, dist: 100, floor: 3 },
       ready: { target: [24, 0, 4], az: 0.42, el: 0.72, dist: 60 },
     };
     const want = { target: cam.target.clone(), az: cam.az, el: cam.el, dist: cam.dist };
@@ -1131,6 +1165,7 @@
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 1.2, el: 1.0, dist: 125, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 1.2, el: 1.0, dist: 125, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 1.2, el: 1.0, dist: 125, floor: 2 },
+      roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 1.2, el: 0.9, dist: 125, floor: 3 },
       ready: { target: [23, 0, 6], az: 1.05, el: 0.86, dist: 82 },
     };
     let viewName = 'overview', baseAz = cam.az, lastInput = -1e9, clock = 0;
@@ -1158,7 +1193,7 @@
     ui.stats = document.createElement('div'); ui.stats.className = 'saa-stats';
     ui.views = document.createElement('div'); ui.views.className = 'saa-views';
     ui.top.append(ui.stats, ui.views);
-    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="ready">Ready Stock</button>';
+    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="roof">Roof</button><button data-v="ready">Ready Stock</button>';
     ui.bar = document.createElement('div'); ui.bar.className = 'saa-bar';
     ui.msg = document.createElement('div'); ui.msg.className = 'saa-empty'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
     host.append(ui.top, ui.bar, ui.msg);
