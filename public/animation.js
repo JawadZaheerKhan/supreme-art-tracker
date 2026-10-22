@@ -153,10 +153,14 @@
   // too, and a wall from the lift's corner down to the kitchen's line closes
   // the kitchen side off from the hall.
   const GROUND_WALLS = [
-    [158, 533, 345, 533], [262, 540, 262, 690], [343, 533, 343, 718],
+    [158, 533, 345, 533], [343, 533, 343, 718],
     [512, 630, 512, 718], [512, 822, 1058, 822], [512, 718, 512, 822], [158, 718, 343, 718]];
   const GROUND_LABELS = [['KITCHEN', 222, 625, 0.7], ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['HALL', 695, 440, 1.1],
     ['HALL', 735, 790, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
+  // Hall-01's pillars (basement plan pixels). The ground floor's hall stands
+  // on the same ones (owner, 2026-10-22), so they line up floor to floor.
+  const HALL1_PILLARS = [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600]];
+  const GROUND_PILLARS = HALL1_PILLARS.map(([bx, by]) => [158 + (wx(PLAN_B, bx) - BLD.x0) * PLAN_G.sx, 158 + (wz(PLAN_B, by) - BLD.z0) * PLAN_G.sz]);
   const FLOORS = [
     // Basement, split-level (owner, 2026-10-22): Hall-01 with the Machine
     // Area and Work Shop is a step up (BASE_RAISE); Hall-02 at the front is
@@ -168,7 +172,7 @@
         // lift's hall side is its doors (owner, 2026-10-21).
         walls: [[330, 597, 330, 815], [400, 597, 400, 710], [400, 710, 500, 710], [330, 668, 400, 668]],
         rails: [[617, 703, 1022, 703]],          // guard rail along the step down to Hall-02 (the ramp end stays open)
-        columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600]],
+        columns: HALL1_PILLARS,
         stairs: [[1025, 258, 1055, 410]],        // outside steps; the stairs to the ground floor are the stair towers
         lift: [333, 597, 397, 665],
         labels: [['HALL-01', 585, 320, 1.4], ['MACHINE AREA', 265, 708, 0.8], ['WORK SHOP', 415, 765, 0.8]] },
@@ -179,13 +183,13 @@
     { parts: [
       // Back part, a few steps up: rooms, halls, Breaking Area, ablution hall.
       { plan: PLAN_G, raise: RAISE, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
-        walls: GROUND_WALLS, labels: GROUND_LABELS },
+        walls: GROUND_WALLS, labels: GROUND_LABELS, columns: GROUND_PILLARS },
       // Stairs + lift core, level with the hall beside it (owner): the U
       // stairs on up to the 1st floor (the basement's L flight arrives here), the lift, and
       // behind it the loading area with its roller-shutter gate - a few
       // steps outside the gate lead down to the street.
       { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
-        walls: [[412, 780, 412, 940], [212, 940, 420, 940], [505, 940, 512, 940]],
+        walls: [[212, 940, 420, 940], [505, 940, 512, 940]],   // open to the loading area (owner, 2026-10-22)
         holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
@@ -313,10 +317,10 @@
   const groundRaise = py => (py < 822 ? RAISE : 0);
   const GROUND_MACHINES = [
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 220], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.35] },
-    { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 329], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.4] },
+    { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 329], pallets: [[3.9, -1.0], [6.3, -1.0]], label: [0, 1.4] },
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 410], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.4] },
     { kind: 'coater', stage: 2, floor: 1, len: 2.7, face: 'down', at: [190, 500], pallets: [[2.4, -0.8], [2.4, 1.2]], label: [4.5, 0] },
-    { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [895, 562], pallets: [], label: [0, -1.6] },
+    { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [895, 570], pallets: [], label: [-4.2, -1.75] },
     { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [894, 650], pallets: [], label: [0, 1.6] },
     { kind: 'laminator', stage: null, floor: 1, len: 2.9, face: 'down', at: [563, 763], pallets: [], label: [1.7, 0] },
     { kind: 'ctp', stage: null, floor: 1, len: 3.4, face: 'left', at: [920, 967], pallets: [], label: [0, 2.6] },
