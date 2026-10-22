@@ -15,6 +15,7 @@
 
   // ── Pure helpers (no Three.js; covered by the offline tests) ──────
   // The app's red (index.html --brand, --brand-dark, --brand-light, --brand-deep).
+  const CREAM = 0xefe4cc, CREAM_DARK = 0xd9c9a5;   // the buildings' walls (owner, 2026-10-22)
   const BRAND = 0xA32D2D, BRAND_DARK = 0x7C1F1F, BRAND_LIGHT = 0xC04545, BRAND_DEEP = 0x5C1414, BRAND_PALE = 0xe8a3a3;
   const STAGES = ['CTP Plate Making', 'Printing', 'Coatings', 'Die Cutting', 'Sorting', 'Pasting', 'Ready to Deliver', 'Delivered'];
   const BAY_NAMES = ['CTP', 'Printing', 'Coatings', 'Die Cutting', 'Sorting', 'Pasting'];
@@ -199,7 +200,7 @@
     { parts: [
       { plan: PLAN_G,
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
-        ext: [0, 1, 3, 4, 5, 6, 7, 8, 9],   // the hall / offices line is the inner wall below
+        ext: [0, 1, 3, 4, 5, 6, 7, 8, 9], street: 6,   // the hall / offices line is the inner wall below; the core's front is the side wing's façade
         walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS },
       // The offices are a little above the 1st floor's hall side (owner, 2026-10-22).
       { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3], street: 2,
@@ -582,24 +583,25 @@
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
     // ── Buildings (cut-away: tall back wall, low front so you see in) ──
+    const creamWall = new THREE.MeshStandardMaterial({ color: CREAM, roughness: 0.85, transparent: true, opacity: 0.82 });   // cream, tinted (owner)
     const building = (b, name, opts2) => {
       const g = new THREE.Group(); scene.add(g);
       const w = b.x1 - b.x0, d = b.z1 - b.z0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
-      const fl = box(w, 0.3, d, 0xf1f5f9, cx, 0.15, cz, g); fl.castShadow = false;
-      box(w, 7, 0.5, BRAND, cx, 3.8, b.z0, g);
-      box(w + 0.3, 0.45, 0.8, BRAND_DARK, cx, 7.5, b.z0, g);
-      for (let x = b.x0 + 2.5; x < b.x1 - 1; x += 2.5) box(0.12, 6.4, 0.06, 0x8f2626, x, 3.7, b.z0 + 0.28, g, false);
-      box(0.5, 7, d, BRAND, b.x0, 3.8, cz, g);
-      box(0.8, 0.45, d + 0.3, BRAND_DARK, b.x0, 7.5, cz, g);
-      box(0.5, 1.3, d, BRAND_LIGHT, b.x1, 0.95, cz, g);
+      const fl = box(w, 0.3, d, 0xf0c2c2, cx, 0.15, cz, g); fl.castShadow = false;   // red tinted floor
+      box(w, 7, 0.5, creamWall, cx, 3.8, b.z0, g);                                     // cream tinted walls
+      box(w + 0.3, 0.45, 0.8, CREAM_DARK, cx, 7.5, b.z0, g);
+      for (let x = b.x0 + 2.5; x < b.x1 - 1; x += 2.5) box(0.12, 6.4, 0.06, CREAM_DARK, x, 3.7, b.z0 + 0.28, g, false);
+      box(0.5, 7, d, creamWall, b.x0, 3.8, cz, g);
+      box(0.8, 0.45, d + 0.3, CREAM_DARK, b.x0, 7.5, cz, g);
+      box(0.5, 1.3, d, creamWall, b.x1, 0.95, cz, g);
       // Roof beams, so it reads as a building rather than a yard.
-      for (let x = b.x0 + 5; x < b.x1 - 2; x += 7.5) box(0.35, 0.35, d * 0.55, BRAND_DEEP, x, 7.4, b.z0 + d * 0.27, g);
+      for (let x = b.x0 + 5; x < b.x1 - 2; x += 7.5) box(0.35, 0.35, d * 0.55, 0x6b7280, x, 7.4, b.z0 + d * 0.27, g);
       // Front: low wall, with gaps for the docks when asked.
       const gaps = (opts2 && opts2.gaps) || [];
       let x = b.x0;
       const cuts = gaps.map(gx => [gx - 2.1, gx + 2.1]).concat([[b.x1, b.x1]]);
-      for (const [a, c] of cuts) { if (a - x > 0.2) box(a - x, 1.3, 0.5, BRAND_LIGHT, (x + a) / 2, 0.95, b.z1, g); x = c; }
-      const sign = decal(name, Math.min(w * 0.6, 22), 2.6, '#ffffff', { size: 0.66, spacing: 6 });
+      for (const [a, c] of cuts) { if (a - x > 0.2) box(a - x, 1.3, 0.5, creamWall, (x + a) / 2, 0.95, b.z1, g); x = c; }
+      const sign = decal(name, Math.min(w * 0.6, 22), 2.6, '#A32D2D', { size: 0.66, spacing: 6 });
       sign.position.set(cx, 5.2, b.z0 + 0.3); g.add(sign);
       return g;
     };
@@ -633,7 +635,7 @@
     const people = [];
     const person = (x, z, face, parent) => {
       const g = new THREE.Group(); g.position.set(x, 0.3, z); g.rotation.y = face || 0;
-      cyl(0.32, 0.36, 1.1, BRAND, 0, 0.85, 0, g, 10);
+      cyl(0.32, 0.36, 1.1, 0x2563eb, 0, 0.85, 0, g, 10);   // blue overalls (owner)
       const hg = new THREE.SphereGeometry(0.3, 12, 10); geos.add(hg);
       const head = new THREE.Mesh(hg, mat(0xe8b98f)); head.position.y = 1.65; head.castShadow = true; g.add(head);
       box(0.66, 0.16, 0.62, 0xfacc15, 0, 1.92, 0, g);
@@ -652,12 +654,12 @@
       return m;
     };
     const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
-    // Façade (owner, 2026-10-22): red-tint walls over the low outer walls up
-    // to the next floor; windows only on the street front, laid out like the
-    // owner's photo (built after the floors). Overview only - the floor views
-    // keep the low cut-away walls so you see in.
+    // Façade (owner, 2026-10-22): cream tinted walls over the low outer
+    // walls up to the next floor; windows only on the street side, laid out
+    // like the owner's photo (built after the floors). Overview only - the
+    // floor views keep the low cut-away walls so you see in.
     const facade = new THREE.Group(); scene.add(facade);
-    const facadeBits = { wall: [], glass: [], mullion: [] };
+    const facadeBits = { wall: [], stone: [], glass: [], mullion: [], trim: [], joint: [] };
     const curtain = (x1, z1, x2, z2, y0, y1) =>
       facadeBits.wall.push([(x1 + x2) / 2, (y0 + y1) / 2, (z1 + z2) / 2, Math.hypot(x2 - x1, z2 - z1), y1 - y0, 0.12, -Math.atan2(z2 - z1, x2 - x1)]);
     // Solar canopy: steel posts on a grid, beams along the rows, and tilted
@@ -690,7 +692,7 @@
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       // One slab material per floor (upper floors see-through in the overview).
-      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xecc8c8 : 0xf6d6d6, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // red-tint floors (owner)
+      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe3b0b0 : 0xf0c2c2, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // red-tint floors (owner)
       slabMats.push(sm);
       for (const P of F.parts) {
         const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise; g.add(pg);
@@ -715,7 +717,7 @@
         P.outline.forEach(([px, py], k) => {
           if (P.ext && !P.ext.includes(k)) return;
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
-          wallSeg(X(px), Z(py), X(qx), Z(qy), P.parapet ? 1.1 : 2.4, BRAND, 0.35, pg);
+          wallSeg(X(px), Z(py), X(qx), Z(qy), P.parapet ? 1.1 : 2.4, creamWall, 0.35, pg);
         });
         // Red-tint wall panels on the outer edges (ground and 1st floor; not
         // the basement, which is underground, nor the roof's parapets). The
@@ -802,43 +804,85 @@
       const ft = tag(FLOOR_NAMES[fi], '', 'brand', 3.4);
       ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 34); g.add(ft); floorTags.push(ft);   // past the warehouse, beside the core
     });
-    // The street front, after the owner's photo (2026-10-22) - the only side
-    // with windows: the tall stair window on the left (the lobby stairs are
-    // behind it), the middle bay under the 1st floor terrace - the photo's
-    // canopy - with glass doors and dark steps, a small grid window and the
-    // name above, and a tall strip window on the right; red pilasters
-    // between the bays.
+    // The street side, after the owner's photo (2026-10-22) - the only side
+    // with windows. Cream stone panels with joints, windows in dark
+    // reflective glass on a black frame grid inside a stone surround.
+    // Front block: the tall stair window on a bay that steps forward (the
+    // lobby stairs are behind it), the middle bay under the 1st floor
+    // terrace - the photo's canopy - with glass doors, dark steps, a small
+    // grid window and the name above, and a tall strip window on the right.
+    // Side wing (the core, set back): three rows of windows left of the
+    // open loading area.
     {
+      const stoneAt = (x0, x1, y0, y1, z) => {
+        facadeBits.stone.push([(x0 + x1) / 2, (y0 + y1) / 2, z, x1 - x0, y1 - y0, 0.14, 0]);
+        for (let y = y0 + 2.9; y < y1 - 0.5; y += 2.9) facadeBits.joint.push([(x0 + x1) / 2, y, z + 0.08, x1 - x0, 0.05, 0.02, 0]);
+      };
+      const win = (x0, x1, y0, y1, cols, rows, z) => {
+        facadeBits.glass.push([(x0 + x1) / 2, (y0 + y1) / 2, z + 0.06, x1 - x0, y1 - y0, 0.05, 0]);
+        for (let i = 0; i <= cols; i++) facadeBits.mullion.push([x0 + (x1 - x0) * i / cols, (y0 + y1) / 2, z + 0.12, i % cols ? 0.08 : 0.14, y1 - y0, 0.08, 0]);
+        for (let k = 0; k <= rows; k++) facadeBits.mullion.push([(x0 + x1) / 2, y0 + (y1 - y0) * k / rows, z + 0.12, x1 - x0, k % rows ? 0.08 : 0.14, 0.08, 0]);
+        const t = 0.3;   // stone surround, standing a little proud of the wall
+        facadeBits.trim.push([(x0 + x1) / 2, y1 + t / 2, z + 0.12, x1 - x0 + 2 * t, t, 0.3, 0], [(x0 + x1) / 2, y0 - t / 2, z + 0.12, x1 - x0 + 2 * t, t, 0.3, 0],
+          [x0 - t / 2, (y0 + y1) / 2, z + 0.12, t, y1 - y0, 0.3, 0], [x1 + t / 2, (y0 + y1) / 2, z + 0.12, t, y1 - y0, 0.3, 0]);
+      };
+      // Front block.
       const z = wz(PLAN_P, 500), xa = wx(PLAN_P, 0), xb = wx(PLAN_P, 603), top = FLOOR_Y[3] + 1.2;
       const d0 = wx(PLAN_P, 270), d1 = wx(PLAN_P, 330), doorTop = 6.4;   // the plan's entrance doors
-      const pl = wx(PLAN_G, 668) - 0.8, pr = wx(PLAN_G, 902) + 0.8, mc = (pl + pr) / 2;   // pilasters either side of the terrace
-      const wallAt = (x0, x1, y0, y1) => facadeBits.wall.push([(x0 + x1) / 2, (y0 + y1) / 2, z + 0.05, x1 - x0, y1 - y0, 0.12, 0]);
-      wallAt(xa, d0, SLAB, top); wallAt(d1, xb, SLAB, top); wallAt(d0, d1, doorTop, top);
-      const win = (x0, x1, y0, y1, cols, rows) => {
-        facadeBits.glass.push([(x0 + x1) / 2, (y0 + y1) / 2, z + 0.12, x1 - x0, y1 - y0, 0.06, 0]);
-        for (let i = 0; i <= cols; i++) facadeBits.mullion.push([x0 + (x1 - x0) * i / cols, (y0 + y1) / 2, z + 0.17, 0.1, y1 - y0 + 0.1, 0.08, 0]);
-        for (let k = 0; k <= rows; k++) facadeBits.mullion.push([(x0 + x1) / 2, y0 + (y1 - y0) * k / rows, z + 0.17, x1 - x0 + 0.1, 0.1, 0.08, 0]);
-      };
-      win(xa + 1.4, xa + 5.9, 1.8, 18.2, 4, 4);         // tall stair window
-      win(mc - 2.1, mc + 2.1, 13.8, 17.0, 4, 2);        // small window over the terrace
-      win(xb - 3.0, xb - 0.5, 1.8, 18.2, 3, 4);         // tall strip window
-      win(d0, d1, SLAB, doorTop, 2, 1);                 // glass entrance doors
-      for (const x of [xa, pl, pr, xb]) box(0.7, top - SLAB, 0.45, BRAND, x, (top + SLAB) / 2, z + 0.2, facade);
-      box(xb - xa + 0.7, 0.55, 0.6, BRAND_DARK, (xa + xb) / 2, top, z + 0.2, facade);              // cornice
-      box(xb - xa, 0.3, 0.3, 0x1f2937, (xa + xb) / 2, SLAB + 0.15, z + 0.2, facade, false);        // dark base line
+      const pl = wx(PLAN_G, 668) - 0.8, pr = wx(PLAN_G, 902) + 0.8, mc = (pl + pr) / 2;   // the middle bay, under the terrace
+      const zl = z + 0.6;                                                                  // the stair bay steps forward
+      stoneAt(xa, pl, SLAB, top + 0.4, zl);
+      facadeBits.stone.push([pl, (SLAB + top) / 2, z + 0.3, 0.14, top - SLAB, 0.6, 0], [xa, (SLAB + top) / 2, z + 0.3, 0.14, top - SLAB, 0.6, 0]);   // its returns
+      stoneAt(pl, d0, SLAB, top, z); stoneAt(d1, xb, SLAB, top, z); stoneAt(d0, d1, doorTop + 0.4, top, z);
+      win(xa + 1.4, pl - 1.6, 1.8, 18.2, 4, 4, zl);      // tall stair window
+      win(mc - 2.1, mc + 2.1, 13.8, 17.0, 4, 2, z);      // small window over the terrace
+      win(xb - 3.0, xb - 0.6, 1.8, 18.2, 3, 4, z);       // tall strip window
+      // Entrance: glass doors in a dark frame with steel handles, warm light inside.
+      win(d0, d1, SLAB, doorTop, 2, 1, z);
+      box(d1 - d0 + 0.5, 0.4, 0.3, 0x111827, (d0 + d1) / 2, doorTop + 0.2, z + 0.15, facade);
+      for (const hx of [-0.18, 0.18]) box(0.06, 1.1, 0.08, 0xd1d5db, (d0 + d1) / 2 + hx, 3.2, z + 0.25, facade, false);
+      const warm = box(d1 - d0 - 0.2, doorTop - SLAB - 0.4, 0.05, 0xfef3c7, (d0 + d1) / 2, (doorTop + SLAB) / 2, z - 0.4, facade, false);
+      warm.material = new THREE.MeshBasicMaterial({ color: 0xfde68a, transparent: true, opacity: 0.35, depthWrite: false });
+      // Cornice, a dark plinth, the terrace's stone fascia (the canopy) and its lights.
+      box(pl - xa + 0.4, 0.6, 1.0, CREAM_DARK, (xa + pl) / 2, top + 0.7, zl - 0.1, facade);
+      box(xb - pl + 0.4, 0.6, 0.6, CREAM_DARK, (pl + xb) / 2, top + 0.3, z + 0.2, facade);
+      box(pl - xa, 0.35, 0.3, 0x1f2937, (xa + pl) / 2, SLAB + 0.17, zl + 0.12, facade, false);
+      box(xb - pl, 0.35, 0.3, 0x1f2937, (pl + xb) / 2, SLAB + 0.17, z + 0.12, facade, false);
+      const tz = wz(PLAN_G, 1345), tx0 = wx(PLAN_G, 668), tx1 = wx(PLAN_G, 902);
+      box(tx1 - tx0 + 0.3, 1.6, 0.35, CREAM_DARK, (tx0 + tx1) / 2, FLOOR_Y[2] + 0.3, tz + 0.1, facade);
       for (const dx of [-3.5, 0, 3.5]) box(0.5, 0.05, 0.5, 0xfde68a, mc + dx, FLOOR_Y[2] - 0.03, z + 1.8, facade, false);   // lights under the terrace (the entrance canopy)
       box(pr - pl + 1.6, 0.2, 2.4, 0x1f2937, mc, 0.1, z + 1.4, facade, false);                       // dark steps
       box(pr - pl - 0.2, 0.2, 1.5, 0x111827, mc, 0.3, z + 0.95, facade, false);
       for (const [text, y, w, h, color, size] of [['SUPREME ART', 20.0, 11, 1.6, '#dc2626', 0.78], ['(PRIVATE) LIMITED', 18.6, 7, 0.9, '#1f2937', 0.7]]) {
         const sign = decal(text, w, h, color, { size, weight: 900 }); sign.position.set(mc, y, z + 0.25); sign.renderOrder = 3; facade.add(sign);
       }
+      // Paved forecourt with big tiles, like the photo.
+      const fz0 = z + 2.6, fz1 = z + 10, fx0 = xa - 1, fx1 = xb + 0.5;
+      box(fx1 - fx0, 0.05, fz1 - fz0, 0xe7e5e4, (fx0 + fx1) / 2, 0.15, (fz0 + fz1) / 2, scene, false);
+      for (let x = fx0 + 2.2; x < fx1; x += 2.2) box(0.05, 0.02, fz1 - fz0, 0xc8c4bf, x, 0.18, (fz0 + fz1) / 2, scene, false);
+      for (let zz = fz0 + 2.2; zz < fz1; zz += 2.2) box(fx1 - fx0, 0.02, 0.05, 0xc8c4bf, (fx0 + fx1) / 2, 0.18, zz, scene, false);
+      // Side wing: the core's front, from its corner to the open loading area.
+      const cz = wz(PLAN_G, 940), cx0 = wx(PLAN_G, 212), cx1 = wx(PLAN_G, 412), ctop = FLOOR_Y[3] + 1.2;
+      stoneAt(cx0, cx1, 0, ctop, cz + 0.05);
+      for (const [y0, y1] of [[3.2, 7.7], [12.2, 16.2], [18.2, 21.6]])
+        for (let i = 0; i < 3; i++) { const wc = cx0 + 1.7 + i * ((cx1 - cx0 - 3.4) / 2); win(wc - 1.1, wc + 1.1, y0, y1, 2, 2, cz + 0.05); }
+      box(cx1 - cx0 + 0.4, 0.6, 0.7, CREAM_DARK, (cx0 + cx1) / 2, ctop + 0.3, cz + 0.2, facade);
+      box(cx1 - cx0, 0.35, 0.3, 0x1f2937, (cx0 + cx1) / 2, 0.17, cz + 0.2, facade, false);
     }
     {
       const unit = new THREE.BoxGeometry(1, 1, 1); geos.add(unit);
       const kinds = [
-        ['wall', new THREE.MeshStandardMaterial({ color: BRAND, transparent: true, opacity: 0.3, roughness: 0.6, depthWrite: false, side: THREE.DoubleSide }), 1],
-        ['glass', new THREE.MeshStandardMaterial({ color: 0x0b0f17, transparent: true, opacity: 0.66, roughness: 0.12, metalness: 0.6, depthWrite: false }), 2],
-        ['mullion', new THREE.MeshStandardMaterial({ color: 0x374151, roughness: 0.5, metalness: 0.5 }), 0],
+        ['wall', new THREE.MeshStandardMaterial({ color: CREAM, transparent: true, opacity: 0.38, roughness: 0.85, depthWrite: false, side: THREE.DoubleSide }), 1],
+        ['stone', new THREE.MeshStandardMaterial({ color: CREAM, transparent: true, opacity: 0.86, roughness: 0.9, depthWrite: false }), 1],
+        ['joint', new THREE.MeshStandardMaterial({ color: 0xc9b994, roughness: 1 }), 0],
+        ['trim', new THREE.MeshStandardMaterial({ color: CREAM_DARK, roughness: 0.8 }), 0],
+        // Black tinted glass with a sky reflection fading down it.
+        ['glass', new THREE.MeshStandardMaterial({ map: canvasTex(64, 256, (g, w, h) => {
+          const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#6b7f99'); gr.addColorStop(0.35, '#26344a'); gr.addColorStop(1, '#070b12');
+          g.fillStyle = gr; g.fillRect(0, 0, w, h);
+          g.fillStyle = 'rgba(255,255,255,.10)'; g.beginPath(); g.moveTo(0, h * 0.55); g.lineTo(w, h * 0.3); g.lineTo(w, h * 0.42); g.lineTo(0, h * 0.67); g.fill();
+        }), transparent: true, opacity: 0.88, roughness: 0.08, metalness: 0.35, depthWrite: false }), 2],
+        ['mullion', new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.4, metalness: 0.6 }), 0],
       ];
       const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), pos = new THREE.Vector3(), sc = new THREE.Vector3();
       for (const [k, m, order] of kinds) {
@@ -919,12 +963,12 @@
     const frame = new THREE.Group(); scene.add(frame);
     {
       const pl = PLAN_G, bot = FLOOR_Y[0], top = FLOOR_Y[3] + 1.4, hgt = top - bot;
-      for (const [px, py] of OUTLINE_G) cyl(0.14, 0.14, hgt, BRAND_DARK, wx(pl, px), bot + hgt / 2, wz(pl, py), frame, 8);
+      for (const [px, py] of OUTLINE_G) cyl(0.14, 0.14, hgt, CREAM_DARK, wx(pl, px), bot + hgt / 2, wz(pl, py), frame, 8);
       const [a, b, c, d] = LIFT_G, lx = (wx(pl, a) + wx(pl, c)) / 2, lz = (wz(pl, b) + wz(pl, d)) / 2, lw = wx(pl, c) - wx(pl, a), ld = wz(pl, d) - wz(pl, b);
       // The lift runs basement -> 1st floor only; nothing goes on up to the roof.
       const shaftH = FLOOR_Y[2] + 2.8 - bot;
       const shaftGeo = new THREE.BoxGeometry(lw, shaftH, ld); geos.add(shaftGeo);
-      const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: BRAND_LIGHT, transparent: true, opacity: 0.18, depthWrite: false }));
+      const shaft = new THREE.Mesh(shaftGeo, new THREE.MeshStandardMaterial({ color: CREAM, transparent: true, opacity: 0.22, depthWrite: false }));
       shaft.position.set(lx, bot + shaftH / 2, lz); frame.add(shaft);
       var liftCar = box(lw * 0.8, 2.0, ld * 0.8, BRAND_DARK, lx, bot + 1.4, lz, frame);
       const sign = tag('PRODUCTION', '', 'brand', 5.5);
