@@ -253,7 +253,7 @@
   const MACHINES = [
     // 1-3: long presses (~13 m, extended delivery), from just right of the
     // middle pillars to the right side of Hall-01 (owner's blue lines).
-    { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [811, 138], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
+    { kind: 'press', stage: 1, units: 5, len: 14.2, face: 'left', at: [811, 138], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
     { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [802, 298], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
     { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [797, 447], pallets: [[-4.5, -2.7], [-1.9, -2.7]] },
     // 4 and 7 (Hall-02's right side) moved down to the owner's lines.
@@ -299,7 +299,7 @@
   const STAGE_ZONES = [
     { floor: 1, plan: PLAN_P, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
-    { floor: 0, plan: PLAN_B, r: [700, 492, 1000, 588], raise: BASE_RAISE },  // Coatings - basement, Hall-01 front strip
+    { floor: 0, plan: PLAN_B, r: [700, 492, 1000, 588], raise: BASE_RAISE, hidden: true },  // Coatings - its pallets wait here, no outline (owner)
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
     { floor: 2, plan: PLAN_G, r: [530, 365, 860, 520] },   // Sorting     - 1st floor, middle hall
     { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
@@ -977,7 +977,7 @@
     // Stage areas (provisional until the owner places them): a painted
     // outline and the stage's name on its floor.
     STAGE_ZONES.forEach((z, i) => {
-      if (!z.r) return;
+      if (!z.r || z.hidden) return;
       const r = zoneRect(i), g = floorGroups[r.floor], y = SLAB + r.raise + 0.015;
       const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2, w = r.x1 - r.x0, d = r.z1 - r.z0;
       for (const [bw, bd, x, zz] of [[w, 0.2, cx, r.z0], [w, 0.2, cx, r.z1], [0.2, d, r.x0, cz], [0.2, d, r.x1, cz]]) box(bw, 0.02, bd, BRAND, x, y, zz, g, false);
@@ -1140,6 +1140,27 @@
       inst.castShadow = true; floorGroups[0].add(inst);
     }
     const STAGE_COLOR = { 1: '#374151', 3: '#374151' };
+    // Yellow / black hazard tape on the floor round each machine and its
+    // operator (owner, 2026-10-22): one striped texture, its stripes kept
+    // the same size on every side.
+    const tapeTex = canvasTex(64, 16, (g2, w, h) => {
+      g2.fillStyle = '#facc15'; g2.fillRect(0, 0, w, h); g2.fillStyle = '#111827';
+      for (let k = -1; k < 3; k++) { g2.beginPath(); g2.moveTo(k * 32, h); g2.lineTo(k * 32 + 16, 0); g2.lineTo(k * 32 + 32, 0); g2.lineTo(k * 32 + 16, h); g2.fill(); }
+    });
+    tapeTex.wrapS = THREE.RepeatWrapping;
+    const tapeMat = new THREE.MeshStandardMaterial({ map: tapeTex, roughness: 0.6 });
+    const tapeBox = new THREE.Box3();
+    const hazardTape = (g, y) => {
+      g.updateMatrixWorld(true);
+      tapeBox.setFromObject(g);
+      const x0 = tapeBox.min.x - 0.35, x1 = tapeBox.max.x + 0.35, z0 = tapeBox.min.z - 0.35, z1 = tapeBox.max.z + 0.35;
+      for (const [len, cx, cz, alongX] of [[x1 - x0, (x0 + x1) / 2, z0, true], [x1 - x0, (x0 + x1) / 2, z1, true], [z1 - z0, x0, (z0 + z1) / 2, false], [z1 - z0, x1, (z0 + z1) / 2, false]]) {
+        const tg = new THREE.PlaneGeometry(len + 0.22, 0.22); geos.add(tg);
+        const uv = tg.attributes.uv; for (let k = 0; k < uv.count; k++) uv.setX(k, uv.getX(k) * (len + 0.22) / 0.9);
+        const t = new THREE.Mesh(tg, tapeMat); t.rotation.set(-Math.PI / 2, 0, alongX ? 0 : Math.PI / 2);
+        t.position.set(cx, y, cz); t.receiveShadow = true; floorGroups[0].add(t);
+      }
+    };
     MACHINES.forEach((m, i) => {
       const g = new THREE.Group(), x = wx(PLAN_B, m.at[0]), z = wz(PLAN_B, m.at[1]);
       const lift0 = basementRaise(m.at[0], m.at[1]);
@@ -1147,6 +1168,7 @@
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[0].add(g);
       if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else if (m.kind === 'cutter') buildCutter(g, i, m.len, m.dep); else if (m.kind === 'folder') buildFolder(g, i, m.len, m.dep); else buildDieCut(g, i);
+      hazardTape(g, SLAB + lift0 + 0.012);
       // Name painted on the floor behind the machine, far enough back that
       // the machine itself doesn't hide it from the usual camera angle.
       const sideways = m.face === 'up' || m.face === 'down';
