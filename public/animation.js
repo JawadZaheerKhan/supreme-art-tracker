@@ -142,7 +142,7 @@
       // The Machine Area is open to Hall-01 (no wall along its top) and the
       // lift's hall side is its doors (owner, 2026-10-21).
       walls: [[330, 597, 330, 815], [400, 597, 400, 710], [400, 710, 500, 710], [500, 710, 500, 815], [330, 668, 400, 668]],
-      ramp: [403, 600, 497, 708],                // hand-lifter ramp up to the ground floor's loading area
+      ramp: [515, 692, 617, 763, 'back'],        // hand-lifter ramp (owner's mark): Hall-02's top-left corner, high end at the back
       dashed: [[500, 703, 1022, 703]],
       columns: [[332, 242], [504, 242], [677, 242], [849, 242], [332, 421], [504, 421], [677, 421], [849, 421], [504, 600], [677, 600], [849, 600], [677, 707], [849, 707], [677, 815], [849, 815], [677, 922], [849, 922], [677, 1030], [849, 1030]],
       // [plan rect, reversed?] - Hall-02's front stairs climb toward the left.
@@ -212,17 +212,22 @@
   // unit; presses 1-5 deliver to the left, 6-7 to the right. Die cutters 1-2
   // big, front down; 3-5 front right; 6-7 front down; 5-7 in the Machine Area.
   const MACHINES = [
-    { kind: 'press', stage: 1, units: 5, face: 'left', at: [764, 223], pallets: [[-1.6, 2.7], [1.0, 2.7]] },
-    { kind: 'press', stage: 1, units: 5, face: 'left', at: [743, 386], pallets: [[-1.6, 2.7], [1.0, 2.7]] },
-    { kind: 'press', stage: 1, units: 5, face: 'left', at: [721, 516], pallets: [[-1.6, 2.7], [1.0, 2.7]] },
+    // 1-3: long presses (~13 m, extended delivery), from just right of the
+    // middle pillars to the right side of Hall-01 (owner's blue lines).
+    { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [811, 138], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
+    { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [802, 298], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
+    { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [797, 447], pallets: [[-4.5, -2.7], [-1.9, -2.7]] },
     { kind: 'press', stage: 1, units: 2, face: 'left', at: [970, 808], pallets: [[-1.4, 2.7], [1.0, 2.7]] },
-    { kind: 'press', stage: 1, units: 1, face: 'left', at: [671, 848], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
-    { kind: 'press', stage: 1, units: 1, face: 'right', at: [677, 952], pallets: [[-1.3, 2.7], [1.3, 2.7]] },
+    // 5-6 by Hall-02's left wall (owner's blue dots).
+    { kind: 'press', stage: 1, units: 1, face: 'left', at: [573, 880], pallets: [[-1.3, -2.7], [1.3, -2.7]] },
+    { kind: 'press', stage: 1, units: 1, face: 'right', at: [581, 971], pallets: [[4.3, -0.8], [4.3, 1.5]] },
     { kind: 'press', stage: 1, units: 1, face: 'right', at: [955, 989], pallets: [[-1.4, 2.7], [0.8, 2.7]] },
-    { kind: 'diecut-big', stage: 3, face: 'down', at: [485, 160], pallets: [[-1.4, 3.9], [-4.0, 3.9]] },
-    { kind: 'diecut-big', stage: 3, face: 'down', at: [314, 183], pallets: [[-2.6, 1.5], [-2.6, -1.2]] },
-    { kind: 'diecut', stage: 3, face: 'right', at: [320, 316], pallets: [[3.2, 0]] },
-    { kind: 'diecut', stage: 3, face: 'right', at: [311, 388], pallets: [[3.2, 0]] },
+    // Die cutters 1-2: ~6 m long, toward the left (owner's red lines); 3-4
+    // nearer the left wall.
+    { kind: 'diecut-big', stage: 3, len: 6.2, face: 'down', at: [425, 189], pallets: [[0, 4.4], [-2.6, 4.4]] },
+    { kind: 'diecut-big', stage: 3, len: 6.2, face: 'down', at: [245, 180], pallets: [[2.6, 1.5], [2.6, -1.2]] },
+    { kind: 'diecut', stage: 3, face: 'right', at: [235, 358], pallets: [[3.2, 0]] },
+    { kind: 'diecut', stage: 3, face: 'right', at: [224, 435], pallets: [[3.2, 0]] },
     // 5-7 stand together in the Machine Area (owner, 2026-10-21), between
     // the stairs and the Work Shop wall.
     { kind: 'diecut', stage: 3, face: 'right', at: [290, 620], pallets: [[0, -2.6]] },
@@ -237,7 +242,7 @@
   const STAGE_ZONES = [
     { floor: 1, plan: PLAN_P, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
-    { floor: 0, plan: PLAN_B, r: [870, 100, 1000, 560] },  // Coatings    - basement, Hall-01 right strip
+    { floor: 0, plan: PLAN_B, r: [700, 492, 1000, 588] },  // Coatings    - basement, Hall-01 front strip
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
     { floor: 2, plan: PLAN_G, r: [530, 365, 860, 520] },   // Sorting     - 1st floor, middle hall
     { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
@@ -616,19 +621,19 @@
             else box(x1 - x0, h, (z1 - z0) / n, 0xcbd5e1, (x0 + x1) / 2, y0 + h / 2, z0 + (z1 - z0) * (k + 0.5) / n, pg);
           }
         }
-        // Hand-lifter ramp: a wedge climbing toward the front, yellow edges.
+        // Hand-lifter ramp: a wedge climbing toward the front (or the back), yellow edges.
         if (P.ramp) {
-          const [a, b, c, d] = P.ramp, D = Z(d) - Z(b), W = X(c) - X(a), H = 2.2;
-          const rshape = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(D, H)]);
+          const [a, b, c, d, up] = P.ramp, D = Z(d) - Z(b), W = X(c) - X(a), H = 2.2, back = up === 'back';
+          const rshape = new THREE.Shape(back ? [new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(0, H)] : [new THREE.Vector2(0, 0), new THREE.Vector2(D, 0), new THREE.Vector2(D, H)]);
           const rg = new THREE.ExtrudeGeometry(rshape, { depth: W, bevelEnabled: false }); geos.add(rg);
           const ramp = new THREE.Mesh(rg, mat(0x9ca3af)); ramp.rotation.y = -Math.PI / 2; ramp.position.set(X(c), SLAB, Z(b));
           ramp.castShadow = true; ramp.receiveShadow = true; pg.add(ramp);
           const len = Math.hypot(D, H), tilt = Math.atan2(H, D);
           for (const ex of [X(a) + 0.12, X(c) - 0.12]) {
-            const edge = box(0.2, 0.06, len, 0xfacc15, ex, SLAB + H / 2 + 0.04, Z(b) + D / 2, pg, false); edge.rotation.x = -tilt;
+            const edge = box(0.2, 0.06, len, 0xfacc15, ex, SLAB + H / 2 + 0.04, Z(b) + D / 2, pg, false); edge.rotation.x = back ? tilt : -tilt;
           }
-          const lab = decal('RAMP  ↑', 4, 1.0, '#b45309', { size: 0.6 });
-          lab.rotation.x = -Math.PI / 2; lab.position.set((X(a) + X(c)) / 2, SLAB + 0.02, Z(b) - 0.9); lab.renderOrder = 1; pg.add(lab);
+          const lab = decal(back ? 'RAMP  ↓' : 'RAMP  ↑', 4, 1.0, '#b45309', { size: 0.6 });
+          lab.rotation.x = -Math.PI / 2; lab.position.set((X(a) + X(c)) / 2, SLAB + 0.02, back ? Z(d) + 0.9 : Z(b) - 0.9); lab.renderOrder = 1; pg.add(lab);
         }
         // Loading area (yellow-striped bay) and its roller-shutter gate.
         if (P.loading) {
@@ -784,19 +789,20 @@
       const gm = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.16, 10), green); geos.add(gm.geometry); gm.position.set(x, 2.61, z); parent.add(gm);
       return t => { green.emissiveIntensity = 0.5 + 0.5 * Math.sin(t * 4); };
     };
-    const buildPress = (g, n, units) => {  // sheet-fed offset press: feeder -> units -> delivery along +x
-      const UW = 0.95, W = 2.2, L = 1.3 + units * UW + 1.3 + 0.2;
+    const buildPress = (g, n, units, len) => {  // sheet-fed offset press: feeder -> units -> delivery along +x
+      const UW = units >= 5 ? 1.25 : 0.95, W = 2.2, L = Math.max(len || 0, 1.3 + units * UW + 1.3 + 0.2), del = L - 1.3 - units * UW - 0.2;
       box(L, 0.3, W, 0x111827, 0, 0.15, 0, g);
       box(1.3, 1.4, W * 0.9, 0xcbd5e1, -L / 2 + 0.65, 1.0, 0, g);                 // feeder
       box(1.1, 0.5, 1.6, 0xffffff, -L / 2 + 0.6, 1.95, 0, g);                     // paper pile
       const rollers = [];
       for (let u = 0; u < units; u++) {                                          // the printing units
-        const ux = -L / 2 + 1.3 + 0.1 + UW * (u + 0.5);
+        const ux = -L / 2 + 1.3 + 0.1 + UW * (u + 0.5);   // units right after the feeder
         box(UW - 0.05, 1.9, W, u % 2 ? 0x1f2937 : 0x111827, ux, 1.25, 0, g);
         box(0.65, 0.25, W * 0.7, [0x06b6d4, 0xdb2777, 0xfacc15, 0x111827, 0xf97316][u % 5], ux, 2.32, 0, g);   // ink ducts: C M Y K + a fifth colour
         rollers.push(roller(W * 1.02, 0.17, 0x94a3b8, ux + 0.42, 1.6, 0, g));
       }
-      box(1.3, 1.1, W, 0xcbd5e1, L / 2 - 0.65, 0.85, 0, g);                      // delivery
+      box(del, 1.1, W, 0xcbd5e1, L / 2 - del / 2, 0.85, 0, g);                    // delivery (extended on the long presses)
+      if (del > 2.2) box(del - 1.6, 0.55, W * 0.92, 0x374151, L / 2 - del / 2 - 0.5, 1.68, 0, g);   // dryer hood over the extended delivery
       const pile = box(1.0, 1, 1.5, 0xffffff, L / 2 - 0.65, 1.4, 0, g);
       box(0.5, 1.1, 0.35, 0x1f2937, L / 2 - 0.4, 0.85, W / 2 + 0.45, g);         // console
       const scr = box(0.42, 0.3, 0.02, 0x22d3ee, L / 2 - 0.4, 1.25, W / 2 + 0.63, g, false); scr.material = new THREE.MeshBasicMaterial({ color: 0x67e8f9 });
@@ -810,14 +816,14 @@
         light(t + n);
       });
     };
-    const buildDieCutBig = (g, n) => {     // big automatic die cutter, 5 m along x
-      const L = 5, W = 2.4;
+    const buildDieCutBig = (g, n, len) => {  // big automatic die cutter, ~5-6 m along x
+      const L = len || 5, W = 2.4;
       box(L, 0.3, W, 0x111827, 0, 0.15, 0, g);
       box(1.2, 1.5, W * 0.9, 0xcbd5e1, -L / 2 + 0.6, 1.05, 0, g);
       box(1.0, 0.45, 1.7, 0xffffff, -L / 2 + 0.6, 2.02, 0, g);
       box(2.2, 2.1, W, 0x111827, -0.2, 1.35, 0, g);                              // cutting section
       const platen = box(1.9, 0.25, W * 0.85, 0x94a3b8, -0.2, 2.55, 0, g);
-      box(1.0, 1.6, W, 0x9ca3af, 1.4, 1.1, 0, g);                                // stripping
+      box(L / 2 - 1.2, 1.6, W, 0x9ca3af, (0.9 + L / 2 - 0.8) / 2, 1.1, 0, g);     // stripping, up to the delivery
       box(0.8, 1.0, W, 0xcbd5e1, L / 2 - 0.4, 0.8, 0, g);                        // delivery
       const pile = box(0.7, 1, 1.6, 0xc9a26b, L / 2 - 0.4, 1.3, 0, g);
       const light = signal(g, 1.4, -W / 2 + 0.2);
@@ -852,11 +858,11 @@
       g.position.set(x, SLAB, z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[0].add(g);
-      if (m.kind === 'press') buildPress(g, i, m.units || 4); else if (m.kind === 'diecut-big') buildDieCutBig(g, i); else buildDieCut(g, i);
+      if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else buildDieCut(g, i);
       // Name painted on the floor behind the machine, far enough back that
       // the machine itself doesn't hide it from the usual camera angle.
       const sideways = m.face === 'up' || m.face === 'down';
-      const depth = m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? 5 : 2.4) : (sideways ? 1.8 : 1.5);
+      const depth = m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
       const name = m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
       const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage], { size: 0.62 });
       lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + 0.02, z - depth / 2 - (m.kind === 'diecut' ? 1.0 : 1.5)); lab.renderOrder = 1; floorGroups[0].add(lab);
@@ -940,7 +946,7 @@
       return g;
     };
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
-      [PLAN_B, 0, 0, [[420, 270, 610, 560], [520, 600, 1000, 690], [740, 740, 830, 1100]]],
+      [PLAN_B, 0, 0, [[470, 300, 640, 560], [640, 610, 1000, 690], [690, 740, 830, 1100]]],
       [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 520]]],
       [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
       [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
