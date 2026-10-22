@@ -175,7 +175,7 @@
         holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
-      { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3], glass: [2], entrance: [2, 270, 330],
+      { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
         walls: [
           [135, 5, 135, 125], [135, 125, 150, 125], [185, 125, 205, 125], [205, 125, 205, 250], [5, 250, 205, 250],
           [200, 250, 200, 378], [5, 378, 200, 378],
@@ -202,7 +202,7 @@
         ext: [0, 1, 3, 4, 5, 6, 7, 8, 9],   // the hall / offices line is the inner wall below
         walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS },
       // The offices are a little above the 1st floor's hall side (owner, 2026-10-22).
-      { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
+      { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3], street: 2,
         walls: [[560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
           [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
         stairs: [[517, 1165, 640, 1265]], terrace: [668, 1272, 902, 1345],
@@ -652,32 +652,14 @@
       return m;
     };
     const edgeMat = new THREE.LineBasicMaterial({ color: BRAND_DARK });
-    // Façade like the owner's photo: over the low outer walls, red-tint wall
-    // panels up to the next floor with tall black-tint windows on a mullion
-    // grid; a glass front with the entrance canopy on the street. Overview
-    // only - the floor views keep the low cut-away walls so you see in.
+    // Façade (owner, 2026-10-22): red-tint walls over the low outer walls up
+    // to the next floor; windows only on the street front, laid out like the
+    // owner's photo (built after the floors). Overview only - the floor views
+    // keep the low cut-away walls so you see in.
     const facade = new THREE.Group(); scene.add(facade);
     const facadeBits = { wall: [], glass: [], mullion: [] };
-    const curtain = (x1, z1, x2, z2, y0, y1, out, gap) => {
-      const len = Math.hypot(x2 - x1, z2 - z1), ux = (x2 - x1) / len, uz = (z2 - z1) / len, rot = -Math.atan2(z2 - z1, x2 - x1);
-      const at = (t, o) => [x1 + ux * t + out[0] * o, z1 + uz * t + out[1] * o];
-      const spans = gap ? [[0, gap[0]], [gap[1], len]] : [[0, len]];
-      for (const [a, b] of spans) {
-        if (b - a < 0.3) continue;
-        const [mx, mz] = at((a + b) / 2, 0);
-        facadeBits.wall.push([mx, (y0 + y1) / 2, mz, b - a, y1 - y0, 0.12, rot]);
-        const n = Math.floor((b - a - 0.8) / 3.4), pad = (b - a - n * 3.4) / 2, gy0 = y0 + 0.5, gy1 = y1 - 0.9, gh = gy1 - gy0;
-        if (gh < 1) continue;
-        for (let i = 0; i < n; i++) {
-          const [gxp, gzp] = at(a + pad + 3.4 * (i + 0.5), 0.1);
-          facadeBits.glass.push([gxp, (gy0 + gy1) / 2, gzp, 2.4, gh, 0.06, rot]);
-          const [mxp, mzp] = at(a + pad + 3.4 * (i + 0.5), 0.15);
-          facadeBits.mullion.push([mxp, (gy0 + gy1) / 2, mzp, 0.09, gh, 0.08, rot]);
-          for (const f of [1 / 3, 2 / 3]) facadeBits.mullion.push([mxp, gy0 + gh * f, mzp, 2.4, 0.09, 0.08, rot]);
-          for (const sd of [-1.2, 1.2]) { const [fx, fz] = at(a + pad + 3.4 * (i + 0.5) + sd, 0.15); facadeBits.mullion.push([fx, (gy0 + gy1) / 2, fz, 0.1, gh, 0.08, rot]); }
-        }
-      }
-    };
+    const curtain = (x1, z1, x2, z2, y0, y1) =>
+      facadeBits.wall.push([(x1 + x2) / 2, (y0 + y1) / 2, (z1 + z2) / 2, Math.hypot(x2 - x1, z2 - z1), y1 - y0, 0.12, -Math.atan2(z2 - z1, x2 - x1)]);
     // Solar canopy: steel posts on a grid, beams along the rows, and tilted
     // panels (one instanced mesh, so hundreds of panels stay cheap).
     const solarCanopy = (parent, x0, x1, z0, z1, y) => {
@@ -735,28 +717,14 @@
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
           wallSeg(X(px), Z(py), X(qx), Z(qy), P.parapet ? 1.1 : 2.4, BRAND, 0.35, pg);
         });
-        // Façade panels on the glazed edges (ground and 1st floor; not the
-        // basement, which is underground, nor the roof's parapets).
-        if (fi === 1 || fi === 2) {
-          const cxo = P.outline.reduce((t, [px]) => t + X(px), 0) / P.outline.length, czo = P.outline.reduce((t, [, py]) => t + Z(py), 0) / P.outline.length;
-          const top = FLOOR_Y[fi + 1] - FLOOR_Y[fi];
-          P.outline.forEach(([px, py], k) => {
-            const ext = !P.ext || P.ext.includes(k);
-            if (!ext && !(P.glass || []).includes(k)) return;
-            const [qx, qy] = P.outline[(k + 1) % P.outline.length];
-            const x1 = X(px), z1 = Z(py), x2 = X(qx), z2 = Z(qy), len = Math.hypot(x2 - x1, z2 - z1);
-            let ox = (z2 - z1) / len, oz = -(x2 - x1) / len;
-            if (ox * ((x1 + x2) / 2 - cxo) + oz * ((z1 + z2) / 2 - czo) < 0) { ox = -ox; oz = -oz; }
-            const base = FLOOR_Y[fi] + raise + SLAB, door = P.entrance && P.entrance[0] === k ? P.entrance : null;
-            const gap = door && [door[1], door[2]].map(d => Math.abs(X(d) - x1)).sort((a, b) => a - b);   // the door runs along x
-            curtain(x1, z1, x2, z2, base + (ext ? 2.4 : 0), FLOOR_Y[fi] + top, [ox, oz], gap);
-            if (door) {   // entrance canopy and the dark step platform (the photo's front door)
-              const ex = X((door[1] + door[2]) / 2), ew = Math.abs(X(door[2]) - X(door[1]));
-              const c1 = box(ew + 4, 0.4, 2.6, 0xe7e5e4, ex + ox * 1.3, base + 3.6, z1 + oz * 1.3, facade); c1.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
-              const c2 = box(ew + 5, 0.22, 1.8, 0x1f2937, ex + ox * 0.9, FLOOR_Y[fi] + 0.11, z1 + oz * 0.9, facade); c2.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
-            }
-          });
-        }
+        // Red-tint wall panels on the outer edges (ground and 1st floor; not
+        // the basement, which is underground, nor the roof's parapets). The
+        // street front is its own façade, below.
+        if (fi === 1 || fi === 2) P.outline.forEach(([px, py], k) => {
+          if ((P.ext && !P.ext.includes(k)) || k === P.street) return;
+          const [qx, qy] = P.outline[(k + 1) % P.outline.length];
+          curtain(X(px), Z(py), X(qx), Z(qy), FLOOR_Y[fi] + raise + SLAB + 2.4, FLOOR_Y[fi + 1]);
+        });
         // Solar panels on a steel frame over the given area (roof, open area).
         if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
         for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, pg);
@@ -834,6 +802,37 @@
       const ft = tag(FLOOR_NAMES[fi], '', 'brand', 3.4);
       ft.position.set(BLD.x0 - 4.5, 2.4, BLD.z0 + 34); g.add(ft); floorTags.push(ft);   // past the warehouse, beside the core
     });
+    // The street front, after the owner's photo (2026-10-22) - the only side
+    // with windows: the tall stair window on the left (the lobby stairs are
+    // behind it), the middle bay under the 1st floor terrace - the photo's
+    // canopy - with glass doors and dark steps, a small grid window and the
+    // name above, and a tall strip window on the right; red pilasters
+    // between the bays.
+    {
+      const z = wz(PLAN_P, 500), xa = wx(PLAN_P, 0), xb = wx(PLAN_P, 603), top = FLOOR_Y[3] + 1.2;
+      const d0 = wx(PLAN_P, 270), d1 = wx(PLAN_P, 330), doorTop = 6.4;   // the plan's entrance doors
+      const pl = wx(PLAN_G, 668) - 0.8, pr = wx(PLAN_G, 902) + 0.8, mc = (pl + pr) / 2;   // pilasters either side of the terrace
+      const wallAt = (x0, x1, y0, y1) => facadeBits.wall.push([(x0 + x1) / 2, (y0 + y1) / 2, z + 0.05, x1 - x0, y1 - y0, 0.12, 0]);
+      wallAt(xa, d0, SLAB, top); wallAt(d1, xb, SLAB, top); wallAt(d0, d1, doorTop, top);
+      const win = (x0, x1, y0, y1, cols, rows) => {
+        facadeBits.glass.push([(x0 + x1) / 2, (y0 + y1) / 2, z + 0.12, x1 - x0, y1 - y0, 0.06, 0]);
+        for (let i = 0; i <= cols; i++) facadeBits.mullion.push([x0 + (x1 - x0) * i / cols, (y0 + y1) / 2, z + 0.17, 0.1, y1 - y0 + 0.1, 0.08, 0]);
+        for (let k = 0; k <= rows; k++) facadeBits.mullion.push([(x0 + x1) / 2, y0 + (y1 - y0) * k / rows, z + 0.17, x1 - x0 + 0.1, 0.1, 0.08, 0]);
+      };
+      win(xa + 1.4, xa + 5.9, 1.8, 18.2, 4, 4);         // tall stair window
+      win(mc - 2.1, mc + 2.1, 13.8, 17.0, 4, 2);        // small window over the terrace
+      win(xb - 3.0, xb - 0.5, 1.8, 18.2, 3, 4);         // tall strip window
+      win(d0, d1, SLAB, doorTop, 2, 1);                 // glass entrance doors
+      for (const x of [xa, pl, pr, xb]) box(0.7, top - SLAB, 0.45, BRAND, x, (top + SLAB) / 2, z + 0.2, facade);
+      box(xb - xa + 0.7, 0.55, 0.6, BRAND_DARK, (xa + xb) / 2, top, z + 0.2, facade);              // cornice
+      box(xb - xa, 0.3, 0.3, 0x1f2937, (xa + xb) / 2, SLAB + 0.15, z + 0.2, facade, false);        // dark base line
+      for (const dx of [-3.5, 0, 3.5]) box(0.5, 0.05, 0.5, 0xfde68a, mc + dx, FLOOR_Y[2] - 0.03, z + 1.8, facade, false);   // lights under the terrace (the entrance canopy)
+      box(pr - pl + 1.6, 0.2, 2.4, 0x1f2937, mc, 0.1, z + 1.4, facade, false);                       // dark steps
+      box(pr - pl - 0.2, 0.2, 1.5, 0x111827, mc, 0.3, z + 0.95, facade, false);
+      for (const [text, y, w, h, color, size] of [['SUPREME ART', 20.0, 11, 1.6, '#dc2626', 0.78], ['(PRIVATE) LIMITED', 18.6, 7, 0.9, '#1f2937', 0.7]]) {
+        const sign = decal(text, w, h, color, { size, weight: 900 }); sign.position.set(mc, y, z + 0.25); sign.renderOrder = 3; facade.add(sign);
+      }
+    }
     {
       const unit = new THREE.BoxGeometry(1, 1, 1); geos.add(unit);
       const kinds = [
