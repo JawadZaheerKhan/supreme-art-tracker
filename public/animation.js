@@ -279,6 +279,16 @@
     { kind: 'cutter', stage: null, len: 3.9, dep: 2.4, face: 'up', at: [785, 685], pallets: [] },
     { kind: 'cutter', stage: null, len: 2.8, dep: 2.0, face: 'up', at: [871, 680], pallets: [] },
     { kind: 'cutter', stage: null, len: 3.5, dep: 2.4, face: 'up', at: [964, 685], pallets: [] },
+    // Folding machine in Hall-02 by the middle pillars, running front-to-back
+    // (owner's blue mark). Not a job stage either.
+    { kind: 'folder', stage: null, len: 3.0, dep: 1.3, face: 'right', at: [706, 759], pallets: [] },
+  ];
+  // Racks for the small ink cans in Hall-02, either side of a walkway
+  // (owner's green lines): plan line from -> to, the rack's back on the side
+  // away from the walkway.
+  const INK_RACKS = [
+    { from: [859, 744], to: [994, 744], back: 'up' },
+    { from: [868, 809], to: [995, 809], back: 'down' },
   ];
   // A machine's front is its local +x; this turns it to face that side.
   const FACE_ROT = { right: 0, up: Math.PI / 2, left: Math.PI, down: -Math.PI / 2 };
@@ -950,6 +960,50 @@
         light(t + n);
       });
     };
+    const buildFolder = (g, n, len, dep) => {    // sheet folding machine: feeder, fold plates, rollers, delivery belt (long axis z)
+      len = len || 3; dep = dep || 1.3;
+      box(dep, 0.8, len, 0x111827, 0, 0.4, 0, g);                                            // stand
+      const feed = box(dep * 0.9, 0.08, len * 0.3, 0xcbd5e1, 0, 1.15, -len * 0.33, g); feed.rotation.x = 0.25;   // feed table
+      box(dep * 0.7, 0.25, len * 0.22, 0xffffff, 0, 1.3, -len * 0.36, g);                    // paper on the feeder
+      for (let k = 0; k < 4; k++) box(dep * 0.85, 0.05, len * 0.18, 0x9ca3af, 0, 0.95 + k * 0.14, -len * 0.05, g, false);   // fold plates
+      const rolls = [];
+      for (let k = 0; k < 3; k++) { const r = new THREE.Group(); r.position.set(0, 1.0, len * 0.08 + k * 0.22); g.add(r); const c = cyl(0.08, 0.08, dep * 0.9, 0x6b7280, 0, 0, 0, r, 10); c.rotation.z = Math.PI / 2; box(dep * 0.88, 0.04, 0.04, 0x1f2937, 0, 0.07, 0, r, false); rolls.push(r); }
+      box(dep * 0.8, 0.06, len * 0.32, 0x1f2937, 0, 0.88, len * 0.32, g);                    // delivery belt
+      const stack = box(dep * 0.5, 1, 0.3, 0xffffff, 0, 1.0, len * 0.42, g);                // folded sheets piling up
+      box(0.3, 0.45, 0.35, 0x1f2937, dep / 2 + 0.1, 1.05, -len * 0.1, g);                   // control panel
+      const light = signal(g, -dep / 2 + 0.15, -len / 2 + 0.2);
+      person(dep / 2 + 0.75, 0.2, -Math.PI / 2, g);
+      animated.push((dt, t) => {
+        for (const r of rolls) r.rotation.x -= dt * 7;
+        const h = 0.05 + ((t * 0.08 + n * 0.2) % 1) * 0.3; stack.scale.y = h; stack.position.y = 0.91 + h / 2;
+        light(t + n);
+      });
+    };
+    // Ink-can racks: steel shelving, four shelves of small cans (one
+    // instanced mesh for all the cans, coloured C / M / Y / K / spot).
+    {
+      const cans = [];
+      for (const R of INK_RACKS) {
+        const x1 = wx(PLAN_B, R.from[0]), x2 = wx(PLAN_B, R.to[0]), z = wz(PLAN_B, R.from[1]), lift = basementRaise(R.from[0], R.from[1]);
+        const y0 = SLAB + lift, depth = 0.7, zc = z + (R.back === 'up' ? -depth / 2 : depth / 2), bays = Math.max(1, Math.round((x2 - x1) / 1.5));
+        for (let i = 0; i <= bays; i++) for (const dz of [-depth / 2, depth / 2]) box(0.07, 2.1, 0.07, 0x1e40af, x1 + (x2 - x1) * i / bays, y0 + 1.05, zc + dz, floorGroups[0], false);
+        for (let lv = 0; lv < 4; lv++) {
+          const sy = y0 + 0.15 + lv * 0.55;
+          box(x2 - x1, 0.05, depth, 0x9ca3af, (x1 + x2) / 2, sy, zc, floorGroups[0], false);
+          for (let k = 0; (k + 0.5) * 0.32 < x2 - x1; k++) for (const dz of [-0.17, 0.17]) cans.push([x1 + (k + 0.5) * 0.32, sy + 0.14, zc + dz, (k + lv + (dz > 0 ? 2 : 0)) % 5]);
+        }
+      }
+      {   // one floor label down the middle of the walkway
+        const [A, B] = INK_RACKS, lab = decal('INK STORE', 4.4, 0.8, '#374151', { size: 0.6 });
+        lab.rotation.x = -Math.PI / 2; lab.position.set(wx(PLAN_B, (A.from[0] + A.to[0]) / 2), SLAB + basementRaise(A.from[0], A.from[1]) + 0.02, wz(PLAN_B, (A.from[1] + B.from[1]) / 2)); lab.renderOrder = 1; floorGroups[0].add(lab);
+      }
+      const canGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.24, 10); geos.add(canGeo);
+      const canMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.3 });
+      const inst = new THREE.InstancedMesh(canGeo, canMat, cans.length);
+      const m4 = new THREE.Matrix4(), col = new THREE.Color(), INK = [0x06b6d4, 0xdb2777, 0xfacc15, 0x111827, 0xf97316];
+      cans.forEach(([x, y, z, c], i) => { inst.setMatrixAt(i, m4.makeTranslation(x, y, z)); inst.setColorAt(i, col.setHex(INK[c])); });
+      inst.castShadow = true; floorGroups[0].add(inst);
+    }
     const STAGE_COLOR = { 1: '#374151', 3: '#374151' };
     MACHINES.forEach((m, i) => {
       const g = new THREE.Group(), x = wx(PLAN_B, m.at[0]), z = wz(PLAN_B, m.at[1]);
@@ -957,14 +1011,14 @@
       g.position.set(x, SLAB + lift0, z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[0].add(g);
-      if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else if (m.kind === 'cutter') buildCutter(g, i, m.len, m.dep); else buildDieCut(g, i);
+      if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else if (m.kind === 'cutter') buildCutter(g, i, m.len, m.dep); else if (m.kind === 'folder') buildFolder(g, i, m.len, m.dep); else buildDieCut(g, i);
       // Name painted on the floor behind the machine, far enough back that
       // the machine itself doesn't hide it from the usual camera angle.
       const sideways = m.face === 'up' || m.face === 'down';
-      const depth = m.kind === 'cutter' ? (sideways ? m.dep : m.len) : m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
-      const name = m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
+      const depth = m.kind === 'folder' ? m.len : m.kind === 'cutter' ? (sideways ? m.dep : m.len) : m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
+      const name = m.kind === 'folder' ? 'FOLDING' : m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
       const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
-      lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + lift0 + 0.02, z + (m.face === 'up' ? 1 : -1) * (depth / 2 + (m.kind === 'diecut' ? 1.0 : 1.5))); lab.renderOrder = 1; floorGroups[0].add(lab);
+      lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + lift0 + 0.02, z + (m.face === 'up' || m.kind === 'folder' ? 1 : -1) * (depth / 2 + (m.kind === 'diecut' ? 1.0 : 1.5))); lab.renderOrder = 1; floorGroups[0].add(lab);
     });
 
     // Which floors show: all (see-through upper slabs) or just one.
@@ -1046,7 +1100,7 @@
     };
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
       [PLAN_B, 0, BASE_RAISE, [[470, 300, 640, 560]]],
-      [PLAN_B, 0, 0, [[640, 722, 1000, 770], [690, 740, 830, 1100]]],
+      [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
       [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 520]]],
       [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
       [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
