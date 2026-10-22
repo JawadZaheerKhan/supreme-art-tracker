@@ -189,8 +189,8 @@
       // behind it the loading area with its roller-shutter gate - a few
       // steps outside the gate lead down to the street.
       { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
-        walls: [[212, 940, 420, 940], [505, 940, 512, 940]],   // open to the loading area (owner, 2026-10-22)
-        holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
+        walls: [[212, 940, 354, 940], [505, 940, 512, 940]],   // open to the loading area, and the front's third bay open (owner, 2026-10-22)
+        holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936],   // no roller-shutter door any more; the steps outside still lead up (owner, 2026-10-22)
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
       { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
@@ -999,11 +999,13 @@
       for (let zz = fz0 + 2.2; zz < fz1; zz += 2.2) box(fx1 - fx0, 0.02, 0.05, 0xc8c4bf, (fx0 + fx1) / 2, 0.18, zz, scene, false);
       // Side wing: the core's front, from its corner to the open loading area.
       const cz = wz(PLAN_G, 940), cx0 = wx(PLAN_G, 212), cx1 = wx(PLAN_G, 412), ctop = FLOOR_Y[3] + 1.2;
-      stoneAt(cx0, cx1, 0, ctop, cz + 0.05);
+      // Two columns of windows; the third bay, by the loading area, stands open (owner, 2026-10-22).
+      const step = (cx1 - cx0 - 3.4) / 2, cxm = cx0 + 1.7 + step + 2.1;
+      stoneAt(cx0, cxm, 0, ctop, cz + 0.05);
       for (const [y0, y1] of [[3.2, 7.7], [12.2, 16.2], [18.2, 21.6]])
-        for (let i = 0; i < 3; i++) { const wc = cx0 + 1.7 + i * ((cx1 - cx0 - 3.4) / 2); win(wc - 1.1, wc + 1.1, y0, y1, 2, 2, cz + 0.05); }
-      box(cx1 - cx0 + 0.4, 0.6, 0.7, CREAM_DARK, (cx0 + cx1) / 2, ctop + 0.3, cz + 0.2, facade);
-      box(cx1 - cx0, 0.35, 0.3, 0x1f2937, (cx0 + cx1) / 2, 0.17, cz + 0.2, facade, false);
+        for (let i = 0; i < 2; i++) { const wc = cx0 + 1.7 + i * step; win(wc - 1.1, wc + 1.1, y0, y1, 2, 2, cz + 0.05); }
+      box(cxm - cx0 + 0.4, 0.6, 0.7, CREAM_DARK, (cx0 + cxm) / 2, ctop + 0.3, cz + 0.2, facade);
+      box(cxm - cx0, 0.35, 0.3, 0x1f2937, (cx0 + cxm) / 2, 0.17, cz + 0.2, facade, false);
     }
     {
       const unit = new THREE.BoxGeometry(1, 1, 1); geos.add(unit);
