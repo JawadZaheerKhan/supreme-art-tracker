@@ -126,11 +126,12 @@
   const OUTLINE_G = [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 940], [212, 940], [212, 718], [158, 718]];
   const LIFT_G = [343, 718, 410, 780];
   // Stair towers (owner, 2026-10-22): switchback stairs that really climb
-  // the gap between floors. The core's goes basement -> ground -> 1st floor
-  // from the back of the core; the Entrance Lobby's goes down to Hall-02.
+  // the gap between floors. The core's goes basement -> ground, then one
+  // stairwell ground -> 1st floor -> roof in the same place; the Entrance
+  // Lobby's goes down to Hall-02.
   const TOWER_CORE = [218, 775, 276, 905];              // evacuation-plan pixels
-  // The floor openings over it leave the front strip (where the 1st-floor
-  // stairs start / arrive) as floor.
+  // The floor openings over it leave the back strip (where the upper
+  // stairs start and arrive) as floor.
   const TOWER_LOBBY = [22, 392, 172, 495];              // ground-floor-plan pixels
   // Rooms, halls, Breaking Area and the hall with the ablution row.
   const UPPER_WALLS = [
@@ -170,7 +171,7 @@
       // steps outside the gate lead down to the street.
       { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
         walls: [[412, 780, 412, 940], [212, 940, 420, 940], [505, 940, 512, 940]],
-        holes: [[218, 775, 276, 879, 'LT', [[276, 801, 276, 879]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
+        holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936], gate: [420, 505, 940],
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
       { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
@@ -197,29 +198,33 @@
       { plan: PLAN_G,
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
         walls: UPPER_WALLS.filter(w => !(w[1] === 822 && w[3] === 822)).concat([[600, 822, 1058, 822]]),
-        holes: [[218, 775, 276, 879, 'LRT']], lift: LIFT_G, labels: UPPER_LABELS,
+        holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS,
         ramp: [516, 768, 598, 822, 'front', OPEN_RAISE] },
       { plan: PLAN_G, raise: OPEN_RAISE, parapet: true, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
         solar: [522, 832, 1048, 1262], labels: [['OPEN AREA', 785, 1050, 1.3]] },
     ] },
-    // Roof (2nd floor): open, with rows of solar panels on a steel frame.
+    // Roof (2nd floor): open, with rows of solar panels on a steel frame,
+    // over the main block and the stairs core (the stairs come up here).
     { parts: [{ plan: PLAN_G, parapet: true,
-      outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]],
-      solar: [170, 170, 1046, 810], labels: [['SOLAR PANELS', 610, 440, 1.4]] }] },
+      outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
+      holes: [[218, 801, 276, 905, 'LRB']],
+      solar: [170, 170, 1046, 760], labels: [['SOLAR PANELS', 610, 440, 1.4]] }] },
   ];
   // The stair towers: plan rect, the floor heights they join, the axis the
   // flights run along, and which lane the first (lowest) flight climbs.
   // Two flights per tower with one landing between them (owner, 2026-10-22).
-  // Core (owner, 2026-10-22): the basement one (blue) comes up at the BACK,
-  // by the hall wall - from the front of the basement back along the outer
-  // wall, a corner landing, a short flight across the back. The 1st-floor
-  // one (yellow) starts at the FRONT: back along one side, landing, forward
-  // along the other to the 1st floor's front. No stairs go on to the roof.
-  // The lobby one: |_____ from its back-left.
+  // Core (owner, 2026-10-22): the basement one runs against the outer wall -
+  // from the back of the basement forward, a corner landing, a short flight
+  // across the front - and finishes at the ground floor. Then one stairwell
+  // in the same place climbs ground -> 1st floor -> roof: each storey starts
+  // at the back-left (owner's dot), forward along the wall side, a landing
+  // at the front, back up the other side. The lobby one: |_____ from its
+  // back-left.
   const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
   const TOWERS = [
-    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + BASE_RAISE + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'hi' },
-    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'right', startEnd: 'hi' },
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + BASE_RAISE + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'lo' },
+    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'left' },
+    { name: 'first-roof', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[2] + FLOOR_TOP, to: FLOOR_Y[3] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'left' },
     { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L', longAxis: 'x', lane: 'hi', bottom: 'hi' },
   ];
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
@@ -755,7 +760,7 @@
     };
     const landing = (tg, x0, x1, z0, z1, y) => box(x1 - x0, 0.2, z1 - z0, 0xd1d5db, (x0 + x1) / 2, y - 0.1, (z0 + z1) / 2, tg);
     for (const T of TOWERS) {
-      const tg = new THREE.Group(); scene.add(tg); towerGroups.push({ g: tg, floors: T.name === 'ground-first' ? [1, 2] : [0, 1] });
+      const tg = new THREE.Group(); scene.add(tg); towerGroups.push({ g: tg, floors: T.name === 'ground-first' ? [1, 2] : T.name === 'first-roof' ? [2, 3] : [0, 1] });
       const pl = T.plan, x0 = wx(pl, T.r[0]), x1 = wx(pl, T.r[2]), z0 = wz(pl, T.r[1]), z1 = wz(pl, T.r[3]);
       if (T.shape === 'L') {
         // L stairs, built bottom-up: one long flight along `longAxis` in the
