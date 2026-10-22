@@ -229,11 +229,12 @@
     { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [811, 138], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
     { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [802, 298], pallets: [[-4.5, 2.7], [-1.9, 2.7]] },
     { kind: 'press', stage: 1, units: 5, len: 12.8, face: 'left', at: [797, 447], pallets: [[-4.5, -2.7], [-1.9, -2.7]] },
-    { kind: 'press', stage: 1, units: 2, face: 'left', at: [970, 808], pallets: [[-1.4, 2.7], [1.0, 2.7]] },
+    // 4 and 7 (Hall-02's right side) moved down to the owner's lines.
+    { kind: 'press', stage: 1, units: 2, face: 'left', at: [950, 903], pallets: [[-1.4, 2.7], [1.0, 2.7]] },
     // 5-6 by Hall-02's left wall (owner's blue dots).
     { kind: 'press', stage: 1, units: 1, face: 'left', at: [573, 880], pallets: [[-1.3, -2.7], [1.3, -2.7]] },
     { kind: 'press', stage: 1, units: 1, face: 'right', at: [581, 971], pallets: [[4.3, -0.8], [4.3, 1.5]] },
-    { kind: 'press', stage: 1, units: 1, face: 'right', at: [955, 989], pallets: [[-1.4, 2.7], [0.8, 2.7]] },
+    { kind: 'press', stage: 1, units: 1, face: 'right', at: [950, 1046], pallets: [[-1.4, 2.7], [0.8, 2.7]] },
     // Die cutters 1-2: ~6 m long, toward the left (owner's red lines); 3-4
     // nearer the left wall.
     { kind: 'diecut-big', stage: 3, len: 6.2, face: 'down', at: [425, 189], pallets: [[0, 4.4], [-2.6, 4.4]] },
@@ -245,6 +246,12 @@
     { kind: 'diecut', stage: 3, face: 'right', at: [290, 620], pallets: [[0, -2.6]] },
     { kind: 'diecut', stage: 3, face: 'down', at: [300, 686], pallets: [[3.0, 0]] },
     { kind: 'diecut', stage: 3, face: 'down', at: [300, 752], pallets: [[3.0, 0]] },
+    // Paper cutting machines (guillotines) along the line between Hall-01
+    // and Hall-02 - two big, one small in the middle (owner's lines). Not a
+    // job stage in the app, so no pallets wait at them.
+    { kind: 'cutter', stage: null, len: 3.9, dep: 2.4, face: 'down', at: [785, 685], pallets: [] },
+    { kind: 'cutter', stage: null, len: 2.8, dep: 2.0, face: 'down', at: [871, 680], pallets: [] },
+    { kind: 'cutter', stage: null, len: 3.5, dep: 2.4, face: 'down', at: [964, 685], pallets: [] },
   ];
   // A machine's front is its local +x; this turns it to face that side.
   const FACE_ROT = { right: 0, up: Math.PI / 2, left: Math.PI, down: -Math.PI / 2 };
@@ -885,19 +892,42 @@
         light(t + n);
       });
     };
+    const buildCutter = (g, n, len, dep) => {   // guillotine paper cutter: frame + knife beam over a front table
+      len = len || 3.5; dep = dep || 2.4;
+      box(dep * 0.55, 0.9, len, 0x111827, -dep * 0.2, 0.45, 0, g);                      // body
+      box(dep * 0.5, 0.1, len * 0.96, 0xcbd5e1, dep * 0.22, 0.95, 0, g);               // front table
+      for (const s2 of [-1, 1]) {
+        box(dep * 0.5, 1.7, 0.3, 0x1f2937, -dep * 0.12, 1.75, s2 * (len / 2 - 0.15), g);   // side frames
+        box(0.12, 0.85, 0.12, 0x6b7280, dep * 0.42, 0.45, s2 * (len / 2 - 0.3), g, false);  // table legs
+      }
+      box(dep * 0.5, 0.45, len, 0x374151, -dep * 0.12, 2.6, 0, g);                       // knife beam housing
+      const knife = box(0.08, 0.55, len * 0.86, 0x9ca3af, dep * 0.06, 1.6, 0, g);       // the blade
+      const clamp = box(0.22, 0.2, len * 0.86, 0x6b7280, -dep * 0.06, 1.55, 0, g);      // paper clamp
+      box(dep * 0.4, 0.36, len * 0.55, 0xffffff, dep * 0.12, 1.18, 0, g);               // the paper pile
+      box(0.3, 0.5, 0.45, 0x1f2937, dep * 0.15, 1.9, len / 2 - 0.1, g);                 // control panel
+      const scr = box(0.02, 0.28, 0.32, 0x22d3ee, dep * 0.15 + 0.16, 1.95, len / 2 - 0.1, g, false); scr.material = new THREE.MeshBasicMaterial({ color: 0x67e8f9 });
+      const light = signal(g, -dep * 0.2, -len / 2 + 0.3);
+      person(dep / 2 + 0.55, 0, -Math.PI / 2, g);                                       // operator at the table
+      animated.push((dt, t) => {
+        const u = ((t * 0.5 + n * 0.37) % 1);                                          // one cut every 2 s
+        const down = u < 0.15 ? u / 0.15 : u < 0.3 ? 1 - (u - 0.15) / 0.15 : 0;
+        knife.position.y = 1.6 - down * 0.25; clamp.position.y = 1.55 - Math.min(1, down * 2) * 0.12;
+        light(t + n);
+      });
+    };
     const STAGE_COLOR = { 1: '#374151', 3: '#374151' };
     MACHINES.forEach((m, i) => {
       const g = new THREE.Group(), x = wx(PLAN_B, m.at[0]), z = wz(PLAN_B, m.at[1]);
       g.position.set(x, SLAB, z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[0].add(g);
-      if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else buildDieCut(g, i);
+      if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else if (m.kind === 'cutter') buildCutter(g, i, m.len, m.dep); else buildDieCut(g, i);
       // Name painted on the floor behind the machine, far enough back that
       // the machine itself doesn't hide it from the usual camera angle.
       const sideways = m.face === 'up' || m.face === 'down';
-      const depth = m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
-      const name = m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
-      const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage], { size: 0.62 });
+      const depth = m.kind === 'cutter' ? (sideways ? m.dep : m.len) : m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
+      const name = m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
+      const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
       lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + 0.02, z - depth / 2 - (m.kind === 'diecut' ? 1.0 : 1.5)); lab.renderOrder = 1; floorGroups[0].add(lab);
     });
 
@@ -979,7 +1009,7 @@
       return g;
     };
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
-      [PLAN_B, 0, 0, [[470, 300, 640, 560], [640, 610, 1000, 690], [690, 740, 830, 1100]]],
+      [PLAN_B, 0, 0, [[470, 300, 640, 560], [640, 722, 1000, 770], [690, 740, 830, 1100]]],
       [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 520]]],
       [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
       [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
