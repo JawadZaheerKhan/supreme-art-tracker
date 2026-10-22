@@ -111,7 +111,8 @@
   const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
   const FLOOR_Y = [-5, 0, 11, 22];              // basement (one storey down, owner), ground (street), 1st floor, roof
   const RAISE = 1.2;                            // the ground floor's back part, a few steps up
-  const OPEN_RAISE = 0.8;                       // the 1st floor's open area, a little above the floor
+  const OPEN_RAISE = 0.8;                       // the 2nd floor's open area, a little above the roof
+  const OFFICE_RAISE = 1.0;                     // the 1st floor's offices, a little above its hall side
   const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
   // Is this basement plan point in the raised back part (Hall-01 side)?
   const basementRaise = (px, py) => (py < 703 || px < 500) ? BASE_RAISE : 0;
@@ -200,7 +201,8 @@
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
         ext: [0, 1, 3, 4, 5, 6, 7, 8, 9],   // the hall / offices line is the inner wall below
         walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS },
-      { plan: PLAN_G, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
+      // The offices are a little above the 1st floor's hall side (owner, 2026-10-22).
+      { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
         walls: [[560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
           [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
         stairs: [[517, 1165, 640, 1265]], terrace: [668, 1272, 902, 1345],
@@ -733,7 +735,7 @@
         }
         if (P.terrace) {
           const [a, b, c, d] = P.terrace;
-          box(X(c) - X(a), 0.2, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, SLAB - 0.1, (Z(b) + Z(d)) / 2, pg);
+          box(X(c) - X(a), SLAB + raise, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, (SLAB - raise) / 2, (Z(b) + Z(d)) / 2, pg);   // solid down to the floor, like a raised part
           railing(X(a), Z(d), X(c), Z(d), SLAB, pg); railing(X(a), Z(b), X(a), Z(d), SLAB, pg); railing(X(c), Z(b), X(c), Z(d), SLAB, pg);
         }
         for (const [text, px, py, s] of P.labels || []) {
