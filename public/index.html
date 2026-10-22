@@ -8187,7 +8187,24 @@ function buildWhiteLogo() {
 buildWhiteLogo().then(url => {
   const el = document.querySelector('.topbar-brand-logo');
   if (url && el) el.src = url;
+  if (el && isPreviewEnv()) el.style.filter = 'brightness(0)';   // black on preview deploys, see below
 });
+// Preview deploys (the feature branch) wear a black logo - a black tab icon
+// and a black topbar logo - so they're never mistaken for the live app
+// (owner, 2026-10-22). Production is untouched.
+if (isPreviewEnv()) {
+  const icon = new Image();
+  icon.onload = () => {
+    const c = document.createElement('canvas'); c.width = c.height = 32;
+    const g = c.getContext('2d'); g.drawImage(icon, 0, 0, 32, 32);
+    const px = g.getImageData(0, 0, 32, 32), d = px.data;
+    for (let k = 0; k < d.length; k += 4) { const v = 255 - Math.round((d[k] + d[k + 1] + d[k + 2]) / 3); d[k] = d[k + 1] = d[k + 2] = v; d[k + 3] = 255; }   // white ground -> black, logo -> light
+    g.putImageData(px, 0, 0);
+    const url = c.toDataURL('image/png');
+    document.querySelectorAll('link[rel="icon"]').forEach(l => { l.href = url; });
+  };
+  icon.src = '/favicon-32.png';
+}
 
 function renderStats() {
   const s = {
