@@ -347,15 +347,56 @@
   // Site (owner, 2026-10-22): the Ready Stock warehouse stands left of the
   // building; the yard runs out in front to the road - an L, left empty but
   // for the car park under a red tent - with the gate at its left end.
-  const SITE = { x0: -94, x1: 14, z0: -40, z1: 60 };
+  const SITE = { x0: -94, x1: -8, z0: -80, z1: 60 };   // ends just past the building's right side; the back strip holds the inventory store (owner)
   const READY = { x0: -88, x1: -60, z0: -34, z1: -12 };
   const DOCKS = [-82, -74, -66];
   const DOCK_Z = READY.z1 + 4.85;          // truck centre when backed onto the dock
   const GATE = { x0: -50, x1: -40, z: SITE.z1 };
   const ROAD_Z = 70;
-  const CAR_PARK = { x0: -6, x1: 11, z0: 36, z1: 56 };
+  const CAR_PARK = { x0: -93, x1: -76, z0: 34, z1: 56 };   // the left of the front yard (owner)
+  // Inventory store (owner, 2026-10-22): behind the building. Every item on
+  // hand stands on pallets - one pallet per PALLET_SHEETS, at least one - in
+  // stacks of STACK, two deep, with its size on a tile above. Bleach board
+  // has its own side; art card, paper, duplex, sticker... share the other,
+  // grouped by type. Items run along rows from the back wall forward.
+  const INV = { x0: -90, x1: -12, z0: -74, z1: -46 };
+  const INV_SPLIT = -42, INV_DOORS = [-66, -27];
+  const PALLET_SHEETS = 10000, MAX_PALLETS = 48, STACK = 4, COL_W = 1.45, BAY_GAP = 0.9, ROW_PITCH = 4.7, INV_ROWS = 5;
+  const STOCK_TYPES = {   // type -> [tile colour, paper colour]
+    'bleach board': ['#2563eb', 0xf8fafc], 'art card': ['#db2777', 0xffffff], 'art paper': ['#ea580c', 0xf1f5f9], 'duplex board': ['#7c3aed', 0xd6d3d1],
+    'offset paper': ['#0891b2', 0xfefce8], 'off-white': ['#a16207', 0xfef3c7], sticker: ['#ca8a04', 0xfde68a], 'local paper': ['#4b5563', 0xe5e7eb],
+  };
+  const STOCK_ORDER = Object.keys(STOCK_TYPES);
+  const sizeArea = sz => { const m = /(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/i.exec(String(sz || '')); return m ? m[1] * m[2] : 0; };
+  // items: [{ type, size, gsm, sheets, offcut }] -> { bays, overflow }.
+  function stockLayout(items) {
+    const clean = (items || []).filter(i => i && +i.sheets > 0).map(i => ({
+      type: String(i.type || 'other').toLowerCase().trim(), size: String(i.size || ''), gsm: String(i.gsm || ''), sheets: +i.sheets, offcut: !!i.offcut,
+      pallets: Math.min(MAX_PALLETS, Math.max(1, Math.ceil(+i.sheets / PALLET_SHEETS))),
+    }));
+    const rank = t => { const k = STOCK_ORDER.indexOf(t); return k < 0 ? 99 : k; };
+    clean.sort((a, b) => rank(a.type) - rank(b.type) || a.type.localeCompare(b.type) || (a.offcut - b.offcut) || sizeArea(b.size) - sizeArea(a.size) || (parseFloat(a.gsm) || 0) - (parseFloat(b.gsm) || 0));
+    const bays = []; let overflow = 0;
+    for (const [x0, x1, list] of [[INV.x0 + 1, INV_SPLIT - 1, clean.filter(i => i.type === 'bleach board')], [INV_SPLIT + 1, INV.x1 - 1, clean.filter(i => i.type !== 'bleach board')]]) {
+      let row = 0, x = x0;
+      for (const it of list) {
+        const cols = Math.ceil(it.pallets / (2 * STACK)), w = cols * COL_W + BAY_GAP;
+        if (x + w > x1 + 0.01 && x > x0) { row++; x = x0; }
+        if (row >= INV_ROWS) { overflow++; continue; }
+        const zBack = INV.z0 + 1.6 + row * ROW_PITCH, pallets = [];
+        for (let k = 0; k < it.pallets; k++) {
+          const st = Math.floor(k / STACK);
+          pallets.push([x + BAY_GAP / 2 + COL_W * (Math.floor(st / 2) + 0.5), (k % STACK), zBack + 1.15 * ((st % 2) + 0.5)]);
+        }
+        const levels = Math.min(STACK, it.pallets);
+        bays.push({ item: it, x0: x, x1: x + w, pallets, tile: [x + w / 2, levels, zBack + 1.15] });
+        x += w;
+      }
+    }
+    return { bays, overflow };
+  }
   const inReady = v => v.x > READY.x0 - 2 && v.x < READY.x1 + 2 && v.z > READY.z0 - 2 && v.z < READY.z1 + 2;
-  const WAIT = { x0: -7, x1: 4, z0: 12, z1: 24 };
+  const WAIT = { x0: -24, x1: -13, z0: 36, z1: 48 };   // in front of the building, inside the plot
 
   function slotFor(place, k) {
     if (place === 'ready') {
@@ -455,9 +496,9 @@
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xeef3f8);
-    scene.fog = new THREE.Fog(0xeef3f8, 240, 420);
+    scene.fog = new THREE.Fog(0xeef3f8, 270, 460);
     const camera = new THREE.PerspectiveCamera(32, 1, 1, 800);
-    const cam = { target: new THREE.Vector3(-38, 1, 16), az: 0.32, el: 0.62, dist: 190 };
+    const cam = { target: new THREE.Vector3(-50, 1, 0), az: 0.32, el: 0.7, dist: 230 };
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
     const sun = new THREE.DirectionalLight(0xffffff, 2.3);
@@ -617,7 +658,7 @@
       const g2 = new THREE.IcosahedronGeometry(0.85 * s, 0); geos.add(g2);
       const f2 = new THREE.Mesh(g2, mat(0x5fbf7f, { flatShading: true })); f2.position.set(x + 0.2 * s, 3.25 * s, z - 0.1 * s); f2.castShadow = true; trees.add(f2);
     };
-    [[-100, -30], [-100, -10], [-100, 10], [-100, 30], [-100, 50], [-84, -46], [-64, -46], [-44, -46], [-24, -46], [-4, -46], [20, -30], [20, -10], [20, 10], [20, 30], [20, 50],
+    [[-100, -70], [-100, -50], [-100, -30], [-100, -10], [-100, 10], [-100, 30], [-100, 50], [-84, -86], [-64, -86], [-44, -86], [-24, -86], [-2, -70], [-2, -50], [-2, -30], [-2, -10], [-2, 10], [-2, 30], [-2, 50],
      [-110, 78], [-80, 77], [-50, 78], [-20, 77], [10, 78], [40, 77], [70, 78]]
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
@@ -634,7 +675,7 @@
       box(0.8, 0.45, d + 0.3, CREAM_DARK, b.x0, 7.5, cz, g);
       box(0.5, 1.3, d, creamWall, b.x1, 0.95, cz, g);
       // Roof beams, so it reads as a building rather than a yard.
-      for (let x = b.x0 + 5; x < b.x1 - 2; x += 7.5) box(0.35, 0.35, d * 0.55, 0x6b7280, x, 7.4, b.z0 + d * 0.27, g);
+      if (!(opts2 && opts2.noBeams)) for (let x = b.x0 + 5; x < b.x1 - 2; x += 7.5) box(0.35, 0.35, d * 0.55, 0x6b7280, x, 7.4, b.z0 + d * 0.27, g);
       // Front: low wall, with gaps for the docks when asked.
       const gaps = (opts2 && opts2.gaps) || [];
       let x = b.x0;
@@ -669,6 +710,62 @@
       }
       floorDecal('CAR PARKING', 8, 1.2, '#991b1b', cx, C.z0 - 1.6, { size: 0.6 });
     }
+    building(INV, 'INVENTORY STORE', { gaps: INV_DOORS, noBeams: true });   // no roof beams: they'd cross the stock
+    box(0.3, 2.4, INV.z1 - 4 - INV.z0, creamWall, INV_SPLIT, 1.35, (INV.z0 + INV.z1 - 4) / 2, scene);           // bleach board's own side
+    floorDecal('BLEACH BOARD', 12, 1.4, '#1d4ed8', (INV.x0 + INV_SPLIT) / 2, INV.z1 - 2.6, { size: 0.62 });
+    floorDecal('ART CARD · PAPER · DUPLEX · STICKER', 22, 1.3, '#7c3aed', (INV_SPLIT + INV.x1) / 2, INV.z1 - 2.6, { size: 0.55 });
+    floorDecal('1 PALLET ≈ ' + PALLET_SHEETS.toLocaleString() + ' SHEETS', 10, 0.9, '#64748b', INV.x1 - 7, INV.z1 - 1.2, { size: 0.55 });
+    const stockRoot = new THREE.Group(); scene.add(stockRoot);
+    let stockKey = null;
+    const applyStock = items => {
+      const key = JSON.stringify(items || []);
+      if (key === stockKey) return;
+      stockKey = key;
+      stockRoot.traverse(o => { if (o.geometry) { o.geometry.dispose(); geos.delete(o.geometry); } if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+      while (stockRoot.children.length) stockRoot.remove(stockRoot.children[0]);
+      const { bays, overflow } = stockLayout(items);
+      const all = bays.flatMap(b => b.pallets.map(pp => [pp, b.item.type]));
+      if (all.length) {
+        const baseGeo = new THREE.BoxGeometry(1.3, 0.14, 1.05), paperGeo = new THREE.BoxGeometry(1.2, 0.48, 0.98);
+        const bases = new THREE.InstancedMesh(baseGeo, new THREE.MeshStandardMaterial({ color: 0xc8a26b, roughness: 0.9 }), all.length);
+        const papers = new THREE.InstancedMesh(paperGeo, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75 }), all.length);
+        const m4 = new THREE.Matrix4(), col = new THREE.Color();
+        all.forEach(([[x, lv, z], type], i) => {
+          const y = 0.3 + lv * 0.64;
+          bases.setMatrixAt(i, m4.makeTranslation(x, y + 0.07, z));
+          papers.setMatrixAt(i, m4.makeTranslation(x, y + 0.14 + 0.24, z));
+          papers.setColorAt(i, col.setHex((STOCK_TYPES[type] || [0, 0xe5e7eb])[1]));
+        });
+        bases.castShadow = papers.castShadow = true; bases.receiveShadow = papers.receiveShadow = true;
+        stockRoot.add(bases, papers);
+        // Size tiles: one atlas texture, a two-sided tile above each item.
+        const TW = 192, TH = 80, PER_ROW = 16, rows = Math.ceil(bays.length / PER_ROW);
+        const atlas = canvasTex(TW * PER_ROW, TH * rows, (g, w, h) => {
+          bays.forEach((b, i) => {
+            const ox = (i % PER_ROW) * TW, oy = Math.floor(i / PER_ROW) * TH, it = b.item;
+            g.fillStyle = '#ffffff'; g.fillRect(ox + 2, oy + 2, TW - 4, TH - 4);
+            g.fillStyle = (STOCK_TYPES[it.type] || ['#475569'])[0]; g.fillRect(ox + 2, oy + 2, TW - 4, 14);
+            g.strokeStyle = '#0f172a'; g.lineWidth = 2; g.strokeRect(ox + 2, oy + 2, TW - 4, TH - 4);
+            g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#0f172a';
+            g.font = `900 30px ${FONT}`; g.fillText(it.size || '?', ox + TW / 2, oy + 38, TW - 14);
+            const sub = (it.gsm ? it.gsm + 'g' : '') + (it.type !== 'bleach board' ? ' ' + it.type.toUpperCase() : '');
+            g.font = `700 17px ${FONT}`; g.fillStyle = '#334155'; g.fillText(sub.trim(), ox + TW / 2, oy + 63, TW - 14);
+            if (it.offcut) { g.fillStyle = '#dc2626'; g.font = `800 12px ${FONT}`; g.textAlign = 'right'; g.fillText('OFFCUT', ox + TW - 8, oy + 10); }
+          });
+        });
+        const tileMat = new THREE.MeshBasicMaterial({ map: atlas, side: THREE.FrontSide });
+        bays.forEach((b, i) => {
+          const u0 = (i % PER_ROW) / PER_ROW, u1 = u0 + 1 / PER_ROW, v1 = 1 - Math.floor(i / PER_ROW) / rows, v0 = v1 - 1 / rows;
+          const tg = new THREE.PlaneGeometry(1.5, 0.62), uv = tg.attributes.uv;
+          for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) ? u1 : u0, uv.getY(k) ? v1 : v0);
+          const [tx, lv, tz] = b.tile, ty = 0.3 + lv * 0.64 + 0.75;
+          for (const face of [0, Math.PI]) { const t = new THREE.Mesh(tg, tileMat); t.position.set(tx, ty, tz); t.rotation.set(face ? 0.35 : -0.35, face, 0); stockRoot.add(t); }   // tilted back a little, so they read from above too
+          const post = box(0.05, 0.6, 0.05, 0x334155, tx, ty - 0.55, tz, stockRoot, false);
+        });
+      }
+      if (overflow) floorDecal('+' + overflow + ' MORE ITEMS', 8, 0.9, '#b45309', (INV.x0 + INV.x1) / 2, INV.z1 - 1.2, { size: 0.55 });
+    };
+    applyStock(opts.stock || []);
 
     // People (forklift drivers).
     const people = [];
@@ -1424,6 +1521,7 @@
       const w = wander(a, [(a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2], floor, handLifter((k + floor) % 2 === 0), raise);
       w.speed = 1.7;
     }));
+    wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV.x0 + 12, INV.z1 - 3]);   // the store's forklift
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: READY.z0 + 6, z1: READY.z1 - 3 }, [READY.x0 + 14, READY.z1 - 3]);
 
     // ── Trucks ──
@@ -1585,12 +1683,13 @@
     // A floor view shows only that floor (floor: index).
     const BX = BLD.x0 + BLD.w / 2, BZ = BLD.z0 + BLD.d / 2;
     const VIEWS = {
-      overview: { target: [-38, 1, 16], az: 0.32, el: 0.62, dist: 190 },
+      overview: { target: [-50, 1, 0], az: 0.32, el: 0.7, dist: 230 },
       basement: { target: [BX, FLOOR_Y[0], BZ], az: 0.22, el: 1.0, dist: 112, floor: 0 },
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 0.22, el: 1.0, dist: 112, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 0.3, el: 0.8, dist: 100, floor: 3 },
       ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 2], az: 0.42, el: 0.72, dist: 60 },
+      inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2 + 2], az: 0.12, el: 1.12, dist: 76 },
     };
     const want = { target: cam.target.clone(), az: cam.az, el: cam.el, dist: cam.dist };
     // Phones held upright: turn the yard side-on so the row of buildings runs
@@ -1602,6 +1701,7 @@
       first: { target: [BX, FLOOR_Y[2], BZ], az: 1.2, el: 1.0, dist: 125, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 1.2, el: 0.9, dist: 125, floor: 3 },
       ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 4], az: 1.05, el: 0.86, dist: 82 },
+      inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2], az: 1.1, el: 0.9, dist: 110 },
     };
     let viewName = 'overview', baseAz = cam.az, lastInput = -1e9, clock = 0;
     const aspectNow = () => host.clientWidth / Math.max(1, host.clientHeight);
@@ -1628,7 +1728,7 @@
     ui.stats = document.createElement('div'); ui.stats.className = 'saa-stats';
     ui.views = document.createElement('div'); ui.views.className = 'saa-views';
     ui.top.append(ui.stats, ui.views);
-    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="roof">2nd Floor</button><button data-v="ready">Ready Stock</button>';
+    ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="roof">2nd Floor</button><button data-v="ready">Ready Stock</button><button data-v="inventory">Inventory</button>';
     ui.bar = document.createElement('div'); ui.bar.className = 'saa-bar';
     ui.msg = document.createElement('div'); ui.msg.className = 'saa-empty'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
     host.append(ui.top, ui.bar, ui.msg);
@@ -1916,6 +2016,7 @@
       company: opts.company,
       _debug: { cam, want, camera, VIEWS, setView, scene },
       update(nextJobs) { applyJobs(nextJobs, false); },
+      setStock(items) { applyStock(items || []); },
       setActive(on) {
         on = !!on;
         if (on === active) return;
@@ -1941,17 +2042,18 @@
     ensureCss();
     host.classList.add('saa-host');
     host.innerHTML = '<div class="saa-msg">Loading the 3D view&hellip;</div>';
-    let real = null, pendingJobs = opts.jobs, wantActive = false, dead = false;
+    let real = null, pendingJobs = opts.jobs, pendingStock = opts.stock || [], wantActive = false, dead = false;
     const ctl = {
       company: opts.company,
       update(j) { if (real) real.update(j); else pendingJobs = j; },
+      setStock(items) { if (real) real.setStock(items); else pendingStock = items || []; },
       setActive(on) { wantActive = !!on; if (real) real.setActive(on); },
       destroy() { dead = true; if (real) real.destroy(); else host.innerHTML = ''; },
     };
     loadThree().then(THREE => {
       if (dead) return;
       host.innerHTML = '';
-      real = createScene(THREE, host, Object.assign({}, opts, { jobs: pendingJobs }));
+      real = createScene(THREE, host, Object.assign({}, opts, { jobs: pendingJobs, stock: pendingStock }));
       ctl._debug = real._debug;
       real.setActive(wantActive);
     }).catch(() => {
@@ -1961,5 +2063,5 @@
     return ctl;
   }
 
-  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P, TOWERS } };
+  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P, TOWERS, stockLayout, INV } };
 })();

@@ -38818,7 +38818,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=28';
+const CLIENT_ANIM_SRC = '/animation.js?v=29';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -38884,9 +38884,16 @@ async function refreshClientAnim(shell) {
   const company = cfg.company();
   let ctl = clientAnim[shell];
   if (ctl && ctl.company !== company) { ctl.destroy(); ctl = null; delete clientAnim[shell]; }
-  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company });
-  else ctl.update(rows);
+  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, stock: animStockRows() });
+  else { ctl.update(rows); if (ctl.setStock) ctl.setStock(animStockRows()); }
   ctl.setActive(true);
+}
+// The inventory store in the 3D view shows the paper / board on hand. Only
+// staff load the stock list - a client's portal never does - so there the
+// store stands empty.
+function animStockRows() {
+  return (Array.isArray(inventory) ? inventory : []).filter(i => i && (Number(i.current_balance) || 0) > 0)
+    .map(i => ({ type: i.paper_type, size: i.size, gsm: i.gsm, sheets: Number(i.current_balance), offcut: !!i.is_offcut }));
 }
 // While an Animation sub-tab is on screen, re-read the jobs every minute so
 // pallets move and trucks leave without anyone pressing Refresh.
