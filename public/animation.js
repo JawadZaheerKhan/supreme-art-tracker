@@ -144,6 +144,16 @@
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
     ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
     ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
+  // The ground floor's back part has lost most of those walls (owner's white
+  // marks, 2026-10-22): the rooms column is open to the hall but for its top
+  // room's and the kitchen's walls, and the top rooms, the Breaking Area and
+  // the hall round it are one open floor.
+  const GROUND_WALLS = [
+    [158, 253, 345, 253], [158, 533, 345, 533], [262, 540, 262, 690],
+    [512, 158, 512, 348], [512, 630, 512, 718], [875, 718, 1058, 718], [975, 718, 975, 760], [1013, 718, 1013, 760],
+    [512, 822, 1058, 822], [512, 718, 512, 822], [158, 718, 343, 718], [410, 718, 512, 718]];
+  const GROUND_LABELS = [['KITCHEN', 222, 625, 0.7], ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['HALL', 695, 440, 1.1],
+    ['HALL', 735, 790, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
   const FLOORS = [
     // Basement, split-level (owner, 2026-10-22): Hall-01 with the Machine
     // Area and Work Shop is a step up (BASE_RAISE); Hall-02 at the front is
@@ -166,7 +176,7 @@
     { parts: [
       // Back part, a few steps up: rooms, halls, Breaking Area, ablution hall.
       { plan: PLAN_G, raise: RAISE, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
-        walls: UPPER_WALLS, labels: UPPER_LABELS },
+        walls: GROUND_WALLS, labels: GROUND_LABELS },
       // Stairs + lift core, level with the hall beside it (owner): the U
       // stairs on up to the 1st floor (the basement's L flight arrives here), the lift, and
       // behind it the loading area with its roller-shutter gate - a few
@@ -291,6 +301,28 @@
     { from: [859, 744], to: [994, 744], back: 'up' },
     { from: [868, 809], to: [995, 809], back: 'down' },
   ];
+  // Ground floor machines (owner's marks, 2026-10-22), evacuation-plan
+  // pixels: 4 coating machines in the left column (the app has 5, one is
+  // blocked), the 2 inspection machines across the open hall, the manual
+  // lamination machine at the left of the lower hall, and the CTP with its
+  // plate processor in the Scanning Room by Plate Making. Coatings jobs'
+  // pallets wait beside the coating machines.
+  const groundRaise = py => (py < 822 ? RAISE : 0);
+  const GROUND_MACHINES = [
+    { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 220], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.35] },
+    { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 329], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.4] },
+    { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 410], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.4] },
+    { kind: 'coater', stage: 2, floor: 1, len: 2.7, face: 'down', at: [190, 500], pallets: [[2.4, -0.8], [2.4, 1.2]], label: [4.5, 0] },
+    { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [895, 562], pallets: [], label: [0, -1.6] },
+    { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [894, 650], pallets: [], label: [0, 1.6] },
+    { kind: 'laminator', stage: null, floor: 1, len: 2.9, face: 'down', at: [563, 763], pallets: [], label: [1.7, 0] },
+    { kind: 'ctp', stage: null, floor: 1, len: 3.4, face: 'left', at: [920, 967], pallets: [], label: [0, 2.6] },
+    { kind: 'processor', stage: null, floor: 1, len: 1.8, face: 'down', at: [1003, 1008], pallets: [] },
+  ];
+  // Where a machine stands: x / z in the world, the floor's height under it.
+  const machinePos = m => m.floor === 1
+    ? { x: wx(PLAN_G, m.at[0]), z: wz(PLAN_G, m.at[1]), y: FLOOR_Y[1] + groundRaise(m.at[1]), floor: 1 }
+    : { x: wx(PLAN_B, m.at[0]), z: wz(PLAN_B, m.at[1]), y: FLOOR_Y[0] + basementRaise(m.at[0], m.at[1]), floor: 0 };
   // A machine's front is its local +x; this turns it to face that side.
   const FACE_ROT = { right: 0, up: Math.PI / 2, left: Math.PI, down: -Math.PI / 2 };
   // Where each stage's pallets stand. Printing and Die Cutting wait beside
@@ -299,7 +331,7 @@
   const STAGE_ZONES = [
     { floor: 1, plan: PLAN_P, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
-    { floor: 0, plan: PLAN_B, r: [700, 492, 1000, 588], raise: BASE_RAISE, hidden: true },  // Coatings - its pallets wait here, no outline (owner)
+    { floor: 1, machines: true },                          // Coatings    - beside the 4 coating machines, ground floor (owner)
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
     { floor: 2, plan: PLAN_G, r: [530, 365, 860, 520] },   // Sorting     - 1st floor, middle hall
     { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
@@ -330,11 +362,11 @@
     if (STAGE_ZONES[place].machines) {
       // Spread across the stage's machines first, then their second spot,
       // then stack a layer up.
-      const ms = MACHINES.filter(m => m.stage === place);
+      const ms = MACHINES.concat(GROUND_MACHINES).filter(m => m.stage === place);
       const spots = [];
       for (let s = 0; s < 3; s++) ms.forEach(m => { if (m.pallets[s]) spots.push([m, m.pallets[s]]); });
-      const [m, off] = spots[k % spots.length];
-      return { x: wx(PLAN_B, m.at[0]) + off[0], z: wz(PLAN_B, m.at[1]) + off[1], lift: Math.floor(k / spots.length), y: FLOOR_Y[0] + basementRaise(m.at[0], m.at[1]), floor: 0 };
+      const [m, off] = spots[k % spots.length], at = machinePos(m);
+      return { x: at.x + off[0], z: at.z + off[1], lift: Math.floor(k / spots.length), y: at.y, floor: at.floor };
     }
     const r = zoneRect(place);
     const cols = Math.max(1, Math.floor((r.x1 - r.x0 - 0.6) / 3.3)), rows = Math.max(1, Math.floor((r.z1 - r.z0 - 0.6) / 3.0));
@@ -729,7 +761,7 @@
         });
         // Solar panels on a steel frame over the given area (roof, open area).
         if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
-        for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, BRAND_PALE, 0.2, pg);
+        for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, creamWall, 0.2, pg);   // cream tinted, like every wall (owner)
         for (const [a, b, c, d] of P.rails || []) railing(X(a), Z(b), X(c), Z(d), SLAB, pg);
         for (const [a, b, c, d] of P.dashed || []) {
           const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
@@ -1114,6 +1146,109 @@
         light(t + n);
       });
     };
+    const buildCoater = (g, n, len, dep) => {   // UV coating machine along local x: feeder -> roller coater -> UV tunnel -> delivery
+      len = len || 5.2; dep = dep || 1.6;
+      const beltX0 = -len / 2 + 2.05, beltLen = len - 3.25;
+      box(len, 0.35, dep, 0x111827, 0, 0.17, 0, g);                                            // base
+      box(1.1, 1.2, dep * 0.95, 0xcbd5e1, -len / 2 + 0.55, 0.95, 0, g);                        // feeder
+      box(0.9, 0.18, dep * 0.7, 0xffffff, -len / 2 + 0.55, 1.64, 0, g);                         // sheets waiting
+      box(0.9, 1.3, dep, 0x1f2937, -len / 2 + 1.6, 1.0, 0, g);                                  // roller coater
+      const rolls = [];
+      for (const dx of [-0.2, 0.2]) {
+        const r = new THREE.Group(); r.position.set(-len / 2 + 1.6 + dx, 1.78, 0); g.add(r);
+        const c = cyl(0.14, 0.14, dep * 0.9, 0x9ca3af, 0, 0, 0, r, 12); c.rotation.x = Math.PI / 2;
+        box(0.05, 0.05, dep * 0.88, 0x4b5563, 0, 0.13, 0, r, false); rolls.push(r);
+      }
+      box(beltLen, 0.08, dep * 0.8, 0x374151, beltX0 + beltLen / 2, 0.95, 0, g);              // conveyor
+      box(beltLen * 0.6, 0.9, dep * 1.02, 0x9ca3af, beltX0 + beltLen * 0.55, 1.45, 0, g);       // UV tunnel
+      const glow = box(beltLen * 0.6 - 0.1, 0.08, dep * 0.85, 0x7c3aed, beltX0 + beltLen * 0.55, 1.03, 0, g, false);
+      glow.material = new THREE.MeshBasicMaterial({ color: 0xa78bfa });
+      const sheets = [0, 1, 2].map(() => box(0.7, 0.03, dep * 0.6, 0xffffff, beltX0, 1.01, 0, g, false));
+      box(1.2, 0.9, dep, 0xcbd5e1, len / 2 - 0.6, 0.62, 0, g);                                   // delivery
+      const stack = box(0.9, 1, dep * 0.7, 0xffffff, len / 2 - 0.6, 1.1, 0, g);
+      const light = signal(g, -len / 2 + 0.25, -dep / 2 + 0.2);
+      person(-len / 2 - 0.7, 0, Math.PI / 2, g);
+      animated.push((dt, t) => {
+        for (const r of rolls) r.rotation.z -= dt * 6;
+        sheets.forEach((sh, k) => { sh.position.x = beltX0 + ((t * 0.35 + k / 3 + n * 0.13) % 1) * beltLen; });
+        glow.material.color.setHSL(0.73, 0.8, 0.62 + 0.1 * Math.sin(t * 5));
+        const h = 0.05 + ((t * 0.06 + n * 0.3) % 1) * 0.4; stack.scale.y = h; stack.position.y = 1.07 + h / 2;
+        light(t + n);
+      });
+    };
+    const buildInspection = (g, n, len, dep) => {   // sheet inspection machine along local x: feeder -> camera bridges -> good / reject delivery
+      len = len || 12; dep = dep || 1.8;
+      const tX0 = -len / 2 + 1.6, tLen = len - 3.3;
+      box(len, 0.3, dep, 0x111827, 0, 0.15, 0, g);
+      box(1.4, 1.3, dep, 0xcbd5e1, -len / 2 + 0.7, 0.95, 0, g);                                 // feeder
+      box(1.0, 0.3, dep * 0.7, 0xffffff, -len / 2 + 0.7, 1.75, 0, g);
+      box(tLen, 0.12, dep * 0.75, 0x374151, tX0 + tLen / 2, 0.95, 0, g);                       // transport table
+      for (let k = 0; k <= Math.floor(tLen / 2); k++) box(0.1, 0.65, dep * 0.8, 0x1f2937, tX0 + 0.2 + k * 2, 0.6, 0, g);
+      for (const fx of [0.3, 0.55]) {                                                           // camera bridges with their lights
+        const bx = tX0 + tLen * fx;
+        for (const sd of [-1, 1]) box(0.12, 1.5, 0.12, 0x9ca3af, bx, 1.75, sd * (dep / 2 + 0.05), g);
+        box(0.55, 0.4, dep + 0.3, 0x1f2937, bx, 2.5, 0, g);
+        const lamp = box(0.45, 0.04, dep * 0.9, 0xffffff, bx, 2.28, 0, g, false); lamp.material = new THREE.MeshBasicMaterial({ color: 0xbfdbfe });
+      }
+      const scr = box(0.75, 0.5, 0.06, 0x111827, tX0 + tLen * 0.42, 1.9, dep / 2 + 0.35, g);       // inspection screen on a post
+      box(0.08, 1.0, 0.08, 0x6b7280, tX0 + tLen * 0.42, 1.2, dep / 2 + 0.35, g);
+      const glass = box(0.66, 0.4, 0.02, 0x38bdf8, tX0 + tLen * 0.42, 1.9, dep / 2 + 0.39, g, false); glass.material = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+      const sheets = [0, 1, 2, 3].map(() => box(0.8, 0.03, dep * 0.6, 0xffffff, tX0, 1.03, 0, g, false));
+      box(1.6, 0.85, dep, 0xcbd5e1, len / 2 - 0.85, 0.57, 0, g);                                 // delivery
+      const good = box(1.1, 1, dep * 0.55, 0xffffff, len / 2 - 0.85, 1.0, -dep * 0.2, g);
+      const bad = box(0.6, 1, 0.5, 0xfca5a5, len / 2 - 0.85, 1.0, dep * 0.3, g);               // rejects
+      const light = signal(g, len / 2 - 0.2, -dep / 2 + 0.2);
+      person(tX0 + tLen * 0.42, dep / 2 + 0.95, Math.PI, g);
+      person(-len / 2 - 0.7, 0, Math.PI / 2, g);
+      animated.push((dt, t) => {
+        sheets.forEach((sh, k) => { sh.position.x = tX0 + ((t * 0.12 + k / 4 + n * 0.2) % 1) * tLen; });
+        const h = 0.05 + ((t * 0.05 + n * 0.4) % 1) * 0.5; good.scale.y = h; good.position.y = 1.0 + h / 2;
+        const r = 0.02 + ((t * 0.01 + n * 0.3) % 1) * 0.15; bad.scale.y = r; bad.position.y = 1.0 + r / 2;
+        glass.material.color.setHSL(0.55, 0.85, 0.5 + 0.12 * Math.sin(t * 3 + n));
+        light(t + n);
+      });
+    };
+    const buildLaminator = (g, n, len, dep) => {   // manual lamination machine along local x: feed table -> heated rollers -> exit table, film roll above
+      len = len || 2.9; dep = dep || 1.4;
+      box(len, 0.85, dep * 0.8, 0x1f2937, 0, 0.42, 0, g);
+      box(len * 0.38, 0.06, dep, 0xcbd5e1, -len * 0.3, 0.9, 0, g);                              // feed table
+      box(len * 0.38, 0.06, dep, 0xcbd5e1, len * 0.3, 0.9, 0, g);                               // exit table
+      box(0.62, 0.75, dep * 1.05, 0x111827, 0, 1.25, 0, g);                                     // roller head
+      const rolls = [];
+      for (const y of [1.05, 1.32]) { const r = new THREE.Group(); r.position.set(0.34, y, 0); g.add(r); const c = cyl(0.09, 0.09, dep * 0.9, 0x9ca3af, 0, 0, 0, r, 10); c.rotation.x = Math.PI / 2; rolls.push(r); }
+      const film = cyl(0.17, 0.17, dep * 0.9, 0xe0f2fe, -0.1, 1.82, 0, g, 14); film.rotation.x = Math.PI / 2;   // the film roll
+      const sheet = box(0.5, 0.02, dep * 0.6, 0xffffff, -len * 0.35, 0.95, 0, g, false);
+      person(-len / 2 - 0.6, 0, Math.PI / 2, g);
+      animated.push((dt, t) => {
+        for (const r of rolls) r.rotation.z -= dt * 4;
+        sheet.position.x = -len * 0.4 + ((t * 0.25 + n * 0.3) % 1) * len * 0.8;
+      });
+    };
+    const buildCTP = (g, n, len, dep) => {   // CTP platesetter: cabinet, loading table, screen; a plate goes in and comes back exposed
+      len = len || 3.4; dep = dep || 1.6;
+      box(len * 0.62, 1.25, dep, 0xe5e7eb, -len * 0.19, 0.63, 0, g);                           // cabinet
+      box(len * 0.62, 0.14, dep, 0x2563eb, -len * 0.19, 1.32, 0, g);                            // blue band
+      box(len * 0.36, 0.08, dep * 0.8, 0xcbd5e1, len * 0.31, 0.95, 0, g);                       // loading table
+      for (const sx of [0.18, 0.44]) for (const sz of [-1, 1]) box(0.07, 0.9, 0.07, 0x6b7280, len * sx, 0.45, sz * dep * 0.35, g);
+      const plate = box(len * 0.3, 0.02, dep * 0.6, 0xd1d5db, len * 0.31, 1.0, 0, g, false);
+      plate.material = new THREE.MeshStandardMaterial({ color: 0xd1d5db, metalness: 0.7, roughness: 0.3 });
+      box(0.06, 0.45, 0.7, 0x111827, -len * 0.19, 1.65, dep / 2 - 0.3, g);                      // screen
+      const scr = box(0.02, 0.38, 0.6, 0x60a5fa, -len * 0.19 + 0.04, 1.65, dep / 2 - 0.3, g, false); scr.material = new THREE.MeshBasicMaterial({ color: 0x60a5fa });
+      person(len * 0.1, -dep / 2 - 0.75, 0, g);
+      animated.push((dt, t) => {
+        const u = (t * 0.12 + n * 0.3) % 1;
+        plate.position.x = len * 0.31 - (u < 0.5 ? u * 2 : 2 - u * 2) * len * 0.35;
+        plate.material.color.setHex(u > 0.5 ? 0x93c5fd : 0xd1d5db);   // comes back exposed
+      });
+    };
+    const buildProcessor = (g, n, len, dep) => {   // plate processor: plates come out developed onto the tray
+      len = len || 1.8; dep = dep || 1.2;
+      box(len, 0.95, dep, 0xd1d5db, 0, 0.48, 0, g);
+      box(len * 0.9, 0.08, dep * 0.9, 0x1f2937, 0, 0.99, 0, g);
+      box(0.5, 0.06, dep * 0.8, 0xcbd5e1, len / 2 + 0.25, 0.8, 0, g);                           // out tray
+      const pl = box(0.45, 0.02, dep * 0.6, 0x93c5fd, len / 2 + 0.25, 0.85, 0, g, false);
+      animated.push((dt, t) => { const u = (t * 0.15 + n * 0.2) % 1; pl.position.x = len / 2 - 0.2 + u * 0.45; pl.visible = u > 0.1; });
+    };
     // Ink-can racks: steel shelving, four shelves of small cans (one
     // instanced mesh for all the cans, coloured C / M / Y / K / spot).
     {
@@ -1150,7 +1285,7 @@
     tapeTex.wrapS = THREE.RepeatWrapping;
     const tapeMat = new THREE.MeshStandardMaterial({ map: tapeTex, roughness: 0.6 });
     const tapeBox = new THREE.Box3();
-    const hazardTape = (g, y) => {
+    const hazardTape = (g, y, parent) => {
       g.updateMatrixWorld(true);
       tapeBox.setFromObject(g);
       const x0 = tapeBox.min.x - 0.35, x1 = tapeBox.max.x + 0.35, z0 = tapeBox.min.z - 0.35, z1 = tapeBox.max.z + 0.35;
@@ -1158,7 +1293,7 @@
         const tg = new THREE.PlaneGeometry(len + 0.22, 0.22); geos.add(tg);
         const uv = tg.attributes.uv; for (let k = 0; k < uv.count; k++) uv.setX(k, uv.getX(k) * (len + 0.22) / 0.9);
         const t = new THREE.Mesh(tg, tapeMat); t.rotation.set(-Math.PI / 2, 0, alongX ? 0 : Math.PI / 2);
-        t.position.set(cx, y, cz); t.receiveShadow = true; floorGroups[0].add(t);
+        t.position.set(cx, y, cz); t.receiveShadow = true; (parent || floorGroups[0]).add(t);
       }
     };
     MACHINES.forEach((m, i) => {
@@ -1176,6 +1311,21 @@
       const name = m.kind === 'folder' ? 'FOLDING' : m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
       const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
       lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + lift0 + 0.02, z + (m.face === 'up' || m.kind === 'folder' ? 1 : -1) * (depth / 2 + (m.kind === 'diecut' ? 1.0 : 1.5))); lab.renderOrder = 1; floorGroups[0].add(lab);
+    });
+    GROUND_MACHINES.forEach((m, i) => {
+      const g = new THREE.Group(), at = machinePos(m), lift = groundRaise(m.at[1]);
+      g.position.set(at.x, SLAB + lift, at.z);
+      g.rotation.y = FACE_ROT[m.face] || 0;
+      floorGroups[1].add(g);
+      const n = MACHINES.length + i;
+      if (m.kind === 'coater') buildCoater(g, n, m.len); else if (m.kind === 'inspection') buildInspection(g, n, m.len); else if (m.kind === 'laminator') buildLaminator(g, n, m.len);
+      else if (m.kind === 'ctp') buildCTP(g, n, m.len); else buildProcessor(g, n, m.len);
+      hazardTape(g, SLAB + lift + 0.012, floorGroups[1]);
+      if (m.label) {
+        const name = { coater: 'COATING', inspection: 'INSPECTION', laminator: 'LAMINATION', ctp: 'CTP' }[m.kind];
+        const lab = decal(name, name.length * 0.55, 0.75, '#374151', { size: 0.62 });
+        lab.rotation.x = -Math.PI / 2; lab.position.set(at.x + m.label[0], SLAB + lift + 0.02, at.z + m.label[1]); lab.renderOrder = 1; floorGroups[1].add(lab);
+      }
     });
 
     // Which floors show: all (see-through upper slabs) or just one.
@@ -1258,7 +1408,7 @@
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
       [PLAN_B, 0, BASE_RAISE, [[470, 300, 640, 560]]],
       [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
-      [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 520]]],
+      [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 500]]],
       [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
       [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
     ];
