@@ -11703,7 +11703,25 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
                SELECT SUM(t2.change) FROM inventory_transactions t2
                 WHERE t2.item_id = t.item_id
                   AND (t2.created_at > t.created_at OR (t2.created_at = t.created_at AND t2.id > t.id))
-             ), 0))::int AS balance_after
+             ), 0))::int AS balance_after,
+             -- ...and the total of EVERY brand of that paper (same type, size,
+             -- gsm, offcut or not) right after it, the way an item's History
+             -- adds them up: a deleted brand counts until it was deleted.
+             CASE WHEN i.id IS NULL THEN NULL ELSE (
+               SELECT COALESCE(SUM(CASE WHEN g.deleted_at IS NOT NULL AND g.deleted_at <= t.created_at THEN 0
+                 ELSE g.current_balance - COALESCE((
+                   SELECT SUM(t3.change) FROM inventory_transactions t3
+                    WHERE t3.item_id = g.id
+                      AND (t3.created_at > t.created_at OR (t3.created_at = t.created_at AND t3.id > t.id))
+                 ), 0) END), 0)
+                 FROM inventory_items g
+                WHERE COALESCE(g.paper_type, '') = COALESCE(i.paper_type, '') AND COALESCE(g.size, '') = COALESCE(i.size, '')
+                  AND COALESCE(g.gsm::text, '') = COALESCE(i.gsm::text, '') AND COALESCE(g.is_offcut, false) = COALESCE(i.is_offcut, false)
+             )::int END AS group_balance_after,
+             (SELECT COUNT(*) FROM inventory_items g
+               WHERE COALESCE(g.paper_type, '') = COALESCE(i.paper_type, '') AND COALESCE(g.size, '') = COALESCE(i.size, '')
+                 AND COALESCE(g.gsm::text, '') = COALESCE(i.gsm::text, '') AND COALESCE(g.is_offcut, false) = COALESCE(i.is_offcut, false)
+             )::int AS group_items
       FROM inventory_transactions t
       LEFT JOIN jobs j ON j.id = t.job_id
       LEFT JOIN inventory_items i ON i.id = t.item_id

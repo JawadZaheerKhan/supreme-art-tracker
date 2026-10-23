@@ -729,6 +729,11 @@
   .ledger-compact { font-size: 12px; }
   .ledger-compact th, .ledger-compact td { padding: 6px 6px; }
   .ledger-compact td { word-break: break-word; vertical-align: top; }
+  /* Item History: every column hugs its contents and Notes takes the spare
+     width - no wide empty gaps between columns (owner, 2026-10-23). */
+  .ledger-hist th, .ledger-hist td { width: 1%; white-space: nowrap; }
+  .ledger-hist .lh-wrap { white-space: normal; }
+  .ledger-hist .lh-notes { width: auto; white-space: normal; min-width: 160px; }
   .ss-table th     { color: var(--text); font-weight: 700; }
   /* Current Balance Summary, Offcut only: every column hugs its contents and
      the empty column at the end takes the spare width. */
@@ -13305,7 +13310,7 @@ async function openInvHistory(id) {
     const rounded = Math.round(p * 100) / 100;
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
   };
-  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+  openModal(`<div class="modal modal-wide" style="max-width:1180px !important;" onclick="event.stopPropagation()">
     <h2>History · ${esc(label)}</h2>
     <div style="font-size:12px;color:var(--text2);margin:-7px 0 12px;">Combined history for ${brands.length ? esc(brands.join(', ')) : 'all brands'}</div>
     <div id="ledger-content" style="font-size:13px;color:var(--text2);">Loading…</div>
@@ -13376,9 +13381,32 @@ async function renderInvHistory(id) {
       sum + ((m.deleted_at && new Date(when).getTime() >= new Date(m.deleted_at).getTime()) ? 0 : (memberRun.get(m.id) || 0)), 0);
     const rows = txs.map(t => {
       const balanceAfterSheets = members ? groupAfter(t.created_at) : runningAfter;
+      // This entry's own brand(s), before and after it - read before the walk
+      // below moves past this row.
+      const brandBal = [];
+      if (members) for (const p of t._parts) {
+        const b = brandBal.find(x => x.itemId === p.item_id);
+        if (b) { b.change += p.change; continue; }
+        brandBal.push({ itemId: p.item_id, brand: p.item_brand || 'no brand', after: memberRun.get(p.item_id) || 0, change: p.change });
+      }
       runningAfter -= t.change;     // becomes "after" of the next older row
       if (members) for (const p of t._parts) memberRun.set(p.item_id, (memberRun.get(p.item_id) || 0) - p.change);
-      const balanceAfterPkts = fmtPackets(balanceAfterSheets);
+      // Before = every brand's total just before this entry, by the same rule
+      // (an entry on a brand that was already deleted moves no total).
+      const balanceBeforeSheets = members ? groupAfter(t.created_at) : balanceAfterSheets - t.change;
+      // Before / After cells (owner, 2026-10-23): the brand(s) of this entry on
+      // top - green for stock in, red for stock out - and every brand's total
+      // beneath in black. One brand only: just the one number.
+      const brandColour = t.change > 0 ? '#166534' : '#A32D2D';
+      const balTd = (total, brandOf) => {
+        const lines = (showBrand && brandBal.length)
+          ? brandBal.map(b => `<div style="font-size:11px;font-weight:600;color:${brandColour};">${t._parts.length > 1 ? esc(b.brand) + ' ' : ''}${fmtPackets(brandOf(b))} ${unit}</div>`).join('')
+            + `<div style="font-weight:700;color:var(--text);"><span style="font-size:10px;font-weight:600;color:var(--text2);">total</span> ${fmtPackets(total)} ${unit}</div>`
+          : `<div style="font-weight:600;">${fmtPackets(total)} ${unit}</div>`;
+        return `<td>${lines}</td>`;
+      };
+      const beforeTd = balTd(balanceBeforeSheets, b => b.after - b.change);
+      const afterTd  = balTd(balanceAfterSheets, b => b.after);
       // Date over time, two small lines — half the width of one long line.
       const date = `${fmtDMY(t.created_at)}<div style="font-size:10px;color:var(--text3);">${fmtTime12(t.created_at)}</div>${lateEntryTagHtml(t)}`;
       const isReversal      = !!t.reverses_tx_id;
@@ -13429,15 +13457,16 @@ async function renderInvHistory(id) {
         : '';
       const notes = (t.user_notes !== null && t.user_notes !== undefined) ? t.user_notes : (splitSources || txDisplayNotes(t));
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" data-reason="${esc(t.reason || '')}" class="row-hover-red" style="${rowStyle}">
-        <td style="white-space:nowrap;">${date}</td>
-        ${showBrand ? `<td style="font-weight:600;white-space:nowrap;">${[...new Set(t._parts.map(p => p.item_brand || 'no brand'))].map(esc).join(' + ')}</td>` : ''}
+        <td>${date}</td>
+        ${showBrand ? `<td style="font-weight:600;">${[...new Set(t._parts.map(p => p.item_brand || 'no brand'))].map(esc).join(' + ')}</td>` : ''}
+        ${beforeTd}
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
-        <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
+        ${afterTd}
         <td>${reasonHtml}${archivedTag}</td>
-        <td>${challan}</td>
-        <td>${job}</td>
+        <td class="lh-wrap">${challan}</td>
+        <td class="lh-wrap">${job}</td>
         <td>${by}</td>
-        <td>${esc(notes)}</td>
+        <td class="lh-notes">${esc(notes)}</td>
         <td>${reverseBtn}</td>
       </tr>`;
     }).join('');
@@ -13447,8 +13476,8 @@ async function renderInvHistory(id) {
     const box = document.getElementById('ledger-content');
     if (!box) return;
     box.innerHTML = txs.length
-      ? `<table class="ledger-table ledger-compact">
-           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th>Change (${unit})</th><th title="Balance after this transaction">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
+      ? `<table class="ledger-table ledger-compact ledger-hist">
+           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th title="Balance before this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">Before</th><th>Change (${unit})</th><th title="Balance after this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th class="lh-notes">Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
@@ -24082,6 +24111,8 @@ function collapseSplitIssuances(rows) {
       // ...so each brand's own balance after this issuance instead.
       split_balances: [...arr].sort((a, b) => a.id - b.id)
         .map(x => ({ brand: x.item_brand || 'no brand', after: x.balance_after })),
+      // Every brand's total after the LAST part of the split.
+      group_balance_after: [...arr].sort((a, b) => (new Date(b.created_at) - new Date(a.created_at)) || (b.id - a.id))[0].group_balance_after,
       history_item_id: first.item_id, // any member opens the shared group history
       notes: first.notes,
       split_note: splitNote,
@@ -24164,11 +24195,7 @@ function renderStockMovement(direction, from, to) {
     // which used to show on every row (owner, 2026-10-23). A split issuance
     // pulled from 2+ brands, so it lists each brand's own balance after.
     const bal   = isGroup ? null : txBalanceAfter(t);
-    const balCell = isGroup
-      ? splitBalancesHtml(t, ps, unit)
-      : bal === null
-        ? '<span style="color:var(--text3)">—</span>'
-        : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
+    const balCell = balanceAfterCellHtml(t, ps, unit);
     const txWperPack  = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     const txKg        = txWperPack !== null ? txWperPack * Math.abs(pkts) : null;
     const balKg       = (txWperPack !== null && bal !== null) ? txWperPack * (bal / ps) : null;
@@ -24236,7 +24263,7 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th} title="The item's balance right after this entry">Balance After</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th} title="Right after this entry - top: this brand, below: total of every brand of this paper">Balance After</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
@@ -25805,12 +25832,35 @@ function printOffcutConsumption() {
 function txBalanceAfter(t) {
   return (t && t.balance_after !== null && t.balance_after !== undefined && t.balance_after !== '') ? +t.balance_after : null;
 }
-// A split issuance's balance cell: each brand's balance after it.
-function splitBalancesHtml(t, ps, unit) {
-  const parts = Array.isArray(t.split_balances) ? t.split_balances.filter(x => txBalanceAfter({ balance_after: x.after }) !== null) : [];
-  if (!parts.length) return '<span style="color:var(--text3)">split</span>';
+// Every brand's total right after a ledger row (server group_balance_after).
+function txGroupAfter(t) {
+  return (t && t.group_balance_after !== null && t.group_balance_after !== undefined && t.group_balance_after !== '') ? +t.group_balance_after : null;
+}
+// The brand line(s) of a Stock In/Out row: [{ brand, after }] in sheets.
+function balanceAfterBrands(t) {
+  const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
+  if (isGroup) return (Array.isArray(t.split_balances) ? t.split_balances : []).filter(x => txBalanceAfter({ balance_after: x.after }) !== null).map(x => ({ brand: x.brand, after: +x.after }));
+  const bal = txBalanceAfter(t);
+  return bal === null ? [] : [{ brand: t.item_brand || 'no brand', after: bal }];
+}
+// Stock In/Out "Balance After" (owner, 2026-10-23): this brand's balance
+// after the entry on top - green for stock in, red for stock out - and the
+// total of every brand of that paper beneath in black. A paper with one
+// brand shows just its balance, as before.
+function balanceAfterCellHtml(t, ps, unit) {
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
-  return parts.map(x => `<div style="font-size:12px;"><b>${esc(x.brand)}</b> ${fmt(+x.after / ps)} ${unit}</div>`).join('');
+  const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
+  const brands = balanceAfterBrands(t);
+  const total = txGroupAfter(t);
+  if (!isGroup && (total === null || !(+t.group_items > 1))) {
+    return brands.length
+      ? `${fmt(brands[0].after / ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${brands[0].after.toLocaleString()} sheets</span>`
+      : '<span style="color:var(--text3)">—</span>';
+  }
+  if (!brands.length && total === null) return '<span style="color:var(--text3)">split</span>';
+  const colour = t.change > 0 ? '#166534' : '#A32D2D';
+  return brands.map(b => `<div style="font-weight:600;color:${colour};">${isGroup ? esc(b.brand) + ' ' : ''}${fmt(b.after / ps)} ${unit}</div>`).join('')
+    + (total === null ? '' : `<div style="font-weight:700;color:var(--text);"><span style="font-size:10px;font-weight:600;color:var(--text2);">total</span> ${fmt(total / ps)} ${unit}</div><div style="color:var(--text2);font-size:11px;">${total.toLocaleString()} sheets</div>`);
 }
 function splitBalancesText(t, ps) {
   const parts = Array.isArray(t.split_balances) ? t.split_balances.filter(x => txBalanceAfter({ balance_after: x.after }) !== null) : [];
@@ -25851,8 +25901,10 @@ function printStockMovement(direction) {
     const pkts = Math.abs(t.change / ps);
     const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     const bal  = isGroup ? null : txBalanceAfter(t);
-    const balCell = isGroup ? esc(splitBalancesText(t, ps)) + ' ' + unit
-      : bal === null ? '—' : `${fmt(bal/ps)} ${unit}<br><span style="font-size:8pt;">${bal.toLocaleString()} sheets</span>`;
+    const tot  = txGroupAfter(t);
+    const balCell = (isGroup ? esc(splitBalancesText(t, ps)) + ' ' + unit
+      : bal === null ? '—' : `${fmt(bal/ps)} ${unit}<br><span style="font-size:8pt;">${bal.toLocaleString()} sheets</span>`)
+      + ((tot !== null && (isGroup || +t.group_items > 1)) ? `<br><b>total ${fmt(tot/ps)} ${unit}</b>` : '');
     const tdL = 'style="border:1px solid #000;padding:4px;"';
     const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
     const tdChg = `style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};"`;
@@ -25926,10 +25978,11 @@ async function exportStockMovement(direction) {
   // Every column the report shows on screen (Balance After, Weight and
   // Challan No. were missing), worked out the same way as the screen rows.
   const header = ['When', 'Item', 'Change (Packets/Reams)', 'Change (Sheets)', 'Balance After (Packets/Reams)', 'Balance After (Sheets)',
-    'Weight (kg)', 'Weight After (kg)', 'Reason', 'Job', 'Challan No.', 'Entered by', 'Notes'];
+    'Total After, All Brands (Packets/Reams)', 'Total After, All Brands (Sheets)', 'Weight (kg)', 'Weight After (kg)', 'Reason', 'Job', 'Challan No.', 'Entered by', 'Notes'];
   // Stock In has no Job column (owner, 2026-10-16).
   const showJob = direction === 'out';
-  if (!showJob) header.splice(header.indexOf('Job'), 1);
+  const jobCol = header.indexOf('Job');
+  if (!showJob) header.splice(jobCol, 1);
   const aoa = reportExcelAoa(header);
   const r2 = (n) => Math.round(n * 100) / 100;
   for (const t of txs) {
@@ -25948,6 +26001,8 @@ async function exportStockMovement(direction) {
       Math.abs(t.change),
       isGroup ? splitBalancesText(t, ps) : bal === null ? '' : r2(bal / ps),
       isGroup ? '' : bal === null ? '' : bal,
+      txGroupAfter(t) === null ? '' : r2(txGroupAfter(t) / ps),
+      txGroupAfter(t) === null ? '' : txGroupAfter(t),
       wPer !== null ? r2(wPer * Math.abs(pkts)) : '',
       (!isGroup && wPer !== null && bal !== null) ? r2(wPer * (bal / ps)) : '',
       t.reason || '',
@@ -25956,7 +26011,7 @@ async function exportStockMovement(direction) {
       txByName(t),
       [txNotesShown(t), smOffcutText(direction, t)].filter(Boolean).join(' | '),
     ];
-    if (!showJob) row.splice(9, 1);
+    if (!showJob) row.splice(jobCol, 1);
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
