@@ -10568,6 +10568,14 @@ async function loadDropdownHidden() {
     dropdownHidden = new Set(rows.map(r => `${r.field}::${r.value}`));
   } catch { /* non-fatal — just means hidden list empty client-side */ }
 }
+// Paper types for a picker: the standard list, then every other type in the
+// inventory (off-white, flying paper, local paper, sticker...). Stock Out
+// could not pick off-white while its list was the fixed PAPERS one (owner,
+// 2026-10-23).
+function paperTypeList() {
+  const used = invDistinct('paper_type').map(t => String(t).toLowerCase().trim());
+  return [...PAPERS, ...[...new Set(used)].filter(t => !PAPERS.includes(t)).sort((a, b) => a.localeCompare(b))];
+}
 function invDistinct(field) {
   const filterable = field === 'brand' || field === 'supplier';
   return [...new Set(inventory.map(i => i[field]).filter(Boolean))]
@@ -13768,7 +13776,7 @@ function stockReportDateRange(period) {
 
 function openStockReport() {
   stockReportState = { direction: 'all', period: 'month', from: '', to: '', paperType: '', rows: [] };
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
     <h2>Stock Report</h2>
     <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-bottom:14px;">
@@ -15656,7 +15664,7 @@ function renderImportsPage() {
   const state = importsPageState;
   const pane  = document.getElementById('rt-imports');
   if (!pane) return;
-  const paperOpts  = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const paperOpts  = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   pane.innerHTML = `
     <div id="imp-return-bar" style="display:none;"></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
@@ -21891,7 +21899,7 @@ async function exportProductionReport() {
 // Open the add/edit form. If `id` is supplied, prefill from importsCache.
 function openImportAdd(id) {
   const editing = id ? importsCache.find(i => i.id === id) : null;
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${editing && editing.paper_type===p?' selected':''}>${esc(p)}</option>`).join('');
+  const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${editing && editing.paper_type===p?' selected':''}>${esc(p)}</option>`).join('');
   // Pre-compute sheets for editing rows so the sheets field is pre-filled too.
   const editingSheets = editing && editing.packets
     ? Math.round(parseFloat(editing.packets) * packetSize(editing.paper_type))
@@ -22130,7 +22138,7 @@ function openDashboard() {
       <input class="filter" type="date" id="dash-to" value="${dashboardState.to}" onchange="setDashTo(this.value)" title="To date">
       <select class="filter" id="dash-paper-type" onchange="setDashPaperType(this.value)">
         <option value="">All paper types</option>
-        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+        ${paperTypeList().map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
       </select>
       <select class="filter" id="dash-size" onchange="setDashSize(this.value)"><option value="">All sizes</option></select>
       <select class="filter" id="dash-gsm" onchange="setDashGsm(this.value)"><option value="">All GSM</option></select>
@@ -23760,7 +23768,7 @@ function openStockMovementPane(direction) {
   const state = stockMovementStates[direction];
   const pane  = document.getElementById('rt-stock-' + direction);
   const title = direction === 'in' ? 'Stock In' : 'Stock Out';
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
@@ -25035,7 +25043,7 @@ function openManualConsumptionPane() {
     pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Job Card Consumption report needs Wastage Adjustment access.</div></div>`;
     return;
   }
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
@@ -25518,7 +25526,7 @@ function openOffcutConsumptionPane() {
   if (!pane) return;
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v,l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
-  const paperOpts = PAPERS.map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
+  const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Offcut Consumption</h2>
@@ -27047,7 +27055,7 @@ function openCalculator() {
       <label class="form-label">Paper Type</label>
       <select id="calc-paper-type" onchange="calcRecalc()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:#fff;">
         <option value="">— Select paper type —</option>
-        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)} (${packetUnitLabel(p)} of ${packetSize(p)})</option>`).join('')}
+        ${paperTypeList().map(p => `<option value="${esc(p)}">${esc(p)} (${packetUnitLabel(p)} of ${packetSize(p)})</option>`).join('')}
       </select>
     </div>
 
@@ -27325,7 +27333,7 @@ function openCalculatorJobMode() {
       <label class="form-label">Paper Type <span style="font-weight:400;font-size:11px;color:var(--text2);">(needed to compute packets/reams)</span></label>
       <select id="jc-paper" onchange="jcalcRecalc()">
         <option value="">— pick paper —</option>
-        ${PAPERS.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+        ${paperTypeList().map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
       </select>
     </div>
 
