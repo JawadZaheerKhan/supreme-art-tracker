@@ -19695,6 +19695,7 @@ function openSaleReport() {
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm sale-company-only" onclick="openCompanySettings()" title="Set NTN and Destination per company — feeds this report's Company/Destination/NTN columns">&#127970; Company Settings</button>
         <button class="btn btn-sm" onclick="openSaleReportExportModal()">&#128202; Export to Excel</button>
+        <button class="btn btn-sm" onclick="openSaleReportExportModal('details')" title="Your DETAILS workbook's layout - BOX, Label, Leaflets, Waste of board - with its formulas in the calculated columns, so rows pasted into it keep calculating">&#128215; Export for DETAILS sheet</button>
         <button class="btn btn-sm" onclick="printSaleReport()">&#128424; Print Report</button>
       </div>
     </div>
@@ -20043,6 +20044,9 @@ function buildSaleReportRows(tabOverride) {
     const sheetL    = sheetDim ? sheetDim.w : '';
     const sheetW    = sheetDim ? sheetDim.h : '';
     const sheetSize = (sizeStr + (sheetGsm ? ' ' + sheetGsm : '')).trim();
+    // The paper's own sheet (not the cut) - the DETAILS-sheet export writes
+    // KGS/PKT from it, as the owner's workbook does (=23*36*80/3100).
+    const paperDim  = parseSizeInches(sizeStr);
     const part         = j.particulars || {};
     const platesVal    = String((part.plates && part.plates.quantity) || '').trim();
     const upsVal       = String(j.ups == null ? '' : j.ups).trim();
@@ -20162,6 +20166,7 @@ function buildSaleReportRows(tabOverride) {
         pkPerUc: F.pkPerUnit > 0 ? (fig.packetsUnit === 'sheets' ? F.pkPerUnit * F.psJob : F.pkPerUnit) : 0,
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
+        paperL: paperDim ? paperDim.w : '', paperW: paperDim ? paperDim.h : '', cutPieces: F.cutPieces || 1, psJob,
         ups: upsVal, plates: platesVal,
         wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
         coatings: coatingsVal,
@@ -21040,13 +21045,17 @@ async function deleteWasteBoardRow(id) {
   showSaving(false);
 }
 // Export to Excel — pick which product tabs to include; each becomes its own sheet.
-function openSaleReportExportModal() {
-  const picked = saleReportState.exportTabs || SALE_REPORT_TABS.map(t => t.key);
+function openSaleReportExportModal(kind) {
+  const details = kind === 'details';
+  const tabs = details ? SALE_REPORT_TABS.filter(t => DETAILS_SHEET_NAMES[t.key]) : SALE_REPORT_TABS;
+  const picked = details ? tabs.map(t => t.key) : (saleReportState.exportTabs || SALE_REPORT_TABS.map(t => t.key));
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:460px;">
-    <h2>&#128202; Export to Excel</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Each tab you pick becomes its own sheet in the workbook. Every other filter on the report still applies.</div>
+    <h2>${details ? '&#128215; Export for DETAILS sheet' : '&#128202; Export to Excel'}</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">${details
+      ? 'Laid out like your DETAILS workbook - same columns on each tab, with its formulas (To Be Produced, KGS/PKT, Wastage, Kgs, Amount, Tax) - so rows pasted into it keep calculating. Every filter on the report still applies.'
+      : 'Each tab you pick becomes its own sheet in the workbook. Every other filter on the report still applies.'}</div>
     <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:8px;">
-      ${SALE_REPORT_TABS.map(t => `
+      ${tabs.map(t => `
         <label class="srx-row" style="display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;cursor:pointer;background:${picked.includes(t.key) ? '#bbf7d0' : ''};">
           <input type="checkbox" class="srx-tab" value="${t.key}" ${picked.includes(t.key) ? 'checked' : ''} onchange="this.closest('.srx-row').style.background = this.checked ? '#bbf7d0' : '';">
           <span style="font-weight:600;">${esc(t.label)}</span>
@@ -21054,7 +21063,7 @@ function openSaleReportExportModal() {
     </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="runSaleReportExport()">Export</button>
+      <button class="btn btn-primary" onclick="${details ? 'runSaleReportDetailsExport()' : 'runSaleReportExport()'}">Export</button>
     </div>
   </div>`);
 }
@@ -21100,6 +21109,151 @@ async function runSaleReportExport() {
   const tag = saleReportState.client ? `-${saleReportState.client.replace(/\s+/g,'-').toLowerCase()}` : '';
   XLSX.writeFile(wb, `supreme-art-sale-report${tag}-${stamp}.xlsx`);
   notify(`Exported ${sheets} sheet${sheets === 1 ? '' : 's'}!`);
+}
+// ── Export for the DETAILS sheet (owner, 2026-10-23) ──
+// The owner's own workbook (DETAILS - 2027.xlsx) keeps a tab per product with
+// formulas in its calculated columns; pasting plain values from the normal
+// export over them lost those formulas. This export lays every tab out column
+// for column like that workbook and writes the same formulas, so rows pasted
+// in keep calculating. Inputs come from the app; NTN and Destination are the
+// app's values (owner's choice) rather than the workbook's VLOOKUP.
+const DETAILS_SHEET_NAMES = { box: 'BOX', labels: 'Label', leaflets: 'Leaflets', waste: 'Waste of board' };
+// Dates as the workbook writes them: 03-07-2026.
+function detailsDate(v) {
+  const t = String(v || '').trim();
+  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return iso ? `${iso[3]}-${iso[2]}-${iso[1]}` : t.replace(/\//g, '-');
+}
+// "23*36*80" - the workbook's way of writing a sheet.
+function detailsDims(...parts) { return parts.map(v => String(v == null ? '' : v).trim()).filter(Boolean).join('*'); }
+// Each tab: [id, header, cell(r, R, col)] - a value, or { f } for a formula;
+// col(id) gives that column's letter, so formulas follow the layout.
+function detailsSheetColumns(key) {
+  const num = v => xlNum(v);
+  const n = v => { const x = parseFloat(String(v == null ? '' : v).replace(/,/g, '')); return Number.isFinite(x) ? x : null; };
+  const kgsPkt = (r, div) => (n(r.paperL) && n(r.paperW) && n(r.sheetGsm)) ? { f: `${n(r.paperL)}*${n(r.paperW)}*${n(r.sheetGsm)}/${div}` } : '';
+  const divOf = r => isReamPaper(r.paperType) ? 3100 : 15500;
+  const pct = r => (r.taxPct === null || r.taxPct === undefined || r.taxPct === '') ? 18 : +r.taxPct;
+  const base = Object.fromEntries(saleReportCols(key === SALE_REPORT_WASTE_TAB ? 'box' : key).map(c => [c.key, c]));
+  const lead = [
+    ['date', 'Date', r => detailsDate(r.deliveredAt)],
+    ['inv', 'Invoice No', r => xlRef(r.challan)],
+    ['msi', 'MSI #', r => xlRef(r.msiNo)],
+    ['job', 'Job Card No', r => r.idDisplay || ''],
+    ['po', 'PO#', r => xlRef(r.poNo)],
+    ['fbr', 'E-FBR Invoice #', r => xlRef(r.fbrNo)],
+    ['desc', 'Description', r => base.name.xl(r)],
+  ];
+  const tail = (amt, tax, inc) => [
+    ['party', 'Name & Address Of The party To Whom Sold', r => r.client || ''],
+    ['ntn', 'NTN', r => r.ntn || ''],
+    ['dest', 'Destination', r => r.destination || ''],
+  ];
+  if (key === SALE_REPORT_WASTE_TAB) return [
+    ['date', 'Date', r => detailsDate(r.entry_date)],
+    ['inv', 'Invoice No', r => xlRef(r.invoice_no)],
+    ['msi', 'MSI#', r => xlRef(r.msi_no)],
+    ['fbr', 'E-FBR Invoice #', r => xlRef(r.fbr_no)],
+    ['desc', 'Description', r => r.job_name || ''],
+    ['qty', 'Qty. Units sold', r => num(r.qty)],
+    ['rate', 'Rate Per Units', r => num(r.rate)],
+    ['amt', 'Amount Excluding Sales Tax', (r, R, c) => ({ f: `${c('qty')}${R}*${c('rate')}${R}` })],
+    ['tax18', 'Sale Tax @18%', (r, R, c) => ({ f: `SUM(${c('amt')}${R}*18/100)` })],
+    ['tax4', 'Sale Tax @4%', r => num(r.tax4)],
+    ['inc', 'Amount Including Sales Tax', (r, R, c) => ({ f: `${c('amt')}${R}+${c('tax18')}${R}` })],
+    ['party', 'Name & Address Of The party To Whom Sold', r => r.company || ''],
+    ['ntn', 'NTN', r => r.ntn || ''],
+    ['dest', 'Destination', r => r.destination || ''],
+  ];
+  if (key === 'labels' || key === 'leaflets') return [
+    ...lead,
+    ['qty', 'Qty. Units', r => num(r.cartons)],
+    ['paper', 'Paper Size', r => detailsDims(r.paperL, r.paperW, r.sheetGsm)],
+    ['cut', 'Cutting\n Size', r => detailsDims(r.sheetL, r.sheetW)],
+    ['sheets', 'Sheets Issued', r => base.packets.xl(r)],
+    ['ups', 'Ups', r => num(r.ups)],
+    ['tbp', 'To Be Produced Ups', (r, R, c) => ({ f: `${c('sheets')}${R}*${c('ups')}${R}` })],
+    ['prod', 'Produced Ups', (r, R, c) => ({ f: `+${c('qty')}${R}` })],
+    ['ptype', 'Paper', r => r.paperType || ''],
+    ['packed', 'Cartons Packed', r => base.cartonsPackets.xl(r)],
+    ['kgs', 'KGS/PKT', r => kgsPkt(r, divOf(r))],
+    ['wups', 'Wastage Ups', (r, R, c) => ({ f: `${c('tbp')}${R}-${c('prod')}${R}` })],
+    ['wsheets', 'Wastage Sheets', (r, R, c) => ({ f: `${c('wups')}${R}/${c('ups')}${R}/${r.cutPieces || 1}` })],
+    ['wkgs', 'Wastage Kgs', (r, R, c) => ({ f: `${c('wsheets')}${R}/${r.psJob || 500}*${c('kgs')}${R}/${r.cutPieces || 1}` })],
+    ['wpct', 'Wastage Kgs %', (r, R, c) => ({ f: `${c('wkgs')}${R}*100/${c('tkgs')}${R}` })],
+    ['tkgs', 'Total Kgs Issued', (r, R, c) => ({ f: `${c('sheets')}${R}/${r.psJob || 500}*${c('kgs')}${R}/${r.cutPieces || 1}` })],
+    ['rate', 'Rate Per Units', r => base.rate.xl(r)],
+    ['amt', 'Amount Excluding\n Sales Tax', (r, R, c) => ({ f: `${c('qty')}${R}*${c('rate')}${R}` })],
+    ['tax', `Sale Tax \n@ 18%`, (r, R, c) => ({ f: `${c('amt')}${R}*${pct(r) / 100}` })],
+    ['inc', 'Amount Including Sales Tax', (r, R, c) => ({ f: `${c('amt')}${R}+${c('tax')}${R}` })],
+    ...tail(),
+  ];
+  return [   // BOX
+    ...lead,
+    ['qty', 'Qty. Units sold', r => num(r.cartons)],
+    ['sheet', 'Sheet Size', r => detailsDims(r.paperL, r.paperW, r.sheetGsm)],
+    ['len', 'Size ', r => num(r.sheetL)],
+    ['wid', 'Size', r => num(r.sheetW)],
+    ['gsm', 'Grams', r => num(r.sheetGsm)],
+    ['pkts', 'Packet Issued', r => base.packets.xl(r)],
+    ['ups', 'Ups', r => num(r.ups)],
+    ['tbp', 'To Be Produced Ups', (r, R, c) => ({ f: `${c('pkts')}${R}*${r.psJob || 100}*${c('ups')}${R}*${r.cutPieces || 1}` })],
+    ['prod', 'Produced Ups', (r, R, c) => ({ f: `+${c('qty')}${R}` })],
+    ['plates', 'Plates', r => num(r.plates)],
+    ['card', 'Card', r => r.paperType || ''],
+    ['fin', 'Finishing', r => r.coatings || ''],
+    ['packed', 'Cartons Packed', r => base.cartonsPackets.xl(r)],
+    ['kgs', 'KGS/PKT', r => kgsPkt(r, divOf(r))],
+    ['wups', 'Wastage Ups', (r, R, c) => ({ f: `(${c('tbp')}${R}-${c('prod')}${R})` })],
+    ['wsheets', 'Wastage Sheets', (r, R, c) => ({ f: `${c('wups')}${R}/${c('ups')}${R}` })],
+    ['wkgs', 'Wastage Kgs', (r, R, c) => ({ f: `${c('wups')}${R}/${c('ups')}${R}/${r.psJob || 100}*${c('kgs')}${R}` })],
+    ['wpct', 'Wastage Kgs %', (r, R, c) => ({ f: `${c('wkgs')}${R}*100/${c('tkgs')}${R}` })],
+    ['tkgs', 'Total Kgs Issued', (r, R, c) => ({ f: `${c('pkts')}${R}*${c('kgs')}${R}` })],
+    ['rate', 'Rate Per Units', r => base.rate.xl(r)],
+    ['amt', 'Amount Excluding Sales Tax', (r, R, c) => ({ f: `${c('qty')}${R}*${c('rate')}${R}` })],
+    ['tax', 'Sale Tax @18%', (r, R, c) => ({ f: `${c('amt')}${R}*${pct(r)}%` })],
+    ['inc', 'Amount Including Sales Tax', (r, R, c) => ({ f: `${c('amt')}${R}+${c('tax')}${R}` })],
+    ...tail(),
+  ];
+}
+// One sheet as a SheetJS worksheet: headers on row 1, rows from row 2.
+function detailsWorksheet(key, rows) {
+  const cols = detailsSheetColumns(key);
+  const letter = Object.fromEntries(cols.map(([id], i) => [id, XLSX.utils.encode_col(i)]));
+  const col = id => letter[id];
+  const ws = {};
+  const head = { font: { name: 'Arial', sz: 10, bold: true }, alignment: { wrapText: true, vertical: 'center', horizontal: 'center' }, fill: { patternType: 'solid', fgColor: { rgb: 'F3EEE4' } } };
+  const body = { font: { name: 'Arial', sz: 10 } };
+  cols.forEach(([, h], c) => { ws[XLSX.utils.encode_cell({ r: 0, c })] = { t: 's', v: h, s: head }; });
+  rows.forEach((r, i) => {
+    const R = i + 2;
+    cols.forEach(([, , get], c) => {
+      const v = get(r, R, col);
+      const addr = XLSX.utils.encode_cell({ r: i + 1, c });
+      if (v && typeof v === 'object' && v.f) ws[addr] = { t: 'n', f: v.f, s: body };
+      else if (typeof v === 'number' && Number.isFinite(v)) ws[addr] = { t: 'n', v, s: body };
+      else if (v !== '' && v !== null && v !== undefined) ws[addr] = { t: 's', v: String(v), s: body };
+    });
+  });
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(1, rows.length), c: cols.length - 1 } });
+  ws['!cols'] = cols.map(([, h]) => ({ wch: Math.max(10, Math.min(28, String(h).length + 2)) }));
+  ws['!rows'] = [{ hpt: 30 }];
+  return ws;
+}
+async function runSaleReportDetailsExport() {
+  const keys = [...document.querySelectorAll('.srx-tab')].filter(el => el.checked).map(el => el.value).filter(k => DETAILS_SHEET_NAMES[k]);
+  if (!keys.length) { await alertDialog({ title: 'Pick at least one tab to export', kind: 'warn' }); return; }
+  closeModal();
+  try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
+  if (keys.includes(SALE_REPORT_WASTE_TAB) && !__wasteBoardLoaded) {
+    __wasteBoardLoaded = true;
+    await loadWasteBoardSales();
+  }
+  const wb = XLSX.utils.book_new();
+  for (const key of keys) XLSX.utils.book_append_sheet(wb, detailsWorksheet(key, buildSaleReportRows(key)), DETAILS_SHEET_NAMES[key]);
+  const tag = saleReportState.client ? `-${saleReportState.client.replace(/\s+/g, '-').toLowerCase()}` : '';
+  XLSX.writeFile(wb, `supreme-art-details${tag}-${localDateISO()}.xlsx`);
+  notify(`Exported ${keys.length} sheet${keys.length === 1 ? '' : 's'} in your DETAILS layout, with formulas`);
 }
 // Scope / date lines shared by this report's print and Excel headings.
 function saleReportScope(shipmentCount) {
