@@ -4941,9 +4941,13 @@ function parseSheets(v) {
 // and Quantity of Packets is the only field that maps cleanly to raw stock.
 // Returns 0 if packets is missing/zero; caller must surface a clear error.
 const REAM_PAPERS = new Set(['art paper', 'off-white', 'offset paper']);
-function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
-// Reams for art/offset paper, packets for board - the words the shop uses.
-function packetUnitLabelSrv(paperType) { return REAM_PAPERS.has(paperType) ? 'reams' : 'packets'; }
+// Papers come in 500-sheet reams: the three above and any other "... paper"
+// (flying paper, local paper - owner, 2026-10-23). Mirrors isReamPaper() in
+// the frontend.
+function isReamPaperSrv(paperType) { const t = String(paperType || '').toLowerCase().trim(); return REAM_PAPERS.has(t) || /\bpaper\b/.test(t); }
+function packetSize(paperType) { return isReamPaperSrv(paperType) ? 500 : 100; }
+// Reams for paper, packets for board - the words the shop uses.
+function packetUnitLabelSrv(paperType) { return isReamPaperSrv(paperType) ? 'reams' : 'packets'; }
 // Packets, exactly as they are - trailing zeros trimmed, nothing rounded.
 // 46,350 sheets of a 100-sheet board is 463.5 packets, and it must say so.
 function fmtPackets(sheets, ps) {
@@ -6518,7 +6522,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   }
   const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
   const ps   = packetSize(paperType);
-  const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+  const unit = isReamPaperSrv(paperType) ? 'reams' : 'packets';
   // Over-issuance is no longer allowed (owner rule — replaces the
   // earlier "extras go to offcut" flow). Reject cleanly before any
   // ledger writes so the store keeper simply reduces their split
@@ -6893,7 +6897,7 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
         // the Station shows top-ups in a lighter blue tone.
         is_partial: !!isPartial,
         paper_type: item.paper_type, size: item.size, gsm: item.gsm, brand: item.brand,
-        unit: REAM_PAPERS.has(item.paper_type) ? 'reams' : 'packets',
+        unit: isReamPaperSrv(item.paper_type) ? 'reams' : 'packets',
         packet_size: ps,
         owed_sheets: owed,
         owed_packets: ps ? owed / ps : owed,
@@ -7824,7 +7828,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     if (!sourceItem) return res.status(400).json({ error: 'Job paper no longer exists in inventory.' });
     const paperType = sourceItem?.paper_type || '';
     const ps = packetSize(paperType);
-    const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+    const unit = isReamPaperSrv(paperType) ? 'reams' : 'packets';
     const sheets = Math.round(parseFloat(t.qty) * ps);
     if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
     const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : [];
@@ -12207,8 +12211,7 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
 
     // Packets → sheets using the paper-type convention (Cards=100, Papers=500).
     // Mirrors packetSize() in the frontend.
-    const reamSet = new Set(['art paper', 'off-white', 'offset paper']);
-    const perPack = reamSet.has(imp.paper_type) ? 500 : 100;
+    const perPack = packetSize(imp.paper_type);
     const receivedPackets = Number.isFinite(overridePackets) && overridePackets > 0 ? overridePackets : parseFloat(imp.packets);
     const sheets = Math.round(receivedPackets * perPack);
     if (!sheets || sheets <= 0) return res.status(400).json({ error: 'packets must be > 0' });
