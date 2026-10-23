@@ -4861,12 +4861,15 @@ app.post('/api/jobs/:id/ready-check', requirePermission('job_btn_stage_forward')
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const value = !!(req.body && req.body.value);
-    const [job] = await sql`SELECT id, name, stage_index, particulars FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    const [job] = await sql`SELECT id, name, stage_index, particulars, deliveries FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (value) {
       if ((job.stage_index || 0) >= STAGES.length - 1) return res.status(409).json({ error: 'This job is already delivered.' });
       const readyQty = readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty);
       if (!(readyQty > 0)) return res.status(409).json({ error: 'Write the Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
+      // After a partial delivery the next tick needs ready cartons that have
+      // not shipped yet - otherwise Finance would be sent to deliver nothing.
+      if (!(readyQty - sumDeliveryCartons(job.deliveries) > 0)) return res.status(409).json({ error: 'Everything ready has already shipped - write the new Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
     }
     const check = value ? { by: (req.user && req.user.email) || 'unknown', at: new Date().toISOString() } : null;
     const [updated] = await sql`
