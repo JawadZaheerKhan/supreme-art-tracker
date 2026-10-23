@@ -11693,7 +11693,17 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
              i.paper_type, i.size AS item_size, i.gsm AS item_gsm,
              i.brand AS item_brand, i.unit AS item_unit,
-             i.is_offcut AS item_is_offcut
+             i.is_offcut AS item_is_offcut,
+             -- The item's balance right after this entry: today's balance
+             -- minus every later entry of the same item. EVERY ledger row
+             -- counts here (archived, corrections, reversals) because each
+             -- one really moved the balance - the filters below only hide
+             -- rows from the report. Same newest-first order as History.
+             (i.current_balance - COALESCE((
+               SELECT SUM(t2.change) FROM inventory_transactions t2
+                WHERE t2.item_id = t.item_id
+                  AND (t2.created_at > t.created_at OR (t2.created_at = t.created_at AND t2.id > t.id))
+             ), 0))::int AS balance_after
       FROM inventory_transactions t
       LEFT JOIN jobs j ON j.id = t.job_id
       LEFT JOIN inventory_items i ON i.id = t.item_id

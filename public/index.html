@@ -13360,6 +13360,9 @@ async function renderInvHistory(id) {
     // subtract each row's change to get the balance the next-older row left
     // behind. Works correctly with reversals because t.change is the actual
     // signed delta (reversals are separate rows with opposite signs).
+    // Several brands share this History (owner, 2026-10-23): say which
+    // brand each entry was, split issues list every brand they took from.
+    const showBrand = !Array.isArray(payload) && Array.isArray(payload.brands) && payload.brands.length > 1;
     let runningAfter = Array.isArray(payload)
       ? paperGroupMembers(it).reduce((sum, x) => sum + (+x.current_balance || 0), 0)
       : (+payload.current_balance || 0);
@@ -13418,6 +13421,7 @@ async function renderInvHistory(id) {
       const notes = (t.user_notes !== null && t.user_notes !== undefined) ? t.user_notes : (splitSources || txDisplayNotes(t));
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" data-reason="${esc(t.reason || '')}" class="row-hover-red" style="${rowStyle}">
         <td style="white-space:nowrap;">${date}</td>
+        ${showBrand ? `<td style="font-weight:600;white-space:nowrap;">${[...new Set(t._parts.map(p => p.item_brand || 'no brand'))].map(esc).join(' + ')}</td>` : ''}
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
         <td style="font-weight:600;">${balanceAfterPkts} ${unit}</td>
         <td>${reasonHtml}${archivedTag}</td>
@@ -13435,7 +13439,7 @@ async function renderInvHistory(id) {
     if (!box) return;
     box.innerHTML = txs.length
       ? `<table class="ledger-table ledger-compact">
-           <tr><th>When</th><th>Change (${unit})</th><th title="Balance after this transaction">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
+           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th>Change (${unit})</th><th title="Balance after this transaction">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th>Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
@@ -13892,10 +13896,8 @@ function renderStockReport(from, to) {
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const fmt   = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
     const pkts  = t.change / ps;
-    // Look up the item's CURRENT balance from the cached inventory list. May
-    // be null if the item was deleted after this transaction was recorded.
-    const inv   = inventoryAll.find(i => i.id === t.item_id);
-    const bal   = inv ? (inv.current_balance || 0) : null;
+    // The item's balance right after this entry (server balance_after).
+    const bal   = txBalanceAfter(t);
     const balCell = bal === null
       ? '<span style="color:var(--text3)">—</span>'
       : `${bal.toLocaleString()} sheets<br><span style="color:var(--text2);font-size:11px;">${fmt(bal/ps)} ${unit}</span>`;
@@ -13912,7 +13914,7 @@ function renderStockReport(from, to) {
   document.getElementById('sr-content').innerHTML = txs.length
     ? `<div style="font-size:11px;color:var(--text2);margin-bottom:6px;">Period: ${from || '(any)'} to ${to || '(any)'} · ${txs.length} transaction${txs.length===1?'':'s'}</div>
        <table class="ledger-table">
-         <tr><th>When</th><th>Item</th><th>Change</th><th>Current Balance</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
+         <tr><th>When</th><th>Item</th><th>Change</th><th>Balance After</th><th>Reason</th><th>Job</th><th>Notes</th></tr>
          ${rows}
        </table>`
     : '<div class="empty">No transactions in this period.</div>';
@@ -13944,8 +13946,7 @@ function printStockReport() {
     const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
     const fmt  = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
     const pkts = t.change / ps;
-    const inv  = inventoryAll.find(i => i.id === t.item_id);
-    const bal  = inv ? (inv.current_balance || 0) : null;
+    const bal  = txBalanceAfter(t);
     const balCell = bal === null
       ? '—'
       : `${bal.toLocaleString()}<br><span style="font-size:8pt;">${fmt(bal/ps)} ${unit}</span>`;
@@ -13997,7 +13998,7 @@ function printStockReport() {
           <th style="border:1px solid #000;padding:4px;text-align:left;">When</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Item</th>
           <th style="border:1px solid #000;padding:4px;text-align:right;">Change<br><span style="font-weight:normal;font-size:8pt;">(sheets / pkts·reams)</span></th>
-          <th style="border:1px solid #000;padding:4px;text-align:right;">Current Balance</th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Balance After</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Reason</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Notes</th>
@@ -24068,7 +24069,10 @@ function collapseSplitIssuances(rows) {
       group_ids: arr.map(x => x.id),
       change: summedChange,
       item_brand: uniqBrands.join('/'),
-      item_id: null,           // multiple items — balance can't be shown
+      item_id: null,           // multiple items — no single balance
+      // ...so each brand's own balance after this issuance instead.
+      split_balances: [...arr].sort((a, b) => a.id - b.id)
+        .map(x => ({ brand: x.item_brand || 'no brand', after: x.balance_after })),
       history_item_id: first.item_id, // any member opens the shared group history
       notes: first.notes,
       split_note: splitNote,
@@ -24147,13 +24151,12 @@ function renderStockMovement(direction, from, to) {
     const ps    = packetSize(t.paper_type || '');
     const unit  = packetUnitLabel(t.paper_type || '').toLowerCase();
     const pkts  = t.change / ps;
-    // Balance / weight: a split-issuance group has no single item — it
-    // pulled from 2+ brands, each with its own inventory row. Showing a
-    // balance for a single brand would be misleading, so blank the cell.
-    const inv   = isGroup ? null : inventoryAll.find(i => i.id === t.item_id);
-    const bal   = inv ? (inv.current_balance || 0) : null;
+    // Balance AFTER this entry (server balance_after) - not today's balance,
+    // which used to show on every row (owner, 2026-10-23). A split issuance
+    // pulled from 2+ brands, so it lists each brand's own balance after.
+    const bal   = isGroup ? null : txBalanceAfter(t);
     const balCell = isGroup
-      ? '<span style="color:var(--text3)" title="Split across brands — check individual brand balances in Inventory">split</span>'
+      ? splitBalancesHtml(t, ps, unit)
       : bal === null
         ? '<span style="color:var(--text3)">—</span>'
         : `${fmt(bal/ps)} ${unit}<br><span style="color:var(--text2);font-size:11px;">${bal.toLocaleString()} sheets</span>`;
@@ -24162,7 +24165,7 @@ function renderStockMovement(direction, from, to) {
     const balKg       = (txWperPack !== null && bal !== null) ? txWperPack * (bal / ps) : null;
     const weightCell  = txKg === null
       ? '<span style="color:var(--text3)">—</span>'
-      : `<span class="${cls}" style="font-weight:600;">${fmt(txKg)} kg</span>${!isGroup && balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg on hand</span>` : ''}`;
+      : `<span class="${cls}" style="font-weight:600;">${fmt(txKg)} kg</span>${!isGroup && balKg !== null ? `<br><span style="color:var(--text2);font-size:11px;">${fmt(balKg)} kg after</span>` : ''}`;
     // Bulk-selection: a grouped row's checkbox ticks/unticks every
     // underlying tx id at once so bulk actions still target the right
     // ledger rows. Selection state is "checked" only when EVERY id in
@@ -24224,7 +24227,7 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Current Balance</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th} title="The item's balance right after this entry">Balance After</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
@@ -25788,6 +25791,22 @@ function printOffcutConsumption() {
 // only ever come from what's already visible under the current filter, so
 // there's nothing to reconcile). Otherwise falls back to the same filter
 // chain renderStockMovement() uses, so Print/Export always mirror the screen.
+// Balance right after a ledger row, in sheets (server balance_after); null
+// when the item is gone or the server did not send it.
+function txBalanceAfter(t) {
+  return (t && t.balance_after !== null && t.balance_after !== undefined && t.balance_after !== '') ? +t.balance_after : null;
+}
+// A split issuance's balance cell: each brand's balance after it.
+function splitBalancesHtml(t, ps, unit) {
+  const parts = Array.isArray(t.split_balances) ? t.split_balances.filter(x => txBalanceAfter({ balance_after: x.after }) !== null) : [];
+  if (!parts.length) return '<span style="color:var(--text3)">split</span>';
+  const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
+  return parts.map(x => `<div style="font-size:12px;"><b>${esc(x.brand)}</b> ${fmt(+x.after / ps)} ${unit}</div>`).join('');
+}
+function splitBalancesText(t, ps) {
+  const parts = Array.isArray(t.split_balances) ? t.split_balances.filter(x => txBalanceAfter({ balance_after: x.after }) !== null) : [];
+  return parts.length ? parts.map(x => `${x.brand} ${Math.round(+x.after / ps * 100) / 100}`).join(' / ') : 'split';
+}
 function stockMovementPrintRows(direction) {
   const state = stockMovementStates[direction];
   const sel = stockMovementSel[direction];
@@ -25821,9 +25840,10 @@ function printStockMovement(direction) {
     const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
     const fmt  = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
     const pkts = Math.abs(t.change / ps);
-    const inv  = inventoryAll.find(i => i.id === t.item_id);
-    const bal  = inv ? (inv.current_balance || 0) : null;
-    const balCell = bal === null ? '—' : `${fmt(bal/ps)} ${unit}<br><span style="font-size:8pt;">${bal.toLocaleString()} sheets</span>`;
+    const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
+    const bal  = isGroup ? null : txBalanceAfter(t);
+    const balCell = isGroup ? esc(splitBalancesText(t, ps)) + ' ' + unit
+      : bal === null ? '—' : `${fmt(bal/ps)} ${unit}<br><span style="font-size:8pt;">${bal.toLocaleString()} sheets</span>`;
     const tdL = 'style="border:1px solid #000;padding:4px;"';
     const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
     const tdChg = `style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${t.change>0?'#166534':'#A32D2D'};"`;
@@ -25858,7 +25878,7 @@ function printStockMovement(direction) {
           <th style="border:1px solid #000;padding:4px;text-align:left;">When</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Item</th>
           <th style="border:1px solid #000;padding:4px;text-align:right;">Change<br><span style="font-weight:normal;font-size:8pt;">(sheets / pkts·reams)</span></th>
-          <th style="border:1px solid #000;padding:4px;text-align:right;">Current Balance</th>
+          <th style="border:1px solid #000;padding:4px;text-align:right;">Balance After</th>
           <th style="border:1px solid #000;padding:4px;text-align:left;">Reason</th>
           ${direction === 'out' ? '<th style="border:1px solid #000;padding:4px;text-align:left;">Job</th>' : ''}
           <th style="border:1px solid #000;padding:4px;text-align:left;">Notes</th>
@@ -25894,10 +25914,10 @@ async function exportStockMovement(direction) {
   const state = stockMovementStates[direction];
   const txs = stockMovementPrintRows(direction);
   if (!txs.length) { notify('Nothing to export — empty filter result.'); return; }
-  // Every column the report shows on screen (Current Balance, Weight and
+  // Every column the report shows on screen (Balance After, Weight and
   // Challan No. were missing), worked out the same way as the screen rows.
-  const header = ['When', 'Item', 'Change (Packets/Reams)', 'Change (Sheets)', 'Current Balance (Packets/Reams)', 'Current Balance (Sheets)',
-    'Weight (kg)', 'Weight on Hand (kg)', 'Reason', 'Job', 'Challan No.', 'Entered by', 'Notes'];
+  const header = ['When', 'Item', 'Change (Packets/Reams)', 'Change (Sheets)', 'Balance After (Packets/Reams)', 'Balance After (Sheets)',
+    'Weight (kg)', 'Weight After (kg)', 'Reason', 'Job', 'Challan No.', 'Entered by', 'Notes'];
   // Stock In has no Job column (owner, 2026-10-16).
   const showJob = direction === 'out';
   if (!showJob) header.splice(header.indexOf('Job'), 1);
@@ -25909,17 +25929,16 @@ async function exportStockMovement(direction) {
     const job  = t.job_id ? `E-${t.job_id}${t.job_code ? ' · ' + t.job_code : ''}` : '';
     const ps   = packetSize(t.paper_type || '');
     const pkts = t.change / ps;
-    // A split issuance pulled from 2+ brands - no single balance (screen shows "split").
-    const inv  = isGroup ? null : inventoryAll.find(i => i.id === t.item_id);
-    const bal  = inv ? (inv.current_balance || 0) : null;
+    // Balance after this entry; a split issuance lists each brand's.
+    const bal  = isGroup ? null : txBalanceAfter(t);
     const wPer = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     const row = [
       fmtDMYT(t.created_at),
       item,
       r2(Math.abs(pkts)),
       Math.abs(t.change),
-      isGroup ? 'split' : bal === null ? '' : r2(bal / ps),
-      isGroup ? 'split' : bal === null ? '' : bal,
+      isGroup ? splitBalancesText(t, ps) : bal === null ? '' : r2(bal / ps),
+      isGroup ? '' : bal === null ? '' : bal,
       wPer !== null ? r2(wPer * Math.abs(pkts)) : '',
       (!isGroup && wPer !== null && bal !== null) ? r2(wPer * (bal / ps)) : '',
       t.reason || '',
