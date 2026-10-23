@@ -311,7 +311,8 @@ function getDb() {
 // the Procurement role in users_role_check (2026-10-14).
 // Bumped again for carton_transactions.source (Station carton issues, 2026-10-14).
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
-const SCHEMA_VERSION = 'v2026-10-17-carton-delete';
+// Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
+const SCHEMA_VERSION = 'v2026-10-23-ready-check';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -793,6 +794,11 @@ async function initDb() {
     // nothing is visible until someone consciously opts in. Filtered by
     // GET /api/client/jobs alongside role + company + delivered-cutoff.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false`;
+
+    // Ready check (owner, 2026-10-23): { by, at } when the PM ticks a ready
+    // job on its Jobs tile so Finance knows to record its delivery; NULL
+    // when not ticked. See POST /api/jobs/:id/ready-check.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ready_check JSONB`;
 
     // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
     // delivered job, we set deleted_at instead of dropping the row, so the
@@ -4837,6 +4843,43 @@ app.post('/api/jobs/:id/client-visible', requirePermission('job_btn_edit'), asyn
       summary: `Job E-${id} (${updated[0].name}): client_visible → ${value ? 'ON' : 'OFF'} for ${updated[0].client}`,
     });
     res.json(updated[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ready check (owner, 2026-10-23): the PM ticks a ready job (fully or partly
+// ready) on its Jobs tile so Finance knows to record its delivery. Only once
+// QC's Ready to Delivery Qty is written on the job card; un-ticking clears
+// it. A delivery recorded after the tick retires it - the client compares
+// the tick's time with the deliveries' own entry times, so nothing here has
+// to clear it.
+app.post('/api/jobs/:id/ready-check', requirePermission('job_btn_stage_forward'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const value = !!(req.body && req.body.value);
+    const [job] = await sql`SELECT id, name, stage_index, particulars FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (value) {
+      if ((job.stage_index || 0) >= STAGES.length - 1) return res.status(409).json({ error: 'This job is already delivered.' });
+      const readyQty = readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty);
+      if (!(readyQty > 0)) return res.status(409).json({ error: 'Write the Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
+    }
+    const check = value ? { by: (req.user && req.user.email) || 'unknown', at: new Date().toISOString() } : null;
+    const [updated] = await sql`
+      UPDATE jobs SET ready_check = ${check ? JSON.stringify(check) : null}::jsonb
+       WHERE id = ${id} AND deleted_at IS NULL
+       RETURNING id, ready_check`;
+    await logAudit(sql, req, {
+      action: 'job.ready_check',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} (${job.name}): ${value ? 'ticked Ready - Finance to record the delivery' : 'Ready tick removed'}`,
+    });
+    res.json(updated);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

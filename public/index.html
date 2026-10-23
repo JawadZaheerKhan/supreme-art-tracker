@@ -2669,6 +2669,13 @@
 }
 .jc-form { width: 100%; border-collapse: collapse; margin-top: 4px; }
 .jc-form td { border: 1px solid #c5c2b6; padding: 5px 8px; vertical-align: top; background: #fdfcf7; }
+.ready-check { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px 5px 6px; border-radius: 999px; border: 2px solid #16a34a; background: #fff; color: #166534; font-weight: 800; font-size: 12px; letter-spacing: 0.02em; cursor: pointer; box-shadow: 0 2px 6px rgba(22,163,74,0.18); white-space: nowrap; }
+.ready-check .ready-check-box { width: 22px; height: 22px; border-radius: 6px; border: 2px solid #16a34a; background: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; line-height: 1; color: #16a34a; font-weight: 900; }
+.ready-check:hover { background: #f0fdf4; }
+.ready-check.is-on { background: #16a34a; color: #fff; }
+.ready-check.is-on .ready-check-box { border-color: #fff; }
+.ready-check:disabled { cursor: default; opacity: 1; }
+.job-tile.is-ready-checked, .job-card.is-ready-checked { background: #ecfdf5 !important; border-color: #16a34a !important; box-shadow: 0 0 0 3px rgba(22,163,74,0.45), 0 6px 18px rgba(22,163,74,0.20) !important; }
 .jc-form .jc-printed-machine { font-size: 16px; font-weight: 600; padding: 3px 2px; }
 .jc-form .jc-printed-note { font-size: 10px; color: #166534; margin-top: 2px; font-weight: 600; }
 .jc-form .jc-lbl { display: block; font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 2px; font-weight: 600; }
@@ -4530,6 +4537,60 @@ function isPartialReady(j) {
 // entirely: they're proofs, not full production runs, so ticking Shade
 // Card on a job — even mid-stage — makes it deliverable right away.
 // "Ticking the box makes the job work as a shade card" per owner ask.
+// Ready check (owner, 2026-10-23): the PM ticks a ready job (fully or partly
+// ready) on its Jobs tile so Finance knows to record its delivery; the tile
+// glows green until a delivery is recorded after the tick. Only once QC's
+// Ready to Delivery Qty is written - otherwise the click opens the job card
+// at that row so it can be entered.
+function readyCheckEligible(j) { return !!j && !j.deleted_at && ((j.stage_index || 0) === 6 || isPartialReady(j)); }
+function isReadyChecked(j) {
+  const c = j && j.ready_check;
+  if (!c || !c.at || !readyCheckEligible(j)) return false;
+  const t = new Date(c.at).getTime();
+  return !(Array.isArray(j.deliveries) && j.deliveries.some(d => d && d.at && new Date(d.at).getTime() > t));
+}
+function readyCheckBoxHtml(j) {
+  if (!readyCheckEligible(j)) return '';
+  const on = isReadyChecked(j), can = canStageForward();
+  if (!on && !can) return '';   // Finance sees it once ticked
+  const c = j.ready_check || {};
+  const tip = on
+    ? `Ready - checked${c.by ? ' by ' + c.by : ''} ${fmtDMYT(c.at)}. Finance: record the delivery.${can ? ' Click to un-tick.' : ''}`
+    : 'Tick when this job is ready to deliver - Finance will see it highlighted green. Needs the Ready to Delivery Qty written on the job card.';
+  return `<button type="button" class="ready-check${on ? ' is-on' : ''}" ${can ? `onclick="event.stopPropagation(); toggleReadyCheck(${j.id})"` : 'disabled'} title="${esc(tip)}"><span class="ready-check-box">${on ? '&#10003;' : ''}</span><span>${on ? 'Ready &middot; Record Delivery' : 'Mark Ready'}</span></button>`;
+}
+async function toggleReadyCheck(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j || !canStageForward()) return;
+  const on = isReadyChecked(j);
+  if (!on && !(readyCartonsTotal(j) > 0)) {
+    notify('Write the Ready to Delivery Qty first - opening the job card at that row.');
+    openEditAtReadyQty(id);
+    return;
+  }
+  try {
+    const r = await api('POST', `/api/jobs/${id}/ready-check`, { value: !on });
+    jobs = jobs.map(x => x.id === id ? { ...x, ready_check: r.ready_check } : x);
+    renderJobs();
+  } catch (e) {
+    if (e.data && e.data.needs_ready_qty) { notify(e.message); openEditAtReadyQty(id); return; }
+    notify('Could not save the Ready tick: ' + e.message);
+  }
+}
+// Opens the job card at its Ready to Delivery Qty row, flashed green.
+function openEditAtReadyQty(id) {
+  openEdit(id);
+  const grab = (tries = 0) => {
+    const el = document.getElementById('p-delivered_cartons_qty-quantity');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const row = el.closest('tr');
+      if (row) { row.style.transition = 'background 0.3s'; row.style.background = '#bbf7d0'; setTimeout(() => { row.style.background = ''; }, 2600); }
+      setTimeout(() => { try { el.focus(); } catch (_) {} }, 250);
+    } else if (tries < 20) setTimeout(() => grab(tries + 1), 60);
+  };
+  setTimeout(() => grab(), 120);
+}
 function canDeliverNow(j) {
   if (!j) return false;
   if (j.is_shade_card) return true;
@@ -8605,7 +8666,7 @@ function renderJobRowCompact(j, opts) {
         ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
         : '';
     return `
-    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
+    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''} ${(!isGroupTile && isReadyChecked(j)) ? 'is-ready-checked' : ''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
       ${tileDeliveryRecordsHtml(j)}
       <div class="job-top">
         <div class="job-meta">
@@ -8616,6 +8677,7 @@ function renderJobRowCompact(j, opts) {
               ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
             </span>
             ${overDeliveredMarkHtml(j)}
+            ${isGroupTile ? '' : readyCheckBoxHtml(j)}
             ${badge}
             ${linkedJobBadgeHtml(j, false)}
             ${paperWaivedBadgeHtml(j)}
@@ -9146,7 +9208,7 @@ function renderJobCard(j, opts) {
     ? ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`
     : clientTintStyle;
   return `
-  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${tileAttr}>
+  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''} ${(!clientPreview && !isGroupTile && isReadyChecked(j)) ? 'is-ready-checked' : ''}"${tileAttr}>
     ${sideStats}
     ${clientTopRow}
     ${clientPreview ? '' : tileDeliveryRecordsHtml(j)}
@@ -9157,7 +9219,7 @@ function renderJobCard(j, opts) {
         : `<span class="job-number-stack">
              <span class="job-id">#${j.id}</span>
              ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
-           </span>${overDeliveredMarkHtml(j)}`}
+           </span>${overDeliveredMarkHtml(j)}${isGroupTile ? '' : readyCheckBoxHtml(j)}`}
       ${badge}
       ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${clientPreview ? '' : paperWaivedBadgeHtml(j)}
@@ -16259,7 +16321,7 @@ function openJobsReport() {
       <span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#f59e0b;"></span>Partial delivery — still owes cartons</span>
       <span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#166534;"></span>Ready Qty (MIL Products view)</span>
       <span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#dc2626;"></span>Delivered after deadline</span>
-      ${mode === 'ready' ? `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#fff7ed;border:1px solid #fdba74;"></span>Partly ready — still in production</span>` : ''}
+      ${mode === 'ready' ? `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#fff7ed;border:1px solid #fdba74;"></span>Partly ready — still in production</span><span style="display:inline-flex;align-items:center;gap:6px;"><span style="font-weight:800;color:#166534;">E-123</span>Green job no. = Ready to Delivery Qty checked</span>` : ''}
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
@@ -16820,6 +16882,9 @@ function buildJobsReportRows() {
     // Pasting's for a partly-ready job), and whether it is only partly ready.
     const readyLeft = Math.max(0, (earlyReadyTotal(j) || 0) - (totalDeliveredCartons(j) || 0));
     const partialReady = isReadyMode && (j.stage_index || 0) < 6;
+    // Checked: QC's Ready to Delivery Qty is recorded (the PM went over
+    // Pasting's figure and saved it there) - its job number reads green.
+    const readyConfirmed = isReadyMode && (readyCartonsTotal(j) || 0) > 0;
     // Linked-delivery partner — set on any delivery entry recorded via
     // "Deliver Linked Jobs". Used below to merge this job's row with its
     // partner's row into one combined line (only when BOTH rows survive
@@ -16838,6 +16903,7 @@ function buildJobsReportRows() {
       readyAt: readyDates.map(d => d.text).join(' | '),
       readyAtMs: readyDates.length ? readyDates[0].ms : null,
       partialReady,
+      readyConfirmed,
       client: j.client || '',
       poNo: poNoJoined,
       batchNo: batchNoJoined,
@@ -16950,6 +17016,7 @@ function buildJobsReportRows() {
         readyAt: dedupePipe(sorted.map(b => b.readyAt)),
         readyAtMs: sorted.map(b => b.readyAtMs).filter(v => v != null).sort((x, y) => x - y)[0] ?? null,
         partialReady: sorted.some(b => b.partialReady),
+        readyConfirmed: sorted.every(b => b.readyConfirmed),
         client: dedupePipe(sorted.map(b => b.client)),
         poNo: sorted[0].poNo,
         batchNo: dedupePipe(sorted.map(b => b.batchNo)),
@@ -17246,7 +17313,9 @@ function renderJobsReport() {
     const deliveredStyle = r.isPartial ? 'color:#c2410c;font-weight:700;' : '';
     const idCell = (r._merged && r._merged.length > 1)
       ? r._merged.map(mid => `<span onclick="event.stopPropagation(); openEdit(${mid})" title="Open Job E-${mid}" style="cursor:pointer;color:#1d4ed8;font-weight:600;text-decoration:underline;text-underline-offset:2px;">E-${mid}</span>`).join(' ')
-      : esc(r.idDisplay || 'E-' + r.id);
+      : (r.readyConfirmed
+          ? `<span style="color:#166534;font-weight:800;" title="Checked - the Ready to Delivery Qty is recorded">${esc(r.idDisplay || 'E-' + r.id)}</span>`
+          : esc(r.idDisplay || 'E-' + r.id));
     const rowTitle = (r._merged && r._merged.length > 1)
       ? `Open the newest job (E-${r.id}) — or click a job number to open that one`
       : `Open this job's card`;
@@ -17769,7 +17838,7 @@ function printJobsReport() {
     const readyMode = jobsReportState.mode === 'ready';
     // Partly-ready rows (Ready view) print shaded, as on screen.
     return `<tr${readyMode && r.partialReady ? ' style="background:#fff7ed;"' : ''}>
-    <td ${tdL}>${esc(r.idDisplay || 'E-' + r.id)}</td>
+    <td ${tdL}>${r.readyConfirmed ? `<b style="color:#166534;">${esc(r.idDisplay || 'E-' + r.id)}</b>` : esc(r.idDisplay || 'E-' + r.id)}</td>
     <td ${tdL}>${esc(r.name)}${r.isShadeCard ? ' <b>(Shade Card)</b>' : ''}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
     <td ${tdL}>${esc(readyMode ? r.readyAt : r.deliveredAt)}</td>
