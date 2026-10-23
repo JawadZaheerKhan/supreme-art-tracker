@@ -11838,6 +11838,10 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       current_balance: currentBalance,
       item_ids: memberIds,
       brands: members.map(x => x.brand).filter(Boolean),
+      // Each brand's own balance and when it was deleted: a deleted brand's
+      // entries stay in this History, so its stock counts in "After" up to
+      // the moment it was deleted (owner, 2026-10-23).
+      members: members.map(x => ({ id: x.id, current_balance: parseFloat(x.current_balance) || 0, deleted_at: x.deleted_at || null })),
     });
   } catch (err) {
     console.error(err);

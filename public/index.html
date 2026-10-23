@@ -13366,9 +13366,18 @@ async function renderInvHistory(id) {
     let runningAfter = Array.isArray(payload)
       ? paperGroupMembers(it).reduce((sum, x) => sum + (+x.current_balance || 0), 0)
       : (+payload.current_balance || 0);
+    // Walk each brand on its own when the server sends them: a DELETED brand
+    // keeps its entries here, so its stock counts until it was deleted and
+    // not after. Leaving it out everywhere put every older row 40 reams
+    // below zero on off-white 20x30 (owner, 2026-10-23).
+    const members = (!Array.isArray(payload) && Array.isArray(payload.members)) ? payload.members : null;
+    const memberRun = members ? new Map(members.map(m => [m.id, +m.current_balance || 0])) : null;
+    const groupAfter = (when) => members.reduce((sum, m) =>
+      sum + ((m.deleted_at && new Date(when).getTime() >= new Date(m.deleted_at).getTime()) ? 0 : (memberRun.get(m.id) || 0)), 0);
     const rows = txs.map(t => {
-      const balanceAfterSheets = runningAfter;
+      const balanceAfterSheets = members ? groupAfter(t.created_at) : runningAfter;
       runningAfter -= t.change;     // becomes "after" of the next older row
+      if (members) for (const p of t._parts) memberRun.set(p.item_id, (memberRun.get(p.item_id) || 0) - p.change);
       const balanceAfterPkts = fmtPackets(balanceAfterSheets);
       // Date over time, two small lines — half the width of one long line.
       const date = `${fmtDMY(t.created_at)}<div style="font-size:10px;color:var(--text3);">${fmtTime12(t.created_at)}</div>${lateEntryTagHtml(t)}`;
