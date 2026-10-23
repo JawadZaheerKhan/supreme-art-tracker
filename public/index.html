@@ -21241,21 +21241,26 @@ function detailsWorksheet(key, rows) {
 // The same rows as text to paste: tab between cells, a line per row, no
 // header (the DETAILS tab has its own). A formula goes as "=..." - Google
 // Sheets and Excel both turn pasted "=" text into a live formula - written
-// with INDEX(M:M,ROW()) so it reads its OWN row wherever it is pasted. Text
-// that would read as a formula (=, +, -, @) gets a leading ' to stay text.
+// exactly as the DETAILS sheet writes it, with the rows it will land on:
+// pasted at row 512, the first row reads =M512*100*N512*2, the next 513.
+// Text that would read as a formula (=, +, -, @) gets a leading ' to stay text.
 function detailsColLetter(i) { let n = i + 1, out = ''; while (n) { const m = (n - 1) % 26; out = String.fromCharCode(65 + m) + out; n = Math.floor((n - 1) / 26); } return out; }
-function detailsCopyText(key, rows) {
+function detailsCopyText(key, rows, startRow) {
   const cols = detailsSheetColumns(key);
   const letter = Object.fromEntries(cols.map(([id], i) => [id, detailsColLetter(i)]));
-  const ref = id => `INDEX(${letter[id]}:${letter[id]},ROW())`;
+  const first = Math.max(2, parseInt(startRow, 10) || 2);
   const cell = v => {
     if (v && typeof v === 'object' && v.f) return '=' + v.f;
     if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
     const t = String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ').trim();
     return /^[=+\-@]/.test(t) ? "'" + t : t;
   };
-  return rows.map((r, i) => cols.map(([, , get]) => cell(get(r, i + 2, ref))).join('\t')).join('\n');
+  return rows.map((r, i) => { const R = first + i, ref = id => letter[id] + R; return cols.map(([, , get]) => cell(get(r, R, ref))).join('\t'); }).join('\n');
 }
+// Where the next paste starts on each DETAILS tab - remembered on this
+// computer after every copy (the row after the last one copied).
+function detailsNextRow(key) { try { return Math.max(2, parseInt(localStorage.getItem('sa_details_next_row_' + key), 10) || 2); } catch (_) { return 2; } }
+function detailsSetNextRow(key, n) { try { localStorage.setItem('sa_details_next_row_' + key, String(n)); } catch (_) {} }
 // The DETAILS button: pick a tab, then Copy rows (paste into the DETAILS tab)
 // or download that tab as a file.
 function openDetailsExportModal() {
@@ -21263,15 +21268,20 @@ function openDetailsExportModal() {
   const cur = DETAILS_SHEET_NAMES[saleReportState.tab] ? saleReportState.tab : 'box';
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:480px;">
     <h2>&#128215; Export for DETAILS sheet</h2>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Your DETAILS workbook's columns and formulas. <b>Copy rows</b>, then in that tab of your DETAILS sheet click the first empty cell in <b>column A</b> and paste (Ctrl+V) - the formula columns calculate on their own. Every filter on the report still applies.</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">Your DETAILS workbook's columns and formulas. Put the row you will paste at, <b>Copy rows</b>, then in that tab of your DETAILS sheet click that row's cell in <b>column A</b> and paste (Ctrl+V) - the formulas come out like yours (=M512*100*N512*2) and calculate on their own. Every filter on the report still applies.</div>
     <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:8px;">
       ${tabs.map(t => `
         <label class="srx-row" style="display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;cursor:pointer;">
-          <input type="radio" name="srx-details-tab" class="srx-details-tab" value="${t.key}" ${t.key === cur ? 'checked' : ''}>
+          <input type="radio" name="srx-details-tab" class="srx-details-tab" value="${t.key}" ${t.key === cur ? 'checked' : ''} onchange="const r = document.getElementById('srx-start-row'); if (r) r.value = detailsNextRow(this.value);">
           <span style="font-weight:600;">${esc(t.label)}</span>
           <span style="margin-left:auto;font-size:11px;color:var(--text2);">${esc(DETAILS_SHEET_NAMES[t.key])} tab</span>
         </label>`).join('')}
     </div>
+    <label style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;padding:9px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:13px;">
+      <span style="font-weight:700;">Paste at row</span>
+      <input type="number" id="srx-start-row" min="2" step="1" value="${detailsNextRow(cur)}" style="width:90px;" onkeydown="if (event.key === 'Enter') copySaleReportDetails();">
+      <span style="font-size:11px;color:var(--text2);">the first empty row of that tab in your DETAILS sheet</span>
+    </label>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn" onclick="runSaleReportDetailsExport()" title="A file with this tab, formulas as the workbook writes them">&#11015; Download file</button>
@@ -21292,7 +21302,9 @@ async function copySaleReportDetails() {
   if (!key) return;
   const rows = await detailsRowsFor(key);
   if (!rows.length) { notify('No rows to copy - nothing matches the filters.'); return; }
-  const text = detailsCopyText(key, rows);
+  const startEl = document.getElementById('srx-start-row');
+  const start = Math.max(2, parseInt(startEl && startEl.value, 10) || 2);
+  const text = detailsCopyText(key, rows, start);
   let copied = false;
   try { await navigator.clipboard.writeText(text); copied = true; } catch (_) {}
   if (!copied) {   // older browsers / no permission: the classic way
@@ -21303,8 +21315,9 @@ async function copySaleReportDetails() {
     ta.remove();
   }
   if (!copied) { notify('Could not copy - your browser blocked it. Use Download file instead.'); return; }
+  detailsSetNextRow(key, start + rows.length);
   closeModal();
-  notify(`Copied ${rows.length} row${rows.length === 1 ? '' : 's'} - in your ${DETAILS_SHEET_NAMES[key]} tab click the first empty cell in column A and paste (Ctrl+V)`);
+  notify(`Copied ${rows.length} row${rows.length === 1 ? '' : 's'} for rows ${start}-${start + rows.length - 1} - in your ${DETAILS_SHEET_NAMES[key]} tab click cell A${start} and paste (Ctrl+V)`);
 }
 async function runSaleReportDetailsExport() {
   const key = detailsPickedTab();
