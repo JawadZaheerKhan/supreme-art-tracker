@@ -1486,19 +1486,20 @@
     pointer-events: none;
   }
   .jr-mode-slider {
-    position:relative; display:grid; grid-template-columns:1fr 1fr;
-    min-width:176px; padding:3px; overflow:hidden;
+    position:relative; display:grid; grid-template-columns:1fr 1fr 1fr;
+    min-width:252px; padding:3px; overflow:hidden;
     background:#fff; border:1px solid #d8c5c5; border-radius:10px;
     box-shadow:0 2px 8px rgba(91,33,33,.12);
   }
   .jr-mode-slider::before {
     content:""; position:absolute; top:3px; bottom:3px; left:3px;
-    width:calc(50% - 3px); border-radius:7px; background:#A32D2D;
+    width:calc((100% - 6px) / 3); border-radius:7px; background:#A32D2D;
     box-shadow:0 2px 7px rgba(0,0,0,.24);
     transform:translateX(0);
     transition:transform .38s cubic-bezier(.34,1.2,.64,1);
   }
-  .jr-mode-slider.mode-created::before { transform:translateX(100%); }
+  .jr-mode-slider.mode-ready::before { transform:translateX(100%); }
+  .jr-mode-slider.mode-created::before { transform:translateX(200%); }
   /* MIL Products report tab: MIL purple (owner, 2026-10-12). */
   .rsb-item.rsb-item-mil { color:#6d28d9; font-weight:600; }
   .rsb-item.rsb-item-mil.active { background:#7c3aed; color:#fff; }
@@ -15991,6 +15992,7 @@ function printImports() {
 // from/to filter the CREATED date; dfrom/dto filter the DELIVERED date;
 // q matches job number ("59" / "E-59") or job name.
 // mode: 'delivered' (default, delivered-stage only, dfrom/dto = delivered date)
+//     | 'ready'     (jobs at Ready to Deliver + partly-ready jobs, dfrom/dto = the ready dates)
 //     | 'created'   (every non-deleted job, dfrom/dto = created_at)
 const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', challanSearch: '', mode: 'delivered', milOnly: false, shadeOnly: false, period: 'all', sortBy: '', sortDir: 'desc',
   // milGroup narrows Delivered / Created to one MIL product after a click
@@ -16200,7 +16202,31 @@ function openJobsReportPage() {
   openReportsGroup('jobs-group');
 }
 
-function jrSortKey() { return jobsReportState.sortBy || (jobsReportState.mode === 'created' ? 'created' : 'delivered'); }
+function jrSortKey() { return jobsReportState.sortBy || (jobsReportState.mode === 'created' ? 'created' : jobsReportState.mode === 'ready' ? 'ready' : 'delivered'); }
+// 'delivered' | 'ready' | 'created', as a word for the count line and messages.
+function jrModeWord() { return jobsReportState.mode === 'created' ? 'created' : jobsReportState.mode === 'ready' ? 'ready' : 'delivered'; }
+// The Ready view's jobs: at Ready to Deliver (partly shipped ones too), and
+// partly ready while still in production (owner, 2026-10-23).
+function jrIsReadyJob(j) { return !!j && ((j.stage_index || 0) === 6 || isPartialReady(j)); }
+// When a job got ready: each Ready to Delivery Qty entry's date, oldest
+// first ("1st | 2nd | 3rd"). A partly-ready job still in production may only
+// have Pasting's entries, so those; an old job with no dated entries falls
+// back to the Ready to Deliver stage's own stamp. [{ ms, text }]
+function jrReadyDates(j) {
+  const p = (j && j.particulars) || {};
+  const fromRow = row => (row && Array.isArray(row.entries) ? row.entries : [])
+    .map(e => { const iso = jrMilEntryIso(e && e.date); const ms = iso ? new Date(iso + 'T12:00:00').getTime() : NaN; return isFinite(ms) ? { ms, text: fmtDMY(iso) } : null; })
+    .filter(Boolean);
+  let list = fromRow(p.delivered_cartons_qty);
+  if (!list.length && (j.stage_index || 0) < 6) list = fromRow(p.pasted_cartons_qty);
+  if (!list.length) {
+    const st = j.stages && j.stages[6];
+    const ms = st && st.at ? new Date(st.at).getTime() : NaN;
+    if (isFinite(ms)) list = [{ ms, text: fmtDMY(localDateISO(new Date(ms))) }];
+  }
+  list.sort((a, b) => a.ms - b.ms);
+  return list.filter((d, i) => !i || d.text !== list[i - 1].text);   // one entry per day
+}
 function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
@@ -16217,9 +16243,9 @@ function openJobsReport() {
   const mode = jobsReportState.mode || 'delivered';
   const scopeJobs = mode === 'delivered'
     ? jobs.filter(j => (j.stage_index || 0) === STAGES.length - 1)
-    : jobs;
+    : mode === 'ready' ? jobs.filter(jrIsReadyJob) : jobs;
   const clients = [...new Set(scopeJobs.map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
-  const modeLabel = mode === 'delivered' ? 'Delivered' : 'Created';
+  const modeLabel = mode === 'delivered' ? 'Delivered' : mode === 'ready' ? 'Ready' : 'Created';
   pane.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
       <h2 style="margin:0;font-size:20px;">Jobs Report</h2>
@@ -16233,6 +16259,7 @@ function openJobsReport() {
       <span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#f59e0b;"></span>Partial delivery — still owes cartons</span>
       <span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#166534;"></span>Ready Qty (MIL Products view)</span>
       <span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#dc2626;"></span>Delivered after deadline</span>
+      ${mode === 'ready' ? `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:#fff7ed;border:1px solid #fdba74;"></span>Partly ready — still in production</span>` : ''}
     </div>
     <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
@@ -16286,6 +16313,7 @@ function openJobsReport() {
           <option value="id"${jrSortKey()==='id'?' selected':''}>Job ID</option>
           <option value="name"${jrSortKey()==='name'?' selected':''}>Job Name</option>
           <option value="delivered"${jrSortKey()==='delivered'?' selected':''}>Delivered Date</option>
+          <option value="ready"${jrSortKey()==='ready'?' selected':''}>Ready Date</option>
           <option value="client"${jrSortKey()==='client'?' selected':''}>Company</option>
           <option value="deliveredQty"${jrSortKey()==='deliveredQty'?' selected':''}>Delivered Qty</option>
         </select>
@@ -16379,9 +16407,9 @@ function setJrShadeOnly(v) {
   jobsReportSel.clear();
   renderJobsReport();
 }
-// Flip between Delivered-only and every Created job. Re-renders the whole
+// Flip between Delivered, Ready and every Created job. Re-renders the whole
 // pane so the header/labels/company dropdown all reflect the new mode.
-const JR_MODES = [['delivered', 'Delivered'], ['created', 'Created']];
+const JR_MODES = [['delivered', 'Delivered'], ['ready', 'Ready'], ['created', 'Created']];
 function jrModeSliderHtml(mode) {
   return `<div class="jr-mode-slider mode-${mode}">${JR_MODES.map(([k, l]) => `<button class="jr-mode-toggle-btn ${mode === k ? 'is-selected' : ''}" onclick="setJrMode('${k}')">${l}</button>`).join('')}</div>`;
 }
@@ -16484,6 +16512,7 @@ const JR_COL_SEARCH_FIELDS = {
   name:      { label: 'Job Name',    get: r => r.name },
   created:   { label: 'Created',     get: r => r.createdAt },
   delivered: { label: 'Delivered',   get: r => r.deliveredAt },
+  ready:     { label: 'Ready',       get: r => r.readyAt },
   po:        { label: 'PO No.',      get: r => r.poNo },
   batch:     { label: 'Batch No.',   get: r => r.batchNo },
   invoice:   { label: 'Invoice No.', get: r => r.challan },
@@ -16580,6 +16609,7 @@ function jrColSearchApply(field, forced) {
 function buildJobsReportRows() {
   const { client, dfrom, dto, q, poSearch, challanSearch, mode, milOnly, shadeOnly } = jobsReportState;
   const isCreatedMode = mode === 'created';
+  const isReadyMode = mode === 'ready';
   const lastStageIdx = STAGES.length - 1;       // Delivered
   // Search: "59" or "e-59" matches the job number; anything else matches
   // the job name (case-insensitive substring).
@@ -16605,7 +16635,9 @@ function buildJobsReportRows() {
     // so the owner can tell at a glance which ones still owe cartons.
     const deliveriesList = Array.isArray(j.deliveries) ? j.deliveries : [];
     const hasAnyShipment = deliveriesList.length > 0;
-    if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
+    if (isReadyMode) { if (!jrIsReadyJob(j)) continue; }
+    else if (!isCreatedMode && (j.stage_index || 0) !== lastStageIdx && !hasAnyShipment) continue;
+    const readyDates = isReadyMode ? jrReadyDates(j) : [];
     if (client && j.client !== client) continue;
     if (milOnly && !j.stock_group_name) continue;
     if (jobsReportState.milGroup && j.stock_group_name !== jobsReportState.milGroup) continue;
@@ -16640,6 +16672,11 @@ function buildJobsReportRows() {
       let refMs = NaN;
       if (isCreatedMode) {
         if (j.created_at) refMs = new Date(j.created_at).getTime();
+      } else if (isReadyMode) {
+        // In the window when ANY of its ready dates is.
+        const hit = readyDates.map(d => d.ms).find(jrInRange);
+        if (hit === undefined) continue;
+        refMs = hit;
       } else if (deliveriesList.some(d => isFinite(deliveryEntryMs(d)))) {
         // Rows are per SHIPMENT: the job is in the window when ANY of its
         // deliveries is, and the split below drops the shipments dated
@@ -16767,7 +16804,7 @@ function buildJobsReportRows() {
     // search value from a prior Delivered-mode visit would keep silently
     // filtering Created mode too, since the state isn't cleared on toggle
     // (same as every other Jobs Report filter).
-    if (!isCreatedMode) {
+    if (!isCreatedMode && !isReadyMode) {
       if (poSearchNorm      && !searchMatch(poNoJoined, poSearchNorm))    searchHit = false;
       if (challanSearchNorm && !searchMatch(challans, challanSearchNorm)) searchHit = false;
     }
@@ -16778,7 +16815,11 @@ function buildJobsReportRows() {
     const isPartial = isPartialDelivery(j);
     // Yellow shade only while deliveries are OPEN: gone once everything
     // produced has shipped (MIL or a job at Ready+) or it was finalized.
-    const shadeOpen = isPartial && !SF.allDelivered;
+    const shadeOpen = !isReadyMode && isPartial && !SF.allDelivered;
+    // Ready view: what is ready and not shipped yet (QC's Ready qty, else
+    // Pasting's for a partly-ready job), and whether it is only partly ready.
+    const readyLeft = Math.max(0, (earlyReadyTotal(j) || 0) - (totalDeliveredCartons(j) || 0));
+    const partialReady = isReadyMode && (j.stage_index || 0) < 6;
     // Linked-delivery partner — set on any delivery entry recorded via
     // "Deliver Linked Jobs". Used below to merge this job's row with its
     // partner's row into one combined line (only when BOTH rows survive
@@ -16794,6 +16835,9 @@ function buildJobsReportRows() {
       createdAt: createdAt ? createdAt.toLocaleDateString('en-GB') : '',
       createdAtRaw: createdAt,
       deliveredAt: deliveryTime,
+      readyAt: readyDates.map(d => d.text).join(' | '),
+      readyAtMs: readyDates.length ? readyDates[0].ms : null,
+      partialReady,
       client: j.client || '',
       poNo: poNoJoined,
       batchNo: batchNoJoined,
@@ -16815,8 +16859,8 @@ function buildJobsReportRows() {
       // job - PO fully delivered or Finalized - has its leftover counted as
       // wastage, so nothing of it stays Ready.
       wastage: SF.jobWastageAll,
-      readyQty: SF.closed ? 0 : readyQty,
-      readyNow: SF.closed ? 0 : readyQty,                       // current remainder - the footer's figure
+      readyQty: isReadyMode ? readyLeft : (SF.closed ? 0 : readyQty),
+      readyNow: isReadyMode ? readyLeft : (SF.closed ? 0 : readyQty),   // current remainder - the footer's figure
       readyTotalAll: SF.closed ? SF.deliveredTotal : readyTotalJR, // per-shipment "ready as of" math below
       milQty,
       packets,
@@ -16903,6 +16947,9 @@ function buildJobsReportRows() {
         createdAt: latest.createdAt,
         createdAtRaw: latest.createdAtRaw,
         deliveredAt: dedupePipe(sorted.map(b => b.deliveredAt)),
+        readyAt: dedupePipe(sorted.map(b => b.readyAt)),
+        readyAtMs: sorted.map(b => b.readyAtMs).filter(v => v != null).sort((x, y) => x - y)[0] ?? null,
+        partialReady: sorted.some(b => b.partialReady),
         client: dedupePipe(sorted.map(b => b.client)),
         poNo: sorted[0].poNo,
         batchNo: dedupePipe(sorted.map(b => b.batchNo)),
@@ -16954,6 +17001,7 @@ function buildJobsReportRows() {
         const m = String(r.deliveredAt || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
         return m ? new Date(+m[3], +m[2] - 1, +m[1]).getTime() : null;
       }
+      case 'ready':        return r.readyAtMs != null ? r.readyAtMs : null;
       case 'created': default: return r.createdAtRaw ? +r.createdAtRaw : null;
     }
   };
@@ -16972,7 +17020,7 @@ function buildJobsReportRows() {
   // repeat on each of a job's rows exactly as they do there — the footer
   // counts them once per job, see renderJobsReport. Created mode has no
   // shipments to speak of, and a job with none keeps its single row.
-  if (isCreatedMode) return withMilMerge.filter(r => r.searchHit).filter(jrRowPassesColFilters);
+  if (isCreatedMode || isReadyMode) return withMilMerge.filter(r => r.searchHit).filter(jrRowPassesColFilters);   // one row per job
   const numQty = (v) => parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0;
   const perShipment = [];
   for (const r of withMilMerge) {
@@ -17086,7 +17134,7 @@ function renderJobsReport() {
   }
   if (!rows.length) {
     el.innerHTML = `<div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
-      ${reportEmptyHtml('jobs', `No ${jobsReportState.mode === 'created' ? 'created' : 'delivered'} jobs match these filters.`)}`;
+      ${reportEmptyHtml('jobs', `No ${jrModeWord()} jobs match these filters.`)}`;
     return;
   }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
@@ -17202,12 +17250,14 @@ function renderJobsReport() {
     const rowTitle = (r._merged && r._merged.length > 1)
       ? `Open the newest job (E-${r.id}) — or click a job number to open that one`
       : `Open this job's card`;
-    return `<tr data-jr-row="${r.id}" data-jr-ship="${r.id}-${r.shipmentIndex || 0}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${r.shadeOpen ? 'background:#fff7ed;' : ''}" onclick="openEdit(${r.id})" title="${rowTitle}">
+    return `<tr data-jr-row="${r.id}" data-jr-ship="${r.id}-${r.shipmentIndex || 0}" class="cv-summary-row ${isSel?'bulk-row-selected':''}" style="border-bottom:1px solid var(--border);${(r.shadeOpen || r.partialReady) ? 'background:#fff7ed;' : ''}" onclick="openEdit(${r.id})" title="${r.partialReady ? 'Partly ready - still in production. ' : ''}${rowTitle}">
       <td class="bulk-td">${(r.shipmentIndex && !r.firstOfJob) ? '' : `<input type="checkbox" class="bulk-check" ${isSel?'checked':''} onclick="event.stopPropagation(); toggleJobsReportRow(${r.id}, this.checked)">`}</td>
       <td ${td}>${idCell}</td>
       <td ${td}>${esc(r.name)}${r.isShadeCard ? ' <span style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">&#127912; Shade Card</span>' : ''}</td>
       <td ${tdN}>${esc(r.createdAt)}</td>
-      <td style="padding:8px 10px;max-width:180px;white-space:normal;word-break:break-word;font-size:11.5px;line-height:1.5;${r.isLate?'color:#dc2626;font-weight:600;':''}" title="${r.isLate?'Delivered after the deadline':''}">${esc(r.deliveredAt)}</td>
+      ${jobsReportState.mode === 'ready'
+        ? `<td style="padding:8px 10px;max-width:180px;white-space:normal;word-break:break-word;font-size:11.5px;line-height:1.5;" title="${r.partialReady ? 'Partly ready - still in production' : 'When it got ready'}">${esc(r.readyAt)}</td>`
+        : `<td style="padding:8px 10px;max-width:180px;white-space:normal;word-break:break-word;font-size:11.5px;line-height:1.5;${r.isLate?'color:#dc2626;font-weight:600;':''}" title="${r.isLate?'Delivered after the deadline':''}">${esc(r.deliveredAt)}</td>`}
       <td ${td}>${esc(r.client)}</td>
       <td ${wrapTd(160)}>${esc(r.poNo)}</td>
       <td ${wrapTd(140)}>${esc(r.batchNo)}</td>
@@ -17231,7 +17281,7 @@ function renderJobsReport() {
   el.innerHTML = `
     <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
     ${reportFilterChipsHtml('jobs')}
-    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${jobCount} ${jobsReportState.mode === 'created' ? 'created' : 'delivered'} job${jobCount===1?'':'s'}${jobsReportState.mode === 'created' ? '' : ` &middot; ${rows.length} shipment${rows.length===1?'':'s'} (same count as the Sale Report)`} in window</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${jobCount} ${jrModeWord()} job${jobCount===1?'':'s'}${jobsReportState.mode !== 'delivered' ? '' : ` &middot; ${rows.length} shipment${rows.length===1?'':'s'} (same count as the Sale Report)`}${jobsReportState.mode === 'ready' ? ` &middot; ${rows.filter(r => r.partialReady).length} partly ready` : ''} in window</div>
     <div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;min-width:max-content;">
       <thead>
@@ -17240,7 +17290,7 @@ function renderJobsReport() {
           <th ${th}>${jrColSearchHeaderHtml('job', 'Job ID')}</th>
           <th ${th}>${jrColSearchHeaderHtml('name', 'Job Name')}</th>
           <th ${th}>${jrColSearchHeaderHtml('created', 'Created')}</th>
-          <th ${th}>${jrColSearchHeaderHtml('delivered', 'Delivered')}</th>
+          <th ${th}>${jobsReportState.mode === 'ready' ? jrColSearchHeaderHtml('ready', 'Ready') : jrColSearchHeaderHtml('delivered', 'Delivered')}</th>
           <th ${th}>${jrColHeaderHtml('client', 'Company')}</th>
           <th ${th}>${jrColSearchHeaderHtml('po', 'PO No.')}</th>
           <th ${th}>${jrColSearchHeaderHtml('batch', 'Batch No.')}</th>
@@ -17261,7 +17311,7 @@ function renderJobsReport() {
       <tfoot>
         <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
           <td></td>
-          <td style="padding:8px 10px;white-space:nowrap;">${jobCount} job${jobCount===1?'':'s'}${jobsReportState.mode === 'created' ? '' : ` &middot; ${rows.length} shipment${rows.length===1?'':'s'}`}</td>
+          <td style="padding:8px 10px;white-space:nowrap;">${jobCount} job${jobCount===1?'':'s'}${jobsReportState.mode !== 'delivered' ? '' : ` &middot; ${rows.length} shipment${rows.length===1?'':'s'}`}</td>
           <td colspan="7" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           ${milMode ? `<td style="padding:8px 10px;text-align:right;">${fmt(totals.milQty)}</td>` : ''}
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
@@ -17286,7 +17336,8 @@ async function exportJobsReport() {
   const rows = buildJobsReportRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const milMode = !!jobsReportState.milOnly;
-  const header = ['Job ID', 'Job Name', 'Created', 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
+  const readyMode = jobsReportState.mode === 'ready';
+  const header = ['Job ID', 'Job Name', 'Created', readyMode ? 'Ready' : 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
     'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings'];
   const aoa = reportExcelAoa(header);
@@ -17302,7 +17353,7 @@ async function exportJobsReport() {
       r.idDisplay || ('E-' + r.id),
       nameCell,
       r.createdAt,
-      r.deliveredAt,
+      readyMode ? `${r.readyAt}${r.partialReady ? ' (PARTLY READY)' : ''}` : r.deliveredAt,
       r.client,
       r.poNo,
       r.batchNo || '',
@@ -17689,13 +17740,13 @@ async function exportJrMil() {
 function jobsReportScope(jobCount, rowCount) {
   const s = jobsReportState;
   return [
-    s.mode === 'created' ? 'Created' : 'Delivered',
+    s.mode === 'created' ? 'Created' : s.mode === 'ready' ? 'Ready (shaded = partly ready)' : 'Delivered',
     s.client || 'All companies',
     (s.tab && s.tab !== 'all') ? ((JOBS_REPORT_TABS().find(t => t.key === s.tab) || {}).label || s.tab) : '',
     s.milOnly ? 'MIL only' : '',
     s.shadeOnly ? 'Shade cards only' : '',
     // Delivered mode: one row per shipment - the same count as the Sale Report.
-    s.mode === 'created'
+    s.mode !== 'delivered'
       ? `${jobCount} job${jobCount === 1 ? '' : 's'}`
       : `${jobCount} job${jobCount === 1 ? '' : 's'} · ${rowCount} shipment${rowCount === 1 ? '' : 's'}`,
   ].filter(Boolean).join(' · ');
@@ -17715,11 +17766,13 @@ function printJobsReport() {
     // Partial rows show the delivered qty in amber bold — same signal the
     // on-screen text color gives, instead of a separate dot marker.
     const deliveredStyle = r.isPartial ? 'color:#c2410c;font-weight:bold;' : '';
-    return `<tr>
+    const readyMode = jobsReportState.mode === 'ready';
+    // Partly-ready rows (Ready view) print shaded, as on screen.
+    return `<tr${readyMode && r.partialReady ? ' style="background:#fff7ed;"' : ''}>
     <td ${tdL}>${esc(r.idDisplay || 'E-' + r.id)}</td>
     <td ${tdL}>${esc(r.name)}${r.isShadeCard ? ' <b>(Shade Card)</b>' : ''}</td>
     <td ${tdL}>${esc(r.createdAt)}</td>
-    <td ${tdL}>${esc(r.deliveredAt)}</td>
+    <td ${tdL}>${esc(readyMode ? r.readyAt : r.deliveredAt)}</td>
     <td ${tdL}>${esc(r.client)}</td>
     <td ${tdL}>${esc(r.poNo)}</td>
     <td ${tdL}>${esc(r.batchNo || '')}</td>
@@ -17750,7 +17803,7 @@ function printJobsReport() {
           <th ${tdL}>Job ID</th>
           <th ${tdL}>Job Name</th>
           <th ${tdL}>Created</th>
-          <th ${tdL}>Delivered</th>
+          <th ${tdL}>${jobsReportState.mode === 'ready' ? 'Ready' : 'Delivered'}</th>
           <th ${tdL}>Company</th>
           <th ${tdL}>PO No.</th>
           <th ${tdL}>Batch No.</th>
