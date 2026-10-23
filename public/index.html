@@ -733,7 +733,12 @@
      width - no wide empty gaps between columns (owner, 2026-10-23). */
   .ledger-hist th, .ledger-hist td { width: 1%; white-space: nowrap; }
   .ledger-hist .lh-wrap { white-space: normal; }
-  .ledger-hist .lh-notes { width: auto; white-space: normal; min-width: 160px; }
+  .ledger-hist .lh-notes { width: auto; white-space: normal; min-width: 140px; }
+  /* When: date and time stay whole, the LATE tag wraps under them instead
+     of widening the column for every row. By: long names end in "...". */
+  .ledger-hist .lh-when { white-space: normal; }
+  .ledger-hist .lh-when > div[title] { white-space: normal !important; word-break: normal; }
+  .ledger-hist .lh-by { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
   .ss-table th     { color: var(--text); font-weight: 700; }
   /* Current Balance Summary, Offcut only: every column hugs its contents and
      the empty column at the end takes the spare width. */
@@ -13408,7 +13413,7 @@ async function renderInvHistory(id) {
       const beforeTd = balTd(balanceBeforeSheets, b => b.after - b.change);
       const afterTd  = balTd(balanceAfterSheets, b => b.after);
       // Date over time, two small lines — half the width of one long line.
-      const date = `${fmtDMY(t.created_at)}<div style="font-size:10px;color:var(--text3);">${fmtTime12(t.created_at)}</div>${lateEntryTagHtml(t)}`;
+      const date = `<span style="white-space:nowrap;">${fmtDMY(t.created_at)}</span><div style="font-size:10px;color:var(--text3);white-space:nowrap;">${fmtTime12(t.created_at)}</div>${lateEntryTagHtml(t)}`;
       const isReversal      = !!t.reverses_tx_id;
       const hasBeenReversed = !!t.has_been_reversed;
       // Color: positive=green, negative=red, reversal row=orange tint
@@ -13457,7 +13462,7 @@ async function renderInvHistory(id) {
         : '';
       const notes = (t.user_notes !== null && t.user_notes !== undefined) ? t.user_notes : (splitSources || txDisplayNotes(t));
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" data-reason="${esc(t.reason || '')}" class="row-hover-red" style="${rowStyle}">
-        <td>${date}</td>
+        <td class="lh-when">${date}</td>
         ${showBrand ? `<td style="font-weight:600;">${[...new Set(t._parts.map(p => p.item_brand || 'no brand'))].map(esc).join(' + ')}</td>` : ''}
         ${beforeTd}
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
@@ -13465,7 +13470,7 @@ async function renderInvHistory(id) {
         <td>${reasonHtml}${archivedTag}</td>
         <td class="lh-wrap">${challan}</td>
         <td class="lh-wrap">${job}</td>
-        <td>${by}</td>
+        <td><div class="lh-by">${by}</div></td>
         <td class="lh-notes">${esc(notes)}</td>
         <td>${reverseBtn}</td>
       </tr>`;
@@ -13477,7 +13482,7 @@ async function renderInvHistory(id) {
     if (!box) return;
     box.innerHTML = txs.length
       ? `<table class="ledger-table ledger-compact ledger-hist">
-           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th title="Balance before this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">Before</th><th>Change (${unit})</th><th title="Balance after this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th class="lh-notes">Notes</th><th></th></tr>
+           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th title="Balance before this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">Before</th><th>Change</th><th title="Balance after this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th class="lh-notes">Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
