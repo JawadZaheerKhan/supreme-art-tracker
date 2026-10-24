@@ -25208,15 +25208,19 @@ function openManualConsumptionPane() {
   const periodOpts = [['today','Today'],['week','This Week'],['month','This Month'],['all','All Time'],['custom','Custom range…']]
     .map(([v, l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   pane.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-      <h2 style="margin:0;font-size:20px;">Manual Job Card Consumption</h2>
-      <span style="color:var(--text2);font-size:12px;">Paper issued against a Manual Job Card No. (offline jobs, not tracked in the app) — one row per job card + paper item.</span>
+    <div style="margin-bottom:14px;display:flex;flex-direction:column;gap:10px;">
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div id="mc-summary" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
+      <div>
+        <div class="dash-flbl">Manual Job Card No.</div>
+        <input class="filter" type="text" id="mc-search" value="${esc(state.search || '')}" placeholder="e.g. 11729" oninput="setMcSearch(this.value)" style="min-width:160px;">
+      </div>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportManualConsumption()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printManualConsumption()">&#128424; Print Report</button>
       </div>
     </div>
-    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div>
         <div class="dash-flbl">Paper Type</div>
         <select class="filter" id="mc-paper-type" onchange="setMcPaperType(this.value)">
@@ -25236,17 +25240,13 @@ function openManualConsumptionPane() {
         <div class="dash-flbl">Period</div>
         <select class="filter" id="mc-period" onchange="setMcPeriod(this.value)">${periodOpts}</select>
       </div>
-      <div>
-        <div class="dash-flbl">Manual Job Card No.</div>
-        <input class="filter" type="text" id="mc-search" value="${esc(state.search || '')}" placeholder="e.g. 11729" oninput="setMcSearch(this.value)" style="min-width:160px;">
-      </div>
       <div id="mc-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
         <div><div class="dash-flbl">From</div><input class="filter" type="date" id="mc-from" value="${state.from}" onchange="setMcCustom()"></div>
         <div><div class="dash-flbl">To</div><input class="filter" type="date" id="mc-to" value="${state.to}" onchange="setMcCustom()"></div>
       </div>
       <button class="btn btn-sm" style="margin-left:auto;" onclick="resetMcFilters()">Reset filters</button>
     </div>
-    <div id="mc-summary" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    </div>
     <div id="mc-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div id="mc-content" style="font-size:13px;color:var(--text);">Loading…</div>
   `;
@@ -25421,10 +25421,10 @@ function renderManualConsumption() {
   const color = '#A32D2D';
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
   const tile = (label, value, c, sub) =>
-    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:160px;">
-       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
-       <div style="font-size:22px;font-weight:600;color:${c};margin-top:2px;line-height:1.1;">${value}</div>
-       ${sub?`<div style="font-size:11px;color:var(--text2);margin-top:2px;">${sub}</div>`:''}
+    `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:130px;">
+       <div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">${label}</div>
+       <div style="font-size:16px;font-weight:600;color:${c};margin-top:1px;line-height:1.15;">${value}</div>
+       ${sub?`<div style="font-size:10.5px;color:var(--text2);margin-top:1px;">${sub}</div>`:''}
      </div>`;
   const summaryEl = document.getElementById('mc-summary');
   if (summaryEl) summaryEl.innerHTML =
@@ -25689,31 +25689,37 @@ function openOffcutConsumptionPane() {
     .map(([v,l]) => `<option value="${v}"${state.period===v?' selected':''}>${l}</option>`).join('');
   const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   pane.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-      <h2 style="margin:0;font-size:20px;">Offcut Consumption</h2>
-      <span style="color:var(--text2);font-size:12px;">Offcut paper automatically issued to tracked E-jobs.</span>
+    <div id="oc-return-bar" style="display:none;"></div>
+    <div style="margin-bottom:14px;display:flex;flex-direction:column;gap:10px;">
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      <div id="oc-summary" style="display:flex;gap:10px;flex-wrap:wrap;"></div>
+      <div>
+        <div class="dash-flbl">Job Card No.</div>
+        <input class="filter" type="text" id="oc-jobcard" value="${esc(state.jobCard || '')}" placeholder="E-254 or manual no." title="Matches an E-job (e.g. E-254 or 254) or a Manual Job Card reference" oninput="setOffcutConsumptionJobCard(this.value)" style="min-width:150px;">
+      </div>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportOffcutConsumption()">&#128202; Export to Excel</button>
         <button class="btn btn-sm" onclick="printOffcutConsumption()">&#128424; Print Report</button>
       </div>
     </div>
-    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px;display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
       <div><div class="dash-flbl">Paper Type</div><select class="filter" onchange="offcutConsumptionState.paperType=this.value;renderOffcutConsumption()"><option value="">All paper types</option>${paperOpts}</select></div>
       <div><div class="dash-flbl">Period</div><select class="filter" onchange="setOffcutConsumptionPeriod(this.value)">${periodOpts}</select></div>
       <div id="oc-custom" style="display:${state.period==='custom'?'flex':'none'};gap:8px;align-items:flex-end;">
         <div><div class="dash-flbl">From</div><input class="filter" type="date" id="oc-from" value="${state.from}" onchange="setOffcutConsumptionCustom()"></div>
         <div><div class="dash-flbl">To</div><input class="filter" type="date" id="oc-to" value="${state.to}" onchange="setOffcutConsumptionCustom()"></div>
       </div>
-      <div>
-        <div class="dash-flbl">Job Card No.</div>
-        <input class="filter" type="text" id="oc-jobcard" value="${esc(state.jobCard || '')}" placeholder="E-254 or manual no." title="Matches an E-job (e.g. E-254 or 254) or a Manual Job Card reference" oninput="setOffcutConsumptionJobCard(this.value)" style="min-width:150px;">
-      </div>
+      <button class="btn btn-sm" style="margin-left:auto;" onclick="resetOcFilters()">Reset filters</button>
     </div>
-    <div id="oc-return-bar" style="display:none;"></div>
-    <div id="oc-summary" style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;"></div>
+    </div>
     <div id="oc-bulk-bar" class="bulk-actions" style="display:none;"></div>
     <div id="oc-content">Loading…</div>`;
   loadOffcutConsumption();
+}
+function resetOcFilters() {
+  const st = offcutConsumptionState;
+  st.paperType = ''; st.jobCard = '';
+  openOffcutConsumptionPane();   // rebuilds the dropdowns blank
 }
 function setOffcutConsumptionPeriod(v) {
   offcutConsumptionState.period = v;
@@ -25785,7 +25791,7 @@ function renderOffcutConsumption() {
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
   const color = '#A32D2D';
   const sum = document.getElementById('oc-summary');
-  if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:180px;"><div class="dash-flbl">Total Offcut Consumption</div><div style="font-size:22px;font-weight:600;color:${color};">${fmt(totalUnits)} packets / reams</div><div style="font-size:11px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;min-width:140px;"><div class="dash-flbl">Transactions</div><div style="font-size:22px;font-weight:600;">${rows.length}</div></div>`;
+  if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:130px;"><div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Total Offcut Consumption</div><div style="font-size:16px;font-weight:600;color:${color};line-height:1.15;">${fmt(totalUnits)} packets / reams</div><div style="font-size:10.5px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:110px;"><div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Transactions</div><div style="font-size:16px;font-weight:600;line-height:1.15;">${rows.length}</div></div>`;
   const el = document.getElementById('oc-content'); if (!el) return;
   const visibleIds = rows.map(t => t.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => offcutConsumptionState.selected.has(id));
