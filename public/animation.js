@@ -549,14 +549,16 @@
       return { x: wx(PLAN_B, pt[0]), z: wz(PLAN_B, pt[1]), lift: 0, y: FLOOR_Y[0] + basementRaise(pt[0], pt[1]), floor: 0 };
     }
     const zones = FLOW_ZONES[key] || FLOW_ZONES.printx;
-    const caps = zones.map(([f, r]) => { const pl = floorPlan(f), w = (r[2] - r[0]) / pl.sx, d = (r[3] - r[1]) / pl.sz; return [Math.max(1, Math.floor((w - 0.2) / 2.6)), Math.max(1, Math.floor((d - 0.2) / 2.3))]; });
+    // Packed close from the area's corner, not spread over it (owner, 2026-10-24).
+    const PX = 1.85, PZ = 1.55;
+    const caps = zones.map(([f, r]) => { const pl = floorPlan(f), w = (r[2] - r[0]) / pl.sx, d = (r[3] - r[1]) / pl.sz; return [Math.max(1, Math.floor((w - 0.3) / PX)), Math.max(1, Math.floor((d - 0.3) / PZ))]; });
     const total = caps.reduce((a, [c, rr]) => a + c * rr, 0), layer = Math.floor(k / total);
     let i = k % total, zi = 0;
     while (i >= caps[zi][0] * caps[zi][1]) { i -= caps[zi][0] * caps[zi][1]; zi++; }
     const [f, r] = zones[zi], pl = floorPlan(f), [cols, rows] = caps[zi];
     const x0 = wx(pl, r[0]), z0 = wz(pl, r[1]), x1 = wx(pl, r[2]), z1 = wz(pl, r[3]);
     const col = i % cols, row = Math.floor(i / cols);
-    const x = x0 + (x1 - x0) * (col + 0.5) / cols, z = z0 + (z1 - z0) * (row + 0.5) / rows;
+    const x = Math.min(x1 - PX / 2, x0 + 0.15 + PX * (col + 0.5)), z = Math.min(z1 - PZ / 2, z0 + 0.15 + PZ * (row + 0.5));
     const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
     return { x, z, lift: layer, y: FLOOR_Y[f] + floorRaise(f, cx, cy), floor: f };
   }
@@ -1826,6 +1828,7 @@
       slabMats.forEach((m, i) => { m.opacity = (f != null || i === 0) ? 1 : 0.62; });
       for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
+      for (const h of standby) if (!h.busy) h.g.visible = f == null || f === 1;
     };
     // Ready Stock: every ready order stands on the floor as its cartons (see fillPallet).
     floorDecal('MIL JOBS READY TO SHIP', 13, 1.2, '#166534', (READY.x0 + READY.x1) / 2, READY.z1 - 1.0, { size: 0.55 });
@@ -1873,7 +1876,7 @@
       box(0.45, 0.07, 0.07, 0x111827, 0, 1.66, -0.82, g);
       for (const x of [-0.3, 0.3]) { const w = cyl(0.12, 0.12, 0.1, 0x111827, x, 0.12, -0.35, g, 10); w.rotation.z = Math.PI / 2; }
       if (load) for (const x of [-0.3, 0.3]) box(0.55, 0.5, 1.2, 0xc9a26b, x, 0.42, 0.6, g);
-      person(0, -1.25, 0, g);
+      g.userData.who = person(0, -1.25, 0, g);
       g.traverse(o => { if (o.isMesh) o.castShadow = true; });
       scene.add(g);
       return g;
@@ -1893,19 +1896,38 @@
     const moverPool = [];
     const takeMover = () => { const m = moverPool.pop() || handLifter(false); m.visible = true; return m; };
     const giveMover = m => { if (!m) return; m.visible = false; moverPool.push(m); };
-    const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
-      [PLAN_B, 0, BASE_RAISE, [[470, 300, 640, 560]]],
-      [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
-      [PLAN_G, 1, 0, [[360, 180, 500, 700], [530, 370, 860, 500]]],
-      [PLAN_P, 1, FRONT_RAISE, [[215, 262, 380, 400]]],
-      [PLAN_G, 2, 0, [[360, 180, 500, 700], [600, 470, 1040, 590], [640, 262, 1000, 296]]],
-    ];
-    LIFTER_AISLES.forEach(([pl, floor, raise, areas]) => areas.forEach((r, k) => {
-      const a = planArea(pl, r[0], r[1], r[2], r[3]);
-      const w = wander(a, [(a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2], floor, handLifter((k + floor) % 2 === 0), raise);
-      w.speed = 1.7;
-    }));
-    wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV.x0 + 12, INV.z1 - 3]);   // the store's forklift
+    const paintWho = (g, c) => { const w = g.userData.who; if (w && w.userData.body) w.userData.body.material = mat(c); };
+    // The hand-lifter crew (black: no record in the app) stands in the
+    // loading area until there is work (owner, 2026-10-24): 2 per production
+    // floor. Stock in from the store is put down in the loading area; one of
+    // them takes it to the white space and comes back.
+    const LOAD_AREA = [416, 784, 508, 936];
+    const loadPt = (px, py) => new THREE.Vector3(wx(PLAN_G, px), FLOOR_Y[1] + floorRaise(1, px, py) + SLAB, wz(PLAN_G, py));
+    const STANDBY_SPOTS = [[431, 805], [462, 805], [493, 805], [431, 860], [462, 860], [493, 860]];
+    const UNLOAD_PT = loadPt(462, 915);
+    const standby = STANDBY_SPOTS.map(([px, py]) => {
+      const g = handLifter(false), home = loadPt(px, py);
+      g.position.copy(home); g.rotation.y = Math.PI;
+      return { g, home, busy: false };
+    });
+    const takeHelper = () => { const h = standby.find(x => !x.busy); if (h) h.busy = true; return h || null; };
+    const parkHelper = h => { h.busy = false; h.g.position.copy(h.home); h.g.rotation.y = Math.PI; h.g.visible = floorFocus == null || floorFocus === 1; };
+    // Whoever carried it: a helper goes back to stand by, an operator's lifter is put away.
+    const releaseMove = m => { if (!m || !m.mover) return; if (m.helper) parkHelper(m.helper); else giveMover(m.mover); m.mover = null; };
+    // The operator of the machine nearest a point on its floor.
+    const opV = new THREE.Vector3();
+    const nearOperator = pt => {
+      let best = null, bd = Infinity;
+      for (const c of crews) {
+        const who = (c.built && c.built[0]) || c.g;
+        who.getWorldPosition(opV);
+        if (Math.abs(opV.y - pt.y) > 4) continue;
+        const d = (opV.x - pt.x) ** 2 + (opV.z - pt.z) ** 2;
+        if (d < bd) { bd = d; best = new THREE.Vector3(opV.x, pt.y, opV.z); }
+      }
+      return best;
+    };
+    wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV.x0 + 12, INV.z1 - 3]);   // the store's forklift (parked until there's work)
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: READY.z0 + 6, z1: READY.z1 - 3 }, [READY.x0 + 14, READY.z1 - 3]);
 
     // ── Trucks ──
@@ -1936,7 +1958,8 @@
     DOCKS.forEach((dx, k) => {
       const g = makeTruck();
       g.position.set(dx, 0, DOCK_Z);
-      trucks.push({ g, k, dx, state: 'docked', path: null, t: 0, badge: null, onDone: null });
+      const driver = person(dx + 1.85, DOCK_Z + 3.6, -Math.PI / 2);   // the driver stands by his truck (owner, 2026-10-24)
+      trucks.push({ g, k, dx, driver, state: 'docked', path: null, t: 0, badge: null, onDone: null });
     });
     // Smooth curves for a truck's trips (CatmullRom through key points).
     const P = (x, z) => new THREE.Vector3(x, 0, z);
@@ -2037,7 +2060,7 @@
     const removePallet = p => {
       disposeSprite(p.tag); disposeSprite(p.tagS); if (p.ring) p.ring.material.dispose();
       dropMeshes(p.content);
-      if (p.move && p.move.mover) giveMover(p.move.mover);
+      if (p.move) releaseMove(p.move);
       palletRoot.remove(p.g); pallets.delete(p.job.id);
     };
     // Every pallet's spot, recomputed after each change (ordered by job id
@@ -2059,9 +2082,17 @@
           p.floor = s.floor;
           p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
           const prevKey = p.keyWas; p.keyWas = k;
+          if (!instant && !p.placed && k === 'issued' && !reduceMotion) {   // stock in from the store: from the loading area to the white space
+            const h = takeHelper();
+            if (h) {
+              p.g.position.copy(UNLOAD_PT); p.placed = true; p.floorWas = s.floor;
+              p.move = { phases: [routePts([h.home, UNLOAD_PT]), routePts([UNLOAD_PT, to]), routePts([to, h.home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone(), helper: h, mover: h.g };
+              return;
+            }
+          }
           if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; p.floorWas = s.floor; return; }
           if (p.move && p.move.to && p.move.to.distanceTo(to) < 0.01) return;   // already on its way there
-          if (p.move && p.move.mover) giveMover(p.move.mover);
+          if (p.move) releaseMove(p.move);
           if (p.g.position.distanceTo(to) < 0.01) { p.move = null; return; }
           const from = p.g.position.clone(), dist = from.distanceTo(to), f0 = p.floorWas;
           p.floorWas = s.floor;
@@ -2080,9 +2111,10 @@
             let hp = pressOf(prevKey); if (hp < 0) hp = pressOf(k); if (hp < 0 && prevKey === 'issued') hp = pressIndexFor(p.job);
             const hm = hp >= 0 ? MACHINES[hp] : null;
             const home = hm ? new THREE.Vector3(wx(PLAN_B, hm.at[0]), FLOOR_Y[0] + basementRaise(hm.at[0], hm.at[1]) + SLAB, wz(PLAN_B, hm.at[1]) + 2.2)
-              : from.clone().add(new THREE.Vector3(2.4, 0, 1.2));
+              : nearOperator(from) || from.clone().add(new THREE.Vector3(2.4, 0, 1.2));
             const carry = routePts([from, ...via, to]);
-            p.move = { phases: [routePts([home, from]), carry, routePts([to, home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone() };
+            const mover = takeMover(); paintWho(mover, OPERATOR_BLUE);   // the machine's operator
+            p.move = { phases: [routePts([home, from]), carry, routePts([to, home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone(), mover };
             return;
           }
           const arc = inReady(from) !== inReady(to) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
@@ -2502,7 +2534,7 @@
           if (m.seg >= path.length - 1) {                        // this leg done
             if (m.ph === 1) { p.g.position.copy(path[path.length - 1]); if (m.refill) { fillPallet(p); placeTag(p); m.refill = false; p.pendingFill = false; } }
             m.ph++; m.seg = 0; m.segT = 0;
-            if (m.ph >= m.phases.length) { giveMover(m.mover); p.move = null; }
+            if (m.ph >= m.phases.length) { releaseMove(m); p.move = null; }
           } else {
             const a = path[m.seg], b = path[m.seg + 1], L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5;
             m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : 2.6) / L);
@@ -2538,13 +2570,9 @@
       for (const f of liftAnims) f(clock);
       for (const t of floorTags) scaleTag(t);
       people.forEach((pp, i) => { if (!pp.parent || pp.parent.type !== 'Scene') return; pp.position.y = 0.3 + Math.abs(Math.sin(clock * 2 + i)) * 0.05; });
-      // Forklifts wandering about.
+      // Forklifts stay parked until there's work, then go back (owner, 2026-10-24).
       for (const w of wanderers) {
-        if (w.busy) continue;
-        if (w.wait > 0) { w.wait -= dt; continue; }
-        if (!w.target) w.target = [w.area.x0 + Math.random() * (w.area.x1 - w.area.x0), w.area.z0 + Math.random() * (w.area.z1 - w.area.z0)];
-        if (driveTo(w.f, w.target[0], w.target[1], dt, w.speed || 3.2)) { w.target = null; w.wait = 1 + Math.random() * 2.5; }
-        const forks = w.f.userData.forks; if (forks) forks.position.y = Math.max(0, Math.sin(clock * 0.9 + w.area.x0) * 0.5);
+        if (w.busy || w.home) { if (!w.busy && w.home && driveTo(w.f, w.home[0], w.home[1], dt, w.speed || 3.2)) w.home = null; continue; }
       }
       // Loader: stack -> dock -> back.
       if (loaderJob) {
@@ -2562,7 +2590,7 @@
             f.remove(L.crate);
             L.crate.traverse(o => { if (o.isMesh) o.geometry.dispose(); });
             departTruck(L.tr, L.q);
-            loaderJob = null; loader.busy = false; loader.wait = 0.5;
+            loaderJob = null; loader.busy = false; loader.home = [READY.x0 + 14, READY.z1 - 3];
             renderStats();
           }
         }
@@ -2576,6 +2604,7 @@
           continue;
         }
         if (tr.badge) scaleTag(tr.badge);
+        if (tr.driver) tr.driver.visible = tr.state === 'docked' && !tr.legs && tr.g.visible;
         if (!tr.legs) continue;
         const leg = tr.legs[tr.leg];
         const len = leg.len || (leg.len = leg.c.getLength());
