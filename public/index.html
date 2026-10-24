@@ -39435,7 +39435,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=54';
+const CLIENT_ANIM_SRC = '/animation.js?v=55';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -39526,14 +39526,17 @@ async function refreshClientAnim(shell) {
   // The operators at their machines, with their names - staff only (owner, 2026-10-24).
   if (!isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
 }
-// Factory tab: a stage forward / back from the 3D view's pop-up, through the
-// same move as the Jobs tab's pipeline (Ready to Deliver is as far as it goes -
-// delivery is recorded from the Jobs tab).
-async function factoryMoveStage(id, dir) {
+// Factory tab: click a stage in the 3D view's bottom bar to move the job
+// there - the same move as the Jobs tab's pipeline, after a confirm
+// (Delivered is recorded from the Jobs tab).
+async function factoryMoveStage(id, target) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  const cur = j.stage_index || 0, target = Math.max(0, Math.min(6, cur + dir));
-  if (target === cur) { notify(dir > 0 ? 'Already Ready to Deliver - record the delivery from the Jobs tab.' : 'Already at the first stage.'); return; }
+  const cur = j.stage_index || 0;
+  if (target === cur) return;
+  if (target >= STAGES.length - 1) { notify('Record the delivery from the Jobs tab.'); return; }
+  const ok = await confirmDialog({ title: `Move Job E-${id} to ${STAGES[target]}?`, message: `"${j.name}" moves from ${STAGES[cur]} to ${STAGES[target]}.`, confirmText: 'Move' });
+  if (!ok) return;
   await moveToStage(id, target);
   refreshClientAnim('factory');
 }

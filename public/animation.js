@@ -405,11 +405,15 @@
     final1: [[2, [353, 181, 509, 585]], [2, [175, 175, 330, 240]], [2, [175, 265, 330, 335]], [2, [175, 360, 330, 425]], [2, [175, 450, 330, 520]], [2, [238, 647, 330, 705]]],
     final0: [[1, [592, 170, 1050, 383]]],
   };
-  const ZONE_STYLE = {   // outline colour, floor label
-    issued: [0xe2e8f0, '#64748b', 'ISSUED STOCK'], printx: [0x22c55e, '#15803d', 'PRINTING'], die: [0x9333ea, '#7e22ce', 'DIE CUTTING'], emboss: [0xdb2777, '#be185d', 'EMBELLISHMENT'],
-    coat: [0x38bdf8, '#0369a1', 'COATING'], inspect: [0xdc2626, '#b91c1c', 'INSPECTION (NOT ACTIVE)'], sort: [0xf97316, '#c2410c', 'SORTING'], paste: [0x6b7280, '#374151', 'PASTING'],
-    final1: [0x111827, '#111827', 'READY TO DELIVER'], final0: [0x111827, '#111827', 'READY - MARKED, TO SHIP'],
+  // Stage colours (owner, 2026-10-24): outline colour, label colour, floor label.
+  const ZONE_STYLE = {
+    issued: [0xffffff, '#64748b', 'ISSUED STOCK'], printx: [0x111827, '#111827', 'PRINTING'], die: [0xdc2626, '#b91c1c', 'DIE CUTTING'], emboss: [0x9333ea, '#7e22ce', 'EMBELLISHMENT'],
+    coat: [0x2563eb, '#1d4ed8', 'COATING'], inspect: [0x9ca3af, '#6b7280', 'INSPECTION (NOT ACTIVE)'], sort: [0xfacc15, '#a16207', 'SORTING'], paste: [0xf97316, '#c2410c', 'PASTING'],
+    final1: [0x16a34a, '#15803d', 'READY TO DELIVER'], final0: [0x16a34a, '#15803d', 'READY - MARKED, TO SHIP'],
   };
+  // A pallet's top in its stage's colour.
+  const zoneTop = key => key === 'issued' ? 0xffffff : String(key).startsWith('press:') || key === 'printx' ? 0x111827
+    : ({ coat: 0x2563eb, emboss: 0x9333ea, die: 0xdc2626, sort: 0xfacc15, paste: 0xf97316, final0: 0x16a34a, final1: 0x16a34a, ready: 0x16a34a })[key] || 0x9ca3af;
   // The green spots beside each press (owner's dots), by press number; 4 & 7 and 5 & 6 share an area.
   const PRESS_SPOTS = [
     [[719, 213], [799, 216], [909, 222]], [[736, 368], [803, 371], [890, 375]], [[677, 523], [760, 526], [837, 529], [898, 532]],
@@ -442,7 +446,7 @@
     if (place === 0) return 'ctp';
     if (place === 1) {
       const t = Date.parse(j && j.issued_at);
-      if (Number.isFinite(t) && Date.now() - t < 2 * 86400000) return 'issued';
+      if (Number.isFinite(t) && Date.now() - t < 5 * 86400000) return 'issued';   // fresh issued stock: up to 5 days in white (owner, 2026-10-24)
       const pi = pressIndexFor(j);
       return pi >= 0 ? 'press:' + pi : 'printx';
     }
@@ -632,6 +636,8 @@
   .saa-step { position: relative; text-align: center; font-size: 10px; color: #94a3b8; line-height: 1.25; padding: 0 2px; }
   .saa-step::before { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; margin: 1px auto 5px; background: #fff; border: 2px solid #cbd5e1; position: relative; }
   .saa-step.done { color: #1e40af; }
+  .saa-step-btn { background: none; border: 0; font-family: inherit; cursor: pointer; border-radius: 8px; padding: 2px; }
+  .saa-step-btn:hover { background: #eff6ff; color: #1e40af; }
   .saa-step.done::before { background: #2563eb; border-color: #2563eb; }
   .saa-step.now { color: #0f172a; font-weight: 700; }
   .saa-step.now::before { border-color: #2563eb; box-shadow: 0 0 0 4px rgba(37,99,235,.18); animation: saa-pulse 1.6s ease-in-out infinite; }
@@ -1872,6 +1878,17 @@
       scene.add(g);
       return g;
     };
+    // A walk between two points, by the lift when they are on different floors.
+    const moveV = new THREE.Vector3();
+    const routePts = list => {
+      const out = [list[0].clone()];
+      for (let i = 1; i < list.length; i++) {
+        const a = out[out.length - 1], b = list[i];
+        if (Math.abs(a.y - b.y) > 2) out.push(new THREE.Vector3(LIFT_X, a.y, LIFT_DOOR_Z), new THREE.Vector3(LIFT_X, a.y, LIFT_Z), new THREE.Vector3(LIFT_X, b.y, LIFT_Z), new THREE.Vector3(LIFT_X, b.y, LIFT_DOOR_Z));
+        out.push(b.clone());
+      }
+      return out;
+    };
     // Hand lifters that carry pallets between stages (owner, 2026-10-24), reused.
     const moverPool = [];
     const takeMover = () => { const m = moverPool.pop() || handLifter(false); m.visible = true; return m; };
@@ -1968,20 +1985,22 @@
           box(0.52, 0.4, 0.44, (l + c) % 2 ? 0xc9a26b : 0xbf9660, ((c % 4) - 1.5) * 0.56, 0.39 + l * 0.42, (Math.floor(c / 4) - 1.5) * 0.46, g);
         }
         p.readyN = readyCartonsLeft(p.job);
+        box(2.44, 0.05, 2.04, 0x16a34a, 0, 0.2, 0, g, false);   // ready: green under its cartons
       // Cartons only once ready: sorting and pasting still carry printed sheets /
       // blanks - unit cartons are packed after folder gluing (owner, 2026-10-24).
       } else if (place === 'ready') {
         const layers = place === 'ready' ? Math.max(1, Math.min(4, Math.ceil(Math.log10(num(p.job.qty) + 1) - 1))) : 2;
         for (let l = 0; l < layers; l++) for (const x of [-0.55, 0.55]) for (const z of [-0.45, 0.45]) box(1.04, 0.72, 0.86, (l + (x > 0) + (z > 0)) % 2 ? 0xc9a26b : 0xbf9660, x, 0.55 + l * 0.74, z, g);
-        if (place === 'ready') box(2.2, 0.08, 1.8, 0x2563eb, 0, 0.55 + layers * 0.74 - 0.36, 0, g, false);
+        if (place === 'ready') box(2.2, 0.08, 1.8, 0x16a34a, 0, 0.55 + layers * 0.74 - 0.36, 0, g, false);
       } else {
         const h = 0.45 + Math.min(1.1, Math.log10(num(p.job.sheets) + 1) * 0.22);
         box(2.1, h, 1.7, 0xffffff, 0, 0.18 + h / 2, 0, g);
-        if (place >= 1) box(2.12, 0.05, 1.72, JOB_COLORS[p.job.id % JOB_COLORS.length], 0, 0.18 + h + 0.01, 0, g, false);
+        if (place >= 1) box(2.12, 0.05, 1.72, zoneTop(zoneKeyFor(p.job, place)), 0, 0.18 + h + 0.01, 0, g, false);   // the stage's colour (owner, 2026-10-24)
       }
       let top = 0;
       g.children.forEach(c => { top = Math.max(top, c.position.y + (c.geometry.parameters.height || 0) / 2); });
       p.top = top * g.scale.y;
+      p.zoneKey = zoneKeyFor(p.job, place);
       g.traverse(o => { if (o.isMesh) o.userData.jobId = p.job.id; });
     };
     const ringGeo = new THREE.RingGeometry(1.75, 2.05, 36); geos.add(ringGeo);
@@ -2018,6 +2037,7 @@
     const removePallet = p => {
       disposeSprite(p.tag); disposeSprite(p.tagS); if (p.ring) p.ring.material.dispose();
       dropMeshes(p.content);
+      if (p.move && p.move.mover) giveMover(p.move.mover);
       palletRoot.remove(p.g); pallets.delete(p.job.id);
     };
     // Every pallet's spot, recomputed after each change (ordered by job id
@@ -2038,20 +2058,31 @@
           const to = new THREE.Vector3(s.x, (s.y || 0) + (s.floor == null ? 0.3 : SLAB) + s.lift * 1.6, s.z);
           p.floor = s.floor;
           p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
+          const prevKey = p.keyWas; p.keyWas = k;
           if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; p.floorWas = s.floor; return; }
-          if (p.g.position.distanceTo(to) < 0.01) return;
+          if (p.move && p.move.to && p.move.to.distanceTo(to) < 0.01) return;   // already on its way there
+          if (p.move && p.move.mover) giveMover(p.move.mover);
+          if (p.g.position.distanceTo(to) < 0.01) { p.move = null; return; }
           const from = p.g.position.clone(), dist = from.distanceTo(to), f0 = p.floorWas;
           p.floorWas = s.floor;
           // Inside the building: an operator walks it there with a hand
           // lifter, using the lift between floors (owner, 2026-10-24).
+          // The operator of the machine it leaves walks over, takes it by hand
+          // lifter to its new area - through the lift between floors - drops
+          // it and walks back to his machine (owner, 2026-10-24).
           if (f0 != null && s.floor != null && !reduceMotion) {
-            const pts = [from];
-            if (f0 !== s.floor) {
-              const y0 = from.y, y1 = to.y;
-              pts.push(new THREE.Vector3(LIFT_X, y0, LIFT_DOOR_Z), new THREE.Vector3(LIFT_X, y0, LIFT_Z), new THREE.Vector3(LIFT_X, y1, LIFT_Z), new THREE.Vector3(LIFT_X, y1, LIFT_DOOR_Z));
+            const via = [];
+            if (prevKey === 'issued' && k !== 'issued' && !String(k).startsWith('press:')) {   // printing forwarded it: past its press first
+              const pi = pressIndexFor(p.job), pt = pi >= 0 ? pressSpots(pi)[0] : null;
+              if (pt) via.push(new THREE.Vector3(wx(PLAN_B, pt[0]), FLOOR_Y[0] + basementRaise(pt[0], pt[1]) + SLAB, wz(PLAN_B, pt[1])));
             }
-            pts.push(to);
-            p.move = { path: pts, seg: 0, segT: 0, rot: 0, refill: p.pendingFill };
+            const pressOf = key => String(key || '').startsWith('press:') ? +String(key).slice(6) : -1;
+            let hp = pressOf(prevKey); if (hp < 0) hp = pressOf(k); if (hp < 0 && prevKey === 'issued') hp = pressIndexFor(p.job);
+            const hm = hp >= 0 ? MACHINES[hp] : null;
+            const home = hm ? new THREE.Vector3(wx(PLAN_B, hm.at[0]), FLOOR_Y[0] + basementRaise(hm.at[0], hm.at[1]) + SLAB, wz(PLAN_B, hm.at[1]) + 2.2)
+              : from.clone().add(new THREE.Vector3(2.4, 0, 1.2));
+            const carry = routePts([from, ...via, to]);
+            p.move = { phases: [routePts([home, from]), carry, routePts([to, home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone() };
             return;
           }
           const arc = inReady(from) !== inReady(to) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
@@ -2189,7 +2220,9 @@
         const done = (s && s.status === 'done') || k < si || place === 'delivered';
         const cls = k === si && place !== 'delivered' ? (blocked ? 'blocked' : 'now') : done ? 'done' : '';
         const when = s && s.status === 'done' && s.time ? String(s.time).split(' ')[0] : '';
-        return `<div class="saa-step ${cls}">${esc(name)}${when ? `<small>${esc(when)}</small>` : ''}</div>`;
+        return opts.onStage
+          ? `<button type="button" class="saa-step saa-step-btn ${cls}" data-k="${k}" title="Move this job to ${esc(name)}">${esc(name)}${when ? `<small>${esc(when)}</small>` : ''}</button>`
+          : `<div class="saa-step ${cls}">${esc(name)}${when ? `<small>${esc(when)}</small>` : ''}</div>`;
       }).join('');
       const shipped = shippedCartons(j);
       const where = place === 'wait' ? 'Waiting to start' : place === 'ready' ? 'In Ready Stock' : place === 'delivered' ? 'Delivered' : 'At ' + BAY_NAMES[place];
@@ -2199,6 +2232,7 @@
         `<div class="saa-track">${steps}</div>` +
         (blocked && blockNote(j) ? `<div class="saa-note">On hold: ${esc(blockNote(j))}</div>` : '');
       ui.bar.querySelector('.saa-x').onclick = () => { select(null); setView(viewName === 'focus' ? 'overview' : viewName); };
+      if (opts.onStage) ui.bar.querySelectorAll('.saa-step-btn').forEach(b => { b.onclick = () => opts.onStage(j.id, +b.dataset.k); });
     };
     const select = id => {
       const prev = selectedId; selectedId = id;
@@ -2305,10 +2339,8 @@
       openPop('#1e40af', esc(String(STAGES[stageIndex(j)] || '').toUpperCase()),
         `<div class="saa-pop-size"><b>E-${esc(j.id)}</b></div>` + popRow('Product', esc(j.name || '—')) + popRow('Company', esc(j.client || '—')) +
         popRow('PO Qty', num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')) + popRow('Paper', esc(j.paper || '—')) + popRow('To print', esc(toPrint), 'bal') +
-        (j.machine ? popRow('Machine', esc(j.machine)) : '') +
-        (opts.onStage ? `<div class="saa-pop-act"><button data-d="-1" title="Move this job one stage back">&#9664; Stage back</button><button data-d="1" class="fwd" title="Move this job one stage forward">Stage forward &#9654;</button></div>` : ''),
+        (j.machine ? popRow('Machine', esc(j.machine)) : ''),
         { obj: p.g, dy: (p.top || 1) + 2.4, job: true });
-      if (opts.onStage) ui.pop.querySelectorAll('.saa-pop-act button').forEach(b => { b.onclick = ev => { ev.stopPropagation(); select(null); opts.onStage(j.id, +b.dataset.d); }; });
     };
     // A machine: the last job its station entered (any particulars row's entries).
     const whenOf = e => {
@@ -2463,21 +2495,26 @@
       // Pallets: pop in, glide between spots.
       for (const p of pallets.values()) {
         if (p.pop < 1) { p.pop = Math.min(1, p.pop + dt * 2.2); p.g.scale.setScalar(p.pop <= 0 ? 0.001 : Math.max(0.001, easeBack(p.pop))); }
-        if (p.move && p.move.path) {
-          const m = p.move, a = m.path[m.seg], b = m.path[m.seg + 1];
+        if (p.move && p.move.phases) {
+          const m = p.move;
           if (!m.mover) m.mover = takeMover();
-          const L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5;
-          m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : 2.6) / L);
-          p.g.position.lerpVectors(a, b, m.segT); p.g.position.y += 0.12;
-          if (!vert) { const dx = b.x - a.x, dz = b.z - a.z; if (dx * dx + dz * dz > 1e-6) m.rot = Math.atan2(dx, dz); }
-          m.mover.position.set(p.g.position.x - Math.sin(m.rot) * 0.6, p.g.position.y - 0.12, p.g.position.z - Math.cos(m.rot) * 0.6);
-          m.mover.rotation.y = m.rot; m.mover.visible = p.g.visible;
-          if (m.segT >= 1) { m.seg++; m.segT = 0; }
-          if (m.refill && m.seg >= Math.floor(m.path.length / 2)) { fillPallet(p); placeTag(p); m.refill = false; p.pendingFill = false; }
-          if (m.seg >= m.path.length - 1) {
-            p.g.position.copy(m.path[m.path.length - 1]);
-            if (m.refill) { fillPallet(p); placeTag(p); p.pendingFill = false; }
-            giveMover(m.mover); p.move = null;
+          const path = m.phases[m.ph];
+          if (m.seg >= path.length - 1) {                        // this leg done
+            if (m.ph === 1) { p.g.position.copy(path[path.length - 1]); if (m.refill) { fillPallet(p); placeTag(p); m.refill = false; p.pendingFill = false; } }
+            m.ph++; m.seg = 0; m.segT = 0;
+            if (m.ph >= m.phases.length) { giveMover(m.mover); p.move = null; }
+          } else {
+            const a = path[m.seg], b = path[m.seg + 1], L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5;
+            m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : 2.6) / L);
+            moveV.lerpVectors(a, b, m.segT);
+            if (!vert) { const dx = b.x - a.x, dz = b.z - a.z; if (dx * dx + dz * dz > 1e-6) m.rot = Math.atan2(dx, dz); }
+            const carrying = m.ph === 1;                         // 0: walking to it, 1: carrying it, 2: walking back
+            if (carrying) { p.g.position.copy(moveV); p.g.position.y += 0.12; }
+            m.mover.position.set(moveV.x - (carrying ? Math.sin(m.rot) * 0.6 : 0), moveV.y, moveV.z - (carrying ? Math.cos(m.rot) * 0.6 : 0));
+            m.mover.rotation.y = m.rot;
+            let fy = 0; FLOOR_Y.forEach((y, i) => { if (Math.abs(y - moveV.y) < Math.abs(FLOOR_Y[fy] - moveV.y)) fy = i; });
+            m.mover.visible = floorFocus == null || fy === floorFocus;
+            if (m.segT >= 1) { m.seg++; m.segT = 0; }
           }
         } else if (p.move) {
           const m = p.move; m.t = Math.min(1, m.t + dt / m.dur);
@@ -2600,7 +2637,7 @@
         if (mv.to === 'delivered') { if (!p.leaving) { p.leaving = true; enqueueDeparture(mv.job, 0, p.g.position.clone()); queue[queue.length - 1].onPicked = () => removePallet(p); } continue; }
         p.place = mv.to; p.pendingFill = true;
       }
-      for (const p of pallets.values()) { const j = byId.get(p.job.id); if (j) { p.job = j; setTag(p); if (p.place === 'ready' && readyCartonsLeft(j) !== (p.readyN || 0)) p.pendingFill = true; } }
+      for (const p of pallets.values()) { const j = byId.get(p.job.id); if (j) { p.job = j; setTag(p); if (p.place === 'ready' && readyCartonsLeft(j) !== (p.readyN || 0)) p.pendingFill = true; if (zoneKeyFor(j, p.place) !== p.zoneKey) p.pendingFill = true; } }
       layout(first);
       for (const p of pallets.values()) if (p.pendingFill && !p.move) { fillPallet(p); p.pendingFill = false; }
       for (const p of pallets.values()) placeTag(p);
