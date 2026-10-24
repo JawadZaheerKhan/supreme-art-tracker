@@ -311,7 +311,9 @@ function getDb() {
 // the Procurement role in users_role_check (2026-10-14).
 // Bumped again for carton_transactions.source (Station carton issues, 2026-10-14).
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
-const SCHEMA_VERSION = 'v2026-10-17-carton-delete';
+// Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
+// Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
+const SCHEMA_VERSION = 'v2026-10-24-offcut-challan';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -703,6 +705,16 @@ async function initDb() {
       )
     `;
     await sql`INSERT INTO shade_card_dc_counter (id, next_number) VALUES (1, 1) ON CONFLICT (id) DO NOTHING`;
+    // Challan No. on the offcut print of the Current Balance Summary - one
+    // number per print the user chooses to number; starts at 7 (owner,
+    // 2026-10-24). See /api/offcut-challan.
+    await sql`
+      CREATE TABLE IF NOT EXISTS offcut_challan_counter (
+        id          INTEGER PRIMARY KEY,
+        next_number INTEGER NOT NULL DEFAULT 7
+      )
+    `;
+    await sql`INSERT INTO offcut_challan_counter (id, next_number) VALUES (1, 7) ON CONFLICT (id) DO NOTHING`;
     await sql`
       CREATE TABLE IF NOT EXISTS jobs (
         id          SERIAL PRIMARY KEY,
@@ -793,6 +805,11 @@ async function initDb() {
     // nothing is visible until someone consciously opts in. Filtered by
     // GET /api/client/jobs alongside role + company + delivered-cutoff.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false`;
+
+    // Ready check (owner, 2026-10-23): { by, at } when the PM ticks a ready
+    // job on its Jobs tile so Finance knows to record its delivery; NULL
+    // when not ticked. See POST /api/jobs/:id/ready-check.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ready_check JSONB`;
 
     // Soft-delete (Trash) columns: when admin "Delete from History" deletes a
     // delivered job, we set deleted_at instead of dropping the row, so the
@@ -4843,6 +4860,46 @@ app.post('/api/jobs/:id/client-visible', requirePermission('job_btn_edit'), asyn
   }
 });
 
+// Ready check (owner, 2026-10-23): the PM ticks a ready job (fully or partly
+// ready) on its Jobs tile so Finance knows to record its delivery. Only once
+// QC's Ready to Delivery Qty is written on the job card; un-ticking clears
+// it. A delivery recorded after the tick retires it - the client compares
+// the tick's time with the deliveries' own entry times, so nothing here has
+// to clear it.
+app.post('/api/jobs/:id/ready-check', requirePermission('job_btn_stage_forward'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const value = !!(req.body && req.body.value);
+    const [job] = await sql`SELECT id, name, stage_index, particulars, deliveries FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (value) {
+      if ((job.stage_index || 0) >= STAGES.length - 1) return res.status(409).json({ error: 'This job is already delivered.' });
+      const readyQty = readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty);
+      if (!(readyQty > 0)) return res.status(409).json({ error: 'Write the Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
+      // After a partial delivery the next tick needs ready cartons that have
+      // not shipped yet - otherwise Finance would be sent to deliver nothing.
+      if (!(readyQty - sumDeliveryCartons(job.deliveries) > 0)) return res.status(409).json({ error: 'Everything ready has already shipped - write the new Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
+    }
+    const check = value ? { by: (req.user && req.user.email) || 'unknown', at: new Date().toISOString() } : null;
+    const [updated] = await sql`
+      UPDATE jobs SET ready_check = ${check ? JSON.stringify(check) : null}::jsonb
+       WHERE id = ${id} AND deleted_at IS NULL
+       RETURNING id, ready_check`;
+    await logAudit(sql, req, {
+      action: 'job.ready_check',
+      entityType: 'job',
+      entityId: id,
+      summary: `Job E-${id} (${job.name}): ${value ? 'ticked Ready - Finance to record the delivery' : 'Ready tick removed'}`,
+    });
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Group-level client visibility toggle. Sets stock_group_visible on ALL
 // members of the group at once (they must agree — the group is one
 // visibility unit). Independent from per-job client_visible.
@@ -4895,9 +4952,13 @@ function parseSheets(v) {
 // and Quantity of Packets is the only field that maps cleanly to raw stock.
 // Returns 0 if packets is missing/zero; caller must surface a clear error.
 const REAM_PAPERS = new Set(['art paper', 'off-white', 'offset paper']);
-function packetSize(paperType) { return REAM_PAPERS.has(paperType) ? 500 : 100; }
-// Reams for art/offset paper, packets for board - the words the shop uses.
-function packetUnitLabelSrv(paperType) { return REAM_PAPERS.has(paperType) ? 'reams' : 'packets'; }
+// Papers come in 500-sheet reams: the three above and any other "... paper"
+// (flying paper, local paper - owner, 2026-10-23). Mirrors isReamPaper() in
+// the frontend.
+function isReamPaperSrv(paperType) { const t = String(paperType || '').toLowerCase().trim(); return REAM_PAPERS.has(t) || /\bpaper\b/.test(t); }
+function packetSize(paperType) { return isReamPaperSrv(paperType) ? 500 : 100; }
+// Reams for paper, packets for board - the words the shop uses.
+function packetUnitLabelSrv(paperType) { return isReamPaperSrv(paperType) ? 'reams' : 'packets'; }
 // Packets, exactly as they are - trailing zeros trimmed, nothing rounded.
 // 46,350 sheets of a 100-sheet board is 463.5 packets, and it must say so.
 function fmtPackets(sheets, ps) {
@@ -6472,7 +6533,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   }
   const totalIssued = splits.reduce((a, s) => a + s.sheets, 0);
   const ps   = packetSize(paperType);
-  const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+  const unit = isReamPaperSrv(paperType) ? 'reams' : 'packets';
   // Over-issuance is no longer allowed (owner rule — replaces the
   // earlier "extras go to offcut" flow). Reject cleanly before any
   // ledger writes so the store keeper simply reduces their split
@@ -6847,7 +6908,7 @@ app.get('/api/station/offcut-requests', requireStationUser, async (req, res) => 
         // the Station shows top-ups in a lighter blue tone.
         is_partial: !!isPartial,
         paper_type: item.paper_type, size: item.size, gsm: item.gsm, brand: item.brand,
-        unit: REAM_PAPERS.has(item.paper_type) ? 'reams' : 'packets',
+        unit: isReamPaperSrv(item.paper_type) ? 'reams' : 'packets',
         packet_size: ps,
         owed_sheets: owed,
         owed_packets: ps ? owed / ps : owed,
@@ -7778,7 +7839,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     if (!sourceItem) return res.status(400).json({ error: 'Job paper no longer exists in inventory.' });
     const paperType = sourceItem?.paper_type || '';
     const ps = packetSize(paperType);
-    const unit = REAM_PAPERS.has(paperType) ? 'reams' : 'packets';
+    const unit = isReamPaperSrv(paperType) ? 'reams' : 'packets';
     const sheets = Math.round(parseFloat(t.qty) * ps);
     if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
     const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : [];
@@ -8234,6 +8295,40 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
 // if two shade cards get delivered in the same moment, this peeked
 // number can go stale for whichever one submits second — harmless,
 // since that one just gets re-peeked/assigned the number after it.
+// Offcut print Challan No. (owner, 2026-10-24). peek: the number the next
+// numbered print will get (shown in the Print question). POST: claims it -
+// one UPDATE, so two prints at once never share a number - and logs what
+// was printed so the challan can be checked later.
+app.get('/api/offcut-challan/peek', requireAuth, requirePermission('rpt_current_balance', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT next_number FROM offcut_challan_counter WHERE id = 1`;
+    res.json({ next: rows.length ? rows[0].next_number : 7 });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/offcut-challan', requireAuth, requirePermission('rpt_current_balance', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      UPDATE offcut_challan_counter SET next_number = next_number + 1
+       WHERE id = 1
+       RETURNING next_number - 1 AS assigned
+    `;
+    if (!rows.length) return res.status(500).json({ error: 'Challan counter missing' });
+    const number = rows[0].assigned;
+    const b = req.body || {};
+    const lines = Array.isArray(b.lines) ? b.lines.slice(0, 500) : [];
+    await logAudit(sql, req, {
+      action: 'report.offcut_challan', entityType: 'offcut_challan', entityId: number,
+      summary: `Offcut Challan No. ${number} printed - ${lines.length} row${lines.length === 1 ? '' : 's'}, ${(+b.sheets || 0).toLocaleString()} sheets`,
+      metadata: { number, scope: String(b.scope || '').slice(0, 300), sheets: +b.sheets || 0, packets: +b.packets || 0, lines },
+    });
+    res.json({ number });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/shade-card-dc/peek', requireAuth, async (req, res) => {
   try {
     await dbReady;
@@ -11643,7 +11738,35 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
       SELECT t.*, j.name AS job_name, j.jobcode AS job_code,
              i.paper_type, i.size AS item_size, i.gsm AS item_gsm,
              i.brand AS item_brand, i.unit AS item_unit,
-             i.is_offcut AS item_is_offcut
+             i.is_offcut AS item_is_offcut,
+             -- The item's balance right after this entry: today's balance
+             -- minus every later entry of the same item. EVERY ledger row
+             -- counts here (archived, corrections, reversals) because each
+             -- one really moved the balance - the filters below only hide
+             -- rows from the report. Same newest-first order as History.
+             (i.current_balance - COALESCE((
+               SELECT SUM(t2.change) FROM inventory_transactions t2
+                WHERE t2.item_id = t.item_id
+                  AND (t2.created_at > t.created_at OR (t2.created_at = t.created_at AND t2.id > t.id))
+             ), 0))::int AS balance_after,
+             -- ...and the total of EVERY brand of that paper (same type, size,
+             -- gsm, offcut or not) right after it, the way an item's History
+             -- adds them up: a deleted brand counts until it was deleted.
+             CASE WHEN i.id IS NULL THEN NULL ELSE (
+               SELECT COALESCE(SUM(CASE WHEN g.deleted_at IS NOT NULL AND g.deleted_at <= t.created_at THEN 0
+                 ELSE g.current_balance - COALESCE((
+                   SELECT SUM(t3.change) FROM inventory_transactions t3
+                    WHERE t3.item_id = g.id
+                      AND (t3.created_at > t.created_at OR (t3.created_at = t.created_at AND t3.id > t.id))
+                 ), 0) END), 0)
+                 FROM inventory_items g
+                WHERE COALESCE(g.paper_type, '') = COALESCE(i.paper_type, '') AND COALESCE(g.size, '') = COALESCE(i.size, '')
+                  AND COALESCE(g.gsm::text, '') = COALESCE(i.gsm::text, '') AND COALESCE(g.is_offcut, false) = COALESCE(i.is_offcut, false)
+             )::int END AS group_balance_after,
+             (SELECT COUNT(*) FROM inventory_items g
+               WHERE COALESCE(g.paper_type, '') = COALESCE(i.paper_type, '') AND COALESCE(g.size, '') = COALESCE(i.size, '')
+                 AND COALESCE(g.gsm::text, '') = COALESCE(i.gsm::text, '') AND COALESCE(g.is_offcut, false) = COALESCE(i.is_offcut, false)
+             )::int AS group_items
       FROM inventory_transactions t
       LEFT JOIN jobs j ON j.id = t.job_id
       LEFT JOIN inventory_items i ON i.id = t.item_id
@@ -11778,6 +11901,10 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       current_balance: currentBalance,
       item_ids: memberIds,
       brands: members.map(x => x.brand).filter(Boolean),
+      // Each brand's own balance and when it was deleted: a deleted brand's
+      // entries stay in this History, so its stock counts in "After" up to
+      // the moment it was deleted (owner, 2026-10-23).
+      members: members.map(x => ({ id: x.id, current_balance: parseFloat(x.current_balance) || 0, deleted_at: x.deleted_at || null })),
     });
   } catch (err) {
     console.error(err);
@@ -12161,8 +12288,7 @@ app.post('/api/imports/:id/receive', requirePermission('inv_btn_stock_in'), asyn
 
     // Packets → sheets using the paper-type convention (Cards=100, Papers=500).
     // Mirrors packetSize() in the frontend.
-    const reamSet = new Set(['art paper', 'off-white', 'offset paper']);
-    const perPack = reamSet.has(imp.paper_type) ? 500 : 100;
+    const perPack = packetSize(imp.paper_type);
     const receivedPackets = Number.isFinite(overridePackets) && overridePackets > 0 ? overridePackets : parseFloat(imp.packets);
     const sheets = Math.round(receivedPackets * perPack);
     if (!sheets || sheets <= 0) return res.status(400).json({ error: 'packets must be > 0' });
