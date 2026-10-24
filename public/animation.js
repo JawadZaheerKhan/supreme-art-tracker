@@ -151,7 +151,8 @@
   // ablution hall and the kitchen's short wall: one open hall now.
   const UPPER_WALLS = [
     [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533],
-    // No washroom walls here - the sorting table stands in the open hall (owner, 2026-10-24).
+    // Two walls from the hall's edge where the owner drew white lines (2026-10-24).
+    [843, 756, 843, 822], [883, 756, 883, 822],
     [600, 822, 1058, 822], [512, 718, 512, 822],
     [158, 718, 343, 718], [410, 718, 512, 718]];
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
@@ -360,7 +361,7 @@
   // Tables with operators round them (owner's marks, 2026-10-24): plan line from -> to.
   const WORK_TABLES = [
     { name: 'BREAKING', from: [645, 800], to: [715, 800] },
-    { name: 'SORTING', from: [845, 728], to: [945, 728] },
+    { name: 'SORTING', from: [845, 670], to: [945, 670] },   // the owner's green area (2026-10-24)
   ];
   // Where a machine stands: x / z in the world, the floor's height under it.
   const machinePos = m => m.floor === 2
@@ -378,7 +379,7 @@
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
     { floor: 1, machines: true },                          // Coatings    - beside the 4 coating machines, ground floor (owner)
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
-    { floor: 2, plan: PLAN_G, r: [845, 640, 960, 698] },   // Sorting     - 1st floor, beside the sorting table (owner, 2026-10-24)
+    { floor: 2, plan: PLAN_G, r: [845, 600, 960, 642] },   // Sorting     - 1st floor, beside the sorting table (owner, 2026-10-24)
     { floor: 2, machines: true },                          // Pasting     - beside the 3 folder gluers, 1st floor (owner, 2026-10-24)
   ];
   const zoneRect = i => { const z = STAGE_ZONES[i], pl = z.plan; return { floor: z.floor, raise: z.raise || 0, x0: wx(pl, z.r[0]), z0: wz(pl, z.r[1]), x1: wx(pl, z.r[2]), z1: wz(pl, z.r[3]) }; };
@@ -1651,7 +1652,7 @@
       [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
       [PLAN_G, 1, 0, [[360, 180, 500, 700], [530, 370, 860, 500]]],
       [PLAN_P, 1, FRONT_RAISE, [[215, 262, 380, 400]]],
-      [PLAN_G, 2, 0, [[360, 180, 500, 700], [600, 470, 1040, 620], [640, 262, 1000, 296]]],
+      [PLAN_G, 2, 0, [[360, 180, 500, 700], [600, 470, 1040, 590], [640, 262, 1000, 296]]],
     ];
     LIFTER_AISLES.forEach(([pl, floor, raise, areas]) => areas.forEach((r, k) => {
       const a = planArea(pl, r[0], r[1], r[2], r[3]);
