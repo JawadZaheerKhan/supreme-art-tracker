@@ -371,6 +371,19 @@
     { name: 'BREAKING', from: [645, 800], to: [715, 800] },
     { name: 'SORTING', from: [845, 670], to: [945, 670] },   // the owner's green area (2026-10-24)
   ];
+  // The app's names for the machines (the operators' Machine field) and the
+  // station whose people work each one (owner, 2026-10-24), in the order of
+  // MACHINES / GROUND_MACHINES / FIRST_MACHINES. Presses 1-3 five-unit,
+  // 4 two-unit, 5-7 one-unit; die cutters 1-2 big, 3-7 as numbered.
+  const MACHINE_STATIONS = {
+    basement: [['CD-102', 'CD-102'], ['SM74-1', 'SM74 CP-2000'], ['SM74-2', 'SM74 CP-1998'], ['SORMZ-1', 'SORM Z'], ['SORM-1', 'SORM'], ['GTOZ-52', 'GTOZ-52'], ['SM_52', 'SM_52'],
+      ['BOBST102', 'DIE CUTTING 102'], ['1060 CHINA', 'DIE CUTTING 1060 CHINA'], ['CYLINDERDIE-3', 'CYLINDER DIE CUTTING 3'], ['CYLINDERDIE-4', 'CYLINDER DIE CUTTING 4'],
+      ['KIRMADIE-5', 'KIRMA DIE CUTTING CHINA'], ['KIRMADIE-6', 'KIRMA DIE CUTTING 27X34'], ['KIRMADIE-7', 'KIRMA DIE CUTTING 22x28'],
+      ['CUTTING 1', 'POLAR PAPER CUTTING 1'], [null, 'PAPER CUTTING'], ['CUTTING 2', 'POLAR PAPER CUTTING 2'], ['FOLDING', 'FOLDING MACHINE']],
+    ground: [['SORMZ-2', 'SORMZ'], ['SORM-2', 'SORM'], ['COATER-2UV', 'SPOT UV COATER'], ['COATER-3SPOT UV', 'SPOT UV COATER 2'], [null, 'INSPECTION'], [null, 'INSPECTION'],
+      ['MAN-LAMINATION', 'MANUAL LAMINATION'], ['CTP', 'CTP'], [null, null]],
+    first: [['BOBST', 'BOBST DOMINO 110'], ['BOBST MEDIA', 'BOBST MEDIA 68-II'], ['JAGENBERG', 'JAGENBERG PASTING'], ['THERM-LAMINATION', 'THERMAL LAMINATION']],
+  };
   // Where a machine stands: x / z in the world, the floor's height under it.
   const machinePos = m => m.floor === 2
     ? { x: wx(PLAN_G, m.at[0]), z: wz(PLAN_G, m.at[1]), y: FLOOR_Y[2], floor: 2 }
@@ -857,6 +870,7 @@
 
     // People (forklift drivers).
     const people = [];
+    const crews = [];   // each machine's group, its station and the figures its builder made
     const person = (x, z, face, parent) => {
       const g = new THREE.Group(); g.position.set(x, 0.3, z); g.rotation.y = face || 0;
       cyl(0.32, 0.36, 1.1, 0x2563eb, 0, 0.85, 0, g, 10);   // blue overalls (owner)
@@ -1561,14 +1575,16 @@
       g.position.set(x, SLAB + lift0, z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[0].add(g);
+      const st = MACHINE_STATIONS.basement[i] || [], p0 = people.length;
       if (m.kind === 'press') buildPress(g, i, m.units || 4, m.len); else if (m.kind === 'diecut-big') buildDieCutBig(g, i, m.len); else if (m.kind === 'cutter') buildCutter(g, i, m.len, m.dep); else if (m.kind === 'folder') buildFolder(g, i, m.len, m.dep); else buildDieCut(g, i);
       hazardTape(g, SLAB + lift0 + 0.012);
       // Name painted on the floor behind the machine, far enough back that
       // the machine itself doesn't hide it from the usual camera angle.
       const sideways = m.face === 'up' || m.face === 'down';
       const depth = m.kind === 'folder' ? m.len : m.kind === 'cutter' ? (sideways ? m.dep : m.len) : m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
-      const name = m.kind === 'folder' ? 'FOLDING' : m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING';
-      const lab = decal(name, name.length * 0.55, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
+      crews.push({ g, station: st[0], built: people.slice(p0), depth });
+      const name = st[1] || (m.kind === 'folder' ? 'FOLDING' : m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING');
+      const lab = decal(name, name.length * 0.5, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
       lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + lift0 + 0.02, z + (m.face === 'up' || m.kind === 'folder' ? 1 : -1) * (depth / 2 + (m.kind === 'diecut' ? 1.0 : 1.5))); lab.renderOrder = 1; floorGroups[0].add(lab);
     });
     GROUND_MACHINES.forEach((m, i) => {
@@ -1576,13 +1592,14 @@
       g.position.set(at.x, SLAB + lift, at.z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[1].add(g);
-      const n = MACHINES.length + i;
+      const n = MACHINES.length + i, st = MACHINE_STATIONS.ground[i] || [], p0 = people.length;
       if (m.kind === 'coater') buildCoater(g, n, m.len); else if (m.kind === 'inspection') buildInspection(g, n, m.len); else if (m.kind === 'laminator') buildLaminator(g, n, m.len);
       else if (m.kind === 'ctp') buildCTP(g, n, m.len); else buildProcessor(g, n, m.len);
       hazardTape(g, SLAB + lift + 0.012, floorGroups[1]);
+      crews.push({ g, station: st[0], built: people.slice(p0), depth: 2.4 });
       if (m.label) {
-        const name = { coater: 'COATING', inspection: 'INSPECTION', laminator: 'LAMINATION', ctp: 'CTP' }[m.kind];
-        const lab = decal(name, name.length * 0.55, 0.75, '#374151', { size: 0.62 });
+        const name = st[1] || { coater: 'COATING', inspection: 'INSPECTION', laminator: 'LAMINATION', ctp: 'CTP' }[m.kind];
+        const lab = decal(name, name.length * 0.5, 0.75, '#374151', { size: 0.62 });
         lab.rotation.x = -Math.PI / 2; lab.position.set(at.x + m.label[0], SLAB + lift + 0.02, at.z + m.label[1]); lab.renderOrder = 1; floorGroups[1].add(lab);
       }
     });
@@ -1592,12 +1609,13 @@
       g.position.set(at.x, SLAB, at.z);
       g.rotation.y = FACE_ROT[m.face] || 0;
       floorGroups[2].add(g);
-      const n = MACHINES.length + GROUND_MACHINES.length + i;
+      const n = MACHINES.length + GROUND_MACHINES.length + i, st = MACHINE_STATIONS.first[i] || [], p0 = people.length;
       if (m.kind === 'gluer') buildGluer(g, n, m.len); else buildLaminator(g, n, m.len);
       hazardTape(g, SLAB + 0.012, floorGroups[2]);
+      crews.push({ g, station: st[0], built: people.slice(p0), depth: 2.2 });
       if (m.label) {
-        const name = m.name || { gluer: 'FOLDER GLUER', laminator: 'LAMINATION' }[m.kind];
-        const lab = decal(name, name.length * 0.55, 0.75, '#374151', { size: 0.62 });
+        const name = st[1] || m.name || { gluer: 'FOLDER GLUER', laminator: 'LAMINATION' }[m.kind];
+        const lab = decal(name, name.length * 0.5, 0.75, '#374151', { size: 0.62 });
         lab.rotation.x = -Math.PI / 2; lab.position.set(at.x + m.label[0], SLAB + 0.02, at.z + m.label[1]); lab.renderOrder = 1; floorGroups[2].add(lab);
       }
     });
@@ -1608,15 +1626,52 @@
       g.position.set((x1 + x2) / 2, SLAB, (z1 + z2) / 2); g.rotation.y = -Math.atan2(z2 - z1, x2 - x1); floorGroups[2].add(g);
       box(len, 0.08, 1.1, 0xd6d3d1, 0, 0.86, 0, g);                                           // table top
       for (const lx of [-len / 2 + 0.15, len / 2 - 0.15]) for (const lz of [-0.45, 0.45]) box(0.08, 0.82, 0.08, 0x6b7280, lx, 0.41, lz, g);
-      const per = Math.max(2, Math.round(len / 1.4));
+      const per = Math.max(2, Math.round(len / 1.4)), p0 = people.length;
       for (let k = 0; k < per; k++) {
         const px = -len / 2 + len * (k + 0.5) / per;
         box(0.7, 0.18, 0.5, 0xffffff, px, 1.0, 0, g);                                         // sheets on the table
         person(px, -0.95, 0, g); person(px, 0.95, Math.PI, g);
       }
+      if (T.name === 'SORTING') crews.push({ g, station: 'SORTING', built: people.slice(p0), depth: 2.0 });
       const lab = decal(T.name + ' TABLE', 6, 0.8, '#374151', { size: 0.6 });
       lab.rotation.x = -Math.PI / 2; lab.position.set((x1 + x2) / 2, SLAB + 0.02, (z1 + z2) / 2 - 2.1); lab.renderOrder = 1; floorGroups[2].add(lab);
     });
+
+    const nameTag = text => {
+      const t = canvasTex(256, 64, (g, w, h) => {
+        g.fillStyle = 'rgba(255,255,255,.96)'; rrect(g, 4, 6, w - 8, h - 12, 14); g.fill();
+        g.strokeStyle = '#2563eb'; g.lineWidth = 3; rrect(g, 4, 6, w - 8, h - 12, 14); g.stroke();
+        g.fillStyle = '#0f172a'; g.font = `800 28px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, w / 2, h / 2 + 1, w - 22);
+      });
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true }));
+      sp.scale.set(1.8, 0.45, 1); sp.position.y = 2.65; sp.renderOrder = 4;
+      return sp;
+    };
+    const crewExtras = [];
+    const applyOperators = list => {
+      for (const x of crewExtras) {
+        if (x.isSprite) { const k = textures.indexOf(x.material.map); if (k >= 0) textures.splice(k, 1); x.material.map.dispose(); x.material.dispose(); }
+        else { const k = people.indexOf(x); if (k >= 0) people.splice(k, 1); }
+        if (x.parent) x.parent.remove(x);
+      }
+      crewExtras.length = 0;
+      const byStation = new Map();
+      for (const o of list || []) {
+        if (!o || !o.machine || !o.name) continue;
+        const k = String(o.machine).trim().toUpperCase();
+        if (!byStation.has(k)) byStation.set(k, []);
+        byStation.get(k).push(String(o.name).trim());
+      }
+      for (const c of crews) {
+        if (!c.station) continue;
+        (byStation.get(String(c.station).toUpperCase()) || []).forEach((nm, k) => {
+          let who = c.built[k];
+          if (!who) { const e = k - c.built.length; who = person(-1.4 + e * 1.1, c.depth / 2 + 1.1, Math.PI, c.g); crewExtras.push(who); }
+          const tagS = nameTag(nm); who.add(tagS); crewExtras.push(tagS);
+        });
+      }
+    };
+    applyOperators(opts.operators || []);
 
     // Which floors show: all (see-through upper slabs) or just one.
     let floorFocus = null;
@@ -2319,6 +2374,7 @@
       _debug: { cam, want, camera, VIEWS, setView, scene },
       update(nextJobs) { applyJobs(nextJobs, false); },
       setStock(items) { applyStock(items || []); },
+      setOperators(list) { applyOperators(list || []); },
       setActive(on) {
         on = !!on;
         if (on === active) return;
@@ -2347,18 +2403,19 @@
     ensureCss();
     host.classList.add('saa-host');
     host.innerHTML = '<div class="saa-msg">Loading the 3D view&hellip;</div>';
-    let real = null, pendingJobs = opts.jobs, pendingStock = opts.stock || [], wantActive = false, dead = false;
+    let real = null, pendingJobs = opts.jobs, pendingStock = opts.stock || [], pendingOps = opts.operators || [], wantActive = false, dead = false;
     const ctl = {
       company: opts.company,
       update(j) { if (real) real.update(j); else pendingJobs = j; },
       setStock(items) { if (real) real.setStock(items); else pendingStock = items || []; },
+      setOperators(list) { if (real) real.setOperators(list); else pendingOps = list || []; },
       setActive(on) { wantActive = !!on; if (real) real.setActive(on); },
       destroy() { dead = true; if (real) real.destroy(); else host.innerHTML = ''; },
     };
     loadThree().then(THREE => {
       if (dead) return;
       host.innerHTML = '';
-      real = createScene(THREE, host, Object.assign({}, opts, { jobs: pendingJobs, stock: pendingStock }));
+      real = createScene(THREE, host, Object.assign({}, opts, { jobs: pendingJobs, stock: pendingStock, operators: pendingOps }));
       ctl._debug = real._debug;
       real.setActive(wantActive);
     }).catch(() => {
