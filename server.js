@@ -3118,7 +3118,7 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT name, persons, roles FROM operators WHERE active AND persons IS NOT NULL`;
+    const rows = await sql`SELECT name, persons, roles, is_manager FROM operators WHERE active AND persons IS NOT NULL`;
     const out = [];
     const seen = new Set();
     for (const r of rows) {
@@ -3135,7 +3135,7 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
         // Daily Production print pulls everyone whose machine has the
         // 'break' role). Additive — existing all-persons consumers are
         // free to ignore it.
-        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName, roles });
+        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName, roles, manager: !!r.is_manager });
       }
     }
     out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));

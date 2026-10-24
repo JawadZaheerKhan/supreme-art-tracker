@@ -971,9 +971,12 @@
     // People (forklift drivers).
     const people = [];
     const crews = [];   // each machine's group, its station and the figures its builder made
-    const person = (x, z, face, parent) => {
+    // Colours (owner, 2026-10-24): operators blue, line manager / QC red,
+    // anyone the app has no record of black.
+    const STAFF_BLACK = 0x1f2937, OPERATOR_BLUE = 0x2563eb, MANAGER_RED = 0xdc2626;
+    const person = (x, z, face, parent, color) => {
       const g = new THREE.Group(); g.position.set(x, 0.3, z); g.rotation.y = face || 0;
-      cyl(0.32, 0.36, 1.1, 0x2563eb, 0, 0.85, 0, g, 10);   // blue overalls (owner)
+      g.userData.body = cyl(0.32, 0.36, 1.1, color || STAFF_BLACK, 0, 0.85, 0, g, 10);
       const hg = new THREE.SphereGeometry(0.3, 12, 10); geos.add(hg);
       const head = new THREE.Mesh(hg, mat(0xe8b98f)); head.position.y = 1.65; head.castShadow = true; g.add(head);
       box(0.66, 0.16, 0.62, 0xfacc15, 0, 1.92, 0, g);
@@ -1760,28 +1763,48 @@
       return sp;
     };
     const crewExtras = [];
+    const recoloured = [];
+    const paint = (who, c) => { if (who && who.userData.body) { who.userData.body.material = mat(c); recoloured.push(who); } };
     const applyOperators = list => {
+      for (const w of recoloured) if (w.userData.body) w.userData.body.material = mat(STAFF_BLACK);
+      recoloured.length = 0;
       for (const x of crewExtras) {
         if (x.isSprite) { const k = textures.indexOf(x.material.map); if (k >= 0) textures.splice(k, 1); x.material.map.dispose(); x.material.dispose(); }
         else { const k = people.indexOf(x); if (k >= 0) people.splice(k, 1); }
         if (x.parent) x.parent.remove(x);
       }
       crewExtras.length = 0;
-      const byStation = new Map();
-      for (const o of list || []) {
-        if (!o || !o.machine || !o.name) continue;
-        const k = String(o.machine).trim().toUpperCase();
+      // Every person on the operators list, by station (signed-in staff only - no names in this file).
+      const byStation = new Map(), roster = [];
+      const addP = (station, name, roles, manager) => {
+        const k = String(station || '').trim().toUpperCase(), nm = String(name || '').trim();
+        if (!k || !nm) return;
         if (!byStation.has(k)) byStation.set(k, []);
-        byStation.get(k).push(String(o.name).trim());
-      }
+        if (byStation.get(k).some(x => x.toLowerCase() === nm.toLowerCase())) return;
+        byStation.get(k).push(nm); roster.push({ station: k, name: nm, roles: roles || [], manager: !!manager });
+      };
+      for (const o of list || []) if (o && o.machine && o.name) addP(o.machine, o.name, o.roles, o.manager);
       for (const c of crews) {
         if (!c.station) continue;
         (byStation.get(String(c.station).toUpperCase()) || []).forEach((nm, k) => {
           let who = c.built[k];
           if (!who) { const e = k - c.built.length; who = person(-1.4 + e * 1.1, c.depth / 2 + 1.1, Math.PI, c.g); crewExtras.push(who); }
+          paint(who, OPERATOR_BLUE);
           const tagS = nameTag(nm); who.add(tagS); crewExtras.push(tagS);
         });
       }
+      // Line managers (one per production floor) and QC (at the ready areas), in red.
+      const placed = new Set();
+      const standAt = (f, px, py, nm, face) => {
+        const pl = floorPlan(f), who = person(wx(pl, px), wz(pl, py), face || 0, floorGroups[f], MANAGER_RED);
+        who.position.y = SLAB + floorRaise(f, px, py) + 0.3; crewExtras.push(who);
+        const tagS = nameTag(nm); who.add(tagS); crewExtras.push(tagS); placed.add(nm.toLowerCase());
+      };
+      const MANAGER_SPOTS = [[0, 640, 560], [2, 700, 600], [1, 600, 430]];
+      roster.filter(r => r.manager).forEach((r, i) => { if (!placed.has(r.name.toLowerCase()) && i < MANAGER_SPOTS.length) standAt(MANAGER_SPOTS[i][0], MANAGER_SPOTS[i][1], MANAGER_SPOTS[i][2], r.name); });
+      const QC_SPOTS = [[1, 620, 400], [2, 540, 590], [1, 700, 400], [2, 560, 640]];
+      let q = 0;
+      roster.filter(r => !r.manager && r.roles.includes('storage')).forEach(r => { if (!placed.has(r.name.toLowerCase()) && q < QC_SPOTS.length) { const sp = QC_SPOTS[q++]; standAt(sp[0], sp[1], sp[2], r.name, Math.PI); } });
     };
     applyOperators(opts.operators || []);
 
