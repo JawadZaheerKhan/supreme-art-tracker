@@ -3958,9 +3958,15 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div id="users-operators-section" style="display:none;">
     <div class="toolbar" style="padding:0;">
       <div style="font-size:14px;font-weight:600;color:var(--text);">Floor Operators <span style="font-weight:400;color:var(--text2);">— PIN roster for the Station terminal</span></div>
-      <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" onclick="openOperatorModal()">+ Add Operator</button>
+      <button class="btn btn-sm btn-primary ceo-hide" style="margin-left:auto;" id="ops-add-btn" onclick="opsAddClick()">+ Add Machine</button>
+    </div>
+    <!-- Machines (PINs) / Operators (the people) - owner, 2026-10-24. -->
+    <div id="ops-subtabs" style="display:flex;gap:8px;margin-top:0.6rem;">
+      <button class="tab active" data-ops-tab="machines" onclick="setOpsSubTab('machines')">Machines</button>
+      <button class="tab" data-ops-tab="people" onclick="setOpsSubTab('people')">Operators</button>
     </div>
     <div class="inventory-list" id="operators-list" style="margin-top:0.5rem;"></div>
+    <div class="inventory-list" id="floor-people-list" style="margin-top:0.5rem;display:none;"></div>
   </div>
 
   <!-- Recent Activity — also its own sub-tab now, same reason as Operators. -->
@@ -35278,14 +35284,16 @@ async function loadUsersAndAudit() {
     // (Authorized Users + Recent Activity) for any CEO account. Matching
     // the server's real behavior: CEO no longer requests this at all.
     const wantsOperators = hasPerm('user_btn_operators', 'view');
-    if (wantsOperators) reqs.push(api('GET', '/api/operators'));
+    if (wantsOperators) reqs.push(api('GET', '/api/operators'), api('GET', '/api/floor-people').catch(() => []));
     const results = await Promise.all(reqs);
     let i = 0;
     usersList = wantsUsers ? results[i++] : [];
     auditList = wantsAudit ? results[i++] : [];
     operatorsList = wantsOperators ? (results[i++] || []) : [];
+    floorPeople = wantsOperators ? (results[i++] || []) : [];
     renderUsersTab();
     renderOperators();
+    renderFloorPeople();
   } catch (e) {
     notify('Error loading users: ' + e.message);
   }
@@ -35322,6 +35330,112 @@ function renderOperators() {
       </div>
     </div>`;
   }).join('');
+}
+
+// ── Floor operators: the people (owner, 2026-10-24) ──────────
+// Machines (PINs) and Operators (the people) are two views of the
+// Operators sub-tab; a machine picks its people from this list.
+let floorPeople = [];
+let opsSubTab = 'machines';
+function setOpsSubTab(t) {
+  opsSubTab = t === 'people' ? 'people' : 'machines';
+  const m = document.getElementById('operators-list'), pp = document.getElementById('floor-people-list'), b = document.getElementById('ops-add-btn');
+  if (m) m.style.display = opsSubTab === 'machines' ? '' : 'none';
+  if (pp) pp.style.display = opsSubTab === 'people' ? '' : 'none';
+  if (b) b.textContent = opsSubTab === 'people' ? '+ Add Operator' : '+ Add Machine';
+  document.querySelectorAll('#ops-subtabs .tab').forEach(x => x.classList.toggle('active', x.dataset.opsTab === opsSubTab));
+  if (opsSubTab === 'people') renderFloorPeople();
+}
+function opsAddClick() { if (opsSubTab === 'people') openFloorPersonModal(); else openOperatorModal(); }
+// The machines a person is on.
+function machinesOfPerson(name) {
+  const n = String(name || '').trim().toLowerCase();
+  return operatorsList.filter(o => o.active !== false && (Array.isArray(o.persons) ? o.persons : []).some(p => p && String(p.name || '').trim().toLowerCase() === n)).map(o => o.name);
+}
+function renderFloorPeople() {
+  const el = document.getElementById('floor-people-list');
+  if (!el) return;
+  if (!hasPerm('user_btn_operators', 'view')) { el.innerHTML = ''; return; }
+  if (!floorPeople.length) { el.innerHTML = '<div class="empty">No operators yet. Add one, then pick them on a machine.</div>'; return; }
+  el.innerHTML = floorPeople.map(p => {
+    const on = machinesOfPerson(p.name);
+    return `
+    <div class="inv-card">
+      <div class="inv-main">
+        <div class="inv-name">&#128100; ${esc(p.name)}${p.name_ur ? ` <span class="urdu" dir="rtl" lang="ur" style="font-weight:400;color:var(--text2);">${esc(p.name_ur)}</span>` : ''}</div>
+        <div class="inv-sub">${on.length ? 'On: ' + esc(on.join(', ')) : '<span style="color:var(--text3);">Not on any machine</span>'}</div>
+      </div>
+      <div class="inv-actions">
+        <button class="btn btn-sm ceo-hide" onclick="openFloorPersonModal(${p.id})">Edit</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="removeFloorPerson(${p.id})">Remove</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function openFloorPersonModal(id) {
+  const p = id ? floorPeople.find(x => x.id === id) : null;
+  openModal(`<div class="modal" onclick="event.stopPropagation()">
+    <h2>${p ? 'Edit' : 'Add'} Operator</h2>
+    <div class="form-group op-person-row">
+      <label class="form-label">Name</label>
+      <input type="text" class="op-person-name" id="fp-name" placeholder="Name (Roman, e.g. Bilal)" value="${esc((p && p.name) || '')}">
+      <label class="form-label" style="margin-top:10px;">Urdu name <span style="font-weight:400;color:var(--text2);">(optional)</span></label>
+      <div style="display:flex;gap:8px;">
+        <input type="text" class="op-person-name-ur urdu" id="fp-name-ur" dir="rtl" lang="ur" placeholder="نام (اردو، اختیاری)" value="${esc((p && p.name_ur) || '')}" style="flex:1;">
+        <button type="button" class="btn btn-sm" title="Suggest Urdu spelling from the Roman name" onclick="suggestUrduFromRow(this)" style="background:#fef3c7;border-color:#f59e0b;color:#92400e;">✦ Urdu</button>
+      </div>
+      ${p && machinesOfPerson(p.name).length ? `<div style="font-size:12px;color:var(--text2);margin-top:8px;">A new name shows on ${esc(machinesOfPerson(p.name).join(', '))} too.</div>` : ''}
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveFloorPerson(${p ? p.id : 'null'})">Save</button>
+    </div>
+  </div>`);
+  setTimeout(() => document.getElementById('fp-name')?.focus(), 30);
+}
+async function saveFloorPerson(id) {
+  const name = (document.getElementById('fp-name')?.value || '').trim();
+  const name_ur = (document.getElementById('fp-name-ur')?.value || '').trim();
+  if (!name) { notify('Name is required'); return; }
+  showSaving(true);
+  try {
+    if (id) await api('PUT', `/api/floor-people/${id}`, { name, name_ur });
+    else await api('POST', '/api/floor-people', { name, name_ur });
+    const [people, ops] = await Promise.all([api('GET', '/api/floor-people'), id ? api('GET', '/api/operators') : Promise.resolve(operatorsList)]);
+    floorPeople = people; operatorsList = ops;
+    renderFloorPeople(); renderOperators();
+    closeModal(); notify('Operator saved');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function removeFloorPerson(id) {
+  const p = floorPeople.find(x => x.id === id);
+  if (!p) return;
+  const on = machinesOfPerson(p.name);
+  if (on.length) { notify(`${p.name} is on ${on.join(', ')} - take him off the machine first`); return; }
+  const ok = await confirmDialog({ title: `Remove ${p.name}?`, message: 'He comes off the operators list.', danger: true, confirmText: 'Remove' });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/floor-people/${id}`);
+    floorPeople = floorPeople.filter(x => x.id !== id);
+    renderFloorPeople(); notify('Operator removed');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// A machine's operator row: pick from the list (a name already on the
+// machine but not on the list still shows, so nothing is lost).
+function personPickRowHtml(p) {
+  const cur = String((p && p.name) || '').trim(), lc = cur.toLowerCase();
+  const known = floorPeople.some(x => x.name.toLowerCase() === lc);
+  const opts = ['<option value="">— Pick an operator —</option>']
+    .concat(cur && !known ? [`<option value="${esc(cur)}" data-ur="${esc((p && p.name_ur) || '')}" selected>${esc(cur)}</option>`] : [])
+    .concat(floorPeople.map(x => `<option value="${esc(x.name)}" data-ur="${esc(x.name_ur || '')}"${x.name.toLowerCase() === lc ? ' selected' : ''}>${esc(x.name)}${x.name_ur ? ' · ' + esc(x.name_ur) : ''}</option>`));
+  return `
+    <div class="op-person-row" style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;">
+      <select class="op-person-pick">${opts.join('')}</select>
+      <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.op-person-row').remove()">&times;</button>
+    </div>`;
 }
 
 // Pretty-print an operator's assigned roles for the list view.
@@ -35364,9 +35478,10 @@ function openOperatorModal(id) {
     <div class="form-group">
       <label class="form-label" id="op-persons-label">${isManager ? 'Managers using this PIN' : 'Operators on this Machine'} <span style="font-weight:400;color:var(--text2);">(after PIN, they pick themselves from this list)</span></label>
       <div id="op-persons" style="display:flex;flex-direction:column;gap:6px;">
-        ${startingPersons.map((p, i) => personRowHtml(p, i)).join('')}
+        ${startingPersons.map(p => personPickRowHtml(p)).join('')}
       </div>
       <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addPersonRow()">+ Add ${isManager ? 'manager' : 'operator'}</button>
+      <div style="font-size:12px;color:var(--text2);margin-top:6px;">Not in the list? Add them under <b>Operators</b> first.</div>
     </div>
     ${o ? `<div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="op-active" ${o.active!==false?'checked':''}> Active</label></div>` : ''}
     <div class="modal-actions">
@@ -35400,7 +35515,7 @@ function personRowHtml(p, i) {
 function addPersonRow() {
   const wrap = document.getElementById('op-persons');
   if (!wrap) return;
-  wrap.insertAdjacentHTML('beforeend', personRowHtml({ name: '', name_ur: '' }, wrap.children.length));
+  wrap.insertAdjacentHTML('beforeend', personPickRowHtml({ name: '', name_ur: '' }));
 }
 
 // Best-guess Roman → Urdu transliteration. Names are messy: same Roman
@@ -35542,10 +35657,11 @@ async function saveOperator(id) {
   const isManager = !!document.getElementById('op-is-manager')?.checked;
   // Manager PIN → every role, regardless of the (hidden) checkboxes.
   const roles = isManager ? ROLES.map(r => r.id) : Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
-  const persons = Array.from(document.querySelectorAll('#op-persons .op-person-row')).map(row => ({
-    name: row.querySelector('.op-person-name').value.trim(),
-    name_ur: row.querySelector('.op-person-name-ur').value.trim(),
-  })).filter(p => p.name);
+  const seen = new Set();
+  const persons = Array.from(document.querySelectorAll('#op-persons .op-person-pick')).map(sel => {
+    const opt = sel.selectedOptions[0];
+    return { name: sel.value.trim(), name_ur: (opt && opt.dataset.ur) || '' };
+  }).filter(p => p.name && !seen.has(p.name.toLowerCase()) && seen.add(p.name.toLowerCase()));
   const activeEl = document.getElementById('op-active');
   if (!name) { notify(isManager ? 'Manager name is required' : 'Machine name is required'); return; }
   if (!/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
@@ -35559,6 +35675,8 @@ async function saveOperator(id) {
     else await api('POST', '/api/operators', body);
     const ops = await api('GET', '/api/operators');
     operatorsList = ops;
+    floorPeople = await api('GET', '/api/floor-people').catch(() => floorPeople);
+    renderFloorPeople();
     // Refresh the Job Card's Machine dropdown source — adding a new
     // printing-role machine should surface it there immediately.
     loadPrintingMachines();

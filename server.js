@@ -313,7 +313,7 @@ function getDb() {
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
-const SCHEMA_VERSION = 'v2026-10-24-offcut-challan';
+const SCHEMA_VERSION = 'v2026-10-24-floor-people';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1338,6 +1338,27 @@ async function initDb() {
     // client uses this flag to show the all-stages/search station screen
     // and to unlock the Machine field instead of a single-stage queue.
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS is_manager BOOLEAN NOT NULL DEFAULT false`;
+    // Every floor operator (person) in one list (owner, 2026-10-24): a
+    // machine picks its people from it. Filled from the machines' people
+    // here, and kept in step whenever a machine's people are saved.
+    await sql`
+      CREATE TABLE IF NOT EXISTS floor_people (
+        id         SERIAL PRIMARY KEY,
+        name       TEXT NOT NULL,
+        name_ur    TEXT NOT NULL DEFAULT '',
+        active     BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS floor_people_name_active_idx ON floor_people (lower(name)) WHERE active`;
+    await sql`
+      INSERT INTO floor_people (name, name_ur)
+      SELECT DISTINCT ON (lower(btrim(p->>'name'))) btrim(p->>'name'), COALESCE(p->>'name_ur', '')
+      FROM operators o, jsonb_array_elements(COALESCE(o.persons, '[]'::jsonb)) p
+      WHERE btrim(COALESCE(p->>'name', '')) <> ''
+        AND NOT EXISTS (SELECT 1 FROM floor_people f WHERE f.active AND lower(f.name) = lower(btrim(p->>'name')))
+      ORDER BY lower(btrim(p->>'name'))
+    `;
     // One-time migration: turn each existing single-person row into a machine
     // with that one person, and move the machine-name column into `name` so
     // `name` consistently means the machine label going forward.
@@ -2954,6 +2975,17 @@ function parsePersons(body) {
   return out;
 }
 
+// Adds any of a machine's people not yet on the floor operators list.
+async function syncFloorPeople(sql, persons) {
+  for (const p of persons || []) {
+    const n = String((p && p.name) || '').trim();
+    if (!n) continue;
+    try {
+      await sql`INSERT INTO floor_people (name, name_ur) SELECT ${n}, ${String(p.name_ur || '').trim()} WHERE NOT EXISTS (SELECT 1 FROM floor_people WHERE active AND lower(name) = lower(${n}))`;
+    } catch (e) { console.error('floor_people sync:', e.message); }
+  }
+}
+
 app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
   try {
     await dbReady;
@@ -2978,6 +3010,7 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
       VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}, ${isManager}) RETURNING *
     `;
     await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added ${isManager ? 'manager' : 'machine'} ${name} (roles ${parsed.roles.join(',')}, ${persons.length} operator${persons.length === 1 ? '' : 's'})` });
+    await syncFloorPeople(sql, persons);
     res.json(inserted[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -3009,6 +3042,7 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
     await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `Edited ${isManager ? 'manager' : 'operator'} ${name}` });
+    await syncFloorPeople(sql, persons);
     res.json(updated[0]);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -3058,10 +3092,84 @@ app.put('/api/operators/:id/manager-persons', requireStationUser, requirePermiss
     const before = (await sql`SELECT persons FROM operators WHERE id = ${id} AND active AND NOT is_manager`)[0];
     if (!before) return res.status(404).json({ error: 'Machine not found' });
     const updated = await sql`UPDATE operators SET persons = ${JSON.stringify(persons)} WHERE id = ${id} AND active AND NOT is_manager RETURNING id, name, roles, persons`;
+    await syncFloorPeople(sql, persons);
     const was = (Array.isArray(before.persons) ? before.persons : []).map(x => x && x.name).filter(Boolean).join(', ');
     const by = String(req.body.person || '').trim() || v.operator.name;
     await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `${by} (Manager PIN) set the operators on ${updated[0].name}: ${persons.map(x => x.name).join(', ')} (was: ${was || 'none'})` });
     res.json(updated[0]);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
+// Floor operators list (owner, 2026-10-24): every person who works the
+// machines; a machine picks its people from here.
+app.get('/api/floor-people', requireOperatorViewer, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT id, name, name_ur FROM floor_people WHERE active ORDER BY lower(name)`);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+app.post('/api/floor-people', requireOperatorAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = String(req.body.name || '').trim(), nameUr = String(req.body.name_ur || '').trim();
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const dupe = await sql`SELECT id FROM floor_people WHERE active AND lower(name) = lower(${name})`;
+    if (dupe.length) return res.status(409).json({ error: `${name} is already on the list` });
+    const row = (await sql`INSERT INTO floor_people (name, name_ur) VALUES (${name}, ${nameUr}) RETURNING id, name, name_ur`)[0];
+    await logAudit(sql, req, { action: 'operator.person_add', entityType: 'floor_person', entityId: row.id, summary: `Added floor operator ${name}` });
+    res.json(row);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+// Renaming carries the new name onto every machine he is on.
+app.put('/api/floor-people/:id', requireOperatorAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const name = String(req.body.name || '').trim(), nameUr = String(req.body.name_ur || '').trim();
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const old = (await sql`SELECT id, name FROM floor_people WHERE id = ${id} AND active`)[0];
+    if (!old) return res.status(404).json({ error: 'Operator not found' });
+    const dupe = await sql`SELECT id FROM floor_people WHERE active AND lower(name) = lower(${name}) AND id <> ${id}`;
+    if (dupe.length) return res.status(409).json({ error: `${name} is already on the list` });
+    const row = (await sql`UPDATE floor_people SET name = ${name}, name_ur = ${nameUr} WHERE id = ${id} RETURNING id, name, name_ur`)[0];
+    const was = old.name.toLowerCase(), moved = [];
+    for (const m of await sql`SELECT id, name, persons FROM operators`) {
+      const list = Array.isArray(m.persons) ? m.persons : [];
+      if (!list.some(x => x && String(x.name || '').trim().toLowerCase() === was)) continue;
+      const next = list.map(x => x && String(x.name || '').trim().toLowerCase() === was ? { name, name_ur: nameUr } : x);
+      await sql`UPDATE operators SET persons = ${JSON.stringify(next)} WHERE id = ${m.id}`;
+      moved.push(m.name);
+    }
+    await logAudit(sql, req, { action: 'operator.person_edit', entityType: 'floor_person', entityId: id, summary: `Renamed floor operator ${old.name} to ${name}${moved.length ? ' (on ' + moved.join(', ') + ')' : ''}` });
+    res.json(row);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+// Only someone on no machine can come off the list.
+app.delete('/api/floor-people/:id', requireOperatorAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const old = (await sql`SELECT id, name FROM floor_people WHERE id = ${id} AND active`)[0];
+    if (!old) return res.status(404).json({ error: 'Operator not found' });
+    const on = (await sql`SELECT name, persons FROM operators WHERE active`)
+      .filter(m => (Array.isArray(m.persons) ? m.persons : []).some(x => x && String(x.name || '').trim().toLowerCase() === old.name.toLowerCase()))
+      .map(m => m.name);
+    if (on.length) return res.status(409).json({ error: `${old.name} is on ${on.join(', ')} - take him off the machine first` });
+    await sql`UPDATE floor_people SET active = false WHERE id = ${id}`;
+    await logAudit(sql, req, { action: 'operator.person_remove', entityType: 'floor_person', entityId: id, summary: `Removed floor operator ${old.name}` });
+    res.json({ ok: true });
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
