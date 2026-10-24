@@ -115,7 +115,7 @@
   // the hall block's levels - basement, ground, 1st floor, roof; the office
   // block's ground floor is the street (FLOOR_Y[1] - RAISE) and its 1st
   // floor / open area sit RAISE below the hall's.
-  const RAISE = 5;                              // the hall block above the office block
+  const RAISE = 6;                              // the hall block above the office block ("a little more", owner 2026-10-24)
   const FLOOR_Y = [-5, RAISE, 11 + RAISE, 22 + RAISE];
   const OPEN_RAISE = -RAISE;                    // the 2nd floor's open area, half a floor below the roof
   const OFFICE_RAISE = -RAISE;                  // the 1st floor's offices, half a floor below its hall side
@@ -148,7 +148,7 @@
   // ablution hall and the kitchen's short wall: one open hall now.
   const UPPER_WALLS = [
     [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533],
-    [975, 718, 975, 760], [1013, 718, 1013, 760], [512, 822, 1058, 822], [512, 718, 512, 822],
+    [975, 718, 975, 760], [1013, 718, 1013, 760], [600, 822, 1058, 822], [512, 718, 512, 822],
     [158, 718, 343, 718], [410, 718, 512, 718]];
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
     ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
@@ -228,12 +228,14 @@
       { plan: PLAN_G,
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
         ext: [0, 1, 3, 4, 5, 6, 7, 8, 9], street: 6,   // the hall / offices line is the inner wall below; the core's front is the side wing's façade
-        walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS },
+        walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS,
+        // Ramp from the hall up to the 2nd floor's open area over the offices (owner, 2026-10-24).
+        ramp: [518, 622, 598, 822, 'front', FLOOR_Y[3] + OPEN_RAISE - FLOOR_Y[2]] },
       // The offices are a few steps below the 1st floor's hall side (owner, 2026-10-24).
       { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3], street: 2,
         walls: [[560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
           [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
-        stairs: [[517, 1165, 640, 1265]], terrace: [668, 1272, 902, 1345],
+        terrace: [668, 1272, 902, 1345],   // no stairs up to the open area - the 1st floor's ramp goes there (owner, 2026-10-24)
         labels: [['DINING ROOM', 750, 880, 0.9], ['KITCHEN', 975, 885, 0.7], ['BATH', 537, 880, 0.55], ['DIRECTOR OFFICE', 605, 995, 0.7], ['FINANCE SECTION', 785, 1010, 0.7],
           ['WASHROOMS', 985, 995, 0.7], ['LOBBY', 605, 1120, 0.9], ['CORRIDOR', 785, 1125, 0.7], ['DIRECTOR OFFICE', 785, 1215, 0.7], ['DESIGN SECTION', 985, 1160, 0.7], ['TERRACE', 785, 1308, 0.7]] },
     ] },
@@ -245,7 +247,7 @@
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
         holes: [[218, 801, 276, 905, 'LRB']],
         solar: [170, 170, 1046, 760], labels: [['SOLAR PANELS', 610, 440, 1.4]] },
-      { plan: PLAN_G, raise: OPEN_RAISE, parapet: true, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],
+      { plan: PLAN_G, raise: OPEN_RAISE, parapet: true, alsoOn: [2], outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3],   // seen from the 1st floor too - its ramp lands here
         solar: [522, 832, 1048, 1262], labels: [['OPEN AREA', 785, 1050, 1.3]] },
     ] },
   ];
@@ -793,6 +795,7 @@
     // ── Production: the three floors from the owner's plans, stacked apart ──
     const SLAB = 0.35;
     const floorGroups = [], floorTags = [], slabMats = [], liftAnims = [];
+    const sharedParts = [];   // parts shown on more than their own floor (alsoOn)
     const wallSeg = (x1, z1, x2, z2, h, color, t, parent) => {
       const len = Math.hypot(x2 - x1, z2 - z1);
       if (len < 0.05) return null;
@@ -842,7 +845,11 @@
       const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe3b0b0 : 0xf0c2c2, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // red-tint floors (owner)
       slabMats.push(sm);
       for (const P of F.parts) {
-        const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise; g.add(pg);
+        const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise;
+        if (P.alsoOn) {   // its own group, so another floor's view can show it
+          const host = new THREE.Group(); host.position.y = FLOOR_Y[fi]; host.add(pg); scene.add(host);
+          sharedParts.push({ g: host, floors: [fi, ...P.alsoOn] });
+        } else g.add(pg);
         const pl = P.plan, X = px => wx(pl, px), Z = py => wz(pl, py);
         // Slab in the part's own shape; a raised part is a solid step up.
         const shape = new THREE.Shape(P.outline.map(([px, py]) => new THREE.Vector2(X(px), -Z(py))));
@@ -1486,6 +1493,7 @@
     const setFloorFocus = f => {
       floorFocus = f;
       floorGroups.forEach((g, i) => { g.visible = f == null || i === f; });
+      sharedParts.forEach(sp => { sp.g.visible = f == null || sp.floors.includes(f); });
       towerGroups.forEach(t => { t.g.visible = f == null || t.floors.includes(f); });
       frame.visible = f == null; facade.visible = f == null;
       for (const m of [groundMat, yardMat]) { m.opacity = f === 0 ? 0.15 : 1; m.depthWrite = f !== 0; }
