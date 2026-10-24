@@ -387,7 +387,7 @@
   // Site (owner, 2026-10-22): the Ready Stock warehouse stands left of the
   // building; the yard runs out in front to the road - an L, left empty but
   // for the car park under a red tent - with the gate at its left end.
-  const SITE = { x0: -94, x1: -8, z0: -80, z1: 60 };   // ends just past the building's right side; the back strip holds the inventory store (owner)
+  const SITE = { x0: -94, x1: -8, z0: -96, z1: 60 };   // ends just past the building's right side; the back strip holds the inventory store (owner)
   const READY = { x0: -88, x1: -60, z0: -34, z1: -12 };
   const DOCKS = [-82, -74, -66];
   const DOCK_Z = READY.z1 + 4.85;          // truck centre when backed onto the dock
@@ -399,9 +399,9 @@
   // stacks of STACK, two deep, with its size on a tile above. Bleach board
   // has its own side; art card, paper, duplex, sticker... share the other,
   // grouped by type. Items run along rows from the back wall forward.
-  const INV = { x0: -90, x1: -12, z0: -74, z1: -46 };
+  const INV = { x0: -90, x1: -12, z0: -90, z1: -46 };   // bigger store (owner, 2026-10-24)
   const INV_SPLIT = -42, INV_DOORS = [-66, -27];
-  const PALLET_SHEETS = 10000, MAX_PALLETS = 48, STACK = 4, COL_W = 1.45, BAY_GAP = 0.9, ROW_PITCH = 4.7, INV_ROWS = 5;
+  const PALLET_SHEETS = 10000, MAX_PALLETS = 48, STACK = 4, COL_W = 1.8, BAY_GAP = 1.4, ROW_PITCH = 6.4, INV_ROWS = 6, DEEP = 1.4, PALLET_H = 0.72;
   const STOCK_TYPES = {   // type -> [tile colour, paper colour]
     'bleach board': ['#2563eb', 0xf8fafc], 'art card': ['#db2777', 0xffffff], 'art paper': ['#ea580c', 0xf1f5f9], 'duplex board': ['#7c3aed', 0xd6d3d1],
     'offset paper': ['#0891b2', 0xfefce8], 'off-white': ['#a16207', 0xfef3c7], sticker: ['#ca8a04', 0xfde68a], 'local paper': ['#4b5563', 0xe5e7eb],
@@ -412,6 +412,7 @@
   function stockLayout(items) {
     const clean = (items || []).filter(i => i && +i.sheets > 0).map(i => ({
       type: String(i.type || 'other').toLowerCase().trim(), size: String(i.size || ''), gsm: String(i.gsm || ''), sheets: +i.sheets, offcut: !!i.offcut,
+      brand: String(i.brand || ''), supplier: String(i.supplier || ''), perPack: +i.perPack || 0, unit: String(i.unit || ''),
       pallets: Math.min(MAX_PALLETS, Math.max(1, Math.ceil(+i.sheets / PALLET_SHEETS))),
     }));
     const rank = t => { const k = STOCK_ORDER.indexOf(t); return k < 0 ? 99 : k; };
@@ -426,10 +427,10 @@
         const zBack = INV.z0 + 1.6 + row * ROW_PITCH, pallets = [];
         for (let k = 0; k < it.pallets; k++) {
           const st = Math.floor(k / STACK);
-          pallets.push([x + BAY_GAP / 2 + COL_W * (Math.floor(st / 2) + 0.5), (k % STACK), zBack + 1.15 * ((st % 2) + 0.5)]);
+          pallets.push([x + BAY_GAP / 2 + COL_W * (Math.floor(st / 2) + 0.5), (k % STACK), zBack + DEEP * ((st % 2) + 0.5)]);
         }
         const levels = Math.min(STACK, it.pallets);
-        bays.push({ item: it, x0: x, x1: x + w, pallets, tile: [x + w / 2, levels, zBack + 1.15] });
+        bays.push({ item: it, x0: x, x1: x + w, pallets, tile: [x + w / 2, levels, zBack + DEEP] });
         x += w;
       }
     }
@@ -698,7 +699,7 @@
       const g2 = new THREE.IcosahedronGeometry(0.85 * s, 0); geos.add(g2);
       const f2 = new THREE.Mesh(g2, mat(0x5fbf7f, { flatShading: true })); f2.position.set(x + 0.2 * s, 3.25 * s, z - 0.1 * s); f2.castShadow = true; trees.add(f2);
     };
-    [[-100, -70], [-100, -50], [-100, -30], [-100, -10], [-100, 10], [-100, 30], [-100, 50], [-84, -86], [-64, -86], [-44, -86], [-24, -86], [-2, -70], [-2, -50], [-2, -30], [-2, -10], [-2, 10], [-2, 30], [-2, 50],
+    [[-100, -70], [-100, -50], [-100, -30], [-100, -10], [-100, 10], [-100, 30], [-100, 50], [-84, -102], [-64, -102], [-44, -102], [-24, -102], [-2, -70], [-2, -50], [-2, -30], [-2, -10], [-2, 10], [-2, 30], [-2, 50],
      [-110, 78], [-80, 77], [-50, 78], [-20, 77], [10, 78], [40, 77], [70, 78]]
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
@@ -757,50 +758,70 @@
     floorDecal('1 PALLET ≈ ' + PALLET_SHEETS.toLocaleString() + ' SHEETS', 10, 0.9, '#64748b', INV.x1 - 7, INV.z1 - 1.2, { size: 0.55 });
     const stockRoot = new THREE.Group(); scene.add(stockRoot);
     let stockKey = null;
+    // Floating item cards (owner, 2026-10-24): one per item above its stack,
+    // bobbing gently; a click swaps in the big card with the details.
+    const stockTiles = [], stockPick = [];
+    let stockInstBay = [], stockSel = null;
+    const fmtQty = n => { const r = Math.round(n * 100) / 100; return Number.isInteger(r) ? r.toLocaleString() : r.toFixed(2); };
+    const stockBalance = it => it.perPack > 0 ? fmtQty(it.sheets / it.perPack) + ' ' + (it.unit || 'packets').toLowerCase() + ' · ' + it.sheets.toLocaleString() + ' sheets' : it.sheets.toLocaleString() + ' sheets';
+    const tileTex = (it, big) => canvasTex(big ? 560 : 400, big ? 360 : 170, (g, w, h) => {
+      const tone = (STOCK_TYPES[it.type] || ['#475569'])[0];
+      g.shadowColor = 'rgba(15,23,42,.3)'; g.shadowBlur = 12; g.shadowOffsetY = 4;
+      g.fillStyle = '#ffffff'; rrect(g, 8, 6, w - 16, h - 20, 18); g.fill();
+      g.shadowColor = 'transparent';
+      g.save(); rrect(g, 8, 6, w - 16, h - 20, 18); g.clip(); g.fillStyle = tone; g.fillRect(8, 6, w - 16, big ? 56 : 40); g.restore();
+      g.strokeStyle = tone; g.lineWidth = 4; rrect(g, 8, 6, w - 16, h - 20, 18); g.stroke();
+      g.textBaseline = 'middle'; g.textAlign = 'left'; g.fillStyle = '#ffffff';
+      g.font = `800 ${big ? 30 : 24}px ${FONT}`; g.fillText(it.type.toUpperCase(), 26, big ? 35 : 27, w - (it.offcut ? 150 : 52));
+      if (it.offcut) { g.textAlign = 'right'; g.font = `900 ${big ? 26 : 20}px ${FONT}`; g.fillText('OFFCUT', w - 26, big ? 35 : 27); }
+      g.fillStyle = '#0f172a';
+      if (!big) {
+        g.textAlign = 'center'; g.font = `900 52px ${FONT}`; g.fillText(it.size || '?', w / 2 - (it.gsm ? 56 : 0), 92, w - 150);
+        if (it.gsm) { g.font = `800 34px ${FONT}`; g.fillStyle = '#334155'; g.fillText(it.gsm + 'g', w - 78, 94); }
+        g.font = `700 22px ${FONT}`; g.fillStyle = '#64748b'; g.fillText(it.brand || '', w / 2, 132, w - 40);
+        return;
+      }
+      g.textAlign = 'left'; g.font = `900 54px ${FONT}`; g.fillText(it.size || '?', 26, 104, 300);
+      if (it.gsm) { g.textAlign = 'right'; g.font = `800 40px ${FONT}`; g.fillStyle = '#334155'; g.fillText(it.gsm + ' GSM', w - 26, 106); }
+      const rows = [['Brand', it.brand || '—'], ['Supplier', it.supplier || '—'], ['Balance', stockBalance(it)]];
+      rows.forEach(([k, v], i) => {
+        const y = 168 + i * 50;
+        g.textAlign = 'left'; g.fillStyle = '#64748b'; g.font = `700 24px ${FONT}`; g.fillText(k, 26, y);
+        g.fillStyle = i === 2 ? '#166534' : '#0f172a'; g.font = `${i === 2 ? 900 : 800} ${i === 2 ? 30 : 28}px ${FONT}`; g.fillText(v, 150, y, w - 176);
+      });
+    });
     const applyStock = items => {
       const key = JSON.stringify(items || []);
       if (key === stockKey) return;
       stockKey = key;
-      stockRoot.traverse(o => { if (o.geometry) { o.geometry.dispose(); geos.delete(o.geometry); } if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+      stockSel = null;
+      for (const T of stockTiles) { for (const t of [T.small, T.big]) { t.dispose(); const k = textures.indexOf(t); if (k >= 0) textures.splice(k, 1); } }
+      stockTiles.length = 0; stockPick.length = 0; stockInstBay = [];
+      stockRoot.traverse(o => { if (o.geometry) { o.geometry.dispose(); geos.delete(o.geometry); } if (o.material) { o.material.dispose(); } });
       while (stockRoot.children.length) stockRoot.remove(stockRoot.children[0]);
       const { bays, overflow } = stockLayout(items);
-      const all = bays.flatMap(b => b.pallets.map(pp => [pp, b.item.type]));
+      const all = bays.flatMap((b, bi) => b.pallets.map(pp => [pp, b.item.type, bi]));
       if (all.length) {
-        const baseGeo = new THREE.BoxGeometry(1.3, 0.14, 1.05), paperGeo = new THREE.BoxGeometry(1.2, 0.48, 0.98);
+        const baseGeo = new THREE.BoxGeometry(1.5, 0.16, 1.22), paperGeo = new THREE.BoxGeometry(1.4, 0.56, 1.12);
         const bases = new THREE.InstancedMesh(baseGeo, new THREE.MeshStandardMaterial({ color: 0xc8a26b, roughness: 0.9 }), all.length);
         const papers = new THREE.InstancedMesh(paperGeo, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75 }), all.length);
         const m4 = new THREE.Matrix4(), col = new THREE.Color();
-        all.forEach(([[x, lv, z], type], i) => {
-          const y = 0.3 + lv * 0.64;
-          bases.setMatrixAt(i, m4.makeTranslation(x, y + 0.07, z));
-          papers.setMatrixAt(i, m4.makeTranslation(x, y + 0.14 + 0.24, z));
+        all.forEach(([[x, lv, z], type, bi], i) => {
+          const y = 0.3 + lv * PALLET_H;
+          bases.setMatrixAt(i, m4.makeTranslation(x, y + 0.08, z));
+          papers.setMatrixAt(i, m4.makeTranslation(x, y + 0.16 + 0.28, z));
           papers.setColorAt(i, col.setHex((STOCK_TYPES[type] || [0, 0xe5e7eb])[1]));
+          stockInstBay[i] = bi;
         });
         bases.castShadow = papers.castShadow = true; bases.receiveShadow = papers.receiveShadow = true;
-        stockRoot.add(bases, papers);
-        // Size tiles: one atlas texture, a two-sided tile above each item.
-        const TW = 192, TH = 80, PER_ROW = 16, rows = Math.ceil(bays.length / PER_ROW);
-        const atlas = canvasTex(TW * PER_ROW, TH * rows, (g, w, h) => {
-          bays.forEach((b, i) => {
-            const ox = (i % PER_ROW) * TW, oy = Math.floor(i / PER_ROW) * TH, it = b.item;
-            g.fillStyle = '#ffffff'; g.fillRect(ox + 2, oy + 2, TW - 4, TH - 4);
-            g.fillStyle = (STOCK_TYPES[it.type] || ['#475569'])[0]; g.fillRect(ox + 2, oy + 2, TW - 4, 14);
-            g.strokeStyle = '#0f172a'; g.lineWidth = 2; g.strokeRect(ox + 2, oy + 2, TW - 4, TH - 4);
-            g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#0f172a';
-            g.font = `900 30px ${FONT}`; g.fillText(it.size || '?', ox + TW / 2, oy + 38, TW - 14);
-            const sub = (it.gsm ? it.gsm + 'g' : '') + (it.type !== 'bleach board' ? ' ' + it.type.toUpperCase() : '');
-            g.font = `700 17px ${FONT}`; g.fillStyle = '#334155'; g.fillText(sub.trim(), ox + TW / 2, oy + 63, TW - 14);
-            if (it.offcut) { g.fillStyle = '#dc2626'; g.font = `800 12px ${FONT}`; g.textAlign = 'right'; g.fillText('OFFCUT', ox + TW - 8, oy + 10); }
-          });
-        });
-        const tileMat = new THREE.MeshBasicMaterial({ map: atlas, side: THREE.FrontSide });
-        bays.forEach((b, i) => {
-          const u0 = (i % PER_ROW) / PER_ROW, u1 = u0 + 1 / PER_ROW, v1 = 1 - Math.floor(i / PER_ROW) / rows, v0 = v1 - 1 / rows;
-          const tg = new THREE.PlaneGeometry(1.5, 0.62), uv = tg.attributes.uv;
-          for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) ? u1 : u0, uv.getY(k) ? v1 : v0);
-          const [tx, lv, tz] = b.tile, ty = 0.3 + lv * 0.64 + 0.75;
-          for (const face of [0, Math.PI]) { const t = new THREE.Mesh(tg, tileMat); t.position.set(tx, ty, tz); t.rotation.set(face ? 0.35 : -0.35, face, 0); stockRoot.add(t); }   // tilted back a little, so they read from above too
-          const post = box(0.05, 0.6, 0.05, 0x334155, tx, ty - 0.55, tz, stockRoot, false);
+        stockRoot.add(bases, papers); stockPick.push(bases, papers);
+        bays.forEach((b, bi) => {
+          const [tx, lv, tz] = b.tile, ty = 0.3 + lv * PALLET_H + 1.25;
+          const small = tileTex(b.item, false), big = tileTex(b.item, true);
+          const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: small, transparent: true }));
+          sp.scale.set(2.9, 2.9 * 170 / 400, 1); sp.position.set(tx, ty, tz); sp.renderOrder = 5; sp.userData.stockBay = bi;
+          stockRoot.add(sp); stockPick.push(sp);
+          stockTiles.push({ sprite: sp, small, big, item: b.item, x: tx, y: ty, z: tz, phase: bi * 0.7, popped: false });
         });
       }
       if (overflow) floorDecal('+' + overflow + ' MORE ITEMS', 8, 0.9, '#b45309', (INV.x0 + INV.x1) / 2, INV.z1 - 1.2, { size: 0.55 });
@@ -1828,7 +1849,7 @@
       first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 0.3, el: 0.8, dist: 100, floor: 3 },
       ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 2], az: 0.42, el: 0.72, dist: 60 },
-      inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2 + 2], az: 0.12, el: 1.12, dist: 76 },
+      inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2 + 2], az: 0.12, el: 1.0, dist: 92 },
     };
     const want = { target: cam.target.clone(), az: cam.az, el: cam.el, dist: cam.dist };
     // Phones held upright: turn the yard side-on so the row of buildings runs
@@ -1840,7 +1861,7 @@
       first: { target: [BX, FLOOR_Y[2], BZ], az: 1.2, el: 1.0, dist: 125, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 1.2, el: 0.9, dist: 125, floor: 3 },
       ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 4], az: 1.05, el: 0.86, dist: 82 },
-      inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2], az: 1.1, el: 0.9, dist: 110 },
+      inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2], az: 1.1, el: 0.9, dist: 130 },
     };
     let viewName = 'overview', baseAz = cam.az, lastInput = -1e9, clock = 0;
     const aspectNow = () => host.clientWidth / Math.max(1, host.clientHeight);
@@ -1962,6 +1983,31 @@
       }
       want.dist = nd; lastInput = clock;
     };
+    // Store items: the card or any pallet of the item.
+    const pickStock = (cx, cy) => {
+      if (!stockPick.length) return null;
+      const r = el.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const hit = ray.intersectObjects(stockPick, false)[0];
+      if (!hit) return null;
+      if (hit.object.isSprite) return hit.object.userData.stockBay;
+      return hit.instanceId != null ? stockInstBay[hit.instanceId] : null;
+    };
+    const selectStock = bi => {
+      const prev = stockSel != null ? stockTiles.find(T => T.sprite.userData.stockBay === stockSel) : null;
+      if (prev) { prev.popped = false; prev.sprite.material.map = prev.small; prev.sprite.material.needsUpdate = true; prev.sprite.scale.set(2.9, 2.9 * 170 / 400, 1); prev.sprite.renderOrder = 5; }
+      stockSel = bi;
+      const T = bi != null ? stockTiles.find(t => t.sprite.userData.stockBay === bi) : null;
+      if (!T) { stockSel = null; renderBar(); return; }
+      T.popped = true; T.sprite.material.map = T.big; T.sprite.material.needsUpdate = true; T.sprite.scale.set(5.4, 5.4 * 360 / 560, 1); T.sprite.renderOrder = 12;
+      want.target.set(T.x, 0, T.z); want.dist = Math.min(want.dist, 24); lastInput = clock;
+      const it = T.item;
+      ui.bar.innerHTML =
+        `<div class="saa-head"><b>${esc(it.type.toUpperCase())} · ${esc(it.size || '?')}${it.gsm ? ' · ' + esc(it.gsm) + ' gsm' : ''}${it.offcut ? ' · OFFCUT' : ''}</b><span>Inventory store</span><button class="saa-x" title="Close" aria-label="Close">&times;</button></div>` +
+        `<div class="saa-facts"><span><i>Brand</i> ${esc(it.brand || '—')}</span><span><i>Supplier</i> ${esc(it.supplier || '—')}</span><span><i>Balance</i> ${esc(stockBalance(it))}</span></div>`;
+      ui.bar.querySelector('.saa-x').onclick = () => selectStock(null);
+    };
     el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
       el.setPointerCapture(e.pointerId);
@@ -1999,7 +2045,9 @@
       if (pointers.size < 2) pinch0 = 0;
       if (drag && !drag.moved && performance.now() - drag.t < 600 && e.type === 'pointerup') {
         const id = pick(e.clientX, e.clientY);
-        select(id);
+        const sb = id == null ? pickStock(e.clientX, e.clientY) : null;
+        if (sb != null) { if (selectedId != null) select(null); selectStock(sb === stockSel ? null : sb); }
+        else { if (stockSel != null) selectStock(null); select(id); }
         lastInput = clock;
       }
       drag = null;
@@ -2037,6 +2085,7 @@
       const k = 1 - Math.exp(-dt * 3.2);
       cam.target.lerp(want.target, k); cam.az += (want.az - cam.az) * k; cam.el += (want.el - cam.el) * k; cam.dist += (want.dist - cam.dist) * k;
       applyCamera();
+      for (const T of stockTiles) T.sprite.position.y = T.y + (T.popped ? 1.4 : 0) + Math.sin(clock * 1.6 + T.phase) * 0.12;
       // Pallets: pop in, glide between spots.
       for (const p of pallets.values()) {
         if (p.pop < 1) { p.pop = Math.min(1, p.pop + dt * 2.2); p.g.scale.setScalar(p.pop <= 0 ? 0.001 : Math.max(0.001, easeBack(p.pop))); }
