@@ -153,7 +153,7 @@
   // too, and a wall from the lift's corner down to the kitchen's line closes
   // the kitchen side off from the hall.
   const GROUND_WALLS = [
-    [158, 533, 345, 533], [343, 533, 343, 718],
+    [343, 533, 343, 718],   // the kitchen's wall along the coating machines is gone (owner, 2026-10-24)
     [512, 630, 512, 718], [512, 822, 1058, 822], [512, 718, 512, 822], [158, 718, 343, 718]];
   const GROUND_LABELS = [['KITCHEN', 222, 625, 0.7], ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['HALL', 695, 440, 1.1],
     ['HALL', 735, 790, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
