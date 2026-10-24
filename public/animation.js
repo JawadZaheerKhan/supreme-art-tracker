@@ -677,57 +677,32 @@
     const small = Math.min(host.clientWidth, window.innerWidth) < 700;
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, small ? 1.75 : 2));
-    // The gallery look (owner, 2026-10-24, from hamzastudio.pk): soft VSM
-    // shadows, redrawn a few times a second rather than every frame.
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.VSMShadowMap;
-    renderer.shadowMap.autoUpdate = false;
-    renderer.shadowMap.needsUpdate = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     host.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xfffaf2);   // warm white
-    scene.fog = new THREE.Fog(0xfffaf2, 270, 460);
-    // A soft studio room for reflections: a warm box with a few bright panels
-    // (ceiling, windows), blurred into an environment map.
-    {
-      const env = new THREE.Scene(), eg = [], em = [];
-      const plane = (w, h, c, k, x, y, z, rx, ry) => {
-        const g = new THREE.PlaneGeometry(w, h), m = new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(k), side: THREE.DoubleSide });
-        eg.push(g); em.push(m);
-        const o = new THREE.Mesh(g, m); o.position.set(x, y, z); o.rotation.set(rx || 0, ry || 0, 0); env.add(o);
-      };
-      const rg = new THREE.BoxGeometry(20, 10, 20), rm = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff6e8).multiplyScalar(0.55), side: THREE.BackSide });
-      eg.push(rg); em.push(rm); env.add(new THREE.Mesh(rg, rm));
-      plane(20, 20, 0xd9d2c6, 0.3, 0, -4.95, 0, -Math.PI / 2);          // floor
-      plane(12, 12, 0xffffff, 3.2, 0, 4.9, 0, Math.PI / 2);             // ceiling light
-      plane(7, 4, 0xfff8eb, 2.4, -9.9, 2, -2, 0, Math.PI / 2);          // windows
-      plane(7, 4, 0xf5f9ff, 1.8, 9.9, 2, 3, 0, -Math.PI / 2);
-      plane(9, 3, 0xffffff, 1.2, 0, 2.5, -9.9);
-      const pm = new THREE.PMREMGenerator(renderer);
-      scene.environment = pm.fromScene(env, 0.04).texture;
-      pm.dispose(); eg.forEach(g => g.dispose()); em.forEach(m => m.dispose());
-    }
+    scene.background = new THREE.Color(0xeef3f8);
+    scene.fog = new THREE.Fog(0xeef3f8, 270, 460);
     const camera = new THREE.PerspectiveCamera(32, 1, 0.3, 800);   // near 0.3: close-ups of a machine don't clip
     const cam = { target: new THREE.Vector3(-50, 1, 0), az: 0.32, el: 0.7, dist: 230 };
 
-    scene.add(new THREE.AmbientLight(0xfffcf5, 0.45), new THREE.HemisphereLight(0xf5f9ff, 0xfff8ed, 1.15));   // warm, airy (as the gallery)
-    const sun = new THREE.DirectionalLight(0xfff8eb, 2.6);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
+    const sun = new THREE.DirectionalLight(0xffffff, 2.3);
     sun.position.set(-80, 95, 65); sun.target.position.set(-40, 0, 10); scene.add(sun.target);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(small ? 2048 : 4096, small ? 2048 : 4096);
+    sun.shadow.mapSize.set(small ? 1024 : 2048, small ? 1024 : 2048);
     Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 85, bottom: -85, near: 10, far: 260 });
-    sun.shadow.bias = -0.0004;
-    sun.shadow.normalBias = 0.08;
-    sun.shadow.radius = 4; sun.shadow.blurSamples = 8;   // soft edges
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.04;
     scene.add(sun);
 
     // Materials and mesh helpers.
     const mats = new Map();
     const mat = (color, extra) => {
       const key = color + (extra ? JSON.stringify(extra) : '');
-      if (!mats.has(key)) mats.set(key, new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.62, metalness: 0.05, envMapIntensity: 0.5 }, extra || {})));
+      if (!mats.has(key)) mats.set(key, new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.82, metalness: 0.04 }, extra || {})));
       return mats.get(key);
     };
     const geos = new Set();
@@ -748,18 +723,6 @@
       return m;
     };
     const textures = [];
-    let contactMat = null;
-    const contactGeos = new Map();   // one shared plane per size
-    const contactShadow = (w, d, parent, y) => {
-      if (!contactMat) contactMat = new THREE.MeshBasicMaterial({ map: canvasTex(256, 256, (g, cw, ch) => {
-        g.filter = 'blur(22px)'; g.fillStyle = 'rgba(0,0,0,1)'; const ix = cw * 0.19, iy = ch * 0.19; g.fillRect(ix, iy, cw - 2 * ix, ch - 2 * iy);
-      }), transparent: true, opacity: 0.42, depthWrite: false });
-      const key = w + 'x' + d;
-      let pg = contactGeos.get(key);
-      if (!pg) { pg = new THREE.PlaneGeometry(w, d); geos.add(pg); contactGeos.set(key, pg); }
-      const m = new THREE.Mesh(pg, contactMat); m.rotation.x = -Math.PI / 2; m.position.y = y || 0.02; m.renderOrder = 1;
-      parent.add(m); return m;
-    };
     const canvasTex = (w, h, draw) => {
       const c = document.createElement('canvas'); c.width = w; c.height = h;
       draw(c.getContext('2d'), w, h);
@@ -837,8 +800,8 @@
     const groundGeo = new THREE.ShapeGeometry(flatShape(-450, -450, 450, 450)); geos.add(groundGeo);
     // Own materials: in the Basement view the street goes see-through so the
     // whole basement shows, right up to its front wall.
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0xece7df, roughness: 0.8, envMapIntensity: 0.4, transparent: true });
-    const yardMat = new THREE.MeshStandardMaterial({ color: 0xfbf8f3, roughness: 0.7, envMapIntensity: 0.4, transparent: true });
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0xe9eef4, roughness: 0.82, transparent: true });
+    const yardMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.82, transparent: true });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
     const yardGeo = new THREE.ExtrudeGeometry(flatShape(SITE.x0, SITE.z0, SITE.x1, SITE.z1), { depth: 0.12, bevelEnabled: false }); geos.add(yardGeo);
@@ -893,7 +856,7 @@
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
     // ── Buildings (cut-away: tall back wall, low front so you see in) ──
-    const creamWall = new THREE.MeshPhysicalMaterial({ color: CREAM, roughness: 0.6, clearcoat: 0.1, clearcoatRoughness: 0.24, emissive: CREAM, emissiveIntensity: 0.045, envMapIntensity: 0.5, transparent: true, opacity: 0.82 });   // cream, tinted (owner)
+    const creamWall = new THREE.MeshStandardMaterial({ color: CREAM, roughness: 0.85, transparent: true, opacity: 0.82 });   // cream, tinted (owner)
     const building = (b, name, opts2) => {
       const g = new THREE.Group(); scene.add(g);
       const w = b.x1 - b.x0, d = b.z1 - b.z0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
@@ -1084,7 +1047,7 @@
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       // One slab material per floor (upper floors see-through in the overview).
-      const sm = new THREE.MeshPhysicalMaterial({ color: fi === 0 ? 0xe5e7eb : 0xf3f4f6, roughness: 0.42, clearcoat: 0.25, clearcoatRoughness: 0.24, envMapIntensity: 0.6, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // lightest gray floors (owner, 2026-10-24), polished like the gallery's
+      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe5e7eb : 0xf3f4f6, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // lightest gray floors (owner, 2026-10-24)
       slabMats.push(sm);
       for (const P of F.parts) {
         const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise;
@@ -2001,7 +1964,6 @@
       box(2.2, 0.95, 0.05, 0x1e3a5f, 0, 2.45, 4.52, g, false);
       for (const s of [-1, 1]) { box(0.05, 0.75, 1.1, 0x1e3a5f, s * 1.26, 2.4, 3.6, g, false); box(0.35, 0.18, 0.06, 0xfde68a, s * 0.95, 1.2, 4.52, g, false); }
       for (const z of [3.4, -2.5, -3.75]) for (const s of [-1, 1]) { const w = cyl(0.55, 0.55, 0.42, 0x111827, s * 1.1, 0.55, z, g, 14); w.rotation.z = Math.PI / 2; }
-      contactShadow(3.6, 11.5, g, 0.04);
       scene.add(g);
       return g;
     };
@@ -2103,7 +2065,6 @@
     const makePallet = (j, place, delay) => {
       const g = new THREE.Group(); palletRoot.add(g);
       const content = new THREE.Group(); g.add(content);
-      contactShadow(2.5, 2.2, g, 0.03);
       const p = { g, content, job: j, place, tag: null, tagKey: '', ring: null, move: null, pop: reduceMotion ? 1 : -(delay || 0), top: 1 };
       fillPallet(p); setTag(p); placeTag(p);
       g.scale.setScalar(reduceMotion ? 1 : 0.001);
@@ -2611,7 +2572,6 @@
       f.position.x += tmp.x / d * step; f.position.z += tmp.z / d * step;
       return false;
     };
-    let shadowT = 0;
     const tick = (now) => {
       raf = active ? requestAnimationFrame(tick) : 0;
       if (!host.isConnected || host.offsetParent === null || document.hidden) { last = now; return; }
@@ -2726,7 +2686,6 @@
       const near = trucks.some(t => t.g.visible && Math.abs(t.g.position.x - gx) < 7 && Math.abs(t.g.position.z - GATE.z) < 7);
       boomAngle += ((near ? 1.35 : 0) - boomAngle) * Math.min(1, dt * 4);
       boomPivot.rotation.z = -boomAngle;
-      shadowT -= dt; if (shadowT <= 0) { renderer.shadowMap.needsUpdate = true; shadowT = 1 / 12; }
       renderer.render(scene, camera);
     };
 
@@ -2803,7 +2762,6 @@
       renderStats(); renderBar();
     };
     applyJobs(opts.jobs, true);
-    scene.traverse(o => { const m = o.material; if (m && m.isMeshStandardMaterial && !m.isMeshPhysicalMaterial && m.envMapIntensity === 1) m.envMapIntensity = 0.5; });
     // Replay today's deliveries once, so the trucks' trips are seen.
     if (!reduceMotion) for (const s of todaysShipments(jobs).slice(0, 3)) enqueueDeparture(s.job, s.cartons, null);
     resize(); setView('overview', true);
