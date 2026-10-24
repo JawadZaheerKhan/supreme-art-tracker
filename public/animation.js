@@ -117,7 +117,10 @@
   // floor / open area sit RAISE below the hall's.
   const RAISE = 6;                              // the hall block above the office block ("a little more", owner 2026-10-24)
   const FLOOR_Y = [-5, RAISE, 11 + RAISE, 22 + RAISE];
-  const OPEN_RAISE = -RAISE;                    // the 2nd floor's open area, half a floor below the roof
+  // The open area over the offices sits just OPEN_STEP above the hall's 1st
+  // floor - a small ramp up to it (owner, 2026-10-24).
+  const OPEN_STEP = 1.2;
+  const OPEN_RAISE = FLOOR_Y[2] + OPEN_STEP - FLOOR_Y[3];   // the 2nd floor's open area, relative to the roof
   const OFFICE_RAISE = -RAISE;                  // the 1st floor's offices, half a floor below its hall side
   const FRONT_RAISE = -RAISE;                   // the ground floor's office block, on the street
   const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
@@ -230,9 +233,9 @@
         ext: [0, 1, 3, 4, 5, 6, 7, 8, 9], street: 6,   // the hall / offices line is the inner wall below; the core's front is the side wing's façade
         walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS,
         // Ramp from the hall up to the 2nd floor's open area over the offices (owner, 2026-10-24).
-        ramp: [518, 622, 598, 822, 'front', FLOOR_Y[3] + OPEN_RAISE - FLOOR_Y[2]] },
+        ramp: [518, 742, 598, 822, 'front', OPEN_STEP] },
       // The offices are a few steps below the 1st floor's hall side (owner, 2026-10-24).
-      { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3], street: 2,
+      { plan: PLAN_G, raise: OFFICE_RAISE, curtainTop: FLOOR_Y[3] + OPEN_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3], street: 2,
         walls: [[560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
           [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
         terrace: [668, 1272, 902, 1345],   // no stairs up to the open area - the 1st floor's ramp goes there (owner, 2026-10-24)
@@ -880,7 +883,7 @@
         if (fi === 1 || fi === 2) P.outline.forEach(([px, py], k) => {
           if ((P.ext && !P.ext.includes(k)) || k === P.street) return;
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
-          curtain(X(px), Z(py), X(qx), Z(qy), FLOOR_Y[fi] + raise + SLAB + 2.4, FLOOR_Y[fi + 1] + Math.min(0, raise));
+          curtain(X(px), Z(py), X(qx), Z(qy), FLOOR_Y[fi] + raise + SLAB + 2.4, P.curtainTop != null ? P.curtainTop : FLOOR_Y[fi + 1] + Math.min(0, raise));
         });
         // Basement Hall-01 stands up out of the street to the hall block's ground floor.
         if (fi === 0 && P.aboveStreet) P.outline.forEach(([px, py], k) => {
@@ -1012,9 +1015,9 @@
       stoneAt(xa, pl, SLAB, top + 0.4, zl);
       facadeBits.stone.push([pl, (SLAB + top) / 2, z + 0.3, 0.14, top - SLAB, 0.6, 0], [xa, (SLAB + top) / 2, z + 0.3, 0.14, top - SLAB, 0.6, 0]);   // its returns
       stoneAt(pl, d0, SLAB, top, z); stoneAt(d1, xb, SLAB, top, z); stoneAt(d0, d1, doorTop + 0.4, top, z);
-      win(xa + 1.4, pl - 1.6, 1.8, 18.2, 4, 4, zl);      // tall stair window
-      win(mc - 2.1, mc + 2.1, 13.8, 17.0, 4, 2, z);      // small window over the terrace
-      win(xb - 3.0, xb - 0.6, 1.8, 18.2, 3, 4, z);       // tall strip window
+      win(xa + 1.4, pl - 1.6, 1.8, top - 1.2, 4, 4, zl);      // tall stair window
+      win(mc - 2.1, mc + 2.1, top - 7.4, top - 4.4, 4, 2, z);      // small window over the terrace
+      win(xb - 3.0, xb - 0.6, 1.8, top - 1.2, 3, 4, z);       // tall strip window
       // Entrance: glass doors in a dark frame with steel handles, warm light inside.
       win(d0, d1, SLAB, doorTop, 2, 1, z);
       box(d1 - d0 + 0.5, 0.4, 0.3, 0x111827, (d0 + d1) / 2, doorTop + 0.2, z + 0.15, facade);
@@ -1031,7 +1034,7 @@
       for (const dx of [-3.5, 0, 3.5]) box(0.5, 0.05, 0.5, 0xfde68a, mc + dx, FLOOR_Y[2] + OFFICE_RAISE - 0.03, z + 1.8, facade, false);   // lights under the terrace (the entrance canopy)
       box(pr - pl + 1.6, 0.2, 2.4, 0x1f2937, mc, 0.1, z + 1.4, facade, false);                       // dark steps
       box(pr - pl - 0.2, 0.2, 1.5, 0x111827, mc, 0.3, z + 0.95, facade, false);
-      for (const [text, y, w, h, color, size] of [['SUPREME ART', 20.0, 11, 1.6, '#dc2626', 0.78], ['(PRIVATE) LIMITED', 18.6, 7, 0.9, '#1f2937', 0.7]]) {
+      for (const [text, y, w, h, color, size] of [['SUPREME ART', top - 1.8, 11, 1.6, '#dc2626', 0.78], ['(PRIVATE) LIMITED', top - 3.1, 7, 0.9, '#1f2937', 0.7]]) {
         const sign = decal(text, w, h, color, { size, weight: 900 }); sign.position.set(mc, y, z + 0.25); sign.renderOrder = 3; facade.add(sign);
       }
       // Paved forecourt with big tiles, like the photo.
