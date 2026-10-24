@@ -677,10 +677,10 @@
     const small = Math.min(host.clientWidth, window.innerWidth) < 700;
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, small ? 1.75 : 2));
-    // Soft shadows, redrawn a few times a second rather than every frame
-    // (lighter on the app - owner, 2026-10-24).
+    // The gallery look (owner, 2026-10-24, from hamzastudio.pk): soft VSM
+    // shadows, redrawn a few times a second rather than every frame.
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.VSMShadowMap;
     renderer.shadowMap.autoUpdate = false;
     renderer.shadowMap.needsUpdate = true;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -716,10 +716,11 @@
     const sun = new THREE.DirectionalLight(0xfff8eb, 2.6);
     sun.position.set(-80, 95, 65); sun.target.position.set(-40, 0, 10); scene.add(sun.target);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(small ? 1024 : 2048, small ? 1024 : 2048);
+    sun.shadow.mapSize.set(small ? 2048 : 4096, small ? 2048 : 4096);
     Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 85, bottom: -85, near: 10, far: 260 });
-    sun.shadow.bias = -0.0005;
-    sun.shadow.normalBias = 0.04;
+    sun.shadow.bias = -0.0004;
+    sun.shadow.normalBias = 0.08;
+    sun.shadow.radius = 4; sun.shadow.blurSamples = 8;   // soft edges
     scene.add(sun);
 
     // Materials and mesh helpers.
@@ -892,7 +893,7 @@
       .forEach(([x, z], i) => tree(x, z, 0.9 + ((i * 37) % 10) / 22));
 
     // ── Buildings (cut-away: tall back wall, low front so you see in) ──
-    const creamWall = new THREE.MeshStandardMaterial({ color: CREAM, roughness: 0.6, emissive: CREAM, emissiveIntensity: 0.045, envMapIntensity: 0.5, transparent: true, opacity: 0.82 });   // cream, tinted (owner)
+    const creamWall = new THREE.MeshPhysicalMaterial({ color: CREAM, roughness: 0.6, clearcoat: 0.1, clearcoatRoughness: 0.24, emissive: CREAM, emissiveIntensity: 0.045, envMapIntensity: 0.5, transparent: true, opacity: 0.82 });   // cream, tinted (owner)
     const building = (b, name, opts2) => {
       const g = new THREE.Group(); scene.add(g);
       const w = b.x1 - b.x0, d = b.z1 - b.z0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
@@ -1083,7 +1084,7 @@
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       // One slab material per floor (upper floors see-through in the overview).
-      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe5e7eb : 0xf3f4f6, roughness: 0.45, envMapIntensity: 0.6, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // lightest gray floors (owner, 2026-10-24), a soft polish
+      const sm = new THREE.MeshPhysicalMaterial({ color: fi === 0 ? 0xe5e7eb : 0xf3f4f6, roughness: 0.42, clearcoat: 0.25, clearcoatRoughness: 0.24, envMapIntensity: 0.6, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // lightest gray floors (owner, 2026-10-24), polished like the gallery's
       slabMats.push(sm);
       for (const P of F.parts) {
         const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise;
@@ -2802,7 +2803,7 @@
       renderStats(); renderBar();
     };
     applyJobs(opts.jobs, true);
-    scene.traverse(o => { const m = o.material; if (m && m.isMeshStandardMaterial && m.envMapIntensity === 1) m.envMapIntensity = 0.5; });
+    scene.traverse(o => { const m = o.material; if (m && m.isMeshStandardMaterial && !m.isMeshPhysicalMaterial && m.envMapIntensity === 1) m.envMapIntensity = 0.5; });
     // Replay today's deliveries once, so the trucks' trips are seen.
     if (!reduceMotion) for (const s of todaysShipments(jobs).slice(0, 3)) enqueueDeparture(s.job, s.cartons, null);
     resize(); setView('overview', true);
