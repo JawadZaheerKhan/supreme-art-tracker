@@ -112,8 +112,12 @@
   const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
   const FLOOR_Y = [-5, 0, 11, 22];              // basement (one storey down, owner), ground (street), 1st floor, roof
   const RAISE = 1.2;                            // the ground floor's back part, a few steps up
-  const OPEN_RAISE = 0.8;                       // the 2nd floor's open area, a little above the roof
-  const OFFICE_RAISE = 1.0;                     // the 1st floor's offices, a little above its hall side
+  // The offices block (Dining Room side) is LOWER than the hall side on every
+  // floor, the same step as on the ground floor (owner's marked heights,
+  // 2026-10-24): the 1st floor's offices and the 2nd floor's open area sit
+  // RAISE below their floor's hall side.
+  const OPEN_RAISE = -RAISE;                    // the 2nd floor's open area, below the roof
+  const OFFICE_RAISE = -RAISE;                  // the 1st floor's offices, below its hall side
   const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
   // Is this basement plan point in the raised back part (Hall-01 side)?
   const basementRaise = (px, py) => (py < 703 || px < 500) ? BASE_RAISE : 0;
@@ -136,10 +140,13 @@
   // stairs start and arrive) as floor.
   const TOWER_LOBBY = [22, 392, 172, 495];              // ground-floor-plan pixels
   // Rooms, halls, Breaking Area and the hall with the ablution row.
+  // The owner's white marks (2026-10-24) took out the hall's wall by the
+  // rooms column, the top rooms' and store's walls, the walls round the
+  // Breaking Area and the Sorting / Pasting halls, the wall over the
+  // ablution hall and the kitchen's short wall: one open hall now.
   const UPPER_WALLS = [
-    [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533], [262, 540, 262, 690],
-    [512, 158, 512, 718], [697, 158, 697, 348], [875, 158, 875, 348], [512, 348, 1058, 348], [512, 530, 875, 530], [875, 348, 875, 718],
-    [512, 630, 600, 718], [600, 718, 1058, 718], [975, 718, 975, 760], [1013, 718, 1013, 760], [512, 822, 1058, 822], [512, 718, 512, 822],
+    [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533],
+    [975, 718, 975, 760], [1013, 718, 1013, 760], [512, 822, 1058, 822], [512, 718, 512, 822],
     [158, 718, 343, 718], [410, 718, 512, 718]];
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
     ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
@@ -219,7 +226,7 @@
         outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [412, 718], [412, 940], [212, 940], [212, 718], [158, 718]],
         ext: [0, 1, 3, 4, 5, 6, 7, 8, 9], street: 6,   // the hall / offices line is the inner wall below; the core's front is the side wing's façade
         walls: UPPER_WALLS, holes: [[218, 801, 276, 905, 'LRB']], lift: LIFT_G, labels: UPPER_LABELS },
-      // The offices are a little above the 1st floor's hall side (owner, 2026-10-22).
+      // The offices are a few steps below the 1st floor's hall side (owner, 2026-10-24).
       { plan: PLAN_G, raise: OFFICE_RAISE, outline: [[512, 822], [1058, 822], [1058, 1272], [512, 1272]], ext: [1, 2, 3], street: 2,
         walls: [[560, 822, 560, 938], [512, 938, 1058, 938], [697, 938, 697, 1272], [512, 1050, 697, 1050], [697, 1093, 875, 1093], [697, 1160, 875, 1160],
           [875, 938, 875, 1272], [920, 938, 920, 1272], [920, 1045, 1058, 1045]],
@@ -846,10 +853,11 @@
           }
           for (const [e, f, g2, h] of extra || []) railing(X(e), Z(f), X(g2), Z(h), SLAB, pg);
         }
-        const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB + raise, bevelEnabled: false }); geos.add(sg);
-        const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.position.y = -raise; slab.receiveShadow = true; pg.add(slab);
+        const up = Math.max(0, raise);           // a lowered part is a plain slab at its own level
+        const sg = new THREE.ExtrudeGeometry(shape, { depth: SLAB + up, bevelEnabled: false }); geos.add(sg);
+        const slab = new THREE.Mesh(sg, sm); slab.rotation.x = -Math.PI / 2; slab.position.y = -up; slab.receiveShadow = true; pg.add(slab);
         const eg = new THREE.EdgesGeometry(sg); geos.add(eg);
-        const edges = new THREE.LineSegments(eg, edgeMat); edges.rotation.x = -Math.PI / 2; edges.position.y = -raise; pg.add(edges);
+        const edges = new THREE.LineSegments(eg, edgeMat); edges.rotation.x = -Math.PI / 2; edges.position.y = -up; pg.add(edges);
         // Outer walls (on the part's outside edges) and room walls, low so you see in.
         P.outline.forEach(([px, py], k) => {
           if (P.ext && !P.ext.includes(k)) return;
@@ -930,7 +938,7 @@
         }
         if (P.terrace) {
           const [a, b, c, d] = P.terrace;
-          box(X(c) - X(a), SLAB + raise, Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, (SLAB - raise) / 2, (Z(b) + Z(d)) / 2, pg);   // solid down to the floor, like a raised part
+          box(X(c) - X(a), SLAB + Math.max(0, raise), Z(d) - Z(b), 0xe7e5e4, (X(a) + X(c)) / 2, (SLAB - Math.max(0, raise)) / 2, (Z(b) + Z(d)) / 2, pg);   // solid down to the floor, like a raised part
           railing(X(a), Z(d), X(c), Z(d), SLAB, pg); railing(X(a), Z(b), X(a), Z(d), SLAB, pg); railing(X(c), Z(b), X(c), Z(d), SLAB, pg);
         }
         for (const [text, px, py, s] of P.labels || []) {
