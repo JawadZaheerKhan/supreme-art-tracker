@@ -14818,7 +14818,7 @@ async function exportInventoryReport() {
 // Sizing the wrapper to its widest child makes the two line up; min-width
 // keeps a narrow table's heading full-width.
 const REPORT_PRINT_WRAP = 'font-family:Arial,sans-serif;color:#000;width:max-content;min-width:100%;';
-function reportPrintHeading({ title, formCode, scope, dateText, note, tag, tagColor }) {
+function reportPrintHeading({ title, formCode, scope, dateText, note, tag, tagColor, challanNo }) {
   return `
       <div style="border:1px solid #555;background:#f3eee4;padding:3px 7px;break-inside:avoid;">
         <div style="display:grid;grid-template-columns:150px 1fr 150px;align-items:center;gap:5px;">
@@ -14832,7 +14832,7 @@ function reportPrintHeading({ title, formCode, scope, dateText, note, tag, tagCo
             ${formCode ? `<div style="font-size:8pt;margin-top:1px;">${esc(formCode)}</div>` : ''}
             ${scope ? `<div style="font-size:8pt;margin-top:1px;">${esc(scope)}</div>` : ''}
           </div>
-          <div style="font-size:8pt;text-align:right;align-self:end;white-space:nowrap;">${esc(dateText || '')}</div>
+          <div style="font-size:8pt;text-align:right;align-self:end;white-space:nowrap;">${challanNo ? `<div style="font-size:12pt;font-weight:bold;color:#a32d2d;">Challan No. ${esc(String(challanNo))}</div>` : ''}${esc(dateText || '')}</div>
         </div>
         ${note ? `<div style="font-size:8pt;text-align:center;">${esc(note)}</div>` : ''}
       </div>`;
@@ -14937,9 +14937,39 @@ function applyReportExcelCols(ws, header, aoa) {
   }));
 }
 
-function printInventoryReport() {
+// Offcut print asks first (owner, 2026-10-24): with the next Challan No.,
+// or without - so a number is only used when it is wanted.
+async function askOffcutChallanThenPrint() {
+  let next = '…';
+  try { next = (await api('GET', '/api/offcut-challan/peek')).next; } catch (e) { notify('Could not read the next Challan No.: ' + e.message); }
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:440px;">
+    <h2>Print offcut list</h2>
+    <div style="font-size:13px;color:var(--text2);margin:-4px 0 14px;">Print it with a Challan No.? The number is used only if you pick it.</div>
+    <div class="modal-actions" style="flex-wrap:wrap;">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="closeModal(); printInventoryReport(null)">Print without</button>
+      <button class="btn btn-primary" onclick="closeModal(); printOffcutWithChallan()">Print with Challan No. ${esc(String(next))}</button>
+    </div>
+  </div>`);
+}
+async function printOffcutWithChallan() {
   const rows = buildInventoryReportRows();
   if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
+  const fmt = n => +(+n || 0).toFixed(2);
+  try {
+    const r = await api('POST', '/api/offcut-challan', {
+      scope: `Paper: ${invReportState.paperType || 'All'}${invReportState.search ? ' · Search: ' + invReportState.search : ''}`,
+      sheets: rows.reduce((a, x) => a + (+x.sheets || 0), 0),
+      packets: fmt(rows.reduce((a, x) => a + (+x.packets || 0), 0)),
+      lines: rows.map(x => ({ paper: x.paperType, size: x.size || '', gsm: x.gsm || '', packets: fmt(x.packets), sheets: +x.sheets || 0 })),
+    });
+    printInventoryReport(r.number);
+  } catch (e) { notify('Could not get a Challan No.: ' + e.message); }
+}
+function printInventoryReport(challanNo) {
+  const rows = buildInventoryReportRows();
+  if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
+  if (challanNo === undefined && invReportState.offcutMode === 'offcut') { askOffcutChallanThenPrint(); return; }
   const { groupBy, paperType } = invReportState;
   const showBrand    = groupBy === 'brand'    || groupBy === 'both';
   const showSupplier = groupBy === 'supplier' || groupBy === 'both';
@@ -14996,6 +15026,7 @@ function printInventoryReport() {
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'CURRENT BALANCE SUMMARY',
         tag: offcutOnly ? 'OFFCUT' : '',
+        challanNo: challanNo || null,
         scope: `${modeLabel} · Paper: ${paperType || 'All'}${offcutOnly && !invReportState.offcutInStock ? '' : ' · ' + irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
         dateText: `Generated: ${fmtDMYT(new Date())}`,
       })}</div>

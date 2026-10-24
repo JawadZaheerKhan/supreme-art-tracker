@@ -312,7 +312,8 @@ function getDb() {
 // Bumped again for carton_transactions.source (Station carton issues, 2026-10-14).
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
-const SCHEMA_VERSION = 'v2026-10-23-ready-check';
+// Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
+const SCHEMA_VERSION = 'v2026-10-24-offcut-challan';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -704,6 +705,16 @@ async function initDb() {
       )
     `;
     await sql`INSERT INTO shade_card_dc_counter (id, next_number) VALUES (1, 1) ON CONFLICT (id) DO NOTHING`;
+    // Challan No. on the offcut print of the Current Balance Summary - one
+    // number per print the user chooses to number; starts at 7 (owner,
+    // 2026-10-24). See /api/offcut-challan.
+    await sql`
+      CREATE TABLE IF NOT EXISTS offcut_challan_counter (
+        id          INTEGER PRIMARY KEY,
+        next_number INTEGER NOT NULL DEFAULT 7
+      )
+    `;
+    await sql`INSERT INTO offcut_challan_counter (id, next_number) VALUES (1, 7) ON CONFLICT (id) DO NOTHING`;
     await sql`
       CREATE TABLE IF NOT EXISTS jobs (
         id          SERIAL PRIMARY KEY,
@@ -8284,6 +8295,40 @@ function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrN
 // if two shade cards get delivered in the same moment, this peeked
 // number can go stale for whichever one submits second — harmless,
 // since that one just gets re-peeked/assigned the number after it.
+// Offcut print Challan No. (owner, 2026-10-24). peek: the number the next
+// numbered print will get (shown in the Print question). POST: claims it -
+// one UPDATE, so two prints at once never share a number - and logs what
+// was printed so the challan can be checked later.
+app.get('/api/offcut-challan/peek', requireAuth, requirePermission('rpt_current_balance', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT next_number FROM offcut_challan_counter WHERE id = 1`;
+    res.json({ next: rows.length ? rows[0].next_number : 7 });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/offcut-challan', requireAuth, requirePermission('rpt_current_balance', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      UPDATE offcut_challan_counter SET next_number = next_number + 1
+       WHERE id = 1
+       RETURNING next_number - 1 AS assigned
+    `;
+    if (!rows.length) return res.status(500).json({ error: 'Challan counter missing' });
+    const number = rows[0].assigned;
+    const b = req.body || {};
+    const lines = Array.isArray(b.lines) ? b.lines.slice(0, 500) : [];
+    await logAudit(sql, req, {
+      action: 'report.offcut_challan', entityType: 'offcut_challan', entityId: number,
+      summary: `Offcut Challan No. ${number} printed - ${lines.length} row${lines.length === 1 ? '' : 's'}, ${(+b.sheets || 0).toLocaleString()} sheets`,
+      metadata: { number, scope: String(b.scope || '').slice(0, 300), sheets: +b.sheets || 0, packets: +b.packets || 0, lines },
+    });
+    res.json({ number });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/shade-card-dc/peek', requireAuth, async (req, res) => {
   try {
     await dbReady;
