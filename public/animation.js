@@ -1916,7 +1916,9 @@
           box(0.52, 0.4, 0.44, (l + c) % 2 ? 0xc9a26b : 0xbf9660, ((c % 4) - 1.5) * 0.56, 0.39 + l * 0.42, (Math.floor(c / 4) - 1.5) * 0.46, g);
         }
         p.readyN = readyCartonsLeft(p.job);
-      } else if (place === 'ready' || place === 4 || place === 5) {
+      // Cartons only once ready: sorting and pasting still carry printed sheets /
+      // blanks - unit cartons are packed after folder gluing (owner, 2026-10-24).
+      } else if (place === 'ready') {
         const layers = place === 'ready' ? Math.max(1, Math.min(4, Math.ceil(Math.log10(num(p.job.qty) + 1) - 1))) : 2;
         for (let l = 0; l < layers; l++) for (const x of [-0.55, 0.55]) for (const z of [-0.45, 0.45]) box(1.04, 0.72, 0.86, (l + (x > 0) + (z > 0)) % 2 ? 0xc9a26b : 0xbf9660, x, 0.55 + l * 0.74, z, g);
         if (place === 'ready') box(2.2, 0.08, 1.8, 0x2563eb, 0, 0.55 + layers * 0.74 - 0.36, 0, g, false);
