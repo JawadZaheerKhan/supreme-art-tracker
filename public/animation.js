@@ -151,8 +151,9 @@
   // ablution hall and the kitchen's short wall: one open hall now.
   const UPPER_WALLS = [
     [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533],
-    // Two walls from the hall's edge where the owner drew white lines (2026-10-24).
-    [843, 756, 843, 822], [883, 756, 883, 822],
+    // The owner's white lines (2026-10-24): a room walled on three sides -
+    // two walls from the hall's edge and the one joining them by the sorting area.
+    [842, 713, 842, 822], [938, 713, 938, 822], [842, 713, 938, 713],
     [600, 822, 1058, 822], [512, 718, 512, 822],
     [158, 718, 343, 718], [410, 718, 512, 718]];
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
