@@ -481,6 +481,25 @@
   .saa-views { display: flex; gap: 6px; flex-shrink: 0; pointer-events: auto; }
   .saa-views button { font: 600 12px/1 inherit; font-family: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid #cbd5e1; background: rgba(255,255,255,.92); color: #1e293b; cursor: pointer; }
   .saa-views button.on { background: #A32D2D; border-color: #A32D2D; color: #fff; }
+  /* Beside the view, under the date (owner, 2026-10-24). */
+  .saa-top.saa-side { position: fixed; left: auto; right: 14px; flex-direction: column; align-items: stretch; gap: 10px; z-index: 39; pointer-events: auto; }
+  .saa-side .saa-stats { flex-direction: column; flex-wrap: nowrap; gap: 6px; }
+  .saa-side .saa-card { min-width: 0; padding: 6px 10px; }
+  .saa-side .saa-views { flex-direction: column; gap: 5px; }
+  .saa-side .saa-views button { text-align: left; padding: 8px 12px; font-size: 13px; }
+  /* A store item's card, popped up over the view. */
+  .saa-pop { position: absolute; transform: translate(-50%, -100%); min-width: 270px; max-width: 340px; background: #fff; border: 3px solid var(--tone, #2563eb); border-radius: 14px; box-shadow: 0 12px 32px rgba(15,23,42,.28); overflow: hidden; pointer-events: auto; z-index: 6; animation: saaPop .18s ease-out; }
+  @keyframes saaPop { from { transform: translate(-50%, -100%) scale(.6); opacity: 0; } to { transform: translate(-50%, -100%) scale(1); opacity: 1; } }
+  .saa-pop-h { background: var(--tone, #2563eb); color: #fff; font: 800 13px/1 inherit; font-family: inherit; letter-spacing: .04em; padding: 8px 12px; display: flex; align-items: center; gap: 8px; }
+  .saa-pop-h .off { margin-left: auto; background: #dc2626; padding: 2px 7px; border-radius: 999px; font-size: 11px; }
+  .saa-pop-h button { margin-left: 6px; background: rgba(255,255,255,.2); border: 0; color: #fff; width: 22px; height: 22px; border-radius: 6px; cursor: pointer; font-size: 15px; line-height: 1; }
+  .saa-pop-b { padding: 10px 14px 12px; color: #0f172a; }
+  .saa-pop-size { display: flex; align-items: baseline; gap: 10px; }
+  .saa-pop-size b { font-size: 30px; font-weight: 900; }
+  .saa-pop-size span { font-size: 17px; font-weight: 800; color: #334155; }
+  .saa-pop-row { display: flex; gap: 10px; font-size: 13px; margin-top: 6px; }
+  .saa-pop-row i { font-style: normal; color: #64748b; width: 64px; flex-shrink: 0; }
+  .saa-pop-row.bal b { color: #166534; font-size: 15px; }
   .saa-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; background: rgba(255,255,255,.95); border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; box-shadow: 0 4px 14px rgba(15,23,42,.08); font-size: 12px; color: #334155; }
   .saa-bar .saa-hint { color: #64748b; }
   .saa-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -761,7 +780,7 @@
     // Floating item cards (owner, 2026-10-24): one per item above its stack,
     // bobbing gently; a click swaps in the big card with the details.
     const stockTiles = [], stockPick = [];
-    let stockInstBay = [], stockSel = null;
+    let stockInstBay = [], stockSel = null, hideStockPop = () => {};
     const fmtQty = n => { const r = Math.round(n * 100) / 100; return Number.isInteger(r) ? r.toLocaleString() : r.toFixed(2); };
     const stockBalance = it => it.perPack > 0 ? fmtQty(it.sheets / it.perPack) + ' ' + (it.unit || 'packets').toLowerCase() + ' · ' + it.sheets.toLocaleString() + ' sheets' : it.sheets.toLocaleString() + ' sheets';
     const tileTex = (it, big) => canvasTex(big ? 560 : 400, big ? 360 : 170, (g, w, h) => {
@@ -795,7 +814,8 @@
       if (key === stockKey) return;
       stockKey = key;
       stockSel = null;
-      for (const T of stockTiles) { for (const t of [T.small, T.big]) { t.dispose(); const k = textures.indexOf(t); if (k >= 0) textures.splice(k, 1); } }
+      for (const T of stockTiles) { T.small.dispose(); const k = textures.indexOf(T.small); if (k >= 0) textures.splice(k, 1); }
+      hideStockPop();   // set once the overlay exists
       stockTiles.length = 0; stockPick.length = 0; stockInstBay = [];
       stockRoot.traverse(o => { if (o.geometry) { o.geometry.dispose(); geos.delete(o.geometry); } if (o.material) { o.material.dispose(); } });
       while (stockRoot.children.length) stockRoot.remove(stockRoot.children[0]);
@@ -817,11 +837,11 @@
         stockRoot.add(bases, papers); stockPick.push(bases, papers);
         bays.forEach((b, bi) => {
           const [tx, lv, tz] = b.tile, ty = 0.3 + lv * PALLET_H + 1.25;
-          const small = tileTex(b.item, false), big = tileTex(b.item, true);
+          const small = tileTex(b.item, false);
           const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: small, transparent: true }));
           sp.scale.set(2.9, 2.9 * 170 / 400, 1); sp.position.set(tx, ty, tz); sp.renderOrder = 5; sp.userData.stockBay = bi;
           stockRoot.add(sp); stockPick.push(sp);
-          stockTiles.push({ sprite: sp, small, big, item: b.item, x: tx, y: ty, z: tz, phase: bi * 0.7, popped: false });
+          stockTiles.push({ sprite: sp, small, item: b.item, x: tx, y: ty, z: tz, phase: bi * 0.7, popped: false });
         });
       }
       if (overflow) floorDecal('+' + overflow + ' MORE ITEMS', 8, 0.9, '#b45309', (INV.x0 + INV.x1) / 2, INV.z1 - 1.2, { size: 0.55 });
@@ -1891,7 +1911,25 @@
     ui.views.innerHTML = '<button data-v="overview">Overview</button><button data-v="basement">Basement</button><button data-v="ground">Ground</button><button data-v="first">1st Floor</button><button data-v="roof">2nd Floor</button><button data-v="ready">Ready Stock</button><button data-v="inventory">Inventory</button>';
     ui.bar = document.createElement('div'); ui.bar.className = 'saa-bar';
     ui.msg = document.createElement('div'); ui.msg.className = 'saa-empty'; ui.msg.style.display = 'none'; ui.msg.style.pointerEvents = 'none';
-    host.append(ui.top, ui.bar, ui.msg);
+    ui.pop = document.createElement('div'); ui.pop.className = 'saa-pop'; ui.pop.style.display = 'none';
+    host.append(ui.top, ui.bar, ui.msg, ui.pop);
+    hideStockPop = () => { ui.pop.style.display = 'none'; };
+    // Stats + view buttons beside the view, under the date, when the page
+    // has room on the right; otherwise over the view as before (owner, 2026-10-24).
+    const layoutTop = () => {
+      const r = host.getBoundingClientRect(), space = window.innerWidth - r.right;
+      if (active && r.width > 0 && space >= 200) {
+        if (ui.top.parentNode !== document.body) document.body.append(ui.top);
+        ui.top.classList.add('saa-side');
+        const d = document.getElementById('app-date'), db = d && d.offsetParent !== null ? d.getBoundingClientRect() : null;
+        ui.top.style.top = Math.round(db && db.height ? db.bottom + 12 : Math.max(12, r.top)) + 'px';
+        ui.top.style.width = Math.round(Math.min(230, space - 28)) + 'px';
+      } else {
+        if (ui.top.parentNode !== host) host.prepend(ui.top);
+        ui.top.classList.remove('saa-side'); ui.top.style.top = ''; ui.top.style.width = '';
+      }
+    };
+    window.addEventListener('resize', layoutTop);
     ui.views.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; select(null); setView(b.dataset.v); lastInput = clock; });
 
     let jobs = [], selectedId = null;
@@ -1996,17 +2034,42 @@
     };
     const selectStock = bi => {
       const prev = stockSel != null ? stockTiles.find(T => T.sprite.userData.stockBay === stockSel) : null;
-      if (prev) { prev.popped = false; prev.sprite.material.map = prev.small; prev.sprite.material.needsUpdate = true; prev.sprite.scale.set(2.9, 2.9 * 170 / 400, 1); prev.sprite.renderOrder = 5; }
+      if (prev) { prev.popped = false; prev.sprite.scale.set(2.9, 2.9 * 170 / 400, 1); prev.sprite.renderOrder = 5; }
       stockSel = bi;
       const T = bi != null ? stockTiles.find(t => t.sprite.userData.stockBay === bi) : null;
-      if (!T) { stockSel = null; renderBar(); return; }
-      T.popped = true; T.sprite.material.map = T.big; T.sprite.material.needsUpdate = true; T.sprite.scale.set(5.4, 5.4 * 360 / 560, 1); T.sprite.renderOrder = 12;
-      want.target.set(T.x, 0, T.z); want.dist = Math.min(want.dist, 24); lastInput = clock;
-      const it = T.item;
+      if (!T) { stockSel = null; ui.pop.style.display = 'none'; renderBar(); return; }
+      // The card pops up over the view at the item; the camera stays put (owner, 2026-10-24).
+      T.popped = true; T.sprite.scale.set(3.4, 3.4 * 170 / 400, 1); T.sprite.renderOrder = 12;
+      lastInput = clock;
+      const it = T.item, tone = (STOCK_TYPES[it.type] || ['#475569'])[0];
+      ui.pop.style.setProperty('--tone', tone);
+      ui.pop.innerHTML =
+        `<div class="saa-pop-h">${esc(it.type.toUpperCase())}${it.offcut ? '<span class="off">OFFCUT</span>' : ''}<button title="Close" aria-label="Close">&times;</button></div>` +
+        `<div class="saa-pop-b"><div class="saa-pop-size"><b>${esc(it.size || '?')}</b>${it.gsm ? `<span>${esc(it.gsm)} GSM</span>` : ''}</div>` +
+        `<div class="saa-pop-row"><i>Brand</i><b>${esc(it.brand || '—')}</b></div>` +
+        `<div class="saa-pop-row"><i>Supplier</i><b>${esc(it.supplier || '—')}</b></div>` +
+        `<div class="saa-pop-row bal"><i>Balance</i><b>${esc(stockBalance(it))}</b></div></div>`;
+      ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); selectStock(null); };
+      ui.pop.style.display = '';
+      ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
+      placeStockPop();
       ui.bar.innerHTML =
         `<div class="saa-head"><b>${esc(it.type.toUpperCase())} · ${esc(it.size || '?')}${it.gsm ? ' · ' + esc(it.gsm) + ' gsm' : ''}${it.offcut ? ' · OFFCUT' : ''}</b><span>Inventory store</span><button class="saa-x" title="Close" aria-label="Close">&times;</button></div>` +
         `<div class="saa-facts"><span><i>Brand</i> ${esc(it.brand || '—')}</span><span><i>Supplier</i> ${esc(it.supplier || '—')}</span><span><i>Balance</i> ${esc(stockBalance(it))}</span></div>`;
       ui.bar.querySelector('.saa-x').onclick = () => selectStock(null);
+    };
+    // Keep the pop-up over its item as the view turns / zooms; hidden when the item is behind the camera.
+    const popV = new THREE.Vector3();
+    const placeStockPop = () => {
+      if (stockSel == null || !ui.pop || ui.pop.style.display === 'none') return;
+      const T = stockTiles.find(t => t.sprite.userData.stockBay === stockSel);
+      if (!T) return;
+      popV.copy(T.sprite.position); popV.y += 0.8; popV.project(camera);
+      const w = host.clientWidth, h = host.clientHeight;
+      if (popV.z > 1) { ui.pop.style.visibility = 'hidden'; return; }
+      ui.pop.style.visibility = '';
+      const x = Math.max(150, Math.min(w - 150, (popV.x + 1) / 2 * w)), y = Math.max(ui.pop.offsetHeight + 8, Math.min(h - 70, (1 - popV.y) / 2 * h));
+      ui.pop.style.left = x + 'px'; ui.pop.style.top = y + 'px';
     };
     el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
@@ -2085,7 +2148,8 @@
       const k = 1 - Math.exp(-dt * 3.2);
       cam.target.lerp(want.target, k); cam.az += (want.az - cam.az) * k; cam.el += (want.el - cam.el) * k; cam.dist += (want.dist - cam.dist) * k;
       applyCamera();
-      for (const T of stockTiles) T.sprite.position.y = T.y + (T.popped ? 1.4 : 0) + Math.sin(clock * 1.6 + T.phase) * 0.12;
+      for (const T of stockTiles) T.sprite.position.y = T.y + (T.popped ? 0.5 : 0) + Math.sin(clock * 1.6 + T.phase) * 0.12;
+      placeStockPop();
       // Pallets: pop in, glide between spots.
       for (const p of pallets.values()) {
         if (p.pop < 1) { p.pop = Math.min(1, p.pop + dt * 2.2); p.g.scale.setScalar(p.pop <= 0 ? 0.001 : Math.max(0.001, easeBack(p.pop))); }
@@ -2179,6 +2243,7 @@
       renderer.setSize(w, h, false);
       camera.aspect = w / h; camera.updateProjectionMatrix();
       if (viewName !== 'focus') setView(viewName);
+      layoutTop();
     };
     const ro = new ResizeObserver(resize); ro.observe(host);
 
@@ -2233,10 +2298,13 @@
         active = on;
         if (on) { last = performance.now(); raf = requestAnimationFrame(tick); resize(); }
         else if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        layoutTop();
       },
       destroy() {
         this.setActive(false);
         ro.disconnect();
+        window.removeEventListener('resize', layoutTop);
+        ui.top.remove();
         geos.forEach(g => g.dispose()); textures.forEach(t => t.dispose()); mats.forEach(m => m.dispose());
         scene.traverse(o => { if (o.isMesh && o.material && !([...mats.values()].includes(o.material))) { o.material.map && o.material.map.dispose(); o.material.dispose(); } });
         renderer.dispose();
