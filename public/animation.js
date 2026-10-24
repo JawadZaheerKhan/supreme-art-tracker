@@ -755,11 +755,16 @@
       return m;
     };
     // Rounded tag that always faces the camera.
+    // Only as wide as its text - no empty space either side (owner, 2026-10-24).
+    const tagMeasure = document.createElement('canvas').getContext('2d');
     const tag = (title, sub, tone, base) => {
       const bg = tone === 'red' ? '#dc2626' : tone === 'blue' ? '#1e40af' : tone === 'brand' ? '#A32D2D' : tone === 'amber' ? '#b45309' : '#ffffff';
       const fg = tone ? '#ffffff' : '#0f172a';
       const fg2 = tone ? 'rgba(255,255,255,.85)' : '#64748b';
-      const tex = canvasTex(512, sub ? 176 : 120, (g, w, h) => {
+      tagMeasure.font = `800 54px ${FONT}`; let tw = tagMeasure.measureText(title).width;
+      if (sub) { tagMeasure.font = `600 38px ${FONT}`; tw = Math.max(tw, tagMeasure.measureText(sub).width); }
+      const TW = Math.max(150, Math.min(512, Math.ceil(tw + 64)));
+      const tex = canvasTex(TW, sub ? 176 : 120, (g, w, h) => {
         g.shadowColor = 'rgba(15,23,42,.25)'; g.shadowBlur = 10; g.shadowOffsetY = 3;
         g.fillStyle = bg; rrect(g, 10, 8, w - 20, h - 22, 26); g.fill();
         g.shadowColor = 'transparent';
@@ -772,8 +777,8 @@
       const sm = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
       const s = new THREE.Sprite(sm);
       s.renderOrder = 10;
-      s.userData.aspect = (sub ? 176 : 120) / 512;
-      s.userData.base = base || 3.4;
+      s.userData.aspect = (sub ? 176 : 120) / TW;
+      s.userData.base = (base || 3.4) * TW / 512;
       scaleTag(s);
       return s;
     };
@@ -1774,7 +1779,7 @@
     const recoloured = [];
     const paint = (who, c) => { if (who && who.userData.body) { who.userData.body.material = mat(c); recoloured.push(who); } };
     const applyOperators = list => {
-      for (const w of recoloured) if (w.userData.body) w.userData.body.material = mat(STAFF_BLACK);
+      for (const w of recoloured) { if (w.userData.body) w.userData.body.material = mat(STAFF_BLACK); w.userData.info = null; }
       recoloured.length = 0;
       for (const x of crewExtras) {
         if (x.isSprite) { const k = textures.indexOf(x.material.map); if (k >= 0) textures.splice(k, 1); x.material.map.dispose(); x.material.dispose(); }
@@ -1798,21 +1803,24 @@
           let who = c.built[k];
           if (!who) { const e = k - c.built.length; who = person(-1.4 + e * 1.1, c.depth / 2 + 1.1, Math.PI, c.g); crewExtras.push(who); }
           paint(who, OPERATOR_BLUE);
+          const r = roster.find(x => x.station === String(c.station).toUpperCase() && x.name === nm);
+          who.userData.info = { name: nm, role: 'Operator', roles: r ? r.roles : [], machine: c.name || '', station: c.station, crew: c };
           const tagS = nameTag(nm); who.add(tagS); crewExtras.push(tagS);
         });
       }
       // Line managers (one per production floor) and QC (at the ready areas), in red.
       const placed = new Set();
-      const standAt = (f, px, py, nm, face) => {
+      const standAt = (f, px, py, nm, face, info) => {
         const pl = floorPlan(f), who = person(wx(pl, px), wz(pl, py), face || 0, floorGroups[f], MANAGER_RED);
+        who.userData.info = info;
         who.position.y = SLAB + floorRaise(f, px, py) + 0.3; crewExtras.push(who);
         const tagS = nameTag(nm); who.add(tagS); crewExtras.push(tagS); placed.add(nm.toLowerCase());
       };
       const MANAGER_SPOTS = [[0, 640, 560], [2, 700, 600], [1, 600, 430]];
-      roster.filter(r => r.manager).forEach((r, i) => { if (!placed.has(r.name.toLowerCase()) && i < MANAGER_SPOTS.length) standAt(MANAGER_SPOTS[i][0], MANAGER_SPOTS[i][1], MANAGER_SPOTS[i][2], r.name); });
+      roster.filter(r => r.manager).forEach((r, i) => { if (!placed.has(r.name.toLowerCase()) && i < MANAGER_SPOTS.length) standAt(MANAGER_SPOTS[i][0], MANAGER_SPOTS[i][1], MANAGER_SPOTS[i][2], r.name, 0, { name: r.name, role: 'Line manager', roles: r.roles, station: r.station }); });
       const QC_SPOTS = [[1, 620, 400], [2, 540, 590], [1, 700, 400], [2, 560, 640]];
       let q = 0;
-      roster.filter(r => !r.manager && r.roles.includes('storage')).forEach(r => { if (!placed.has(r.name.toLowerCase()) && q < QC_SPOTS.length) { const sp = QC_SPOTS[q++]; standAt(sp[0], sp[1], sp[2], r.name, Math.PI); } });
+      roster.filter(r => !r.manager && r.roles.includes('storage')).forEach(r => { if (!placed.has(r.name.toLowerCase()) && q < QC_SPOTS.length) { const sp = QC_SPOTS[q++]; standAt(sp[0], sp[1], sp[2], r.name, Math.PI, { name: r.name, role: 'QC', roles: r.roles, station: r.station }); } });
     };
     applyOperators(opts.operators || []);
 
@@ -1829,6 +1837,7 @@
       for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
       for (const h of standby) if (!h.busy) h.g.visible = f == null || f === 1;
+      newRoot.visible = f == null || f === 1;
     };
     // Ready Stock: every ready order stands on the floor as its cartons (see fillPallet).
     floorDecal('MIL JOBS READY TO SHIP', 13, 1.2, '#166534', (READY.x0 + READY.x1) / 2, READY.z1 - 1.0, { size: 0.55 });
@@ -1905,8 +1914,9 @@
     const loadPt = (px, py) => new THREE.Vector3(wx(PLAN_G, px), FLOOR_Y[1] + floorRaise(1, px, py) + SLAB, wz(PLAN_G, py));
     const STANDBY_SPOTS = [[431, 805], [462, 805], [493, 805], [431, 860], [462, 860], [493, 860]];
     const UNLOAD_PT = loadPt(462, 915);
-    const standby = STANDBY_SPOTS.map(([px, py]) => {
+    const standby = STANDBY_SPOTS.map(([px, py], i) => {
       const g = handLifter(false), home = loadPt(px, py);
+      g.userData.who.userData.info = { name: 'Hand lifter ' + (i + 1), role: 'Hand lifter', note: 'No record in the app · stands by in the loading area' };
       g.position.copy(home); g.rotation.y = Math.PI;
       return { g, home, busy: false };
     });
@@ -1923,12 +1933,14 @@
         who.getWorldPosition(opV);
         if (Math.abs(opV.y - pt.y) > 4) continue;
         const d = (opV.x - pt.x) ** 2 + (opV.z - pt.z) ** 2;
-        if (d < bd) { bd = d; best = new THREE.Vector3(opV.x, pt.y, opV.z); }
+        if (d < bd) { bd = d; best = new THREE.Vector3(opV.x, pt.y, opV.z); best.info = who.userData && who.userData.info; }
       }
       return best;
     };
-    wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV.x0 + 12, INV.z1 - 3]);   // the store's forklift (parked until there's work)
+    wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV.x0 + 12, INV.z1 - 3])   // the store's forklift (parked until there's work)
+      .f.userData.info = { name: 'Store forklift', role: 'Forklift driver', note: 'No record in the app · at the inventory store' };
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: READY.z0 + 6, z1: READY.z1 - 3 }, [READY.x0 + 14, READY.z1 - 3]);
+    loader.f.userData.info = { name: 'Loader', role: 'Loader', note: 'No record in the app · loads the trucks at the Ready Store' };
 
     // ── Trucks ──
     const trucks = [];
@@ -1959,6 +1971,7 @@
       const g = makeTruck();
       g.position.set(dx, 0, DOCK_Z);
       const driver = person(dx + 1.85, DOCK_Z + 3.6, -Math.PI / 2);   // the driver stands by his truck (owner, 2026-10-24)
+      driver.userData.info = { name: 'Driver ' + (k + 1), role: 'Driver', note: 'Truck ' + (k + 1) + ' · no record in the app' };
       trucks.push({ g, k, dx, driver, state: 'docked', path: null, t: 0, badge: null, onDone: null });
     });
     // Smooth curves for a truck's trips (CatmullRom through key points).
@@ -1985,18 +1998,19 @@
       const place = p.place;
       g.scale.setScalar(place === 0 ? 1 : PALLET_SCALE);   // smaller pallets (owner, 2026-10-24)
       if (place === 0) {
-        // CTP: the job's steel plates on a plate table, not a pallet (owner,
+        // CTP: the job's steel plates, standing in a rack, not a pallet (owner,
         // 2026-10-24) - Plates on the job card (1 if blank); 4 = C M Y K,
         // any other count in other colours.
         const q = parseInt(String(((p.job.particulars || {}).plates || {}).quantity || '').replace(/[^0-9]/g, ''), 10);
         const n = Math.max(1, Math.min(12, Number.isFinite(q) && q > 0 ? q : 1));
         const cols = n === 4 ? [0x00aeef, 0xec008c, 0xfff200, 0x231f20] : [0xf97316, 0x16a34a, 0x7c3aed, 0xdc2626, 0x0891b2, 0xca8a04, 0xdb2777, 0x2563eb, 0x65a30d, 0x9333ea, 0xea580c, 0x0d9488];
-        box(1.8, 0.06, 1.3, 0x6b7280, 0, 0.72, 0, g);                                            // plate table
-        for (const lx of [-0.8, 0.8]) for (const lz of [-0.55, 0.55]) box(0.06, 0.7, 0.06, 0x374151, lx, 0.36, lz, g);
+        // Standing upright side by side in a low floor rack - no table (owner, 2026-10-24).
+        const depth = 0.2 + n * 0.1;
+        for (const lx of [-0.6, 0.6]) box(0.08, 0.1, depth, 0x374151, lx, 0.05, 0, g);            // rack rails
         for (let k = 0; k < n; k++) {
-          const ox = (k - (n - 1) / 2) * 0.07, y = 0.78 + k * 0.03;
-          box(1.4, 0.016, 1.0, 0xc0c7d1, ox, y, 0, g);                                            // aluminium plate
-          box(1.34, 0.006, 0.94, cols[k % cols.length], ox, y + 0.011, 0, g, false);               // its colour (the image)
+          const oz = (k - (n - 1) / 2) * 0.1;
+          box(1.4, 1.0, 0.016, 0xc0c7d1, 0, 0.6, oz, g);                                          // aluminium plate, on edge
+          box(1.34, 0.94, 0.006, cols[k % cols.length], 0, 0.6, oz + 0.011, g, false);              // its colour (the image)
         }
       } else box(2.4, 0.18, 2.0, 0xc08a57, 0, 0.09, 0, g);
       if (place === 0) { /* plates drawn above */ } else if (place === 'wait') {
@@ -2031,14 +2045,14 @@
       const j = p.job, blocked = isBlocked(j), urgent = /urgent/i.test(String(j.priority || ''));
       const tone = blocked ? 'red' : (selectedId === j.id ? 'blue' : (urgent ? 'amber' : ''));
       const rc = jobPlace(j) === 'ready' ? readyCartonsLeft(j) : 0;
-      const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobPlace(j) === 0 ? 'Plates' : clip(j.name || '', 20));
+      const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobPlace(j) === 0 ? 'Plates' : clip(j.name || '', 16));
       const title = jobPlace(j) === 'ready' && j.stock_group_name ? clip(j.stock_group_name, 18) : 'E-' + j.id;   // job number; a MIL job in the Ready Store: its MIL name (owner, 2026-10-24)
       const key = title + '|' + sub + '|' + tone;
       if (p.tagKey === key) return;
       disposeSprite(p.tag); disposeSprite(p.tagS);
       // Two tags: the full one for close up, a title-only one for the
       // overview so neighbouring pallets' tags don't pile on each other.
-      p.tag = tag(title, sub, tone); p.tagS = tag(title, '', tone, 2.5); p.tagKey = key;
+      p.tag = tag(title, sub, tone, 3.0); p.tagS = tag(title, '', tone, 2.2); p.tagKey = key;
       p.tag.userData.jobId = p.tagS.userData.jobId = j.id;
       p.g.add(p.tag, p.tagS);
       if (p.ring) { p.g.remove(p.ring); p.ring.material.dispose(); p.ring = null; }
@@ -2114,6 +2128,8 @@
               : nearOperator(from) || from.clone().add(new THREE.Vector3(2.4, 0, 1.2));
             const carry = routePts([from, ...via, to]);
             const mover = takeMover(); paintWho(mover, OPERATOR_BLUE);   // the machine's operator
+            const op = nearOperator(home), toName = String(k).startsWith('press:') ? 'its press' : (ZONE_STYLE[k] ? ZONE_STYLE[k][2].toLowerCase() : 'its next area');
+            mover.userData.who.userData.info = Object.assign({ name: 'Operator', role: 'Operator' }, op && op.info, { note: 'Moving E-' + p.job.id + ' to ' + toName });
             p.move = { phases: [routePts([home, from]), carry, routePts([to, home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone(), mover };
             return;
           }
@@ -2268,7 +2284,7 @@
     };
     const select = id => {
       const prev = selectedId; selectedId = id;
-      if (popTarget && (popTarget.ready || popTarget.job || popTarget.machine)) { popTarget = null; ui.pop.style.display = 'none'; }
+      if (popTarget && (popTarget.ready || popTarget.job || popTarget.machine || popTarget.person)) { popTarget = null; ui.pop.style.display = 'none'; }
       for (const k of [prev, id]) { const p = k != null && pallets.get(k); if (p) setTag(p), placeTag(p); }
       if (id != null) {
         const p = pallets.get(id);
@@ -2368,9 +2384,14 @@
     const showJobPop = p => {
       const j = p.job, sheets = num(j.sheets), ups = num(j.ups);
       const toPrint = sheets ? sheets.toLocaleString() + ' sheets' + (ups > 1 ? ' · ' + (sheets * ups).toLocaleString() + ' UC' : '') : '—';
+      const parts = j.particulars || {}, nc = parts.no_of_colors || {}, pl = parts.plates || {};
+      const specials = (Array.isArray(parts.special_colors) ? parts.special_colors : []).map(x => x && x.name).filter(Boolean);
+      const colours = [nc.quantity || nc.details || '', specials.join(', ')].filter(Boolean).join(' + ');
       openPop('#1e40af', esc(String(STAGES[stageIndex(j)] || '').toUpperCase()),
         `<div class="saa-pop-size"><b>E-${esc(j.id)}</b></div>` + popRow('Product', esc(j.name || '—')) + popRow('Company', esc(j.client || '—')) +
-        popRow('PO Qty', num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')) + popRow('Paper', esc(j.paper || '—')) + popRow('To print', esc(toPrint), 'bal') +
+        popRow('PO Qty', num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')) + popRow('Paper', esc(j.paper || '—')) +
+        popRow('Colours', esc(colours || '—')) + popRow('Ups', ups ? esc(ups) : '—') + (p.place === 0 ? popRow('Plates', esc(pl.quantity || '—')) : '') +
+        popRow('To print', esc(toPrint), 'bal') +
         (j.machine ? popRow('Machine', esc(j.machine)) : ''),
         { obj: p.g, dy: (p.top || 1) + 2.4, job: true });
     };
@@ -2417,6 +2438,35 @@
       for (let o = hit.object; o; o = o.parent) { const c = crews.find(cc => cc.g === o); if (c) return c.station || c.name ? c : null; }
       return null;
     };
+    // A person: the nearest thing up his tree that says who he is (owner, 2026-10-24).
+    const pickPerson = (cx, cy) => {
+      const r = el.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const shown = o => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+      const hit = ray.intersectObjects(people, true).find(h => !h.object.isSprite && shown(h.object));
+      if (!hit) return null;
+      let who = null;
+      for (let o = hit.object; o; o = o.parent) {
+        if (!who && people.includes(o)) who = o;
+        if (o.userData.info) return { who: who || o, info: o.userData.info };
+      }
+      if (!who) return null;
+      const c = crews.find(cc => { for (let o = who; o; o = o.parent) if (o === cc.g) return true; return false; });
+      return { who, info: c ? { name: 'No name on record', role: 'Machine crew', machine: c.name || '', station: c.station || '', crew: c } : { name: 'No name on record', role: 'Staff' } };
+    };
+    const showPersonPop = r => {
+      const i = r.info, last = i.crew ? lastJobFor(i.crew) : null;
+      const tone = i.role === 'Line manager' || i.role === 'QC' ? '#b91c1c' : i.role === 'Operator' ? '#1d4ed8' : '#1f2937';
+      openPop(tone, esc(String(i.role || 'Staff').toUpperCase()),
+        `<div class="saa-pop-size"><b>${esc(i.name || '—')}</b></div>` +
+        (i.machine ? popRow('Machine', esc(i.machine)) : '') +
+        (i.station && String(i.station).toUpperCase() !== String(i.machine || '').toUpperCase() ? popRow('Station', esc(i.station)) : '') +
+        (i.roles && i.roles.length ? popRow('Roles', esc(i.roles.join(', '))) : '') +
+        (last ? popRow('Last job', 'E-' + esc(last.job.id) + ' · ' + esc(clip(last.job.name || '', 22))) : '') +
+        (i.note ? popRow('Note', esc(i.note)) : ''),
+        { obj: r.who, dy: 2.6, person: true });
+    };
     const showReadyPop = p => {
       const j = p.job, n = readyCartonsLeft(j), R = num(j._readyQty), D = shippedCartons(j), mil = !!j.stock_group_name;
       ui.pop.style.setProperty('--tone', '#166534');
@@ -2460,7 +2510,7 @@
         if (pinch0 > 0) { zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, pinch0 / d); pinch0 = d; }
         return;
       }
-      if (!drag) { if (e.pointerType === 'mouse') el.style.cursor = pick(e.clientX, e.clientY) != null ? 'pointer' : 'grab'; return; }
+      if (!drag) { if (e.pointerType === 'mouse') el.style.cursor = pick(e.clientX, e.clientY) != null || pickNewJob(e.clientX, e.clientY) != null ? 'pointer' : 'grab'; return; }
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY;
       if (Math.abs(e.clientX - drag.sx) + Math.abs(e.clientY - drag.sy) > 5) drag.moved = true;
@@ -2484,7 +2534,16 @@
         const id = pick(e.clientX, e.clientY);
         const sb = id == null ? pickStock(e.clientX, e.clientY) : null;
         if (sb != null) { if (selectedId != null) select(null); selectStock(sb === stockSel ? null : sb); }
-        else { if (stockSel != null) selectStock(null); const mc = id == null ? pickMachine(e.clientX, e.clientY) : null; select(id); if (mc) showMachinePop(mc); }
+        else {
+          if (stockSel != null) selectStock(null);
+          const nj = id == null ? pickNewJob(e.clientX, e.clientY) : null;
+          const pr = id == null && nj == null ? pickPerson(e.clientX, e.clientY) : null;
+          const mc = id == null && nj == null && !pr ? pickMachine(e.clientX, e.clientY) : null;
+          select(id);
+          if (nj != null) { if (opts.onJobCard) opts.onJobCard(nj); }
+          else if (pr) showPersonPop(pr);
+          else if (mc) showMachinePop(mc);
+        }
         lastInput = clock;
       }
       drag = null;
@@ -2569,6 +2628,7 @@
       if (floorGroups[0].visible) for (const f of animated) f(dt, clock);
       for (const f of liftAnims) f(clock);
       for (const t of floorTags) scaleTag(t);
+      for (const t of newTiles.values()) scaleTag(t);
       people.forEach((pp, i) => { if (!pp.parent || pp.parent.type !== 'Scene') return; pp.position.y = 0.3 + Math.abs(Math.sin(clock * 2 + i)) * 0.05; });
       // Forklifts stay parked until there's work, then go back (owner, 2026-10-24).
       for (const w of wanderers) {
@@ -2639,6 +2699,31 @@
     };
     const ro = new ResizeObserver(resize); ro.observe(host);
 
+    // New jobs (not issued yet): just their job-number tiles, floating over
+    // the Production Office; a click opens the job card (owner, 2026-10-24).
+    const newRoot = new THREE.Group(); scene.add(newRoot);
+    const newTiles = new Map();
+    const syncNewTiles = () => {
+      const list = jobs.filter(j => jobPlace(j) === 'wait').sort((a, b) => a.id - b.id);
+      const ids = new Set(list.map(j => j.id));
+      for (const [id, sp] of newTiles) if (!ids.has(id)) { disposeSprite(sp); newTiles.delete(id); }
+      list.forEach((j, i) => {
+        let sp = newTiles.get(j.id);
+        if (!sp) { sp = tag('E-' + j.id, '', '', 2.0); sp.userData.newJobId = j.id; newRoot.add(sp); newTiles.set(j.id, sp); }
+        const col = i % 5, row = Math.floor(i / 5) % 4, layer = Math.floor(i / 20);
+        const px = 25 + col * 38, py = 140 + row * 28;
+        sp.position.set(wx(PLAN_P, px), FLOOR_Y[1] + FRONT_RAISE + SLAB + 2.0 + layer * 1.3, wz(PLAN_P, py));
+      });
+    };
+    const pickNewJob = (cx, cy) => {
+      if (!newTiles.size || !newRoot.visible) return null;
+      const r = el.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const hit = ray.intersectObjects([...newTiles.values()], false)[0];
+      return hit ? hit.object.userData.newJobId : null;
+    };
+
     // ── Public controller ──
     const applyJobs = (next, first) => {
       next = (next || []).filter(j => j && j.id != null);
@@ -2667,6 +2752,7 @@
         p.place = mv.to; p.pendingFill = true;
       }
       for (const p of pallets.values()) { const j = byId.get(p.job.id); if (j) { p.job = j; setTag(p); if (p.place === 'ready' && readyCartonsLeft(j) !== (p.readyN || 0)) p.pendingFill = true; if (zoneKeyFor(j, p.place) !== p.zoneKey) p.pendingFill = true; } }
+      syncNewTiles();
       layout(first);
       for (const p of pallets.values()) if (p.pendingFill && !p.move) { fillPallet(p); p.pendingFill = false; }
       for (const p of pallets.values()) placeTag(p);

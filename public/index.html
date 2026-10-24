@@ -39435,7 +39435,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=56';
+const CLIENT_ANIM_SRC = '/animation.js?v=57';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -39520,12 +39520,27 @@ async function refreshClientAnim(shell) {
   if (ctl && ctl.company !== company) { ctl.destroy(); ctl = null; delete clientAnim[shell]; }
   if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, stock: animStockRows(),
     // The Factory tab: an admin can move a job a stage forward / back from its pop-up (owner, 2026-10-24).
-    onStage: shell === 'factory' && canStageForward() ? factoryMoveStage : null });
+    onStage: shell === 'factory' && canStageForward() ? factoryMoveStage : null,
+    onJobCard: shell === 'factory' ? factoryJobCard : null });
   else { ctl.update(rows); if (ctl.setStock) ctl.setStock(animStockRows()); }
   ctl.setActive(true);
   // The operators at their machines, with their names - staff only (owner, 2026-10-24).
   if (!isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
 }
+// Factory tab: a new job's tile opens its job card - the printed card, on
+// screen (owner, 2026-10-24).
+function factoryJobCard(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:9.2in;background:#fff;color:#000;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;">
+      <b style="font-size:16px;">Job card · E-${j.id}</b>
+      <span>${canPrintJobCard() ? `<button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button> ` : ''}<button class="btn btn-sm" onclick="closeModal()">Close</button></span>
+    </div>
+    <div style="position:relative;width:8.5in;max-width:100%;overflow-x:auto;font-family:Arial,sans-serif;">${buildPrintCard(j)}</div>
+  </div>`);
+}
+
 // Factory tab: click a stage in the 3D view's bottom bar to move the job
 // there - the same move as the Jobs tab's pipeline, after a confirm
 // (Delivered is recorded from the Jobs tab).
