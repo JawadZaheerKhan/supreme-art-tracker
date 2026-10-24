@@ -3029,6 +3029,44 @@ app.delete('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
   }
 });
 
+// Line manager at the Station (owner, 2026-10-24): with the Manager PIN he
+// sees every machine's operators and can rename them or add / remove one.
+// Only the people on a machine - its name, PIN and roles stay with admin /
+// PM, and manager rows are left alone. PIN-verified on every call; PINs are
+// never sent back.
+app.post('/api/operators/manager-roster', requireStationUser, requirePermission('station_manager_pin'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyManagerPin(sql, String(req.body.pin || '').trim());
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const rows = await sql`SELECT id, name, roles, persons FROM operators WHERE active AND NOT is_manager ORDER BY name`;
+    res.json(rows);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+app.put('/api/operators/:id/manager-persons', requireStationUser, requirePermission('station_manager_pin'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyManagerPin(sql, String(req.body.pin || '').trim());
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const id = parseInt(req.params.id, 10);
+    const persons = parsePersons(req.body);
+    if (!persons.length) return res.status(400).json({ error: 'Add at least one operator on this machine' });
+    const before = (await sql`SELECT persons FROM operators WHERE id = ${id} AND active AND NOT is_manager`)[0];
+    if (!before) return res.status(404).json({ error: 'Machine not found' });
+    const updated = await sql`UPDATE operators SET persons = ${JSON.stringify(persons)} WHERE id = ${id} AND active AND NOT is_manager RETURNING id, name, roles, persons`;
+    const was = (Array.isArray(before.persons) ? before.persons : []).map(x => x && x.name).filter(Boolean).join(', ');
+    const by = String(req.body.person || '').trim() || v.operator.name;
+    await logAudit(sql, req, { action: 'operator.update', entityType: 'operator', entityId: id, summary: `${by} (Manager PIN) set the operators on ${updated[0].name}: ${persons.map(x => x.name).join(', ')} (was: ${was || 'none'})` });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Verify a PIN — used by the station PIN pad. Returns the operator's identity
 // (never the pin). requireWriteUser so the floor terminal can call it but the
 // read-only CEO account cannot.
