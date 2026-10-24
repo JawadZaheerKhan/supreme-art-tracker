@@ -384,6 +384,59 @@
       ['MAN-LAMINATION', 'MANUAL LAMINATION'], ['CTP', 'CTP'], [null, null]],
     first: [['BOBST', 'BOBST DOMINO 110'], ['BOBST MEDIA', 'BOBST MEDIA 68-II'], ['JAGENBERG', 'JAGENBERG PASTING'], ['THERM-LAMINATION', 'THERMAL LAMINATION']],
   };
+  // The owner's marked areas (2026-10-24), plan rects [x0, y0, x1, y1] per
+  // floor (0 basement - presses / die; 1 ground - coaters / inspection;
+  // 2 1st floor - gluers / sorting). Pallets fill them in order.
+  const FLOW_ZONES = {
+    issued: [[0, [407, 584, 508, 695]], [0, [616, 615, 760, 695]], [0, [935, 545, 1015, 616]], [0, [752, 731, 841, 791]],
+      [1, [463, 488, 562, 560]], [1, [471, 599, 515, 684]], [1, [348, 543, 401, 636]]],
+    printx: [[0, [965, 90, 1010, 470]], [0, [691, 1045, 876, 1096]], [0, [559, 1031, 625, 1093]]],
+    die: [[0, [300, 315, 388, 507]], [0, [160, 70, 435, 113]], [0, [160, 246, 227, 325]], [0, [160, 478, 231, 559]]],
+    emboss: [[0, [486, 70, 632, 208]], [0, [456, 309, 573, 497]]],
+    coat: [[1, [336, 175, 512, 248]], [1, [341, 294, 407, 385]], [1, [461, 293, 548, 384]], [1, [162, 557, 237, 681]], [1, [279, 553, 337, 681]], [1, [596, 707, 635, 815]],
+      [2, [980, 593, 1050, 720]]],
+    inspect: [[1, [635, 446, 1050, 732]]],
+    sort: [[2, [518, 611, 603, 713]], [2, [716, 637, 835, 792]], [2, [600, 640, 682, 760]]],
+    paste: [[2, [479, 170, 581, 529]], [2, [618, 475, 1033, 559]]],
+    final: [[1, [592, 170, 1050, 383]], [2, [353, 181, 509, 585]], [2, [175, 175, 330, 240]], [2, [175, 265, 330, 335]], [2, [175, 360, 330, 425]], [2, [175, 450, 330, 520]], [2, [238, 647, 330, 705]]],
+  };
+  const ZONE_STYLE = {   // outline colour, floor label
+    issued: [0xe2e8f0, '#64748b', 'ISSUED STOCK'], printx: [0x22c55e, '#15803d', 'PRINTING'], die: [0x9333ea, '#7e22ce', 'DIE CUTTING'], emboss: [0xdb2777, '#be185d', 'EMBELLISHMENT'],
+    coat: [0x38bdf8, '#0369a1', 'COATING'], inspect: [0xdc2626, '#b91c1c', 'INSPECTION (NOT ACTIVE)'], sort: [0xf97316, '#c2410c', 'SORTING'], paste: [0x6b7280, '#374151', 'PASTING'],
+    final: [0x111827, '#111827', 'READY TO DELIVER'],
+  };
+  // The green spots beside each press (owner's dots), by press number; 4 & 7 and 5 & 6 share an area.
+  const PRESS_SPOTS = [
+    [[719, 213], [799, 216], [909, 222]], [[736, 368], [803, 371], [890, 375]], [[677, 523], [760, 526], [837, 529], [898, 532]],
+    'R', 'L', 'L', 'R'];
+  const PRESS_AREAS = { R: [936, 947, 1012, 997], L: [641, 867, 736, 1040] };
+  // Which press a job is planned on (its Machine Name), by the app's names.
+  const pressIndexFor = j => {
+    const n = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const jm = n(String(j && j.machine || '').split(/[|+,]/)[0]);
+    if (!jm) return -1;
+    let best = -1, score = 0;
+    MACHINE_STATIONS.basement.slice(0, 7).forEach(([st, name], i) => {
+      for (const k of [n(st), n(name)]) {
+        const sc = k === jm ? 3 : (k.startsWith(jm) && /^\d*$/.test(k.slice(jm.length))) ? 2 : (k.startsWith(jm) || jm.startsWith(k)) ? 1 : 0;
+        if (sc > score) { score = sc; best = i; }
+      }
+    });
+    return best;
+  };
+  // A job's zone: by stage, issued stock for 2 days, then its press.
+  const zoneKeyFor = (j, place) => {
+    if (place === 'wait') return 'wait';
+    if (place === 'ready') return j && j.stock_group_name ? 'ready' : 'final';
+    if (place === 0) return 'ctp';
+    if (place === 1) {
+      const t = Date.parse(j && j.issued_at);
+      if (Number.isFinite(t) && Date.now() - t < 2 * 86400000) return 'issued';
+      const pi = pressIndexFor(j);
+      return pi >= 0 ? 'press:' + pi : 'printx';
+    }
+    return { 2: 'coat', 3: 'die', 4: 'sort', 5: 'paste' }[place] || 'printx';
+  };
   // Where a machine stands: x / z in the world, the floor's height under it.
   const machinePos = m => m.floor === 2
     ? { x: wx(PLAN_G, m.at[0]), z: wz(PLAN_G, m.at[1]), y: FLOOR_Y[2], floor: 2 }
@@ -459,6 +512,38 @@
   const inReady = v => v.x > READY.x0 - 2 && v.x < READY.x1 + 2 && v.z > READY.z0 - 2 && v.z < READY.z1 + 2;
   const WAIT = { x0: -24, x1: -13, z0: 36, z1: 48 };   // in front of the building, inside the plot
 
+  // A pallet's spot in a flow zone (see FLOW_ZONES / zoneKeyFor).
+  const floorPlan = f => f === 0 ? PLAN_B : PLAN_G;
+  const floorRaise = (f, px, py) => f === 0 ? basementRaise(px, py) : f === 1 ? groundRaise(py) : 0;
+  function pressSpots(pi) {
+    const sp = PRESS_SPOTS[pi];
+    if (Array.isArray(sp)) return sp;
+    // its own spots beside it, then alternate cells of the area it shares
+    const m = MACHINES[pi], own = (m.pallets || []).map(([dx, dz]) => [m.at[0] + dx * PLAN_B.sx, m.at[1] + dz * PLAN_B.sz]);
+    const r = PRESS_AREAS[sp], cells = [];
+    for (let y = r[1] + 22; y <= r[3] - 18; y += 44) for (let x = r[0] + 24; x <= r[2] - 20; x += 50) cells.push([x, y]);
+    const mates = PRESS_SPOTS.map((v, i) => v === sp ? i : -1).filter(i => i >= 0), me = mates.indexOf(pi);
+    return own.concat(cells.filter((_, i) => i % mates.length === me));
+  }
+  function zoneSlot(key, k) {
+    if (key === 'wait' || key === 'ready') return slotFor(key, k);
+    if (key === 'ctp') return slotFor(0, k);
+    if (key.startsWith('press:')) {
+      const pt = pressSpots(+key.slice(6))[k] || pressSpots(+key.slice(6))[0];
+      return { x: wx(PLAN_B, pt[0]), z: wz(PLAN_B, pt[1]), lift: 0, y: FLOOR_Y[0] + basementRaise(pt[0], pt[1]), floor: 0 };
+    }
+    const zones = FLOW_ZONES[key] || FLOW_ZONES.printx;
+    const caps = zones.map(([f, r]) => { const pl = floorPlan(f), w = (r[2] - r[0]) / pl.sx, d = (r[3] - r[1]) / pl.sz; return [Math.max(1, Math.floor((w - 0.2) / 2.6)), Math.max(1, Math.floor((d - 0.2) / 2.3))]; });
+    const total = caps.reduce((a, [c, rr]) => a + c * rr, 0), layer = Math.floor(k / total);
+    let i = k % total, zi = 0;
+    while (i >= caps[zi][0] * caps[zi][1]) { i -= caps[zi][0] * caps[zi][1]; zi++; }
+    const [f, r] = zones[zi], pl = floorPlan(f), [cols, rows] = caps[zi];
+    const x0 = wx(pl, r[0]), z0 = wz(pl, r[1]), x1 = wx(pl, r[2]), z1 = wz(pl, r[3]);
+    const col = i % cols, row = Math.floor(i / cols);
+    const x = x0 + (x1 - x0) * (col + 0.5) / cols, z = z0 + (z1 - z0) * (row + 0.5) / rows;
+    const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+    return { x, z, lift: layer, y: FLOOR_Y[f] + floorRaise(f, cx, cy), floor: f };
+  }
   function slotFor(place, k) {
     if (place === 'ready') {
       const col = k % 8, row = Math.floor(k / 8) % 6, layer = Math.floor(k / 48);
@@ -1582,7 +1667,7 @@
       // the machine itself doesn't hide it from the usual camera angle.
       const sideways = m.face === 'up' || m.face === 'down';
       const depth = m.kind === 'folder' ? m.len : m.kind === 'cutter' ? (sideways ? m.dep : m.len) : m.kind === 'press' ? 2.2 : m.kind === 'diecut-big' ? (sideways ? (m.len || 5) : 2.4) : (sideways ? 1.8 : 1.5);
-      crews.push({ g, station: st[0], built: people.slice(p0), depth });
+      crews.push({ g, station: st[0], name: st[1], built: people.slice(p0), depth });
       const name = st[1] || (m.kind === 'folder' ? 'FOLDING' : m.kind === 'cutter' ? 'CUTTING' : m.stage === 1 ? (m.units ? m.units + '-UNIT PRESS' : 'PRINTING') : m.kind === 'diecut' ? 'DIE CUT' : 'DIE CUTTING');
       const lab = decal(name, name.length * 0.5, 0.75, STAGE_COLOR[m.stage] || '#374151', { size: 0.62 });
       lab.rotation.x = -Math.PI / 2; lab.position.set(x, SLAB + lift0 + 0.02, z + (m.face === 'up' || m.kind === 'folder' ? 1 : -1) * (depth / 2 + (m.kind === 'diecut' ? 1.0 : 1.5))); lab.renderOrder = 1; floorGroups[0].add(lab);
@@ -1596,7 +1681,7 @@
       if (m.kind === 'coater') buildCoater(g, n, m.len); else if (m.kind === 'inspection') buildInspection(g, n, m.len); else if (m.kind === 'laminator') buildLaminator(g, n, m.len);
       else if (m.kind === 'ctp') buildCTP(g, n, m.len); else buildProcessor(g, n, m.len);
       hazardTape(g, SLAB + lift + 0.012, floorGroups[1]);
-      crews.push({ g, station: st[0], built: people.slice(p0), depth: 2.4 });
+      crews.push({ g, station: st[0], name: st[1], built: people.slice(p0), depth: 2.4 });
       if (m.label) {
         const name = st[1] || { coater: 'COATING', inspection: 'INSPECTION', laminator: 'LAMINATION', ctp: 'CTP' }[m.kind];
         const lab = decal(name, name.length * 0.5, 0.75, '#374151', { size: 0.62 });
@@ -1612,7 +1697,7 @@
       const n = MACHINES.length + GROUND_MACHINES.length + i, st = MACHINE_STATIONS.first[i] || [], p0 = people.length;
       if (m.kind === 'gluer') buildGluer(g, n, m.len); else buildLaminator(g, n, m.len);
       hazardTape(g, SLAB + 0.012, floorGroups[2]);
-      crews.push({ g, station: st[0], built: people.slice(p0), depth: 2.2 });
+      crews.push({ g, station: st[0], name: st[1], built: people.slice(p0), depth: 2.2 });
       if (m.label) {
         const name = st[1] || m.name || { gluer: 'FOLDER GLUER', laminator: 'LAMINATION' }[m.kind];
         const lab = decal(name, name.length * 0.5, 0.75, '#374151', { size: 0.62 });
@@ -1637,6 +1722,18 @@
       lab.rotation.x = -Math.PI / 2; lab.position.set((x1 + x2) / 2, SLAB + 0.02, (z1 + z2) / 2 - 2.1); lab.renderOrder = 1; floorGroups[2].add(lab);
     });
 
+    for (const [key, zones] of Object.entries(FLOW_ZONES)) {
+      const [col, txt, label] = ZONE_STYLE[key];
+      zones.forEach(([f, r], zi) => {
+        const pl = floorPlan(f), x0 = wx(pl, r[0]), z0 = wz(pl, r[1]), x1 = wx(pl, r[2]), z1 = wz(pl, r[3]);
+        const y = SLAB + floorRaise(f, (r[0] + r[2]) / 2, (r[1] + r[3]) / 2) + 0.02, grp = floorGroups[f];
+        for (const [w, d, x, z] of [[x1 - x0, 0.16, (x0 + x1) / 2, z0], [x1 - x0, 0.16, (x0 + x1) / 2, z1], [0.16, z1 - z0, x0, (z0 + z1) / 2], [0.16, z1 - z0, x1, (z0 + z1) / 2]]) box(w, 0.03, d, col, x, y, z, grp, false);
+        if (zi === 0 || (x1 - x0) > 5) {
+          const lab = decal(label, Math.min(x1 - x0 - 0.4, label.length * 0.42), 0.6, txt, { size: 0.62 });
+          lab.rotation.x = -Math.PI / 2; lab.position.set((x0 + x1) / 2, y + 0.01, z0 + 0.5); lab.renderOrder = 1; grp.add(lab);
+        }
+      });
+    }
     const nameTag = text => {
       const t = canvasTex(256, 64, (g, w, h) => {
         g.fillStyle = 'rgba(255,255,255,.96)'; rrect(g, 4, 6, w - 8, h - 12, 14); g.fill();
@@ -1873,12 +1970,16 @@
     // so a pallet keeps its place when others come and go).
     const layout = (instant) => {
       const groups = new Map();
-      for (const p of pallets.values()) { if (p.leaving) continue; const k = String(p.place); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
+      const addTo = (k, p) => { if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); };
+      for (const p of pallets.values()) { if (p.leaving) continue; addTo(zoneKeyFor(p.job, p.place), p); }
+      for (const [k, list] of [...groups]) if (k.startsWith('press:')) {
+        list.sort((a, b) => a.job.id - b.job.id);
+        list.splice(pressSpots(+k.slice(6)).length).forEach(p => addTo('printx', p));
+      }
       for (const [k, list] of groups) {
         list.sort((a, b) => a.job.id - b.job.id);
-        const place = k === 'ready' || k === 'wait' ? k : +k;
         list.forEach((p, i) => {
-          const s = slotFor(place, i);
+          const s = zoneSlot(k, i);
           p.stag = i % 2;
           const to = new THREE.Vector3(s.x, (s.y || 0) + (s.floor == null ? 0.3 : SLAB) + s.lift * 1.6, s.z);
           p.floor = s.floor;
@@ -2034,18 +2135,13 @@
     };
     const select = id => {
       const prev = selectedId; selectedId = id;
-      if (popTarget && popTarget.ready) { popTarget = null; ui.pop.style.display = 'none'; }
+      if (popTarget && (popTarget.ready || popTarget.job || popTarget.machine)) { popTarget = null; ui.pop.style.display = 'none'; }
       for (const k of [prev, id]) { const p = k != null && pallets.get(k); if (p) setTag(p), placeTag(p); }
       if (id != null) {
         const p = pallets.get(id);
-        // A ready order: its card pops up where it stands (owner, 2026-10-24).
+        // The job's card pops up where its pallet stands - no zoom (owner, 2026-10-24).
         if (p && p.place === 'ready') showReadyPop(p);
-        // Zoom to the pallet; on a production floor show just that floor.
-        else if (p) {
-          want.target.set(p.g.position.x, p.floor == null ? 0 : FLOOR_Y[p.floor], p.g.position.z); want.dist = fitDist(34); want.el = 0.8; viewName = 'focus';
-          setFloorFocus(p.floor == null ? null : p.floor);
-          ui.views.querySelectorAll('button').forEach(b => b.classList.remove('on'));
-        }
+        else if (p) showJobPop(p);
       }
       renderBar();
     };
@@ -2126,6 +2222,68 @@
     };
     // Keep the pop-up over its item as the view turns / zooms; hidden when the item is behind the camera.
     const popV = new THREE.Vector3();
+    const popRow = (k, v, cls) => `<div class="saa-pop-row${cls ? ' ' + cls : ''}"><i>${k}</i><b>${v}</b></div>`;
+    const openPop = (tone, head, body, target) => {
+      ui.pop.style.setProperty('--tone', tone);
+      ui.pop.innerHTML = `<div class="saa-pop-h">${head}<button title="Close" aria-label="Close">&times;</button></div><div class="saa-pop-b">${body}</div>`;
+      ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); select(null); };
+      popTarget = target;
+      ui.pop.style.display = ''; ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
+      placeStockPop();
+    };
+    // A job's pallet: job no., product, company, PO qty, paper, to be printed.
+    const showJobPop = p => {
+      const j = p.job, sheets = num(j.sheets), ups = num(j.ups);
+      const toPrint = sheets ? sheets.toLocaleString() + ' sheets' + (ups > 1 ? ' · ' + (sheets * ups).toLocaleString() + ' UC' : '') : '—';
+      openPop('#1e40af', esc(String(STAGES[stageIndex(j)] || '').toUpperCase()),
+        `<div class="saa-pop-size"><b>E-${esc(j.id)}</b></div>` + popRow('Product', esc(j.name || '—')) + popRow('Company', esc(j.client || '—')) +
+        popRow('PO Qty', num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')) + popRow('Paper', esc(j.paper || '—')) + popRow('To print', esc(toPrint), 'bal') +
+        (j.machine ? popRow('Machine', esc(j.machine)) : ''),
+        { obj: p.g, dy: (p.top || 1) + 2.4, job: true });
+    };
+    // A machine: the last job its station entered (any particulars row's entries).
+    const whenOf = e => {
+      const v = e && (e.at || e.time || e.date || e.created_at);
+      if (!v) return NaN;
+      const m = String(v).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{1,2}):(\d{2}))?/);
+      return m ? new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).getTime() : Date.parse(v);
+    };
+    const lastJobFor = c => {
+      const n = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const keys = new Set([n(c.station), n(c.name)].filter(Boolean));
+      let best = null;
+      for (const j of jobs) {
+        const parts = (j && j.particulars) || {};
+        for (const [row, v] of Object.entries(parts)) {
+          if (!v || !Array.isArray(v.entries)) continue;
+          v.entries.forEach((e, k) => {
+            if (!e || !keys.has(n(e.machine))) return;
+            const t = whenOf(e), rank = Number.isFinite(t) ? t : -1e15 + k;
+            if (!best || rank > best.rank) best = { job: j, entry: e, row, rank, t };
+          });
+        }
+      }
+      return best;
+    };
+    const showMachinePop = c => {
+      const last = lastJobFor(c);
+      const body = `<div class="saa-pop-size"><b>${esc(c.name || c.station || 'Machine')}</b></div>` + (last
+        ? popRow('Last job', 'E-' + esc(last.job.id)) + popRow('Product', esc(last.job.name || '—')) + popRow('Company', esc(last.job.client || '—')) +
+          (last.entry.qty != null && last.entry.qty !== '' ? popRow('Entered', esc(String(last.entry.qty)), 'bal') : '') +
+          (Number.isFinite(last.t) ? popRow('When', esc(new Date(last.t).toLocaleString())) : '')
+        : popRow('Last job', 'No station entries yet'));
+      openPop('#334155', 'MACHINE', body, { obj: c.g, dy: 3.6, machine: true });
+    };
+    const pickMachine = (cx, cy) => {
+      const r = el.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const shown = o => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+      const hit = ray.intersectObjects(crews.map(c => c.g), true).find(h => shown(h.object));
+      if (!hit) return null;
+      for (let o = hit.object; o; o = o.parent) { const c = crews.find(cc => cc.g === o); if (c) return c.station || c.name ? c : null; }
+      return null;
+    };
     const showReadyPop = p => {
       const j = p.job, n = readyCartonsLeft(j), R = num(j._readyQty), D = shippedCartons(j);
       ui.pop.style.setProperty('--tone', '#166534');
@@ -2192,7 +2350,7 @@
         const id = pick(e.clientX, e.clientY);
         const sb = id == null ? pickStock(e.clientX, e.clientY) : null;
         if (sb != null) { if (selectedId != null) select(null); selectStock(sb === stockSel ? null : sb); }
-        else { if (stockSel != null) selectStock(null); select(id); }
+        else { if (stockSel != null) selectStock(null); const mc = id == null ? pickMachine(e.clientX, e.clientY) : null; select(id); if (mc) showMachinePop(mc); }
         lastInput = clock;
       }
       drag = null;
