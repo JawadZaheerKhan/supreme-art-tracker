@@ -3346,6 +3346,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
     <button class="mode-btn" data-mode="client-view" onclick="setMode('client-view')" id="mode-client-view-btn">&#128100; Client View</button>
+    <button class="mode-btn" data-mode="factory" onclick="setMode('factory')" id="mode-factory-btn" style="display:none;">&#127981; Factory</button>
   </div>
   <div class="topbar-right">
     <!-- Calculator is now reached via the floating round 🧮 launcher in the
@@ -3948,6 +3949,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      production_manager / CEO for reviewing exactly what a chosen client
      sees. Uses the SAME /api/client/jobs helper server-side, so admin
      preview and real client can never drift apart. -->
+<!-- Factory: the 3D view of the whole factory, Super Admin only (owner, 2026-10-24). -->
+<div class="main" id="factory-mode" style="display:none;">
+  <div id="factory-anim"></div>
+</div>
 <div class="main" id="client-view-mode" style="display:none;">
   <div id="client-view-hero" class="hero-card"></div>
   <!-- Moved into the slim hero by renderClientHero (owner, 2026-10-21). -->
@@ -3959,10 +3964,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
   </div>
   <!-- Project Animation (owner, 2026-10-21): Jobs | Animation sub-tabs. -->
-  <div class="tabs" id="client-view-subtabs" style="margin:0 0 12px;">
-    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-view','jobs')">Jobs</button>
-    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-view','animation')">&#127981; Animation</button>
-  </div>
+  <!-- The 3D animation moved to its own Factory tab (owner, 2026-10-24). -->
+  <div class="tabs" id="client-view-subtabs" style="display:none;"></div>
   <div id="client-view-jobs-pane">
     <div id="client-view-summary" style="margin:0 0 16px;"></div>
     <div id="client-view-list">
@@ -3978,10 +3981,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      /api/client/jobs — this shell is UX only. -->
 <div class="main" id="client-mode" style="display:none;">
   <div id="client-portal-hero" class="hero-card"></div>
-  <div class="tabs" id="client-portal-subtabs" style="margin:16px 0 0;">
-    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-portal','jobs')">Jobs</button>
-    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-portal','animation')">&#127981; Animation</button>
-  </div>
+  <div class="tabs" id="client-portal-subtabs" style="display:none;"></div>
   <div id="client-portal-jobs-pane">
     <div id="client-portal-summary" style="margin-top:16px;"></div>
     <div id="client-portal-list" style="margin-top:16px;">
@@ -5738,6 +5738,7 @@ function tabAllowed(m) {
     case 'station':     return hasPerm('station_access', 'view');
     case 'users':       return hasPerm('user_tab_access', 'view');
     case 'client-view': return hasPerm('client_view_preview', 'view');
+    case 'factory':     return false;   // the 3D factory view: Super Admin only (owner, 2026-10-24)
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
     default:            return true;
@@ -6178,6 +6179,7 @@ function renderUserChip() {
   showTab('mode-station-btn', 'station');
   showTab('mode-users-btn', 'users');
   showTab('mode-client-view-btn', 'client-view');
+  showTab('mode-factory-btn', 'factory');
   if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   const op = isOperator(), sm = isStoreManager(), fin = isFinance();
   // Trash card — gated by trash_view (default admin/ceo, was previously
@@ -6764,8 +6766,11 @@ function setMode(m) {
   document.getElementById('station-mode').style.display   = m === 'station' ? 'block' : 'none';
   const clientViewEl = document.getElementById('client-view-mode');
   if (clientViewEl) clientViewEl.style.display = m === 'client-view' ? 'block' : 'none';
+  const factoryEl = document.getElementById('factory-mode');
+  if (factoryEl) factoryEl.style.display = m === 'factory' ? 'block' : 'none';
   // Project Animation: stop drawing the 3D view while its tab is off screen.
   if (m !== 'client-view' && typeof clientAnim !== 'undefined' && clientAnim['client-view']) clientAnim['client-view'].setActive(false);
+  if (m !== 'factory' && typeof clientAnim !== 'undefined' && clientAnim.factory) clientAnim.factory.setActive(false);
   if (typeof syncClientAnimTimer === 'function') syncClientAnimTimer();
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
@@ -6829,6 +6834,11 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     if (refreshBtn) refreshBtn.style.display = 'none';
     enterClientView();
+  } else if (m === 'factory') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    refreshClientAnim('factory');
   } else if (m === 'station') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -38835,7 +38845,14 @@ const CLIENT_ANIM_SHELLS = {
     reload: () => loadClientJobs(),
   },
 };
-const clientSubTab = { 'client-view': 'jobs', 'client-portal': 'jobs' };
+// The Factory tab: every job in the factory (owner, 2026-10-24).
+CLIENT_ANIM_SHELLS.factory = {
+  anim: 'factory-anim',
+  rows: () => (Array.isArray(jobs) ? jobs : []).filter(j => j && !j.deleted_at),
+  company: () => '__factory__',
+  reload: () => loadJobs().then(() => refreshClientAnim('factory')),
+};
+const clientSubTab = { 'client-view': 'jobs', 'client-portal': 'jobs', factory: 'animation' };
 const clientAnim = {};
 let clientAnimScript = null;
 let clientAnimTimer = null;
@@ -38914,11 +38931,12 @@ function animStockRows() {
 // While an Animation sub-tab is on screen, re-read the jobs every minute so
 // pallets move and trucks leave without anyone pressing Refresh.
 function syncClientAnimTimer() {
-  const on = (clientSubTab['client-view'] === 'animation' && mode === 'client-view') ||
+  const on = mode === 'factory' || (clientSubTab['client-view'] === 'animation' && mode === 'client-view') ||
              (clientSubTab['client-portal'] === 'animation' && isClient());
   if (on && !clientAnimTimer) {
     clientAnimTimer = setInterval(() => {
       if (document.hidden) return;
+      if (mode === 'factory') { CLIENT_ANIM_SHELLS.factory.reload(); return; }
       if (isClient()) { if (clientSubTab['client-portal'] === 'animation') CLIENT_ANIM_SHELLS['client-portal'].reload(); }
       else if (mode === 'client-view' && clientSubTab['client-view'] === 'animation' && clientViewCompany) CLIENT_ANIM_SHELLS['client-view'].reload();
     }, 60000);
