@@ -110,14 +110,16 @@
   // gap so each can be seen. A floor is one or more parts, each drawn from a
   // plan in that plan's own pixels; all plans are fitted to one footprint.
   const BLD = { x0: -54, z0: -32, w: 45, d: 56 };
-  const FLOOR_Y = [-5, 0, 11, 22];              // basement (one storey down, owner), ground (street), 1st floor, roof
-  const RAISE = 1.2;                            // the ground floor's back part, a few steps up
-  // The offices block (Dining Room side) is LOWER than the hall side on every
-  // floor, the same step as on the ground floor (owner's marked heights,
-  // 2026-10-24): the 1st floor's offices and the 2nd floor's open area sit
-  // RAISE below their floor's hall side.
-  const OPEN_RAISE = -RAISE;                    // the 2nd floor's open area, below the roof
-  const OFFICE_RAISE = -RAISE;                  // the 1st floor's offices, below its hall side
+  // Split level (owner's marked heights, 2026-10-24): the hall block stands
+  // half a floor (RAISE) above the office block on every floor. FLOOR_Y are
+  // the hall block's levels - basement, ground, 1st floor, roof; the office
+  // block's ground floor is the street (FLOOR_Y[1] - RAISE) and its 1st
+  // floor / open area sit RAISE below the hall's.
+  const RAISE = 5;                              // the hall block above the office block
+  const FLOOR_Y = [-5, RAISE, 11 + RAISE, 22 + RAISE];
+  const OPEN_RAISE = -RAISE;                    // the 2nd floor's open area, half a floor below the roof
+  const OFFICE_RAISE = -RAISE;                  // the 1st floor's offices, half a floor below its hall side
+  const FRONT_RAISE = -RAISE;                   // the ground floor's office block, on the street
   const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
   // Is this basement plan point in the raised back part (Hall-01 side)?
   const basementRaise = (px, py) => (py < 703 || px < 500) ? BASE_RAISE : 0;
@@ -173,7 +175,7 @@
     // Area and Work Shop is a step up (BASE_RAISE); Hall-02 at the front is
     // the low part, and the ramp in its top-left corner climbs to Hall-01.
     { parts: [
-      { plan: PLAN_B, raise: BASE_RAISE,
+      { plan: PLAN_B, raise: BASE_RAISE, aboveStreet: true,
         outline: [[157, 60], [1022, 60], [1022, 703], [500, 703], [500, 815], [207, 815], [207, 600], [157, 600]], ext: [0, 1, 4, 5, 6, 7],
         // The Machine Area is open to Hall-01 (no wall along its top) and the
         // lift's hall side is its doors (owner, 2026-10-21).
@@ -189,18 +191,18 @@
         labels: [['HALL-02', 755, 870, 1.4]] }] },
     { parts: [
       // Back part, a few steps up: rooms, halls, Breaking Area, ablution hall.
-      { plan: PLAN_G, raise: RAISE, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
+      { plan: PLAN_G, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
         walls: GROUND_WALLS, labels: GROUND_LABELS, columns: GROUND_PILLARS },
       // Stairs + lift core, level with the hall beside it (owner): the U
       // stairs on up to the 1st floor (the basement's L flight arrives here), the lift, and
       // behind it the loading area with its roller-shutter gate - a few
       // steps outside the gate lead down to the street.
-      { plan: PLAN_G, raise: RAISE, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
+      { plan: PLAN_G, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
         walls: [[212, 940, 354, 940], [505, 940, 512, 940]],   // open to the loading area, and the front's third bay open (owner, 2026-10-22)
         holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936],   // no roller-shutter door any more; the steps outside still lead up (owner, 2026-10-22)
         stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12]] },
       // Front part on the street (the owner's ground-floor plan).
-      { plan: PLAN_P, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
+      { plan: PLAN_P, raise: FRONT_RAISE, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
         walls: [
           [135, 5, 135, 125], [135, 125, 150, 125], [185, 125, 205, 125], [205, 125, 205, 250], [5, 250, 205, 250],
           [200, 250, 200, 378], [5, 378, 200, 378],
@@ -258,10 +260,10 @@
   // back-left.
   const FLOOR_TOP = 0.35;                         // slab thickness: a floor's walking level above its y
   const TOWERS = [
-    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + BASE_RAISE + FLOOR_TOP, to: FLOOR_Y[1] + RAISE + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'lo' },
-    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + RAISE + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'left' },
+    { name: 'basement-ground', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[0] + BASE_RAISE + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L', longAxis: 'z', lane: 'lo', bottom: 'lo' },
+    { name: 'ground-first', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[1] + FLOOR_TOP, to: FLOOR_Y[2] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'left' },
     { name: 'first-roof', plan: PLAN_G, r: TOWER_CORE, from: FLOOR_Y[2] + FLOOR_TOP, to: FLOOR_Y[3] + FLOOR_TOP, axis: 'z', flights: 2, startLane: 'left' },
-    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FLOOR_TOP, shape: 'L', longAxis: 'x', lane: 'hi', bottom: 'hi' },
+    { name: 'lobby-basement', plan: PLAN_P, r: TOWER_LOBBY, from: FLOOR_Y[0] + FLOOR_TOP, to: FLOOR_Y[1] + FRONT_RAISE + FLOOR_TOP, shape: 'L', longAxis: 'x', lane: 'hi', bottom: 'hi' },
   ];
   // The basement machines, placed by the owner (2026-10-21) on a screenshot:
   // 7 printing presses (red) and 7 die-cutting + embellishment machines
@@ -321,7 +323,7 @@
   // lamination machine at the left of the lower hall, and the CTP with its
   // plate processor in the Scanning Room by Plate Making. Coatings jobs'
   // pallets wait beside the coating machines.
-  const groundRaise = py => (py < 822 ? RAISE : 0);
+  const groundRaise = py => (py < 822 ? 0 : FRONT_RAISE);
   const GROUND_MACHINES = [
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 220], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.35] },
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 329], pallets: [[3.9, -1.0], [6.3, -1.0]], label: [0, 1.4] },
@@ -344,7 +346,7 @@
   // their machines; the rest use a plan rectangle - PROVISIONAL until the
   // owner places those stages too.
   const STAGE_ZONES = [
-    { floor: 1, plan: PLAN_P, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
+    { floor: 1, plan: PLAN_P, raise: FRONT_RAISE, r: [400, 18, 590, 118] },    // CTP         - ground floor, the Plate Making room
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
     { floor: 1, machines: true },                          // Coatings    - beside the 4 coating machines, ground floor (owner)
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
@@ -870,7 +872,13 @@
         if (fi === 1 || fi === 2) P.outline.forEach(([px, py], k) => {
           if ((P.ext && !P.ext.includes(k)) || k === P.street) return;
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
-          curtain(X(px), Z(py), X(qx), Z(qy), FLOOR_Y[fi] + raise + SLAB + 2.4, FLOOR_Y[fi + 1]);
+          curtain(X(px), Z(py), X(qx), Z(qy), FLOOR_Y[fi] + raise + SLAB + 2.4, FLOOR_Y[fi + 1] + Math.min(0, raise));
+        });
+        // Basement Hall-01 stands up out of the street to the hall block's ground floor.
+        if (fi === 0 && P.aboveStreet) P.outline.forEach(([px, py], k) => {
+          if (P.ext && !P.ext.includes(k)) return;
+          const [qx, qy] = P.outline[(k + 1) % P.outline.length];
+          curtain(X(px), Z(py), X(qx), Z(qy), 0, FLOOR_Y[1]);
         });
         // Solar panels on a steel frame over the given area (roof, open area).
         if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
@@ -972,7 +980,7 @@
           [x0 - t / 2, (y0 + y1) / 2, z + 0.12, t, y1 - y0, 0.3, 0], [x1 + t / 2, (y0 + y1) / 2, z + 0.12, t, y1 - y0, 0.3, 0]);
       };
       // Front block.
-      const z = wz(PLAN_P, 500), xa = wx(PLAN_P, 0), xb = wx(PLAN_P, 603), top = FLOOR_Y[3] + 1.2;
+      const z = wz(PLAN_P, 500), xa = wx(PLAN_P, 0), xb = wx(PLAN_P, 603), top = FLOOR_Y[3] + OPEN_RAISE + 1.2;
       const d0 = wx(PLAN_P, 270), d1 = wx(PLAN_P, 330), doorTop = 6.4;   // the plan's entrance doors
       const pl = wx(PLAN_G, 668) - 0.8, pr = wx(PLAN_G, 902) + 0.8, mc = (pl + pr) / 2;   // the middle bay, under the terrace
       const zl = z + 0.6;                                                                  // the stair bay steps forward
@@ -994,8 +1002,8 @@
       box(pl - xa, 0.35, 0.3, 0x1f2937, (xa + pl) / 2, SLAB + 0.17, zl + 0.12, facade, false);
       box(xb - pl, 0.35, 0.3, 0x1f2937, (pl + xb) / 2, SLAB + 0.17, z + 0.12, facade, false);
       const tz = wz(PLAN_G, 1345), tx0 = wx(PLAN_G, 668), tx1 = wx(PLAN_G, 902);
-      box(tx1 - tx0 + 0.3, 1.6, 0.35, CREAM_DARK, (tx0 + tx1) / 2, FLOOR_Y[2] + 0.3, tz + 0.1, facade);
-      for (const dx of [-3.5, 0, 3.5]) box(0.5, 0.05, 0.5, 0xfde68a, mc + dx, FLOOR_Y[2] - 0.03, z + 1.8, facade, false);   // lights under the terrace (the entrance canopy)
+      box(tx1 - tx0 + 0.3, 1.6, 0.35, CREAM_DARK, (tx0 + tx1) / 2, FLOOR_Y[2] + OFFICE_RAISE + 0.3, tz + 0.1, facade);
+      for (const dx of [-3.5, 0, 3.5]) box(0.5, 0.05, 0.5, 0xfde68a, mc + dx, FLOOR_Y[2] + OFFICE_RAISE - 0.03, z + 1.8, facade, false);   // lights under the terrace (the entrance canopy)
       box(pr - pl + 1.6, 0.2, 2.4, 0x1f2937, mc, 0.1, z + 1.4, facade, false);                       // dark steps
       box(pr - pl - 0.2, 0.2, 1.5, 0x111827, mc, 0.3, z + 0.95, facade, false);
       for (const [text, y, w, h, color, size] of [['SUPREME ART', 20.0, 11, 1.6, '#dc2626', 0.78], ['(PRIVATE) LIMITED', 18.6, 7, 0.9, '#1f2937', 0.7]]) {
@@ -1011,7 +1019,7 @@
       // Two columns of windows; the third bay, by the loading area, stands open (owner, 2026-10-22).
       const step = (cx1 - cx0 - 3.4) / 2, cxm = cx0 + 1.7 + step + 2.1;
       stoneAt(cx0, cxm, 0, ctop, cz + 0.05);
-      for (const [y0, y1] of [[3.2, 7.7], [12.2, 16.2], [18.2, 21.6]])
+      for (const [y0, y1] of [[3.2, 7.7], [12.2, 16.2], [18.2, 21.6]].map(([a, b]) => [a + RAISE, b + RAISE]))
         for (let i = 0; i < 2; i++) { const wc = cx0 + 1.7 + i * step; win(wc - 1.1, wc + 1.1, y0, y1, 2, 2, cz + 0.05); }
       box(cxm - cx0 + 0.4, 0.6, 0.7, CREAM_DARK, (cx0 + cxm) / 2, ctop + 0.3, cz + 0.2, facade);
       box(cxm - cx0, 0.35, 0.3, 0x1f2937, (cx0 + cxm) / 2, 0.17, cz + 0.2, facade, false);
@@ -1523,8 +1531,8 @@
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
       [PLAN_B, 0, BASE_RAISE, [[470, 300, 640, 560]]],
       [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
-      [PLAN_G, 1, RAISE, [[360, 180, 500, 700], [530, 370, 860, 500]]],
-      [PLAN_P, 1, 0, [[215, 262, 380, 400]]],
+      [PLAN_G, 1, 0, [[360, 180, 500, 700], [530, 370, 860, 500]]],
+      [PLAN_P, 1, FRONT_RAISE, [[215, 262, 380, 400]]],
       [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
     ];
     LIFTER_AISLES.forEach(([pl, floor, raise, areas]) => areas.forEach((r, k) => {
