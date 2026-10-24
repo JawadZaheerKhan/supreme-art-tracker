@@ -319,7 +319,8 @@
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 220], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.35] },
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 329], pallets: [[3.9, -1.0], [6.3, -1.0]], label: [0, 1.4] },
     { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 410], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.4] },
-    { kind: 'coater', stage: 2, floor: 1, len: 2.7, face: 'down', at: [190, 500], pallets: [[2.4, -0.8], [2.4, 1.2]], label: [4.5, 0] },
+    // The 4th is the same size as the other three and in line with them (owner, 2026-10-24).
+    { kind: 'coater', stage: 2, floor: 1, len: 5.2, face: 'right', at: [250, 492], pallets: [[3.9, 0], [6.3, 0]], label: [0, 1.4] },
     { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [895, 570], pallets: [], label: [-4.2, -1.75] },
     { kind: 'inspection', stage: null, floor: 1, len: 12, face: 'right', at: [894, 650], pallets: [], label: [0, 1.6] },
     { kind: 'laminator', stage: null, floor: 1, len: 2.9, face: 'down', at: [563, 763], pallets: [], label: [1.7, 0] },
