@@ -48,6 +48,13 @@
     return (Array.isArray(j && j.deliveries) ? j.deliveries : []).filter(d => d && (num(d.cartons) > 0 || d.date));
   }
   function shippedCartons(j) { return shipments(j).reduce((a, d) => a + num(d.cartons), 0); }
+  // Shipper cartons still in Ready Stock (owner, 2026-10-24): the Carton
+  // Shipper count written on the job, less the share of the Ready Qty shipped.
+  function readyCartonsLeft(j) {
+    const S = num(j && j._shipperCartons), R = num(j && j._readyQty), D = shippedCartons(j);
+    if (!(S > 0)) return 0;
+    return R > 0 ? Math.max(0, Math.round(S * Math.max(0, R - D) / R)) : S;
+  }
   function clip(s, n) { s = String(s || '').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   function jobTitle(j) { return j.ref ? 'PO ' + clip(j.ref, 12) : clip(j.name || ('Job ' + j.id), 14); }
   function jobSub(j) { return j.ref ? clip(j.name, 20) : clip(j.jobcode || '', 20); }
@@ -388,7 +395,7 @@
   // building; the yard runs out in front to the road - an L, left empty but
   // for the car park under a red tent - with the gate at its left end.
   const SITE = { x0: -94, x1: -8, z0: -96, z1: 60 };   // ends just past the building's right side; the back strip holds the inventory store (owner)
-  const READY = { x0: -88, x1: -60, z0: -34, z1: -12 };
+  const READY = { x0: -92, x1: -58, z0: -42, z1: -12 };   // bigger (owner, 2026-10-24)
   const DOCKS = [-82, -74, -66];
   const DOCK_Z = READY.z1 + 4.85;          // truck centre when backed onto the dock
   const GATE = { x0: -50, x1: -40, z: SITE.z1 };
@@ -441,8 +448,8 @@
 
   function slotFor(place, k) {
     if (place === 'ready') {
-      const col = k % 6, row = Math.floor(k / 6) % 4, layer = Math.floor(k / 24);
-      return { x: READY.x0 + 3.6 + col * 3.9, z: READY.z0 + 7.5 + row * 3.4, lift: layer, y: 0 };
+      const col = k % 8, row = Math.floor(k / 8) % 6, layer = Math.floor(k / 48);
+      return { x: READY.x0 + 3.2 + col * 3.9, z: READY.z0 + 3.6 + row * 3.8, lift: layer, y: 0 };
     }
     if (place === 'wait') {
       const col = k % 3, row = Math.floor(k / 3) % 3, layer = Math.floor(k / 9);
@@ -780,7 +787,7 @@
     // Floating item cards (owner, 2026-10-24): one per item above its stack,
     // bobbing gently; a click swaps in the big card with the details.
     const stockTiles = [], stockPick = [];
-    let stockInstBay = [], stockSel = null, hideStockPop = () => {};
+    let stockInstBay = [], stockSel = null, hideStockPop = () => {}, popTarget = null;
     const fmtQty = n => { const r = Math.round(n * 100) / 100; return Number.isInteger(r) ? r.toLocaleString() : r.toFixed(2); };
     const stockBalance = it => it.perPack > 0 ? fmtQty(it.sheets / it.perPack) + ' ' + (it.unit || 'packets').toLowerCase() + ' · ' + it.sheets.toLocaleString() + ' sheets' : it.sheets.toLocaleString() + ' sheets';
     const tileTex = (it, big) => canvasTex(big ? 560 : 400, big ? 360 : 170, (g, w, h) => {
@@ -1624,16 +1631,7 @@
       for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
     };
-    // Ready Stock: racks along the back wall, filled with cartons.
-    for (let r = 0; r < 3; r++) {
-      const rx = READY.x0 + 5 + r * 9;
-      for (const ux of [-3.8, 3.8]) for (const uz of [-0.7, 0.7]) box(0.16, 5.2, 0.16, 0x374151, rx + ux, 2.9, READY.z0 + 1.8 + uz, scene);
-      for (let lv = 0; lv < 3; lv++) {
-        box(7.8, 0.14, 0.14, 0xf97316, rx, 0.9 + lv * 1.75, READY.z0 + 1.1, scene, false);
-        box(7.8, 0.14, 0.14, 0xf97316, rx, 0.9 + lv * 1.75, READY.z0 + 2.5, scene, false);
-        for (let bx = 0; bx < 4; bx++) if ((r + lv + bx) % 5 !== 0) box(1.5, 1.0, 1.2, (r + bx) % 2 ? 0xc9a26b : 0xb88f5a, rx - 2.85 + bx * 1.9, 1.5 + lv * 1.75, READY.z0 + 1.8, scene);
-      }
-    }
+    // Ready Stock: every ready order stands on the floor as its cartons (see fillPallet).
     floorDecal('CARTONS READY TO SHIP', 13, 1.2, '#166534', (READY.x0 + READY.x1) / 2, READY.z1 - 1.0, { size: 0.55 });
     for (const dx of DOCKS) {
       box(3.8, 0.12, 1.2, 0xfacc15, dx, 0.33, READY.z1 - 0.9, scene, false);
@@ -1759,6 +1757,13 @@
       box(2.4, 0.18, 2.0, 0xc08a57, 0, 0.09, 0, g);
       if (place === 'wait') {
         box(2.1, 0.7, 1.7, 0xffffff, 0, 0.53, 0, g); box(2.12, 0.08, 1.72, 0xe2e8f0, 0, 0.6, 0, g, false);
+      } else if (place === 'ready' && readyCartonsLeft(p.job) > 0) {
+        const n = Math.min(96, readyCartonsLeft(p.job)), per = 16;
+        for (let k = 0; k < n; k++) {
+          const l = Math.floor(k / per), c = k % per;
+          box(0.52, 0.4, 0.44, (l + c) % 2 ? 0xc9a26b : 0xbf9660, ((c % 4) - 1.5) * 0.56, 0.39 + l * 0.42, (Math.floor(c / 4) - 1.5) * 0.46, g);
+        }
+        p.readyN = readyCartonsLeft(p.job);
       } else if (place === 'ready' || place === 4 || place === 5) {
         const layers = place === 'ready' ? Math.max(1, Math.min(4, Math.ceil(Math.log10(num(p.job.qty) + 1) - 1))) : 2;
         for (let l = 0; l < layers; l++) for (const x of [-0.55, 0.55]) for (const z of [-0.45, 0.45]) box(1.04, 0.72, 0.86, (l + (x > 0) + (z > 0)) % 2 ? 0xc9a26b : 0xbf9660, x, 0.55 + l * 0.74, z, g);
@@ -1777,7 +1782,8 @@
     const setTag = (p) => {
       const j = p.job, blocked = isBlocked(j), urgent = /urgent/i.test(String(j.priority || ''));
       const tone = blocked ? 'red' : (selectedId === j.id ? 'blue' : (urgent ? 'amber' : ''));
-      const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : jobSub(j));
+      const rc = jobPlace(j) === 'ready' ? readyCartonsLeft(j) : 0;
+      const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobSub(j));
       const key = jobTitle(j) + '|' + sub + '|' + tone;
       if (p.tagKey === key) return;
       disposeSprite(p.tag); disposeSprite(p.tagS);
@@ -1868,7 +1874,7 @@
       ground: { target: [BX, FLOOR_Y[1], BZ], az: 0.22, el: 1.0, dist: 112, floor: 1 },
       first: { target: [BX, FLOOR_Y[2], BZ], az: 0.22, el: 1.0, dist: 112, floor: 2 },
       roof: { target: [BX, FLOOR_Y[3], BZ - 6], az: 0.3, el: 0.8, dist: 100, floor: 3 },
-      ready: { target: [(READY.x0 + READY.x1) / 2, 0, READY.z1 - 2], az: 0.42, el: 0.72, dist: 60 },
+      ready: { target: [(READY.x0 + READY.x1) / 2, 0, (READY.z0 + READY.z1) / 2 + 3], az: 0.3, el: 0.9, dist: 74 },
       inventory: { target: [(INV.x0 + INV.x1) / 2, 0, (INV.z0 + INV.z1) / 2 + 2], az: 0.12, el: 1.0, dist: 92 },
     };
     const want = { target: cam.target.clone(), az: cam.az, el: cam.el, dist: cam.dist };
@@ -1965,18 +1971,21 @@
       const where = place === 'wait' ? 'Waiting to start' : place === 'ready' ? 'In Ready Stock' : place === 'delivered' ? 'Delivered' : 'At ' + BAY_NAMES[place];
       ui.bar.innerHTML =
         `<div class="saa-head"><b>${esc(j.name || 'Job ' + j.id)}</b><span>${esc(where)}</span><button class="saa-x" title="Close" aria-label="Close">&times;</button></div>` +
-        `<div class="saa-facts">${j.ref ? `<span><i>PO</i> ${esc(j.ref)}</span>` : ''}${j.bno ? `<span><i>Batch</i> ${esc(j.bno)}</span>` : ''}${j.qty ? `<span><i>Qty</i> ${esc(j.qty)}</span>` : ''}${shipped ? `<span><i>Shipped</i> ${shipped.toLocaleString()} cartons</span>` : ''}${j.deadline ? `<span><i>Due</i> ${esc(j.deadline)}</span>` : ''}</div>` +
+        `<div class="saa-facts">${j.ref ? `<span><i>PO</i> ${esc(j.ref)}</span>` : ''}${j.bno ? `<span><i>Batch</i> ${esc(j.bno)}</span>` : ''}${j.qty ? `<span><i>Qty</i> ${esc(j.qty)}</span>` : ''}${place === 'ready' && readyCartonsLeft(j) > 0 ? `<span><i>In store</i> ${readyCartonsLeft(j).toLocaleString()} cartons</span>` : ''}${num(j._readyQty) ? `<span><i>Ready</i> ${num(j._readyQty).toLocaleString()}</span>` : ''}${shipped ? `<span><i>Shipped</i> ${shipped.toLocaleString()}</span>` : ''}${j.deadline ? `<span><i>Due</i> ${esc(j.deadline)}</span>` : ''}</div>` +
         `<div class="saa-track">${steps}</div>` +
         (blocked && blockNote(j) ? `<div class="saa-note">On hold: ${esc(blockNote(j))}</div>` : '');
       ui.bar.querySelector('.saa-x').onclick = () => { select(null); setView(viewName === 'focus' ? 'overview' : viewName); };
     };
     const select = id => {
       const prev = selectedId; selectedId = id;
+      if (popTarget && popTarget.ready) { popTarget = null; ui.pop.style.display = 'none'; }
       for (const k of [prev, id]) { const p = k != null && pallets.get(k); if (p) setTag(p), placeTag(p); }
       if (id != null) {
         const p = pallets.get(id);
+        // A ready order: its card pops up where it stands (owner, 2026-10-24).
+        if (p && p.place === 'ready') showReadyPop(p);
         // Zoom to the pallet; on a production floor show just that floor.
-        if (p) {
+        else if (p) {
           want.target.set(p.g.position.x, p.floor == null ? 0 : FLOOR_Y[p.floor], p.g.position.z); want.dist = fitDist(34); want.el = 0.8; viewName = 'focus';
           setFloorFocus(p.floor == null ? null : p.floor);
           ui.views.querySelectorAll('button').forEach(b => b.classList.remove('on'));
@@ -2037,7 +2046,7 @@
       if (prev) { prev.popped = false; prev.sprite.scale.set(2.9, 2.9 * 170 / 400, 1); prev.sprite.renderOrder = 5; }
       stockSel = bi;
       const T = bi != null ? stockTiles.find(t => t.sprite.userData.stockBay === bi) : null;
-      if (!T) { stockSel = null; ui.pop.style.display = 'none'; renderBar(); return; }
+      if (!T) { stockSel = null; popTarget = null; ui.pop.style.display = 'none'; renderBar(); return; }
       // The card pops up over the view at the item; the camera stays put (owner, 2026-10-24).
       T.popped = true; T.sprite.scale.set(3.4, 3.4 * 170 / 400, 1); T.sprite.renderOrder = 12;
       lastInput = clock;
@@ -2052,6 +2061,7 @@
       ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); selectStock(null); };
       ui.pop.style.display = '';
       ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
+      popTarget = { obj: T.sprite, dy: 0.8 };
       placeStockPop();
       ui.bar.innerHTML =
         `<div class="saa-head"><b>${esc(it.type.toUpperCase())} · ${esc(it.size || '?')}${it.gsm ? ' · ' + esc(it.gsm) + ' gsm' : ''}${it.offcut ? ' · OFFCUT' : ''}</b><span>Inventory store</span><button class="saa-x" title="Close" aria-label="Close">&times;</button></div>` +
@@ -2060,11 +2070,25 @@
     };
     // Keep the pop-up over its item as the view turns / zooms; hidden when the item is behind the camera.
     const popV = new THREE.Vector3();
+    const showReadyPop = p => {
+      const j = p.job, n = readyCartonsLeft(j), R = num(j._readyQty), D = shippedCartons(j);
+      ui.pop.style.setProperty('--tone', '#166534');
+      ui.pop.innerHTML =
+        `<div class="saa-pop-h">READY TO SHIP<button title="Close" aria-label="Close">&times;</button></div>` +
+        `<div class="saa-pop-b"><div class="saa-pop-size"><b>${esc(j.ref ? 'PO ' + j.ref : (j.name || 'Job ' + j.id))}</b></div>` +
+        (j.ref ? `<div class="saa-pop-row"><i>Product</i><b>${esc(j.name || '')}</b></div>` : '') +
+        `<div class="saa-pop-row bal"><i>Cartons</i><b>${n > 0 ? n.toLocaleString() + ' in store' : '—'}</b></div>` +
+        (R ? `<div class="saa-pop-row"><i>Ready</i><b>${R.toLocaleString()}</b></div>` : '') +
+        (D ? `<div class="saa-pop-row"><i>Shipped</i><b>${D.toLocaleString()}</b></div>` : '') +
+        (j.bno ? `<div class="saa-pop-row"><i>Batch</i><b>${esc(j.bno)}</b></div>` : '') + '</div>';
+      ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); select(null); };
+      popTarget = { obj: p.g, dy: (p.top || 1) + 2.4, ready: true };
+      ui.pop.style.display = ''; ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
+      placeStockPop();
+    };
     const placeStockPop = () => {
-      if (stockSel == null || !ui.pop || ui.pop.style.display === 'none') return;
-      const T = stockTiles.find(t => t.sprite.userData.stockBay === stockSel);
-      if (!T) return;
-      popV.copy(T.sprite.position); popV.y += 0.8; popV.project(camera);
+      if (!popTarget || !ui.pop || ui.pop.style.display === 'none') return;
+      popTarget.obj.getWorldPosition(popV); popV.y += popTarget.dy; popV.project(camera);
       const w = host.clientWidth, h = host.clientHeight;
       if (popV.z > 1) { ui.pop.style.visibility = 'hidden'; return; }
       ui.pop.style.visibility = '';
@@ -2273,7 +2297,7 @@
         if (mv.to === 'delivered') { if (!p.leaving) { p.leaving = true; enqueueDeparture(mv.job, 0, p.g.position.clone()); queue[queue.length - 1].onPicked = () => removePallet(p); } continue; }
         p.place = mv.to; p.pendingFill = true;
       }
-      for (const p of pallets.values()) { const j = byId.get(p.job.id); if (j) { p.job = j; setTag(p); } }
+      for (const p of pallets.values()) { const j = byId.get(p.job.id); if (j) { p.job = j; setTag(p); if (p.place === 'ready' && readyCartonsLeft(j) !== (p.readyN || 0)) p.pendingFill = true; } }
       layout(first);
       for (const p of pallets.values()) if (p.pendingFill && !p.move) { fillPallet(p); p.pendingFill = false; }
       for (const p of pallets.values()) placeTag(p);
