@@ -178,7 +178,7 @@
     // Area and Work Shop is a step up (BASE_RAISE); Hall-02 at the front is
     // the low part, and the ramp in its top-left corner climbs to Hall-01.
     { parts: [
-      { plan: PLAN_B, raise: BASE_RAISE, aboveStreet: true,
+      { plan: PLAN_B, raise: BASE_RAISE,
         outline: [[157, 60], [1022, 60], [1022, 703], [500, 703], [500, 815], [207, 815], [207, 600], [157, 600]], ext: [0, 1, 4, 5, 6, 7],
         // The Machine Area is open to Hall-01 (no wall along its top) and the
         // lift's hall side is its doors (owner, 2026-10-21).
@@ -196,6 +196,10 @@
       // Back part, a few steps up: rooms, halls, Breaking Area, ablution hall.
       { plan: PLAN_G, outline: [[158, 158], [1058, 158], [1058, 822], [512, 822], [512, 718], [158, 718]], ext: [0, 1, 5],
         rails: [[512, 822, 638, 822], [690, 822, 1058, 822]],   // the hall's edge over the office block; open where the lobby stairs arrive
+        // From the street up to this floor (owner's purple marks, 2026-10-24); the
+        // front one over the office block has four windows (between the green marks).
+        plinth: [[158, 158, 1058, 158], [1058, 158, 1058, 822], [158, 158, 158, 718],
+          [512, 822, 1058, 822, [[605, 655], [723, 773], [873, 923], [1007, 1050]]]],
         walls: GROUND_WALLS, labels: GROUND_LABELS, columns: GROUND_PILLARS },
       // Stairs + lift core, level with the hall beside it (owner): the U
       // stairs on up to the 1st floor (the basement's L flight arrives here), the lift, and
@@ -204,7 +208,8 @@
       { plan: PLAN_G, outline: [[212, 718], [512, 718], [512, 940], [212, 940]], ext: [3],
         walls: [[212, 940, 354, 940], [505, 940, 512, 940]],   // open to the loading area, and the front's third bay open (owner, 2026-10-22)
         holes: [[218, 801, 276, 905, 'LB', [[276, 801, 276, 878]]]], lift: LIFT_G, loading: [416, 784, 508, 936],   // no roller-shutter door any more; the steps outside still lead up (owner, 2026-10-22)
-        stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12, 'steel']] },   // steel stairs (owner, 2026-10-24)
+        stairs: [[420, 942, 505, 978, 1, RAISE + 0.35 - 0.12, 'z', -RAISE + 0.12, 'steel']],   // steel stairs (owner, 2026-10-24)
+        plinth: [[212, 940, 420, 940], [212, 718, 212, 940], [420, 942, 420, 978]] },   // the core's front left of the loading stairs, its side, and the wall beside those stairs
       // Front part on the street (the owner's ground-floor plan).
       { plan: PLAN_P, raise: FRONT_RAISE, outline: [[0, 5], [603, 5], [603, 500], [0, 500]], ext: [1, 3],
         walls: [
@@ -885,16 +890,28 @@
           const [qx, qy] = P.outline[(k + 1) % P.outline.length];
           curtain(X(px), Z(py), X(qx), Z(qy), FLOOR_Y[fi] + raise + SLAB + 2.4, P.curtainTop != null ? P.curtainTop : FLOOR_Y[fi + 1] + Math.min(0, raise));
         });
-        // Basement Hall-01 stands up out of the street to the hall block's ground floor.
-        if (fi === 0 && P.aboveStreet) P.outline.forEach(([px, py], k) => {
-          if (P.ext && !P.ext.includes(k)) return;
-          const [qx, qy] = P.outline[(k + 1) % P.outline.length];
-          curtain(X(px), Z(py), X(qx), Z(qy), 0, FLOOR_Y[1]);
-        });
         // Solar panels on a steel frame over the given area (roof, open area).
         if (P.solar) solarCanopy(pg, X(P.solar[0]), X(P.solar[2]), Z(P.solar[1]), Z(P.solar[3]), SLAB + 3.0);
         for (const [a, b, c, d] of P.walls || []) wallSeg(X(a), Z(b), X(c), Z(d), 1.5, creamWall, 0.2, pg);   // cream tinted, like every wall (owner)
         for (const [a, b, c, d] of P.rails || []) railing(X(a), Z(b), X(c), Z(d), SLAB, pg);
+        for (const [a, b, c, d, wins] of P.plinth || []) {
+          const yS = -(FLOOR_Y[fi] + raise), yT = SLAB, x1 = X(a), z1 = Z(b), x2 = X(c), z2 = Z(d);
+          const len = Math.hypot(x2 - x1, z2 - z1), rot = -Math.atan2(z2 - z1, x2 - x1);
+          const piece = (t0, t1, y0, y1, color, thick) => {
+            const m = box(len * (t1 - t0), y1 - y0, thick, color, x1 + (x2 - x1) * (t0 + t1) / 2, (y0 + y1) / 2, z1 + (z2 - z1) * (t0 + t1) / 2, pg);
+            m.rotation.y = rot; return m;
+          };
+          const spans = (wins || []).map(([w0, w1]) => [(X(w0) - x1) / (x2 - x1), (X(w1) - x1) / (x2 - x1)]).sort((u, v) => u[0] - v[0]);
+          let t = 0;
+          for (const [w0, w1] of spans) {
+            if (w0 > t) piece(t, w0, yS, yT, CREAM, 0.3);
+            piece(w0, w1, yS, yS + 0.8, CREAM, 0.3);            // sill
+            piece(w0, w1, yT - 0.7, yT, CREAM, 0.3);            // head
+            piece(w0, w1, yS + 0.8, yT - 0.7, 0x1e293b, 0.12);  // glass
+            t = w1;
+          }
+          if (t < 1) piece(t, 1, yS, yT, CREAM, 0.3);
+        }
         for (const [a, b, c, d] of P.dashed || []) {
           const n = Math.round(Math.hypot(X(c) - X(a), Z(d) - Z(b)) / 1.2);
           for (let k = 0; k < n; k += 2) { const t0 = k / n, t1 = (k + 1) / n; box(Math.abs(X(c) - X(a)) * (t1 - t0) + 0.15, 0.02, Math.abs(Z(d) - Z(b)) * (t1 - t0) + 0.15, 0x94a3b8, X(a) + (X(c) - X(a)) * (t0 + t1) / 2, SLAB + 0.01, Z(b) + (Z(d) - Z(b)) * (t0 + t1) / 2, pg, false); }
@@ -1042,18 +1059,6 @@
       box(fx1 - fx0, 0.05, fz1 - fz0, 0xe7e5e4, (fx0 + fx1) / 2, 0.15, (fz0 + fz1) / 2, scene, false);
       for (let x = fx0 + 2.2; x < fx1; x += 2.2) box(0.05, 0.02, fz1 - fz0, 0xc8c4bf, x, 0.18, (fz0 + fz1) / 2, scene, false);
       for (let zz = fz0 + 2.2; zz < fz1; zz += 2.2) box(fx1 - fx0, 0.02, 0.05, 0xc8c4bf, (fx0 + fx1) / 2, 0.18, zz, scene, false);
-      // The hall block's edge over the office block (owner, 2026-10-24): the
-      // half-floor drop from the hall's floor to the street is a wall - glass
-      // over the Lobby (the owner's blue marks), solid stone either side
-      // (green), open where the lobby's steel stairs climb.
-      {
-        const ez = wz(PLAN_G, 822), eTop = FLOOR_Y[1] + SLAB, gx = px => wx(PLAN_G, px);
-        stoneAt(gx(512), gx(638), 0, eTop, ez);
-        stoneAt(gx(690), gx(1058), 0, eTop, ez);
-        win(gx(698), gx(866), 0.7, eTop - 0.7, 3, 1, ez);
-        // and a wall beside the loading area's steel stairs, from the street up (green mark).
-        box(0.3, eTop + 1.0, wz(PLAN_G, 978) - wz(PLAN_G, 942), CREAM, wx(PLAN_G, 420) - 0.15, (eTop + 1.0) / 2, (wz(PLAN_G, 942) + wz(PLAN_G, 978)) / 2, facade);
-      }
       // Side wing: the core's front, from its corner to the open loading area.
       const cz = wz(PLAN_G, 940), cx0 = wx(PLAN_G, 212), cx1 = wx(PLAN_G, 412), ctop = FLOOR_Y[3] + 1.2;
       // Two columns of windows; the third bay, by the loading area, stands open (owner, 2026-10-22).
