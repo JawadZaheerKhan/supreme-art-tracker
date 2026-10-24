@@ -1569,6 +1569,20 @@
     transition: background 0.12s, border-color 0.12s;
   }
   #create-group-btn:hover { background: #ddd6fe; border-color: #a78bfa; }
+  /* Mark Ready filter (green, like the tick) and the Over-issued warning
+     (red) - next to Create Mil Job (owner, 2026-10-24). */
+  #ready-check-toggle, #over-issue-alert {
+    font-weight: 600; font-size: 14px;
+    padding: 8px 16px; border-radius: 7px;
+    font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  #ready-check-toggle { background: #fff; color: #15803d; border: 1.5px solid #16a34a; }
+  #ready-check-toggle:hover { background: #f0fdf4; }
+  #ready-check-toggle.is-on { background: #16a34a; color: #fff; }
+  #over-issue-alert { background: #fee2e2; color: #b91c1c; border: 1.5px solid #f87171; font-weight: 700; }
+  #over-issue-alert:hover { background: #fecaca; border-color: #ef4444; }
   /* Stock Group tile — purple accent top-border to distinguish from job cards */
   .group-card { border-top: 4px solid #7c3aed !important; }
   .job-tile.group-card .tile-ribbon,
@@ -3395,6 +3409,12 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       </select>
       <span id="date-custom" style="display:none;gap:6px;align-items:center;"><input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;"><span style="color:var(--text2);font-size:12px;">to</span><input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;"></span>
       <div class="jobs-filter-right">
+      <button id="over-issue-alert" class="whole-toggle" style="display:none;" onclick="openOverIssuedList()" title="Jobs with over-issued paper waiting for a decision - click to pick one and go to it">
+        <span class="whole-toggle-text">&#9888; <span id="over-issue-alert-label">Over-issued</span></span>
+      </button>
+      <button id="ready-check-toggle" class="whole-toggle" onclick="toggleReadyCheckFilter()" title="Show only jobs marked Ready - waiting for Record Delivery">
+        <span class="whole-toggle-text">&#10004; <span id="ready-check-toggle-label">Mark Ready</span></span>
+      </button>
       <button id="create-group-btn" class="ceo-hide whole-toggle" onclick="playActionToggle(this); openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
         <span class="whole-toggle-text">&#128230; Create Mil Job</span>
       </button>
@@ -4272,6 +4292,8 @@ let filterPO = '';
 let filterCode = '';   // Item Code box (the job card's Code), owner 2026-10-08
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
+// Mark Ready filter: only jobs ticked Ready, still waiting for Record Delivery.
+let filterReadyChecked = false;
 let filterGroup = '';
 let filterDateRange = '';
 let filterDateFrom = '';
@@ -8047,6 +8069,7 @@ function jobPassesFilters(j) {
   if (String(filterCode || '').trim() && !searchMatch(j.jobcode, filterCode)) return false;
   if (filterShadeCard === 'only' && !j.is_shade_card) return false;
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
+  if (filterReadyChecked && !isReadyChecked(j)) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
   if (filterGroup && j.stock_group_name !== filterGroup) return false;
   if (!inDateRange(j)) return false;
@@ -8324,6 +8347,8 @@ function renderJobs() {
     b.classList.toggle('active', b.dataset.jv === jobsViewMode));
   renderNewJobsBulkBar();
   renderShadeCardToggle();
+  renderReadyCheckToggle();
+  renderOverIssueAlert();
   renderWastageAdjBar();
   if (jobsViewMode === 'cards') renderJobsCards();
   else renderJobsCompact();
@@ -9943,6 +9968,65 @@ function setCodeFilterDebounced(v) { clearTimeout(_codeTimer); _codeTimer = setT
 function toggleShadeCardFilter() {
   filterShadeCard = filterShadeCard === 'only' ? '' : 'only';
   renderJobs();
+}
+// Mark Ready filter (owner, 2026-10-24): the jobs ticked Ready that still
+// wait for Record Delivery. They sit in Ready to Deliver or Partially
+// Delivered, so switching it on opens the All tab to show both.
+function renderReadyCheckToggle() {
+  const btn = document.getElementById('ready-check-toggle');
+  if (!btn) return;
+  const count = jobs.filter(j => j && isReadyChecked(j)).length;
+  const label = document.getElementById('ready-check-toggle-label');
+  if (label) label.textContent = count ? `Mark Ready (${count})` : 'Mark Ready';
+  btn.classList.toggle('is-on', filterReadyChecked);
+}
+function toggleReadyCheckFilter() {
+  filterReadyChecked = !filterReadyChecked;
+  if (filterReadyChecked && view !== 'all') { setView('all'); return; }
+  renderJobs();
+}
+// Over-issued warning (owner, 2026-10-24): shows only while a job has
+// over-issued paper waiting for a decision. Click -> list of those jobs ->
+// pick one to go to its tile, where Use in job / Add to Offcut / Send Back
+// / Ignore sit.
+function overIssuedJobs() { return jobs.filter(j => j && !j.deleted_at && hasOverIssuePending(j)); }
+function renderOverIssueAlert() {
+  const btn = document.getElementById('over-issue-alert');
+  if (!btn) return;
+  const count = overIssuedJobs().length;
+  btn.style.display = count ? '' : 'none';
+  const label = document.getElementById('over-issue-alert-label');
+  if (label) label.textContent = `Over-issued (${count})`;
+}
+function openOverIssuedList() {
+  const list = overIssuedJobs();
+  if (!list.length) { notify('No over-issued jobs right now.'); renderOverIssueAlert(); return; }
+  const rows = list.map(j => {
+    const p = overIssuePending(j) || {};
+    const pk = typeof p.total_packets === 'number' ? (Number.isInteger(p.total_packets) ? p.total_packets : p.total_packets.toFixed(2)) : (p.total_packets || '');
+    return `<div onclick="goToOverIssuedJob(${j.id})" class="row-hover-red" style="display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 12px;border:1px solid #fecaca;border-radius:8px;margin-bottom:8px;cursor:pointer;background:#fff;">
+      <div><b style="color:#1e3a8a;">#${j.id}</b> <b>${esc(j.name || '')}</b><div style="font-size:12px;color:var(--text2);">${esc(j.client || '')}</div></div>
+      <div style="color:#b91c1c;font-weight:700;white-space:nowrap;">&#9888; ${esc(String(pk))} ${esc(p.unit || 'packets')} over${p.challan_no ? `<div style="font-size:11px;font-weight:500;color:var(--text2);">challan ${esc(p.challan_no)}</div>` : ''}</div>
+    </div>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
+    <h2>&#9888; Over-issued jobs (${list.length})</h2>
+    <div style="font-size:12px;color:var(--text2);margin:-6px 0 12px;">More paper went out than these jobs need. Click a job to go to it and decide.</div>
+    ${rows}
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
+// Go to one job's tile: All tab, search set to its number, then scroll and flash.
+function goToOverIssuedJob(id) {
+  closeModal();
+  jobsMilFocus = null;
+  filterReadyChecked = false;
+  filterShadeCard = '';
+  filterText = String(id);
+  const box = document.getElementById('search-input');
+  if (box) box.value = String(id);
+  if (view !== 'all') setView('all'); else renderJobs();
+  setTimeout(() => scrollToClientTile(id), 60);
 }
 // ── Report row -> this item -> back ──────────────────────────
 // Set while the user is here because they clicked a row in the Current
