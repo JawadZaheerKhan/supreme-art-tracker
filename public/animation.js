@@ -151,13 +151,12 @@
   // ablution hall and the kitchen's short wall: one open hall now.
   const UPPER_WALLS = [
     [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533],
-    // Washrooms (owner's white marks, 2026-10-24): a walled block with stalls.
-    [828, 749, 966, 749], [828, 749, 828, 822], [966, 749, 966, 822], [874, 790, 874, 822], [920, 790, 920, 822],
+    // No washroom walls here - the sorting table stands in the open hall (owner, 2026-10-24).
     [600, 822, 1058, 822], [512, 718, 512, 822],
     [158, 718, 343, 718], [410, 718, 512, 718]];
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
     ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
-    ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['WASHROOMS', 897, 772, 0.7]];
+    ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0]];
   // The ground floor's back part has lost most of those walls (owner's white
   // marks, 2026-10-22): the rooms column is open to the hall but for its top
   // room's and the kitchen's walls, and the top rooms, the Breaking Area and
