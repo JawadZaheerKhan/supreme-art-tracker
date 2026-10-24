@@ -151,11 +151,13 @@
   // ablution hall and the kitchen's short wall: one open hall now.
   const UPPER_WALLS = [
     [345, 158, 345, 533], [158, 253, 345, 253], [158, 348, 345, 348], [158, 437, 345, 437], [158, 533, 345, 533],
-    [975, 718, 975, 760], [1013, 718, 1013, 760], [600, 822, 1058, 822], [512, 718, 512, 822],
+    // Washrooms (owner's white marks, 2026-10-24): a walled block with stalls.
+    [828, 749, 966, 749], [828, 749, 828, 822], [966, 749, 966, 822], [874, 790, 874, 822], [920, 790, 920, 822],
+    [600, 822, 1058, 822], [512, 718, 512, 822],
     [158, 718, 343, 718], [410, 718, 512, 718]];
   const UPPER_LABELS = [['ROOM', 250, 205, 0.8], ['ROOM', 250, 300, 0.8], ['ROOM', 250, 390, 0.8], ['ROOM', 250, 485, 0.8], ['KITCHEN', 222, 625, 0.7],
     ['HALL', 430, 370, 1.1], ['HALL', 420, 615, 1.1], ['ROOM', 605, 250, 0.9], ['ROOM', 785, 250, 0.9], ['STORE', 965, 250, 0.9], ['HALL', 695, 440, 1.1],
-    ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['ABLUTION AREA', 945, 790, 0.7]];
+    ['HALL', 965, 540, 1.1], ['BREAKING AREA', 720, 620, 0.9], ['HALL', 735, 770, 1.0], ['WASHROOMS', 897, 772, 0.7]];
   // The ground floor's back part has lost most of those walls (owner's white
   // marks, 2026-10-22): the rooms column is open to the hall but for its top
   // room's and the kitchen's walls, and the top rooms, the Breaking Area and
@@ -347,8 +349,24 @@
     { kind: 'ctp', stage: null, floor: 1, len: 3.4, face: 'left', at: [920, 967], pallets: [], label: [0, 2.6] },
     { kind: 'processor', stage: null, floor: 1, len: 1.8, face: 'down', at: [1003, 1008], pallets: [] },
   ];
+  // 1st floor machines (owner's marks, 2026-10-24): the 3 folder gluers
+  // (Pasting) across the hall, the thermal lamination machine by the
+  // washrooms. Pasting jobs' pallets wait at the gluers' delivery ends.
+  const FIRST_MACHINES = [
+    { kind: 'gluer', stage: 5, floor: 2, len: 16, face: 'right', at: [794, 221], pallets: [[9.6, 0]], label: [0, 1.6] },
+    { kind: 'gluer', stage: 5, floor: 2, len: 16, face: 'right', at: [794, 331], pallets: [[9.6, 0]], label: [0, 1.6] },
+    { kind: 'gluer', stage: 5, floor: 2, len: 16, face: 'right', at: [794, 435], pallets: [[9.6, 0]], label: [0, 1.6] },
+    { kind: 'laminator', stage: null, floor: 2, len: 3.4, face: 'down', at: [1010, 785], pallets: [], label: [-2.6, 0], name: 'THERMAL LAMINATION' },
+  ];
+  // Tables with operators round them (owner's marks, 2026-10-24): plan line from -> to.
+  const WORK_TABLES = [
+    { name: 'BREAKING', from: [645, 800], to: [715, 800] },
+    { name: 'SORTING', from: [845, 728], to: [945, 728] },
+  ];
   // Where a machine stands: x / z in the world, the floor's height under it.
-  const machinePos = m => m.floor === 1
+  const machinePos = m => m.floor === 2
+    ? { x: wx(PLAN_G, m.at[0]), z: wz(PLAN_G, m.at[1]), y: FLOOR_Y[2], floor: 2 }
+    : m.floor === 1
     ? { x: wx(PLAN_G, m.at[0]), z: wz(PLAN_G, m.at[1]), y: FLOOR_Y[1] + groundRaise(m.at[1]), floor: 1 }
     : { x: wx(PLAN_B, m.at[0]), z: wz(PLAN_B, m.at[1]), y: FLOOR_Y[0] + basementRaise(m.at[0], m.at[1]), floor: 0 };
   // A machine's front is its local +x; this turns it to face that side.
@@ -361,8 +379,8 @@
     { floor: 0, machines: true },                          // Printing    - beside the 7 presses
     { floor: 1, machines: true },                          // Coatings    - beside the 4 coating machines, ground floor (owner)
     { floor: 0, machines: true },                          // Die Cutting - beside the 7 die cutters
-    { floor: 2, plan: PLAN_G, r: [530, 365, 860, 520] },   // Sorting     - 1st floor, middle hall
-    { floor: 2, plan: PLAN_G, r: [890, 365, 1040, 700] },  // Pasting     - 1st floor, right hall
+    { floor: 2, plan: PLAN_G, r: [845, 640, 960, 698] },   // Sorting     - 1st floor, beside the sorting table (owner, 2026-10-24)
+    { floor: 2, machines: true },                          // Pasting     - beside the 3 folder gluers, 1st floor (owner, 2026-10-24)
   ];
   const zoneRect = i => { const z = STAGE_ZONES[i], pl = z.plan; return { floor: z.floor, raise: z.raise || 0, x0: wx(pl, z.r[0]), z0: wz(pl, z.r[1]), x1: wx(pl, z.r[2]), z1: wz(pl, z.r[3]) }; };
   // Site (owner, 2026-10-22): the Ready Stock warehouse stands left of the
@@ -431,7 +449,7 @@
     if (STAGE_ZONES[place].machines) {
       // Spread across the stage's machines first, then their second spot,
       // then stack a layer up.
-      const ms = MACHINES.concat(GROUND_MACHINES).filter(m => m.stage === place);
+      const ms = MACHINES.concat(GROUND_MACHINES, FIRST_MACHINES).filter(m => m.stage === place);
       const spots = [];
       for (let s = 0; s < 3; s++) ms.forEach(m => { if (m.pallets[s]) spots.push([m, m.pallets[s]]); });
       const [m, off] = spots[k % spots.length], at = machinePos(m);
@@ -1209,6 +1227,30 @@
       const gm = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.16, 10), green); geos.add(gm.geometry); gm.position.set(x, 2.61, z); parent.add(gm);
       return t => { green.emissiveIntensity = 0.5 + 0.5 * Math.sin(t * 4); };
     };
+    const buildGluer = (g, n, len, dep) => {   // folder gluer along local x: feeder -> folding + glue section -> compression belt -> packed cartons
+      len = len || 16; dep = dep || 1.6;
+      box(len, 0.35, dep, 0x111827, 0, 0.17, 0, g);
+      box(1.8, 1.4, dep + 0.3, 0xcbd5e1, -len / 2 + 0.9, 0.95, 0, g);                            // feeder
+      const blanks = box(1.2, 1, dep * 0.75, 0xd6c3a1, -len / 2 + 0.9, 1.65, 0, g);                // stack of flat blanks
+      const bx0 = -len / 2 + 2.0, bLen = len - 5.6;
+      box(bLen, 0.12, dep * 0.8, 0x374151, bx0 + bLen / 2, 0.98, 0, g);                         // carrier belts
+      for (const sd of [-1, 1]) box(bLen, 0.35, 0.08, 0x2563eb, bx0 + bLen / 2, 1.15, sd * dep * 0.45, g);   // folding rails
+      for (let k = 0; k < 4; k++) box(0.6, 0.55, dep * 0.95, 0x1d4ed8, bx0 + bLen * (0.12 + k * 0.22), 1.35, 0, g);   // folding / gluing stations
+      for (const fx of [0.3, 0.55]) box(0.22, 0.3, 0.22, 0xdc2626, bx0 + bLen * fx, 1.75, dep * 0.3, g);               // glue pots
+      box(3.2, 0.9, dep, 0x9ca3af, len / 2 - 1.8, 0.62, 0, g);                                    // compression belt
+      box(3.0, 0.12, dep * 0.8, 0x1f2937, len / 2 - 1.8, 1.12, 0, g);
+      const packed = box(1.1, 1, dep * 0.7, 0xc9a26b, len / 2 - 0.45, 0.5, 0, g);                  // packed cartons at the end
+      const items = [0, 1, 2, 3, 4].map(() => box(0.5, 0.05, dep * 0.55, 0xe7d8b8, bx0, 1.07, 0, g, false));
+      const light = signal(g, len / 2 - 0.3, -dep / 2 - 0.1);
+      person(-len / 2 - 0.7, 0, Math.PI / 2, g);                                                  // feeding
+      person(len / 2 - 1.6, dep / 2 + 0.8, Math.PI, g);                                           // packing at the end
+      animated.push((dt, t) => {
+        items.forEach((it, k) => { it.position.x = bx0 + ((t * 0.18 + k / 5 + n * 0.17) % 1) * (bLen + 3); });
+        const h = 0.1 + ((t * 0.04 + n * 0.3) % 1) * 0.8; packed.scale.y = h; packed.position.y = 0.2 + h / 2;
+        const b = 0.9 - ((t * 0.03 + n * 0.2) % 1) * 0.7; blanks.scale.y = b; blanks.position.y = 1.65 - (1 - b) / 2;
+        light(t + n);
+      });
+    };
     const buildPress = (g, n, units, len) => {  // sheet-fed offset press: feeder -> units -> delivery along +x
       const UW = units >= 5 ? 1.25 : 0.95, W = 2.2, L = Math.max(len || 0, 1.3 + units * UW + 1.3 + 0.2), del = L - 1.3 - units * UW - 0.2;
       box(L, 0.3, W, 0x111827, 0, 0.15, 0, g);
@@ -1496,6 +1538,37 @@
       }
     });
 
+    FIRST_MACHINES.forEach((m, i) => {
+      const g = new THREE.Group(), at = machinePos(m);
+      g.position.set(at.x, SLAB, at.z);
+      g.rotation.y = FACE_ROT[m.face] || 0;
+      floorGroups[2].add(g);
+      const n = MACHINES.length + GROUND_MACHINES.length + i;
+      if (m.kind === 'gluer') buildGluer(g, n, m.len); else buildLaminator(g, n, m.len);
+      hazardTape(g, SLAB + 0.012, floorGroups[2]);
+      if (m.label) {
+        const name = m.name || { gluer: 'FOLDER GLUER', laminator: 'LAMINATION' }[m.kind];
+        const lab = decal(name, name.length * 0.55, 0.75, '#374151', { size: 0.62 });
+        lab.rotation.x = -Math.PI / 2; lab.position.set(at.x + m.label[0], SLAB + 0.02, at.z + m.label[1]); lab.renderOrder = 1; floorGroups[2].add(lab);
+      }
+    });
+    // Breaking and sorting tables, operators along both sides.
+    WORK_TABLES.forEach(T => {
+      const x1 = wx(PLAN_G, T.from[0]), z1 = wz(PLAN_G, T.from[1]), x2 = wx(PLAN_G, T.to[0]), z2 = wz(PLAN_G, T.to[1]);
+      const len = Math.hypot(x2 - x1, z2 - z1), g = new THREE.Group();
+      g.position.set((x1 + x2) / 2, SLAB, (z1 + z2) / 2); g.rotation.y = -Math.atan2(z2 - z1, x2 - x1); floorGroups[2].add(g);
+      box(len, 0.08, 1.1, 0xd6d3d1, 0, 0.86, 0, g);                                           // table top
+      for (const lx of [-len / 2 + 0.15, len / 2 - 0.15]) for (const lz of [-0.45, 0.45]) box(0.08, 0.82, 0.08, 0x6b7280, lx, 0.41, lz, g);
+      const per = Math.max(2, Math.round(len / 1.4));
+      for (let k = 0; k < per; k++) {
+        const px = -len / 2 + len * (k + 0.5) / per;
+        box(0.7, 0.18, 0.5, 0xffffff, px, 1.0, 0, g);                                         // sheets on the table
+        person(px, -0.95, 0, g); person(px, 0.95, Math.PI, g);
+      }
+      const lab = decal(T.name + ' TABLE', 6, 0.8, '#374151', { size: 0.6 });
+      lab.rotation.x = -Math.PI / 2; lab.position.set((x1 + x2) / 2, SLAB + 0.02, (z1 + z2) / 2 - 2.1); lab.renderOrder = 1; floorGroups[2].add(lab);
+    });
+
     // Which floors show: all (see-through upper slabs) or just one.
     let floorFocus = null;
     const setFloorFocus = f => {
@@ -1579,7 +1652,7 @@
       [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
       [PLAN_G, 1, 0, [[360, 180, 500, 700], [530, 370, 860, 500]]],
       [PLAN_P, 1, FRONT_RAISE, [[215, 262, 380, 400]]],
-      [PLAN_G, 2, 0, [[360, 180, 500, 700], [530, 370, 860, 520], [890, 365, 1040, 700]]],
+      [PLAN_G, 2, 0, [[360, 180, 500, 700], [600, 470, 1040, 620], [640, 262, 1000, 296]]],
     ];
     LIFTER_AISLES.forEach(([pl, floor, raise, areas]) => areas.forEach((r, k) => {
       const a = planArea(pl, r[0], r[1], r[2], r[3]);
