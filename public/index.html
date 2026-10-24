@@ -3364,6 +3364,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
+    <button class="mode-btn" data-mode="mgr-operators" id="mode-mgr-operators-btn" onclick="setMode('mgr-operators')" style="display:none;">&#128101; Operators</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
     <button class="mode-btn" data-mode="client-view" onclick="setMode('client-view')" id="mode-client-view-btn">&#128100; Client View</button>
   </div>
@@ -3977,6 +3978,13 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      see their section's job queue, and advance jobs / record numbers. -->
 <div class="main" id="station-mode" style="display:none;" onclick="stationResetIdle()">
   <div id="station-root"></div>
+</div>
+
+<!-- Operators, for the line manager once his Manager PIN is in at the
+     Station (owner, 2026-10-24): rename / add the operators on each
+     machine. Hidden again when he logs out. -->
+<div class="main" id="mgr-operators-mode" style="display:none;">
+  <div id="mgr-ops-root"></div>
 </div>
 
 <!-- Client View (admin preview) — a top-level tab available to admin /
@@ -5825,6 +5833,7 @@ function startBtnAccess() {
   _btnObserver.observe(document.body, { childList: true, subtree: true });
 }
 function tabAllowed(m) {
+  if (m === 'mgr-operators') return mgrOpsUnlocked();   // only while a Manager PIN is in, even for Super Admin
   if (isSuperAdmin()) return true;
   switch (m) {
     case 'jobs':        return hasPerm('job_tab_access', 'view');
@@ -5837,6 +5846,7 @@ function tabAllowed(m) {
     case 'client-view': return hasPerm('client_view_preview', 'view');
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
+    case 'mgr-operators': return mgrOpsUnlocked();
     default:            return true;
   }
 }
@@ -6275,6 +6285,7 @@ function renderUserChip() {
   showTab('mode-station-btn', 'station');
   showTab('mode-users-btn', 'users');
   showTab('mode-client-view-btn', 'client-view');
+  showTab('mode-mgr-operators-btn', 'mgr-operators');
   if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   const op = isOperator(), sm = isStoreManager(), fin = isFinance();
   // Trash card — gated by trash_view (default admin/ceo, was previously
@@ -6859,6 +6870,9 @@ function setMode(m) {
   const dashEl = document.getElementById('dashboard-mode');
   if (dashEl) dashEl.style.display = m === 'dashboard' ? 'block' : 'none';
   document.getElementById('station-mode').style.display   = m === 'station' ? 'block' : 'none';
+  const mgrOpsEl = document.getElementById('mgr-operators-mode');
+  if (mgrOpsEl) mgrOpsEl.style.display = m === 'mgr-operators' ? 'block' : 'none';
+  if (m === 'mgr-operators') mgrOpsLoad();
   const clientViewEl = document.getElementById('client-view-mode');
   if (clientViewEl) clientViewEl.style.display = m === 'client-view' ? 'block' : 'none';
   const addBtn    = document.getElementById('topbar-add');
@@ -35798,9 +35812,90 @@ function stationLogout(silent) {
   stationCloseQwerty();
   stationRecAbort();
   if (stationIdleTimer) { clearTimeout(stationIdleTimer); stationIdleTimer = null; }
+  mgrOpsList = null;
+  mgrOpsSyncTab();
+  if (mode === 'mgr-operators') setMode('station');
   if (mode === 'station') stationRender();
   if (!silent) notify('Signed out of station');
 }
+
+// ── Operators tab for the line manager (owner, 2026-10-24) ──────────
+// Shows once the Manager PIN is in at the Station; every machine's operators
+// can be renamed, added or removed (machines, PINs and roles stay with admin
+// / PM). Log Out signs the PIN out and the tab hides again.
+let mgrOpsList = null;
+function mgrOpsUnlocked() {
+  try { return !!(stationOperator && stationOperator.is_manager && stationOperator.pin); } catch (e) { return false; }
+}
+function mgrOpsSyncTab() {
+  const b = document.getElementById('mode-mgr-operators-btn');
+  if (b) b.style.display = mgrOpsUnlocked() ? '' : 'none';
+  if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
+}
+async function mgrOpsLoad() {
+  const el = document.getElementById('mgr-ops-root');
+  if (!el) return;
+  if (!mgrOpsUnlocked()) { el.innerHTML = '<div class="empty">Enter the Manager PIN at the Station to manage operators.</div>'; return; }
+  if (!mgrOpsList) el.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    mgrOpsList = await api('POST', '/api/operators/manager-roster', { pin: stationOperator.pin });
+    mgrOpsRender();
+  } catch (e) {
+    el.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+function mgrOpsRender() {
+  const el = document.getElementById('mgr-ops-root');
+  if (!el || !mgrOpsList) return;
+  const who = (stationPerson && stationPerson.name) || (stationOperator && stationOperator.name) || 'Manager';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+      <div><div style="font-size:20px;font-weight:800;">Operators</div>
+        <div style="color:var(--text2);font-size:13px;">Signed in with the Manager PIN as <b>${esc(who)}</b>. Edit a name, add a new operator, then Save that machine.</div></div>
+      <button class="btn btn-danger" onclick="mgrOpsLogout()">&#x23FB; Log Out</button>
+    </div>
+    ${mgrOpsList.length ? mgrOpsList.map(o => {
+      const persons = Array.isArray(o.persons) && o.persons.length ? o.persons : [{ name: '', name_ur: '' }];
+      return `
+      <div class="inv-card" data-op-id="${o.id}" style="margin-bottom:12px;">
+        <div class="inv-name">&#9881; ${esc(o.name || '(unnamed machine)')}</div>
+        <div class="mgr-op-persons" style="display:flex;flex-direction:column;gap:8px;margin:10px 0;">${persons.map((p, i) => personRowHtml(p, i)).join('')}</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button class="btn btn-sm" onclick="mgrOpsAddRow(${o.id})">+ Add Operator</button>
+          <button class="btn btn-sm btn-primary" onclick="mgrOpsSave(${o.id}, this)">Save</button>
+        </div>
+      </div>`;
+    }).join('') : '<div class="empty">No machines yet.</div>'}`;
+}
+function mgrOpsAddRow(id) {
+  const wrap = document.querySelector(`#mgr-ops-root [data-op-id="${id}"] .mgr-op-persons`);
+  if (!wrap) return;
+  wrap.insertAdjacentHTML('beforeend', personRowHtml({ name: '', name_ur: '' }, wrap.children.length));
+  const rows = wrap.querySelectorAll('.op-person-name');
+  if (rows.length) rows[rows.length - 1].focus();
+}
+async function mgrOpsSave(id, btn) {
+  if (!mgrOpsUnlocked()) { notify('Enter the Manager PIN at the Station first'); return; }
+  const card = document.querySelector(`#mgr-ops-root [data-op-id="${id}"]`);
+  if (!card) return;
+  const persons = [...card.querySelectorAll('.op-person-row')].map(row => ({
+    name: row.querySelector('.op-person-name').value.trim(),
+    name_ur: row.querySelector('.op-person-name-ur').value.trim(),
+  })).filter(p => p.name);
+  if (!persons.length) { notify('Add at least one operator on this machine'); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const row = await api('PUT', `/api/operators/${id}/manager-persons`, { pin: stationOperator.pin, persons, person: stationPerson && stationPerson.name });
+    const k = mgrOpsList.findIndex(o => o.id === id);
+    if (k >= 0) mgrOpsList[k] = row;
+    mgrOpsRender();
+    notify(`Saved the operators on ${row.name}`);
+  } catch (e) {
+    notify(e.message || 'Could not save');
+    if (btn) btn.disabled = false;
+  }
+}
+function mgrOpsLogout() { stationLogout(); }
 
 // True on tablets / phones (coarse pointer), false on a laptop / desktop
 // with a mouse. Drives whether the station inputs are readonly+on-screen-
@@ -35875,6 +35970,7 @@ async function stationPinSubmit() {
     // the people on this machine). Person + stage get picked next.
     stationOperator = { ...machine, pin, stage_indices: stages, machine: machine.name };
     stationPerson = persons.length === 1 ? persons[0] : null;
+    mgrOpsSyncTab();
     if (!stationPerson) { stationView = 'person-pick'; stationRender(); return; }
     // Manager PIN — skip the single-stage pick entirely, land on the
     // all-stages/search screen instead.
