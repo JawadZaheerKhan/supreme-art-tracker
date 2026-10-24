@@ -505,7 +505,7 @@
   .saa-pop-size b { font-size: 30px; font-weight: 900; }
   .saa-pop-size span { font-size: 17px; font-weight: 800; color: #334155; }
   .saa-pop-row { display: flex; gap: 10px; font-size: 13px; margin-top: 6px; }
-  .saa-pop-row i { font-style: normal; color: #64748b; width: 64px; flex-shrink: 0; }
+  .saa-pop-row i { font-style: normal; color: #64748b; width: 74px; flex-shrink: 0; }
   .saa-pop-row.bal b { color: #166534; font-size: 15px; }
   .saa-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; background: rgba(255,255,255,.95); border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; box-shadow: 0 4px 14px rgba(15,23,42,.08); font-size: 12px; color: #334155; }
   .saa-bar .saa-hint { color: #64748b; }
@@ -1784,12 +1784,13 @@
       const tone = blocked ? 'red' : (selectedId === j.id ? 'blue' : (urgent ? 'amber' : ''));
       const rc = jobPlace(j) === 'ready' ? readyCartonsLeft(j) : 0;
       const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobSub(j));
-      const key = jobTitle(j) + '|' + sub + '|' + tone;
+      const title = jobPlace(j) === 'ready' ? 'E-' + j.id : jobTitle(j);   // Ready Stock: the job number (owner, 2026-10-24)
+      const key = title + '|' + sub + '|' + tone;
       if (p.tagKey === key) return;
       disposeSprite(p.tag); disposeSprite(p.tagS);
       // Two tags: the full one for close up, a title-only one for the
       // overview so neighbouring pallets' tags don't pile on each other.
-      p.tag = tag(jobTitle(j), sub, tone); p.tagS = tag(jobTitle(j), '', tone, 2.5); p.tagKey = key;
+      p.tag = tag(title, sub, tone); p.tagS = tag(title, '', tone, 2.5); p.tagKey = key;
       p.tag.userData.jobId = p.tagS.userData.jobId = j.id;
       p.g.add(p.tag, p.tagS);
       if (p.ring) { p.g.remove(p.ring); p.ring.material.dispose(); p.ring = null; }
@@ -2075,12 +2076,14 @@
       ui.pop.style.setProperty('--tone', '#166534');
       ui.pop.innerHTML =
         `<div class="saa-pop-h">READY TO SHIP<button title="Close" aria-label="Close">&times;</button></div>` +
-        `<div class="saa-pop-b"><div class="saa-pop-size"><b>${esc(j.ref ? 'PO ' + j.ref : (j.name || 'Job ' + j.id))}</b></div>` +
-        (j.ref ? `<div class="saa-pop-row"><i>Product</i><b>${esc(j.name || '')}</b></div>` : '') +
-        `<div class="saa-pop-row bal"><i>Cartons</i><b>${n > 0 ? n.toLocaleString() + ' in store' : '—'}</b></div>` +
-        (R ? `<div class="saa-pop-row"><i>Ready</i><b>${R.toLocaleString()}</b></div>` : '') +
-        (D ? `<div class="saa-pop-row"><i>Shipped</i><b>${D.toLocaleString()}</b></div>` : '') +
-        (j.bno ? `<div class="saa-pop-row"><i>Batch</i><b>${esc(j.bno)}</b></div>` : '') + '</div>';
+        `<div class="saa-pop-b"><div class="saa-pop-size"><b>E-${esc(j.id)}</b></div>` +
+        `<div class="saa-pop-row"><i>Product</i><b>${esc(j.name || '—')}</b></div>` +
+        `<div class="saa-pop-row"><i>Company</i><b>${esc(j.client || '—')}</b></div>` +
+        `<div class="saa-pop-row"><i>PO No.</i><b>${esc(j.ref || '—')}</b></div>` +
+        `<div class="saa-pop-row"><i>PO Qty</i><b>${num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')}</b></div>` +
+        `<div class="saa-pop-row"><i>Ready Qty</i><b>${R ? R.toLocaleString() : '—'}</b></div>` +
+        `<div class="saa-pop-row bal"><i>Cartons</i><b>${n > 0 ? n.toLocaleString() : '—'}</b></div>` +
+        (D ? `<div class="saa-pop-row"><i>Shipped</i><b>${D.toLocaleString()}</b></div>` : '') + '</div>';
       ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); select(null); };
       popTarget = { obj: p.g, dy: (p.top || 1) + 2.4, ready: true };
       ui.pop.style.display = ''; ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
