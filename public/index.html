@@ -39435,7 +39435,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=52';
+const CLIENT_ANIM_SRC = '/animation.js?v=53';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -39497,7 +39497,13 @@ async function refreshClientAnim(shell) {
   // Ready Stock store shows that many cartons (owner, 2026-10-24).
   const rawRows = cfg.rows();
   const fullJob = j => (typeof jobs !== 'undefined' && Array.isArray(jobs) && jobs.find(x => x && x.id === j.id)) || j;   // the client rows can lack the Carton Shipper
-  const rows = rawRows && rawRows.map(j => { const f = fullJob(j); return { ...j, _readyQty: readyCartonsTotal(f) || readyCartonsTotal(j), _shipperCartons: cartonsPacketsFor(f) || cartonsPacketsFor(j) }; });
+  const milQtyOf = j => {
+    if (!j.stock_group_name) return null;
+    const g = j.group_job_id && typeof stockGroupById === 'function' ? stockGroupById(j.group_job_id) : null;
+    return parseFloat(String((g && g.po_qty) || j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  };
+  const rows = rawRows && rawRows.map(j => { const f = fullJob(j); return { ...j, _readyQty: readyCartonsTotal(f) || readyCartonsTotal(j), _shipperCartons: cartonsPacketsFor(f) || cartonsPacketsFor(j),
+    _readyLeft: Math.max(0, (readyCartonsTotal(f) || 0) - (totalDeliveredCartons(f) || 0)), _milQty: milQtyOf(f) }; });
   if (!rows) {
     if (clientAnim[shell]) { clientAnim[shell].destroy(); delete clientAnim[shell]; }
     host.className = '';
@@ -39512,11 +39518,24 @@ async function refreshClientAnim(shell) {
   const company = cfg.company();
   let ctl = clientAnim[shell];
   if (ctl && ctl.company !== company) { ctl.destroy(); ctl = null; delete clientAnim[shell]; }
-  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, stock: animStockRows() });
+  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, stock: animStockRows(),
+    // The Factory tab: an admin can move a job a stage forward / back from its pop-up (owner, 2026-10-24).
+    onStage: shell === 'factory' && canStageForward() ? factoryMoveStage : null });
   else { ctl.update(rows); if (ctl.setStock) ctl.setStock(animStockRows()); }
   ctl.setActive(true);
   // The operators at their machines, with their names - staff only (owner, 2026-10-24).
   if (!isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
+}
+// Factory tab: a stage forward / back from the 3D view's pop-up, through the
+// same move as the Jobs tab's pipeline (Ready to Deliver is as far as it goes -
+// delivery is recorded from the Jobs tab).
+async function factoryMoveStage(id, dir) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  const cur = j.stage_index || 0, target = Math.max(0, Math.min(6, cur + dir));
+  if (target === cur) { notify(dir > 0 ? 'Already Ready to Deliver - record the delivery from the Jobs tab.' : 'Already at the first stage.'); return; }
+  await moveToStage(id, target);
+  refreshClientAnim('factory');
 }
 // Every operator with the station (machine) they work, for the 3D view;
 // re-read at most every 10 minutes.

@@ -143,6 +143,8 @@
   const wz = (pl, py) => BLD.z0 + (py - pl.py0) / pl.sz;
   const OUTLINE_G = [[158, 158], [1058, 158], [1058, 1272], [512, 1272], [512, 940], [212, 940], [212, 718], [158, 718]];
   const LIFT_G = [343, 718, 410, 780];
+  // The lift the hand lifters ride between floors: its centre, and a spot in front of its doors.
+  const LIFT_X = -54 + ((LIFT_G[0] + LIFT_G[2]) / 2 - 158) / 20, LIFT_Z = -32 + ((LIFT_G[1] + LIFT_G[3]) / 2 - 158) / 20, LIFT_DOOR_Z = -32 + (LIFT_G[1] - 158) / 20 - 1.6;
   // Stair towers (owner, 2026-10-22): switchback stairs that really climb
   // the gap between floors. The core's goes basement -> ground, then one
   // stairwell ground -> 1st floor -> roof in the same place; the Entrance
@@ -615,6 +617,9 @@
   .saa-pop-row { display: flex; gap: 10px; font-size: 13px; margin-top: 6px; }
   .saa-pop-row i { font-style: normal; color: #64748b; width: 74px; flex-shrink: 0; }
   .saa-pop-row.bal b { color: #166534; font-size: 15px; }
+  .saa-pop-act { display: flex; gap: 8px; margin-top: 12px; }
+  .saa-pop-act button { flex: 1; font: 700 12px/1 inherit; font-family: inherit; padding: 8px 6px; border-radius: 8px; border: 1px solid #cbd5e1; background: #f8fafc; color: #0f172a; cursor: pointer; }
+  .saa-pop-act button.fwd { background: #166534; border-color: #166534; color: #fff; }
   .saa-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; background: rgba(255,255,255,.95); border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; box-shadow: 0 4px 14px rgba(15,23,42,.08); font-size: 12px; color: #334155; }
   .saa-bar .saa-hint { color: #64748b; }
   .saa-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -725,7 +730,7 @@
     const decal = (text, w, h, color, opts2) => {
       const o = opts2 || {};
       const tex = canvasTex(1024, Math.round(1024 * h / w), (g, cw, ch) => {
-        g.fillStyle = color;
+        g.fillStyle = o.keepColor ? color : '#7f1d1d';   // floor / wall text in maroon (owner, 2026-10-24)
         g.font = `${o.weight || 800} ${Math.round(ch * (o.size || 0.62))}px ${FONT}`;
         g.textAlign = o.align || 'center'; g.textBaseline = 'middle';
         if (o.spacing && 'letterSpacing' in g) g.letterSpacing = o.spacing + 'px';
@@ -842,7 +847,7 @@
     const building = (b, name, opts2) => {
       const g = new THREE.Group(); scene.add(g);
       const w = b.x1 - b.x0, d = b.z1 - b.z0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
-      const fl = box(w, 0.3, d, 0xf0c2c2, cx, 0.15, cz, g); fl.castShadow = false;   // red tinted floor
+      const fl = box(w, 0.3, d, 0xf3f4f6, cx, 0.15, cz, g); fl.castShadow = false;   // lightest gray floor (owner, 2026-10-24)
       box(w, 7, 0.5, creamWall, cx, 3.8, b.z0, g);                                     // cream tinted walls
       box(w + 0.3, 0.45, 0.8, CREAM_DARK, cx, 7.5, b.z0, g);
       for (let x = b.x0 + 2.5; x < b.x1 - 1; x += 2.5) box(0.12, 6.4, 0.06, CREAM_DARK, x, 3.7, b.z0 + 0.28, g, false);
@@ -860,7 +865,7 @@
       sign.position.set(cx, 5.2, b.z0 + 0.3); g.add(sign);
       return g;
     };
-    building(READY, 'READY STOCK', { gaps: DOCKS });
+    building(READY, 'READY STORE', { gaps: DOCKS });   // MIL jobs' ready store (owner, 2026-10-24)
     // Car park under a red tent in the front yard (owner, 2026-10-22).
     {
       const C = CAR_PARK, cx = (C.x0 + C.x1) / 2, cz = (C.z0 + C.z1) / 2, W = C.x1 - C.x0, half = (C.z1 - C.z0) / 2, eave = 3.2, ridge = 4.6;
@@ -1026,7 +1031,7 @@
     FLOORS.forEach((F, fi) => {
       const g = new THREE.Group(); g.position.y = FLOOR_Y[fi]; scene.add(g); floorGroups.push(g);
       // One slab material per floor (upper floors see-through in the overview).
-      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe3b0b0 : 0xf0c2c2, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // red-tint floors (owner)
+      const sm = new THREE.MeshStandardMaterial({ color: fi === 0 ? 0xe5e7eb : 0xf3f4f6, roughness: 0.9, transparent: true, opacity: fi === 0 ? 1 : 0.62 });   // lightest gray floors (owner, 2026-10-24)
       slabMats.push(sm);
       for (const P of F.parts) {
         const raise = P.raise || 0, pg = new THREE.Group(); pg.position.y = raise;
@@ -1083,7 +1088,7 @@
             if (w0 > t) piece(t, w0, yS, yT, CREAM, 0.3);
             piece(w0, w1, yS, yS + 0.8, CREAM, 0.3);            // sill
             piece(w0, w1, yT - 0.7, yT, CREAM, 0.3);            // head
-            piece(w0, w1, yS + 0.8, yT - 0.7, 0x1e293b, 0.12);  // glass
+            piece(w0, w1, yS + 0.8, yT - 0.7, 0x374151, 0.12);  // glass, dark gray tint
             t = w1;
           }
           if (t < 1) piece(t, 1, yS, yT, CREAM, 0.3);
@@ -1254,7 +1259,7 @@
         ['trim', new THREE.MeshStandardMaterial({ color: CREAM_DARK, roughness: 0.8 }), 0],
         // Black tinted glass with a sky reflection fading down it.
         ['glass', new THREE.MeshStandardMaterial({ map: canvasTex(64, 256, (g, w, h) => {
-          const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#6b7f99'); gr.addColorStop(0.35, '#26344a'); gr.addColorStop(1, '#070b12');
+          const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#6b7280'); gr.addColorStop(0.35, '#374151'); gr.addColorStop(1, '#111827');   // dark gray tint (owner, 2026-10-24)
           g.fillStyle = gr; g.fillRect(0, 0, w, h);
           g.fillStyle = 'rgba(255,255,255,.10)'; g.beginPath(); g.moveTo(0, h * 0.55); g.lineTo(w, h * 0.3); g.lineTo(w, h * 0.42); g.lineTo(0, h * 0.67); g.fill();
         }), transparent: true, opacity: 0.88, roughness: 0.08, metalness: 0.35, depthWrite: false }), 2],
@@ -1794,7 +1799,7 @@
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
     };
     // Ready Stock: every ready order stands on the floor as its cartons (see fillPallet).
-    floorDecal('CARTONS READY TO SHIP', 13, 1.2, '#166534', (READY.x0 + READY.x1) / 2, READY.z1 - 1.0, { size: 0.55 });
+    floorDecal('MIL JOBS READY TO SHIP', 13, 1.2, '#166534', (READY.x0 + READY.x1) / 2, READY.z1 - 1.0, { size: 0.55 });
     for (const dx of DOCKS) {
       box(3.8, 0.12, 1.2, 0xfacc15, dx, 0.33, READY.z1 - 0.9, scene, false);
       for (const s of [-1.3, 1.3]) box(0.4, 0.8, 0.35, 0x111827, dx + s, 0.7, READY.z1 + 0.35, scene);
@@ -1844,6 +1849,10 @@
       scene.add(g);
       return g;
     };
+    // Hand lifters that carry pallets between stages (owner, 2026-10-24), reused.
+    const moverPool = [];
+    const takeMover = () => { const m = moverPool.pop() || handLifter(false); m.visible = true; return m; };
+    const giveMover = m => { if (!m) return; m.visible = false; moverPool.push(m); };
     const LIFTER_AISLES = [               // [plan, floor, step height, aisles]
       [PLAN_B, 0, BASE_RAISE, [[470, 300, 640, 560]]],
       [PLAN_B, 0, 0, [[875, 760, 985, 792], [735, 800, 830, 1100]]],
@@ -1958,7 +1967,7 @@
       const tone = blocked ? 'red' : (selectedId === j.id ? 'blue' : (urgent ? 'amber' : ''));
       const rc = jobPlace(j) === 'ready' ? readyCartonsLeft(j) : 0;
       const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobPlace(j) === 0 ? 'Plates' : clip(j.name || '', 20));
-      const title = 'E-' + j.id;   // the job number on every pallet (owner, 2026-10-24)
+      const title = jobPlace(j) === 'ready' && j.stock_group_name ? clip(j.stock_group_name, 18) : 'E-' + j.id;   // job number; a MIL job in the Ready Store: its MIL name (owner, 2026-10-24)
       const key = title + '|' + sub + '|' + tone;
       if (p.tagKey === key) return;
       disposeSprite(p.tag); disposeSprite(p.tagS);
@@ -2006,9 +2015,22 @@
           const to = new THREE.Vector3(s.x, (s.y || 0) + (s.floor == null ? 0.3 : SLAB) + s.lift * 1.6, s.z);
           p.floor = s.floor;
           p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
-          if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; return; }
+          if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; p.floorWas = s.floor; return; }
           if (p.g.position.distanceTo(to) < 0.01) return;
-          const from = p.g.position.clone(), dist = from.distanceTo(to);
+          const from = p.g.position.clone(), dist = from.distanceTo(to), f0 = p.floorWas;
+          p.floorWas = s.floor;
+          // Inside the building: an operator walks it there with a hand
+          // lifter, using the lift between floors (owner, 2026-10-24).
+          if (f0 != null && s.floor != null && !reduceMotion) {
+            const pts = [from];
+            if (f0 !== s.floor) {
+              const y0 = from.y, y1 = to.y;
+              pts.push(new THREE.Vector3(LIFT_X, y0, LIFT_DOOR_Z), new THREE.Vector3(LIFT_X, y0, LIFT_Z), new THREE.Vector3(LIFT_X, y1, LIFT_Z), new THREE.Vector3(LIFT_X, y1, LIFT_DOOR_Z));
+            }
+            pts.push(to);
+            p.move = { path: pts, seg: 0, segT: 0, rot: 0, refill: p.pendingFill };
+            return;
+          }
           const arc = inReady(from) !== inReady(to) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
           p.move = { from, to, t: 0, dur: Math.max(0.9, Math.min(4, dist / 9)), arc, refill: p.pendingFill };
         });
@@ -2260,8 +2282,10 @@
       openPop('#1e40af', esc(String(STAGES[stageIndex(j)] || '').toUpperCase()),
         `<div class="saa-pop-size"><b>E-${esc(j.id)}</b></div>` + popRow('Product', esc(j.name || '—')) + popRow('Company', esc(j.client || '—')) +
         popRow('PO Qty', num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')) + popRow('Paper', esc(j.paper || '—')) + popRow('To print', esc(toPrint), 'bal') +
-        (j.machine ? popRow('Machine', esc(j.machine)) : ''),
+        (j.machine ? popRow('Machine', esc(j.machine)) : '') +
+        (opts.onStage ? `<div class="saa-pop-act"><button data-d="-1" title="Move this job one stage back">&#9664; Stage back</button><button data-d="1" class="fwd" title="Move this job one stage forward">Stage forward &#9654;</button></div>` : ''),
         { obj: p.g, dy: (p.top || 1) + 2.4, job: true });
+      if (opts.onStage) ui.pop.querySelectorAll('.saa-pop-act button').forEach(b => { b.onclick = ev => { ev.stopPropagation(); select(null); opts.onStage(j.id, +b.dataset.d); }; });
     };
     // A machine: the last job its station entered (any particulars row's entries).
     const whenOf = e => {
@@ -2307,16 +2331,17 @@
       return null;
     };
     const showReadyPop = p => {
-      const j = p.job, n = readyCartonsLeft(j), R = num(j._readyQty), D = shippedCartons(j);
+      const j = p.job, n = readyCartonsLeft(j), R = num(j._readyQty), D = shippedCartons(j), mil = !!j.stock_group_name;
       ui.pop.style.setProperty('--tone', '#166534');
       ui.pop.innerHTML =
-        `<div class="saa-pop-h">READY TO SHIP<button title="Close" aria-label="Close">&times;</button></div>` +
-        `<div class="saa-pop-b"><div class="saa-pop-size"><b>E-${esc(j.id)}</b></div>` +
+        `<div class="saa-pop-h">${mil ? 'READY STORE' : 'READY TO SHIP'}<button title="Close" aria-label="Close">&times;</button></div>` +
+        `<div class="saa-pop-b"><div class="saa-pop-size"><b>${mil ? esc(j.stock_group_name) : 'E-' + esc(j.id)}</b></div>` + (mil ? `<div class="saa-pop-row"><i>Job</i><b>E-${esc(j.id)}</b></div>` : '') +
         `<div class="saa-pop-row"><i>Product</i><b>${esc(j.name || '—')}</b></div>` +
         `<div class="saa-pop-row"><i>Company</i><b>${esc(j.client || '—')}</b></div>` +
         `<div class="saa-pop-row"><i>PO No.</i><b>${esc(j.ref || '—')}</b></div>` +
-        `<div class="saa-pop-row"><i>PO Qty</i><b>${num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')}</b></div>` +
+        (mil ? `<div class="saa-pop-row"><i>MIL Qty</i><b>${num(j._milQty) ? num(j._milQty).toLocaleString() : '—'}</b></div>` : `<div class="saa-pop-row"><i>PO Qty</i><b>${num(j.qty) ? num(j.qty).toLocaleString() : esc(j.qty || '—')}</b></div>`) +
         `<div class="saa-pop-row"><i>Ready Qty</i><b>${R ? R.toLocaleString() : '—'}</b></div>` +
+        `<div class="saa-pop-row"><i>To deliver</i><b>${num(j._readyLeft) ? num(j._readyLeft).toLocaleString() : '—'}</b></div>` +
         `<div class="saa-pop-row bal"><i>Cartons</i><b>${n > 0 ? n.toLocaleString() : '—'}</b></div>` +
         (D ? `<div class="saa-pop-row"><i>Shipped</i><b>${D.toLocaleString()}</b></div>` : '') + '</div>';
       ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); select(null); };
@@ -2415,7 +2440,23 @@
       // Pallets: pop in, glide between spots.
       for (const p of pallets.values()) {
         if (p.pop < 1) { p.pop = Math.min(1, p.pop + dt * 2.2); p.g.scale.setScalar(p.pop <= 0 ? 0.001 : Math.max(0.001, easeBack(p.pop))); }
-        if (p.move) {
+        if (p.move && p.move.path) {
+          const m = p.move, a = m.path[m.seg], b = m.path[m.seg + 1];
+          if (!m.mover) m.mover = takeMover();
+          const L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5;
+          m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : 2.6) / L);
+          p.g.position.lerpVectors(a, b, m.segT); p.g.position.y += 0.12;
+          if (!vert) { const dx = b.x - a.x, dz = b.z - a.z; if (dx * dx + dz * dz > 1e-6) m.rot = Math.atan2(dx, dz); }
+          m.mover.position.set(p.g.position.x - Math.sin(m.rot) * 0.6, p.g.position.y - 0.12, p.g.position.z - Math.cos(m.rot) * 0.6);
+          m.mover.rotation.y = m.rot; m.mover.visible = p.g.visible;
+          if (m.segT >= 1) { m.seg++; m.segT = 0; }
+          if (m.refill && m.seg >= Math.floor(m.path.length / 2)) { fillPallet(p); placeTag(p); m.refill = false; p.pendingFill = false; }
+          if (m.seg >= m.path.length - 1) {
+            p.g.position.copy(m.path[m.path.length - 1]);
+            if (m.refill) { fillPallet(p); placeTag(p); p.pendingFill = false; }
+            giveMover(m.mover); p.move = null;
+          }
+        } else if (p.move) {
           const m = p.move; m.t = Math.min(1, m.t + dt / m.dur);
           const e2 = ease(m.t);
           p.g.position.lerpVectors(m.from, m.to, e2); p.g.position.y += Math.sin(Math.PI * m.t) * m.arc;
