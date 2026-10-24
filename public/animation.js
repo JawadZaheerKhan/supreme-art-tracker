@@ -398,12 +398,15 @@
     inspect: [[1, [635, 446, 1050, 732]]],
     sort: [[2, [518, 611, 603, 713]], [2, [716, 637, 835, 792]], [2, [600, 640, 682, 760]]],
     paste: [[2, [479, 170, 581, 529]], [2, [618, 475, 1033, 559]]],
-    final: [[1, [592, 170, 1050, 383]], [2, [353, 181, 509, 585]], [2, [175, 175, 330, 240]], [2, [175, 265, 330, 335]], [2, [175, 360, 330, 425]], [2, [175, 450, 330, 520]], [2, [238, 647, 330, 705]]],
+    // Ready to deliver: kept on the 1st floor (hall strip, rooms, kitchen corner);
+    // once the PM ticks Mark Ready it comes down to the ground floor (owner, 2026-10-24).
+    final1: [[2, [353, 181, 509, 585]], [2, [175, 175, 330, 240]], [2, [175, 265, 330, 335]], [2, [175, 360, 330, 425]], [2, [175, 450, 330, 520]], [2, [238, 647, 330, 705]]],
+    final0: [[1, [592, 170, 1050, 383]]],
   };
   const ZONE_STYLE = {   // outline colour, floor label
     issued: [0xe2e8f0, '#64748b', 'ISSUED STOCK'], printx: [0x22c55e, '#15803d', 'PRINTING'], die: [0x9333ea, '#7e22ce', 'DIE CUTTING'], emboss: [0xdb2777, '#be185d', 'EMBELLISHMENT'],
     coat: [0x38bdf8, '#0369a1', 'COATING'], inspect: [0xdc2626, '#b91c1c', 'INSPECTION (NOT ACTIVE)'], sort: [0xf97316, '#c2410c', 'SORTING'], paste: [0x6b7280, '#374151', 'PASTING'],
-    final: [0x111827, '#111827', 'READY TO DELIVER'],
+    final1: [0x111827, '#111827', 'READY TO DELIVER'], final0: [0x111827, '#111827', 'READY - MARKED, TO SHIP'],
   };
   // The green spots beside each press (owner's dots), by press number; 4 & 7 and 5 & 6 share an area.
   const PRESS_SPOTS = [
@@ -424,10 +427,16 @@
     });
     return best;
   };
+  // The PM's Mark Ready tick, still standing (a delivery after it retires it).
+  const readyTicked = j => {
+    const c = j && j.ready_check, t = c && Date.parse(c.at);
+    if (!Number.isFinite(t)) return false;
+    return !(Array.isArray(j.deliveries) && j.deliveries.some(d => d && d.at && Date.parse(d.at) > t));
+  };
   // A job's zone: by stage, issued stock for 2 days, then its press.
   const zoneKeyFor = (j, place) => {
     if (place === 'wait') return 'wait';
-    if (place === 'ready') return j && j.stock_group_name ? 'ready' : 'final';
+    if (place === 'ready') return j && j.stock_group_name ? 'ready' : (readyTicked(j) ? 'final0' : 'final1');
     if (place === 0) return 'ctp';
     if (place === 1) {
       const t = Date.parse(j && j.issued_at);
@@ -474,6 +483,7 @@
   // grouped by type. Items run along rows from the back wall forward.
   const INV = { x0: -90, x1: -12, z0: -90, z1: -46 };   // bigger store (owner, 2026-10-24)
   const INV_SPLIT = -42, INV_DOORS = [-66, -27];
+  const PALLET_SCALE = 0.7;   // job pallets in the building, smaller (owner, 2026-10-24)
   const PALLET_SHEETS = 10000, MAX_PALLETS = 48, STACK = 4, COL_W = 1.8, BAY_GAP = 1.4, ROW_PITCH = 6.4, INV_ROWS = 6, DEEP = 1.4, PALLET_H = 0.72;
   const STOCK_TYPES = {   // type -> [tile colour, paper colour]
     'bleach board': ['#2563eb', 0xf8fafc], 'art card': ['#db2777', 0xffffff], 'art paper': ['#ea580c', 0xf1f5f9], 'duplex board': ['#7c3aed', 0xd6d3d1],
@@ -1789,12 +1799,7 @@
       box(3.8, 0.12, 1.2, 0xfacc15, dx, 0.33, READY.z1 - 0.9, scene, false);
       for (const s of [-1.3, 1.3]) box(0.4, 0.8, 0.35, 0x111827, dx + s, 0.7, READY.z1 + 0.35, scene);
     }
-    // Waiting area in front of Production (new orders / waiting for paper).
-    {
-      const wx = (WAIT.x0 + WAIT.x1) / 2, wz = (WAIT.z0 + WAIT.z1) / 2, ww = WAIT.x1 - WAIT.x0, wd = WAIT.z1 - WAIT.z0;
-      for (const [w, d, x, z] of [[ww, 0.25, wx, WAIT.z0], [ww, 0.25, wx, WAIT.z1], [0.25, wd, WAIT.x0, wz], [0.25, wd, WAIT.x1, wz]]) box(w, 0.03, d, 0xf59e0b, x, 0.15, z, scene, false);
-      floorDecal('WAITING TO START', 10, 1.1, '#b45309', wx, WAIT.z1 + 1.3, { size: 0.6 });
-    }
+    // No waiting area for new jobs - not needed (owner, 2026-10-24).
 
     // ── Forklifts ──
     const forklift = () => {
@@ -1906,8 +1911,23 @@
       const g = p.content;
       dropMeshes(g);
       const place = p.place;
-      box(2.4, 0.18, 2.0, 0xc08a57, 0, 0.09, 0, g);
-      if (place === 'wait') {
+      g.scale.setScalar(place === 0 ? 1 : PALLET_SCALE);   // smaller pallets (owner, 2026-10-24)
+      if (place === 0) {
+        // CTP: the job's steel plates on a plate table, not a pallet (owner,
+        // 2026-10-24) - Plates on the job card (1 if blank); 4 = C M Y K,
+        // any other count in other colours.
+        const q = parseInt(String(((p.job.particulars || {}).plates || {}).quantity || '').replace(/[^0-9]/g, ''), 10);
+        const n = Math.max(1, Math.min(12, Number.isFinite(q) && q > 0 ? q : 1));
+        const cols = n === 4 ? [0x00aeef, 0xec008c, 0xfff200, 0x231f20] : [0xf97316, 0x16a34a, 0x7c3aed, 0xdc2626, 0x0891b2, 0xca8a04, 0xdb2777, 0x2563eb, 0x65a30d, 0x9333ea, 0xea580c, 0x0d9488];
+        box(1.8, 0.06, 1.3, 0x6b7280, 0, 0.72, 0, g);                                            // plate table
+        for (const lx of [-0.8, 0.8]) for (const lz of [-0.55, 0.55]) box(0.06, 0.7, 0.06, 0x374151, lx, 0.36, lz, g);
+        for (let k = 0; k < n; k++) {
+          const ox = (k - (n - 1) / 2) * 0.07, y = 0.78 + k * 0.03;
+          box(1.4, 0.016, 1.0, 0xc0c7d1, ox, y, 0, g);                                            // aluminium plate
+          box(1.34, 0.006, 0.94, cols[k % cols.length], ox, y + 0.011, 0, g, false);               // its colour (the image)
+        }
+      } else box(2.4, 0.18, 2.0, 0xc08a57, 0, 0.09, 0, g);
+      if (place === 0) { /* plates drawn above */ } else if (place === 'wait') {
         box(2.1, 0.7, 1.7, 0xffffff, 0, 0.53, 0, g); box(2.12, 0.08, 1.72, 0xe2e8f0, 0, 0.6, 0, g, false);
       } else if (place === 'ready' && readyCartonsLeft(p.job) > 0) {
         const n = Math.min(96, readyCartonsLeft(p.job)), per = 16;
@@ -1929,7 +1949,7 @@
       }
       let top = 0;
       g.children.forEach(c => { top = Math.max(top, c.position.y + (c.geometry.parameters.height || 0) / 2); });
-      p.top = top;
+      p.top = top * g.scale.y;
       g.traverse(o => { if (o.isMesh) o.userData.jobId = p.job.id; });
     };
     const ringGeo = new THREE.RingGeometry(1.75, 2.05, 36); geos.add(ringGeo);
@@ -1937,8 +1957,8 @@
       const j = p.job, blocked = isBlocked(j), urgent = /urgent/i.test(String(j.priority || ''));
       const tone = blocked ? 'red' : (selectedId === j.id ? 'blue' : (urgent ? 'amber' : ''));
       const rc = jobPlace(j) === 'ready' ? readyCartonsLeft(j) : 0;
-      const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobSub(j));
-      const title = jobPlace(j) === 'ready' ? 'E-' + j.id : jobTitle(j);   // Ready Stock: the job number (owner, 2026-10-24)
+      const sub = blocked ? 'Blocked' : (urgent ? 'Urgent' : rc > 0 ? rc.toLocaleString() + ' carton' + (rc === 1 ? '' : 's') : jobPlace(j) === 0 ? 'Plates' : clip(j.name || '', 20));
+      const title = 'E-' + j.id;   // the job number on every pallet (owner, 2026-10-24)
       const key = title + '|' + sub + '|' + tone;
       if (p.tagKey === key) return;
       disposeSprite(p.tag); disposeSprite(p.tagS);
@@ -2499,7 +2519,7 @@
       for (const o of d.removed) { const p = pallets.get(o.id); if (p) removePallet(p); }
       // New jobs pop in, staggered on the first load.
       let n = 0;
-      for (const j of d.added) { const place = jobPlace(j); if (place !== 'delivered' && !pallets.has(j.id)) makePallet(j, place, first ? (n++) * 0.06 : 0); }
+      for (const j of d.added) { const place = jobPlace(j); if (place !== 'delivered' && place !== 'wait' && !pallets.has(j.id)) makePallet(j, place, first ? (n++) * 0.06 : 0); }
       // Departures: the pallet (or a share of it) goes on a truck.
       for (const dep of d.departures) {
         const p = pallets.get(dep.job.id);
@@ -2511,7 +2531,8 @@
       // Moves between areas.
       for (const mv of d.moves) {
         const p = pallets.get(mv.job.id);
-        if (!p) { if (mv.to !== 'delivered') makePallet(mv.job, mv.to, 0); continue; }
+        if (!p) { if (mv.to !== 'delivered' && mv.to !== 'wait') makePallet(mv.job, mv.to, 0); continue; }
+        if (mv.to === 'wait') { removePallet(p); continue; }
         if (mv.to === 'delivered') { if (!p.leaving) { p.leaving = true; enqueueDeparture(mv.job, 0, p.g.position.clone()); queue[queue.length - 1].onPicked = () => removePallet(p); } continue; }
         p.place = mv.to; p.pendingFill = true;
       }
