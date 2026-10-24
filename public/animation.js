@@ -537,7 +537,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xeef3f8);
     scene.fog = new THREE.Fog(0xeef3f8, 270, 460);
-    const camera = new THREE.PerspectiveCamera(32, 1, 1, 800);
+    const camera = new THREE.PerspectiveCamera(32, 1, 0.3, 800);   // near 0.3: close-ups of a machine don't clip
     const cam = { target: new THREE.Vector3(-50, 1, 0), az: 0.32, el: 0.7, dist: 230 };
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
@@ -1944,6 +1944,24 @@
       for (const p of pallets.values()) if (p.g === o || p.tag === hit.object) return p.job.id;
       return null;
     };
+    // Zoom toward a screen point (owner, 2026-10-24): the spot under the
+    // cursor stays under it, and you can get right up to a machine.
+    const MIN_DIST = 5, MAX_DIST = 300;
+    const zoomPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), zoomHit = new THREE.Vector3();
+    const zoomAt = (cx, cy, factor) => {
+      const nd = Math.max(MIN_DIST, Math.min(MAX_DIST, want.dist * factor));
+      if (nd === want.dist) return;
+      const r = el.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      zoomPlane.constant = -want.target.y;
+      if (ray.ray.intersectPlane(zoomPlane, zoomHit)) {
+        const t = 1 - nd / want.dist;   // in: slide toward the spot; out: away from it
+        want.target.x += (zoomHit.x - want.target.x) * t;
+        want.target.z += (zoomHit.z - want.target.z) * t;
+      }
+      want.dist = nd; lastInput = clock;
+    };
     el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
       el.setPointerCapture(e.pointerId);
@@ -1956,7 +1974,7 @@
       if (pt) { pt.x = e.clientX; pt.y = e.clientY; }
       if (pointers.size === 2) {
         const [a, b] = [...pointers.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (pinch0 > 0) { want.dist = Math.max(16, Math.min(260, want.dist * pinch0 / d)); pinch0 = d; lastInput = clock; }
+        if (pinch0 > 0) { zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, pinch0 / d); pinch0 = d; }
         return;
       }
       if (!drag) { if (e.pointerType === 'mouse') el.style.cursor = pick(e.clientX, e.clientY) != null ? 'pointer' : 'grab'; return; }
@@ -1988,7 +2006,11 @@
     };
     el.addEventListener('pointerup', endPointer);
     el.addEventListener('pointercancel', endPointer);
-    el.addEventListener('wheel', e => { e.preventDefault(); want.dist = Math.max(16, Math.min(260, want.dist * (1 + Math.sign(e.deltaY) * Math.min(0.25, Math.abs(e.deltaY) * 0.0012)))); lastInput = clock; }, { passive: false });
+    el.addEventListener('wheel', e => {
+      e.preventDefault();
+      const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+      zoomAt(e.clientX, e.clientY, 1 + Math.sign(dy) * Math.min(0.3, Math.abs(dy) * 0.002));
+    }, { passive: false });
 
     // ── Frame loop ──
     let raf = 0, active = false, last = 0;
@@ -2011,7 +2033,7 @@
       if (!host.isConnected || host.offsetParent === null || document.hidden) { last = now; return; }
       const dt = Math.min(0.05, ((now - last) || 16) / 1000); last = now; clock += dt;
       // Camera easing + slow drift when nobody is touching it.
-      if (!reduceMotion && selectedId == null && clock - lastInput > 7) want.az = baseAz + Math.sin((clock - lastInput - 7) * 0.07) * 0.2;
+      if (!reduceMotion && selectedId == null && want.dist > 70 && clock - lastInput > 7) want.az = baseAz + Math.sin((clock - lastInput - 7) * 0.07) * 0.2;
       const k = 1 - Math.exp(-dt * 3.2);
       cam.target.lerp(want.target, k); cam.az += (want.az - cam.az) * k; cam.el += (want.el - cam.el) * k; cam.dist += (want.dist - cam.dist) * k;
       applyCamera();
