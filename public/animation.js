@@ -122,13 +122,14 @@
   // the hall block's levels - basement, ground, 1st floor, roof; the office
   // block's ground floor is the street (FLOOR_Y[1] - RAISE) and its 1st
   // floor / open area sit RAISE below the hall's.
-  const RAISE = 6;                              // the hall block above the office block ("a little more", owner 2026-10-24)
-  const FLOOR_Y = [-5, RAISE, 11 + RAISE, 22 + RAISE];
+  const RAISE = 4;                              // the hall block's ground floor (and loading deck) above the street (owner, 2026-10-25)
+  const FLOOR_Y = [-5, RAISE, 17, 28];          // the hall's 1st floor and the roof stay put (owner, 2026-10-25)
+  const OFFICE_FIRST = 10;                      // the office block's 1st floor above the street (owner, 2026-10-25)
   // The open area over the offices sits just OPEN_STEP above the hall's 1st
   // floor - a small ramp up to it (owner, 2026-10-24).
   const OPEN_STEP = 1.2;
   const OPEN_RAISE = FLOOR_Y[2] + OPEN_STEP - FLOOR_Y[3];   // the 2nd floor's open area, relative to the roof
-  const OFFICE_RAISE = -RAISE;                  // the 1st floor's offices, half a floor below its hall side
+  const OFFICE_RAISE = OFFICE_FIRST - FLOOR_Y[2];   // the 1st floor's offices, below its hall side
   const FRONT_RAISE = -RAISE;                   // the ground floor's office block, on the street
   const BASE_RAISE = 1.0;                       // basement Hall-01 (+ Machine Area, Work Shop) above Hall-02
   // Is this basement plan point in the raised back part (Hall-01 side)?
@@ -1261,7 +1262,7 @@
       // Two columns of windows; the third bay, by the loading area, stands open (owner, 2026-10-22).
       const step = (cx1 - cx0 - 3.4) / 2, cxm = cx0 + 1.7 + step + 2.1;
       stoneAt(cx0, cxm, 0, ctop, cz + 0.05);
-      for (const [y0, y1] of [[3.2, 7.7], [12.2, 16.2], [18.2, 21.6]].map(([a, b]) => [a + RAISE, b + RAISE]))
+      for (const [y0, y1] of [[FLOOR_Y[1] + 3.2, FLOOR_Y[1] + 7.7], [FLOOR_Y[2] + 1.2, FLOOR_Y[2] + 5.2], [FLOOR_Y[2] + 7.2, FLOOR_Y[2] + 10.6]])
         for (let i = 0; i < 2; i++) { const wc = cx0 + 1.7 + i * step; win(wc - 1.1, wc + 1.1, y0, y1, 2, 2, cz + 0.05); }
       box(cxm - cx0 + 0.4, 0.6, 0.7, CREAM_DARK, (cx0 + cxm) / 2, ctop + 0.3, cz + 0.2, facade);
       box(cxm - cx0, 0.35, 0.3, 0x1f2937, (cx0 + cxm) / 2, 0.17, cz + 0.2, facade, false);
