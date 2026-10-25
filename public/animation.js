@@ -1834,7 +1834,7 @@
       frame.visible = f == null; facade.visible = f == null;
       for (const m of [groundMat, yardMat]) { m.opacity = f === 0 ? 0.15 : 1; m.depthWrite = f !== 0; }
       slabMats.forEach((m, i) => { m.opacity = (f != null || i === 0) ? 1 : 0.62; });
-      for (const p of pallets.values()) p.g.visible = f == null || p.floor == null || p.floor === f;
+      for (const p of pallets.values()) p.g.visible = !p.inTransit && (f == null || p.floor == null || p.floor === f);
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
       for (const h of standby) if (!h.busy) h.g.visible = f == null || f === 1;
       newRoot.visible = f == null || f === 1;
@@ -1859,7 +1859,7 @@
       const forks = new THREE.Group(); mast.add(forks);
       for (const x of [-0.32, 0.32]) box(0.14, 0.06, 1.2, 0x475569, x, 0.25, 0.6, forks, false);
       for (const [x, z] of [[-0.62, 0.5], [0.62, 0.5], [-0.62, -0.8], [0.62, -0.8]]) { const w = cyl(0.3, 0.3, 0.22, 0x111827, x, 0.3, z, g, 10); w.rotation.z = Math.PI / 2; }
-      person(0, -0.45, 0, g).scale.setScalar(0.75);
+      (g.userData.seat = person(0, -0.45, 0, g)).scale.setScalar(0.75);
       g.userData.forks = forks;
       g.traverse(o => { if (o.isMesh) o.castShadow = true; });
       scene.add(g);
@@ -1911,9 +1911,9 @@
     // floor. Stock in from the store is put down in the loading area; one of
     // them takes it to the white space and comes back.
     const LOAD_AREA = [416, 784, 508, 936];
-    const loadPt = (px, py) => new THREE.Vector3(wx(PLAN_G, px), FLOOR_Y[1] + floorRaise(1, px, py) + SLAB, wz(PLAN_G, py));
+    const loadPt = (px, py) => new THREE.Vector3(wx(PLAN_G, px), FLOOR_Y[1] + SLAB, wz(PLAN_G, py));   // the stairs core's deck (no street-level step there)
     const STANDBY_SPOTS = [[431, 805], [462, 805], [493, 805], [431, 860], [462, 860], [493, 860]];
-    const UNLOAD_PT = loadPt(462, 915);
+    const UNLOAD_PT = loadPt(384, 912);   // the deck's edge, over the yard: stock in is lifted up here
     const standby = STANDBY_SPOTS.map(([px, py], i) => {
       const g = handLifter(false), home = loadPt(px, py);
       g.userData.who.userData.info = { name: 'Hand lifter ' + (i + 1), role: 'Hand lifter', note: 'No record in the app · stands by in the loading area' };
@@ -1937,8 +1937,12 @@
       }
       return best;
     };
-    wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV.x0 + 12, INV.z1 - 3])   // the store's forklift (parked until there's work)
-      .f.userData.info = { name: 'Store forklift', role: 'Forklift driver', note: 'No record in the app · at the inventory store' };
+    const storeFL = wander({ x0: INV.x0 + 3, x1: INV.x1 - 3, z0: INV.z1 - 4.2, z1: INV.z1 - 1.8 }, [INV_DOORS[1] - 4, INV.z1 - 4]);   // the store's forklift, by the door the trucks use
+    storeFL.f.userData.info = { name: 'Store forklift', role: 'Forklift', note: 'Driven by the loader who comes with the truck for issued stock' };
+    storeFL.f.userData.seat.visible = false;
+    const yardFL = wander({ x0: -50, x1: -46, z0: 12, z1: 16 }, [-48.5, 13]);   // the yard's forklift, by the loading deck
+    yardFL.f.userData.info = { name: 'Yard forklift', role: 'Forklift', note: 'Lifts issued stock off the truck onto the loading deck' };
+    yardFL.f.userData.seat.visible = false;
     const loader = wander({ x0: READY.x0 + 3, x1: READY.x1 - 3, z0: READY.z0 + 6, z1: READY.z1 - 3 }, [READY.x0 + 14, READY.z1 - 3]);
     loader.f.userData.info = { name: 'Loader', role: 'Loader', note: 'No record in the app · loads the trucks at the Ready Store' };
 
@@ -1985,6 +1989,7 @@
 
     // ── Job pallets ──
     const pallets = new Map();     // job id -> { g, place, job, ... }
+    const issueQueue = [];         // newly issued pallets waiting for the store run (hidden till unloaded)
     const palletRoot = new THREE.Group(); scene.add(palletRoot);
     // Pallet contents are rebuilt as jobs move; free their geometry each time.
     const dropMeshes = g => {
@@ -2075,6 +2080,7 @@
       disposeSprite(p.tag); disposeSprite(p.tagS); if (p.ring) p.ring.material.dispose();
       dropMeshes(p.content);
       if (p.move) releaseMove(p.move);
+      { const qi = issueQueue.indexOf(p); if (qi >= 0) issueQueue.splice(qi, 1); }
       palletRoot.remove(p.g); pallets.delete(p.job.id);
     };
     // Every pallet's spot, recomputed after each change (ordered by job id
@@ -2094,15 +2100,23 @@
           p.stag = i % 2;
           const to = new THREE.Vector3(s.x, (s.y || 0) + (s.floor == null ? 0.3 : SLAB) + s.lift * 1.6, s.z);
           p.floor = s.floor;
-          p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
+          p.g.visible = !p.inTransit && (floorFocus == null || p.floor == null || p.floor === floorFocus);
           const prevKey = p.keyWas; p.keyWas = k;
-          if (!instant && !p.placed && k === 'issued' && !reduceMotion) {   // stock in from the store: from the loading area to the white space
-            const h = takeHelper();
-            if (h) {
-              p.g.position.copy(UNLOAD_PT); p.placed = true; p.floorWas = s.floor;
-              p.move = { phases: [routePts([h.home, UNLOAD_PT]), routePts([UNLOAD_PT, to]), routePts([to, h.home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone(), helper: h, mover: h.g };
-              return;
-            }
+          // Still on its way from the store: keep its spot up to date. If it
+          // moved on before the truck even left, it simply goes there.
+          if (p.inTransit) {
+            p.waitIssue.to = to;
+            if (k === 'issued' || p.issueStarted) return;
+            const qi = issueQueue.indexOf(p); if (qi >= 0) issueQueue.splice(qi, 1);
+            p.inTransit = false; p.waitIssue = null;
+            p.g.position.copy(to); p.floorWas = s.floor; p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
+            return;
+          }
+          // Newly issued: hidden until the truck brings it from the store (see startIssueRun).
+          if (!instant && !p.placed && k === 'issued' && !reduceMotion) {
+            p.placed = true; p.inTransit = true; p.waitIssue = { to: to.clone() }; p.g.visible = false; p.floorWas = s.floor;
+            issueQueue.push(p);
+            return;
           }
           if (instant || !p.placed) { p.g.position.copy(to); p.placed = true; p.move = null; p.floorWas = s.floor; return; }
           if (p.move && p.move.to && p.move.to.distanceTo(to) < 0.01) return;   // already on its way there
@@ -2166,6 +2180,97 @@
         disposeSprite(tr.badge); tr.badge = null;
         tr.state = 'away'; tr.awayFor = reduceMotion ? 1 : 6;
       });
+    };
+
+    // ── Stock in (owner, 2026-10-25) ──
+    // A job's stock is issued: a truck goes to the inventory store with its
+    // driver and Loader 2. He drives the store's forklift, takes the stock
+    // into the truck and rides back; at the factory he lifts it off with the
+    // yard forklift onto the loading deck, and one of the crew on the deck
+    // walks it by hand lifter to the white area. Every pallet issued while
+    // the truck is out goes on the next run.
+    const STORE_TRUCK = new THREE.Vector3(INV_DOORS[1], 0, INV.z1 + 4.7);   // backed onto the store's door
+    const FACTORY_TRUCK = new THREE.Vector3(UNLOAD_PT.x, 0, 18);           // backed up behind the loading deck
+    const LOADER2_HOME = [DOCKS[0] - 4, DOCK_Z + 3.6];
+    const loader2 = person(LOADER2_HOME[0], LOADER2_HOME[1], Math.PI / 2);
+    loader2.userData.info = { name: 'Loader 2', role: 'Loader', note: 'No record in the app · rides with the truck to fetch issued stock' };
+    const stockCrate = new THREE.Group();   // the issued stock: paper on a pallet (one, reused every run)
+    box(2.4, 0.16, 2.0, 0xc08a57, 0, 0.08, 0, stockCrate); box(2.1, 0.9, 1.7, 0xffffff, 0, 0.61, 0, stockCrate); box(2.12, 0.05, 1.72, 0xe2e8f0, 0, 1.08, 0, stockCrate, false);
+    stockCrate.scale.setScalar(0.62); stockCrate.visible = false;
+    // Small steps run one after another; each returns true when done.
+    const walkVia = (obj, pts, speed) => { let list = null, i = 0; return dt => { if (!list) list = typeof pts === 'function' ? pts() : pts; while (i < list.length && driveTo(obj, list[i][0], list[i][1], dt, speed)) i++; return i >= list.length; }; };
+    const pause = sec => { let t = sec; return dt => (t -= dt) <= 0; };
+    const doNow = fn => () => { fn(); return true; };
+    const turnTo = (obj, ang) => dt => { let d = ang - obj.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); obj.rotation.y += d * Math.min(1, dt * 5); return Math.abs(d) < 0.03; };
+    const tweenTo = (obj, to, dur) => { let t = 0, from = null; return dt => { if (!from) from = obj.position.clone(); t = Math.min(1, t + dt / dur); obj.position.lerpVectors(from, to, ease(t)); return t >= 1; }; };
+    const drive = (tr, legs) => { let st = 0; return () => { if (st === 0) { st = 1; startTrip(tr, legs(), () => { st = 2; }); } return st === 2; }; };
+    const cabOf = tr => { tr.g.updateMatrixWorld(); const v = tr.g.localToWorld(new THREE.Vector3(1.85, 0, 3.4)); return [v.x, v.z]; };
+    const outAt = (who, xz) => doNow(() => { const c = typeof xz === 'function' ? xz() : xz; who.position.set(c[0], 0.3, c[1]); who.visible = true; });
+    const onForks = f => doNow(() => { f.add(stockCrate); stockCrate.position.set(0, 0.45, 1.7); stockCrate.rotation.set(0, 0, 0); stockCrate.visible = true; });
+    // The stock comes up on the deck: the crew walks each pallet to its white area.
+    const revealIssued = p => {
+      p.issueStarted = false;
+      if (pallets.get(p.job.id) !== p || !p.inTransit) return;
+      const to = p.waitIssue.to; p.inTransit = false; p.waitIssue = null;
+      p.g.position.copy(UNLOAD_PT); p.floorWas = 1;
+      p.g.visible = floorFocus == null || p.floor == null || p.floor === floorFocus;
+      const h = takeHelper();
+      if (!h) { p.g.position.copy(to); p.floorWas = p.floor; return; }
+      p.move = { phases: [routePts([h.home, UNLOAD_PT]), routePts([UNLOAD_PT, to]), routePts([to, h.home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone(), helper: h, mover: h.g };
+    };
+    let issueRun = null;
+    const startIssueRun = () => {
+      if (issueRun || !issueQueue.length) return;
+      const tr = freeTruck();
+      if (!tr) return;
+      const batch = issueQueue.splice(0, issueQueue.length);
+      batch.forEach(b => { b.issueStarted = true; });
+      tr.state = 'issuing';
+      const sf = storeFL.f, yf = yardFL.f, dx = tr.dx;
+      storeFL.busy = yardFL.busy = true;
+      const sHome = [sf.position.x, sf.position.z], yHome = [yf.position.x, yf.position.z];
+      const sx = STORE_TRUCK.x, sz = STORE_TRUCK.z, fx = FACTORY_TRUCK.x, fz = FACTORY_TRUCK.z;
+      const toCab = () => { const c = cabOf(tr); return [[c[0], c[1] - 1]]; };
+      issueRun = { i: 0, steps: [
+        // Loader 2 gets in; the truck drives round the Ready Store to the store's door and backs onto it.
+        walkVia(loader2, toCab, 2.2), doNow(() => { loader2.visible = false; }),
+        drive(tr, () => [
+          { c: curve([P(dx, DOCK_Z), P(dx, DOCK_Z + 4), P(dx + 4, DOCK_Z + 7.5), P(-60, DOCK_Z + 7.8), P(-56, DOCK_Z + 4), P(-56, -20), P(-55.6, -34), P(-50, -39.6), P(-38, -39.8), P(sx + 6, sz + 2.7)]), speed: 9 },
+          { c: curve([P(sx + 6, sz + 2.7), P(sx + 2.5, sz + 2.4), P(sx + 0.4, sz + 1.3), P(sx, sz)]), speed: 3, reverse: true }]),
+        // At the store: into the store's forklift, stock out of the store and into the truck.
+        outAt(loader2, () => cabOf(tr)),
+        walkVia(loader2, [[sx + 2.4, sz - 4], [sx + 1.7, INV.z1 - 1.6], [sHome[0] + 1.3, sHome[1]]], 2.2),
+        doNow(() => { loader2.visible = false; sf.userData.seat.visible = true; }),
+        walkVia(sf, [[sx, INV.z1 - 2.5], [sx, INV.z1 - 12]], 3), pause(0.5), onForks(sf), pause(0.4),
+        walkVia(sf, [[sx, INV.z1 - 3.4]], 2.2), turnTo(sf, 0),
+        (() => { let t = 0; return dt => { t += dt; stockCrate.position.z = 1.7 + t * 3; return t >= 0.8; }; })(),   // into the truck
+        doNow(() => { sf.remove(stockCrate); stockCrate.visible = false; }),
+        walkVia(sf, [[sx - 1.5, INV.z1 - 6], sHome], 3),
+        doNow(() => { sf.userData.seat.visible = false; }), outAt(loader2, [sHome[0] + 1.3, sHome[1]]),
+        walkVia(loader2, () => [[sx + 1.7, INV.z1 - 1.6], [sx + 2.4, sz - 4], ...toCab()], 2.2), doNow(() => { loader2.visible = false; }),
+        // Back past the Ready Store, down the yard, and backed up behind the loading deck.
+        drive(tr, () => [
+          { c: curve([P(sx, sz), P(sx - 0.4, sz + 2.7), P(sx - 4, sz + 4.1), P(-40, -37.4), P(-50, -38.4), P(-55.6, -33), P(-56, -18), P(-56, 2), P(-56, 12), P(-54.5, 22), P(-50, 27.5), P(fx - 1.1, 29.5)]), speed: 9 },
+          { c: curve([P(fx - 1.1, 29.5), P(fx - 0.4, 25.5), P(fx, 21.5), P(fx, fz)]), speed: 3, reverse: true }]),
+        // At the factory: the yard forklift takes it off the truck and lifts it onto the deck.
+        outAt(loader2, () => cabOf(tr)),
+        walkVia(loader2, [[fx + 2.3, fz - 5.8], [yHome[0] + 1.3, yHome[1] - 1]], 2.2),
+        doNow(() => { loader2.visible = false; yf.userData.seat.visible = true; }),
+        walkVia(yf, [[fx, fz - 8]], 3), turnTo(yf, 0), pause(0.3), onForks(yf), pause(0.4),
+        turnTo(yf, Math.PI), walkVia(yf, [[fx, UNLOAD_PT.z + 3.9]], 2),
+        doNow(() => { const w = new THREE.Vector3(); stockCrate.getWorldPosition(w); yf.remove(stockCrate); scene.add(stockCrate); stockCrate.position.copy(w); stockCrate.rotation.set(0, yf.rotation.y, 0); }),
+        tweenTo(stockCrate, UNLOAD_PT, 1.8),
+        doNow(() => { scene.remove(stockCrate); stockCrate.visible = false; batch.forEach(revealIssued); }),
+        walkVia(yf, [yHome], 3),
+        doNow(() => { yf.userData.seat.visible = false; }), outAt(loader2, [yHome[0] + 1.3, yHome[1] - 1]),
+        walkVia(loader2, () => [[fx + 2.3, fz - 5.8], ...toCab()], 2.2), doNow(() => { loader2.visible = false; }),
+        // Home to its dock.
+        drive(tr, () => [
+          { c: curve([P(fx, fz), P(fx - 0.3, 24), P(-48, 28), P(-54.5, 24), P(-56.3, 14), P(-57, 7.5), P(dx + 10, DOCK_Z + 13), P(dx - 3, DOCK_Z + 12), P(dx - 7, DOCK_Z + 8), P(dx - 4, DOCK_Z + 6.2), P(dx + 7, DOCK_Z + 7.6)]), speed: 9 },
+          { c: reverseCurve(dx), speed: 3, reverse: true }]),
+        doNow(() => { tr.state = 'docked'; tr.g.position.set(dx, 0, DOCK_Z); tr.g.rotation.y = 0; storeFL.busy = yardFL.busy = false; renderStats(); }),
+        outAt(loader2, () => toCab()[0]), walkVia(loader2, [LOADER2_HOME], 2.2), turnTo(loader2, Math.PI / 2),
+      ] };
     };
 
     // ── Camera: drag to turn, wheel / pinch to zoom, right-drag to pan ──
@@ -2656,6 +2761,9 @@
         }
       }
       runQueue();
+      // The store run for issued stock, a step at a time.
+      if (issueRun) { if (issueRun.steps[issueRun.i](dt)) issueRun.i++; if (issueRun.i >= issueRun.steps.length) issueRun = null; }
+      else startIssueRun();
       // Trucks on their trips.
       for (const tr of trucks) {
         if (tr.state === 'away') {
