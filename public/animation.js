@@ -1838,6 +1838,7 @@
       for (const p of pallets.values()) p.g.visible = !p.inTransit && (f == null || p.floor == null || p.floor === f);
       for (const w of wanderers) w.f.visible = f == null || w.floor == null || w.floor === f;
       for (const h of standby) if (!h.busy) h.g.visible = f == null || f === 1;
+      for (const L of lifters) if (!L.busy) L.g.visible = f == null || f === L.floor;
       newRoot.visible = f == null || f === 1;
     };
     // Ready Stock: every ready order stands on the floor as its cartons (see fillPallet).
@@ -1902,11 +1903,32 @@
       }
       return out;
     };
-    // Hand lifters that carry pallets between stages (owner, 2026-10-24), reused.
+    // Spare hand lifters put away (any move not using a floor's own two).
     const moverPool = [];
-    const takeMover = () => { const m = moverPool.pop() || handLifter(false); m.visible = true; return m; };
     const giveMover = m => { if (!m) return; m.visible = false; moverPool.push(m); };
     const paintWho = (g, c) => { const w = g.userData.who; if (w && w.userData.body) w.userData.body.material = mat(c); };
+    // Stage moves' hand lifters (owner, 2026-10-25): two per production floor,
+    // each in its own yellow-marked space beside the lift door.
+    const floorYAt = (f, x, z) => { const pl = floorPlan(f); return FLOOR_Y[f] + floorRaise(f, pl.px0 + (x - BLD.x0) * pl.sx, pl.py0 + (z - BLD.z0) * pl.sz) + SLAB; };
+    const lifters = [];
+    [0, 1, 2].forEach(f => [-2.6, 2.6].forEach(dx => {
+      const x = LIFT_X + dx, z = LIFT_DOOR_Z - 1.6, y = floorYAt(f, x, z), park = new THREE.Vector3(x, y, z);
+      const g = handLifter(false); g.userData.who.visible = false;
+      g.position.copy(park); g.rotation.y = Math.PI;
+      for (const [w, d, ox, oz] of [[1.6, 0.08, 0, 1.45], [1.6, 0.08, 0, -1.75], [0.08, 3.2, -0.8, -0.15], [0.08, 3.2, 0.8, -0.15]]) box(w, 0.03, d, 0xfacc15, x + ox, y - FLOOR_Y[f] + 0.02, z + oz, floorGroups[f], false);
+      lifters.push({ g, floor: f, park, busy: false });
+    }));
+    const takeLifter = f => { const L = lifters.find(x => x.floor === f && !x.busy); if (L) L.busy = true; return L || null; };
+    const giveLifter = L => {
+      L.busy = false; L.g.position.copy(L.park); L.g.rotation.y = Math.PI; L.g.userData.who.visible = false;
+      L.g.visible = floorFocus == null || floorFocus === L.floor;
+    };
+    // Operators on foot (to the hand lifter and back to the machine).
+    const walkRoot = new THREE.Group(); scene.add(walkRoot);   // not straight on the scene: the idle bob would pin them to the street
+    const walkerPool = [];
+    const takeWalker = () => { const w = walkerPool.pop() || person(0, 0, 0, walkRoot, OPERATOR_BLUE); w.visible = true; return w; };
+    const giveWalker = w => { if (!w) return; w.visible = false; walkerPool.push(w); };
+    const liftWait = [];   // pallets whose operator is waiting for a free hand lifter, in turn
     // The hand-lifter crew (black: no record in the app) stands in the
     // loading area until there is work (owner, 2026-10-24): 2 per production
     // floor. Stock in from the store is put down in the loading area; one of
@@ -1924,7 +1946,29 @@
     const takeHelper = () => { const h = standby.find(x => !x.busy); if (h) h.busy = true; return h || null; };
     const parkHelper = h => { h.busy = false; h.g.position.copy(h.home); h.g.rotation.y = Math.PI; h.g.visible = floorFocus == null || floorFocus === 1; };
     // Whoever carried it: a helper goes back to stand by, an operator's lifter is put away.
-    const releaseMove = m => { if (!m || !m.mover) return; if (m.helper) parkHelper(m.helper); else giveMover(m.mover); m.mover = null; };
+    const releaseMove = m => {
+      if (!m) return;
+      if (m.waiting) { m.waiting = false; return; }            // still in the queue: dropped from it on the next tick
+      if (m.lifter) { giveLifter(m.lifter); m.lifter = null; m.mover = null; }
+      if (m.walker) { giveWalker(m.walker); m.walker = null; }
+      if (!m.mover) return;
+      if (m.helper) parkHelper(m.helper); else giveMover(m.mover);
+      m.mover = null;
+    };
+    // A free hand lifter on his floor: the operator's walk starts.
+    const startLifterMove = (p, L) => {
+      const m = p.move, w = takeWalker(), from = p.g.position.clone();
+      w.userData.info = m.info; L.g.userData.who.userData.info = m.info; paintWho(L.g, OPERATOR_BLUE);
+      w.position.set(m.home.x, m.home.y + 0.3, m.home.z);
+      p.move = { phases: [
+        { kind: 'walk', path: routePts([m.home, L.park]) },          // to the hand lifter's space
+        { kind: 'drive', path: routePts([L.park, from]) },           // with it to the pallet
+        { kind: 'carry', path: routePts([from, ...m.via, m.to]) },   // the pallet to its next area
+        { kind: 'drive', path: routePts([m.to, L.park]) },           // the hand lifter back to its space
+        { kind: 'walk', path: routePts([L.park, m.home]) },          // back to his machine
+      ], ph: 0, seg: 0, segT: 0, rot: 0, refill: m.refill, to: m.to, mover: L.g, lifter: L, walker: w };
+      L.g.userData.who.visible = false;
+    };
     // The operator of the machine nearest a point on its floor.
     const opV = new THREE.Vector3();
     const nearOperator = pt => {
@@ -2141,11 +2185,11 @@
             const hm = hp >= 0 ? MACHINES[hp] : null;
             const home = hm ? new THREE.Vector3(wx(PLAN_B, hm.at[0]), FLOOR_Y[0] + basementRaise(hm.at[0], hm.at[1]) + SLAB, wz(PLAN_B, hm.at[1]) + 2.2)
               : nearOperator(from) || from.clone().add(new THREE.Vector3(2.4, 0, 1.2));
-            const carry = routePts([from, ...via, to]);
-            const mover = takeMover(); paintWho(mover, OPERATOR_BLUE);   // the machine's operator
             const op = nearOperator(home), toName = String(k).startsWith('press:') ? 'its press' : (ZONE_STYLE[k] ? ZONE_STYLE[k][2].toLowerCase() : 'its next area');
-            mover.userData.who.userData.info = Object.assign({ name: 'Operator', role: 'Operator' }, op && op.info, { note: 'Moving E-' + p.job.id + ' to ' + toName });
-            p.move = { phases: [routePts([home, from]), carry, routePts([to, home])], ph: 0, seg: 0, segT: 0, rot: 0, refill: p.pendingFill, to: to.clone(), mover };
+            const info = Object.assign({ name: 'Operator', role: 'Operator' }, op && op.info, { note: 'Moving E-' + p.job.id + ' to ' + toName });
+            // He needs one of his floor's hand lifters: waits his turn if both are out.
+            p.move = { waiting: true, floor: hm ? 0 : f0, home, via, to: to.clone(), info, refill: p.pendingFill };
+            liftWait.push(p);
             return;
           }
           const arc = inReady(from) !== inReady(to) || Math.abs(from.z - to.z) > 9 || Math.abs(from.y - to.y) > 1 ? 9 : Math.min(1.2, 0.2 + dist * 0.08);
@@ -2690,27 +2734,48 @@
       for (const T of stockTiles) T.sprite.position.y = T.y + (T.popped ? 0.5 : 0) + Math.sin(clock * 1.6 + T.phase) * 0.12;
       placeStockPop();
       // Pallets: pop in, glide between spots.
+      // Operators waiting for a hand lifter, in turn: the first free one on his floor.
+      for (let i = 0; i < liftWait.length; i++) {
+        const wp = liftWait[i], wm = wp.move;
+        if (!wm || !wm.waiting || pallets.get(wp.job.id) !== wp) { liftWait.splice(i--, 1); continue; }
+        const L = takeLifter(wm.floor);
+        if (!L) continue;
+        liftWait.splice(i--, 1);
+        startLifterMove(wp, L);
+      }
       for (const p of pallets.values()) {
         if (p.pop < 1) { p.pop = Math.min(1, p.pop + dt * 2.2); p.g.scale.setScalar(p.pop <= 0 ? 0.001 : Math.max(0.001, easeBack(p.pop))); }
-        if (p.move && p.move.phases) {
+        if (p.move && p.move.waiting) {
+          // the pallet stays put until its operator gets a hand lifter
+        } else if (p.move && p.move.phases) {
           const m = p.move;
-          if (!m.mover) m.mover = takeMover();
-          const path = m.phases[m.ph];
+          // A phase is { kind, path } (walk / drive / carry); the loading crew's moves are plain paths: drive, carry, drive.
+          const ph = m.phases[m.ph], path = ph.path || ph, kind = ph.kind || (m.ph === 1 ? 'carry' : 'drive');
           if (m.seg >= path.length - 1) {                        // this leg done
-            if (m.ph === 1) { p.g.position.copy(path[path.length - 1]); if (m.refill) { fillPallet(p); placeTag(p); m.refill = false; p.pendingFill = false; } }
+            if (kind === 'carry') { p.g.position.copy(path[path.length - 1]); if (m.refill) { fillPallet(p); placeTag(p); m.refill = false; p.pendingFill = false; } }
+            const next = m.phases[m.ph + 1];
+            if (kind === 'walk' && next && next.kind === 'drive' && m.walker) { m.walker.visible = false; if (m.mover) m.mover.userData.who.visible = true; }   // takes the hand lifter
+            if (kind === 'drive' && next && next.kind === 'walk' && m.lifter) {                                                                            // leaves it in its space
+              giveLifter(m.lifter); m.lifter = null; m.mover = null;
+              if (m.walker) { const e = path[path.length - 1]; m.walker.position.set(e.x, e.y + 0.3, e.z); m.walker.visible = true; }
+            }
             m.ph++; m.seg = 0; m.segT = 0;
             if (m.ph >= m.phases.length) { releaseMove(m); p.move = null; }
           } else {
             const a = path[m.seg], b = path[m.seg + 1], L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5;
-            m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : 2.6) / L);
+            m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : kind === 'walk' ? 1.6 : 2.6) / L);
             moveV.lerpVectors(a, b, m.segT);
             if (!vert) { const dx = b.x - a.x, dz = b.z - a.z; if (dx * dx + dz * dz > 1e-6) m.rot = Math.atan2(dx, dz); }
-            const carrying = m.ph === 1;                         // 0: walking to it, 1: carrying it, 2: walking back
+            const carrying = kind === 'carry';
             if (carrying) { p.g.position.copy(moveV); p.g.position.y += 0.12; }
-            m.mover.position.set(moveV.x - (carrying ? Math.sin(m.rot) * 0.6 : 0), moveV.y, moveV.z - (carrying ? Math.cos(m.rot) * 0.6 : 0));
-            m.mover.rotation.y = m.rot;
             let fy = 0; FLOOR_Y.forEach((y, i) => { if (Math.abs(y - moveV.y) < Math.abs(FLOOR_Y[fy] - moveV.y)) fy = i; });
-            m.mover.visible = floorFocus == null || fy === floorFocus;
+            const shown = floorFocus == null || fy === floorFocus;
+            if (kind === 'walk' && m.walker) {
+              m.walker.position.set(moveV.x, moveV.y + 0.3, moveV.z); m.walker.rotation.y = m.rot; m.walker.visible = shown;
+            } else if (m.mover) {
+              m.mover.position.set(moveV.x - (carrying ? Math.sin(m.rot) * 0.6 : 0), moveV.y, moveV.z - (carrying ? Math.cos(m.rot) * 0.6 : 0));
+              m.mover.rotation.y = m.rot; m.mover.visible = shown;
+            }
             if (m.segT >= 1) { m.seg++; m.segT = 0; }
           }
         } else if (p.move) {
