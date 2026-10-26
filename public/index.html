@@ -4135,8 +4135,14 @@ const ROLES = [
   { id: 'storage',   label: 'Ready to Deliver',  stage_index: 6 },
   // No stage — a Paper Cutting PIN opens the pending offcut issuance list.
   { id: 'papercut',  label: 'Paper Cutting',     stage_index: null },
+  // Information only (owner, 2026-10-26): who does these jobs. No stage, no
+  // Station sign-in; an entry with only these roles needs no PIN.
+  { id: 'breaking',  label: 'Breaking',          stage_index: null, info: true },
+  { id: 'driver',    label: 'Driver',            stage_index: null, info: true },
+  { id: 'loader',    label: 'Loader',            stage_index: null, info: true },
 ];
 function roleById(id) { return ROLES.find(r => r.id === id); }
+function infoOnlyRoles(ids) { return Array.isArray(ids) && ids.length > 0 && ids.every(id => (roleById(id) || {}).info); }
 function rolesOfOperator(o) {
   if (Array.isArray(o.roles) && o.roles.length) return o.roles;
   // Legacy back-compat: derive from stage_indices (defaults to 'coatings'
@@ -35410,7 +35416,7 @@ function renderOperators() {
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
         <div class="inv-name">${o.is_manager ? '&#128100;' : '&#9881;'} ${esc(o.name || '(unnamed machine)')}${o.is_manager?' <span class="inv-badge" style="background:#f5f3ff;color:#5b21b6;">manager</span>':''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
-        <div class="inv-sub">${o.is_manager ? 'All stages' : esc(operatorStageNames(o))} · PIN ${esc(o.pin)} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
+        <div class="inv-sub">${o.is_manager ? 'All stages' : esc(operatorStageNames(o))} · ${o.pin ? 'PIN ' + esc(o.pin) : 'No PIN (info only)'} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
         <button class="btn btn-sm ceo-hide" onclick="openOperatorModal(${o.id})">Edit</button>
@@ -35537,7 +35543,7 @@ function openOperatorModal(id) {
   const assigned = o ? rolesOfOperator(o) : [];
   const isManager = !!(o && o.is_manager);
   const boxes = ROLES.map(r => {
-    const hint = r.finishes ? ` <span style="font-weight:400;color:var(--text2);font-size:12px;">(${r.finishes.join(', ')})</span>` : '';
+    const hint = r.finishes ? ` <span style="font-weight:400;color:var(--text2);font-size:12px;">(${r.finishes.join(', ')})</span>` : r.info ? ' <span style="font-weight:400;color:var(--text2);font-size:12px;">(info only)</span>' : '';
     return `
       <label class="op-stage-chk" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;cursor:pointer;">
         <input type="checkbox" class="op-role-cb" value="${esc(r.id)}" ${assigned.includes(r.id) ? 'checked' : ''}>
@@ -35556,7 +35562,7 @@ function openOperatorModal(id) {
     <div class="form-row">
       <div class="form-group"><label class="form-label" id="op-name-label">${isManager ? 'Manager Station Name' : 'Machine Name'}</label>
         <input type="text" id="op-name" value="${o?esc(o.name||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
-      <div class="form-group"><label class="form-label">3-digit PIN</label>
+      <div class="form-group"><label class="form-label">3-digit PIN <span style="font-weight:400;color:var(--text2);font-size:12px;">(not needed for Breaking / Driver / Loader only)</span></label>
         <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;"></div>
     </div>
     <div class="form-group" id="op-roles-group" style="${isManager ? 'display:none;' : ''}">
@@ -35744,7 +35750,7 @@ async function saveOperator(id) {
   const pin = document.getElementById('op-pin').value.trim();
   const isManager = !!document.getElementById('op-is-manager')?.checked;
   // Manager PIN → every role, regardless of the (hidden) checkboxes.
-  const roles = isManager ? ROLES.map(r => r.id) : Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
+  const roles = isManager ? ROLES.filter(r => !r.info).map(r => r.id) : Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
   const seen = new Set();
   const persons = Array.from(document.querySelectorAll('#op-persons .op-person-pick')).map(sel => {
     const opt = sel.selectedOptions[0];
@@ -35752,7 +35758,8 @@ async function saveOperator(id) {
   }).filter(p => p.name && !seen.has(p.name.toLowerCase()) && seen.add(p.name.toLowerCase()));
   const activeEl = document.getElementById('op-active');
   if (!name) { notify(isManager ? 'Manager name is required' : 'Machine name is required'); return; }
-  if (!/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
+  const infoOnly = !isManager && infoOnlyRoles(roles);   // Breaking / Driver / Loader only: no PIN needed
+  if (!(infoOnly && pin === '') && !/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
   if (!roles.length) { notify('Select at least one role'); return; }
   if (!persons.length) { notify(isManager ? 'Add at least one manager' : 'Add at least one operator on this machine'); return; }
   const body = { name, pin, roles, persons, is_manager: isManager };
