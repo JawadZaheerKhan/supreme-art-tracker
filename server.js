@@ -320,7 +320,7 @@ function getDb() {
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
-const SCHEMA_VERSION = 'v2026-10-26-info-roles';
+const SCHEMA_VERSION = 'v2026-10-26-gate-admin';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1220,11 +1220,11 @@ async function initDb() {
     // each cold start. Own try/catch so a stale list can never do that again.
     try {
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin','procurement'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin','procurement','gate_admin'))`;
       await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
       await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin','procurement'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin','procurement','gate_admin'))`;
     } catch (roleErr) {
       // Log loudly but keep going — the migrations below must still run.
       console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
@@ -2531,7 +2531,8 @@ function publicUser(u) {
 // client is a mutually-exclusive external role, ranked last).
 // 'procurement' (owner, 2026-10-14): the carton shipper buyer - by default
 // sees only the Carton Shippers tab.
-const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'procurement', 'operator', 'client'];
+// 'gate_admin' (owner, 2026-10-26): Gate Admin - what it may do is set in the Access Register; nothing by default.
+const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'procurement', 'gate_admin', 'operator', 'client'];
 // actingUser: only a Super Admin can grant or keep the super_admin role on
 // anyone (including themselves) — a plain Admin submitting 'super_admin' in
 // the payload (by tampering with the request, since the checkbox is hidden
@@ -2820,7 +2821,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 // hard client-role block above; letting it appear in the editor would
 // invite a mistaken edit into something that actually can't take effect
 // safely, which is worse than just not offering it.
-const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement'];
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'gate_admin'];
 
 // Every signed-in user needs to know their OWN effective permissions
 // (client-side canWriteJobs() etc. read this at boot) — this is not
