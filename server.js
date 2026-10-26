@@ -137,7 +137,14 @@ const ROLES = [
   // Not a production stage — a Paper Cutting PIN gets its own Station screen
   // listing pending offcut issuance requests instead of a stage queue.
   { id: 'papercut',  label: 'Paper Cutting',     stage_index: null },
+  // Information only (owner, 2026-10-26): who does these jobs. No stage, no
+  // Station sign-in; an entry with only these roles needs no PIN.
+  { id: 'breaking',  label: 'Breaking',          stage_index: null, info: true },
+  { id: 'driver',    label: 'Driver',            stage_index: null, info: true },
+  { id: 'loader',    label: 'Loader',            stage_index: null, info: true },
 ];
+const INFO_ROLE_IDS = new Set(ROLES.filter(r => r.info).map(r => r.id));
+const infoOnlyRoles = roles => Array.isArray(roles) && roles.length > 0 && roles.every(r => INFO_ROLE_IDS.has(r));
 const ROLE_FINISHES = {
   coatings:  ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup','Color Seal'],
   embellish: ['Emboss','Cylinder Emboss','Hot Foiling'],
@@ -147,7 +154,7 @@ const ROLE_IDS = new Set(ROLES.map(r => r.id));
 // Every role id, in order — a Manager PIN gets all of them so they're
 // treated as qualified for every stage/finish without a special-cased
 // scope check anywhere in the station pipeline.
-const ALL_ROLE_IDS = ROLES.map(r => r.id);
+const ALL_ROLE_IDS = ROLES.filter(r => !r.info).map(r => r.id);
 
 function rolesOf(operator) {
   if (Array.isArray(operator.roles) && operator.roles.length) return operator.roles;
@@ -313,7 +320,7 @@ function getDb() {
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
-const SCHEMA_VERSION = 'v2026-10-24-floor-people';
+const SCHEMA_VERSION = 'v2026-10-26-info-roles';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1306,7 +1313,9 @@ async function initDb() {
       )
     `;
     // PIN must be unique among active operators so /verify is unambiguous.
-    await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_idx ON operators(pin) WHERE active`;
+    // (Info-only entries - Breaking / Driver / Loader - have no PIN: unique only where set, owner 2026-10-26.)
+    await sql`DROP INDEX IF EXISTS operators_pin_active_idx`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS operators_pin_active_set_idx ON operators(pin) WHERE active AND pin <> ''`;
     // PINs are now 3 digits. Existing 4-digit PINs that start with 0 get
     // their leading 0 dropped (0001 → 001, 0023 → 023). PINs that don't fit
     // that pattern are left alone so admin can re-issue them by hand.
@@ -2955,7 +2964,7 @@ function parseOperatorRoles(body) {
   // A Paper Cutting-only PIN has no stage; stage_index is NOT NULL, so it
   // stores -1, which never matches a real job stage.
   if (!stageIndices.length) {
-    return roleIds.includes('papercut') ? { roles: roleIds, stageIndices: [], primary: -1 } : null;
+    return roleIds.includes('papercut') || infoOnlyRoles(roleIds) ? { roles: roleIds, stageIndices: [], primary: -1 } : null;
   }
   return { roles: roleIds, stageIndices, primary: stageIndices[0] };
 }
@@ -3000,10 +3009,11 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
       : parseOperatorRoles(req.body);
     const persons = parsePersons(req.body);
     if (!name) return res.status(400).json({ error: isManager ? 'Manager name is required' : 'Machine name is required' });
-    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
+    const infoOnly = !isManager && infoOnlyRoles(parsed.roles);   // Breaking / Driver / Loader only: PIN optional
+    if (!(infoOnly && pin === '') && !validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!persons.length) return res.status(400).json({ error: isManager ? 'Add at least one manager' : 'Add at least one operator on this machine' });
-    const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
+    const dupe = pin === '' ? [] : await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const inserted = await sql`
       INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons, is_manager)
@@ -3031,10 +3041,11 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     const persons = parsePersons(req.body);
     const active = req.body.active !== false;
     if (!name) return res.status(400).json({ error: isManager ? 'Manager name is required' : 'Machine name is required' });
-    if (!validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
+    const infoOnly = !isManager && infoOnlyRoles(parsed.roles);   // Breaking / Driver / Loader only: PIN optional
+    if (!(infoOnly && pin === '') && !validPin(pin)) return res.status(400).json({ error: 'PIN must be exactly 3 digits' });
     if (!persons.length) return res.status(400).json({ error: isManager ? 'Add at least one manager' : 'Add at least one operator on this machine' });
-    const dupe = await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
+    const dupe = pin === '' ? [] : await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const updated = await sql`
       UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}, is_manager=${isManager}
@@ -3189,6 +3200,7 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const op = rows[0];
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
     if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
+    if (!op.is_manager && infoOnlyRoles(op.roles)) return res.status(403).json({ error: 'This entry is for information only - it has no Station sign-in' });
     if (!Array.isArray(op.persons)) op.persons = [];
     res.json(op);
   } catch (err) {
@@ -3210,6 +3222,7 @@ app.post('/api/station/job-card-context', requireAuth, async (req, res) => {
     if (!op) return res.status(404).json({ error: 'No active station machine covers this stage yet — add one under Users → Operators.' });
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
     if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
+    if (!op.is_manager && infoOnlyRoles(op.roles)) return res.status(403).json({ error: 'This entry is for information only - it has no Station sign-in' });
     if (!Array.isArray(op.persons)) op.persons = [];
     res.json(op);
   } catch (err) {
