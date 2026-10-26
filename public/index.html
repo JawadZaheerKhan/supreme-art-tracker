@@ -4039,8 +4039,11 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
   </div>
   <!-- Project Animation (owner, 2026-10-21): Jobs | Animation sub-tabs. -->
-  <!-- The 3D animation moved to its own Factory tab (owner, 2026-10-24). -->
-  <div class="tabs" id="client-view-subtabs" style="display:none;"></div>
+  <!-- The client's own Factory view (owner, 2026-10-26): what the client sees. -->
+  <div class="tabs" id="client-view-subtabs" style="margin:0 0 12px;">
+    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-view','jobs')">Jobs</button>
+    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-view','animation')">&#127981; Factory</button>
+  </div>
   <div id="client-view-jobs-pane">
     <div id="client-view-summary" style="margin:0 0 16px;"></div>
     <div id="client-view-list">
@@ -4056,7 +4059,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      /api/client/jobs — this shell is UX only. -->
 <div class="main" id="client-mode" style="display:none;">
   <div id="client-portal-hero" class="hero-card"></div>
-  <div class="tabs" id="client-portal-subtabs" style="display:none;"></div>
+  <div class="tabs" id="client-portal-subtabs" style="margin:16px 0 0;">
+    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-portal','jobs')">Jobs</button>
+    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-portal','animation')">&#127981; Factory</button>
+  </div>
   <div id="client-portal-jobs-pane">
     <div id="client-portal-summary" style="margin-top:16px;"></div>
     <div id="client-portal-list" style="margin-top:16px;">
@@ -39671,7 +39677,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=63';
+const CLIENT_ANIM_SRC = '/animation.js?v=64';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -39754,14 +39760,18 @@ async function refreshClientAnim(shell) {
   const company = cfg.company();
   let ctl = clientAnim[shell];
   if (ctl && ctl.company !== company) { ctl.destroy(); ctl = null; delete clientAnim[shell]; }
-  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, stock: animStockRows(),
+  // A client (and the admin's preview of one) sees only that client's jobs -
+  // MIL jobs are Global's - with an empty inventory store and nameless people
+  // (owner, 2026-10-26). Only the staff Factory tab gets the stock and names.
+  const forClient = shell !== 'factory';
+  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, client: forClient, stock: forClient ? [] : animStockRows(),
     // The Factory tab: an admin can move a job a stage forward / back from its pop-up (owner, 2026-10-24).
     onStage: shell === 'factory' && canStageForward() ? factoryMoveStage : null,
     onJobCard: shell === 'factory' ? factoryJobCard : null });
-  else { ctl.update(rows); if (ctl.setStock) ctl.setStock(animStockRows()); }
+  else { ctl.update(rows); if (ctl.setStock && !forClient) ctl.setStock(animStockRows()); }
   ctl.setActive(true);
   // The operators at their machines, with their names - staff only (owner, 2026-10-24).
-  if (!isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
+  if (!forClient && !isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
 }
 // Factory tab: a new job's tile opens its job card - the printed card, on
 // screen (owner, 2026-10-24).

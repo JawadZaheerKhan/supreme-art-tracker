@@ -980,7 +980,9 @@
       }
       if (overflow) floorDecal('+' + overflow + ' MORE ITEMS', 8, 0.9, '#b45309', (INV.x0 + INV.x1) / 2, INV.z1 - 1.2, { size: 0.55 });
     };
-    applyStock(opts.stock || []);
+    // A client's view (owner, 2026-10-26): no inventory items, no names on people.
+    const forClient = !!opts.client;
+    applyStock(forClient ? [] : (opts.stock || []));
 
     // People (forklift drivers).
     const people = [];
@@ -2891,7 +2893,7 @@
         else {
           if (stockSel != null) selectStock(null);
           const nj = id == null ? pickNewJob(e.clientX, e.clientY) : null;
-          const pr = id == null && nj == null ? pickPerson(e.clientX, e.clientY) : null;
+          const pr = id == null && nj == null && !forClient ? pickPerson(e.clientX, e.clientY) : null;   // a client sees people, not who they are
           const mc = id == null && nj == null && !pr ? pickMachine(e.clientX, e.clientY) : null;
           select(id);
           if (nj != null) { if (opts.onJobCard) opts.onJobCard(nj); }
@@ -3148,8 +3150,8 @@
       company: opts.company,
       _debug: { cam, want, camera, VIEWS, setView, scene },
       update(nextJobs) { applyJobs(nextJobs, false); },
-      setStock(items) { applyStock(items || []); },
-      setOperators(list) { applyOperators(list || []); },
+      setStock(items) { if (!forClient) applyStock(items || []); },
+      setOperators(list) { if (!forClient) applyOperators(list || []); },
       setActive(on) {
         on = !!on;
         if (on === active) return;
