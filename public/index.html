@@ -5425,6 +5425,8 @@ function canDuplicateJob()   { return isSuperAdmin() || hasPerm('job_btn_duplica
 function canCreateMil()      { return isSuperAdmin() || hasPerm('job_btn_create_mil'); }
 function canNewJob()         { return isSuperAdmin() || hasPerm('job_btn_new_job'); }
 function canStageForward()   { return isSuperAdmin() || hasPerm('job_btn_stage_forward'); }
+// CTP / Pending Stock / Delivered moves - its own row (owner, 2026-10-26).
+function canStageMoves()     { return isSuperAdmin() || hasPerm('job_btn_stage_moves'); }
 function canAddPaper()       { return isSuperAdmin() || hasPerm('inv_btn_add_paper'); }
 function canAddOffcut()      { return isSuperAdmin() || hasPerm('inv_btn_add_offcut'); }
 // Delivery ledger — admin, PM, or finance by default. Finance is the only
@@ -5523,6 +5525,7 @@ function roleLabel(role) {
     finance: 'Finance',
     operator: 'Operator',
     procurement: 'Procurement',
+    gate_admin: 'Gate Admin',
     client: 'Client',
     // Legacy role names that may still appear on un-migrated user rows.
     user: 'Production Manager',
@@ -5688,7 +5691,7 @@ function overIssueBannerHtml(j) {
     : String(pkts || '');
   const unit = p.unit || 'packets';
   const challan = p.challan_no ? ` · challan ${esc(p.challan_no)}` : '';
-  const canDecide = isAdmin() || isProductionManager() || isSuperAdmin();
+  const canDecide = isSuperAdmin() || hasPerm('job_btn_over_issue');
   // Ignore: Super Admin only, in the Super Admin black (owner, 2026-10-13).
   const ignoreBtn = isSuperAdmin()
     ? `<button class="btn btn-sm" style="background:#111827;border-color:#111827;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'ignore')" title="Super Admin: clear this without moving any stock or adding to the job - e.g. the offcut was already entered by hand.">&#10005; Ignore</button>`
@@ -5847,11 +5850,11 @@ const BTN_FN_ROWS = {
   deleteJob: ['job_btn_delete', 'yes'],
   openDuplicateJob: ['job_btn_duplicate', 'yes'], duplicateGroupIntoJob: ['job_btn_duplicate', 'yes'], createNextJobInGroup: ['job_btn_duplicate', 'yes'],
   openCreateGroupPicker: ['job_btn_create_mil', 'yes'], openCreateGroupModal: ['job_btn_create_mil', 'yes'],
-  processJobToCtp: ['job_btn_stage_forward', 'yes'], processJobFromCtp: ['job_btn_stage_forward', 'yes'], finalizeAsDelivered: ['job_btn_stage_forward', 'yes'],
-  moveJobToCtp: ['job_btn_stage_forward', 'yes'], moveJobToPendingStock: ['job_btn_stage_forward', 'yes'], moveToStage: ['job_btn_stage_forward', 'yes'],
+  processJobToCtp: ['job_btn_stage_moves', 'yes'], processJobFromCtp: ['job_btn_stage_moves', 'yes'], finalizeAsDelivered: ['job_btn_stage_moves', 'yes'],
+  moveJobToCtp: ['job_btn_stage_moves', 'yes'], moveJobToPendingStock: ['job_btn_stage_moves', 'yes'], moveToStage: ['job_btn_stage_forward', 'yes'],
   openEditWithDelivery: ['job_btn_record_delivery', 'yes'], openDeliverLinkedModal: ['job_btn_record_delivery', 'yes'], openDeliverGroupModal: ['job_btn_record_delivery', 'yes'],
   removeDelivery: ['job_btn_delete_delivery', 'yes'],
-  undoFinalizeDelivery: ['job_btn_stage_forward', 'yes'], processWithoutPaper: ['job_btn_process_without_paper', 'yes'], reverseJobHistory: ['job_btn_history_reverse', 'yes'],
+  undoFinalizeDelivery: ['job_btn_stage_moves', 'yes'], processWithoutPaper: ['job_btn_process_without_paper', 'yes'], reverseJobHistory: ['job_btn_history_reverse', 'yes'],
   openAdjustModal: ['job_btn_adjust', 'yes'], removeAdjustment: ['job_btn_adjust', 'yes'],
   // Inventory
   openInvHistory: ['inv_btn_history', 'view'], openInvHistoryAt: ['inv_btn_history', 'view'],
@@ -8881,10 +8884,10 @@ function renderJobRowCompact(j, opts) {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${isNew && canStageForward() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
-            ${isCtp && canStageForward() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
-            ${partialDelv && canStageForward() ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
-            ${canReopenDelivery(j) && canStageForward() ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
+            ${isNew && canStageMoves() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
+            ${isCtp && canStageMoves() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
+            ${partialDelv && canStageMoves() ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
+            ${canReopenDelivery(j) && canStageMoves() ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
             ${processWithoutPaperBtnHtml(j)}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
@@ -9283,13 +9286,13 @@ function renderJobCard(j, opts) {
   // CTP-queue job, surface "Process to Printing" so PM can bump plates
   // through when they're done. Both live on the tile so the PM doesn't
   // have to dig into the ⋯ menu.
-  const primary = clientPreview ? '' : (isNew && canStageForward())
+  const primary = clientPreview ? '' : (isNew && canStageMoves())
     ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>`
-    : (isCtp && canStageForward())
+    : (isCtp && canStageMoves())
       ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
-      : (partialDelv && canStageForward())
+      : (partialDelv && canStageMoves())
         ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
-        : (canReopenDelivery(j) && canStageForward())
+        : (canReopenDelivery(j) && canStageMoves())
           ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>`
           : '';
   const more = clientPreview ? '' : `
@@ -9307,7 +9310,7 @@ function renderJobCard(j, opts) {
         ${canEditJob() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
-        ${isAdmin()?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
+        ${(isSuperAdmin() || hasPerm('job_btn_delete'))?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
     </details>`;
   // Edit / View is the most-used action when not pending — surface it directly.
@@ -28870,7 +28873,7 @@ function jobForm(j={}, opts) {
           // Request Extra Packets: restricted to admin / super admin only
           // (tighter than the general job_write permission, which also
           // covers production_manager by default) — per explicit request.
-          const topupBtn = (j.id && j.issuance_status === 'issued' && (isAdmin() || isSuperAdmin()))
+          const topupBtn = (j.id && j.issuance_status === 'issued' && (isSuperAdmin() || hasPerm('job_btn_extra_packets')))
             ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id})" title="Request extra packets for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;">+</button>`
             : '';
           return `
@@ -33396,13 +33399,13 @@ function openEdit(id, opts) {
   // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
   // both offered from inside the Edit modal so the PM can flip status
   // right after tweaking specs, without closing back to the list.
-  const processBtn = (adjustMode || managerMode) ? '' : (isNewJob(j) && canStageForward())
+  const processBtn = (adjustMode || managerMode) ? '' : (isNewJob(j) && canStageMoves())
     ? `<button class="btn ceo-hide" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
-    : (isCtpQueue(j) && canStageForward())
+    : (isCtpQueue(j) && canStageMoves())
       ? `<button class="btn ceo-hide" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
-      : (isPartialDelivery(j) && canStageForward())
+      : (isPartialDelivery(j) && canStageMoves())
         ? `<button class="btn ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
-        : (canReopenDelivery(j) && canStageForward())
+        : (canReopenDelivery(j) && canStageMoves())
           ? `<button class="btn ceo-hide" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>`
           : '';
   const managerBanner = managerMode
@@ -33596,7 +33599,7 @@ async function moveToReadyAndEdit(id) {
 async function moveJobToCtp(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  if (!canStageForward()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
+  if (!canStageMoves()) { notify('Only Production Manager / Admin can move jobs back to CTP.'); return; }
   if (j.issuance_status === 'ctp' || j.issuance_status === 'new') return;
   const ok = await confirmDialog({
     title: `Send Job E-${id} back to CTP?`,
@@ -33617,7 +33620,7 @@ async function moveJobToCtp(id) {
 async function moveJobToPendingStock(id) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
-  if (!canStageForward()) { notify('Only Production Manager / Admin can move jobs to Pending Stock.'); return; }
+  if (!canStageMoves()) { notify('Only Production Manager / Admin can move jobs to Pending Stock.'); return; }
   if (j.issuance_status === 'new' || j.issuance_status === 'ctp') { notify('Job is at CTP — advance it to Printing first.'); return; }
   if (j.issuance_status === 'pending' && (j.stage_index || 0) === 1) return;
   const ok = await confirmDialog({
@@ -33797,7 +33800,7 @@ async function deleteJob(id) {
 // Same green "Process" button style everywhere; confirmation includes
 // the remaining qty so the PM knows exactly what they're waiving.
 async function finalizeAsDelivered(id) {
-  if (!canStageForward()) { notify('Only Production Manager / Admin can finalize deliveries.'); return; }
+  if (!canStageMoves()) { notify('Only Production Manager / Admin can finalize deliveries.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (!isPartialDelivery(j)) { notify('This job is not a partial delivery.'); return; }
@@ -33855,7 +33858,7 @@ function isReopenedDelivery(j) { return !!(j && (j.stage_index || 0) === 6 && j.
 function deliveredReadyLeft(j) { return (j && !j.is_shade_card) ? Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j)) : 0; }
 function canReopenDelivery(j) { return !!(j && (j.stage_index || 0) === 7 && (isFinalizedDelivery(j) || deliveredReadyLeft(j) > 0)); }
 async function undoFinalizeDelivery(id) {
-  if (!canStageForward()) { notify('Only Production Manager / Admin can send a delivered job back to Partial Delivery.'); return; }
+  if (!canStageMoves()) { notify('Only Production Manager / Admin can send a delivered job back to Partial Delivery.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j || !canReopenDelivery(j)) { notify('This job has nothing left to deliver.'); return; }
   if (_finalizedJobIds.has(id)) { notify('This job has a wastage adjustment - un-adjust it first.'); return; }
@@ -33895,7 +33898,7 @@ async function undoFinalizeDelivery(id) {
 }
 
 async function processJobToCtp(id) {
-  if (!canStageForward()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
+  if (!canStageMoves()) { notify('Only Production Manager / Admin can process jobs to CTP.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j || !isNewJob(j)) return;
   const ok = await confirmDialog({
@@ -33923,7 +33926,7 @@ async function processJobToCtp(id) {
 // button on the CTP tab card. Advances the job past plate-making so the
 // store keeper can issue paper and the Printing operator can start.
 async function processJobFromCtp(id) {
-  if (!canStageForward()) { notify('Only Production Manager / Admin can process jobs out of CTP.'); return; }
+  if (!canStageMoves()) { notify('Only Production Manager / Admin can process jobs out of CTP.'); return; }
   const j = jobs.find(x => x.id === id);
   if (!j || !isCtpQueue(j)) return;
   const ok = await confirmDialog({
@@ -34338,7 +34341,7 @@ async function approvePacketsTopup(jobId, topupId) {
 //   return → logs "sent back"; store keeper handles the physical return manually
 async function decideOverIssue(jobId, decision) {
   if (decision === 'ignore' && !isSuperAdmin()) { notify('Only a Super Admin can ignore an over-issue.'); return; }
-  if (!(isAdmin() || isProductionManager() || isSuperAdmin())) {
+  if (!(isSuperAdmin() || hasPerm('job_btn_over_issue'))) {
     notify('Only admin / production manager can decide over-issued sheets.');
     return;
   }
@@ -38403,7 +38406,7 @@ function renderUsersTab() {
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(visibleRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
-                ${(isSuperAdmin() ? [['super_admin','Super Admin']] : []).concat([['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['procurement','Procurement'],['operator','Operator'],['client','Client']]).map(([r,lbl]) => `
+                ${(isSuperAdmin() ? [['super_admin','Super Admin']] : []).concat([['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['procurement','Procurement'],['gate_admin','Gate Admin'],['operator','Operator'],['client','Client']]).map(([r,lbl]) => `
                   <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
                     <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
                            ${isMe && (r==='admin' || r==='super_admin') ? 'disabled' : ''}
@@ -38549,7 +38552,10 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_create_mil',      type: 'button' },
   { key: 'job_btn_new_job',         type: 'button' },
   { key: 'job_btn_stage_forward',   type: 'button' },
+  { key: 'job_btn_stage_moves',     type: 'button' },
   { key: 'job_btn_process_without_paper', type: 'button' },
+  { key: 'job_btn_extra_packets',   type: 'button' },
+  { key: 'job_btn_over_issue',      type: 'button' },
   { key: 'job_btn_record_delivery', type: 'button' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'button' },
@@ -38558,6 +38564,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_adjust',          type: 'button' },
   { key: 'job_btn_stickers',        type: 'button' },
   { key: 'job_btn_pricing',         type: 'button' },
+  { key: 'wastage_adjustment',      type: 'button' },   // Wastage Adjustment + the Finalized tab (owner, 2026-10-26)
 ];
 // Inventory tab — Imports lives inside here too (per request), as its own
 // tab-level view/hidden row right under Inventory's own. 'button-30day' is
@@ -38709,7 +38716,7 @@ async function cycleRolePermission(key, role) {
 // Column order for every row — Super Admin and Client stay locked (Super
 // Admin always has full access; Client is never part of this system at
 // all — see roleHasPermission's hard client block server-side).
-const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'client'];
+const COLUMN_ROLES = ['super_admin', 'admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'gate_admin', 'client'];
 // Rows where every role except Super Admin is force-locked to HIDDEN,
 // no matter what's saved in the DB — currently just the Access Register
 // row itself, so no role can ever grant itself (or another role) a way
@@ -38757,6 +38764,7 @@ function renderAccessRegisterHtml(matrixData) {
               <th>Finance</th>
               <th>Operator</th>
               <th>Procure-<br>ment</th>
+              <th>Gate<br>Admin</th>
               <th>Client</th>
             </tr>
           </thead>
@@ -38784,7 +38792,7 @@ function openInviteUser() {
     <div class="form-group"><label class="form-label">Email *</label><input type="email" id="invite-email" placeholder="someone@gmail.com"></div>
     <div class="form-group"><label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(pick one or more — access combines)</span></label>
       <div id="invite-roles" style="display:flex;flex-direction:column;gap:6px;">
-        ${(isSuperAdmin() ? [['super_admin','Super Admin',false]] : []).concat([['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['procurement','Procurement (Carton Shippers only)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]]).map(([r,lbl,def]) => `
+        ${(isSuperAdmin() ? [['super_admin','Super Admin',false]] : []).concat([['production_manager','Production Manager',true],['store_manager','Store Manager',false],['finance','Finance (view-only + delivery ledger)',false],['operator','Operator (Station only)',false],['ceo','CEO (view-only)',false],['procurement','Procurement (Carton Shippers only)',false],['gate_admin','Gate Admin (set its access in the Access Register)',false],['admin','Admin',false],['client','Client (external — sees only the portal)',false]]).map(([r,lbl,def]) => `
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
             <input type="checkbox" value="${r}" ${def?'checked':''} onchange="onInviteRolesChanged()"> ${lbl}
           </label>`).join('')}

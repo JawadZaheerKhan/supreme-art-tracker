@@ -320,7 +320,7 @@ function getDb() {
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
-const SCHEMA_VERSION = 'v2026-10-26-info-roles';
+const SCHEMA_VERSION = 'v2026-10-26-jobs-rows';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -405,7 +405,11 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_delete:          { label: 'Delete button', levels: { admin: 'yes' } },
   job_btn_create_mil:      { label: 'Create Mil Job button', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_new_job:         { label: 'New Job button', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_stage_forward:   { label: 'Stage forwarding — also covers Process to CTP/Printing, Finalize as Delivered and Back to Partial Delivery', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_stage_forward:   { label: 'Stage forwarding — the stage pipeline and the Ready ✓ tick', levels: { admin: 'yes', production_manager: 'yes' } },
+  // Split from Stage forwarding (owner, 2026-10-26); starts with what each role had there.
+  job_btn_stage_moves:     { label: 'CTP / Pending Stock / Delivered moves — Process to CTP / Printing, Move to CTP / Pending Stock, Finalize as Delivered, Back to Partial Delivery', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_extra_packets:   { label: '+ Request extra packets — on a running job, sent to the store keeper', levels: { admin: 'yes' } },
+  job_btn_over_issue:      { label: 'Over-issued stock — Approve / Reject (Ignore stays Super Admin only)', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
@@ -1220,11 +1224,11 @@ async function initDb() {
     // each cold start. Own try/catch so a stale list can never do that again.
     try {
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin','procurement'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','user','stock','ceo','production_manager','store_manager','operator','finance','client','super_admin','procurement','gate_admin'))`;
       await sql`UPDATE users SET role = 'production_manager' WHERE role = 'user'`;
       await sql`UPDATE users SET role = 'store_manager'      WHERE role = 'stock'`;
       await sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`;
-      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin','procurement'))`;
+      await sql`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','production_manager','store_manager','finance','operator','ceo','client','super_admin','procurement','gate_admin'))`;
     } catch (roleErr) {
       // Log loudly but keep going — the migrations below must still run.
       console.error('users_role_check migration failed (roles in the table may not match the allowed list):', roleErr.message);
@@ -1654,6 +1658,14 @@ async function initDb() {
         PRIMARY KEY (permission_key, role)
       )
     `;
+    // Rows split off another (owner, 2026-10-26) start with what each role had on it.
+    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward']]) {
+      await sql`
+        INSERT INTO role_permissions (permission_key, role, level, updated_by)
+        SELECT ${to}, role, level, 'copied from ' || ${from} FROM role_permissions WHERE permission_key = ${from}
+        ON CONFLICT (permission_key, role) DO NOTHING
+      `;
+    }
     for (const [key, def] of Object.entries(ROLE_PERMISSION_DEFAULTS)) {
       for (const [role, level] of Object.entries(def.levels)) {
         await sql`
@@ -2266,7 +2278,8 @@ async function requireStageOrBlock(req, res, next) {
     const rows = await sql`SELECT stage_index FROM jobs WHERE id = ${parseInt(req.params.id, 10)}`;
     const cur = rows.length ? Number(rows[0].stage_index || 0) : null;
     const target = Number(req.body && req.body.stage_index);
-    const key = (cur !== null && target === cur) ? 'job_btn_block' : 'job_btn_stage_forward';
+    // Into or out of Delivered (Finalize as Delivered / Back to Partial Delivery) is its own row (owner, 2026-10-26).
+    const key = (cur !== null && target === cur) ? 'job_btn_block' : (target === 7 || cur === 7) ? 'job_btn_stage_moves' : 'job_btn_stage_forward';
     if (!userHasBtn(req.user, key)) return res.status(403).json({ error: 'Not allowed' });
     next();
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
@@ -2531,7 +2544,8 @@ function publicUser(u) {
 // client is a mutually-exclusive external role, ranked last).
 // 'procurement' (owner, 2026-10-14): the carton shipper buyer - by default
 // sees only the Carton Shippers tab.
-const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'procurement', 'operator', 'client'];
+// 'gate_admin' (owner, 2026-10-26): Gate Admin - what it may do is set in the Access Register; nothing by default.
+const ROLE_PRIORITY = ['super_admin', 'admin', 'production_manager', 'store_manager', 'finance', 'ceo', 'procurement', 'gate_admin', 'operator', 'client'];
 // actingUser: only a Super Admin can grant or keep the super_admin role on
 // anyone (including themselves) — a plain Admin submitting 'super_admin' in
 // the payload (by tampering with the request, since the checkbox is hidden
@@ -2820,7 +2834,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 // hard client-role block above; letting it appear in the editor would
 // invite a mistaken edit into something that actually can't take effect
 // safely, which is worse than just not offering it.
-const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement'];
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'gate_admin'];
 
 // Every signed-in user needs to know their OWN effective permissions
 // (client-side canWriteJobs() etc. read this at boot) — this is not
@@ -5479,7 +5493,7 @@ async function recordBurnedJobNumber(sql, req, err) {
 // now sits in its OWN tab so the CTP operator can pick it up and start
 // making plates BEFORE paper is ordered/issued. Only advances to Pending
 // Stock once CTP is done (see process-from-ctp / station-update below).
-app.post('/api/jobs/:id/process-to-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
+app.post('/api/jobs/:id/process-to-ctp', requirePermission('job_btn_stage_moves'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5509,7 +5523,7 @@ app.post('/api/jobs/:id/process-to-ctp', requirePermission('job_btn_stage_forwar
 // stage_index must be 1 (Printing, the stage process-from-ctp leaves it
 // at). Once paper is issued or the Printing operator has recorded anything
 // we refuse — reverting then would silently discard downstream state.
-app.post('/api/jobs/:id/move-back-to-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
+app.post('/api/jobs/:id/move-back-to-ctp', requirePermission('job_btn_stage_moves'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5562,7 +5576,7 @@ app.post('/api/jobs/:id/move-back-to-ctp', requirePermission('job_btn_stage_forw
 // is a deliberate "reset back to CTP" action from anywhere in production.
 // Ledger untouched (mirrors paper-swap flow); store keeper handles any
 // physical paper return manually.
-app.post('/api/jobs/:id/move-to-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
+app.post('/api/jobs/:id/move-to-ctp', requirePermission('job_btn_stage_moves'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5614,7 +5628,7 @@ app.post('/api/jobs/:id/move-to-ctp', requirePermission('job_btn_stage_forward')
 // as move-to-ctp but stops one step further along the pipeline:
 // stage_index=1 (Printing), issuance_status='pending'. Used by the
 // Pending Stock pipeline pill on the job tile. Ledger untouched.
-app.post('/api/jobs/:id/move-to-pending-stock', requirePermission('job_btn_stage_forward'), async (req, res) => {
+app.post('/api/jobs/:id/move-to-pending-stock', requirePermission('job_btn_stage_moves'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -5673,7 +5687,7 @@ app.post('/api/jobs/:id/move-to-pending-stock', requirePermission('job_btn_stage
 //   * CTP operator at Station clicks Save & Done on the plate-making
 //     screen — that path lives inside /api/jobs/:id/station-update and
 //     applies the same status/stage flip when the source status is 'ctp'.
-app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_forward'), async (req, res) => {
+app.post('/api/jobs/:id/process-from-ctp', requirePermission('job_btn_stage_moves'), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -7933,13 +7947,9 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
 // stays 'issued' — this only appends a pending entry in particulars.packets_topups
 // so the store-keeper sees it in the Pending Stock queue and can Approve
 // (deducts extra) or Reject (no ledger change).
-app.post('/api/jobs/:id/packets-topup', requirePermission('job_btn_edit'), async (req, res) => {
+// Its own Access Register row (owner, 2026-10-26) - was Admin / Super Admin only.
+app.post('/api/jobs/:id/packets-topup', requirePermission('job_btn_extra_packets'), async (req, res) => {
   try {
-    // Tighter than requireJobsWriter (which also allows production_manager)
-    // — extra-packet requests are admin / super admin only, per request.
-    if (!userHasRole(req.user, 'admin', 'super_admin')) {
-      return res.status(403).json({ error: 'Only admin or super admin can request extra packets' });
-    }
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
@@ -8113,7 +8123,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_b
 //                extra is never raised again.
 // The source item's original deduction stays untouched, so the inventory
 // report keeps recording the extra issuance exactly as it did before.
-app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_edit'), async (req, res) => {
+app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_over_issue'), async (req, res) => {   // its own row (owner, 2026-10-26)
   try {
     await dbReady;
     const sql = getDb();
