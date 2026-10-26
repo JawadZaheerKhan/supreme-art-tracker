@@ -226,6 +226,10 @@
   body.role-store-manager .sm-hide { display: none !important; }
   /* Manual Consumption report — Super Admin only (regular Admins excluded). */
   body.role-not-superadmin .superadmin-only-report { display: none !important; }
+  /* The Access Register on screen (owner, 2026-10-26): View = greyed out;
+     Super Admin only = black. See applyBtnAccess. */
+  .acc-view { opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(1); }
+  .acc-sa-only { background: #111827 !important; border-color: #111827 !important; color: #fff !important; }
   /* Finance features merged in from the Finance app, each gated by its own
      Access Register row (see renderUserChip for the body classes). */
   body.role-no-sale-report .sale-report-only { display: none !important; }
@@ -4625,13 +4629,13 @@ function isReadyChecked(j) {
 }
 function readyCheckBoxHtml(j) {
   if (!readyCheckEligible(j)) return '';
-  const on = isReadyChecked(j), can = canStageForward();
-  if (!on && !can) return '';   // Finance sees it once ticked
+  const on = isReadyChecked(j), can = canStageForward(), see = seeBtn('job_btn_stage_forward');
+  if (!on && !see) return '';   // Finance sees it once ticked
   const c = j.ready_check || {};
   const tip = on
     ? `Ready - checked${c.by ? ' by ' + c.by : ''} ${fmtDMYT(c.at)}. Finance: record the delivery.${can ? ' Click to un-tick.' : ''}`
     : 'Tick when this job is ready to deliver - Finance will see it highlighted green. Needs the Ready to Delivery Qty written on the job card (after a partial delivery, the new ready cartons). A delivery recorded after the tick clears it.';
-  return `<button type="button" class="ready-check${on ? ' is-on' : ''}" ${can ? `onclick="event.stopPropagation(); toggleReadyCheck(${j.id})"` : 'disabled'} title="${esc(tip)}"><span class="ready-check-box">${on ? '&#10003;' : ''}</span><span>${on ? 'Ready &middot; Record Delivery' : 'Mark Ready'}</span></button>`;
+  return `<button type="button" ${see ? 'data-acc="job_btn_stage_forward" ' : ''}class="ready-check${on ? ' is-on' : ''}" ${can ? `onclick="event.stopPropagation(); toggleReadyCheck(${j.id})"` : 'disabled'} title="${esc(tip)}"><span class="ready-check-box">${on ? '&#10003;' : ''}</span><span>${on ? 'Ready &middot; Record Delivery' : 'Mark Ready'}</span></button>`;
 }
 async function toggleReadyCheck(id) {
   const j = jobs.find(x => x.id === id);
@@ -5573,14 +5577,14 @@ function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || 
 // owed - can be sent into production with no stock issued. The server
 // stamps particulars.paper_waived; nothing is deducted. Not offered at CTP
 // (plates first - the job then comes to Pending Stock) or once waived.
-function canProcessWithoutPaper(j) {
-  if (!j || !(isSuperAdmin() || hasPerm('job_btn_process_without_paper'))) return false;
+function canProcessWithoutPaper(j, min) {   // min 'view': may the button be drawn
+  if (!j || !(isSuperAdmin() || hasPerm('job_btn_process_without_paper', min || 'yes'))) return false;
   if (j.particulars && j.particulars.paper_waived) return false;
   if (j.issuance_status === 'pending') return true;
   return j.issuance_status === 'issued' && (partialPendingSheets(j) > 0 || secondaryPendingSheets(j) > 0 || thirdPendingSheets(j) > 0);
 }
 function processWithoutPaperBtnHtml(j) {
-  if (!canProcessWithoutPaper(j)) return '';
+  if (!canProcessWithoutPaper(j, 'view')) return '';
   return `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;" onclick="event.stopPropagation(); processWithoutPaper(${j.id})" title="Admin only - start this job without issuing any paper. Nothing is deducted from stock.">&#9654; Process without paper</button>`;
 }
 // The small mark on a job that was processed without paper.
@@ -5641,16 +5645,16 @@ function overIssueBannerHtml(j) {
     : String(pkts || '');
   const unit = p.unit || 'packets';
   const challan = p.challan_no ? ` · challan ${esc(p.challan_no)}` : '';
-  const canDecide = isSuperAdmin() || hasPerm('job_btn_over_issue');
+  const canDecide = seeBtn('job_btn_over_issue');
   // Ignore: Super Admin only, in the Super Admin black (owner, 2026-10-13).
-  const ignoreBtn = (isSuperAdmin() || hasPerm('job_btn_over_issue_ignore'))
-    ? `<button class="btn btn-sm" style="background:#111827;border-color:#111827;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'ignore')" title="Super Admin: clear this without moving any stock or adding to the job - e.g. the offcut was already entered by hand.">&#10005; Ignore</button>`
+  const ignoreBtn = seeBtn('job_btn_over_issue_ignore')
+    ? `<button class="btn btn-sm" style="background:#111827;border-color:#111827;color:#fff;font-weight:700;" data-acc="job_btn_over_issue_ignore" onclick="decideOverIssue(${j.id}, 'ignore')" title="Super Admin: clear this without moving any stock or adding to the job - e.g. the offcut was already entered by hand.">&#10005; Ignore</button>`
     : '';
   const actions = (canDecide || ignoreBtn)
     ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">${canDecide ? `
-        <button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'use')" title="Add these extras to the job's packet count (existing top-up system). No inventory movement — sheets were already deducted at issuance.">&#10003; Use in job</button>
-        <button class="btn btn-sm" style="background:#0891b2;border-color:#0e7490;color:#ffffff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'offcut')" title="Credit the extras to the matching offcut item — the same automatic behaviour the app used to do at issuance.">&#128230; Add to Offcut</button>
-        <button class="btn btn-sm" style="background:#6b7280;border-color:#4b5563;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'return')" title="Mark the extras as sent back to the store. Store keeper handles the physical return manually.">&#8630; Send Back</button>
+        <button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" data-acc="job_btn_over_issue" onclick="decideOverIssue(${j.id}, 'use')" title="Add these extras to the job's packet count (existing top-up system). No inventory movement — sheets were already deducted at issuance.">&#10003; Use in job</button>
+        <button class="btn btn-sm" style="background:#0891b2;border-color:#0e7490;color:#ffffff;font-weight:700;" data-acc="job_btn_over_issue" onclick="decideOverIssue(${j.id}, 'offcut')" title="Credit the extras to the matching offcut item — the same automatic behaviour the app used to do at issuance.">&#128230; Add to Offcut</button>
+        <button class="btn btn-sm" style="background:#6b7280;border-color:#4b5563;color:#fff;font-weight:700;" data-acc="job_btn_over_issue" onclick="decideOverIssue(${j.id}, 'return')" title="Mark the extras as sent back to the store. Store keeper handles the physical return manually.">&#8630; Send Back</button>
         ` : ''}${ignoreBtn}
       </div>`
     : `<div style="font-size:11px;color:#9f1239;font-style:italic;">Waiting for Admin / Production Manager to decide (Use in job · Add to Offcut · Send Back).</div>`;
@@ -5789,7 +5793,11 @@ function firstVisibleReportPane(groupId, fallback) {
 // (History, Print, opening the card), so View is enough for it to work.
 const BTN_FN_ROWS = {
   // Jobs
-  openEdit: ['job_btn_edit', 'view'], openGroupEdit: ['job_btn_edit', 'view'], openAddToGroupModal: ['job_btn_edit', 'yes'], removeJobFromGroup: ['job_btn_edit', 'yes'], openPacketsTopup: ['job_btn_edit', 'yes'],
+  openEdit: ['job_btn_edit', 'view'], openGroupEdit: ['job_btn_edit', 'view'], openAddToGroupModal: ['job_btn_edit', 'yes'], removeJobFromGroup: ['job_btn_edit', 'yes'], openPacketsTopup: ['job_btn_extra_packets', 'yes'],
+  openAdd: ['job_btn_new_job', 'yes'], deleteStockGroup: ['job_btn_edit', 'yes'], openAddExistingToGroupModal: ['job_btn_edit', 'yes'],
+  openStationEntryFromJob: ['job_btn_operator_entry', 'yes'], reuseJobNumber: ['rpt_job_number_reuse', 'yes'],
+  approvePacketsTopup: ['inv_btn_stock_out', 'yes'], rejectPacketsTopup: ['inv_btn_stock_out', 'yes'], issueStock: ['inv_btn_stock_out', 'yes'], dismissPendingStock: ['inv_btn_dismiss_pending', 'yes'],
+  openCartonTypeModal: ['carton_btn_types', 'yes'], openCartonBulkIn: ['carton_btn_stock_in', 'yes'], openCartonStockIn: ['carton_btn_stock_in', 'yes'], openCartonBulkOut: ['carton_btn_issue', 'yes'], openCartonIssue: ['carton_btn_issue', 'yes'],
   openHistory: ['job_btn_history', 'view'],
   openLinkJobPicker: ['job_btn_link', 'yes'], unlinkJob: ['job_btn_link', 'yes'],
   printJobCard: ['job_btn_print', 'view'], printSelectedJobs: ['job_btn_print', 'view'],
@@ -5825,22 +5833,55 @@ function btnDecision(onclickAttr) {
   _btnDecision.set(onclickAttr, hit);
   return hit;
 }
+// The Access Register on screen, automatically (owner, 2026-10-26). Any
+// control tied to a register row - its onclick function in BTN_FN_ROWS, or a
+// data-acc="row_key" attribute (data-acc="super_admin" for a Super Admin-only
+// control) - is hidden at Hidden, greyed out and stopped at View, and, for the
+// Super Admin, drawn black when no other role has it (from the register, so it
+// follows every change made there). A new button only needs drawing with
+// seeBtn(row) - View or Edit - and its function in BTN_FN_ROWS (or data-acc).
+function seeBtn(key) { return isSuperAdmin() || hasPerm(key, 'view'); }
+const ACC_NEED = { no: 0, hidden: 0, view: 1, yes: 2, '30-day': 2 };
+function accOthersHave(key, need) {
+  if (!_roleMatrixData) return true;   // not loaded yet: not black
+  const m = (_roleMatrixData.matrix || {})[key] || {};
+  return (_roleMatrixData.roles || []).some(r => (ACC_NEED[m[r]] || 0) >= (ACC_NEED[need] || 2));
+}
+function accDecision(el) {
+  const a = el.dataset && el.dataset.acc;
+  if (a) return [a, el.dataset.accNeed || 'yes'];
+  const oc = el.getAttribute && el.getAttribute('onclick');
+  return oc ? btnDecision(oc) : null;
+}
 function applyBtnAccess(root) {
-  if (!root || isSuperAdmin()) return;
+  if (!root) return;
   const els = [];
-  if (root.matches && root.matches('[onclick]')) els.push(root);
-  if (root.querySelectorAll) els.push(...root.querySelectorAll('[onclick]'));
+  if (root.matches && root.matches('[onclick],[data-acc]')) els.push(root);
+  if (root.querySelectorAll) els.push(...root.querySelectorAll('[onclick],[data-acc]'));
+  const sa = isSuperAdmin();
   for (const el of els) {
-    const d = btnDecision(el.getAttribute('onclick'));
+    const d = accDecision(el);
     if (!d) continue;
+    if (sa) {   // Super Admin: black when it's his alone
+      const only = d[0] === 'super_admin' || !accOthersHave(d[0], d[1]);
+      el.classList.toggle('acc-sa-only', only);
+      if (only && !el.dataset.saTip) { el.dataset.saTip = '1'; el.title = (el.title ? el.title + ' \u2014 ' : '') + 'Super Admin only'; }
+      continue;
+    }
+    if (d[0] === 'super_admin') { el.style.display = 'none'; continue; }
     const lvl = permLevel(d[0]);
     if (lvl === 'hidden' || lvl === 'no') { el.style.display = 'none'; }
-    else if (d[1] === 'yes' && lvl === 'view') { el.disabled = true; el.title = 'View only \u2014 no edit access'; el.style.opacity = '0.5'; el.style.cursor = 'not-allowed'; }
+    else if (d[1] === 'yes' && lvl === 'view') {
+      el.disabled = true; el.classList.add('acc-view'); el.title = 'View only \u2014 no edit access';
+      if (!/^(BUTTON|INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) el.style.pointerEvents = 'none';   // a span / step can't be "disabled"
+    }
   }
 }
 let _btnObserver = null;
 function startBtnAccess() {
-  if (_btnObserver || isSuperAdmin() || typeof MutationObserver === 'undefined') return;
+  if (_btnObserver || typeof MutationObserver === 'undefined') return;
+  // The Super Admin needs the whole register to know what is his alone.
+  if (isSuperAdmin() && !_roleMatrixData) api('GET', '/api/role-permissions').then(d => { _roleMatrixData = d; applyBtnAccess(document.body); }).catch(() => {});
   applyBtnAccess(document.body);
   _btnObserver = new MutationObserver(muts => {
     for (const mu of muts) for (const n of mu.addedNodes) if (n.nodeType === 1) applyBtnAccess(n);
@@ -6900,12 +6941,12 @@ function setMode(m) {
   if (offcutBtn) offcutBtn.style.display = 'none';
   // Jobs keeps its + New Job on the number-tiles row instead (owner, 2026-10-24).
   const jobsNewBtn = document.getElementById('jobs-new-btn');
-  if (jobsNewBtn) jobsNewBtn.style.display = (m === 'jobs' && canNewJob()) ? '' : 'none';
+  if (jobsNewBtn) jobsNewBtn.style.display = (m === 'jobs' && seeBtn('job_btn_new_job')) ? '' : 'none';
   // ...and Inventory its + New Paper / + Add Offcut (owner, 2026-10-24).
   const invNewBtn = document.getElementById('inv-new-btn');
   const invOffcutBtn = document.getElementById('inv-offcut-btn');
-  if (invNewBtn) invNewBtn.style.display = (m === 'inventory' && canAddPaper()) ? '' : 'none';
-  if (invOffcutBtn) invOffcutBtn.style.display = (m === 'inventory' && canAddOffcut()) ? '' : 'none';
+  if (invNewBtn) invNewBtn.style.display = (m === 'inventory' && seeBtn('inv_btn_add_paper')) ? '' : 'none';
+  if (invOffcutBtn) invOffcutBtn.style.display = (m === 'inventory' && seeBtn('inv_btn_add_offcut')) ? '' : 'none';
   if (m === 'jobs') {
     addBtn.style.display = 'none';
     addBtn.textContent = '+ New Job';     addBtn.onclick = openAdd;
@@ -7072,9 +7113,9 @@ function renderCartons() {
         <button class="tab ${cartonView === 'summary' ? 'active' : ''}" onclick="setCartonView('summary')">&#128202; Summary</button>
       </div>
       <div class="carton-top-actions" style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
-        ${canCartonTypes() ? `<button class="btn" onclick="openCartonTypeModal()">+ Carton Type</button>` : ''}
-        ${canCartonStockIn() ? `<button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="openCartonBulkIn()">&#128230; Stock In (Bulk)</button>` : ''}
-        ${canCartonIssue() ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonBulkOut()">&#128228; Stock Out (Bulk)</button>` : ''}
+        ${seeBtn('carton_btn_types') ? `<button class="btn" onclick="openCartonTypeModal()">+ Carton Type</button>` : ''}
+        ${seeBtn('carton_btn_stock_in') ? `<button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="openCartonBulkIn()">&#128230; Stock In (Bulk)</button>` : ''}
+        ${seeBtn('carton_btn_issue') ? `<button class="btn" style="background:#DC2626;color:#fff;border-color:#DC2626;" onclick="openCartonBulkOut()">&#128228; Stock Out (Bulk)</button>` : ''}
       </div>
     </div>
     ${cartonView === 'stock' ? cartonStockViewHtml() : cartonView === 'summary' ? cartonSummaryViewHtml() : cartonLogViewHtml(cartonView)}`;
@@ -7129,11 +7170,11 @@ function renderCartonStockList() {
             <td class="num cs-onhand"${cartonIsBelowZero(t) ? ' style="color:#991b1b;"' : ''}><b>${cartonNum(t.current_balance)}</b></td>
             <td class="num cs-reorder">${t.reorder_level != null ? cartonNum(t.reorder_level) : '—'}</td>
             <td class="carton-actions">
-              ${canCartonStockIn() && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
-              ${canCartonIssue() && !t.hidden ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
+              ${seeBtn('carton_btn_stock_in') && !t.hidden ? `<button class="btn btn-sm btn-primary" style="background:#166534;border-color:#166534;color:#fff;" title="Stock In" onclick="openCartonStockIn(${t.id})">+ In</button>` : ''}
+              ${seeBtn('carton_btn_issue') && !t.hidden ? `<button class="btn btn-sm" style="background:#DC2626;color:#fff;border-color:#DC2626;" title="Issue" onclick="openCartonIssue(${t.id})">&minus; Issue</button>` : ''}
               <button class="btn btn-sm" title="Every Stock In / Stock Out of this type, with the balance after each" onclick="openCartonHistory(${t.id})">History</button>
-              ${canCartonTypes() ? `<button class="btn btn-sm" title="Edit or hide this type" onclick="openCartonTypeModal(${t.id})">Edit</button>` : ''}
-              ${isSuperAdmin() ? `<button class="btn btn-sm" style="${CARTON_DELETE_STYLE}" title="Delete this carton type - its Stock In / Stock Out entries stay" onclick="deleteCartonType(${t.id})">Delete</button>` : ''}
+              ${seeBtn('carton_btn_types') ? `<button class="btn btn-sm" title="Edit or hide this type" onclick="openCartonTypeModal(${t.id})">Edit</button>` : ''}
+              ${isSuperAdmin() ? `<button class="btn btn-sm" style="${CARTON_DELETE_STYLE}" data-acc="super_admin" title="Delete this carton type - its Stock In / Stock Out entries stay" onclick="deleteCartonType(${t.id})">Delete</button>` : ''}
             </td>
           </tr>`;
         }).join('')}</tbody>
@@ -8801,21 +8842,21 @@ function renderJobRowCompact(j, opts) {
         </div>
         <div class="job-right">
           <div class="job-actions">
-            ${isNew && canStageMoves() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
-            ${isCtp && canStageMoves() ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
-            ${partialDelv && canStageMoves() ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
-            ${canReopenDelivery(j) && canStageMoves() ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
+            ${isNew && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>` : ''}
+            ${isCtp && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>` : ''}
+            ${partialDelv && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
+            ${canReopenDelivery(j) && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
             ${processWithoutPaperBtnHtml(j)}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
-            ${(!_finalizedJobIds.has(j.id) && canLinkJob()) ? (j.linked_job_id
+            ${(!_finalizedJobIds.has(j.id) && seeBtn('job_btn_link')) ? (j.linked_job_id
               ? `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Add another job to this link set (${esc(linkSetLabel(j))})">&#128279; + Link</button>
                  <button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Take E-${j.id} out of the link set (${esc(linkSetLabel(j))}) — the others stay linked">&#128279; Unlink</button>`
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
             ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
-            ${hasPerm('job_btn_delete')?`<button class="btn btn-sm btn-danger btn-dark-maroon" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
+            ${seeBtn('job_btn_delete')?`<button class="btn btn-sm btn-danger btn-dark-maroon" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
             ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
             ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
@@ -8831,8 +8872,8 @@ function renderJobRowCompact(j, opts) {
       ${partialIssueBannerHtml(j)}
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
-        ${(() => { const readyTick = isGroupTile ? '' : readyCheckBoxHtml(j); return (readyTick && !(canRecordDelivery() && !done && canDeliverNow(j))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;align-items:center;">${readyTick}</div>` : ''; })()}
-        ${(canRecordDelivery() && !done && canDeliverNow(j)) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;align-items:center;">
+        ${(() => { const readyTick = isGroupTile ? '' : readyCheckBoxHtml(j); return (readyTick && !(seeBtn('job_btn_record_delivery') && !done && canDeliverNow(j))) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;align-items:center;">${readyTick}</div>` : ''; })()}
+        ${(seeBtn('job_btn_record_delivery') && !done && canDeliverNow(j)) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;align-items:center;">
           ${isGroupTile ? '' : readyCheckBoxHtml(j)}
 
           ${j.linked_job_id ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
@@ -8928,7 +8969,7 @@ function cardIssueStockBtn(j) {
   const offcutStyle = offcut
     ? ` style="${OFFCUT_BTN_STYLE}"`
     : '';
-  return `<button class="btn btn-sm ${offcut ? '' : cls}"${offcutStyle} onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
+  return `<button class="btn btn-sm ${offcut ? '' : cls}"${offcutStyle} data-acc="${offcut ? 'inv_btn_offcut_issuance' : 'inv_btn_stock_out'}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`;
 }
 
 function renderJobCard(j, opts) {
@@ -9203,13 +9244,13 @@ function renderJobCard(j, opts) {
   // CTP-queue job, surface "Process to Printing" so PM can bump plates
   // through when they're done. Both live on the tile so the PM doesn't
   // have to dig into the ⋯ menu.
-  const primary = clientPreview ? '' : (isNew && canStageMoves())
+  const primary = clientPreview ? '' : (isNew && seeBtn('job_btn_stage_moves'))
     ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})" title="Move this job into the CTP queue. The CTP operator will pick it up and make plates.">&rarr; Process to CTP</button>`
-    : (isCtp && canStageMoves())
+    : (isCtp && seeBtn('job_btn_stage_moves'))
       ? `<button class="btn btn-sm" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})" title="Plates are done. Move this job to Printing / Pending Stock so the store keeper can issue paper.">&rarr; Process to Printing</button>`
-      : (partialDelv && canStageMoves())
+      : (partialDelv && seeBtn('job_btn_stage_moves'))
         ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
-        : (canReopenDelivery(j) && canStageMoves())
+        : (canReopenDelivery(j) && seeBtn('job_btn_stage_moves'))
           ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>`
           : '';
   const more = clientPreview ? '' : `
@@ -9219,15 +9260,15 @@ function renderJobCard(j, opts) {
         <button onclick="closeJobMore(this); openEdit(${j.id})">Edit / View</button>
         <button onclick="closeJobMore(this); openHistory(${j.id})">History</button>
         ${!_finalizedJobIds.has(j.id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openDuplicateJob(${j.id})">Duplicate</button>` : ''}
-        ${(!_finalizedJobIds.has(j.id) && canLinkJob()) ? (j.linked_job_id
+        ${(!_finalizedJobIds.has(j.id) && seeBtn('job_btn_link')) ? (j.linked_job_id
           ? `<button class="ceo-hide" onclick="closeJobMore(this); unlinkJob(${j.id})">Unlink (E-${j.linked_job_id})</button>`
           : `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Link Job</button>`) : ''}
-        ${(!_finalizedJobIds.has(j.id) && canLinkJob() && j.linked_job_id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Add to Link Set</button>` : ''}
-        ${canCreateMil() && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
-        ${canEditJob() && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
+        ${(!_finalizedJobIds.has(j.id) && seeBtn('job_btn_link') && j.linked_job_id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Add to Link Set</button>` : ''}
+        ${seeBtn('job_btn_create_mil') && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
+        ${seeBtn('job_btn_edit') && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
         ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
-        ${(isSuperAdmin() || hasPerm('job_btn_delete'))?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
+        ${seeBtn('job_btn_delete')?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
     </details>`;
   // Edit / View is the most-used action when not pending — surface it directly.
@@ -9344,8 +9385,8 @@ function renderJobCard(j, opts) {
       ${updateBtn}
       ${more}
       ${isGroupTile ? '' : (readyCheckBoxHtml(j) ? `<span style="margin-left:auto;display:inline-flex;">${readyCheckBoxHtml(j)}</span>` : '')}
-      ${(canRecordDelivery() && !done && canDeliverNow(j) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${(!isGroupTile && readyCheckBoxHtml(j)) ? '' : 'margin-left:auto;'}" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
-      ${(canRecordDelivery() && !done && canDeliverNow(j)) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${(j.linked_job_id || (!isGroupTile && readyCheckBoxHtml(j))) ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
+      ${(seeBtn('job_btn_record_delivery') && !done && canDeliverNow(j) && j.linked_job_id) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${(!isGroupTile && readyCheckBoxHtml(j)) ? '' : 'margin-left:auto;'}" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>` : ''}
+      ${(seeBtn('job_btn_record_delivery') && !done && canDeliverNow(j)) ? `<button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;${(j.linked_job_id || (!isGroupTile && readyCheckBoxHtml(j))) ? '' : 'margin-left:auto;'}" onclick="openEditWithDelivery(${j.id})" title="Jump straight to the delivery ledger to record a shipment">&#128666; Record Delivery</button>` : ''}
       ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;margin-left:auto;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
       ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;margin-left:auto;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
     </div>`}
@@ -10870,7 +10911,7 @@ function renderInvCardHtml(it) {
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was corrected today — a manual edit or a Reverse.', it.id) : ''}</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
-        ${hasPerm('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
+        ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
     </div>`;
 }
@@ -10902,7 +10943,7 @@ function renderInvBrandRow(it) {
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
-        ${hasPerm('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
+        ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
     </div>`;
 }
@@ -11070,9 +11111,9 @@ function renderInvPendingList() {
     const paperLabel = invIt
       ? `${esc(invIt.paper_type)}${invIt.size?' · '+esc(invIt.size):''}${invIt.gsm?' · '+esc(invIt.gsm)+'gsm':''}${brandList?' · '+esc(brandList):''}`
       : '<span style="color:var(--text2);font-style:italic;">No paper linked</span>';
-    const approveBtn = canIssueStock()
+    const approveBtn = seeBtn('inv_btn_stock_out')
       ? `<button class="btn btn-sm ${enough ? 'btn-success' : 'btn-low-stock'} ceo-hide" onclick="approvePacketsTopup(${j.id}, '${esc(t.id)}')" title="Approve and deduct ${need.toLocaleString()} sheets">&#10003; Approve</button>` : '';
-    const rejectBtn = canIssueStock()
+    const rejectBtn = seeBtn('inv_btn_stock_out')
       ? `<button class="btn btn-sm btn-danger btn-dark-maroon ceo-hide" onclick="rejectPacketsTopup(${j.id}, '${esc(t.id)}')" title="Reject this top-up request">&#10005; Reject</button>` : '';
     return `
       <div class="inv-card inv-pending-row" style="border-left:3px solid #16a34a;">
@@ -11188,16 +11229,16 @@ function renderInvPendingList() {
           ? `<span class="badge" style="background:#cffafe;color:#155e75;border:1px solid #67e8f9;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`
           : `<span class="badge" style="background:#fff;color:#dc2626;border:1px solid #dc2626;font-weight:800;font-size:12px;letter-spacing:0.03em;padding:3px 10px;margin-left:8px;">&#9888; LOW ISSUANCE &middot; ${partialPktsStr} ${unit} STILL NEEDED</span>`)
       : '';
-    const topupBtn = (partial && canIssueStock())
-      ? `<button class="btn btn-sm ceo-hide" style="${offcut ? OFFCUT_BTN_LIGHT_STYLE : 'background:#166534;border-color:#166534;color:#fff;font-weight:700;'}" onclick="issueStock(${j.id})" title="Issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job — from any brand in this paper group">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
+    const topupBtn = (partial && seeBtn('inv_btn_stock_out'))
+      ? `<button class="btn btn-sm ceo-hide" style="${offcut ? OFFCUT_BTN_LIGHT_STYLE : 'background:#166534;border-color:#166534;color:#fff;font-weight:700;'}" data-acc="${offcut ? 'inv_btn_offcut_issuance' : 'inv_btn_stock_out'}" onclick="issueStock(${j.id})" title="Issue the remaining ${partialPktsStr} ${unit} (${partial.toLocaleString()} sheets) to finish this job — from any brand in this paper group">&#8593; Issue More ${partialPktsStr} ${unit}</button>`
       : '';
-    const offcutOk = !offcut || canIssueOffcutStock();
+    const offcutOk = !offcut || seeBtn('inv_btn_offcut_issuance');
     const offcutStyle = offcut
       ? ` style="${OFFCUT_BTN_STYLE}"`
       : '';
     const offcutBadge = offcut ? OFFCUT_PENDING_BADGE : '';
-    const issueBtn = (!partial && canIssueStock() && offcutOk)
-      ? `<button class="btn btn-sm ${offcut ? '' : cls} ceo-hide"${offcutStyle} onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
+    const issueBtn = (!partial && seeBtn('inv_btn_stock_out') && offcutOk)
+      ? `<button class="btn btn-sm ${offcut ? '' : cls} ceo-hide"${offcutStyle} data-acc="${offcut ? 'inv_btn_offcut_issuance' : 'inv_btn_stock_out'}" onclick="issueStock(${j.id})" title="${esc(tip)}">${icon} ${label}</button>`
       : '';
     // Only render the primary tile when the primary side actually needs
     // stock. When the job is in the pending queue solely because its
@@ -11235,7 +11276,7 @@ function renderInvPendingList() {
         <div class="inv-actions">
           ${topupBtn}
           ${issueBtn}
-          ${isDone(j) && (isSuperAdmin() || hasPerm('inv_btn_dismiss_pending')) ? `<button class="btn btn-sm btn-danger btn-dark-maroon" onclick="dismissPendingStock(${j.id})" title="Remove this delivered job from the pending queue">Dismiss</button>` : ''}
+          ${isDone(j) && seeBtn('inv_btn_dismiss_pending') ? `<button class="btn btn-sm btn-danger btn-dark-maroon" onclick="dismissPendingStock(${j.id})" title="Remove this delivered job from the pending queue">Dismiss</button>` : ''}
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
           <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
         </div>
@@ -11268,8 +11309,8 @@ function renderInvPendingList() {
       const secRemPkts = secPs ? remSecSheets / secPs : 0;
       const secRemStr = Number.isInteger(secRemPkts) ? String(secRemPkts) : (+secRemPkts.toFixed(2)).toString();
       const secIsOffcut = !!secIt.is_offcut;
-      const secIssueBtn = canIssueStock()
-        ? `<button class="btn btn-sm ${secIsOffcut ? '' : secCls} ceo-hide"${secIsOffcut ? ` style="${OFFCUT_BTN_STYLE}"` : ''} onclick="issueStock(${j.id}, '${source}')" title="${esc(secTip)}">${secIcon} ${secLabel}</button>`
+      const secIssueBtn = seeBtn('inv_btn_stock_out')
+        ? `<button class="btn btn-sm ${secIsOffcut ? '' : secCls} ceo-hide"${secIsOffcut ? ` style="${OFFCUT_BTN_STYLE}"` : ''} data-acc="${secIsOffcut ? 'inv_btn_offcut_issuance' : 'inv_btn_stock_out'}" onclick="issueStock(${j.id}, '${source}')" title="${esc(secTip)}">${secIcon} ${secLabel}</button>`
         : '';
       return `
       <div class="inv-card inv-pending-row" style="border-left:3px solid #16a34a;background:rgba(22,163,74,0.12);">
@@ -13681,7 +13722,7 @@ function jhReverseHtml(jobId, a, reversedIds) {
   if (a.action === 'job.update' && m.revert && !m.revert.reversible) {
     return facts + `<div style="font-size:11px;color:var(--text2);margin-top:2px;">Can't be reversed here - ${esc(m.revert.why || 'it moved stock')}; change it back on the job card.</div>`;
   }
-  if (!r.ok(m) || !(isSuperAdmin() || (hasPerm(r.perm) && hasPerm('job_btn_history_reverse')))) return facts;
+  if (!r.ok(m) || !(isSuperAdmin() || (hasPerm(r.perm) && seeBtn('job_btn_history_reverse')))) return facts;
   return facts + `<div style="margin-top:4px;"><button class="btn btn-sm ceo-hide" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:2px 9px;font-size:11px;" onclick="event.stopPropagation(); reverseJobHistory(${jobId}, ${a.id})" title="Undo this change - ${esc(r.what)}">&#8634; Reverse</button></div>`;
 }
 async function reverseJobHistory(jobId, auditId) {
@@ -16381,7 +16422,7 @@ function jobNumbersTableHtml() {
       <td ${td}>${r.ended_at ? fmtDMYT(r.ended_at) : '\u2014'}</td>
       <td ${td}>${esc(r.ended_by || '') || '\u2014'}</td>
       <td ${td} style="padding:6px 8px;color:var(--text2);">${esc(r.note || '')}</td>
-      <td ${td}>${r.reusable && canNewJob() && (isSuperAdmin() || hasPerm('rpt_job_number_reuse'))
+      <td ${td}>${r.reusable && seeBtn('job_btn_new_job') && seeBtn('rpt_job_number_reuse')
         ? `<button class="btn btn-sm" style="background:#166534;color:#fff;border-color:#166534;font-weight:600;" onclick="reuseJobNumber(${r.id})" title="Create the next job card on this number instead of a new one">&#8634; Reuse</button>`
         : ''}</td>
     </tr>`;
@@ -24759,7 +24800,7 @@ function renderWastageAdjBar() {
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
       <span style="font-size:14px;font-weight:700;color:#7c3aed;">&#9881; Finalized Jobs</span>
-      <button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;" onclick="openWastageAdjSettingsModal()">&#9881; Wastage Settings</button>
+      <button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;" data-acc="super_admin" onclick="openWastageAdjSettingsModal()">&#9881; Wastage Settings</button>
       ${n ? `<span class="njb-count">${n} selected</span>
         <button class="btn btn-sm btn-danger" style="background:#1a1a18;border-color:#1a1a18;color:#fff;" onclick="bulkDeleteSelectedFinalizedJobs()" title="Permanently move the selected finalized jobs to Archive">&#128465; Delete Selected (${n})</button>` : ''}
       <span style="font-size:12px;color:var(--text2);margin-left:auto;">
@@ -28499,7 +28540,7 @@ function particularsTable(p, job, opts) {
   // Green/yellow dot beside a stage row's label — a click-through to that
   // stage's Station entry (no PIN) for holders of the job_btn_operator_entry
   // Access Register row. Not in preview mode (finalized view is read-only).
-  const canEntryDot = !opts.preview && job.id && hasPerm('job_btn_operator_entry');
+  const canEntryDot = !opts.preview && job.id && seeBtn('job_btn_operator_entry');
   // Read only unless the Particulars row is at Edit (Super Admin always) -
   // owner, 2026-10-14; it was Super Admin only (2026-10-01). Changes go
   // through the green ▶ Station entry.
@@ -28791,7 +28832,7 @@ function jobForm(j={}, opts) {
           // Request Extra Packets: restricted to admin / super admin only
           // (tighter than the general job_write permission, which also
           // covers production_manager by default) — per explicit request.
-          const topupBtn = (j.id && j.issuance_status === 'issued' && (isSuperAdmin() || hasPerm('job_btn_extra_packets')))
+          const topupBtn = (j.id && j.issuance_status === 'issued' && seeBtn('job_btn_extra_packets'))
             ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id})" title="Request extra packets for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;">+</button>`
             : '';
           return `
@@ -29012,7 +29053,7 @@ function deliveriesSection(j, opts) {
     : (typeof canRecordDelivery === 'function' && canRecordDelivery());
   const canFillNow = !managerMode && typeof canFillDeliveryDetails === 'function' && canFillDeliveryDetails();
   const canAddDelivery = canDeliverNow(j) && !isDelivered && (canRecordNow || canFillNow);
-  const isAdminUser = typeof hasPerm === 'function' && hasPerm('job_btn_delete_delivery');
+  const isAdminUser = typeof hasPerm === 'function' && seeBtn('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
   // No. / Batch No. pre-filling from the job card, still fully editable
@@ -29199,7 +29240,7 @@ function deliveriesSectionFinance(j, opts) {
     : (typeof canRecordDelivery === 'function' && canRecordDelivery());
   const canFillNow = !managerMode && typeof canFillDeliveryDetails === 'function' && canFillDeliveryDetails();
   const canAddDelivery = canDeliverNow(j) && !isDelivered && (canRecordNow || canFillNow);
-  const isAdminUser = typeof hasPerm === 'function' && hasPerm('job_btn_delete_delivery');
+  const isAdminUser = typeof hasPerm === 'function' && seeBtn('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
   // Cartons Qty minus what's already been delivered) — same idea as PO
   // No. / Batch No. pre-filling from the job card, still fully editable
@@ -30867,7 +30908,7 @@ function renderGroupTileCompact(groupName, groupJobs, hitIds) {
   // Bottom Record Delivery — the normal compact tile puts pipeline +
   // tile-record-delivery in a single flex row. Replace only the inner
   // tile-record-delivery content so the flex row stays intact.
-  const groupDelivBtn = canRecordDelivery()
+  const groupDelivBtn = seeBtn('job_btn_record_delivery')
     ? `<div class="tile-record-delivery" style="flex:0 0 auto;"><button class="btn btn-sm ceo-hide finance-allow" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="openDeliverGroupModal(${jsStr(groupName)})" title="Record a delivery — FIFO across the group, oldest job ships first">&#128666; Record Delivery</button></div>`
     : '';
   if (/<div class="tile-record-delivery"/.test(html)) {
@@ -30945,7 +30986,7 @@ function openGroupEdit(groupId) {
     ${jobForm(synthetic).replace('<span class="jc-lbl">P.O. Qty</span>', '<span class="jc-lbl" style="color:#7c3aed;">MIL Qty</span>')}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      ${canEditJob() ? `<button class="btn btn-danger btn-dark-maroon" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
+      ${seeBtn('job_btn_edit') ? `<button class="btn btn-danger btn-dark-maroon" onclick="deleteStockGroup(${groupId})" style="margin-right:auto;">Delete Group</button>` : ''}
       <button class="btn btn-primary" onclick="saveGroupEdit(${groupId})">Save Group</button>
     </div>
   </div>`);
@@ -31230,7 +31271,7 @@ function openGroupJobsModal(groupName) {
   const useCards = (typeof jobsView !== 'undefined' && jobsView === 'cards');
   const perJob = useCards ? renderJobCard : renderJobRowCompact;
   const tiles = groupJobs.map(j => {
-    const removeChip = canEditJob()
+    const removeChip = seeBtn('job_btn_edit')
       ? `<div style="display:flex;justify-content:flex-end;margin-bottom:-4px;">
           <button class="btn btn-sm ceo-hide" onclick="removeJobFromGroup(${j.id},${gName})" title="Take this job out of the group (job itself is not deleted)" style="background:#791F1F;color:#fff;border-color:#791F1F;">&minus; Remove from Group</button>
          </div>`
@@ -31249,7 +31290,7 @@ function openGroupJobsModal(groupName) {
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0;">
-        ${canEditJob() ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
+        ${seeBtn('job_btn_edit') ? `<button class="btn btn-sm ceo-hide" onclick="openAddExistingToGroupModal(${gName})">+ Add Existing Job</button>` : ''}
         <button class="btn btn-sm" onclick="closeModal()">Close</button>
       </div>
     </div>
@@ -33317,13 +33358,13 @@ function openEdit(id, opts) {
   // Process-to-CTP (from New) and Process-to-Printing (from CTP) are
   // both offered from inside the Edit modal so the PM can flip status
   // right after tweaking specs, without closing back to the list.
-  const processBtn = (adjustMode || managerMode) ? '' : (isNewJob(j) && canStageMoves())
+  const processBtn = (adjustMode || managerMode) ? '' : (isNewJob(j) && seeBtn('job_btn_stage_moves'))
     ? `<button class="btn ceo-hide" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobToCtp(${j.id})">&rarr; Process to CTP</button>`
-    : (isCtpQueue(j) && canStageMoves())
+    : (isCtpQueue(j) && seeBtn('job_btn_stage_moves'))
       ? `<button class="btn ceo-hide" style="background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;" onclick="processJobFromCtp(${j.id})">&rarr; Process to Printing</button>`
-      : (isPartialDelivery(j) && canStageMoves())
+      : (isPartialDelivery(j) && seeBtn('job_btn_stage_moves'))
         ? `<button class="btn ceo-hide" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>`
-        : (canReopenDelivery(j) && canStageMoves())
+        : (canReopenDelivery(j) && seeBtn('job_btn_stage_moves'))
           ? `<button class="btn ceo-hide" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>`
           : '';
   const managerBanner = managerMode
@@ -38320,18 +38361,18 @@ function renderUsersTab() {
         <div class="inv-sub">${esc(u.email)} · Last login: ${last} · ${devicesLabel}${u.invited_by_email?' · Invited by '+esc(u.invited_by_email):''}</div>
       </div>
       <div class="inv-balance">
-        ${!hasPerm('user_btn_change_role')
+        ${!seeBtn('user_btn_change_role')
           ? `<span class="inv-badge" style="text-transform:uppercase;font-size:10px;letter-spacing:0.04em;background:var(--bg2);color:var(--text2);padding:4px 10px;border-radius:10px;">${esc(visibleRolesOf(u).map(roleLabel).join(' + '))}${u.client_company ? ' · '+esc(u.client_company) : ''}</span>`
           : `<div class="user-role-checks" data-uid="${u.id}" style="display:flex;flex-direction:column;gap:4px;max-width:300px;">
               <div style="display:flex;flex-wrap:wrap;gap:4px 10px;">
                 ${(isSuperAdmin() ? [['super_admin','Super Admin']] : []).concat([['admin','Admin'],['production_manager','Prod. Manager'],['store_manager','Store Manager'],['finance','Finance'],['ceo','CEO'],['procurement','Procurement'],['gate_admin','Gate Admin'],['operator','Operator'],['client','Client']]).map(([r,lbl]) => `
                   <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;">
-                    <input type="checkbox" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
+                    <input type="checkbox" data-acc="user_btn_change_role" value="${r}" ${userRolesOf(u).includes(r)?'checked':''}
                            ${isMe && (r==='admin' || r==='super_admin') ? 'disabled' : ''}
                            onchange="changeUserRoles(${u.id})"> ${lbl}
                   </label>`).join('')}
               </div>
-              <select class="user-client-company" data-uid="${u.id}" onchange="changeUserRoles(${u.id})"
+              <select class="user-client-company" data-acc="user_btn_change_role" data-uid="${u.id}" onchange="changeUserRoles(${u.id})"
                       style="${userRolesOf(u).includes('client') ? '' : 'display:none;'}font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;">
                 <option value="">— Pick company —</option>
                 ${clientCompanyOptions(u.client_company)}
@@ -38483,7 +38524,6 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_adjust',          type: 'button' },
   { key: 'job_btn_stickers',        type: 'button' },
   { key: 'job_btn_pricing',         type: 'button' },
-  { key: 'wastage_adjustment',      type: 'button' },   // Wastage Adjustment + the Finalized tab (owner, 2026-10-26)
 ];
 // Inventory tab — Imports lives inside here too (per request), as its own
 // tab-level view/hidden row right under Inventory's own. 'button-30day' is
@@ -38623,6 +38663,7 @@ async function cycleRolePermission(key, role) {
     await api('PUT', '/api/role-permissions', { key, role, level: next });
     if (!_roleMatrixData.matrix[key]) _roleMatrixData.matrix[key] = {};
     _roleMatrixData.matrix[key][role] = next;
+    applyBtnAccess(document.body);   // black / not black follows the change
     const accEl = document.getElementById('users-access-register-section');
     if (accEl) accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
     notify(`${roleLabel(role)}: ${groupDef.label} → ${ACC_LEVEL_LABEL[next] || next.toUpperCase()}`);
