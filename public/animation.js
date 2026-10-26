@@ -652,17 +652,44 @@
   .saa-step small { display: block; color: #94a3b8; font-weight: 400; }
   .saa-note { margin-top: 8px; color: #b91c1c; background: #fef2f2; border-radius: 8px; padding: 6px 8px; }
   @keyframes saa-pulse { 50% { box-shadow: 0 0 0 7px rgba(37,99,235,.06); } }
+  /* Full screen (owner, 2026-10-26): a button in the view's corner. */
+  .saa-fs { position: absolute; top: 10px; right: 10px; z-index: 7; width: 34px; height: 34px; border-radius: 9px; border: 1px solid #cbd5e1; background: rgba(255,255,255,.92); color: #1e293b; font-size: 17px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(15,23,42,.08); padding: 0; }
+  .saa-fs:hover { background: #fff; }
+  .saa-top:not(.saa-side) { right: 54px; }   /* room for the full-screen button */
+  .saa-host.saa-full { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; z-index: 9999; border-radius: 0; border: 0; }
+  .saa-host:fullscreen { width: 100%; height: 100%; border-radius: 0; border: 0; }
+  .saa-host:-webkit-full-screen { width: 100%; height: 100%; border-radius: 0; border: 0; }
+  /* Phones and tablets (owner, 2026-10-26): small cards and buttons, one row
+     each - the buttons scroll sideways - so the factory isn't covered. */
+  @media (max-width: 1100px) {
+    .saa-top:not(.saa-side) { top: 8px; left: 8px; right: 48px; flex-direction: column; gap: 5px; }
+    .saa-top:not(.saa-side) .saa-stats { gap: 4px; flex-wrap: nowrap; }
+    .saa-top:not(.saa-side) .saa-card { min-width: 0; padding: 3px 8px; border-radius: 7px; box-shadow: none; }
+    .saa-top:not(.saa-side) .saa-card b { font-size: 13px; }
+    .saa-top:not(.saa-side) .saa-card span { font-size: 9px; }
+    .saa-top:not(.saa-side) .saa-views { gap: 4px; flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .saa-top:not(.saa-side) .saa-views::-webkit-scrollbar { display: none; }
+    .saa-top:not(.saa-side) .saa-views button { flex: 0 0 auto; padding: 4px 8px; font-size: 10.5px; border-radius: 6px; white-space: nowrap; }
+    .saa-bar { left: 8px; right: 8px; bottom: 8px; padding: 6px 10px; font-size: 11px; }
+    .saa-head { margin-bottom: 4px; } .saa-head b { font-size: 12.5px; }
+    .saa-track { margin-top: 6px; }
+    .saa-fs { top: 8px; right: 8px; width: 32px; height: 32px; font-size: 15px; }
+    .saa-empty { top: 84px; }
+  }
   @media (max-width: 640px) {
     .saa-host { height: max(400px, calc(100vh - 150px)); height: max(400px, calc(100dvh - 150px)); border-radius: 10px; }
-    .saa-top { top: 8px; left: 8px; right: 8px; flex-direction: column; gap: 6px; }
-    .saa-empty { top: 112px; }
-    .saa-stats { gap: 5px; flex-wrap: nowrap; width: 100%; }
-    .saa-card { flex: 1 1 0; min-width: 0; padding: 4px 6px; border-radius: 8px; }
-    .saa-card b { font-size: 14px; } .saa-card span { font-size: 9.5px; white-space: normal; display: block; line-height: 1.15; }
-    .saa-views { width: 100%; gap: 4px; }
-    .saa-views button { flex: 1 1 auto; padding: 6px 4px; font-size: 10.5px; white-space: nowrap; }
-    .saa-bar { left: 8px; right: 8px; bottom: 8px; padding: 8px 10px; }
-    .saa-step { font-size: 8.5px; }
+    .saa-top:not(.saa-side) { right: 44px; gap: 4px; }
+    .saa-top:not(.saa-side) .saa-stats { width: 100%; gap: 3px; }
+    .saa-top:not(.saa-side) .saa-card { flex: 1 1 0; padding: 2px 5px; border-radius: 6px; }
+    .saa-top:not(.saa-side) .saa-card b { font-size: 11.5px; }
+    .saa-top:not(.saa-side) .saa-card span { font-size: 8px; white-space: normal; display: block; line-height: 1.1; }
+    .saa-top:not(.saa-side) .saa-views button { padding: 3px 7px; font-size: 9.5px; }
+    .saa-bar { left: 6px; right: 6px; bottom: 6px; padding: 5px 8px; font-size: 10.5px; border-radius: 10px; }
+    .saa-step { font-size: 8px; } .saa-step::before { width: 8px; height: 8px; margin-bottom: 3px; }
+    .saa-fs { top: 6px; right: 6px; width: 30px; height: 30px; font-size: 14px; }
+    .saa-empty { top: 74px; }
+    .saa-pop { min-width: 230px; max-width: 280px; }
+    .saa-pop-size b { font-size: 24px; } .saa-pop-row { font-size: 12px; }
   }
   @media (prefers-reduced-motion: reduce) { .saa-step.now::before { animation: none; } }
   `;
@@ -2582,11 +2609,46 @@
     ui.pop = document.createElement('div'); ui.pop.className = 'saa-pop'; ui.pop.style.display = 'none';
     host.append(ui.top, ui.bar, ui.msg, ui.pop);
     hideStockPop = () => { ui.pop.style.display = 'none'; };
+    // Full screen (owner, 2026-10-26): the browser's own full screen where it
+    // has one; otherwise (an iPhone) the view fills the window. The same
+    // button, or Esc, comes back.
+    ui.fs = document.createElement('button'); ui.fs.type = 'button'; ui.fs.className = 'saa-fs';
+    host.append(ui.fs);
+    const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+    const isFull = () => fsEl() === host || host.classList.contains('saa-full');
+    const fsIcon = () => {
+      const on = isFull();
+      ui.fs.innerHTML = on ? '&#x2715;' : '&#x26F6;';
+      ui.fs.title = on ? 'Exit full screen' : 'Full screen'; ui.fs.setAttribute('aria-label', ui.fs.title);
+    };
+    const syncFs = () => {   // on a change (after the view is built)
+      fsIcon();
+      layoutTop();
+      resize();
+    };
+    const fillWindow = on => { host.classList.toggle('saa-full', on); document.body.style.overflow = on ? 'hidden' : ''; syncFs(); };
+    ui.fs.addEventListener('click', e => {
+      e.stopPropagation();
+      if (isFull()) {
+        if (fsEl() === host) { const ex = document.exitFullscreen || document.webkitExitFullscreen; if (ex) ex.call(document); }
+        else fillWindow(false);
+        return;
+      }
+      const req = host.requestFullscreen || host.webkitRequestFullscreen;
+      if (!req) { fillWindow(true); return; }
+      try { const pr = req.call(host); if (pr && pr.catch) pr.catch(() => fillWindow(true)); } catch (err) { fillWindow(true); }
+    });
+    ui.fs.addEventListener('pointerdown', e => e.stopPropagation());
+    const onFsKey = e => { if (e.key === 'Escape' && host.classList.contains('saa-full')) fillWindow(false); };
+    document.addEventListener('fullscreenchange', syncFs);
+    document.addEventListener('webkitfullscreenchange', syncFs);
+    document.addEventListener('keydown', onFsKey);
     // Stats + view buttons beside the view, under the date, when the page
     // has room on the right; otherwise over the view as before (owner, 2026-10-24).
+    // Full screen keeps them over the view.
     const layoutTop = () => {
       const r = host.getBoundingClientRect(), space = window.innerWidth - r.right;
-      if (active && r.width > 0 && space >= 200) {
+      if (active && r.width > 0 && space >= 200 && !isFull()) {
         if (ui.top.parentNode !== document.body) document.body.append(ui.top);
         ui.top.classList.add('saa-side');
         const d = document.getElementById('app-date'), db = d && d.offsetParent !== null ? d.getBoundingClientRect() : null;
@@ -2598,6 +2660,7 @@
       }
     };
     window.addEventListener('resize', layoutTop);
+    fsIcon();
     ui.views.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; select(null); setView(b.dataset.v); lastInput = clock; });
 
     let jobs = [], selectedId = null;
@@ -3178,6 +3241,11 @@
         this.setActive(false);
         ro.disconnect();
         window.removeEventListener('resize', layoutTop);
+        document.removeEventListener('fullscreenchange', syncFs);
+        document.removeEventListener('webkitfullscreenchange', syncFs);
+        document.removeEventListener('keydown', onFsKey);
+        if (fsEl() === host) { const ex = document.exitFullscreen || document.webkitExitFullscreen; if (ex) try { ex.call(document); } catch (err) { /* already out */ } }
+        if (host.classList.contains('saa-full')) { host.classList.remove('saa-full'); document.body.style.overflow = ''; }
         ui.top.remove();
         geos.forEach(g => g.dispose()); textures.forEach(t => t.dispose()); mats.forEach(m => m.dispose());
         scene.traverse(o => { if (o.isMesh && o.material && !([...mats.values()].includes(o.material))) { o.material.map && o.material.map.dispose(); o.material.dispose(); } });
