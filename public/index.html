@@ -257,6 +257,8 @@
   body.role-client #topbar-add-offcut, body.role-client #inv-new-btn, body.role-client #inv-offcut-btn,
   body.role-client #calc-launcher,
   body.role-client #app-date { display: none !important; }
+  /* The Summary line a 3D view pop-up jumped to (owner, 2026-10-26). */
+  .cv-summary-row.cv-summary-flash td { background: #fef3c7 !important; transition: background .3s; }
   /* Client portal responsive tweaks — targets both the real client
      shell (body.role-client) and the admin Client View tab so both
      read well on mobile / small tablet screens. */
@@ -5778,6 +5780,8 @@ function showClientPortal() {
     filterValue: clientPortalFilter,
     onInputHandler: 'onClientPortalSearch',
   });
+  // A client lands on the 3D Factory (owner, 2026-10-26).
+  if (!showClientPortal.landed) { showClientPortal.landed = true; setClientSubTab('client-portal', 'animation'); }
 }
 // Inject the "not for your role" placeholder into each finance-blocked
 // mode div (once, idempotent). CSS toggles between the message and the
@@ -5905,7 +5909,7 @@ function tabAllowed(m) {
     case 'station':     return hasPerm('station_access', 'view');
     case 'users':       return hasPerm('user_tab_access', 'view');
     case 'client-view': return hasPerm('client_view_preview', 'view');
-    case 'factory':     return false;   // the 3D factory view: Super Admin only (owner, 2026-10-24)
+    case 'factory':     return hasRole('ceo');   // the 3D factory view: Super Admin and the CEO (owner, 2026-10-24 / 2026-10-26)
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
     case 'mgr-operators': return mgrOpsUnlocked();
@@ -6439,6 +6443,7 @@ async function onGoogleCredential(response) {
     await Promise.all(loaders);
     if (isOperator())            setMode('station');
     else if (isStoreManager())   setMode('inventory');
+    else if (hasRole('ceo') && tabAllowed('factory')) setMode('factory');   // the CEO lands on the 3D Factory (owner, 2026-10-26)
     else if (!tabAllowed('jobs')) setMode(firstAllowedTab());   // e.g. Procurement -> Carton Shippers
     hideLoadingScreen();
   } catch (e) {
@@ -39251,7 +39256,7 @@ function renderClientSummary(rows, containerId) {
       nTotals.ready      += ready;
       nTotals.shipped    += shipped;
       exportJobsRows.push({ product: j.name || '', code: j.jobcode || '', poNo: j.ref || '', batchNo: j.bno || '', poQty, ready, shipped, status: stageOf(j) });
-      return `<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${j.id})" title="Jump to this job's tile below">
+      return `<tr class="cv-summary-row" data-job-id="${j.id}" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${j.id})" title="Jump to this job's tile below">
         <td style="padding:6px 8px;">${esc(j.name || '')}</td>
         <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
         <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
@@ -39328,7 +39333,7 @@ function renderClientSummary(rows, containerId) {
       gTotals.shipped   += shipped;
       gTotals.shipCount += shipCount;
       exportGroupRows.push({ product, code: codeVal, poQty, ready, shipped, shipCount });
-      groupHtmlRows.push(`<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${repr.id})" title="Jump to this group's tile below">
+      groupHtmlRows.push(`<tr class="cv-summary-row" data-job-id="${repr.id}" data-group="${esc(repr.stock_group_name || '')}" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${repr.id})" title="Jump to this group's tile below">
         <td style="padding:6px 8px;font-weight:700;">${esc(product)}</td>
         <td style="padding:6px 8px;">${esc(codeVal)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
@@ -39677,7 +39682,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=64';
+const CLIENT_ANIM_SRC = '/animation.js?v=65';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -39767,12 +39772,32 @@ async function refreshClientAnim(shell) {
   if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, client: forClient, stock: forClient ? [] : animStockRows(),
     // The Factory tab: an admin can move a job a stage forward / back from its pop-up (owner, 2026-10-24).
     onStage: shell === 'factory' && canStageForward() ? factoryMoveStage : null,
-    onJobCard: shell === 'factory' ? factoryJobCard : null });
+    onJobCard: shell === 'factory' ? factoryJobCard : null,
+    onJobOpen: id => factoryOpenJob(shell, id) });
   else { ctl.update(rows); if (ctl.setStock && !forClient) ctl.setStock(animStockRows()); }
   ctl.setActive(true);
   // The operators at their machines, with their names - staff only (owner, 2026-10-24).
   if (!forClient && !isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
 }
+// A job's pop-up in the 3D view, clicked (owner, 2026-10-26): the client (or
+// the admin previewing him) goes to the Jobs sub-tab, to that job's line in
+// the Summary; the staff Factory tab opens the job card.
+function factoryOpenJob(shell, id) {
+  if (shell === 'factory') { factoryJobCard(id); return; }
+  setClientSubTab(shell, 'jobs');
+  const rows = (CLIENT_ANIM_SHELLS[shell] && CLIENT_ANIM_SHELLS[shell].rows()) || [];
+  const j = rows.find(x => x && x.id === id);
+  setTimeout(() => {
+    const box = document.getElementById(shell === 'client-view' ? 'client-view-summary' : 'client-portal-summary');
+    let row = box && box.querySelector(`.cv-summary-row[data-job-id="${id}"]`);
+    if (!row && box && j && j.stock_group_name) row = [...box.querySelectorAll('.cv-summary-row[data-group]')].find(r => r.dataset.group === j.stock_group_name);
+    if (!row) { if (typeof scrollToClientTile === 'function') scrollToClientTile(id); return; }
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.add('cv-summary-flash');
+    setTimeout(() => row.classList.remove('cv-summary-flash'), 2600);
+  }, 80);
+}
+
 // Factory tab: a new job's tile opens its job card - the printed card, on
 // screen (owner, 2026-10-24).
 function factoryJobCard(id) {
@@ -39923,6 +39948,7 @@ async function init() {
     // store managers onto the default Jobs view.
     if (isOperator())          setMode('station');
     else if (isStoreManager()) setMode('inventory');
+    else if (hasRole('ceo') && tabAllowed('factory')) setMode('factory');   // the CEO lands on the 3D Factory (owner, 2026-10-26)
     else if (!tabAllowed('jobs')) setMode(firstAllowedTab());   // e.g. Procurement -> Carton Shippers
     startSmartPolling();
   } finally {

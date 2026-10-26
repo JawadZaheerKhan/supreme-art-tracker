@@ -618,6 +618,9 @@
   .saa-pop-h .off { margin-left: auto; background: #dc2626; padding: 2px 7px; border-radius: 999px; font-size: 11px; }
   .saa-pop-h button { margin-left: 6px; background: rgba(255,255,255,.2); border: 0; color: #fff; width: 22px; height: 22px; border-radius: 6px; cursor: pointer; font-size: 15px; line-height: 1; }
   .saa-pop-b { padding: 10px 14px 12px; color: #0f172a; }
+  .saa-pop-b.saa-pop-click { cursor: pointer; }
+  .saa-pop-b.saa-pop-click:hover { background: #f8fafc; }
+  .saa-pop-open { margin-top: 8px; font-size: 12px; font-weight: 700; color: #1d4ed8; text-align: right; }
   .saa-pop-size { display: flex; align-items: baseline; gap: 10px; }
   .saa-pop-size b { font-size: 30px; font-weight: 900; }
   .saa-pop-size span { font-size: 17px; font-weight: 800; color: #334155; }
@@ -2736,6 +2739,15 @@
       ui.pop.style.display = ''; ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
       placeStockPop();
     };
+    // Clicking a job's pop-up opens that job's data (owner, 2026-10-26).
+    const popOpensJob = j => {
+      if (!opts.onJobOpen) return;
+      const b = ui.pop.querySelector('.saa-pop-b');
+      if (!b) return;
+      b.insertAdjacentHTML('beforeend', '<div class="saa-pop-open">Open job details &#8250;</div>');
+      b.classList.add('saa-pop-click');
+      b.onclick = ev => { ev.stopPropagation(); opts.onJobOpen(j.id); };
+    };
     // A job's pallet: job no., product, company, PO qty, paper, to be printed.
     const showJobPop = p => {
       const j = p.job, sheets = num(j.sheets), ups = num(j.ups);
@@ -2750,6 +2762,7 @@
         popRow('To print', esc(toPrint), 'bal') +
         (j.machine ? popRow('Machine', esc(j.machine)) : ''),
         { obj: p.g, dy: (p.top || 1) + 2.4, job: true });
+      popOpensJob(j);
     };
     // A machine: the last job its station entered (any particulars row's entries).
     const whenOf = e => {
@@ -2781,7 +2794,7 @@
         ? popRow('Last job', 'E-' + esc(last.job.id)) + popRow('Product', esc(last.job.name || '—')) + popRow('Company', esc(last.job.client || '—')) +
           (last.entry.qty != null && last.entry.qty !== '' ? popRow('Entered', esc(String(last.entry.qty)), 'bal') : '') +
           (Number.isFinite(last.t) ? popRow('When', esc(new Date(last.t).toLocaleString())) : '')
-        : popRow('Last job', 'No station entries yet'));
+        : popRow('Last job', forClient ? 'No job' : 'No station entries yet'));   // a client: only his own jobs count (owner, 2026-10-26)
       openPop('#334155', 'MACHINE', body, { obj: c.g, dy: 3.6, machine: true });
     };
     const pickMachine = (cx, cy) => {
@@ -2839,6 +2852,7 @@
         (D ? `<div class="saa-pop-row"><i>Shipped</i><b>${D.toLocaleString()}</b></div>` : '') + '</div>';
       ui.pop.querySelector('button').onclick = ev => { ev.stopPropagation(); select(null); };
       popTarget = { obj: p.g, dy: (p.top || 1) + 2.4, ready: true };
+      popOpensJob(j);
       ui.pop.style.display = ''; ui.pop.style.animation = 'none'; void ui.pop.offsetWidth; ui.pop.style.animation = '';
       placeStockPop();
     };
