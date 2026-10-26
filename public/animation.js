@@ -1894,12 +1894,200 @@
     };
     // A walk between two points, by the lift when they are on different floors.
     const moveV = new THREE.Vector3();
+    // ── Walking routes (owner, 2026-10-26) ──
+    // People go along the floor, round walls, machines, pillars, railings and
+    // stair openings - not through them. A floor's walk map (half-metre cells:
+    // is there floor, at what height, is something standing there) is made
+    // the first time someone walks on it. Hall-01 is a step up from Hall-02:
+    // only its ramp joins them.
+    const NAV_CELL = 0.5, NAV_R = 0.3;
+    const NAV_NX = Math.ceil(BLD.w / NAV_CELL), NAV_NZ = Math.ceil(BLD.d / NAV_CELL);
+    const NAV_DIRS = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1], [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2]];
+    const navMaps = [];
+    const navLevels = [];   // every walking level: { f, y }
+    [0, 1, 2].forEach(f => FLOORS[f].parts.forEach(P => navLevels.push({ f, y: FLOOR_Y[f] + (P.raise || 0) + SLAB })));
+    const floorOfY = y => { let best = navLevels[0]; for (const L of navLevels) if (Math.abs(L.y - y) < Math.abs(best.y - y)) best = L; return best.f; };
+    const inPoly = (poly, x, y) => {
+      let c = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i], [xj, yj] = poly[j];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+      }
+      return c;
+    };
+    const hull2 = pts => {   // convex hull (monotone chain)
+      pts = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+      const lo = [], hi = [];
+      for (const q of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 1e-9) lo.pop(); lo.push(q); }
+      for (let i = pts.length - 1; i >= 0; i--) { const q = pts[i]; while (hi.length >= 2 && cr(hi[hi.length - 2], hi[hi.length - 1], q) <= 1e-9) hi.pop(); hi.push(q); }
+      lo.pop(); hi.pop();
+      return lo.concat(hi);
+    };
+    const nearHull = (h, x, z, r) => {   // inside the footprint, or within r of its edge
+      if (h.length >= 3) {
+        let inside = true;
+        for (let i = 0; i < h.length; i++) { const a = h[i], b = h[(i + 1) % h.length]; if ((b[0] - a[0]) * (z - a[1]) - (b[1] - a[1]) * (x - a[0]) < 0) { inside = false; break; } }
+        if (inside) return true;
+      }
+      for (let i = 0; i < h.length; i++) {
+        const a = h[i], b = h[(i + 1) % h.length], dx = b[0] - a[0], dz = b[1] - a[1], L2 = dx * dx + dz * dz;
+        const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / L2)) : 0;
+        if (Math.hypot(x - (a[0] + t * dx), z - (a[1] + t * dz)) < r) return true;
+      }
+      return false;
+    };
+    const buildNav = f => {
+      const n = NAV_NX * NAV_NZ, level = new Float32Array(n).fill(NaN), blocked = new Uint8Array(n), ramp = new Uint8Array(n);
+      for (let iz = 0; iz < NAV_NZ; iz++) for (let ix = 0; ix < NAV_NX; ix++) {
+        const x = BLD.x0 + (ix + 0.5) * NAV_CELL, z = BLD.z0 + (iz + 0.5) * NAV_CELL, c = iz * NAV_NX + ix;
+        for (const P of FLOORS[f].parts) {
+          if (!P.outline) continue;
+          const pl = P.plan, px = pl.px0 + (x - BLD.x0) * pl.sx, py = pl.py0 + (z - BLD.z0) * pl.sz;
+          if (!inPoly(P.outline, px, py)) continue;
+          if ((P.holes || []).some(([a, b, c2, d]) => px >= a && px <= c2 && py >= b && py <= d)) blocked[c] = 1;   // stair openings
+          if (P.ramp && px >= P.ramp[0] && px <= P.ramp[2] && py >= P.ramp[1] && py <= P.ramp[3]) ramp[c] = 1;
+          level[c] = FLOOR_Y[f] + (P.raise || 0) + SLAB;
+          break;
+        }
+        if (Number.isNaN(level[c])) blocked[c] = 1;   // no floor here
+      }
+      // What stands on the floor: walls, machines, pillars, railings, stairs (boxes and
+      // cylinders reaching from about the floor to above the knee). Anything that moves,
+      // and the people, are left out.
+      const lv = navLevels.filter(L => L.f === f).map(L => L.y), lo = Math.min(...lv), hi = Math.max(...lv);
+      const skip = new Set([palletRoot, walkRoot, newRoot, stockCrate, loader2, liftCar, ...people, ...lifters.map(L => L.g), ...standby.map(h => h.g), ...wanderers.map(w => w.f), ...trucks.map(t => t.g), ...moverPool]);
+      scene.updateMatrixWorld(true);
+      const v = new THREE.Vector3();
+      const mark = o => {
+        const g = o.geometry; if (!g.boundingBox) g.computeBoundingBox();
+        const bb = g.boundingBox, pts = [];
+        let y0 = Infinity, y1 = -Infinity, x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < 8; i++) {
+          v.set(i & 1 ? bb.max.x : bb.min.x, i & 2 ? bb.max.y : bb.min.y, i & 4 ? bb.max.z : bb.min.z).applyMatrix4(o.matrixWorld);
+          pts.push([v.x, v.z]); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+          x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); z0 = Math.min(z0, v.z); z1 = Math.max(z1, v.z);
+        }
+        if (y1 < lo + 0.45 || y0 > hi + 1.6) return;
+        const h = hull2(pts);
+        const ix0 = Math.max(0, Math.floor((x0 - NAV_R - BLD.x0) / NAV_CELL)), ix1 = Math.min(NAV_NX - 1, Math.floor((x1 + NAV_R - BLD.x0) / NAV_CELL));
+        const iz0 = Math.max(0, Math.floor((z0 - NAV_R - BLD.z0) / NAV_CELL)), iz1 = Math.min(NAV_NZ - 1, Math.floor((z1 + NAV_R - BLD.z0) / NAV_CELL));
+        for (let iz = iz0; iz <= iz1; iz++) for (let ix = ix0; ix <= ix1; ix++) {
+          const c = iz * NAV_NX + ix, L = level[c];
+          if (blocked[c] || Number.isNaN(L) || !(y1 > L + 0.45 && y0 < L + 1.6)) continue;
+          if (nearHull(h, BLD.x0 + (ix + 0.5) * NAV_CELL, BLD.z0 + (iz + 0.5) * NAV_CELL, NAV_R)) blocked[c] = 1;
+        }
+      };
+      const visit = o => {
+        if (skip.has(o)) return;
+        if (o.isMesh && !o.isInstancedMesh && o.geometry && (o.geometry.type === 'BoxGeometry' || o.geometry.type === 'CylinderGeometry')) mark(o);
+        for (const ch of o.children) visit(ch);
+      };
+      visit(scene);
+      return { level, blocked, ramp };
+    };
+    const navOf = f => navMaps[f] || (navMaps[f] = buildNav(f));
+    const cellOf = (x, z) => {
+      const ix = Math.floor((x - BLD.x0) / NAV_CELL), iz = Math.floor((z - BLD.z0) / NAV_CELL);
+      return ix < 0 || iz < 0 || ix >= NAV_NX || iz >= NAV_NZ ? -1 : iz * NAV_NX + ix;
+    };
+    const walkable = (N, c) => c >= 0 && !N.blocked[c];
+    const canStep = (N, a, b) => walkable(N, b) && (Math.abs(N.level[a] - N.level[b]) < 0.3 || N.ramp[a] || N.ramp[b]);
+    const nearestFree = (N, c) => {   // a machine's operator spot, a pallet against a wall: the closest open floor
+      if (c < 0) return -1;
+      const seen = new Uint8Array(NAV_NX * NAV_NZ), q = [c]; seen[c] = 1;
+      for (let h = 0; h < q.length && h < 3000; h++) {
+        const k = q[h];
+        if (walkable(N, k)) return k;
+        const kx = k % NAV_NX, kz = (k / NAV_NX) | 0;
+        for (const [dx, dz] of NAV_DIRS.slice(0, 4)) {
+          const nx = kx + dx, nz = kz + dz, nc = nz * NAV_NX + nx;
+          if (nx < 0 || nz < 0 || nx >= NAV_NX || nz >= NAV_NZ || seen[nc]) continue;
+          seen[nc] = 1; q.push(nc);
+        }
+      }
+      return -1;
+    };
+    const astar = (N, s, g) => {
+      const n = NAV_NX * NAV_NZ, gs = new Float32Array(n).fill(Infinity), came = new Int32Array(n).fill(-1), closed = new Uint8Array(n);
+      const gx = g % NAV_NX, gz = (g / NAV_NX) | 0, hh = c => Math.hypot(c % NAV_NX - gx, ((c / NAV_NX) | 0) - gz);
+      const heap = [];   // [cost, cell], a binary heap
+      const push = (f2, c) => { heap.push([f2, c]); let i = heap.length - 1; while (i > 0) { const pp = (i - 1) >> 1; if (heap[pp][0] <= heap[i][0]) break; [heap[pp], heap[i]] = [heap[i], heap[pp]]; i = pp; } };
+      const pop = () => {
+        const top = heap[0], last = heap.pop();
+        if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } }
+        return top[1];
+      };
+      gs[s] = 0; push(hh(s), s);
+      while (heap.length) {
+        const c = pop();
+        if (c === g) break;
+        if (closed[c]) continue;
+        closed[c] = 1;
+        const cx = c % NAV_NX, cz = (c / NAV_NX) | 0;
+        for (const [dx, dz, w] of NAV_DIRS) {
+          const nx = cx + dx, nz = cz + dz;
+          if (nx < 0 || nz < 0 || nx >= NAV_NX || nz >= NAV_NZ) continue;
+          const nc = nz * NAV_NX + nx;
+          if (closed[nc] || !canStep(N, c, nc)) continue;
+          if (dx && dz && (!canStep(N, c, cz * NAV_NX + nx) || !canStep(N, c, nz * NAV_NX + cx))) continue;   // no cutting corners
+          const ng = gs[c] + w;
+          if (ng < gs[nc]) { gs[nc] = ng; came[nc] = c; push(ng + hh(nc), nc); }
+        }
+      }
+      if (s !== g && came[g] < 0) return null;
+      const out = [g];
+      while (out[out.length - 1] !== s) out.push(came[out[out.length - 1]]);
+      return out.reverse();
+    };
+    const clearLine = (N, a, b) => {   // straight from cell a to cell b over open floor (a level change only on the ramp)
+      const ax = a % NAV_NX + 0.5, az = ((a / NAV_NX) | 0) + 0.5, bx = b % NAV_NX + 0.5, bz = ((b / NAV_NX) | 0) + 0.5;
+      const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) * 3));
+      let prev = a;
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps, cx = Math.floor(ax + (bx - ax) * t), cz = Math.floor(az + (bz - az) * t), c = cz * NAV_NX + cx;
+        if (c === prev) continue;
+        if (!canStep(N, prev, c)) return false;
+        const px = prev % NAV_NX, pz = (prev / NAV_NX) | 0;
+        if (px !== cx && pz !== cz && (!walkable(N, pz * NAV_NX + cx) || !walkable(N, cz * NAV_NX + px))) return false;
+        prev = c;
+      }
+      return true;
+    };
+    const navPath = (f, a, b) => {   // the route on floor f from a to b: points after a, ending at b
+      const N = navOf(f);
+      let sc = cellOf(a.x, a.z), gc = cellOf(b.x, b.z);
+      if (sc >= 0 && !walkable(N, sc)) sc = nearestFree(N, sc);
+      if (gc >= 0 && !walkable(N, gc)) gc = nearestFree(N, gc);
+      if (sc < 0 || gc < 0) return [b.clone()];
+      const cells = sc === gc ? [sc] : astar(N, sc, gc);
+      if (!cells) return [b.clone()];                       // no way found: straight, as before
+      const keep = [cells[0]];
+      for (let i = 0; i < cells.length - 1;) {
+        let j = i + 1;
+        while (j + 1 < cells.length && clearLine(N, cells[i], cells[j + 1])) j++;
+        keep.push(cells[j]); i = j;
+      }
+      const out = keep.map(c => new THREE.Vector3(BLD.x0 + (c % NAV_NX + 0.5) * NAV_CELL, N.level[c], BLD.z0 + (((c / NAV_NX) | 0) + 0.5) * NAV_CELL));
+      if (out.length && Math.hypot(out[0].x - a.x, out[0].z - a.z) < NAV_CELL) out.shift();
+      if (out.length && Math.hypot(out[out.length - 1].x - b.x, out[out.length - 1].z - b.z) < NAV_CELL) out.pop();
+      out.push(b.clone());
+      return out;
+    };
+    const liftDoorAt = f => {
+      const N = navOf(f);
+      let c = cellOf(LIFT_X, LIFT_DOOR_Z);
+      if (c >= 0 && !walkable(N, c)) c = nearestFree(N, c);
+      return new THREE.Vector3(LIFT_X, c >= 0 ? N.level[c] : FLOOR_Y[f] + SLAB, LIFT_DOOR_Z);
+    };
+    // A walk through the given points, on the walk maps; between floors by the lift.
     const routePts = list => {
       const out = [list[0].clone()];
       for (let i = 1; i < list.length; i++) {
-        const a = out[out.length - 1], b = list[i];
-        if (Math.abs(a.y - b.y) > 2) out.push(new THREE.Vector3(LIFT_X, a.y, LIFT_DOOR_Z), new THREE.Vector3(LIFT_X, a.y, LIFT_Z), new THREE.Vector3(LIFT_X, b.y, LIFT_Z), new THREE.Vector3(LIFT_X, b.y, LIFT_DOOR_Z));
-        out.push(b.clone());
+        const a = out[out.length - 1], b = list[i], fa = floorOfY(a.y), fb = floorOfY(b.y);
+        if (fa === fb) { out.push(...navPath(fa, a, b)); continue; }
+        const da = liftDoorAt(fa), db = liftDoorAt(fb);
+        out.push(...navPath(fa, a, da), new THREE.Vector3(LIFT_X, da.y, LIFT_Z), new THREE.Vector3(LIFT_X, db.y, LIFT_Z), db, ...navPath(fb, db, b));
       }
       return out;
     };
@@ -2134,14 +2322,30 @@
       const groups = new Map();
       const addTo = (k, p) => { if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); };
       for (const p of pallets.values()) { if (p.leaving) continue; addTo(zoneKeyFor(p.job, p.place), p); }
-      for (const [k, list] of [...groups]) if (k.startsWith('press:')) {
+      // Each pallet keeps its spot while it stays in its area (owner, 2026-10-26):
+      // one leaving doesn't make the rest shuffle along - only a pallet whose
+      // area changes is moved. A newcomer takes the first free spot.
+      const keepSpots = (k, list, cap) => {
         list.sort((a, b) => a.job.id - b.job.id);
-        list.splice(pressSpots(+k.slice(6)).length).forEach(p => addTo('printx', p));
-      }
+        const used = new Set(), kept = [], fresh = [], over = [];
+        for (const p of list) {
+          if (p.slotKey === k && p.slotIdx != null && (cap == null || p.slotIdx < cap) && !used.has(p.slotIdx)) { used.add(p.slotIdx); kept.push(p); }
+          else fresh.push(p);
+        }
+        let i = 0;
+        for (const p of fresh) {
+          while (used.has(i)) i++;
+          if (cap != null && i >= cap) { over.push(p); continue; }
+          p.slotKey = k; p.slotIdx = i; used.add(i); kept.push(p);
+        }
+        list.length = 0; list.push(...kept);
+        return over;
+      };
+      for (const [k, list] of [...groups]) if (k.startsWith('press:')) keepSpots(k, list, pressSpots(+k.slice(6)).length).forEach(p => addTo('printx', p));
       for (const [k, list] of groups) {
-        list.sort((a, b) => a.job.id - b.job.id);
-        list.forEach((p, i) => {
-          const s = zoneSlot(k, i);
+        if (!k.startsWith('press:')) keepSpots(k, list);
+        list.forEach(p => {
+          const i = p.slotIdx, s = zoneSlot(k, i);
           p.stag = i % 2;
           const to = new THREE.Vector3(s.x, (s.y || 0) + (s.floor == null ? 0.3 : SLAB) + s.lift * 1.6, s.z);
           p.floor = s.floor;
@@ -2762,7 +2966,7 @@
             m.ph++; m.seg = 0; m.segT = 0;
             if (m.ph >= m.phases.length) { releaseMove(m); p.move = null; }
           } else {
-            const a = path[m.seg], b = path[m.seg + 1], L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5;
+            const a = path[m.seg], b = path[m.seg + 1], L = Math.max(0.001, a.distanceTo(b)), vert = Math.abs(b.y - a.y) > 0.5 && Math.hypot(b.x - a.x, b.z - a.z) < 0.3;
             m.segT = Math.min(1, m.segT + dt * (vert ? 1.6 : kind === 'walk' ? 1.6 : 2.6) / L);
             moveV.lerpVectors(a, b, m.segT);
             if (!vert) { const dx = b.x - a.x, dz = b.z - a.z; if (dx * dx + dz * dz > 1e-6) m.rot = Math.atan2(dx, dz); }
