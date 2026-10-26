@@ -320,7 +320,7 @@ function getDb() {
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
-const SCHEMA_VERSION = 'v2026-10-26-jobs-rows';
+const SCHEMA_VERSION = 'v2026-10-26-over-issue-ignore';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -355,7 +355,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_delete:           { label: 'Delete a job', levels: { admin: 'yes' } },
   delivery_write:       { label: 'Record a delivery (including linked-job challans)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   delivery_delete:      { label: 'Delete a delivery ledger entry', levels: { admin: 'yes' } },
-  wastage_adjustment:   { label: 'Wastage Adjustment (adjust/un-adjust), the Finalized Jobs tab, and the Manual Job Card Consumption report', levels: {} },
+  wastage_adjustment:   { label: 'Wastage Adjustment (adjust/un-adjust) and the Finalized Jobs tab', levels: {} },
   inventory_write:      { label: 'Add/edit inventory items, stock in/out (manual + bulk), and issue stock (fresh or offcut) to a job', levels: { admin: 'yes', store_manager: 'yes' } },
   inventory_view:       { label: 'View the Inventory tab', levels: { admin: 'yes', ceo: 'yes', production_manager: 'yes', store_manager: 'yes', finance: 'yes' } },
   inventory_delete:     { label: 'Delete a paper item', levels: { admin: 'yes' } },
@@ -409,7 +409,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Split from Stage forwarding (owner, 2026-10-26); starts with what each role had there.
   job_btn_stage_moves:     { label: 'CTP / Pending Stock / Delivered moves — Process to CTP / Printing, Move to CTP / Pending Stock, Finalize as Delivered, Back to Partial Delivery', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_extra_packets:   { label: '+ Request extra packets — on a running job, sent to the store keeper', levels: { admin: 'yes' } },
-  job_btn_over_issue:      { label: 'Over-issued stock — Approve / Reject (Ignore stays Super Admin only)', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_over_issue:      { label: 'Over-issued stock — Use in job / Add to Offcut / Send Back', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_over_issue_ignore: { label: 'Over-issued stock — Ignore (clears it, no stock moves)', levels: {} },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
@@ -8123,7 +8124,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_b
 //                extra is never raised again.
 // The source item's original deduction stays untouched, so the inventory
 // report keeps recording the extra issuance exactly as it did before.
-app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_over_issue'), async (req, res) => {   // its own row (owner, 2026-10-26)
+app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue', 'job_btn_over_issue_ignore']), async (req, res) => {   // its own row (owner, 2026-10-26)
   try {
     await dbReady;
     const sql = getDb();
@@ -8132,7 +8133,9 @@ app.post('/api/jobs/:id/over-issue/decide', requirePermission('job_btn_over_issu
     if (!['use', 'offcut', 'return', 'ignore'].includes(decision)) {
       return res.status(400).json({ error: 'decision must be use, offcut, return or ignore' });
     }
-    if (decision === 'ignore' && !userHasRole(req.user, 'super_admin')) {
+    // Ignore and the other decisions each follow their own row (owner, 2026-10-26).
+    if (decision !== 'ignore' && !userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'job_btn_over_issue')) return res.status(403).json({ error: 'Not allowed' });
+    if (decision === 'ignore' && !userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'job_btn_over_issue_ignore')) {
       return res.status(403).json({ error: 'Only a Super Admin can ignore an over-issue.' });
     }
     const rows = await sql`SELECT * FROM jobs WHERE id=${id} AND deleted_at IS NULL`;
@@ -13443,7 +13446,7 @@ app.post('/api/wastage-adjustment/post/:jobId', requirePermission('wastage_adjus
 
 // Allocation totals per inventory transaction — used by Manual Consumption report
 // to render green fill bars showing how much of each stock-out has been absorbed.
-app.get('/api/wastage-adjustment/allocations', requirePermission('wastage_adjustment', 'view'), async (req, res) => {
+app.get('/api/wastage-adjustment/allocations', requireAnyBtn(['wastage_adjustment', 'rpt_manual_job_card_consumption'], 'view'), async (req, res) => {   // the Manual Job Card Consumption report reads them too (owner, 2026-10-26)
   try {
     await dbReady;
     const sql = getDb();

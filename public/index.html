@@ -3608,8 +3608,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item" data-rpt="rpt_current_balance" data-rt="inventory-report" onclick="setReportsTab('inventory-report')">
           <span class="rsb-icon">&#128230;</span> Current Balance Summary
         </button>
-        <div class="rsb-section superadmin-only-report" data-rpt="rpt_manual_job_card_consumption">Manual</div>
-        <button class="rsb-item superadmin-only-report" data-rpt="rpt_manual_job_card_consumption" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
+        <div class="rsb-section" data-rpt="rpt_manual_job_card_consumption">Manual</div>
+        <button class="rsb-item" data-rpt="rpt_manual_job_card_consumption" data-rt="manual-consumption" onclick="setReportsTab('manual-consumption')">
           <span class="rsb-icon" style="color:#A32D2D;">&#9997;</span> Manual Job Card Consumption
         </button>
         <button class="rsb-item" data-rpt="rpt_offcut_consumption" data-rt="offcut-consumption" onclick="setReportsTab('offcut-consumption')">
@@ -5643,15 +5643,15 @@ function overIssueBannerHtml(j) {
   const challan = p.challan_no ? ` · challan ${esc(p.challan_no)}` : '';
   const canDecide = isSuperAdmin() || hasPerm('job_btn_over_issue');
   // Ignore: Super Admin only, in the Super Admin black (owner, 2026-10-13).
-  const ignoreBtn = isSuperAdmin()
+  const ignoreBtn = (isSuperAdmin() || hasPerm('job_btn_over_issue_ignore'))
     ? `<button class="btn btn-sm" style="background:#111827;border-color:#111827;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'ignore')" title="Super Admin: clear this without moving any stock or adding to the job - e.g. the offcut was already entered by hand.">&#10005; Ignore</button>`
     : '';
-  const actions = canDecide
-    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">
+  const actions = (canDecide || ignoreBtn)
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">${canDecide ? `
         <button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'use')" title="Add these extras to the job's packet count (existing top-up system). No inventory movement — sheets were already deducted at issuance.">&#10003; Use in job</button>
         <button class="btn btn-sm" style="background:#0891b2;border-color:#0e7490;color:#ffffff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'offcut')" title="Credit the extras to the matching offcut item — the same automatic behaviour the app used to do at issuance.">&#128230; Add to Offcut</button>
         <button class="btn btn-sm" style="background:#6b7280;border-color:#4b5563;color:#fff;font-weight:700;" onclick="decideOverIssue(${j.id}, 'return')" title="Mark the extras as sent back to the store. Store keeper handles the physical return manually.">&#8630; Send Back</button>
-        ${ignoreBtn}
+        ` : ''}${ignoreBtn}
       </div>`
     : `<div style="font-size:11px;color:#9f1239;font-style:italic;">Waiting for Admin / Production Manager to decide (Use in job · Add to Offcut · Send Back).</div>`;
   return `<div class="over-issue-banner" style="background:#ffe4e6;border:1px solid #fda4af;border-radius:8px;padding:8px 10px;font-size:12px;color:#9f1239;margin:6px 0;">
@@ -25227,8 +25227,9 @@ function openManualConsumptionPane() {
   // + .superadmin-only-report CSS, but this handles every other path into
   // the pane. Also skips loading the data (loadManualConsumption) and the
   // export/print buttons, so those can't leak the data either.
-  if (typeof canWastageAdjust === 'function' && !canWastageAdjust()) {
-    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Job Card Consumption report needs Wastage Adjustment access.</div></div>`;
+  // Its own Reports row (owner, 2026-10-26) - not tied to Wastage Adjustment.
+  if (!rptAllowed('rpt_manual_job_card_consumption')) {
+    pane.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);"><div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">Not available for your role</div><div style="font-size:13px;">The Manual Job Card Consumption report is not on for your role in the Access Register.</div></div>`;
     return;
   }
   const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
@@ -34257,8 +34258,8 @@ async function approvePacketsTopup(jobId, topupId) {
 //   offcut → credits the matching offcut item (what the old auto behaviour did)
 //   return → logs "sent back"; store keeper handles the physical return manually
 async function decideOverIssue(jobId, decision) {
-  if (decision === 'ignore' && !isSuperAdmin()) { notify('Only a Super Admin can ignore an over-issue.'); return; }
-  if (!(isSuperAdmin() || hasPerm('job_btn_over_issue'))) {
+  if (decision === 'ignore' && !(isSuperAdmin() || hasPerm('job_btn_over_issue_ignore'))) { notify('Ignore is not on for your role.'); return; }
+  if (decision !== 'ignore' && !(isSuperAdmin() || hasPerm('job_btn_over_issue'))) {
     notify('Only admin / production manager can decide over-issued sheets.');
     return;
   }
@@ -38473,6 +38474,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_process_without_paper', type: 'button' },
   { key: 'job_btn_extra_packets',   type: 'button' },
   { key: 'job_btn_over_issue',      type: 'button' },
+  { key: 'job_btn_over_issue_ignore', type: 'button' },
   { key: 'job_btn_record_delivery', type: 'button' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'button' },
