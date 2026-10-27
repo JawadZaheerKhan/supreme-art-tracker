@@ -5850,6 +5850,8 @@ const BTN_FN_ROWS = {
   openAdd: ['job_btn_new_job', 'yes'], deleteStockGroup: ['job_btn_edit', 'yes'], openAddExistingToGroupModal: ['job_btn_edit', 'yes'],
   openStationEntryFromJob: ['job_btn_operator_entry', 'yes'], reuseJobNumber: ['rpt_job_number_reuse', 'yes'],
   approvePacketsTopup: ['inv_btn_stock_out', 'yes'], rejectPacketsTopup: ['inv_btn_stock_out', 'yes'], issueStock: ['inv_btn_stock_out', 'yes'], dismissPendingStock: ['inv_btn_dismiss_pending', 'yes'],
+  bulkDeleteJobsReport: ['rpt_btn_delete_history', 'yes'], bulkDeleteStockMovement: ['rpt_btn_delete_history', 'yes'], bulkDeleteImports: ['rpt_btn_delete_history', 'yes'],
+  deleteOffcutConsumptionRows: ['rpt_btn_delete_consumption', 'yes'], deleteManualConsumptionRows: ['rpt_btn_delete_consumption', 'yes'], deleteSelectedManualConsumption: ['rpt_btn_delete_consumption', 'yes'],
   openCartonTypeModal: ['carton_btn_types', 'yes'], openCartonBulkIn: ['carton_btn_stock_in', 'yes'], openCartonStockIn: ['carton_btn_stock_in', 'yes'], openCartonBulkOut: ['carton_btn_issue', 'yes'], openCartonIssue: ['carton_btn_issue', 'yes'],
   openHistory: ['job_btn_history', 'view'],
   openLinkJobPicker: ['job_btn_link', 'yes'], unlinkJob: ['job_btn_link', 'yes'],
@@ -16181,7 +16183,7 @@ function renderImportsBulkBar() {
     <span class="bulk-spacer"></span>
     ${allPending ? `<button class="btn btn-sm btn-bulk-receive ceo-hide" onclick="bulkReceiveImports()">&#10003; Receive Selected</button>` : ''}
     ${allPending ? `<button class="btn btn-sm btn-bulk-cancel  ceo-hide" onclick="bulkCancelImports()">&#10006; Cancel Selected</button>` : ''}
-    ${(isAdmin() && noneReceived) ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteImports()">&#128465; Delete from History</button>` : ''}
+    ${(seeBtn('rpt_btn_delete_history') && noneReceived) ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteImports()">&#128465; Delete from History</button>` : ''}
   `;
 }
 
@@ -16866,14 +16868,14 @@ function renderJobsReportBulkBar() {
     <span class="bulk-count">${sel.length} selected</span>
     <button class="btn btn-sm btn-clear" onclick="clearJobsReportSel()">Clear</button>
     <span class="bulk-spacer"></span>
-    ${isAdmin()
+    ${seeBtn('rpt_btn_delete_history')
       ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteJobsReport()">&#128465; Delete from History</button>`
-      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History wipes old delivered jobs.</span>`}
+      : ''}
   `;
 }
 
 async function bulkDeleteJobsReport() {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  if (!(isSuperAdmin() || hasPerm('rpt_btn_delete_history'))) { notify('Delete from History is not on for your role.'); return; }
   const ids = [...jobsReportSel];
   if (!ids.length) { notify('Nothing selected.'); return; }
   // Expand merged rows first so the confirm dialog shows the true count.
@@ -24011,9 +24013,9 @@ function renderStockMovementBulkBar(dir) {
     <span class="bulk-count">${sel.length} selected${qtyLabel}</span>
     <button class="btn btn-sm btn-clear" onclick="clearStockMovementSel('${dir}')">Clear</button>
     <span class="bulk-spacer"></span>
-    ${isAdmin()
+    ${seeBtn('rpt_btn_delete_history')
       ? `<button class="btn btn-sm btn-bulk-delete" onclick="bulkDeleteStockMovement('${dir}')">&#128465; Delete from History</button>`
-      : `<span style="font-size:11px;color:var(--text2);">Admin only — Delete from History moves rows to the Archive.</span>`}
+      : ''}
   `;
 }
 
@@ -24021,7 +24023,7 @@ function renderStockMovementBulkBar(dir) {
 // explicit warning that balances stay untouched — the user has to remember
 // that this is archival cleanup, not a fix.
 async function bulkDeleteStockMovement(dir) {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  if (!(isSuperAdmin() || hasPerm('rpt_btn_delete_history'))) { notify('Delete from History is not on for your role.'); return; }
   const sel = [...stockMovementSel[dir]];
   const rows = sel.map(id => (stockMovementStates[dir].rows || []).find(t => t.id === id)).filter(Boolean);
   if (!rows.length) { notify('Nothing selected.'); return; }
@@ -25933,7 +25935,7 @@ function offcutConsumptionRows() {
 }
 function renderOffcutConsumption() {
   const rows = offcutConsumptionRows();
-  const canDelete = isAdmin();
+  const canDelete = seeBtn('rpt_btn_delete_consumption');   // its own row (owner, 2026-10-27)
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
@@ -26024,7 +26026,7 @@ function toggleAllOffcutConsumption(checked) {
   renderOffcutConsumption();
 }
 async function deleteOffcutConsumptionRows(ids, skipConfirm = false) {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  if (!(isSuperAdmin() || hasPerm('rpt_btn_delete_consumption'))) { notify('Deleting consumption rows is not on for your role.'); return; }
   const cleanIds = [...new Set((ids || []).filter(Number.isFinite))];
   if (!cleanIds.length) return;
   if (!skipConfirm) {
@@ -27229,7 +27231,7 @@ async function bulkCancelImports() {
 }
 
 async function bulkDeleteImports() {
-  if (!isAdmin()) { notify('Admin only.'); return; }
+  if (!(isSuperAdmin() || hasPerm('rpt_btn_delete_history'))) { notify('Delete from History is not on for your role.'); return; }
   const ids = [...importsBulkSel];
   const rows = ids.map(id => importsCache.find(i => i.id === id)).filter(i => i && i.status !== 'received');
   if (!rows.length) { notify('Nothing deletable selected (received rows must be reversed first).'); return; }
@@ -38655,6 +38657,8 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_current_balance',             type: 'tab' },
   { key: 'rpt_offcut_consumption',          type: 'tab' },
   { key: 'rpt_manual_job_card_consumption', type: 'tab' },
+  { key: 'rpt_btn_delete_history',     type: 'button' },
+  { key: 'rpt_btn_delete_consumption', type: 'button' },
   { key: 'rpt_jobs_report',                 type: 'tab' },
   { key: 'rpt_mil_products',                type: 'tab' },
   { key: 'rpt_production_report',           type: 'tab' },
