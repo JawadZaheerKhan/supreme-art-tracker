@@ -320,7 +320,7 @@ function getDb() {
 // Bumped again for carton_types.deleted_at / deleted_by (Delete type, 2026-10-17).
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
-const SCHEMA_VERSION = 'v2026-10-26-over-issue-ignore';
+const SCHEMA_VERSION = 'v2026-10-27-report-deletes';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -488,6 +488,9 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Empty by default, same as the old wastage_adjustment group it mirrors
   // (only Super Admin gets this today).
   rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
+  // Owner, 2026-10-27: the reports' delete buttons, Admin only to start (as before).
+  rpt_btn_delete_history:     { label: 'Delete from History — bulk delete in the Jobs Report, Stock In / Stock Out and Imports history (to the Archive)', levels: { admin: 'yes' } },
+  rpt_btn_delete_consumption: { label: 'Delete consumption rows — Offcut Consumption and Manual Job Card Consumption reports (to the Archive)', levels: { admin: 'yes' } },
   rpt_jobs_report:                 { label: 'Jobs Report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   // Its own row (2026-10-13); it rode on the Jobs Report before, so it starts
   // with the same roles.
@@ -12347,13 +12350,25 @@ app.post('/api/trash/empty', requirePermission('trash_admin'), async (req, res) 
 //   otherwise (Stock In/Out "Delete from History", Offcut Consumption
 //     Delete): leaves those movement reports too.
 // To undo an entry's effect on stock, use Reverse in the History instead.
-app.delete('/api/inventory/transactions/:id', requirePermission('trash_admin'), async (req, res) => {
+app.delete('/api/inventory/transactions/:id', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
     const scope = req.query.scope === 'manual' ? 'manual' : 'history';
+    // Owner, 2026-10-27: Manual Consumption and Offcut Consumption rows follow
+    // "Delete consumption rows"; everything else "Delete from History". Trash
+    // admin (and Super Admin) may still delete any row.
+    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'trash_admin')) {
+      const t = (await sql`SELECT t.change, i.is_offcut FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id WHERE t.id = ${id}`)[0];
+      if (!t) return res.status(404).json({ error: 'Transaction not found' });
+      const consumption = scope === 'manual' || (t.is_offcut && Number(t.change) < 0);
+      const ok = consumption
+        ? roleHasPermission(req.user, 'rpt_btn_delete_consumption') || (scope !== 'manual' && roleHasPermission(req.user, 'rpt_btn_delete_history'))
+        : roleHasPermission(req.user, 'rpt_btn_delete_history');
+      if (!ok) return res.status(403).json({ error: 'Not allowed' });
+    }
     const by = req.user?.email || 'unknown';
     // A Manual-Consumption-archived row deleted again from Stock In/Out moves
     // up to 'history'; nothing else re-archives an archived row.
@@ -12384,7 +12399,7 @@ app.delete('/api/inventory/transactions/:id', requirePermission('trash_admin'), 
 // on the Imports page. Refuses to delete a "received" row because that would
 // orphan the stock-in transaction it created. Pending / Cancelled are fine to
 // hard-delete since they never touched inventory.
-app.delete('/api/imports/:id', requirePermission('trash_admin'), async (req, res) => {
+app.delete('/api/imports/:id', requireAnyBtn(['trash_admin', 'rpt_btn_delete_history']), async (req, res) => {   // Delete from History (owner, 2026-10-27)
   try {
     await dbReady;
     const sql = getDb();
