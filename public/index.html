@@ -2446,6 +2446,10 @@
   .hist-floor-note .sn-body { font-size: 14px; font-weight: 500; }
   .hist-floor-note audio { width: 100%; height: 36px; margin-top: 4px; }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
+  /* Smooth scrolling in a job card (owner, 2026-10-27): with a window open,
+     nothing behind it animates; a stage machine only moves on screen. */
+  body.modal-open .main *, body.modal-open .main *::before, body.modal-open .main *::after { animation-play-state: paused !important; }
+  .stage-machine.sm-off *, .stage-machine.sm-off *::before, .stage-machine.sm-off *::after { animation-play-state: paused !important; }
   /* Back bar of a jump into Jobs (e.g. Product Rate -> a job): while a window
      (the job card) is open it floats ABOVE the overlay, top-left, so Back is
      one click from the job card itself (owner, 2026-10-06). */
@@ -27189,6 +27193,28 @@ function setDateCustom() {
 
 // ── Modals ────────────────────────────────────────────────────
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
+// Smooth scrolling in a job card (owner, 2026-10-27). (1) While a window is
+// open, body.modal-open pauses every animation behind it - watched on the
+// modal root, so any way a window opens or closes counts. (2) A Track-view
+// stage machine only animates while it's on screen (sm-off otherwise).
+(function smoothScrollWatch() {
+  const root = document.getElementById('modal-root');
+  if (root && typeof MutationObserver !== 'undefined') {
+    const sync = () => document.body.classList.toggle('modal-open', !!root.querySelector('.overlay'));
+    new MutationObserver(sync).observe(root, { childList: true });
+    sync();
+  }
+  if (typeof IntersectionObserver === 'undefined' || typeof MutationObserver === 'undefined') return;
+  const io = new IntersectionObserver(es => { for (const e of es) e.target.classList.toggle('sm-off', !e.isIntersecting); }, { rootMargin: '150px' });
+  const seen = new WeakSet();
+  const watch = node => {
+    const list = node.matches && node.matches('.stage-machine') ? [node] : (node.querySelectorAll ? node.querySelectorAll('.stage-machine') : []);
+    for (const el of list) if (!seen.has(el)) { seen.add(el); el.classList.add('sm-off'); io.observe(el); }
+  };
+  watch(document.body);
+  new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) watch(n); })
+    .observe(document.body, { childList: true, subtree: true });
+})();
 function closeModal() {
   const adjPanel = document.getElementById('adj-side-panel');
   if (adjPanel) adjPanel._layoutObserver?.disconnect();
