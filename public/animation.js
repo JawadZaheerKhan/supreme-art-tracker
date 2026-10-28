@@ -3007,7 +3007,9 @@
     };
     const tick = (now) => {
       raf = active ? requestAnimationFrame(tick) : 0;
-      if (!host.isConnected || host.offsetParent === null || document.hidden) { last = now; return; }
+      // Not on screen: skip the frame. (Not offsetParent - it's always null for a
+      // position:fixed element, i.e. in full screen, which froze the view; owner 2026-10-28.)
+      if (!host.isConnected || !host.getClientRects().length || document.hidden) { last = now; return; }
       const dt = Math.min(0.05, ((now - last) || 16) / 1000); last = now; clock += dt;
       // Camera easing + slow drift when nobody is touching it.
       if (!reduceMotion && selectedId == null && want.dist > 70 && clock - lastInput > 7) want.az = baseAz + Math.sin((clock - lastInput - 7) * 0.07) * 0.2;
