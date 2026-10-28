@@ -261,6 +261,8 @@
   body.role-client #topbar-add-offcut, body.role-client #inv-new-btn, body.role-client #inv-offcut-btn,
   body.role-client #calc-launcher,
   body.role-client #app-date { display: none !important; }
+  /* The Summary line a 3D view pop-up jumped to (owner, 2026-10-26). */
+  .cv-summary-row.cv-summary-flash td { background: #fef3c7 !important; transition: background .3s; }
   /* Client portal responsive tweaks — targets both the real client
      shell (body.role-client) and the admin Client View tab so both
      read well on mobile / small tablet screens. */
@@ -3375,6 +3377,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="mgr-operators" id="mode-mgr-operators-btn" onclick="setMode('mgr-operators')" style="display:none;">&#128101; Operators</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
     <button class="mode-btn" data-mode="client-view" onclick="setMode('client-view')" id="mode-client-view-btn">&#128100; Client View</button>
+    <button class="mode-btn" data-mode="factory" onclick="setMode('factory')" id="mode-factory-btn" style="display:none;">&#127981; Factory</button>
   </div>
   <div class="topbar-right">
     <!-- Calculator is now reached via the floating round 🧮 launcher in the
@@ -4001,19 +4004,32 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      production_manager / CEO for reviewing exactly what a chosen client
      sees. Uses the SAME /api/client/jobs helper server-side, so admin
      preview and real client can never drift apart. -->
+<!-- Factory: the 3D view of the whole factory, Super Admin only (owner, 2026-10-24). -->
+<div class="main" id="factory-mode" style="display:none;">
+  <div id="factory-anim"></div>
+</div>
 <div class="main" id="client-view-mode" style="display:none;">
   <div id="client-view-hero" class="hero-card"></div>
-  <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:12px 0 16px;flex-wrap:wrap;">
+  <div id="client-view-controls" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:12px 0 16px;flex-wrap:wrap;">
     <label style="font-size:12px;color:var(--text2);font-weight:600;">Preview company:</label>
     <select id="client-view-company" onchange="loadClientViewJobs()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;min-width:200px;">
       <option value="">— Pick company —</option>
     </select>
     <button class="btn btn-sm" onclick="loadClientViewJobs(true)">&#8635; Refresh</button>
   </div>
-  <div id="client-view-summary" style="margin:0 0 16px;"></div>
-  <div id="client-view-list">
-    <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
+  <!-- Project Animation (owner, 2026-10-21): Jobs | Animation sub-tabs. -->
+  <!-- The client's own Factory view (owner, 2026-10-26): what the client sees. -->
+  <div class="tabs" id="client-view-subtabs" style="margin:0 0 12px;">
+    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-view','jobs')">Jobs</button>
+    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-view','animation')">&#127981; Factory</button>
   </div>
+  <div id="client-view-jobs-pane">
+    <div id="client-view-summary" style="margin:0 0 16px;"></div>
+    <div id="client-view-list">
+      <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>
+    </div>
+  </div>
+  <div id="client-view-anim" style="display:none;"></div>
 </div>
 
 <!-- Client portal — external stakeholders. Only shown to users whose
@@ -4022,10 +4038,17 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      /api/client/jobs — this shell is UX only. -->
 <div class="main" id="client-mode" style="display:none;">
   <div id="client-portal-hero" class="hero-card"></div>
-  <div id="client-portal-summary" style="margin-top:16px;"></div>
-  <div id="client-portal-list" style="margin-top:16px;">
-    <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
+  <div class="tabs" id="client-portal-subtabs" style="margin:16px 0 0;">
+    <button class="tab active" data-sub="jobs" onclick="setClientSubTab('client-portal','jobs')">Jobs</button>
+    <button class="tab" data-sub="animation" onclick="setClientSubTab('client-portal','animation')">&#127981; Factory</button>
   </div>
+  <div id="client-portal-jobs-pane">
+    <div id="client-portal-summary" style="margin-top:16px;"></div>
+    <div id="client-portal-list" style="margin-top:16px;">
+      <div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading…</div>
+    </div>
+  </div>
+  <div id="client-portal-anim" style="display:none;margin-top:16px;"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -5736,6 +5759,8 @@ function showClientPortal() {
     filterValue: clientPortalFilter,
     onInputHandler: 'onClientPortalSearch',
   });
+  // A client lands on the 3D Factory (owner, 2026-10-26).
+  if (!showClientPortal.landed) { showClientPortal.landed = true; setClientSubTab('client-portal', 'animation'); }
 }
 // Inject the "not for your role" placeholder into each finance-blocked
 // mode div (once, idempotent). CSS toggles between the message and the
@@ -5902,6 +5927,7 @@ function tabAllowed(m) {
     case 'station':     return hasPerm('station_access', 'view');
     case 'users':       return hasPerm('user_tab_access', 'view');
     case 'client-view': return hasPerm('client_view_preview', 'view');
+    case 'factory':     return hasRole('ceo');   // the 3D factory view: Super Admin and the CEO (owner, 2026-10-24 / 2026-10-26)
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
     case 'mgr-operators': return mgrOpsUnlocked();
@@ -6343,6 +6369,7 @@ function renderUserChip() {
   showTab('mode-station-btn', 'station');
   showTab('mode-users-btn', 'users');
   showTab('mode-client-view-btn', 'client-view');
+  showTab('mode-factory-btn', 'factory');
   showTab('mode-mgr-operators-btn', 'mgr-operators');
   if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   const op = isOperator(), sm = isStoreManager(), fin = isFinance();
@@ -6934,6 +6961,12 @@ function setMode(m) {
   if (m === 'mgr-operators') mgrOpsLoad();
   const clientViewEl = document.getElementById('client-view-mode');
   if (clientViewEl) clientViewEl.style.display = m === 'client-view' ? 'block' : 'none';
+  const factoryEl = document.getElementById('factory-mode');
+  if (factoryEl) factoryEl.style.display = m === 'factory' ? 'block' : 'none';
+  // Project Animation: stop drawing the 3D view while its tab is off screen.
+  if (m !== 'client-view' && typeof clientAnim !== 'undefined' && clientAnim['client-view']) clientAnim['client-view'].setActive(false);
+  if (m !== 'factory' && typeof clientAnim !== 'undefined' && clientAnim.factory) clientAnim.factory.setActive(false);
+  if (typeof syncClientAnimTimer === 'function') syncClientAnimTimer();
   const addBtn    = document.getElementById('topbar-add');
   const exportBtn = document.getElementById('topbar-export');
   const refreshBtn= document.getElementById('app-date-refresh');
@@ -7004,6 +7037,11 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     if (refreshBtn) refreshBtn.style.display = 'none';
     enterClientView();
+  } else if (m === 'factory') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    refreshClientAnim('factory');
   } else if (m === 'station') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -39023,6 +39061,7 @@ async function loadClientJobs(showToast) {
     ]);
     clientJobs = clientRes;
     renderClientJobs();
+    refreshClientAnim('client-portal');
     if (showToast) notify('Refreshed');
   } catch (e) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load your jobs: ${esc(e.message || String(e))}</div>`;
@@ -39226,7 +39265,7 @@ function renderClientSummary(rows, containerId) {
       nTotals.ready      += ready;
       nTotals.shipped    += shipped;
       exportJobsRows.push({ product: j.name || '', code: j.jobcode || '', poNo: j.ref || '', batchNo: j.bno || '', poQty, ready, shipped, status: stageOf(j) });
-      return `<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${j.id})" title="Jump to this job's tile below">
+      return `<tr class="cv-summary-row" data-job-id="${j.id}" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${j.id})" title="Jump to this job's tile below">
         <td style="padding:6px 8px;">${esc(j.name || '')}</td>
         <td style="padding:6px 8px;">${esc(j.jobcode || '')}</td>
         <td style="padding:6px 8px;">${esc(j.ref || '')}</td>
@@ -39303,7 +39342,7 @@ function renderClientSummary(rows, containerId) {
       gTotals.shipped   += shipped;
       gTotals.shipCount += shipCount;
       exportGroupRows.push({ product, code: codeVal, poQty, ready, shipped, shipCount });
-      groupHtmlRows.push(`<tr class="cv-summary-row" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${repr.id})" title="Jump to this group's tile below">
+      groupHtmlRows.push(`<tr class="cv-summary-row" data-job-id="${repr.id}" data-group="${esc(repr.stock_group_name || '')}" style="border-bottom:1px solid var(--border);" onclick="scrollToClientTile(${repr.id})" title="Jump to this group's tile below">
         <td style="padding:6px 8px;font-weight:700;">${esc(product)}</td>
         <td style="padding:6px 8px;">${esc(codeVal)}</td>
         <td style="padding:6px 8px;text-align:right;">${fmtN(poQty)}</td>
@@ -39624,6 +39663,7 @@ async function loadClientViewJobs(showToast) {
   renderClientViewHero(); // greeting reflects the picked company
   if (!company) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to preview their portal view.</div>`;
+    refreshClientAnim('client-view');
     return;
   }
   listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Loading&hellip;</div>`;
@@ -39638,9 +39678,194 @@ async function loadClientViewJobs(showToast) {
     ]);
     clientViewJobs = clientRes;
     renderClientViewList();
+    refreshClientAnim('client-view');
     if (showToast) notify('Refreshed');
   } catch (e) {
     listEl.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">Could not load client view: ${esc(e.message || String(e))}</div>`;
+  }
+}
+
+// ── Project Animation (owner, 2026-10-21) ─────────────────────────
+// The Clients tab's "Animation" sub-tab (Client View preview and the real
+// client portal): a 3D view of the shop - Production building, Ready Stock
+// building, 3 trucks - drawn by public/animation.js from the same
+// client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
+const CLIENT_ANIM_SRC = '/animation.js?v=66';
+const CLIENT_ANIM_SHELLS = {
+  'client-view': {
+    bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
+    // The admin preview lists hidden jobs too (to tick them); the client
+    // only ever sees the ones shown to them, so the animation does too.
+    rows: () => clientViewCompany ? clientViewJobs.filter(j => j.stock_group_name ? j.stock_group_visible : j.client_visible) : null,
+    company: () => clientViewCompany,
+    reload: () => loadClientViewJobs(),
+  },
+  'client-portal': {
+    bar: 'client-portal-subtabs', jobs: 'client-portal-jobs-pane', anim: 'client-portal-anim',
+    rows: () => clientJobs,
+    company: () => (currentUser && currentUser.client_company) || '',
+    reload: () => loadClientJobs(),
+  },
+};
+// The Factory tab: every job in the factory (owner, 2026-10-24).
+CLIENT_ANIM_SHELLS.factory = {
+  anim: 'factory-anim',
+  rows: () => (Array.isArray(jobs) ? jobs : []).filter(j => j && !j.deleted_at),
+  company: () => '__factory__',
+  reload: () => loadJobs().then(() => refreshClientAnim('factory')),
+};
+const clientSubTab = { 'client-view': 'jobs', 'client-portal': 'jobs', factory: 'animation' };
+const clientAnim = {};
+let clientAnimScript = null;
+let clientAnimTimer = null;
+function loadClientAnimScript() {
+  if (window.SAAnimation) return Promise.resolve();
+  return clientAnimScript || (clientAnimScript = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = CLIENT_ANIM_SRC;
+    s.onload = resolve;
+    s.onerror = () => { clientAnimScript = null; s.remove(); reject(new Error('Could not load the animation.')); };
+    document.head.appendChild(s);
+  }));
+}
+function setClientSubTab(shell, tab) {
+  const cfg = CLIENT_ANIM_SHELLS[shell];
+  if (!cfg) return;
+  clientSubTab[shell] = tab;
+  document.querySelectorAll(`#${cfg.bar} .tab`).forEach(b => b.classList.toggle('active', b.dataset.sub === tab));
+  // The job search means nothing to the 3D view, so the slim banner hides it there.
+  const heroEl = document.getElementById(shell === 'client-view' ? 'client-view-hero' : 'client-portal-hero');
+  if (heroEl) heroEl.classList.toggle('hero-anim', tab === 'animation');
+  const jobsEl = document.getElementById(cfg.jobs), animEl = document.getElementById(cfg.anim);
+  if (jobsEl) jobsEl.style.display = tab === 'animation' ? 'none' : '';
+  if (animEl) animEl.style.display = tab === 'animation' ? '' : 'none';
+  if (tab === 'animation') refreshClientAnim(shell);
+  else if (clientAnim[shell]) clientAnim[shell].setActive(false);
+  syncClientAnimTimer();
+}
+async function refreshClientAnim(shell) {
+  const cfg = CLIENT_ANIM_SHELLS[shell];
+  if (!cfg || clientSubTab[shell] !== 'animation') return;
+  const host = document.getElementById(cfg.anim);
+  if (!host) return;
+  // Each row also carries its Ready Qty and its Carton Shipper count - the
+  // Ready Stock store shows that many cartons (owner, 2026-10-24).
+  const rawRows = cfg.rows();
+  const fullJob = j => (typeof jobs !== 'undefined' && Array.isArray(jobs) && jobs.find(x => x && x.id === j.id)) || j;   // the client rows can lack the Carton Shipper
+  const milQtyOf = j => {
+    if (!j.stock_group_name) return null;
+    const g = j.group_job_id && typeof stockGroupById === 'function' ? stockGroupById(j.group_job_id) : null;
+    return parseFloat(String((g && g.po_qty) || j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  };
+  const rows = rawRows && rawRows.map(j => { const f = fullJob(j); return { ...j, _readyQty: readyCartonsTotal(f) || readyCartonsTotal(j), _shipperCartons: cartonsPacketsFor(f) || cartonsPacketsFor(j),
+    _readyLeft: Math.max(0, (readyCartonsTotal(f) || 0) - (totalDeliveredCartons(f) || 0)), _milQty: milQtyOf(f) }; });
+  if (!rows) {
+    if (clientAnim[shell]) { clientAnim[shell].destroy(); delete clientAnim[shell]; }
+    host.className = '';
+    host.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">Pick a company above to see their animation.</div>`;
+    return;
+  }
+  try { await loadClientAnimScript(); } catch (e) {
+    host.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:#A32D2D;">${esc(e.message)} Check the internet connection, then press Refresh.</div>`;
+    return;
+  }
+  if (clientSubTab[shell] !== 'animation') return;
+  const company = cfg.company();
+  let ctl = clientAnim[shell];
+  if (ctl && ctl.company !== company) { ctl.destroy(); ctl = null; delete clientAnim[shell]; }
+  // A client (and the admin's preview of one) sees only that client's jobs -
+  // MIL jobs are Global's - with an empty inventory store and nameless people
+  // (owner, 2026-10-26). Only the staff Factory tab gets the stock and names.
+  const forClient = shell !== 'factory';
+  if (!ctl) ctl = clientAnim[shell] = window.SAAnimation.mount(host, { jobs: rows, company, client: forClient, stock: forClient ? [] : animStockRows(),
+    // The Factory tab: an admin can move a job a stage forward / back from its pop-up (owner, 2026-10-24).
+    onStage: shell === 'factory' && canStageForward() ? factoryMoveStage : null,
+    onJobCard: shell === 'factory' ? factoryJobCard : null,
+    onJobOpen: id => factoryOpenJob(shell, id) });
+  else { ctl.update(rows); if (ctl.setStock && !forClient) ctl.setStock(animStockRows()); }
+  ctl.setActive(true);
+  // The operators at their machines, with their names - staff only (owner, 2026-10-24).
+  if (!forClient && !isClient() && ctl.setOperators) animCrewRows().then(list => { if (clientAnim[shell] === ctl) ctl.setOperators(list); });
+}
+// A job's pop-up in the 3D view, clicked (owner, 2026-10-26): the client (or
+// the admin previewing him) goes to the Jobs sub-tab, to that job's line in
+// the Summary; the staff Factory tab opens the job card.
+function factoryOpenJob(shell, id) {
+  if (shell === 'factory') { factoryJobCard(id); return; }
+  setClientSubTab(shell, 'jobs');
+  const rows = (CLIENT_ANIM_SHELLS[shell] && CLIENT_ANIM_SHELLS[shell].rows()) || [];
+  const j = rows.find(x => x && x.id === id);
+  setTimeout(() => {
+    const box = document.getElementById(shell === 'client-view' ? 'client-view-summary' : 'client-portal-summary');
+    let row = box && box.querySelector(`.cv-summary-row[data-job-id="${id}"]`);
+    if (!row && box && j && j.stock_group_name) row = [...box.querySelectorAll('.cv-summary-row[data-group]')].find(r => r.dataset.group === j.stock_group_name);
+    if (!row) { if (typeof scrollToClientTile === 'function') scrollToClientTile(id); return; }
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.add('cv-summary-flash');
+    setTimeout(() => row.classList.remove('cv-summary-flash'), 2600);
+  }, 80);
+}
+
+// Factory tab: a new job's tile opens its job card - the printed card, on
+// screen (owner, 2026-10-24).
+function factoryJobCard(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:9.2in;background:#fff;color:#000;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;">
+      <b style="font-size:16px;">Job card · E-${j.id}</b>
+      <span>${canPrintJobCard() ? `<button class="btn btn-sm" onclick="printJobCard(${j.id})">Print</button> ` : ''}<button class="btn btn-sm" onclick="closeModal()">Close</button></span>
+    </div>
+    <div style="position:relative;width:8.5in;max-width:100%;overflow-x:auto;font-family:Arial,sans-serif;">${buildPrintCard(j)}</div>
+  </div>`);
+}
+
+// Factory tab: click a stage in the 3D view's bottom bar to move the job
+// there - the same move as the Jobs tab's pipeline, after a confirm
+// (Delivered is recorded from the Jobs tab).
+async function factoryMoveStage(id, target) {
+  const j = jobs.find(x => x.id === id);
+  if (!j) return;
+  const cur = j.stage_index || 0;
+  if (target === cur) return;
+  if (target >= STAGES.length - 1) { notify('Record the delivery from the Jobs tab.'); return; }
+  const ok = await confirmDialog({ title: `Move Job E-${id} to ${STAGES[target]}?`, message: `"${j.name}" moves from ${STAGES[cur]} to ${STAGES[target]}.`, confirmText: 'Move' });
+  if (!ok) return;
+  await moveToStage(id, target);
+  refreshClientAnim('factory');
+}
+// Every operator with the station (machine) they work, for the 3D view;
+// re-read at most every 10 minutes.
+let _animCrew = null, _animCrewAt = 0;
+async function animCrewRows() {
+  if (_animCrew && Date.now() - _animCrewAt < 600000) return _animCrew;
+  try { _animCrew = await api('GET', '/api/operators/all-persons'); _animCrewAt = Date.now(); }
+  catch (e) { _animCrew = _animCrew || []; }
+  return _animCrew;
+}
+// The inventory store in the 3D view shows the paper / board on hand. Only
+// staff load the stock list - a client's portal never does - so there the
+// store stands empty.
+function animStockRows() {
+  return (Array.isArray(inventory) ? inventory : []).filter(i => i && (Number(i.current_balance) || 0) > 0)
+    .map(i => ({ type: i.paper_type, size: i.size, gsm: i.gsm, sheets: Number(i.current_balance), offcut: !!i.is_offcut,
+      brand: i.brand || '', supplier: i.supplier || '', perPack: packetSize(i.paper_type), unit: packetUnitLabel(i.paper_type) }));
+}
+// While an Animation sub-tab is on screen, re-read the jobs every minute so
+// pallets move and trucks leave without anyone pressing Refresh.
+function syncClientAnimTimer() {
+  const on = mode === 'factory' || (clientSubTab['client-view'] === 'animation' && mode === 'client-view') ||
+             (clientSubTab['client-portal'] === 'animation' && isClient());
+  if (on && !clientAnimTimer) {
+    clientAnimTimer = setInterval(() => {
+      if (document.hidden) return;
+      if (mode === 'factory') { CLIENT_ANIM_SHELLS.factory.reload(); return; }
+      if (isClient()) { if (clientSubTab['client-portal'] === 'animation') CLIENT_ANIM_SHELLS['client-portal'].reload(); }
+      else if (mode === 'client-view' && clientSubTab['client-view'] === 'animation' && clientViewCompany) CLIENT_ANIM_SHELLS['client-view'].reload();
+    }, 60000);
+  } else if (!on && clientAnimTimer) {
+    clearInterval(clientAnimTimer);
+    clientAnimTimer = null;
   }
 }
 
