@@ -11176,6 +11176,47 @@ function invJobWhere(j) {
 function invPaperText(it) {
   return it ? `${it.is_offcut ? 'OFFCUT · ' : ''}${it.paper_type}${it.size ? ' · ' + it.size : ''}${it.gsm ? ' · ' + it.gsm + 'gsm' : ''}` : '';
 }
+// Paper / packets edits of the searched jobs (owner, 2026-10-29), fetched in
+// one call a moment after typing stops and kept for a minute.
+const _paperTrail = new Map();   // job id -> { t, list }
+let _paperTrailTimer = null;
+function ensurePaperTrail(ids) {
+  const now = Date.now();
+  const want = [...new Set(ids)].filter(id => { const e = _paperTrail.get(id); return !e || now - e.t > 60000; }).slice(0, 50);
+  if (!want.length) return;
+  clearTimeout(_paperTrailTimer);
+  _paperTrailTimer = setTimeout(async () => {
+    try {
+      const d = await api('GET', '/api/jobs/paper-trail?ids=' + want.join(','));
+      const t = Date.now();
+      for (const id of want) _paperTrail.set(id, { t, list: (d && d[id]) || [] });
+      if (invViewMode === 'pending' && mode === 'inventory') renderInvPendingList();
+    } catch (e) { /* the lookup still works without it */ }
+  }, 350);
+}
+function invTrailHtml(j) {
+  const e = _paperTrail.get(j.id);
+  if (!e || !e.list.length) return '';
+  const item = id => id ? inventoryAll.find(i => i.id === +id) : null;
+  const paperTxt = id => { const it = item(id); return it ? invPaperText(it) : (id ? 'paper #' + id : 'none'); };
+  const extraTxt = v => {
+    if (!v || !v.item) return 'none';
+    const it = item(v.item);
+    return paperTxt(v.item) + (v.packets ? ' · ' + v.packets + ' ' + (it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets') : '');
+  };
+  const arrow = (b, a) => `${esc(b)} &rarr; <b>${esc(a)}</b>`;
+  const lines = e.list.map(c => {
+    const parts = c.items.map(x =>
+      x.what === 'paper'   ? 'Paper: ' + arrow(paperTxt(x.before), paperTxt(x.after)) :
+      x.what === 'size'    ? 'Size/GSM: ' + arrow(x.before || 'blank', x.after || 'blank') :
+      x.what === 'packets' ? 'Packets: ' + arrow(x.before || 'blank', x.after || 'blank') :
+      x.what === '2nd' || x.what === '3rd' ? x.what + ' paper: ' + arrow(extraTxt(x.before), extraTxt(x.after)) :
+      x.what === 'reissue' ? 'Paper changed after it was issued - sent back to Pending Stock' :
+      esc(x.text || ''));
+    return `<div>&#9998; ${esc(fmtDMY(c.at))}${c.by ? ' &middot; ' + esc(c.by) : ''}: ${parts.join(' &nbsp;|&nbsp; ')}</div>`;
+  });
+  return `<div class="inv-sub" style="margin-top:5px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:4px 8px;"><b>Paper / packets edited:</b>${lines.join('')}</div>`;
+}
 function invLookupCardHtml(j) {
   const where = invJobWhere(j);
   const P = j.particulars || {};
@@ -11221,6 +11262,7 @@ function invLookupCardHtml(j) {
           </div>
           <div class="inv-sub">${j.client ? esc(j.client) + ' &middot; ' : ''}Job card asks for: ${need.length ? need.join(' &nbsp;|&nbsp; ') : '<span style="font-style:italic;">no paper linked</span>'}</div>
           <div class="inv-sub" style="margin-top:3px;">${issuedLine}</div>
+          ${invTrailHtml(j)}
         </div>
         <div class="inv-actions">
           <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
@@ -11256,6 +11298,7 @@ function renderInvPendingList() {
   });
   topupRows.sort((a, b) => a.job.id - b.job.id || (a.topup.requested_at || '').localeCompare(b.topup.requested_at || ''));
   const lookup = invLookupJobs();
+  if (String(invFilterText || '').trim()) ensurePaperTrail([...pendingJobs, ...topupRows.map(r => r.job), ...lookup].map(j => j.id));
   const lookupHtml = lookup.length ? `
       <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Other jobs matching "${esc(String(invFilterText).trim())}" - not waiting for stock</div>
       ${lookup.map(invLookupCardHtml).join('')}` : '';
@@ -11433,6 +11476,7 @@ function renderInvPendingList() {
             ${pktStr ? ` &middot; <span style="color:#A32D2D;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(pktStr)} ${unit} needed</span>${offcutNote}` : ''}
             ${j.deadline ? ` &middot; <span style="color:#dc2626;font-weight:600;">Due ${esc(fmtDMY(j.deadline))}</span>` : ''}
           </div>
+          ${String(invFilterText || '').trim() ? invTrailHtml(j) : ''}
         </div>
         <div class="inv-balance">
           ${invIt ? (() => {
@@ -11458,6 +11502,8 @@ function renderInvPendingList() {
     // Rendered even when the primary is fully done so the store keeper
     // can finish the secondary side independently.
     // One tile per extra paper: the 2nd paper and the 3rd paper (same rules).
+    // The edit line goes on the job's first row only (owner, 2026-10-29).
+    let trailLeft = !primaryTile && !!String(invFilterText || '').trim();
     const extraTile = (key, source, ord) => {
       const remSecSheets = secondaryPendingSheets(j, key);
       if (remSecSheets <= 0) return '';
@@ -11497,6 +11543,7 @@ function renderInvPendingList() {
             ${secPaperLabel}
             &middot; <span style="color:#166534;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:0.03em;">${esc(secRemStr)} ${secUnit} needed</span>
           </div>
+          ${trailLeft ? (trailLeft = false, invTrailHtml(j)) : ''}
         </div>
         <div class="inv-balance">
           ${(() => {
