@@ -2621,6 +2621,8 @@
       ui.fs.title = on ? 'Exit full screen' : 'Full screen'; ui.fs.setAttribute('aria-label', ui.fs.title);
     };
     const syncFs = () => {   // on a change (after the view is built)
+      // The real full screen arrived after the fill-the-window stand-in: drop the stand-in.
+      if (fsEl() === host && host.classList.contains('saa-full')) { host.classList.remove('saa-full'); document.body.style.overflow = ''; }
       fsIcon();
       layoutTop();
       resize();
@@ -2635,7 +2637,12 @@
       }
       const req = host.requestFullscreen || host.webkitRequestFullscreen;
       if (!req) { fillWindow(true); return; }
-      try { const pr = req.call(host); if (pr && pr.catch) pr.catch(() => fillWindow(true)); } catch (err) { fillWindow(true); }
+      // Some browsers / app windows never answer the request (no error, no full
+      // screen): fill the window if full screen hasn't started soon (owner, 2026-10-29).
+      let done = false;
+      const fallback = () => { if (!done && fsEl() !== host) { done = true; fillWindow(true); } };
+      try { const pr = req.call(host); if (pr && pr.then) pr.then(() => { done = true; }, fallback); } catch (err) { fallback(); return; }
+      setTimeout(fallback, 800);
     });
     ui.fs.addEventListener('pointerdown', e => e.stopPropagation());
     const onFsKey = e => { if (e.key === 'Escape' && host.classList.contains('saa-full')) fillWindow(false); };
