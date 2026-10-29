@@ -11089,7 +11089,7 @@ function renderInvPendingToggle() {
   btn.classList.toggle('inv-pending-idle',   invViewMode !== 'pending');
   btn.classList.toggle('is-on', invViewMode === 'pending');
   const search = document.getElementById('inv-search-input');
-  if (search) search.placeholder = invViewMode === 'pending' ? 'Search job no., name, company or paper...' : 'Search paper type, brand...';
+  if (search) search.placeholder = invViewMode === 'pending' ? 'Search any job (no., name, company) or paper - see its stage and issuance...' : 'Search paper type, brand...';
 }
 
 // Inventory search box while Pending Stock is open: job no. ("1039" /
@@ -11101,6 +11101,87 @@ function invPendingSearchHit(j) {
   if (/^\d+$/.test(idQ) && String(j.id).includes(idQ)) return true;
   const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   return searchMatch([j.name, j.client, j.jobcode, j.ref, it && it.paper_type, it && it.size, it && it.gsm, it && it.brand].filter(Boolean).join(' '), q);
+}
+// Job lookup in Pending Stock (owner, 2026-10-29): the search also finds jobs
+// that are NOT waiting for stock - by job no., name, company, code or PO (not
+// by paper, which would list every job on that board) - and says where each
+// one is and what was issued, so the store manager sees why it isn't queued.
+function invLookupJobs() {
+  const q = String(invFilterText || '').trim();
+  if (!q) return [];
+  const idQ = q.toLowerCase().replace(/^e[-\s]?/, '');
+  const numeric = /^\d+$/.test(idQ);
+  const hit = j => (numeric && String(j.id).includes(idQ))
+    || searchMatch([j.name, j.client, j.jobcode, j.ref].filter(Boolean).join(' '), q);
+  return jobs.filter(j => !isPendingIssuance(j) && !packetTopupsPending(j).length && hit(j))
+    .sort((a, b) => (numeric ? (String(b.id) === idQ) - (String(a.id) === idQ) : 0) || b.id - a.id)
+    .slice(0, 30);
+}
+// Where the job is, in words, for the lookup card.
+function invJobWhere(j) {
+  const si = j.stage_index || 0;
+  if (isNewJob(j)) return { text: 'New Job - not sent to the store yet (still with the Production Manager)', color: '#7c3aed' };
+  if (isCtpQueue(j)) return { text: 'At CTP - plates being made' + (issuedPrimarySheets(j) > 0 ? ' (paper already issued)' : ''), color: '#2563eb' };
+  if (isDone(j)) return { text: 'Delivered', color: '#a16207' };
+  if (isBlocked(j)) return { text: 'Blocked at ' + (STAGES[si] || 'its stage'), color: '#dc2626' };
+  if (si === 6) return { text: 'Ready to Deliver', color: '#16a34a' };
+  return { text: 'In production - at ' + (STAGES[si] || 'its stage'), color: '#1e40af' };
+}
+// One paper as a label: type · size · gsm.
+function invPaperText(it) {
+  return it ? `${it.is_offcut ? 'OFFCUT · ' : ''}${it.paper_type}${it.size ? ' · ' + it.size : ''}${it.gsm ? ' · ' + it.gsm + 'gsm' : ''}` : '';
+}
+function invLookupCardHtml(j) {
+  const where = invJobWhere(j);
+  const P = j.particulars || {};
+  // What the job card asks for (the board required).
+  const main = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+  const unitOf = it => it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+  const need = [];
+  if (main) need.push(`${esc(invPaperText(main))}${packetsDisplay(j) ? ' &middot; <b>' + esc(packetsDisplay(j)) + ' ' + esc(unitOf(main)) + '</b>' : ''}`);
+  [['secondary_paper', '2nd'], ['third_paper', '3rd']].forEach(([k, l]) => {
+    const sec = P[k]; if (!sec || !sec.inventory_item_id) return;
+    const it = inventoryAll.find(i => i.id === sec.inventory_item_id);
+    if (it) need.push(`${l} paper: ${esc(invPaperText(it))}${sec.packets ? ' &middot; <b>' + esc(String(sec.packets)) + ' ' + esc(unitOf(it)) + '</b>' : ''}`);
+  });
+  // What has been issued against it, per paper + brand.
+  const issued = new Map();
+  for (const x of (Array.isArray(j.issued_items) ? j.issued_items : [])) {
+    if (!x) continue;
+    const it = inventoryAll.find(i => i.id === x.item_id);
+    const key = (x.source || 'primary') + '|' + (it ? invPaperText(it) : (x.paper || 'Paper')) + '|' + (x.brand || '');
+    const row = issued.get(key) || { source: x.source || 'primary', paper: it ? invPaperText(it) : (x.paper || 'Paper'), brand: x.brand || '', sheets: 0, it };
+    row.sheets += parseFloat(x.sheets) || 0;
+    issued.set(key, row);
+  }
+  const issuedList = [...issued.values()].filter(r => r.sheets > 0).map(r => {
+    const ps = r.it ? packetSize(r.it.paper_type) : 0;
+    const amt = ps ? `${fmtPkts(r.sheets / ps)} ${unitOf(r.it)} (${r.sheets.toLocaleString()} sheets)` : `${r.sheets.toLocaleString()} sheets`;
+    const tag = r.source === 'secondary' ? '2nd paper: ' : r.source === 'third' ? '3rd paper: ' : '';
+    return `${tag}${esc(r.paper)}${r.brand ? ' (' + esc(r.brand) + ')' : ''} &middot; <b>${amt}</b>`;
+  });
+  const issuedLine = issuedList.length
+    ? `<span style="color:#166534;font-weight:700;">&#10003; Issued${j.issued_at ? ' ' + esc(fmtDMY(j.issued_at)) : ''}:</span> ${issuedList.join(' &nbsp;|&nbsp; ')}`
+    : P.paper_waived
+      ? '<span style="color:#a16207;font-weight:700;">Sent to production without paper (Admin) - nothing issued</span>'
+      : (isNewJob(j) || isCtpQueue(j))
+        ? '<span style="color:var(--text2);">Nothing issued yet</span>'
+        : '<span style="color:#dc2626;font-weight:700;">No paper issued in the app</span>';
+  return `
+      <div class="inv-card inv-pending-row" style="border-left:3px solid ${where.color};">
+        <div class="inv-main">
+          <div class="inv-name">
+            <b>#${j.id}</b> &middot; ${esc(j.name)}
+            <span class="badge" style="background:#fff;color:${where.color};border:1px solid ${where.color};font-weight:700;margin-left:8px;">${esc(where.text)}</span>
+          </div>
+          <div class="inv-sub">${j.client ? esc(j.client) + ' &middot; ' : ''}Job card asks for: ${need.length ? need.join(' &nbsp;|&nbsp; ') : '<span style="font-style:italic;">no paper linked</span>'}</div>
+          <div class="inv-sub" style="margin-top:3px;">${issuedLine}</div>
+        </div>
+        <div class="inv-actions">
+          <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
+          <button class="btn btn-sm" onclick="openEdit(${j.id})">Edit / View</button>
+        </div>
+      </div>`;
 }
 function toggleInvViewMode() {
   invViewMode = invViewMode === 'pending' ? 'items' : 'pending';
@@ -11129,8 +11210,14 @@ function renderInvPendingList() {
     if (invPendingSearchHit(j)) packetTopupsPending(j).forEach(t => topupRows.push({ job: j, topup: t }));
   });
   topupRows.sort((a, b) => a.job.id - b.job.id || (a.topup.requested_at || '').localeCompare(b.topup.requested_at || ''));
+  const lookup = invLookupJobs();
+  const lookupHtml = lookup.length ? `
+      <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Other jobs matching "${esc(String(invFilterText).trim())}" - not waiting for stock</div>
+      ${lookup.map(invLookupCardHtml).join('')}` : '';
   if (!pendingJobs.length && !topupRows.length && String(invFilterText || '').trim()) {
-    el.innerHTML = `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">No job waiting for stock matches "${esc(String(invFilterText).trim())}".</div>`;
+    el.innerHTML = lookupHtml
+      ? `<div class="empty" style="padding:12px;text-align:center;color:var(--text2);">No job waiting for stock matches "${esc(String(invFilterText).trim())}".</div>` + lookupHtml
+      : `<div class="empty" style="padding:32px;text-align:center;color:var(--text2);">No job matches "${esc(String(invFilterText).trim())}".</div>`;
     return;
   }
   if (!pendingJobs.length && !topupRows.length) {
@@ -11383,7 +11470,7 @@ function renderInvPendingList() {
       </div>`;
     };
     return primaryTile + extraTile('secondary_paper', 'secondary', '2nd') + extraTile('third_paper', 'third', '3rd');
-  }).join('') + topupHtml;
+  }).join('') + topupHtml + lookupHtml;
 }
 
 async function dismissPendingStock(jobId) {
