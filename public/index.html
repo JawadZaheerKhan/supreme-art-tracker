@@ -15697,7 +15697,32 @@ function renderStockSummary() {
   }).join('');
   const scopeLabel = (isAll ? 'All paper types' : esc(paperType)) + (stockSummaryState.offcutOnly ? ' · Offcut items only' : '');
   const unitLabel = isAll ? 'units vary by row' : `units: ${esc(packetUnitLabel(paperType).toLowerCase())}`;
-  el.innerHTML = `
+  // Safeguard (owner, 2026-10-29): each paper's balance must equal the sum of
+  // ALL its movements (archived ones too - the Summary counts them). A paper
+  // that doesn't add up is listed in red, so a gap like the July / August
+  // deletes (record erased, balance kept) can never sit there unnoticed.
+  const ledgerSum = new Map();
+  for (const t of stockSummaryState.txs || []) ledgerSum.set(t.item_id, (ledgerSum.get(t.item_id) || 0) + (Number(t.change) || 0));
+  const mismatches = (stockSummaryState.items || []).filter(it => !it.deleted_at)
+    .map(it => ({ it, bal: Number(it.current_balance) || 0, sum: ledgerSum.get(it.id) || 0 }))
+    .filter(m => Math.abs(m.bal - m.sum) > 0.5);
+  const mismatchHtml = mismatches.length ? `
+    <div style="margin:0 0 12px;padding:10px 12px;background:#fef2f2;border:1px solid #dc2626;border-radius:6px;font-size:12px;">
+      <div style="font-weight:700;color:#991b1b;margin-bottom:4px;">&#9888; ${mismatches.length} paper${mismatches.length === 1 ? ' does' : 's do'} not add up - the balance and the stock movements disagree</div>
+      <div style="color:#7f1d1d;margin-bottom:8px;">This report adds up the movements; History starts from the balance. Until this is sorted out, the two will show different numbers for these papers.</div>
+      <table style="width:100%;font-size:12px;border-collapse:collapse;">
+        <tr style="background:#fee2e2;"><th style="text-align:left;padding:4px 8px;">Paper</th><th style="text-align:left;padding:4px 8px;">Size / GSM</th><th style="text-align:left;padding:4px 8px;">Brand</th><th style="text-align:right;padding:4px 8px;">Balance</th><th style="text-align:right;padding:4px 8px;">Movements add up to</th><th style="text-align:right;padding:4px 8px;">Difference</th></tr>
+        ${mismatches.map(m => { const ps = packetSize(m.it.paper_type); return `<tr>
+          <td style="padding:4px 8px;">${esc(m.it.paper_type || '—')}${m.it.is_offcut ? ' (offcut)' : ''}</td>
+          <td style="padding:4px 8px;">${esc(m.it.size || '—')} / ${esc(m.it.gsm || '—')}</td>
+          <td style="padding:4px 8px;">${esc(m.it.brand || '—')}</td>
+          <td style="padding:4px 8px;text-align:right;">${fmtPkts(m.bal / ps, { keepZero: true })}</td>
+          <td style="padding:4px 8px;text-align:right;">${fmtPkts(m.sum / ps, { keepZero: true })}</td>
+          <td style="padding:4px 8px;text-align:right;font-weight:700;color:#991b1b;">${m.bal - m.sum > 0 ? '+' : ''}${fmtPkts((m.bal - m.sum) / ps)}</td>
+        </tr>`; }).join('')}
+      </table>
+    </div>` : '';
+  el.innerHTML = mismatchHtml + `
     <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">${scopeLabel} · ${esc(fmtDMY(stockSummaryState.from))} to ${esc(fmtDMY(stockSummaryState.to))} · ${rows.length} item${rows.length===1?'':'s'} · ${unitLabel}${asOfPast ? ' · <b>' + esc(summaryAsOfNote(asOfPast)) + '</b>' : ''}</div>
     <div class="report-scroll-wrap">
     <table class="ledger-table" style="font-size:12px;min-width:max-content;">
