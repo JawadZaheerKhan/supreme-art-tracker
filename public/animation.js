@@ -708,8 +708,7 @@
     const small = Math.min(host.clientWidth, window.innerWidth) < 700;
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, small ? 1.75 : 2));
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.enabled = false;   // no shadows - lighter on the app (owner, 2026-10-29)
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     host.appendChild(renderer.domElement);
 
@@ -722,7 +721,7 @@
     scene.add(new THREE.HemisphereLight(0xffffff, 0xc7d2e0, 2.1));
     const sun = new THREE.DirectionalLight(0xffffff, 2.3);
     sun.position.set(-80, 95, 65); sun.target.position.set(-40, 0, 10); scene.add(sun.target);
-    sun.castShadow = true;
+    sun.castShadow = false;
     sun.shadow.mapSize.set(small ? 1024 : 2048, small ? 1024 : 2048);
     Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 85, bottom: -85, near: 10, far: 260 });
     sun.shadow.bias = -0.0005;
@@ -3225,9 +3224,61 @@
     if (!reduceMotion) for (const s of todaysShipments(jobs).slice(0, 3)) enqueueDeparture(s.job, s.cartons, null);
     resize(); setView('overview', true);
 
+    // ── Fewer things to draw (owner, 2026-10-29) ──
+    // Every mesh that never moves is merged into one per material per group, so
+    // the screen draws a few hundred pieces instead of ~2,900 each frame.
+    const mergeStats = { before: 0, after: 0, merged: 0 };
+    (() => {
+      [0, 1, 2].forEach(f => navOf(f));   // the walk maps read walls / machines one by one: before they merge
+      scene.updateMatrixWorld(true);
+      // What moves: run every animation at a few moments and see what changed.
+      const state = o => [o.position.x, o.position.y, o.position.z, o.quaternion.x, o.quaternion.y, o.quaternion.z, o.quaternion.w, o.scale.x, o.scale.y, o.scale.z, o.visible, o.material];
+      const snap = new Map(); scene.traverse(o => snap.set(o, state(o)));
+      for (const t of [0.37, 1.93, 4.21, 7.77, 13.1]) { for (const f of animated) f(0.016, t); for (const f of liftAnims) f(t); }
+      const moving = new Set();
+      scene.traverse(o => { const a = snap.get(o), b = state(o); if (a && a.some((v, i) => v !== b[i])) moving.add(o); });
+      const skip = new Set([palletRoot, walkRoot, newRoot, stockRoot, stockCrate, loader2, liftCar, boomPivot, ...people, ...lifters.map(L => L.g), ...standby.map(h => h.g), ...wanderers.map(w => w.f), ...trucks.map(t => t.g), ...moverPool, ...moving]);
+      const roots = new Set([...crews.map(c => c.g), ...floorGroups, ...sharedParts.map(sp => sp.g), ...towerGroups.map(t => t.g), frame, facade, scene]);
+      const groups = new Map();
+      scene.traverse(o => { if (o.isMesh) mergeStats.before++; });
+      scene.traverse(o => {
+        if (!o.isMesh || o.isInstancedMesh || Array.isArray(o.material) || !o.geometry || !o.geometry.attributes.position) return;
+        if (o.material.transparent || o.userData.jobId != null || o.userData.stockBay != null || o.userData.noMerge) return;
+        let r = null;
+        for (let a = o; a; a = a.parent) { if (skip.has(a)) return; if (!r && a !== o && roots.has(a)) r = a; }
+        if (!r) return;
+        const key = r.uuid + '|' + o.material.uuid + '|' + o.renderOrder + '|' + (o.geometry.attributes.uv ? 1 : 0);
+        if (!groups.has(key)) groups.set(key, { r, mat: o.material, order: o.renderOrder, list: [] });
+        groups.get(key).list.push(o);
+      });
+      const inv = new THREE.Matrix4(), rel = new THREE.Matrix4();
+      for (const { r, mat, order, list } of groups.values()) {
+        if (list.length < 2) continue;
+        inv.copy(r.matrixWorld).invert();
+        const parts = list.map(m => { const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone(); rel.multiplyMatrices(inv, m.matrixWorld); g.applyMatrix4(rel); return g; });
+        const total = parts.reduce((a, g) => a + g.attributes.position.count, 0);
+        const pos = new Float32Array(total * 3), nor = new Float32Array(total * 3), uv = parts.every(g => g.attributes.uv) ? new Float32Array(total * 2) : null;
+        let k = 0;
+        for (const g of parts) {
+          pos.set(g.attributes.position.array, k * 3);
+          if (g.attributes.normal) nor.set(g.attributes.normal.array, k * 3);
+          if (uv) uv.set(g.attributes.uv.array, k * 2);
+          k += g.attributes.position.count; g.dispose();
+        }
+        const mg = new THREE.BufferGeometry();
+        mg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        mg.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+        if (uv) mg.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        mg.computeBoundingSphere(); geos.add(mg);
+        const mm = new THREE.Mesh(mg, mat); mm.renderOrder = order; mm.matrixAutoUpdate = false; r.add(mm);
+        for (const m of list) m.parent.remove(m);
+        mergeStats.merged += list.length;
+      }
+      scene.traverse(o => { if (o.isMesh) mergeStats.after++; });
+    })();
     return {
       company: opts.company,
-      _debug: { cam, want, camera, VIEWS, setView, scene },
+      _debug: { cam, want, camera, VIEWS, setView, scene, mergeStats },
       update(nextJobs) { applyJobs(nextJobs, false); },
       setStock(items) { if (!forClient) applyStock(items || []); },
       setOperators(list) { if (!forClient) applyOperators(list || []); },
