@@ -6281,7 +6281,9 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     await logAudit(sql, req, {
       action: 'job.update', entityType: 'job', entityId: job.id,
       summary: `Edited Job E-${job.id}: ${job.name}${allChanges.length ? ' — ' + allChanges.join('; ') : ''}`,
-      metadata: { changes: allChanges, revert: { reversible: !revBlock, why: revBlock, cols: revCols, particulars: revParts } },
+      metadata: { changes: allChanges, revert: { reversible: !revBlock, why: revBlock, cols: revCols, particulars: revParts },
+        // The main paper before / after - Pending Stock's job lookup shows it (owner, 2026-10-29).
+        paper_item: paperItemChanged ? { before: oldItemId, after: newItemId } : undefined },
     });
     // Quantity of Packets (or the 2nd paper's share) changed on a job whose
     // paper already went out, same paper: if more went out than it now needs,
@@ -13267,6 +13269,57 @@ app.get('/api/station-notes/for-stage/:stageIndex', requireStationUser, async (r
 });
 
 // All notes for one job — the office History modal. Any signed-in user.
+// Paper / packets edits of a few jobs, for Pending Stock's job lookup (owner,
+// 2026-10-29): the main paper, Quantity of Packets, and the 2nd / 3rd paper
+// (item or packets), from the job's edit history - only those, oldest first.
+// Edits from before the main paper was recorded fall back to the Size/GSM
+// and packets lines of the edit.
+app.get('/api/jobs/paper-trail', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const ids = [...new Set(String(req.query.ids || '').split(',').map(n => parseInt(n, 10)).filter(n => n > 0))].slice(0, 50);
+    const out = {};
+    if (!ids.length) return res.json(out);
+    const rows = await sql`
+      SELECT entity_id, action, user_email, created_at, metadata FROM audit_log
+       WHERE entity_type = 'job' AND entity_id = ANY(${ids})
+         AND action IN ('job.update', 'job.paper_change_reissue')
+       ORDER BY id ASC`;
+    const str = v => String(v ?? '').trim();
+    const extra = v => (v && typeof v === 'object' && v.inventory_item_id) ? { item: v.inventory_item_id, packets: str(v.packets) } : null;
+    const sameExtra = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    for (const r of rows) {
+      const m = r.metadata || {};
+      const items = [];
+      if (r.action === 'job.paper_change_reissue') items.push({ what: 'reissue' });
+      else {
+        const parts = (m.revert && m.revert.particulars) || {};
+        const cols = (m.revert && m.revert.cols) || {};
+        if (m.paper_item) items.push({ what: 'paper', before: m.paper_item.before, after: m.paper_item.after });
+        else if (cols.size) items.push({ what: 'size', before: str(cols.size.before), after: str(cols.size.after) });
+        if (parts.quantity_of_packets && str(parts.quantity_of_packets.before) !== str(parts.quantity_of_packets.after)) {
+          items.push({ what: 'packets', before: str(parts.quantity_of_packets.before), after: str(parts.quantity_of_packets.after) });
+        }
+        for (const [k, what] of [['secondary_paper', '2nd'], ['third_paper', '3rd']]) {
+          if (!parts[k]) continue;
+          const b = extra(parts[k].before), a = extra(parts[k].after);
+          if (!sameExtra(b, a)) items.push({ what, before: b, after: a });
+        }
+        // Edits from before the Reverse record: the plain-words lines.
+        if (!m.revert) for (const c of (Array.isArray(m.changes) ? m.changes : [])) {
+          if (/^(Size\/GSM|Quantity of Packets)\b/i.test(String(c))) items.push({ what: 'text', text: String(c) });
+        }
+      }
+      if (!items.length) continue;
+      (out[r.entity_id] = out[r.entity_id] || []).push({ at: r.created_at, by: r.user_email || '', items });
+    }
+    res.json(out);
+  } catch (err) {
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/jobs/:id/station-notes', requireAuth, async (req, res) => {
   try {
     await dbReady;
