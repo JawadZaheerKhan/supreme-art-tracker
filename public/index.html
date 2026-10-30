@@ -3575,6 +3575,11 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <div class="report-card-title">Sale Report</div>
         <div class="report-card-desc">Every delivered job with full invoicing detail — PO/Batch/E-FBR/Invoice No., quantities, paper/machine/coatings, Rate, Sale Tax %, and Company/Destination/NTN. With totals row, print + Excel export.</div>
       </button>
+      <button class="report-card" data-rpt="rpt_cost_report" onclick="openCostReportPage()">
+        <div class="report-card-icon">&#129534;</div>
+        <div class="report-card-title">Cost Report</div>
+        <div class="report-card-desc">Every job's board, coating, printing, die cutting, pasting and CTP cost, priced from the rates saved in Cost Settings.</div>
+      </button>
       <button class="report-card sm-hide" data-rpt="rpt_jobs_report|rpt_mil_products|rpt_production_report" onclick="openJobsReportPage()">
         <div class="report-card-icon">&#128196;</div>
         <div class="report-card-title">Jobs Report</div>
@@ -3701,6 +3706,22 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <div id="rt-party-ledger" class="rt-pane" style="display:none;"></div>
         <div id="rt-aging-report" class="rt-pane" style="display:none;"></div>
         <div id="rt-chart-accounts" class="rt-pane" style="display:none;"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Cost Report group. -->
+  <div id="cost-report-group" class="reports-group" style="display:none;">
+    <div class="reports-layout">
+      <aside class="reports-sidebar">
+        <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <div class="rsb-section">Cost Report</div>
+        <button class="rsb-item active" data-rt="cost-report" onclick="setReportsTab('cost-report')">
+          <span class="rsb-icon">&#129534;</span> Cost Report
+        </button>
+      </aside>
+      <main class="reports-content">
+        <div id="rt-cost-report" class="rt-pane"></div>
       </main>
     </div>
   </div>
@@ -24003,11 +24024,12 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'mil-products', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'trash-papers', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['cost-report', 'sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'mil-products', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'trash-papers', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
   });
+  if (name === 'cost-report')     openCostReport();
   if (name === 'sale-report')     openSaleReport();
   if (name === 'party-ledger')    openPartyLedger();
   if (name === 'aging-report')    openAgingReport();
@@ -24032,6 +24054,243 @@ function setReportsTab(name) {
   if (name === 'dp-breaking')     loadDailyProductionBreaking();
   if (name === 'dp-pasting')      loadDailyProductionPasting();
   if (name === 'dp-sorting')      loadDailyProductionSorting();
+}
+
+// ── Cost Report (owner, 2026-10-30) ──────────────────────────
+// Every job's cost, priced from one saved list of rates (Cost Settings), so a
+// rate changed there re-prices every job. Rate + Per, the way a vendor quotes
+// it: Rs 3000 per 100 kg = Rs 30 / kg.
+//   Board    - per kg / sheet / packet, per paper + size + GSM, on the paper
+//              actually issued (the job card's paper until something is issued)
+//   Coatings - per sheet / box, per coating
+//   Printing - per sheet / box, per machine
+//   Die Cutting, Pasting - per sheet / box (not on leaflets; no Pasting on labels)
+//   CTP      - per plate, on the job card's Plates ("4+1" = 5)
+// Sheets = the job card's Sheets Qty; boxes = sheets x ups.
+const costReportState = { q: '', client: '', dateRange: 'this-month', dfrom: '', dto: '', onlyMissing: false };
+let _costRates = null;   // Map: key -> { key, category, label, rate, per_qty, unit }
+const COST_NUM = v => { const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) && n > 0 ? n : 0; };
+const COST_MONEY = n => Math.round(n).toLocaleString('en-PK');
+function costPaperKey(type, size, gsm) {
+  return 'paper:' + String(type || '').trim().toLowerCase() + '|' + String(size || '').trim().toLowerCase().replace(/×/g, 'x').replace(/\s+/g, '') + '|' + String(gsm == null ? '' : gsm).trim();
+}
+function costEffRate(e) { return e && Number(e.rate) > 0 ? Number(e.rate) / (Number(e.per_qty) || 1) : 0; }
+// The rate for a paper: its own row; an offcut (or a size with no row) uses the
+// same paper + GSM's rate, since a kg of that board costs the same.
+function costPaperEntry(type, size, gsm) {
+  const own = _costRates.get(costPaperKey(type, size, gsm));
+  if (own && Number(own.rate) > 0) return own;
+  const t = String(type || '').trim().toLowerCase(), g = String(gsm == null ? '' : gsm).trim();
+  for (const e of _costRates.values()) {
+    if (e.category !== 'paper' || !(Number(e.rate) > 0)) continue;
+    const [pt, , pg] = e.key.slice(6).split('|');
+    if (pt === t && pg === g) return e;
+  }
+  return null;
+}
+// The paper a job used: what was issued, else what its job card asks for.
+function costJobPapers(j) {
+  const P = j.particulars || {};
+  if (P.paper_waived) return [];
+  const itemOf = id => (id ? inventoryAll.find(i => i.id === id) : null) || null;
+  const issued = (Array.isArray(j.issued_items) ? j.issued_items : []).filter(x => x && parseFloat(x.sheets) > 0);
+  if (issued.length) return issued.map(x => ({ item: itemOf(x.item_id), label: x.paper || 'Paper', sheets: parseFloat(x.sheets) }));
+  const out = [];
+  let extraPackets = 0;
+  for (const k of ['secondary_paper', 'third_paper']) {
+    const sec = P[k], packets = sec && parseFloat(sec.packets);
+    if (!sec || !sec.inventory_item_id || !(packets > 0)) continue;
+    extraPackets += packets;
+    const it = itemOf(sec.inventory_item_id);
+    out.push({ item: it, label: 'Paper', sheets: packets * (it ? packetSize(it.paper_type) : 100) });
+  }
+  const mainPackets = (parseFloat(P.quantity_of_packets) || 0) - extraPackets;
+  if (mainPackets > 0) {
+    const it = itemOf(j.inventory_item_id);
+    out.unshift({ item: it, label: j.paper || 'Paper', sheets: mainPackets * packetSize(it ? it.paper_type : (j.paper || '')) });
+  }
+  return out;
+}
+function jobCost(j) {
+  const P = j.particulars || {};
+  const missing = [];
+  const lineFor = (entry, sheets, boxes, label) => {
+    if (!costEffRate(entry)) { missing.push(label); return 0; }
+    return costEffRate(entry) * (entry.unit === 'box' ? boxes : sheets);
+  };
+  // Board.
+  let board = 0, rawSheets = 0;
+  for (const p of costJobPapers(j)) {
+    rawSheets += p.sheets;
+    const type = p.item ? p.item.paper_type : (j.paper_resolved || j.paper || '');
+    const m = p.item ? null : /^\s*([\d.]+\s*[x×]\s*[\d.]+)\s*(?:\/\s*(\d+))?/i.exec(String(j.size || ''));
+    const size = p.item ? p.item.size : (m ? m[1] : '');
+    const gsm = p.item ? p.item.gsm : (m ? m[2] : '');
+    const entry = costPaperEntry(type, size, gsm);
+    if (!entry) { missing.push('Board (' + (p.item ? invPaperText(p.item) : p.label) + ')'); continue; }
+    const packets = p.sheets / (packetSize(type) || 100);
+    if (entry.unit === 'sheet') board += costEffRate(entry) * p.sheets;
+    else if (entry.unit === 'packet') board += costEffRate(entry) * packets;
+    else {
+      const kgPerPacket = packWeightKg(type, size, gsm);
+      if (kgPerPacket === null) { missing.push('Board size / GSM'); continue; }
+      board += costEffRate(entry) * kgPerPacket * packets;
+    }
+  }
+  const ups = COST_NUM(j.ups);
+  const sheets = COST_NUM(j.sheets) || rawSheets * jobCutPieces(j);
+  const boxes = sheets * ups;
+  // Coatings.
+  const coating = splitCoatings(j.coatings).reduce((sum, name) =>
+    sum + lineFor(_costRates.get('coating:' + name.toLowerCase()), sheets, boxes, name), 0);
+  // Printing: the machine that printed it, else the planned one.
+  const machine = (printedOnMachines(j)[0] || j.machine || '').trim();
+  const printing = machine ? lineFor(_costRates.get('printing:' + machine.toLowerCase()), sheets, boxes, 'Printing (' + machine + ')') : 0;
+  if (!machine) missing.push('Printing (no machine)');
+  // Die Cutting + Pasting.
+  const tab = saleReportTabFor(j);
+  const die = tab === 'leaflets' ? 0 : lineFor(_costRates.get('diecutting:standard'), sheets, boxes, 'Die Cutting');
+  const pasting = (tab === 'leaflets' || tab === 'labels') ? 0 : lineFor(_costRates.get('pasting:standard'), sheets, boxes, 'Pasting');
+  // CTP.
+  const plates = String((P.plates && P.plates.quantity) || '').split(/[^0-9.]+/).reduce((a, x) => a + (parseFloat(x) || 0), 0);
+  const ctp = plates ? lineFor(_costRates.get('plate:standard'), plates, plates, 'CTP') : 0;
+  const total = board + coating + printing + die + pasting + ctp;
+  return { board, coating, printing, die, pasting, ctp, total, boxes, sheets, perBox: boxes > 0 ? total / boxes : 0, missing };
+}
+function openCostReportPage() {
+  openReportsGroup('cost-report-group');
+  setReportsTab('cost-report');
+}
+async function loadCostRates() {
+  const rows = await api('GET', '/api/cost-settings');
+  _costRates = new Map((rows || []).map(r => [r.key, r]));
+}
+async function openCostReport() {
+  const pane = document.getElementById('rt-cost-report');
+  if (!pane) return;
+  pane.innerHTML = '<div class="empty" style="padding:24px;text-align:center;color:var(--text2);">Loading...</div>';
+  try { await loadCostRates(); } catch (e) { pane.innerHTML = `<div class="empty" style="padding:24px;text-align:center;color:#A32D2D;">${esc(e.message)}</div>`; return; }
+  const s = costReportState;
+  pane.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+      <h2 style="margin:0;font-size:18px;">Cost Report</h2>
+      <button class="btn btn-primary" style="margin-left:auto;" data-acc="rpt_cost_settings" data-acc-need="view" onclick="openCostSettings()">&#9881;&#65039; Cost Settings</button>
+    </div>
+    <div class="toolbar" style="flex-wrap:wrap;">
+      <div class="search-wrap"><input type="text" id="cr-q" placeholder="Search job no. or name..." value="${esc(s.q)}" oninput="costReportState.q=this.value;renderCostReportTable()"><span class="search-icon">&#128269;</span></div>
+      <select class="filter" onchange="costReportState.client=this.value;renderCostReportTable()"><option value="">All companies</option>${clientCompanyOptions(s.client)}</select>
+      ${dateFilterToolbarHtml('cr', s.dateRange, s.dfrom, s.dto, 'costSetDatePreset', 'costSetDateCustom', true)}
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;"><input type="checkbox" ${s.onlyMissing ? 'checked' : ''} onchange="costReportState.onlyMissing=this.checked;renderCostReportTable()"> Rates missing only</label>
+    </div>
+    <div id="cr-table"></div>`;
+  renderCostReportTable();
+}
+function costSetDatePreset(v) { costReportState.dateRange = v; openCostReport(); }
+function costSetDateCustom() {
+  costReportState.dfrom = (document.getElementById('cr-dfrom') || {}).value || '';
+  costReportState.dto = (document.getElementById('cr-dto') || {}).value || '';
+  renderCostReportTable();
+}
+function renderCostReportTable() {
+  const el = document.getElementById('cr-table');
+  if (!el || !_costRates) return;
+  const s = costReportState;
+  const q = String(s.q || '').trim(), idQ = q.toLowerCase().replace(/^e[-\s]?/, '');
+  const bounds = resolveDateFilterBounds(s.dateRange, s.dfrom, s.dto);
+  const rows = [];
+  for (const j of jobs) {
+    if (s.client && String(j.client || '').trim().toLowerCase() !== String(s.client).trim().toLowerCase()) continue;
+    if (q && !(/^\d+$/.test(idQ) && String(j.id).includes(idQ)) && !searchMatch(j.name, q)) continue;
+    if (bounds) {
+      const t = new Date(j.dateissued || j.created_at).getTime();
+      if (!Number.isFinite(t) || (bounds.from !== null && t < bounds.from) || (bounds.to !== null && t > bounds.to)) continue;
+    }
+    const c = jobCost(j);
+    if (s.onlyMissing && !c.missing.length) continue;
+    rows.push({ j, c });
+  }
+  rows.sort((a, b) => b.j.id - a.j.id);
+  const sum = k => rows.reduce((a, r) => a + r.c[k], 0);
+  const cell = n => `<td style="text-align:right;">${n ? COST_MONEY(n) : '—'}</td>`;
+  el.innerHTML = !rows.length
+    ? '<div class="empty" style="padding:24px;text-align:center;color:var(--text2);">No jobs match.</div>'
+    : `<div style="overflow-x:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;" class="cost-report-table">
+        <thead><tr style="background:var(--bg2);text-align:right;">
+          <th style="text-align:left;padding:8px;">Job</th><th style="text-align:left;">Company</th><th style="padding:8px;">Sheets</th><th>Boxes</th>
+          <th>Board</th><th>Coating</th><th>Printing</th><th>Die Cutting</th><th>Pasting</th><th>CTP</th><th>Total Cost</th><th style="padding-right:8px;">Cost / Box</th>
+        </tr></thead>
+        <tbody>${rows.map(({ j, c }) => `<tr style="border-top:1px solid var(--border);">
+          <td style="padding:8px;"><b>#${j.id}</b> ${esc(j.name)}${c.missing.length ? `<div style="color:#dc2626;font-size:11px;font-weight:600;">No rate: ${esc([...new Set(c.missing)].join(', '))}</div>` : ''}</td>
+          <td>${esc(j.client || '')}</td>
+          ${cell(c.sheets)}${cell(c.boxes)}${cell(c.board)}${cell(c.coating)}${cell(c.printing)}${cell(c.die)}${cell(c.pasting)}${cell(c.ctp)}
+          <td style="text-align:right;font-weight:700;">${c.total ? COST_MONEY(c.total) : '—'}</td>
+          <td style="text-align:right;padding-right:8px;">${c.perBox ? c.perBox.toFixed(2) : '—'}</td>
+        </tr>`).join('')}</tbody>
+        <tfoot><tr style="border-top:2px solid var(--border2);font-weight:700;background:var(--bg2);">
+          <td style="padding:8px;" colspan="2">${rows.length} job${rows.length === 1 ? '' : 's'}</td>
+          ${cell(sum('sheets'))}${cell(sum('boxes'))}${cell(sum('board'))}${cell(sum('coating'))}${cell(sum('printing'))}${cell(sum('die'))}${cell(sum('pasting'))}${cell(sum('ctp'))}${cell(sum('total'))}
+          <td style="text-align:right;padding-right:8px;">${sum('boxes') ? (sum('total') / sum('boxes')).toFixed(2) : '—'}</td>
+        </tr></tfoot>
+      </table></div>`;
+}
+// Cost Settings: one row per rate, saved the moment it changes.
+function costSettingRowHtml(cat, key, label, unit, units, canEdit) {
+  const e = _costRates.get(key) || {};
+  const dis = canEdit ? '' : ' disabled';
+  const opts = units.map(u => `<option value="${u}"${(e.unit || unit) === u ? ' selected' : ''}>${u}</option>`).join('');
+  return `<tr class="cost-set-row" data-key="${esc(key)}" data-cat="${esc(cat)}" data-label="${esc(label)}" style="border-top:1px solid var(--border);">
+    <td style="padding:6px 8px;">${esc(label)}</td>
+    <td style="text-align:right;"><input type="number" min="0" step="any" class="cs-rate" value="${e.rate != null && Number(e.rate) > 0 ? e.rate : ''}" placeholder="0" style="width:90px;text-align:right;" onchange="costSettingChanged(this)"${dis}></td>
+    <td style="text-align:center;white-space:nowrap;">per <input type="number" min="0.0001" step="any" class="cs-per" value="${e.per_qty || 1}" style="width:64px;text-align:right;" onchange="costSettingChanged(this)"${dis}></td>
+    <td style="padding-right:8px;">${units.length > 1 ? `<select class="cs-unit" onchange="costSettingChanged(this)"${dis}>${opts}</select>` : `<span class="cs-unit-fixed">${esc(units[0])}</span>`}</td>
+  </tr>`;
+}
+function openCostSettings() {
+  const canEdit = hasPerm('rpt_cost_settings', 'yes');
+  const seen = new Map();
+  for (const it of inventoryAll) {
+    if (it.deleted_at || it.is_offcut || !it.paper_type) continue;
+    const key = costPaperKey(it.paper_type, it.size, it.gsm);
+    if (!seen.has(key)) seen.set(key, `${it.paper_type}${it.size ? ' · ' + it.size : ''}${it.gsm ? ' · ' + it.gsm + 'gsm' : ''}`);
+  }
+  // A paper removed from Inventory keeps its saved rate on the list.
+  for (const e of _costRates.values()) if (e.category === 'paper' && !seen.has(e.key)) seen.set(e.key, e.label);
+  const papers = [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const coatings = [...new Set([...PRINT_COATINGS_ROW1, ...PRINT_COATINGS_ROW2, ...jobs.flatMap(j => splitCoatings(j.coatings))])];
+  const machines = [...new Set([...(printingMachines && printingMachines.length ? printingMachines : MACHINES), ...jobs.map(j => String(j.machine || '').trim()).filter(Boolean)])];
+  const table = rows => `<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:6px;"><tbody>${rows}</tbody></table>`;
+  const head = t => `<h3 style="margin:14px 0 6px;font-size:14px;">${t}</h3>`;
+  openModal(`<div class="modal" style="max-width:640px;" onclick="event.stopPropagation()">
+    <h2 style="margin-bottom:4px;">Cost Settings</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Enter a rate the way your vendor quotes it, e.g. Rs 3000 per 100 kg. It saves by itself and applies to every job.</div>
+    ${head('Board / Paper')}
+    <input type="text" placeholder="Search paper..." oninput="costSettingsFilter(this)" style="width:100%;margin-bottom:6px;">
+    <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">${table(papers.map(([k, l]) => costSettingRowHtml('paper', k, l, 'kg', ['kg', 'sheet', 'packet'], canEdit)).join(''))}</div>
+    ${head('Coatings')}${table(coatings.map(n => costSettingRowHtml('coating', 'coating:' + n.toLowerCase(), n, 'sheet', ['sheet', 'box'], canEdit)).join(''))}
+    ${head('Printing (per machine)')}${table(machines.map(m => costSettingRowHtml('printing', 'printing:' + m.toLowerCase(), m, 'sheet', ['sheet', 'box'], canEdit)).join(''))}
+    ${head('Die Cutting, Pasting, CTP')}${table(costSettingRowHtml('diecutting', 'diecutting:standard', 'Die Cutting', 'sheet', ['sheet', 'box'], canEdit) + costSettingRowHtml('pasting', 'pasting:standard', 'Pasting', 'sheet', ['sheet', 'box'], canEdit) + costSettingRowHtml('plate', 'plate:standard', 'CTP Plate', 'plate', ['plate'], canEdit))}
+    <div class="modal-actions"><button class="btn" onclick="closeModal();openCostReport();">Close</button></div>
+  </div>`);
+}
+function costSettingsFilter(inp) {
+  const q = inp.value.trim();
+  inp.parentElement.querySelectorAll('.cost-set-row[data-cat="paper"]').forEach(r => { r.style.display = !q || searchMatch(r.dataset.label, q) ? '' : 'none'; });
+}
+async function costSettingChanged(el) {
+  const row = el.closest('.cost-set-row');
+  const unitEl = row.querySelector('.cs-unit');
+  const body = {
+    category: row.dataset.cat, label: row.dataset.label,
+    rate: parseFloat(row.querySelector('.cs-rate').value) || 0,
+    per_qty: parseFloat(row.querySelector('.cs-per').value) || 1,
+    unit: unitEl ? unitEl.value : row.querySelector('.cs-unit-fixed').textContent,
+  };
+  try {
+    const saved = await api('PUT', '/api/cost-settings/' + encodeURIComponent(row.dataset.key), body);
+    _costRates.set(saved.key, saved);
+    notify('Rate saved');
+  } catch (e) { notify('Error: ' + e.message); }
 }
 
 // ── Stock In / Stock Out panes ───────────────────────────────
@@ -38817,6 +39076,8 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_party_ledger_entry',          type: 'button' },
   { key: 'rpt_chart_accounts',              type: 'tab' },
   { key: 'rpt_chart_accounts_edit',         type: 'button' },
+  { key: 'rpt_cost_report',                 type: 'tab' },
+  { key: 'rpt_cost_settings',               type: 'button' },
 ];
 // Products tab (Product Rate), merged in from the Finance app.
 const ACC_PRODUCTS_TAB_ROWS = [
