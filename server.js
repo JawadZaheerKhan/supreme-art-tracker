@@ -956,6 +956,7 @@ async function initDb() {
           sheet_cut: seedParts.sheet_cut || '1/1',
           artworks_matter_approval: seedParts.artworks_matter_approval || {},
           shade_card: seedParts.shade_card || {},
+          inside_leaflet: seedParts.inside_leaflet || {},
           plates: seedParts.plates || {},
           no_of_colors: seedParts.no_of_colors || {},
           special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
@@ -5757,7 +5758,7 @@ const JOB_DIFF_FIELDS = [
 // doesn't reduce to quantity/name/signature/details without losing meaning.
 const PARTICULARS_LABELS = {
   artworks_matter_approval: 'Artworks & Matter Approval',
-  shade_card: 'Shade Card', plates: 'Plates', no_of_colors: 'No. of Colors',
+  shade_card: 'Shade Card', inside_leaflet: 'Inside Leaflet', plates: 'Plates', no_of_colors: 'No. of Colors',
   printed_sheets_qty: 'Printed Sheets Qty', printed_waste_sheets: 'Printed Waste Sheets',
   coating_sheets_qty: 'Coating Sheets Qty', uv_waste_sheets: 'Coating Waste Sheets',
   die_cutting_sheets: 'Die Cutting Sheets', die_cutting_waste: 'Die Cutting Waste',
@@ -9939,6 +9940,7 @@ app.post('/api/stock-groups', requirePermission('job_btn_create_mil'), async (re
           sheet_cut: seedParts.sheet_cut || '1/1',
           artworks_matter_approval: seedParts.artworks_matter_approval || {},
           shade_card: seedParts.shade_card || {},
+          inside_leaflet: seedParts.inside_leaflet || {},
           plates: seedParts.plates || {},
           no_of_colors: seedParts.no_of_colors || {},
           special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
