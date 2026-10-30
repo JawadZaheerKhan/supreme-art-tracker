@@ -28410,6 +28410,7 @@ function ctpSetupRow(p) {
   const noColors  = p.no_of_colors || {};
   const ammaOn   = String(amma.quantity  || '').trim().toLowerCase() === 'yes';
   const scOn     = String(shade.quantity || '').trim().toLowerCase() === 'yes';
+  const leafletOn = String((p.inside_leaflet || {}).quantity || '').trim().toLowerCase() === 'yes';   // owner, 2026-10-30
   const platesQty = esc(plates.quantity   || '');
   const colorsQty = esc(noColors.quantity || '');
   const ctpName   = (plates.name || noColors.name || shade.name || amma.name || '').trim();
@@ -28419,7 +28420,7 @@ function ctpSetupRow(p) {
   return `
     <table class="jc-part jc-ctp-table">
       <colgroup>
-        <col style="width:28.57%"><col style="width:14.29%"><col style="width:14.29%"><col style="width:14.29%"><col style="width:28.57%">
+        <col style="width:25%"><col style="width:12%"><col style="width:12%"><col style="width:13%"><col style="width:13%"><col style="width:25%">
       </colgroup>
       <tr class="jc-ctp-row-tr">
         <td>
@@ -28432,6 +28433,12 @@ function ctpSetupRow(p) {
           <div class="jc-ctp-lbl">Shade Card</div>
           <label class="jc-ctp-check-only" for="p-ctp-shade">
             <input type="checkbox" id="p-ctp-shade" ${scOn ? 'checked' : ''}>
+          </label>
+        </td>
+        <td>
+          <div class="jc-ctp-lbl">Inside Leaflet</div>
+          <label class="jc-ctp-check-only" for="p-ctp-leaflet">
+            <input type="checkbox" id="p-ctp-leaflet" ${leafletOn ? 'checked' : ''}>
           </label>
         </td>
         <td>
@@ -31326,6 +31333,7 @@ async function saveGroupEdit(groupId) {
         sheet_cut:           collected.sheet_cut || '1/1',
         artworks_matter_approval: collected.artworks_matter_approval || {},
         shade_card:               collected.shade_card               || {},
+        inside_leaflet:           collected.inside_leaflet           || {},
         plates:                   collected.plates                   || {},
         no_of_colors:             collected.no_of_colors             || {},
         special_colors: Array.isArray(collected.special_colors) ? collected.special_colors : [],
@@ -31425,6 +31433,7 @@ function duplicateGroupIntoJob(groupId) {
       sheet_cut: seedParts.sheet_cut || '1/1',
       artworks_matter_approval: seedParts.artworks_matter_approval || {},
       shade_card: seedParts.shade_card || {},
+      inside_leaflet: seedParts.inside_leaflet || {},
       plates: seedParts.plates || {},
       no_of_colors: seedParts.no_of_colors || {},
       special_colors: Array.isArray(seedParts.special_colors) ? JSON.parse(JSON.stringify(seedParts.special_colors)) : [],
@@ -32208,14 +32217,17 @@ function collectParticulars() {
   };
   const ammaOn    = !!(document.getElementById('p-ctp-amma')  ||{}).checked;
   const scOn      = !!(document.getElementById('p-ctp-shade') ||{}).checked;
+  const leafletOn = !!(document.getElementById('p-ctp-leaflet')||{}).checked;
   const platesQty = (document.getElementById('p-ctp-plates')||{}).value?.trim() || '';
   const colorsQty = (document.getElementById('p-ctp-colors')||{}).value?.trim() || '';
   const ammaMerged   = mergeField('artworks_matter_approval', { quantity: ammaOn ? 'Yes' : '' });
   const shadeMerged  = mergeField('shade_card',               { quantity: scOn   ? 'Yes' : '' });
+  const leafletMerged = mergeField('inside_leaflet',          { quantity: leafletOn ? 'Yes' : '' });
   const platesMerged = mergeField('plates',                   { quantity: platesQty });
   const colorsMerged = mergeField('no_of_colors',             { quantity: colorsQty });
   if (Object.values(ammaMerged  ).some(v => v !== '' && v != null)) out.artworks_matter_approval = ammaMerged;
   if (Object.values(shadeMerged ).some(v => v !== '' && v != null)) out.shade_card               = shadeMerged;
+  if (Object.values(leafletMerged).some(v => v !== '' && v != null)) out.inside_leaflet          = leafletMerged;
   if (Object.values(platesMerged).some(v => v !== '' && v != null)) out.plates                   = platesMerged;
   if (Object.values(colorsMerged).some(v => v !== '' && v != null)) out.no_of_colors             = colorsMerged;
   out.cutting_size_gsm = normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value) || '';
@@ -33361,7 +33373,7 @@ function openDuplicateJob(id) {
   // like Printed Sheets, all the waste columns, Delivered Cartons Qty, and
   // free-text Comments) starts blank on the new job — those are filled in
   // afresh when the actual run happens.
-  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand', 'artworks_matter_approval', 'shade_card', 'plates', 'no_of_colors'];
+  const KEEP_PARTICULARS = ['cutting_size_gsm', 'quantity_of_packets', 'sheet_cut', 'paper_types', 'brand', 'artworks_matter_approval', 'shade_card', 'inside_leaflet', 'plates', 'no_of_colors'];
   const sp = source.particulars || {};
   const newParticulars = {};
   for (const k of KEEP_PARTICULARS) {
@@ -34914,6 +34926,7 @@ function buildPrintCard(j) {
   const p_col   = p.no_of_colors             || {};
   const ammaOn  = String(p_amma.quantity || '').trim().toLowerCase() === 'yes';
   const scOn    = String(p_sc.quantity   || '').trim().toLowerCase() === 'yes';
+  const leafletOn = String((p.inside_leaflet || {}).quantity || '').trim().toLowerCase() === 'yes';   // owner, 2026-10-30
   const platesVal = p_plt.quantity || p_plt.details || '';
   const colorsVal = p_col.quantity || p_col.details || '';
   // Prefer the station-stamped name from any of the CTP fields; artworks
@@ -34924,9 +34937,10 @@ function buildPrintCard(j) {
     <tr class="pc-ctp-row">
       <td colspan="2"><div class="pc-label"><span style="display:inline-flex;align-items:center;gap:6px;">${tickBox(ammaOn)}Artworks &amp; Matter Approval</span></div></td>
       <td colspan="1"><div class="pc-label">Shade Card</div><div class="pc-value" style="text-align:center;">${tickBox(scOn)}</div></td>
+      <td colspan="1"><div class="pc-label" style="font-size:8pt;">Inside Leaflet</div><div class="pc-value" style="text-align:center;">${tickBox(leafletOn)}</div></td>
       <td colspan="1"><div class="pc-label">Plates</div><div class="pc-value">${v(platesVal)}</div></td>
       <td colspan="1"><div class="pc-label">Colors</div><div class="pc-value">${v(colorsVal)}</div></td>
-      <td colspan="2"><div class="pc-label">Name</div><div class="pc-value">${v(ctpName) || '&nbsp;'}</div></td>
+      <td colspan="1"><div class="pc-label">Name</div><div class="pc-value">${v(ctpName) || '&nbsp;'}</div></td>
     </tr>`;
 
   // Rows 8–12 — Special Colors block. Each special color is one column of
@@ -36048,6 +36062,7 @@ const STATION_STAGE_FIELDS = {
   // straight from particulars, same as any other stage.
   0: [
     { key: 'shade_card',   label: 'Shade Card', type: 'checkbox' },
+    { key: 'inside_leaflet', label: 'Inside Leaflet', type: 'checkbox' },
     { key: 'no_of_colors', label: 'No. of Colors' },
     { key: 'plates',       label: 'Plates' },
   ],
