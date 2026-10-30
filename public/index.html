@@ -28403,6 +28403,15 @@ const CTP_PARTICULARS_KEYS = new Set([
 // gets stamped on plates / no_of_colors / shade_card when they save at
 // the terminal), so the modal just displays it read-only rather than
 // letting a data-entry mistake override it.
+// The CTP operator's name for the job card: who signed the CTP fields, else an
+// older row's typed name - never the machine "CTP" (owner, 2026-10-30).
+function ctpPersonName(p) {
+  const rows = ['plates', 'no_of_colors', 'shade_card', 'inside_leaflet', 'artworks_matter_approval'].map(k => (p && p[k]) || {});
+  const clean = x => { const t = String(x || '').trim(); return t.toLowerCase() === 'ctp' ? '' : t; };
+  for (const r of rows) { const t = clean(r.signature); if (t) return t; }
+  for (const r of rows) { const t = clean(r.name); if (t) return t; }
+  return '';
+}
 function ctpSetupRow(p) {
   const amma      = p.artworks_matter_approval || {};
   const shade     = p.shade_card               || {};
@@ -28413,7 +28422,7 @@ function ctpSetupRow(p) {
   const leafletOn = String((p.inside_leaflet || {}).quantity || '').trim().toLowerCase() === 'yes';   // owner, 2026-10-30
   const platesQty = esc(plates.quantity   || '');
   const colorsQty = esc(noColors.quantity || '');
-  const ctpName   = (plates.name || noColors.name || shade.name || amma.name || '').trim();
+  const ctpName   = ctpPersonName(p);
   const nameCell  = ctpName
     ? `<div class="jc-ctp-name-display">${esc(ctpName)}</div>`
     : `<div class="jc-ctp-name-display jc-ctp-name-empty">auto from CTP</div>`;
@@ -34931,7 +34940,7 @@ function buildPrintCard(j) {
   const colorsVal = p_col.quantity || p_col.details || '';
   // Prefer the station-stamped name from any of the CTP fields; artworks
   // is a fallback for the pre-station "typed at desk" case.
-  const ctpName = (p_plt.name || p_col.name || p_sc.name || p_amma.name || '').trim();
+  const ctpName = ctpPersonName(p);
   const tickBox = on => `<span class="pc-coat-box${on ? ' pc-coat-on' : ''}">${on ? '✓' : ''}</span>`;
   const ctpRow = `
     <tr class="pc-ctp-row">
@@ -34940,7 +34949,7 @@ function buildPrintCard(j) {
       <td colspan="1"><div class="pc-label" style="font-size:8pt;">Inside Leaflet</div><div class="pc-value" style="text-align:center;">${tickBox(leafletOn)}</div></td>
       <td colspan="1"><div class="pc-label">Plates</div><div class="pc-value">${v(platesVal)}</div></td>
       <td colspan="1"><div class="pc-label">Colors</div><div class="pc-value">${v(colorsVal)}</div></td>
-      <td colspan="1"><div class="pc-label">Name</div><div class="pc-value">${v(ctpName) || '&nbsp;'}</div></td>
+      <td colspan="1"><div class="pc-label">Name</div><div class="pc-value" style="font-size:11pt;overflow-wrap:anywhere;text-transform:uppercase;">${v(ctpName) || '&nbsp;'}</div></td>
     </tr>`;
 
   // Rows 8–12 — Special Colors block. Each special color is one column of
