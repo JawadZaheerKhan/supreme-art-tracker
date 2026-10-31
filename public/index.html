@@ -5838,6 +5838,14 @@ function partialIssueBannerHtml(j) {
     <div style="font-weight:700;">&#9888; Low issuance &mdash; still needs <b>${pktsStr} ${unit}</b> (${remaining.toLocaleString()} sheets). Store keeper can Issue More from Pending Stock.</div>
   </div>`;
 }
+// A top-up's paper (owner, 2026-10-31): t.paper names the 2nd / 3rd paper; none = the main paper.
+const TOPUP_ORD = { secondary_paper: '2nd', third_paper: '3rd' };
+function topupItem(j, t) {
+  const ref = t && t.paper ? (j.particulars || {})[t.paper] : j;
+  const id = ref && ref.inventory_item_id;
+  return id ? inventoryAll.find(i => i.id === id) || null : null;
+}
+function topupOrd(t) { return t && t.paper ? TOPUP_ORD[t.paper] + ' paper' : '1st paper'; }
 function packetTopupsPending(j)   { return packetTopups(j).filter(t => t.status === 'pending'); }
 function packetTopupsApproved(j)  { return packetTopups(j).filter(t => t.status === 'approved'); }
 function hasPendingPacketTopup(j) { return packetTopupsPending(j).length > 0; }
@@ -11455,7 +11463,7 @@ function renderInvPendingList() {
     return;
   }
   const topupHtml = topupRows.map(({ job: j, topup: t }) => {
-    const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+    const invIt = topupItem(j, t);
     const groupMembers = invIt ? paperGroupMembers(invIt) : [];
     const have  = groupMembers.reduce((a, x) => a + (x.current_balance || 0), 0);
     const ps    = invIt ? packetSize(invIt.paper_type) : 100;
@@ -11475,7 +11483,7 @@ function renderInvPendingList() {
         <div class="inv-main">
           <div class="inv-name">
             <b>#${j.id}</b> &middot; ${esc(j.name)}
-            <span class="badge" style="background:rgba(22,163,74,0.35);color:#166534;box-shadow:inset 0 0 0 1px rgba(22,163,74,0.55);margin-left:8px;">TOP-UP · +${esc(String(t.qty))} ${esc(unit)}</span>
+            <span class="badge" style="background:rgba(22,163,74,0.35);color:#166534;box-shadow:inset 0 0 0 1px rgba(22,163,74,0.55);margin-left:8px;">TOP-UP · ${topupOrd(t).toUpperCase()} · +${esc(String(t.qty))} ${esc(unit)}</span>
           </div>
           <div class="inv-sub">
             ${j.client ? esc(j.client) + ' &middot; ' : ''}
@@ -13201,7 +13209,7 @@ function pendingJobChipsForGroup(key) {
         // not satisfy primaryPending above. Surface each pending request as
         // its own chip and route Save through the top-up approval endpoint.
         const ps = packetSize(pIt.paper_type);
-        packetTopupsPending(j).forEach(t => {
+        packetTopupsPending(j).filter(t => !t.paper).forEach(t => {
           const qty = parseFloat(t.qty);
           if (!Number.isFinite(qty) || qty <= 0) return;
           out.push({
@@ -13225,6 +13233,11 @@ function pendingJobChipsForGroup(key) {
           if (rem > 0) {
             out.push({ job: j, jobId: j.id, source, needSheets: rem, label: `E-${j.id} (${ord})` });
           }
+          packetTopupsPending(j).filter(t => t.paper === pk).forEach(t => {
+            const qty = parseFloat(t.qty);
+            if (!Number.isFinite(qty) || qty <= 0) return;
+            out.push({ job: j, jobId: j.id, source: 'topup', topupId: String(t.id), needSheets: Math.round(qty * packetSize(sIt.paper_type)), label: `E-${j.id} (${ord}) · TOP-UP +${qty}` });
+          });
         }
       }
     }
@@ -28967,15 +28980,18 @@ function specsSection(p, coatings, j) {
   // form) and "Size / GSM" respectively, so users don't enter the same
   // dimensions twice. The live preview below the toggle just shows what
   // will be sent on save. See getFormData() and renderCutPreview().
+  // One tick per paper (owner, 2026-10-31); renderCutPreview shows the rows.
   const cutEnabled = !!(j && (j.cut_size || j.offcut_size));
-  const cutRow = `
-    <tr class="jc-spec-row"><td colspan="5">
+  const extraCut = key => { const e = j && j.particulars && j.particulars[key]; return !!(e && (e.cut_size || e.offcut_size)); };
+  const cutTick = (n, ord, on) => `
+    <tr class="jc-spec-row" id="f-cut-row${n}"${n ? ' style="display:none;"' : ''}><td colspan="5">
       <label style="display:inline-flex;align-items:center;gap:6px;">
-        <input type="checkbox" id="f-cut-toggle" ${cutEnabled?'checked':''} onchange="renderCutPreview()">
-        <span style="font-size:12px;">Cut this sheet (keep the leftover as offcut stock)</span>
+        <input type="checkbox" id="f-cut-toggle${n}" ${on?'checked':''} onchange="renderCutPreview()">
+        <span style="font-size:12px;" id="f-cut-label${n}">Cut ${ord} (keep the leftover as offcut stock)</span>
       </label>
-      <span id="cut-preview" style="font-size:12px;margin-left:14px;color:var(--text2);"></span>
+      <span id="cut-preview${n}" style="font-size:12px;margin-left:14px;color:var(--text2);"></span>
     </td></tr>`;
+  const cutRow = cutTick('', 'this sheet', cutEnabled) + cutTick('-2', '2nd paper', extraCut('secondary_paper')) + cutTick('-3', '3rd paper', extraCut('third_paper'));
   const coatRow = list => `
     <tr class="jc-spec-row"><td colspan="5" style="text-align:center;">
       ${list.map(c => `<label><input type="checkbox" name="f-coatings" value="${c}" ${coatings.includes(c)?'checked':''} onchange="refreshJobFormParticulars()"> ${c==='Color Seal'?'Colour Seal':c}</label>`).join('')}
@@ -29132,12 +29148,31 @@ function computeOffcutSize(sourceSize, cutSize) {
 // Cutting Size / GSM; offcut_size is computed as (source - cut) so the user
 // never has to type it. Called by oninput on Cutting Size/GSM and when the
 // modal first opens.
+// The 2nd / 3rd paper's cut, as saved on that paper: same Cutting Size, its own leftover.
+function extraPaperCut(n, itemId) {
+  if (!(document.getElementById('f-cut-toggle' + n)||{}).checked) return {};
+  const item = inventoryAll.find(i => i.id === itemId);
+  const cut = dimsOnly(normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value));
+  const offcut = item && cut ? computeOffcutSize(item.size, cut) : null;
+  return offcut ? { cut_size: cut, offcut_size: offcut } : {};
+}
 function renderCutPreview() {
-  const on = (document.getElementById('f-cut-toggle')||{}).checked;
-  const el = document.getElementById('cut-preview');
+  // A tick per paper in use (owner, 2026-10-31).
+  const second = !!(document.getElementById('f-use-second-paper')||{}).checked;
+  const third = second && !!(document.getElementById('f-use-third-paper')||{}).checked;
+  const row2 = document.getElementById('f-cut-row-2'), row3 = document.getElementById('f-cut-row-3');
+  if (row2) row2.style.display = second ? '' : 'none';
+  if (row3) row3.style.display = third ? '' : 'none';
+  const label = document.getElementById('f-cut-label');
+  if (label) label.textContent = `Cut ${second ? '1st paper' : 'this sheet'} (keep the leftover as offcut stock)`;
+  ['', '-2', '-3'].forEach(renderCutPreviewFor);
+}
+function renderCutPreviewFor(n) {
+  const on = (document.getElementById('f-cut-toggle' + n)||{}).checked;
+  const el = document.getElementById('cut-preview' + n);
   if (!el) return;
   if (!on) { el.textContent = ''; return; }
-  const hidden  = document.getElementById('f-inventory-item');
+  const hidden  = document.getElementById('f-inventory-item' + n);
   const itemId  = hidden && parseInt(hidden.value, 10);
   const source  = itemId ? inventoryAll.find(i => i.id === itemId) : null;
   const cutSize = dimsOnly(normalizeCuttingSize((document.getElementById('f-cutting-size')||{}).value));
@@ -29887,8 +29922,10 @@ function jobForm(j={}, opts) {
           // Request Extra Packets: restricted to admin / super admin only
           // (tighter than the general job_write permission, which also
           // covers production_manager by default) — per explicit request.
-          const topupBtn = (j.id && j.issuance_status === 'issued' && seeBtn('job_btn_extra_packets'))
-            ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id})" title="Request extra packets for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;">+</button>`
+          // One per paper (owner, 2026-10-31); a paper shows its + once saved on the job.
+          const topupBtn = (key, ord) => (j.id && j.issuance_status === 'issued' && seeBtn('job_btn_extra_packets')
+              && (!key || ((j.particulars || {})[key] && (j.particulars || {})[key].inventory_item_id)))
+            ? `<button type="button" class="btn btn-sm ceo-hide" onclick="openPacketsTopup(${j.id}, '${key}')" title="Request extra packets of the ${ord} paper for this running job. Sent to store keeper for approval." style="padding:2px 8px;font-weight:700;flex:0 0 auto;">+</button>`
             : '';
           return `
         <td colspan="1"><span class="jc-lbl">Sheets Qty</span>
@@ -29912,12 +29949,13 @@ function jobForm(j={}, opts) {
                  line so Row 2's number inputs get the FULL cell width
                  instead of being squeezed beside them (the row is already
                  this tall because of the Paper cell, so no height change). -->
-            <div style="display:flex;gap:6px;align-items:center;">
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
               <select id="f-sheet-cut" title="Cut — pieces per sheet; affects Packets auto-fill"
                       onchange="jobPacketsSync(); updateStockHint();"
                       style="width:52px;padding:4px 2px;border:1px solid var(--border);border-radius:4px;font-size:13px;flex:0 0 auto;">
                 ${cutOptions}
               </select>
+              ${topupBtn('', '1st')}
               <span id="cut-plus-sec" style="display:${hasSecond ? 'inline-flex' : 'none'};gap:6px;align-items:center;flex:0 0 auto;">
                 <span style="font-weight:700;color:var(--text2);">+</span>
                 <select id="f-sheet-cut-2" title="2nd paper's cut — pieces per sheet of THAT paper"
@@ -29925,6 +29963,7 @@ function jobForm(j={}, opts) {
                         style="width:52px;padding:4px 2px;border:1px solid var(--border);border-radius:4px;font-size:13px;flex:0 0 auto;">
                   ${cutOptions2}
                 </select>
+                ${topupBtn('secondary_paper', '2nd')}
               </span>
               <span id="cut-plus-third" style="display:${hasThird ? 'inline-flex' : 'none'};gap:6px;align-items:center;flex:0 0 auto;">
                 <span style="font-weight:700;color:var(--text2);">+</span>
@@ -29933,8 +29972,8 @@ function jobForm(j={}, opts) {
                         style="width:52px;padding:4px 2px;border:1px solid var(--border);border-radius:4px;font-size:13px;flex:0 0 auto;">
                   ${cutOptions3}
                 </select>
+                ${topupBtn('third_paper', '3rd')}
               </span>
-              ${topupBtn}
             </div>
             <!-- Row 2: the packet numbers, full width. -->
             <div style="display:flex;gap:6px;align-items:center;">
@@ -29952,9 +29991,9 @@ function jobForm(j={}, opts) {
           <div id="wp-top-packets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newPackets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newPackets) ? topOverlay.packetsDisplay : ''}</div>`;
         })()}
           ${packetTopupsApproved(j).length
-            ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
+            ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>(t.paper ? TOPUP_ORD[t.paper] + ': ' : '') + esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
           ${hasPendingPacketTopup(j)
-            ? `<div style="margin-top:4px;"><span style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;box-shadow:inset 0 0 0 1px rgba(22,163,74,0.55);font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
+            ? `<div style="margin-top:4px;"><span style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;box-shadow:inset 0 0 0 1px rgba(22,163,74,0.55);font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>(t.paper ? TOPUP_ORD[t.paper] + ': ' : '') + esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
         </td>
       </tr>
       ${(() => {
@@ -33041,6 +33080,7 @@ function collectParticulars() {
       inventory_item_id: secondId,
       packets: secondPkts,
       sheet_cut: secondCut,
+      ...extraPaperCut('-2', secondId),
       ...(sameSecondaryItem && priorSec.issued_sheets != null ? { issued_sheets: priorSec.issued_sheets } : {}),
     };
   } else {
@@ -33059,6 +33099,7 @@ function collectParticulars() {
       inventory_item_id: thirdId,
       packets: thirdPkts,
       sheet_cut: ((document.getElementById('f-sheet-cut-3')||{}).value || '1/1'),
+      ...extraPaperCut('-3', thirdId),
       ...(sameThirdItem && priorThird.issued_sheets != null ? { issued_sheets: priorThird.issued_sheets } : {}),
     };
   } else {
@@ -33235,6 +33276,7 @@ function toggleSecondPaper() {
   const row = document.getElementById('second-paper-row');
   if (!cb || !row) return;
   row.style.display = cb.checked ? '' : 'none';
+  renderCutPreview();
   // Show/hide the "+ secondary" boxes in the Sheets & Packets cells, and
   // shrink/grow the primary boxes so the layout matches.
   const pktPlus   = document.getElementById('packets-plus-sec');
@@ -33355,6 +33397,7 @@ function toggleThirdPaper() {
   const cb = document.getElementById('f-use-third-paper');
   const block = document.getElementById('third-paper-block');
   if (!cb || !block) return;
+  setTimeout(renderCutPreview, 0);
   if (cb.checked) {
     block.style.display = '';
     ['packets-plus-third', 'sheets-plus-third', 'cut-plus-third'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'inline-flex'; });
@@ -33573,6 +33616,7 @@ function paperFilter3() {
 }
 function paperKey3(ev) { if (ev.key === 'Escape') paperClose3(); }
 function paperSelect3(itemId) {
+  setTimeout(renderCutPreview, 0);
   const it = inventoryAll.find(x => x.id === itemId);
   if (!it) return;
   const search = document.getElementById('paper-search-3');
@@ -33585,6 +33629,7 @@ function paperSelect3(itemId) {
   jobThirdPacketsEdited();
 }
 function paperSelect2(itemId) {
+  setTimeout(renderCutPreview, 0);
   const it = inventoryAll.find(x => x.id === itemId);
   if (!it) return;
   const search = document.getElementById('paper-search-2');
@@ -35301,15 +35346,16 @@ async function saveSplitIssue(jobId) {
 // Request extra packets for an already-issued job. The job stays in its
 // current stage; a pending entry appears in Inventory → Pending Stock for
 // the store keeper to Approve (extra deduction) or Reject (no change).
-async function openPacketsTopup(id) {
+async function openPacketsTopup(id, paper) {
   const j = jobs.find(x => x.id === id);
   if (!j) return;
   if (j.issuance_status !== 'issued') { notify('Top-ups are only for jobs whose stock is already issued.'); return; }
-  const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+  const ref = paper ? { paper } : {};
+  const it = topupItem(j, ref);
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
   const qtyStr = await promptDialog({
-    title: `Request extra packets · Job E-${id}`,
-    message: `How many EXTRA ${unit} do you need for this running job?\nThe store keeper will approve or reject it from Inventory → Pending Stock.`,
+    title: `Request extra packets · ${topupOrd(ref)} · Job E-${id}`,
+    message: `How many EXTRA ${unit} of the ${topupOrd(ref)}${it ? ' (' + paperGroupLabel(it) + ')' : ''} do you need for this running job?\nThe store keeper will approve or reject it from Inventory → Pending Stock.`,
     placeholder: 'e.g. 5',
     confirmText: 'Send request',
   });
@@ -35318,7 +35364,7 @@ async function openPacketsTopup(id) {
   if (!Number.isFinite(qty) || qty <= 0) { notify('Enter a positive number.'); return; }
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${id}/packets-topup`, { qty });
+    const updated = await api('POST', `/api/jobs/${id}/packets-topup`, { qty, ...ref });
     const idx = jobs.findIndex(x => x.id === id); if (idx >= 0) jobs[idx] = updated;
     closeModal();
     render();
@@ -35333,12 +35379,12 @@ async function approvePacketsTopup(jobId, topupId) {
   if (!j) return;
   const t = packetTopups(j).find(x => String(x.id) === String(topupId));
   if (!t) return;
-  const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+  const it = topupItem(j, t);
   const unit = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
   const ps = it ? packetSize(it.paper_type) : 100;
   const sheets = Math.round(parseFloat(t.qty) * ps);
   const ok = await confirmDialog({
-    title: `Approve +${t.qty} ${unit} for Job E-${jobId}?`,
+    title: `Approve +${t.qty} ${unit} (${topupOrd(t)}) for Job E-${jobId}?`,
     message: `This will deduct ${sheets.toLocaleString()} sheets from inventory as a top-up.`,
     confirmText: 'Approve & deduct',
   });

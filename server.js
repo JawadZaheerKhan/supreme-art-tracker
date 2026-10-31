@@ -5280,7 +5280,7 @@ async function jobMainPaperOverIssue(sql, job) {
     }
   }
   const topupSheets = (Array.isArray(p.packets_topups) ? p.packets_topups : [])
-    .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile')
+    .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile' && !t.paper)
     .reduce((a, t) => a + Math.round((parseFloat(t.qty) || 0) * ps), 0);
   const needed = Math.max(0, total - secSheets) + topupSheets;
   const rows = await sql`
@@ -6884,14 +6884,17 @@ async function performIssueStockUnlocked(sql, req, id, body) {
       challanNo,
       occurredAt,
     });
-    if (job.cut_size && job.offcut_size) {
-      const offcutItem = await findOrCreateOffcutItem(sql, it, job.offcut_size);
+    // This paper's own cut (owner, 2026-10-31): the job's cut belongs to the
+    // main paper; a 2nd / 3rd paper carries its own, its leftover its own size.
+    const cutOf = isSecondary ? secondaryRef : job;
+    if (cutOf.cut_size && cutOf.offcut_size) {
+      const offcutItem = await findOrCreateOffcutItem(sql, it, cutOf.offcut_size);
       await applyInventoryChange(sql, {
         itemId: offcutItem.id,
         change: +s.sheets,
         reason: 'job-offcut',
         jobId: job.id,
-        notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
+        notes: `Job E-${job.id}: ${s.sheets} sheets of ${cutOf.offcut_size} offcut (${it.brand || 'no brand'}) returned to stock`,
         user: req.user,
         challanNo,
         occurredAt,
@@ -8077,10 +8080,14 @@ app.post('/api/jobs/:id/packets-topup', requirePermission('job_btn_extra_packets
     const job = rows[0];
     if (job.issuance_status !== 'issued') return res.status(400).json({ error: 'Job must be already issued before requesting extra packets' });
     const p = job.particulars || {};
+    // Which paper the extra is for (owner, 2026-10-31); none = the main paper.
+    const topupPaper = ['secondary_paper', 'third_paper'].includes(req.body?.paper) ? req.body.paper : null;
+    if (topupPaper && !(p[topupPaper] && p[topupPaper].inventory_item_id)) return res.status(400).json({ error: 'This job has no such paper.' });
     const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
     const entry = {
       id: `t${Date.now()}${Math.floor(Math.random()*1000)}`,
       qty,
+      ...(topupPaper ? { paper: topupPaper } : {}),
       status: 'pending',
       requested_at: new Date().toISOString(),
       requested_by_id: req.user?.id || null,
@@ -8093,7 +8100,7 @@ app.post('/api/jobs/:id/packets-topup', requirePermission('job_btn_extra_packets
       action: 'job.packets_topup.request',
       entityType: 'job',
       entityId: id,
-      summary: `Requested +${qty} extra packets for Job E-${id}: ${job.name} — pending store-keeper approval`,
+      summary: `Requested +${qty} extra packets${topupPaper ? ` of the ${topupPaper === 'third_paper' ? '3rd' : '2nd'} paper` : ''} for Job E-${id}: ${job.name} — pending store-keeper approval`,
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -8119,8 +8126,11 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     if (idx < 0) return res.status(404).json({ error: 'Top-up request not found' });
     const t = topups[idx];
     if (t.status !== 'pending') return res.status(400).json({ error: `Top-up already ${t.status}` });
-    if (!job.inventory_item_id) return res.status(400).json({ error: 'Job has no paper linked — cannot approve' });
-    const inv = await sql`SELECT * FROM inventory_items WHERE id=${job.inventory_item_id}`;
+    // The paper this request is for; its own cut decides any leftover.
+    const topupRef = t.paper ? p[t.paper] : job;
+    const topupItemId = topupRef && topupRef.inventory_item_id;
+    if (!topupItemId) return res.status(400).json({ error: 'Job has no paper linked — cannot approve' });
+    const inv = await sql`SELECT * FROM inventory_items WHERE id=${topupItemId}`;
     const sourceItem = inv[0];
     if (!sourceItem) return res.status(400).json({ error: 'Job paper no longer exists in inventory.' });
     const paperType = sourceItem?.paper_type || '';
@@ -8132,7 +8142,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     const splits = rawSplits.length
       ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10) }))
           .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0)
-      : [{ item_id: job.inventory_item_id, sheets }];
+      : [{ item_id: topupItemId, sheets }];
     if (splits.reduce((sum, s) => sum + s.sheets, 0) !== sheets) {
       return res.status(400).json({ error: `Top-up must issue exactly ${t.qty} ${unit} (${sheets} sheets).` });
     }
@@ -8163,16 +8173,16 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
         occurredAt,
       });
     }
-    if (job.cut_size && job.offcut_size && sourceItem) {
+    if (topupRef.cut_size && topupRef.offcut_size && sourceItem) {
       for (const s of splits) {
         const splitItem = byId.get(s.item_id);
-        const offcutItem = await findOrCreateOffcutItem(sql, splitItem, job.offcut_size);
+        const offcutItem = await findOrCreateOffcutItem(sql, splitItem, topupRef.offcut_size);
       await applyInventoryChange(sql, {
         itemId: offcutItem.id,
           change: +s.sheets,
         reason: 'job-offcut',
         jobId: job.id,
-          notes: `Job E-${job.id}: ${s.sheets} sheets of ${job.offcut_size} offcut (${splitItem.brand || 'no brand'}) returned to stock (top-up)`,
+          notes: `Job E-${job.id}: ${s.sheets} sheets of ${topupRef.offcut_size} offcut (${splitItem.brand || 'no brand'}) returned to stock (top-up)`,
         user: req.user,
           challanNo,
           occurredAt,
