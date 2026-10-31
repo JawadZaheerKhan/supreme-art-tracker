@@ -2446,9 +2446,12 @@
   .hist-floor-note .sn-body { font-size: 14px; font-weight: 500; }
   .hist-floor-note audio { width: 100%; height: 36px; margin-top: 4px; }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
-  /* Smooth scrolling in a job card (owner, 2026-10-27): with a window open,
-     nothing behind it animates; a stage machine only moves on screen. */
-  body.modal-open .main *, body.modal-open .main *::before, body.modal-open .main *::after { animation-play-state: paused !important; }
+  /* A stage machine only moves on screen (owner, 2026-10-27). Off-screen job
+     tiles cost nothing until they scroll into view - with 1,200+ jobs in the
+     All tab, styling and animating them all was the app's biggest slowdown
+     (owner, 2026-10-31). */
+  .jobs-list > .job-card { content-visibility: auto; contain-intrinsic-size: auto 190px; }
+  .acc-sa-only, .acc-view { transition: none !important; }
   .stage-machine.sm-off *, .stage-machine.sm-off *::before, .stage-machine.sm-off *::after { animation-play-state: paused !important; }
   /* Back bar of a jump into Jobs (e.g. Product Rate -> a job): while a window
      (the job card) is open it floats ABOVE the overlay, top-left, so Back is
@@ -28108,13 +28111,26 @@ function setDateCustom() {
 // ── Modals ────────────────────────────────────────────────────
 function openModal(html) { document.getElementById('modal-root').innerHTML=`<div class="overlay" id="overlay" onclick="overlayClick(event)">${html}</div>`; }
 // Smooth scrolling in a job card (owner, 2026-10-27). (1) While a window is
-// open, body.modal-open pauses every animation behind it - watched on the
-// modal root, so any way a window opens or closes counts. (2) A Track-view
-// stage machine only animates while it's on screen (sm-off otherwise).
+// open, the animations running behind it are paused - watched on the modal
+// root, so any way a window opens or closes counts. One by one, not with a
+// CSS rule: a rule on every element restyled the whole list on each open and
+// close, 1-2 s with 1,200+ jobs (owner, 2026-10-31). (2) A Track-view stage
+// machine only animates while it's on screen (sm-off otherwise).
 (function smoothScrollWatch() {
   const root = document.getElementById('modal-root');
   if (root && typeof MutationObserver !== 'undefined') {
-    const sync = () => document.body.classList.toggle('modal-open', !!root.querySelector('.overlay'));
+    let paused = null;
+    const sync = () => {
+      const open = !!root.querySelector('.overlay');
+      document.body.classList.toggle('modal-open', open);
+      if (open && !paused) {
+        paused = document.getAnimations().filter(a => a.playState === 'running' && a.effect && a.effect.target && a.effect.target.closest('.main'));
+        paused.forEach(a => a.pause());
+      } else if (!open && paused) {
+        paused.forEach(a => { try { a.play(); } catch (e) { /* its element was redrawn */ } });
+        paused = null;
+      }
+    };
     new MutationObserver(sync).observe(root, { childList: true });
     sync();
   }
