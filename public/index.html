@@ -8853,7 +8853,7 @@ function renderJobRowCompact(j, opts) {
     const si = j.stage_index || 0;
     const done = isDone(j), blocked = isBlocked(j);
     const pending = j.issuance_status === 'pending';
-    const partial = isPartialIssuance(j);
+    const partial = isPartialIssuance(j) || (j.issuance_status === 'issued' && hasSecondaryPending(j));
     const isNew = isNewJob(j);
     const isCtp = isCtpQueue(j);
     // Status badge: 'New Job' takes priority (the job isn't in the
@@ -8908,7 +8908,7 @@ function renderJobRowCompact(j, opts) {
       si === 6 ? `<span class="badge" style="background:#16a34a;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${readyLabelCL}</span>` :
       `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`;
     const partialBadge = partial
-      ? ` <span class="badge badge-more-stock">&#9888; Requires More Stock</span>`
+      ? ` <span class="badge badge-more-stock">&#128232; Stock Requested</span>`
       : '';
     const topupBadge = hasPendingPacketTopup(j)
       ? ` <span class="badge badge-extra-stock">&#128229; Extra Stock Required</span>`
@@ -9113,7 +9113,7 @@ function jobStockBadge(j) {
   // just needs more to finish. "Requires More Stock" reads clearly for
   // this case, whereas "Low Stock" implies the whole issuance is short.
   if (isPartialIssuance(j)) {
-    return '<span class="badge badge-more-stock">&#9888; Requires More Stock</span>';
+    return '<span class="badge badge-more-stock">&#128232; Stock Requested</span>';
   }
   const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Store keeper can issue from ANY brand in the paper group (see
@@ -9264,7 +9264,7 @@ function renderJobCard(j, opts) {
       ? `<span class="badge badge-active">${esc((STAGES[si] || '').toUpperCase())}</span>`
       : `<span class="badge badge-active">Stage ${si+1}/${STAGES.length}</span>`);
   const partialBadge = (!clientPreview && partial)
-    ? ` <span class="badge badge-more-stock">&#9888; Requires More Stock</span>`
+    ? ` <span class="badge badge-more-stock">&#128232; Stock Requested</span>`
     : '';
   const topupBadge = (!clientPreview && hasPendingPacketTopup(j))
     ? ` <span class="badge badge-extra-stock">&#128229; Extra Stock Required</span>`
@@ -37427,7 +37427,7 @@ async function stationLoadPapercut() {
     stationPapercutRequests = [];
     notify('Could not load offcut requests: ' + e.message);
   }
-  if (stationView === 'papercut') stationRender();
+  if (stationView === 'papercut' || stationView === 'manager-queue') stationRender();
 }
 function stationPapercutQty(n) {
   return Number.isInteger(n) ? n.toLocaleString() : (+(+n).toFixed(2)).toLocaleString();
@@ -37696,7 +37696,8 @@ async function stationPapercutIssue(jobId, source) {
   if (!ok) return;
   showSaving(true);
   try {
-    const updated = await api('POST', `/api/jobs/${jobId}/papercut-issue-stock`, {
+    // A line manager's PIN issues through its own route.
+    const updated = await api('POST', `/api/jobs/${jobId}/${stationOperator.is_manager ? 'manager' : 'papercut'}-issue-stock`, {
       pin: stationOperator.pin,
       source,
       person_name: (stationPerson && stationPerson.name) || '',
@@ -37908,6 +37909,7 @@ let stationManagerTab = 0; // a STAGES index, or 'search'
 let stationManagerSearch = '';
 function stationManagerSetTab(t) {
   stationManagerTab = t;
+  if (t === 'requests') stationLoadPapercut();
   stationManagerSearch = '';   // a stage button shows that stage's list
   stationRender();
 }
@@ -37980,7 +37982,7 @@ function stationManagerJobRow(j) {
         ${j.is_shade_card ? '<span class="shade-card-sign">&#127912; Shade Card</span>' : ''}
       </div>
       <div class="sj-main" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">
-        <div class="sj-name">${esc(j.name)}</div>
+        <div class="sj-name">${esc(j.name)}${stationManagerOffcutPending(j) ? ' <span class="badge badge-more-stock">&#128232; Stock Requested</span>' : ''}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}</div>
       </div>
       <div class="sj-go" style="cursor:pointer;" onclick="stationManagerOpenJobCard(${j.id})">›</div>
@@ -38059,17 +38061,23 @@ async function stationManagerSaveJobCard(id) {
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
+let _mgrReqLoading = false;
 function stationManagerQueueHtml() {
   // Search bar under the stage buttons (owner, 2026-10-14 - it was a Search
   // tab): typing searches every job; a stage button shows that stage.
   if (stationManagerTab === 'search') stationManagerTab = 0;
   const q = String(stationManagerSearch || '').trim().toLowerCase();
-  const tabs = STAGES.map((s, i) => `<button class="btn btn-sm${!q && stationManagerTab===i?' btn-primary':''}" onclick="stationManagerSetTab(${i})">${esc(SHORT[i]||s)}</button>`).join('');
+  // Every offcut request, any stage and any paper (owner, 2026-10-31).
+  if (stationPapercutRequests == null && !_mgrReqLoading) { _mgrReqLoading = true; stationLoadPapercut().finally(() => { _mgrReqLoading = false; }); }
+  const reqTab = `<button class="btn btn-sm${!q && stationManagerTab==='requests'?' btn-primary':''}" style="font-weight:700;" onclick="stationManagerSetTab('requests')">&#128230; Offcut Requests${Array.isArray(stationPapercutRequests) ? ' (' + stationPapercutRequests.length + ')' : ''}</button>`;
+  const tabs = reqTab + STAGES.map((s, i) => `<button class="btn btn-sm${!q && stationManagerTab===i?' btn-primary':''}" onclick="stationManagerSetTab(${i})">${esc(SHORT[i]||s)}</button>`).join('');
   const searchBar = stationSearchBarHtml('station-mgr-search-input', stationManagerSearch, '\u{1F50D} Search by job #, name, company or item code\u2026', 'stationManagerSearchInput(this.value)', 'stationManagerClearSearch()');
   let listHtml;
   if (q) {
     const results = jobs.filter(j => !isNewJob(j) && stationJobMatches(j, q));
     listHtml = `<div class="station-queue">${results.length ? results.map(j => stationManagerJobRow(j)).join('') : `<div class="empty">No jobs match "${esc(stationManagerSearch)}".</div>`}</div>`;
+  } else if (stationManagerTab === 'requests') {
+    listHtml = stationPapercutRequestsHtml();
   } else {
     const idx = stationManagerTab;
     const queue = jobs.filter(j => !isNewJob(j) && (j.stage_index || 0) === idx).reverse();
