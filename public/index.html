@@ -2451,6 +2451,7 @@
      All tab, styling and animating them all was the app's biggest slowdown
      (owner, 2026-10-31). */
   .jobs-list > .job-card { content-visibility: auto; contain-intrinsic-size: auto 190px; }
+  #products-grid > * { content-visibility: auto; contain-intrinsic-size: auto 170px; }
   .acc-sa-only, .acc-view { transition: none !important; }
   .stage-machine.sm-off *, .stage-machine.sm-off *::before, .stage-machine.sm-off *::after { animation-play-state: paused !important; }
   /* Back bar of a jump into Jobs (e.g. Product Rate -> a job): while a window
@@ -8712,6 +8713,43 @@ function clearNewJobSelection() {
   render();
 }
 
+// The Jobs list draws in batches as you scroll, so a redraw builds only what
+// can be seen, not 1,200+ tiles (owner, 2026-10-31). A redraw of the same tab
+// keeps as many tiles as were on the page, so the scroll position holds.
+const JOBS_BATCH = 40;
+let _jobsWin = null;   // { view, shown, items, tileAt, pos, el }
+function jobsListNext(win, count) {
+  let html = '';
+  for (let n = 0; n < count && win.pos < win.items.length; n++) html += win.tileAt(win.items[win.pos++]);
+  win.shown = win.pos;
+  return html;
+}
+// Draw on while the end of the drawn list is near the screen.
+function jobsListCheck() {
+  const more = document.getElementById('jobs-list-more');
+  if (!more || mode !== 'jobs' || document.body.classList.contains('modal-open')) return;
+  if (more.getBoundingClientRect().top < window.innerHeight + 1500) jobsListAppend();
+}
+window.addEventListener('scroll', jobsListCheck, { passive: true, capture: true });
+setInterval(jobsListCheck, 400);
+// One more batch; false when the list is all on the page.
+function jobsListAppend() {
+  const win = _jobsWin, more = document.getElementById('jobs-list-more');
+  if (!win || !more) return false;
+  more.insertAdjacentHTML('beforebegin', jobsListNext(win, JOBS_BATCH));
+  if (win.pos >= win.items.length) { more.remove(); return false; }
+  return true;
+}
+function jobsListDraw(el, head, items, tileAt) {
+  const keep = _jobsWin && _jobsWin.view === view ? _jobsWin.shown : 0;
+  const win = _jobsWin = { view, shown: 0, items, tileAt, pos: 0 };
+  const html = jobsListNext(win, Math.max(JOBS_BATCH, keep));
+  el.innerHTML = head + html + (win.pos < items.length ? '<div id="jobs-list-more" style="height:1px;"></div>' : '');
+}
+// A jump to a job further down than has been drawn: draw down to it.
+function jobsListEnsureTile(jobId) {
+  while (!document.getElementById('cv-tile-' + jobId) && jobsListAppend());
+}
 function renderJobsCompact() {
   const filtered = sortJobsForView(getFiltered());
   const el = document.getElementById('jobs-list');
@@ -8729,7 +8767,7 @@ function renderJobsCompact() {
   // job asked for never appeared and read as missing. A search overrides
   // the collapsing and shows the matched jobs as themselves.
   const searching = jobsSearchActive();
-  el.innerHTML = elsewhere + filtered.map(j => {
+  jobsListDraw(el, elsewhere, filtered, j => {
     if (j.stock_group_name) {
       if (seenGroupsC.has(j.stock_group_name)) return '';
       seenGroupsC.add(j.stock_group_name);
@@ -8740,7 +8778,7 @@ function renderJobsCompact() {
       return renderGroupTileCompact(j.stock_group_name, gJobs, hits);
     }
     return renderJobRowCompact(j);
-  }).join('');
+  });
 }
 
 // Every recorded delivery of a job, read-only, with the same fields as the
@@ -40042,6 +40080,7 @@ function onJobTileClick(e, jobId) {
 }
 
 function scrollToClientTile(jobId) {
+  jobsListEnsureTile(jobId);
   const el = document.getElementById('cv-tile-' + jobId);
   if (!el) { notify("Couldn't find that job's tile — try Refresh."); return; }
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -40059,6 +40098,7 @@ function scrollToClientTile(jobId) {
 // a scroll-and-flash if the partner tile isn't rendered in this
 // filtered view (different client, hidden by a filter, etc.).
 function openLinkedJobCompare(jobId) {
+  jobsListEnsureTile(jobId);
   const src = document.getElementById('cv-tile-' + jobId);
   if (!src) {
     // Nothing to clone — behave like the old scroll helper so the user at
