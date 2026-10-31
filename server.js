@@ -6266,7 +6266,20 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       const after  = particularsRowStr((cleanParticulars || {})[k]);
       if (before !== after) particularsChanges.push(`${label}: ${before || '(blank)'} -> ${after || '(blank)'}`);
     }
-    const allChanges = [...fieldChanges, ...particularsChanges];
+    // Packets by paper, not the job's total: "1st paper: 11 -> 29 packets" says what
+    // was changed; "Sheets Qty: 2400 -> 3600" is every paper added up (owner, 2026-10-31).
+    const pkNum = v => { const n = parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, '')); return Number.isFinite(n) ? n : 0; };
+    const exPk = (o, k) => (o && o[k] && o[k].inventory_item_id) ? pkNum(o[k].packets) : 0;
+    const pB = priorParticulars || {}, pA = cleanParticulars || {};
+    const [b2, a2, b3, a3] = [exPk(pB, 'secondary_paper'), exPk(pA, 'secondary_paper'), exPk(pB, 'third_paper'), exPk(pA, 'third_paper')];
+    const manyPapers = !!(b2 || a2 || b3 || a3);
+    const b1 = pkNum(pB.quantity_of_packets) - b2 - b3, a1 = pkNum(pA.quantity_of_packets) - a2 - a3;
+    const paperLines = [];
+    if (b1 !== a1) paperLines.push(manyPapers ? `1st paper: ${b1} -> ${a1} packets` : `Packets: ${b1} -> ${a1}`);
+    if (b2 !== a2) paperLines.push(`2nd paper: ${b2} -> ${a2} packets`);
+    if (b3 !== a3) paperLines.push(`3rd paper: ${b3} -> ${a3} packets`);
+    const shownFields = (manyPapers && paperLines.length) ? fieldChanges.filter(c => !c.startsWith('Sheets Qty:')) : fieldChanges;
+    const allChanges = [...shownFields, ...paperLines, ...particularsChanges];
 
     const result = finalLog
       ? await sql`
@@ -6413,10 +6426,20 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
           if (upd[0]) Object.assign(job, upd[0]);
           await logAudit(sql, req, {
             action: 'job.more_paper_needed', entityType: 'job', entityId: job.id,
-            summary: `Job E-${job.id}: Quantity of Packets raised after its paper was issued - ${owed.toLocaleString()} more sheets needed, back in Pending Stock`,
+            summary: `Stock requested: 1st paper needs ${owed.toLocaleString()} more sheets`,
             metadata: { owed_sheets: owed },
           });
         }
+      }
+      // The 2nd / 3rd paper are owed by themselves; here it's only recorded.
+      for (const e of EXTRA_PAPERS) {
+        const after = jp[e.key], before = priorParticulars && priorParticulars[e.key];
+        if (!after || !after.inventory_item_id || parseFloat(after.packets) <= parseFloat((before && before.packets) || 0)) continue;
+        if (!before || before.inventory_item_id !== after.inventory_item_id) continue;
+        const item = (await sql`SELECT * FROM inventory_items WHERE id = ${after.inventory_item_id}`)[0];
+        const owedE = item ? secondaryOwedSheets(job, item, e.key) : 0;
+        if (owedE > 0) await logAudit(sql, req, { action: 'job.more_paper_needed', entityType: 'job', entityId: job.id,
+          summary: `Stock requested: ${e.label} paper needs ${owedE.toLocaleString()} more sheets`, metadata: { owed_sheets: owedE, paper: e.key } });
       }
     } catch (e) { console.error('more-paper check after save failed:', e.message); }   // never fails the save itself
     res.json(job);
@@ -7078,19 +7101,22 @@ app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, requirePermiss
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const job = rows[0];
-    if (!job.inventory_item_id) return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
-    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${job.inventory_item_id}`;
+    // Which paper (owner, 2026-10-31): none = the main paper.
+    const extra = extraPaperBySource(req.body.source);
+    const anchorId = extra ? ((job.particulars || {})[extra.key] || {}).inventory_item_id : job.inventory_item_id;
+    if (!anchorId) return res.status(400).json({ error: 'Job has no paper assigned — nothing to issue' });
+    const anchorRows = await sql`SELECT * FROM inventory_items WHERE id = ${anchorId}`;
     const anchor = anchorRows[0];
     if (!anchor || !anchor.is_offcut) {
       return res.status(400).json({ error: 'This job is not an offcut job — issue fresh stock from the Pending Stock queue instead.' });
     }
-    const result = await performIssueStock(sql, req, id, {});
+    const result = await performIssueStock(sql, req, id, extra ? { source: extra.source } : {});
     if (result.error) return res.status(result.status || 400).json({ error: result.error });
     await logAudit(sql, req, {
       action: 'job.manager_issue_stock',
       entityType: 'job',
       entityId: id,
-      summary: `Job E-${id}: offcut stock issued from Station by manager ${v.operator.name}`,
+      summary: `Job E-${id}: offcut stock${extra ? ` (${extra.label} paper)` : ''} issued from Station by manager ${v.operator.name}`,
     });
     res.json(result.job);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
