@@ -6395,6 +6395,30 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
         }
       }
     } catch (e) { console.error('over-issue check after save failed:', e.message); }   // never fails the save itself
+    // ...and if the job now needs MORE of its main paper than went out, ask for
+    // the rest: an issued job only owes paper once this marker is set, and until
+    // now only an issuance set it, so raising the packets asked nobody (E-1111,
+    // owner 2026-10-31). primaryOwedSheets reckons need less issued with it set.
+    try {
+      const pq = (o) => String((o && o.quantity_of_packets) ?? '').trim();
+      const sp = (o) => EXTRA_PAPERS.map(e => String((o && o[e.key] && o[e.key].packets) ?? '').trim()).join('|');
+      const jp = job.particulars || {};
+      const primaryIssued = (Array.isArray(job.issued_items) ? job.issued_items : []).some(x => x && !EXTRA_SOURCES.has(x.source));
+      if ((pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp)) && oldItemId === newItemId
+          && job.issuance_status === 'issued' && primaryIssued && !jp.paper_waived) {
+        const owed = await primaryOwedSheets(sql, { ...job, particulars: { ...jp, partial_pending_sheets: 1 } });
+        if (owed > 0) {
+          const np = { ...jp, partial_pending_sheets: owed };
+          const upd = await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)} WHERE id = ${job.id} RETURNING *`;
+          if (upd[0]) Object.assign(job, upd[0]);
+          await logAudit(sql, req, {
+            action: 'job.more_paper_needed', entityType: 'job', entityId: job.id,
+            summary: `Job E-${job.id}: Quantity of Packets raised after its paper was issued - ${owed.toLocaleString()} more sheets needed, back in Pending Stock`,
+            metadata: { owed_sheets: owed },
+          });
+        }
+      }
+    } catch (e) { console.error('more-paper check after save failed:', e.message); }   // never fails the save itself
     res.json(job);
   } catch (err) {
     console.error(err);
