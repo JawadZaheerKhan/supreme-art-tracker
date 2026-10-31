@@ -321,7 +321,8 @@ function getDb() {
 // Bumped again for jobs.ready_check (the Jobs tile's Ready tick, 2026-10-23).
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
 // Bumped again for the Cost Report: finance.cost_settings and its Access Register rows.
-const SCHEMA_VERSION = 'v2026-10-30-cost-report';
+// Bumped again for the Cost Report's per-job board rates (finance.cost_board_rates).
+const SCHEMA_VERSION = 'v2026-10-31-cost-board-rates';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -523,7 +524,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_chart_accounts:              { label: 'Chart of Accounts — view the coded account list', levels: { ceo: 'view', finance: 'view' } },
   // Cost Report: every job's cost from one saved list of rates. Super Admin only until opened up here.
   rpt_cost_report:                 { label: 'Cost Report — view every job\'s cost', levels: {} },
-  rpt_cost_settings:               { label: 'Cost Report — Cost Settings (see and change the rates)', levels: {} },
+  rpt_cost_settings:               { label: 'Cost Report — Cost Settings and each job\'s board rate (see and change the rates)', levels: {} },
   rpt_chart_accounts_edit:         { label: 'Chart of Accounts — add / edit / remove accounts and link customers', levels: { finance: 'yes' } },
 
   // Access Register — Users tab. Same "not wired into any gate yet" note
@@ -1937,6 +1938,14 @@ async function initDb() {
     // Stamp the schema version so future cold starts hit the fast-path
     // short-circuit at the top of initDb instead of replaying every ALTER.
     await sql`
+      CREATE TABLE IF NOT EXISTS finance.cost_board_rates (
+        job_id      INTEGER PRIMARY KEY,
+        rate_per_kg NUMERIC NOT NULL,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await sql`
       CREATE TABLE IF NOT EXISTS finance.cost_settings (
         key        TEXT PRIMARY KEY,
         category   TEXT NOT NULL,
@@ -2800,10 +2809,10 @@ app.post('/api/users/:id/unblock', requirePermission('user_btn_block'), async (r
   }
 });
 
-// Cost Report (owner, 2026-10-30): one saved list of rates, priced onto every
-// job in the browser. key = 'paper:<type>|<size>|<gsm>', 'coating:<name>',
-// 'printing:<machine>', 'diecutting:standard', 'pasting:standard', 'plate:standard'.
-const COST_UNITS = { paper: ['kg', 'sheet', 'packet'], coating: ['sheet', 'box'], printing: ['sheet', 'box'], diecutting: ['sheet', 'box'], pasting: ['sheet', 'box'], plate: ['plate'] };
+// Cost Report (owner, 2026-10-31): the Hamza Guide's Cost Settings and per-job
+// board rates. key = 'paper:<type>|<size>|<gsm>', 'coating:<name>',
+// 'printing:<label>', 'diecutting:<label>', 'pasting:<label>', 'plate:<label>'.
+const COST_CATEGORIES = new Set(['paper', 'coating', 'printing', 'diecutting', 'pasting', 'plate']);
 const costRow = r => ({ key: r.key, category: r.category, label: r.label, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, unit: r.unit, updated_at: r.updated_at });
 app.get('/api/cost-settings', requirePermission('rpt_cost_report', 'view'), async (req, res) => {
   try {
@@ -2818,8 +2827,8 @@ app.put('/api/cost-settings/:key', requirePermission('rpt_cost_settings'), async
     const sql = getDb();
     const key = String(req.params.key || '').trim();
     const { category, label, rate, per_qty, unit } = req.body || {};
-    if (!COST_UNITS[category] || !key.startsWith(category + ':')) return res.status(400).json({ error: 'Unknown rate.' });
-    if (!COST_UNITS[category].includes(unit)) return res.status(400).json({ error: 'Unknown unit.' });
+    if (!COST_CATEGORIES.has(category) || !key.startsWith(category + ':')) return res.status(400).json({ error: 'Unknown rate.' });
+    if (!['rs_per_kg', 'rs_per_sheet', 'rs_per_plate'].includes(unit)) return res.status(400).json({ error: 'Unknown unit.' });
     if (!String(label || '').trim()) return res.status(400).json({ error: 'A rate needs a name.' });
     const rateNum = Number(rate), perNum = Number(per_qty);
     if (!Number.isFinite(rateNum) || rateNum < 0) return res.status(400).json({ error: 'Rate must be zero or more.' });
@@ -2831,8 +2840,33 @@ app.put('/api/cost-settings/:key', requirePermission('rpt_cost_settings'), async
         unit = EXCLUDED.unit, updated_by = EXCLUDED.updated_by, updated_at = NOW()
       RETURNING *`;
     await logAudit(sql, req, { action: 'cost_setting.update', entityType: 'cost_setting', entityId: null,
-      summary: `Cost Settings: ${String(label).trim()} = Rs ${rateNum} per ${perNum} ${unit}` });
+      summary: `Cost Settings: ${String(label).trim()} = Rs ${rateNum} per ${perNum} (${unit})` });
     res.json(costRow(rows[0]));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// A job's own Rs/kg, typed in the Cost Report. 0 clears it (back to Cost Settings).
+app.get('/api/cost-board-rates', requirePermission('rpt_cost_report', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT job_id, rate_per_kg FROM finance.cost_board_rates`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/cost-board-rates/:job_id', requirePermission('rpt_cost_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const jobId = parseInt(req.params.job_id, 10);
+    const rate = Number(req.body && req.body.rate_per_kg);
+    if (!Number.isFinite(jobId) || jobId <= 0) return res.status(400).json({ error: 'Invalid job.' });
+    if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Rate must be zero or more.' });
+    if (rate === 0) await sql`DELETE FROM finance.cost_board_rates WHERE job_id = ${jobId}`;
+    else await sql`
+      INSERT INTO finance.cost_board_rates (job_id, rate_per_kg, updated_by) VALUES (${jobId}, ${rate}, ${req.user?.email || null})
+      ON CONFLICT (job_id) DO UPDATE SET rate_per_kg = EXCLUDED.rate_per_kg, updated_by = EXCLUDED.updated_by, updated_at = NOW()`;
+    await logAudit(sql, req, { action: 'cost_setting.job_rate', entityType: 'job', entityId: jobId,
+      summary: rate ? `Cost Report: Job E-${jobId} board rate set to Rs ${rate} / kg` : `Cost Report: Job E-${jobId} board rate back to Cost Settings` });
+    res.json({ job_id: jobId, rate_per_kg: rate });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
