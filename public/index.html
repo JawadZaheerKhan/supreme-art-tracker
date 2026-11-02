@@ -5658,7 +5658,7 @@ function partialPendingSheets(j) {
   if (!need) return marker;                       // paper not loaded - cannot recompute
   return Math.max(0, need - issuedPrimarySheets(j));
 }
-function isPartialIssuance(j) { return j && j.issuance_status === 'issued' && partialPendingSheets(j) > 0; }
+function isPartialIssuance(j) { return j && (j.issuance_status === 'issued' || j.issuance_status === 'ctp') && partialPendingSheets(j) > 0; }
 // True when the 2nd paper was silently auto-consumed on CTP forward — the
 // old offcut behaviour. Those legacy jobs owe nothing on the 2nd paper.
 function secondaryInPreConsumed(j, key = 'secondary_paper') {
@@ -13259,6 +13259,13 @@ function jobDeductionSheetsClient(j) {
 // The job's main-paper requirement as it stands right now, ignoring anything
 // already issued: packets x packet size, less offcut pre-consumed on CTP
 // forward, less whatever the 2nd paper covers.
+// Another brand of the same paper keeps what was already issued (owner, 2026-11-02):
+// the store picks the brand when it issues.
+function samePaperForIssue(a, b) {
+  if (a === b) return true;
+  const x = inventoryAll.find(i => i.id === a), y = inventoryAll.find(i => i.id === b);
+  return !!(x && y && paperGroupKey(x) === paperGroupKey(y));
+}
 function jobFreshNeedSheets(j) {
   const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   if (!invIt) return 0;
@@ -33032,7 +33039,7 @@ function collectParticulars() {
     // next time anyone edited an unrelated field on the job card. Switching
     // to a genuinely different paper item correctly resets it to fresh.
     const priorSec = priorParticularsCP.secondary_paper;
-    const sameSecondaryItem = priorSec && priorSec.inventory_item_id === secondId;
+    const sameSecondaryItem = priorSec && samePaperForIssue(priorSec.inventory_item_id, secondId);
     const secondCut = ((document.getElementById('f-sheet-cut-2')||{}).value || '1/1');
     out.secondary_paper = {
       inventory_item_id: secondId,
@@ -33052,7 +33059,7 @@ function collectParticulars() {
   const thirdPkts = parseFloat((document.getElementById('f-packets-3')||{}).value);
   if (out.secondary_paper && useThird && Number.isFinite(thirdId) && Number.isFinite(thirdPkts) && thirdPkts > 0) {
     const priorThird = priorParticularsCP.third_paper;
-    const sameThirdItem = priorThird && priorThird.inventory_item_id === thirdId;
+    const sameThirdItem = priorThird && samePaperForIssue(priorThird.inventory_item_id, thirdId);
     out.third_paper = {
       inventory_item_id: thirdId,
       packets: thirdPkts,
